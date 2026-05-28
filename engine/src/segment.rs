@@ -1234,7 +1234,34 @@ impl Engine {
     ///   A: parse + extract + bump frequencies
     ///   (finalize the common mask)
     ///   B: choose signatures, classify, append to the base segment.
+    /// Compile a batch into the first immutable base segment (the initial bulk
+    /// load). Infallible convenience wrapper over [`try_build_from_queries`](Self::try_build_from_queries):
+    /// in persistent mode a failure to durably write the segment or manifest is
+    /// surfaced only via [`persistence_healthy`](Self::persistence_healthy) and
+    /// an empty report. Callers that must distinguish a durable commit from a
+    /// persistence failure should call [`try_build_from_queries`](Self::try_build_from_queries).
     pub fn build_from_queries(&mut self, queries: &[(u64, String)]) -> IngestReport {
+        match self.try_build_from_queries(queries) {
+            Ok(report) => report,
+            Err(e) => {
+                eprintln!("[percolator] build_from_queries persistence failed, batch rolled back: {e}");
+                self.persistence_healthy = false;
+                IngestReport::default()
+            }
+        }
+    }
+
+    /// Compile a batch into the first immutable base segment, surfacing a
+    /// persistence failure as an [`io::Error`](std::io::Error) instead of folding
+    /// it into a degraded in-memory state. The batch is all-or-nothing: on a
+    /// segment-write or manifest-write failure the in-memory segment is dropped,
+    /// the orphan file is deleted, and nothing is committed (see ADR-017). Parse
+    /// and cost-class-D rejections are non-fatal and counted in the returned
+    /// [`IngestReport`].
+    pub fn try_build_from_queries(
+        &mut self,
+        queries: &[(u64, String)],
+    ) -> std::io::Result<IngestReport> {
         let mut report = IngestReport::default();
         let mut lc = String::new();
         let mut extracted: Vec<(u64, Extracted, &str)> = Vec::with_capacity(queries.len());
@@ -1259,31 +1286,24 @@ impl Engine {
             dict.finalize_mask();
         }
 
-        // Pass B -> first base segment
+        // Pass B -> first base segment. Accepted source text is collected and
+        // applied to the query store only after the durable commit succeeds
+        // (see commit_base_segment), so a failed batch leaves no partial sources.
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
-        let mut sources = qs_write(&self.query_store);
+        let mut accepted: Vec<(u64, String)> = Vec::new();
         for (logical, ex, text) in &extracted {
             if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
                 self.rejected_class_d += 1;
                 report.rejected_class_d += 1;
             } else {
-                sources.insert(*logical, (*text).to_string());
+                accepted.push((*logical, (*text).to_string()));
                 report.ingested += 1;
             }
         }
-        drop(sources);
         // Seal: build anchor filter before pushing as immutable base segment.
         seg.build_filter();
-        self.seal_and_push(seg);
-        self.emit(crate::events::EngineEvent::Ingest {
-            ingested: report.ingested,
-            rejected_parse: report.rejected_parse,
-            rejected_class_d: report.rejected_class_d,
-            base_segments_after: self.segments.len(),
-        });
-        self.save_manifest_if_persistent();
-        report
+        self.commit_base_segment(seg, accepted, report)
     }
 
     /// Live insert (hot delta -> memtable). New features get fresh ids; since
@@ -1490,6 +1510,28 @@ impl Engine {
     /// (so the shared dict stays accurate), but uses the already-finalized mask
     /// for signature selection (finalizing once if it was never done).
     pub fn bulk_ingest(&mut self, queries: &[(u64, String)]) -> IngestReport {
+        match self.try_bulk_ingest(queries) {
+            Ok(report) => report,
+            Err(e) => {
+                eprintln!("[percolator] bulk_ingest persistence failed, batch rolled back: {e}");
+                self.persistence_healthy = false;
+                IngestReport::default()
+            }
+        }
+    }
+
+    /// Durable [`bulk_ingest`](Self::bulk_ingest): surfaces a persistence failure
+    /// as an [`io::Error`](std::io::Error). Bulk ingest deliberately bypasses the
+    /// WAL — the segment file is itself the durable artifact and the manifest
+    /// update is the atomic commit point (the RocksDB `IngestExternalFile`
+    /// pattern, ADR-017) — so there is no WAL backstop and a failed write must be
+    /// reported, not silently degraded to an in-memory segment. All-or-nothing:
+    /// on failure nothing is committed. Parse / cost-class-D rejections are
+    /// non-fatal and counted in the returned [`IngestReport`].
+    pub fn try_bulk_ingest(
+        &mut self,
+        queries: &[(u64, String)],
+    ) -> std::io::Result<IngestReport> {
         let mut report = IngestReport::default();
         let mut lc = String::new();
         let mut extracted: Vec<(u64, Extracted, &str)> = Vec::with_capacity(queries.len());
@@ -1512,31 +1554,24 @@ impl Engine {
             }
         }
         let mut seg = Segment::new();
-        let mut sources = qs_write(&self.query_store);
+        seg.vocab_epoch = self.vocab_epoch;
+        let mut accepted: Vec<(u64, String)> = Vec::new();
         for (logical, ex, text) in &extracted {
             if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
                 self.rejected_class_d += 1;
                 report.rejected_class_d += 1;
             } else {
-                sources.insert(*logical, (*text).to_string());
+                accepted.push((*logical, (*text).to_string()));
                 report.ingested += 1;
             }
         }
-        drop(sources);
         // Seal: build anchor filter before pushing as immutable base segment.
         seg.build_filter();
-        self.seal_and_push(seg);
-        self.emit(crate::events::EngineEvent::Ingest {
-            ingested: report.ingested,
-            rejected_parse: report.rejected_parse,
-            rejected_class_d: report.rejected_class_d,
-            base_segments_after: self.segments.len(),
-        });
-        self.save_manifest_if_persistent();
+        let report = self.commit_base_segment(seg, accepted, report)?;
         if self.config.auto_compact_on_ingest {
             self.maybe_compact();
         }
-        report
+        Ok(report)
     }
 
     /// Compact base segments: merge them into fewer segments to reduce read
@@ -1977,6 +2012,88 @@ impl Engine {
         }
     }
 
+    /// Persist a sealed segment to disk and mmap it back, propagating any I/O
+    /// error instead of silently falling back to an in-memory segment (that
+    /// silent fallback is the false-durability bug behind ADR-017). Returns the
+    /// base segment plus its on-disk path, so a later commit failure can delete
+    /// the orphaned file. In-memory mode (no `data_dir`) returns a `Memory` base
+    /// and `None`.
+    fn build_durable_base(
+        &mut self,
+        seg: Segment,
+    ) -> std::io::Result<(BaseSegment, Option<PathBuf>)> {
+        let Some(dir) = self.config.data_dir.clone() else {
+            return Ok((BaseSegment::Memory(seg), None));
+        };
+        let path = dir.join("segments").join(self.next_segment_filename());
+        if let Err(e) = crate::storage::write_segment(&seg, &path) {
+            self.persistence_healthy = false;
+            return Err(e);
+        }
+        match MmapSegment::open(&path) {
+            Ok(mmap_seg) => Ok((BaseSegment::Mmap(mmap_seg), Some(path))),
+            Err(e) => {
+                self.persistence_healthy = false;
+                let _ = std::fs::remove_file(&path);
+                Err(e)
+            }
+        }
+    }
+
+    /// Durably commit a freshly-built segment as a new base segment,
+    /// all-or-nothing (ADR-017). Writes the segment file (fsync'd + atomic rename
+    /// via `write_segment`), appends it in memory, then writes the manifest — the
+    /// atomic commit point, which both references the new segment file and embeds
+    /// the updated dict. If the segment or manifest write fails, the in-memory
+    /// segment is dropped and the orphan file deleted, so nothing is committed
+    /// (mirrors RocksDB's `IngestExternalFile`).
+    ///
+    /// `accepted` carries the `(logical_id, source_text)` of queries that
+    /// compiled. It is applied to the query store (display-only, never on the
+    /// match path) *after* the commit point and then persisted to `sources.dat`.
+    /// Bulk ingest has no WAL backstop, so this is the sole point at which bulk
+    /// source text becomes durable; a `sources.dat` write failure is surfaced via
+    /// `persistence_healthy` but does not un-commit the already-durable match data.
+    fn commit_base_segment(
+        &mut self,
+        seg: Segment,
+        accepted: Vec<(u64, String)>,
+        report: IngestReport,
+    ) -> std::io::Result<IngestReport> {
+        let (base, seg_path) = self.build_durable_base(seg)?;
+        self.segments.push(Arc::new(base));
+
+        // The manifest write is the atomic commit point. If it fails, roll the
+        // batch back entirely: drop the in-memory segment and delete the orphan.
+        if !self.save_manifest_if_persistent() {
+            self.segments.pop();
+            if let Some(p) = seg_path {
+                let _ = std::fs::remove_file(p);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "manifest write failed during ingest; batch rolled back",
+            ));
+        }
+
+        // Past the commit point — the match data is durable. Publish source text.
+        {
+            let mut sources = qs_write(&self.query_store);
+            for (logical, text) in accepted {
+                sources.insert(logical, text);
+            }
+        }
+        self.save_query_sources();
+
+        self.emit(crate::events::EngineEvent::Ingest {
+            ingested: report.ingested,
+            rejected_parse: report.rejected_parse,
+            rejected_class_d: report.rejected_class_d,
+            base_segments_after: self.segments.len(),
+        });
+        Ok(report)
+    }
+
     /// Write a WAL flush checkpoint (all prior WAL entries are in segments).
     fn checkpoint_wal(&mut self) {
         if let Some(ref mut wal) = self.wal {
@@ -2094,6 +2211,42 @@ mod wal_failure_tests {
             ..EngineConfig::default()
         };
         Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg)
+    }
+
+    /// Micro-benchmark: cost of a single durable `bulk_ingest` as the base corpus
+    /// grows. P1-15 added a `sources.dat` rewrite to the bulk commit; the manifest
+    /// (which serializes the whole dict) was already O(corpus), so this shows the
+    /// per-call persistence cost stays in the same order. Ignored by default (it
+    /// does real disk writes). Run with:
+    ///   cargo test --release --lib wal_failure_tests::bench_bulk_persist_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_bulk_persist_cost() {
+        use crate::gen::{generate, GenConfig};
+        use std::time::Instant;
+
+        for &base_n in &[10_000usize, 50_000, 100_000] {
+            let data = generate(&GenConfig {
+                num_queries: base_n + 2_000,
+                num_titles: 0,
+                seed: 0xB017,
+                ..GenConfig::default()
+            });
+            let mut eng = engine_with_wal(&format!("bulk_persist_{base_n}"));
+            eng.build_from_queries(&data.queries[..base_n]);
+
+            // Time a single small bulk_ingest into the now-large corpus.
+            let batch: Vec<(u64, String)> = data.queries[base_n..base_n + 200].to_vec();
+            let t = Instant::now();
+            let report = eng.try_bulk_ingest(&batch).expect("bulk ingest should be durable");
+            let elapsed = t.elapsed();
+            assert!(report.ingested > 0);
+            println!(
+                "base={base_n:>7} queries  bulk(200) durable commit: {:>7.2} ms  ({} total queries)",
+                elapsed.as_secs_f64() * 1000.0,
+                eng.num_queries(),
+            );
+        }
     }
 
     // P1-17: a WAL write failure must reject the insert (not apply it and report

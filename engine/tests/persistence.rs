@@ -284,3 +284,93 @@ fn wal_recovery_reports_corrupt_tail() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn bulk_ingest_persists_sources_across_reopen() {
+    // P1-15: bulk_ingest now persists both the segment AND the source text
+    // (sources.dat) as part of its durable commit. Previously bulk bypassed
+    // sources.dat entirely, so source text was lost on reopen.
+    let dir = test_dir("bulk_sources_reopen");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::with_config(make_norm(), config.clone());
+    engine.build_from_queries(&sample_queries());
+
+    let batch = vec![
+        (100u64, "wander franco prospect".to_string()),
+        (101u64, "fernando tatis jr rookie".to_string()),
+    ];
+    let report = engine.bulk_ingest(&batch);
+    assert_eq!(report.ingested, 2);
+    assert_eq!(engine.get_query_source(100).as_deref(), Some("wander franco prospect"));
+
+    let title = "Wander Franco 2019 Bowman Chrome Prospect";
+    let expected = match_ids(&engine, title);
+    assert!(expected.contains(&100), "bulk query should match before reopen");
+    drop(engine);
+
+    // Reopen: both the match data AND the bulk source text must survive.
+    let engine2 = Engine::open(make_norm(), config).unwrap();
+    assert_eq!(match_ids(&engine2, title), expected, "bulk matches lost after reopen");
+    assert_eq!(
+        engine2.get_query_source(100).as_deref(),
+        Some("wander franco prospect"),
+        "bulk-ingested source text lost after reopen (sources.dat not persisted)"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn bulk_ingest_failure_is_all_or_nothing() {
+    // P1-15: a persistence failure during bulk ingest must roll the batch back
+    // entirely (no segment added, no source committed) and surface as an error,
+    // instead of silently degrading to an in-memory segment.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = test_dir("bulk_all_or_nothing");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::with_config(make_norm(), config);
+    engine.build_from_queries(&sample_queries());
+    let segs_before = engine.num_segments();
+
+    // Make the segments dir read-only so the next segment write fails.
+    let seg_dir = dir.join("segments");
+    let orig = std::fs::metadata(&seg_dir).unwrap().permissions();
+    std::fs::set_permissions(&seg_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let batch = vec![(100u64, "wander franco prospect".to_string())];
+    let failed = engine.try_bulk_ingest(&batch);
+
+    // Restore perms BEFORE asserting so temp-dir cleanup always works.
+    std::fs::set_permissions(&seg_dir, orig).unwrap();
+
+    assert!(failed.is_err(), "bulk ingest into a read-only dir should fail");
+    assert_eq!(
+        engine.num_segments(),
+        segs_before,
+        "a failed bulk ingest must not add a segment"
+    );
+    assert!(
+        !engine.persistence_healthy,
+        "persistence should be marked unhealthy after a write failure"
+    );
+    assert!(
+        engine.get_query_source(100).is_none(),
+        "a rolled-back batch must not commit source text"
+    );
+
+    // Once the dir is writable again, a fresh bulk ingest commits cleanly.
+    let ok = engine.try_bulk_ingest(&batch);
+    assert!(ok.is_ok(), "bulk ingest should succeed after the dir is writable");
+    assert_eq!(engine.num_segments(), segs_before + 1);
+    assert_eq!(engine.get_query_source(100).as_deref(), Some("wander franco prospect"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

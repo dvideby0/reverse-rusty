@@ -1011,11 +1011,29 @@ async fn bulk_ingest(
 
     // Ingest the valid pairs.
     if !pairs.is_empty() {
-        let report = {
+        let result = {
             let mut engine = state.engine.lock();
-            engine.bulk_ingest(&pairs)
+            engine.try_bulk_ingest(&pairs)
         };
-        state.publish_snapshot();
+
+        let report = match result {
+            Ok(report) => {
+                state.publish_snapshot();
+                report
+            }
+            Err(e) => {
+                // Durability failure: the batch was NOT committed (all-or-nothing,
+                // ADR-017). 503 tells the client to retry — engine state is
+                // unchanged, so no snapshot republish is needed.
+                error!(error = %e, "bulk ingest persistence failed, batch rolled back");
+                state.prom.http_requests_total.with_label_values(&["bulk", "503"]).inc();
+                return ApiError::response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "persistence_unavailable",
+                    format!("bulk ingest could not be durably persisted: {}", e),
+                ).into_response();
+            }
+        };
 
         info!(
             ingested = report.ingested,
@@ -1494,7 +1512,15 @@ async fn main() {
             );
         }
         if !result.queries.is_empty() {
-            let report = engine.build_from_queries(&result.queries);
+            // All-or-nothing: if the initial load can't be durably persisted,
+            // fail fast rather than silently serve an empty/non-durable engine.
+            let report = match engine.try_build_from_queries(&result.queries) {
+                Ok(report) => report,
+                Err(e) => {
+                    error!(error = %e, "initial query load could not be durably persisted; aborting startup");
+                    std::process::exit(1);
+                }
+            };
             let elapsed = start.elapsed();
             info!(
                 ingested = report.ingested,
