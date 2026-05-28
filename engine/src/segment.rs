@@ -886,13 +886,6 @@ impl Engine {
     /// automatic flush is triggered (which may in turn trigger compaction if
     /// `auto_compact_on_flush` is set).
     pub fn insert_live(&mut self, text: &str, logical: u64, version: u32) -> Option<u32> {
-        // Write to WAL FIRST (durability before visibility)
-        if let Some(ref mut wal) = self.wal {
-            if let Err(e) = wal.append_insert(logical, version, text) {
-                eprintln!("[percolator] WAL insert write failed: {}", e);
-                self.wal_healthy = false;
-            }
-        }
         match self.try_insert_live(text, logical, version) {
             Ok(InsertOutcome::Inserted(local)) => {
                 self.maybe_flush();
@@ -917,6 +910,13 @@ impl Engine {
         logical: u64,
         version: u32,
     ) -> Result<InsertOutcome, crate::error::ParseError> {
+        // Write to WAL FIRST (durability before visibility)
+        if let Some(ref mut wal) = self.wal {
+            if let Err(e) = wal.append_insert(logical, version, text) {
+                eprintln!("[percolator] WAL insert write failed: {}", e);
+                self.wal_healthy = false;
+            }
+        }
         let ast = crate::dsl::parse(text)?;
         let mut lc = String::new();
         let ex = extract(&ast, &self.norm, &mut self.dict, &mut lc);
