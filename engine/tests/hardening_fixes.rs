@@ -7,7 +7,6 @@
 //! → delete → flush → compact → persist → reopen → verify correctness throughout.
 
 use percolator::config::EngineConfig;
-use percolator::explain::ExplainDetail;
 use percolator::normalize::Normalizer;
 use percolator::segment::{Engine, MatchScratch};
 use percolator::vocab::Vocab;
