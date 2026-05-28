@@ -849,6 +849,22 @@ pub enum InsertOutcome {
     RejectedClassD,
 }
 
+/// Per-item outcome for one query in a bulk batch, returned in submission order
+/// by [`Engine::try_bulk_ingest_detailed`]. Lets a caller (e.g. the HTTP
+/// `/_bulk` handler) report exactly which items were rejected and why — ES-style
+/// per-item status — rather than only an aggregate count that hides *which*
+/// queries were dropped. The variant tallies match the aggregate [`IngestReport`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IngestItemStatus {
+    /// Compiled and stored in the new base segment.
+    Ingested,
+    /// The DSL string failed to parse; carries the diagnostic so the caller can
+    /// echo the same detail the single-doc path returns.
+    RejectedParse(crate::error::ParseError),
+    /// Compiled but rejected as cost-class D — no anchorable feature, not stored.
+    RejectedClassD,
+}
+
 /// Result of a compaction operation. Tells callers what happened so they can
 /// log it, tune the policy, or feed it to telemetry.
 #[derive(Debug, Clone, Copy, Default)]
@@ -1532,20 +1548,41 @@ impl Engine {
         &mut self,
         queries: &[(u64, String)],
     ) -> std::io::Result<IngestReport> {
+        self.try_bulk_ingest_detailed(queries).map(|(report, _)| report)
+    }
+
+    /// [`try_bulk_ingest`](Self::try_bulk_ingest) that additionally returns a
+    /// per-item outcome for every input query, in submission order
+    /// (`items[i]` describes `queries[i]`). The HTTP `/_bulk` handler uses this
+    /// to report exactly which items were rejected and why — ES-style per-item
+    /// status — instead of an aggregate count that leaves the caller unable to
+    /// tell *which* queries were dropped. The returned [`IngestReport`] is the
+    /// same aggregate as `try_bulk_ingest` and is consistent with the per-item
+    /// vec (its counts equal the variant tallies). Durability semantics are
+    /// identical (all-or-nothing, ADR-017); per-item statuses are only reported
+    /// once the batch has durably committed.
+    pub fn try_bulk_ingest_detailed(
+        &mut self,
+        queries: &[(u64, String)],
+    ) -> std::io::Result<(IngestReport, Vec<IngestItemStatus>)> {
         let mut report = IngestReport::default();
         let mut lc = String::new();
-        let mut extracted: Vec<(u64, Extracted, &str)> = Vec::with_capacity(queries.len());
+        let mut extracted: Vec<(usize, u64, Extracted, &str)> = Vec::with_capacity(queries.len());
+        let mut item_status: Vec<IngestItemStatus> = Vec::with_capacity(queries.len());
         {
             let dict = Arc::make_mut(&mut self.dict);
-            for (logical, text) in queries {
+            for (idx, (logical, text)) in queries.iter().enumerate() {
                 match crate::dsl::parse(text) {
                     Ok(ast) => {
                         let ex = extract(&ast, &self.norm, dict, &mut lc);
-                        extracted.push((*logical, ex, text));
+                        extracted.push((idx, *logical, ex, text));
+                        // Provisional — Pass B may downgrade this to RejectedClassD.
+                        item_status.push(IngestItemStatus::Ingested);
                     }
-                    Err(_) => {
+                    Err(e) => {
                         self.rejected_parse += 1;
                         report.rejected_parse += 1;
+                        item_status.push(IngestItemStatus::RejectedParse(e));
                     }
                 }
             }
@@ -1556,10 +1593,11 @@ impl Engine {
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
-        for (logical, ex, text) in &extracted {
+        for (idx, logical, ex, text) in &extracted {
             if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
                 self.rejected_class_d += 1;
                 report.rejected_class_d += 1;
+                item_status[*idx] = IngestItemStatus::RejectedClassD;
             } else {
                 accepted.push((*logical, (*text).to_string()));
                 report.ingested += 1;
@@ -1571,7 +1609,7 @@ impl Engine {
         if self.config.auto_compact_on_ingest {
             self.maybe_compact();
         }
-        Ok(report)
+        Ok((report, item_status))
     }
 
     /// Compact base segments: merge them into fewer segments to reduce read

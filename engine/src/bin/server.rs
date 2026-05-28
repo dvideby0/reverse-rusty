@@ -53,7 +53,7 @@ use percolator::config::EngineConfig;
 use percolator::events::EngineEvent;
 use percolator::loader;
 use percolator::normalize::Normalizer;
-use percolator::segment::{Engine, EngineSnapshot, MatchScratch, MatchStats};
+use percolator::segment::{Engine, EngineSnapshot, IngestItemStatus, MatchScratch, MatchStats};
 
 thread_local! {
     static SCRATCH: RefCell<MatchScratch> = RefCell::new(MatchScratch::new());
@@ -931,6 +931,9 @@ async fn bulk_ingest(
     // Parse NDJSON action/source pairs.
     let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
     let mut pairs: Vec<(u64, String)> = Vec::new();
+    // For each entry in `pairs`, the index of its provisional item in `items`,
+    // so the engine's per-item outcome can be mapped back to the right slot.
+    let mut pair_item_idx: Vec<usize> = Vec::new();
     let mut items: Vec<BulkItem> = Vec::new();
     let mut has_errors = false;
 
@@ -1006,6 +1009,9 @@ async fn bulk_ingest(
         };
 
         pairs.push((id, query));
+        // Provisional success; the engine outcome (below) may downgrade this
+        // item to a 400 once the batch is compiled.
+        pair_item_idx.push(items.len());
         items.push(BulkItem { index: BulkItemInner { _id: id, status: 201, error: None } });
     }
 
@@ -1013,13 +1019,13 @@ async fn bulk_ingest(
     if !pairs.is_empty() {
         let result = {
             let mut engine = state.engine.lock();
-            engine.try_bulk_ingest(&pairs)
+            engine.try_bulk_ingest_detailed(&pairs)
         };
 
-        let report = match result {
-            Ok(report) => {
+        let (report, item_status) = match result {
+            Ok(outcome) => {
                 state.publish_snapshot();
-                report
+                outcome
             }
             Err(e) => {
                 // Durability failure: the batch was NOT committed (all-or-nothing,
@@ -1035,16 +1041,33 @@ async fn bulk_ingest(
             }
         };
 
+        // Map each engine outcome back onto its provisional item. `item_status[k]`
+        // describes `pairs[k]`, whose response slot is `pair_item_idx[k]`. Parse
+        // and class-D rejections become per-item 400s (mirroring PUT /_doc), so a
+        // caller can see exactly which queries were dropped and why.
+        for (status, &slot) in item_status.iter().zip(pair_item_idx.iter()) {
+            match status {
+                IngestItemStatus::Ingested => {}
+                IngestItemStatus::RejectedParse(e) => {
+                    items[slot].index.status = 400;
+                    items[slot].index.error = Some(format!("parse error: {e}"));
+                    has_errors = true;
+                }
+                IngestItemStatus::RejectedClassD => {
+                    items[slot].index.status = 400;
+                    items[slot].index.error =
+                        Some("query has no anchorable feature (cost class D)".into());
+                    has_errors = true;
+                }
+            }
+        }
+
         info!(
             ingested = report.ingested,
             rejected_parse = report.rejected_parse,
             rejected_class_d = report.rejected_class_d,
             "bulk ingest complete"
         );
-
-        if report.rejected_parse > 0 || report.rejected_class_d > 0 {
-            has_errors = true;
-        }
     }
 
     let took_ms = start.elapsed().as_secs_f64() * 1000.0;
