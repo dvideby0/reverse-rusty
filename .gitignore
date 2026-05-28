@@ -31,6 +31,9 @@ mokabench/
 .env
 .env.*
 
+# Local stress / load tests (not part of CI suite)
+engine/tests/stress.rs
+
 # Data files that may appear at runtime
 data/
 *.csv
