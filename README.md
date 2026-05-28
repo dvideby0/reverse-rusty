@@ -1,3 +1,6 @@
+<img height="258" alt="reverse_rusty" src="https://github.com/user-attachments/assets/ab6aeedb-0934-445e-8cb3-de6b726b19a0" />
+
+
 # Reverse Rusty
 
 A high-performance reverse query matching engine written in Rust. Given millions of stored
