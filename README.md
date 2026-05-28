@@ -537,6 +537,22 @@ includes the error:
 {"_id": 1, "result": "rejected", "error": "query has no anchorable feature (cost class D)"}
 ```
 
+### `GET /_doc/{id}` — Retrieve a Query
+
+```bash
+curl localhost:9200/_doc/1
+```
+
+```json
+{"_id": 1, "found": true, "_source": {"query": "dell laptop"}}
+```
+
+If the query ID doesn't exist:
+
+```json
+{"_id": 1, "found": false}
+```
+
 ### `DELETE /_doc/{id}` — Remove a Query
 
 ```bash
@@ -566,8 +582,10 @@ curl -X POST localhost:9200/_search \
 ```json
 {
   "took_ms": 0.42,
-  "hits": {"total": 1, "ids": [1]},
-  "slots": null
+  "hits": {
+    "total": 1,
+    "hits": [{"_id": 1, "_source": {"query": "dell laptop"}}]
+  }
 }
 ```
 
@@ -576,11 +594,12 @@ Optional request fields:
 | Field | Default | Description |
 |---|---|---|
 | `timeout_ms` | 30000 | Per-request timeout in milliseconds (returns 408 on expiry) |
-| `size` | 1000 | Maximum number of hit IDs to return |
+| `size` | 1000 | Maximum number of hits to return |
 | `from` | 0 | Offset into the result set for pagination |
+| `include_source` | true | Include original query text in each hit |
 
-`total` always reflects the full match count; `ids` is the paginated window.
-```
+`total` always reflects the full match count; `hits` is the paginated window.
+Set `include_source: false` to skip query text lookup for faster responses.
 
 Match multiple titles in a single request:
 
@@ -599,12 +618,18 @@ curl -X POST localhost:9200/_search \
 ```json
 {
   "took_ms": 0.87,
-  "hits": {"total": 2, "ids": [1, 2]},
+  "hits": {
+    "total": 2,
+    "hits": [
+      {"_id": 1, "_source": {"query": "dell laptop"}},
+      {"_id": 2, "_source": {"query": "leather jacket"}}
+    ]
+  },
   "slots": [
     {
       "slot": 0,
       "total": 1,
-      "ids": [1],
+      "hits": [{"_id": 1, "_source": {"query": "dell laptop"}}],
       "stats": {
         "unique_candidates": 15,
         "postings_scanned": 47,
@@ -616,7 +641,7 @@ curl -X POST localhost:9200/_search \
     {
       "slot": 1,
       "total": 1,
-      "ids": [2],
+      "hits": [{"_id": 2, "_source": {"query": "leather jacket"}}],
       "stats": {
         "unique_candidates": 9,
         "postings_scanned": 22,
@@ -859,6 +884,7 @@ across different queries before it's included. Higher values reduce noise.
 | Endpoint | Method | Description |
 |---|---|---|
 | `/` | GET | Version info |
+| `/_doc/{id}` | GET | Retrieve a stored query |
 | `/_doc/{id}` | PUT | Register a single query |
 | `/_doc/{id}` | DELETE | Remove a stored query |
 | `/_search` | POST | Percolate one or more titles |

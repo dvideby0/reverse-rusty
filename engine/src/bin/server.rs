@@ -32,7 +32,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
     Json, Router,
 };
 use parking_lot::RwLock;
@@ -366,6 +366,8 @@ struct SearchBody {
     size: Option<usize>,
     /// Offset into the result set for pagination (default: 0).
     from: Option<usize>,
+    /// Include original query text in each hit (default: true).
+    include_source: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -384,14 +386,26 @@ struct SearchResponse {
 #[derive(Serialize)]
 struct SearchHits {
     total: usize,
-    ids: Vec<u64>,
+    hits: Vec<SearchHitItem>,
+}
+
+#[derive(Serialize)]
+struct SearchHitItem {
+    _id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    _source: Option<HitSource>,
+}
+
+#[derive(Serialize)]
+struct HitSource {
+    query: String,
 }
 
 #[derive(Serialize)]
 struct SlotHit {
     slot: usize,
     total: usize,
-    ids: Vec<u64>,
+    hits: Vec<SearchHitItem>,
     stats: StatsResponse,
 }
 
@@ -576,6 +590,36 @@ async fn put_doc(
     result
 }
 
+/// GET /_doc/{id} — retrieve a stored query by logical ID.
+#[instrument(skip(state), fields(query_id = id))]
+async fn get_doc(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    let start = Instant::now();
+    let engine = state.engine.read();
+    let result = match engine.get_query_source(id) {
+        Some(query_text) => {
+            state.prom.http_requests_total.with_label_values(&["get_doc", "200"]).inc();
+            (StatusCode::OK, Json(serde_json::json!({
+                "_id": id,
+                "found": true,
+                "_source": { "query": query_text }
+            })))
+        }
+        None => {
+            state.prom.http_requests_total.with_label_values(&["get_doc", "404"]).inc();
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+                "_id": id,
+                "found": false
+            })))
+        }
+    };
+    state.prom.http_request_duration.with_label_values(&["get_doc"])
+        .observe(start.elapsed().as_secs_f64());
+    result
+}
+
 /// DELETE /_doc/{id} — remove a stored query by logical ID.
 #[instrument(skip(state), fields(query_id = id))]
 async fn delete_doc(
@@ -612,6 +656,7 @@ async fn search(
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ApiError>)> {
     let start = Instant::now();
     let include_broad = state.include_broad;
+    let include_source = body.include_source.unwrap_or(true);
     let timeout = tokio::time::Duration::from_millis(body.timeout_ms.unwrap_or(30_000));
     let page_size = body.size.unwrap_or(1000);
     let page_from = body.from.unwrap_or(0);
@@ -664,11 +709,20 @@ async fn search(
 
             let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             let total = ids.len();
-            let paged_ids = ids.into_iter().skip(page_from).take(page_size).collect();
+            let paged_ids: Vec<u64> = ids.into_iter().skip(page_from).take(page_size).collect();
+            let hits = if include_source {
+                let engine = state.engine.read();
+                paged_ids.iter().map(|&id| SearchHitItem {
+                    _id: id,
+                    _source: engine.get_query_source(id).map(|q| HitSource { query: q.to_string() }),
+                }).collect()
+            } else {
+                paged_ids.iter().map(|&id| SearchHitItem { _id: id, _source: None }).collect()
+            };
             info!(titles = 1, matches = total, took_ms = format!("{:.2}", took_ms), "search complete");
             SearchResponse {
                 took_ms,
-                hits: SearchHits { total, ids: paged_ids },
+                hits: SearchHits { total, hits },
                 slots: None,
             }
         }
@@ -708,29 +762,48 @@ async fn search(
 
             let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             let mut all_ids = Vec::new();
-            let mut slots = Vec::new();
+            let mut slot_data: Vec<(usize, Vec<u64>, StatsResponse)> = Vec::new();
             for (slot, ids, stats) in results {
-                // Record per-title metrics.
                 prom.match_candidates_per_title.observe(stats.unique_candidates as f64);
                 prom.match_results_per_title.observe(ids.len() as f64);
 
                 all_ids.extend_from_slice(&ids);
-                slots.push(SlotHit {
-                    slot,
-                    total: ids.len(),
-                    ids,
-                    stats: stats.into(),
-                });
+                slot_data.push((slot, ids, stats.into()));
             }
             all_ids.sort_unstable();
             all_ids.dedup();
 
             let total = all_ids.len();
-            let paged_ids = all_ids.into_iter().skip(page_from).take(page_size).collect();
+            let paged_ids: Vec<u64> = all_ids.into_iter().skip(page_from).take(page_size).collect();
+
+            // Build rich hits and slot hits with optional source lookup
+            let (hits, slots) = if include_source {
+                let engine = state.engine.read();
+                let hits = paged_ids.iter().map(|&id| SearchHitItem {
+                    _id: id,
+                    _source: engine.get_query_source(id).map(|q| HitSource { query: q.to_string() }),
+                }).collect();
+                let slots = slot_data.into_iter().map(|(slot, ids, stats)| {
+                    let slot_hits = ids.iter().map(|&id| SearchHitItem {
+                        _id: id,
+                        _source: engine.get_query_source(id).map(|q| HitSource { query: q.to_string() }),
+                    }).collect();
+                    SlotHit { slot, total: ids.len(), hits: slot_hits, stats }
+                }).collect();
+                (hits, slots)
+            } else {
+                let hits = paged_ids.iter().map(|&id| SearchHitItem { _id: id, _source: None }).collect();
+                let slots = slot_data.into_iter().map(|(slot, ids, stats)| {
+                    let slot_hits = ids.iter().map(|&id| SearchHitItem { _id: id, _source: None }).collect();
+                    SlotHit { slot, total: ids.len(), hits: slot_hits, stats }
+                }).collect();
+                (hits, slots)
+            };
+
             info!(titles = num_docs, matches = total, took_ms = format!("{:.2}", took_ms), "search complete");
             SearchResponse {
                 took_ms,
-                hits: SearchHits { total, ids: paged_ids },
+                hits: SearchHits { total, hits },
                 slots: Some(slots),
             }
         }
@@ -1378,7 +1451,7 @@ async fn main() {
     // Build router.
     let app = Router::new()
         .route("/", get(api_root))
-        .route("/_doc/{id}", put(put_doc).delete(delete_doc))
+        .route("/_doc/{id}", get(get_doc).put(put_doc).delete(delete_doc))
         .route("/_search", post(search))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))
@@ -1398,7 +1471,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, PUT /_doc/{id}, POST /_search, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn",
+        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn",
         "server listening"
     );
 

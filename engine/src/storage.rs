@@ -1120,3 +1120,73 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         rejected_class_d,
     })
 }
+
+// -- Query source store persistence ------------------------------------------
+
+const SOURCES_MAGIC: [u8; 4] = *b"SRCS";
+const SOURCES_VERSION: u32 = 1;
+
+pub fn write_query_sources(
+    store: &crate::util::FastMap<u64, String>,
+    path: &Path,
+) -> io::Result<()> {
+    let tmp = path.with_extension("sources.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&SOURCES_MAGIC)?;
+    write_u32(&mut f, SOURCES_VERSION)?;
+    write_u32(&mut f, store.len() as u32)?;
+    for (logical_id, text) in store {
+        write_u64(&mut f, *logical_id)?;
+        let bytes = text.as_bytes();
+        write_u32(&mut f, bytes.len() as u32)?;
+        f.write_all(bytes)?;
+    }
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, String>> {
+    if !path.exists() {
+        return Ok(crate::util::fast_map());
+    }
+    let data = std::fs::read(path)?;
+    if data.len() < 12 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "sources file too small"));
+    }
+    if &data[0..4] != &SOURCES_MAGIC {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad sources magic"));
+    }
+    let version = read_u32_at(&data, 4);
+    if version != SOURCES_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported sources version {}", version),
+        ));
+    }
+    let count = read_u32_at(&data, 8) as usize;
+    let mut store = crate::util::FastMap::with_capacity_and_hasher(
+        count,
+        std::hash::BuildHasherDefault::default(),
+    );
+    let mut cursor = 12;
+    for _ in 0..count {
+        if cursor + 12 > data.len() {
+            break;
+        }
+        let logical_id = read_u64_at(&data, cursor);
+        cursor += 8;
+        let text_len = read_u32_at(&data, cursor) as usize;
+        cursor += 4;
+        if cursor + text_len > data.len() {
+            break;
+        }
+        let text = std::str::from_utf8(&data[cursor..cursor + text_len])
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            .to_string();
+        cursor += text_len;
+        store.insert(logical_id, text);
+    }
+    Ok(store)
+}

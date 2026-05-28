@@ -557,6 +557,8 @@ pub struct Engine {
     pub persistence_healthy: bool,
     /// Number of corrupt segments skipped during Engine::open().
     pub skipped_segments: usize,
+    /// Maps logical_id → original query text for retrieval and search hit enrichment.
+    query_store: crate::util::FastMap<u64, String>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -575,6 +577,7 @@ impl std::fmt::Debug for Engine {
             .field("wal_healthy", &self.wal_healthy)
             .field("persistence_healthy", &self.persistence_healthy)
             .field("skipped_segments", &self.skipped_segments)
+            .field("query_store_entries", &self.query_store.len())
             .finish()
     }
 }
@@ -611,6 +614,7 @@ impl Engine {
             wal_healthy: true,
             persistence_healthy: true,
             skipped_segments: 0,
+            query_store: crate::util::fast_map(),
         }
     }
 
@@ -683,6 +687,11 @@ impl Engine {
             Some(Wal::open(&wal_path)?)
         };
 
+        // Load persisted query sources (if available)
+        let sources_path = dir.join("sources.dat");
+        let query_store = crate::storage::load_query_sources(&sources_path)
+            .unwrap_or_default();
+
         let mut engine = Engine {
             config,
             norm,
@@ -698,6 +707,7 @@ impl Engine {
             wal_healthy: true,
             persistence_healthy: skipped_segments == 0,
             skipped_segments,
+            query_store,
         };
 
         // Replay WAL entries after last checkpoint
@@ -764,6 +774,12 @@ impl Engine {
         &self.norm
     }
 
+    /// Look up the original query text for a logical ID. Returns `None` if
+    /// the ID was never ingested or has been deleted.
+    pub fn get_query_source(&self, logical_id: u64) -> Option<&str> {
+        self.query_store.get(&logical_id).map(|s| s.as_str())
+    }
+
     pub fn num_queries(&self) -> usize {
         self.segments.iter().map(|s| s.len()).sum::<usize>() + self.memtable.len()
     }
@@ -819,14 +835,14 @@ impl Engine {
     pub fn build_from_queries(&mut self, queries: &[(u64, String)]) -> IngestReport {
         let mut report = IngestReport::default();
         let mut lc = String::new();
-        let mut extracted: Vec<(u64, Extracted)> = Vec::with_capacity(queries.len());
+        let mut extracted: Vec<(u64, Extracted, &str)> = Vec::with_capacity(queries.len());
 
         // Pass A
         for (logical, text) in queries {
             match crate::dsl::parse(text) {
                 Ok(ast) => {
                     let ex = extract(&ast, &self.norm, &mut self.dict, &mut lc);
-                    extracted.push((*logical, ex));
+                    extracted.push((*logical, ex, text));
                 }
                 Err(_) => {
                     self.rejected_parse += 1;
@@ -840,11 +856,12 @@ impl Engine {
 
         // Pass B -> first base segment
         let mut seg = Segment::new();
-        for (logical, ex) in &extracted {
+        for (logical, ex, text) in &extracted {
             if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
                 self.rejected_class_d += 1;
                 report.rejected_class_d += 1;
             } else {
+                self.query_store.insert(*logical, (*text).to_string());
                 report.ingested += 1;
             }
         }
@@ -904,7 +921,10 @@ impl Engine {
         let mut lc = String::new();
         let ex = extract(&ast, &self.norm, &mut self.dict, &mut lc);
         match self.memtable.add_compiled(&ex, &self.dict, logical, version) {
-            Some(local) => Ok(InsertOutcome::Inserted(local)),
+            Some(local) => {
+                self.query_store.insert(logical, text.to_string());
+                Ok(InsertOutcome::Inserted(local))
+            }
             None => {
                 self.rejected_class_d += 1;
                 Ok(InsertOutcome::RejectedClassD)
@@ -979,6 +999,9 @@ impl Engine {
             }
         }
 
+        if count > 0 {
+            self.query_store.remove(&logical_id);
+        }
         count
     }
 
@@ -997,9 +1020,10 @@ impl Engine {
             entries,
             base_segments_after: self.segments.len(),
         });
-        // Write WAL checkpoint + save manifest, then reset WAL if manifest succeeded
+        // Write WAL checkpoint + save manifest + query sources, then reset WAL
         self.checkpoint_wal();
         let manifest_ok = self.save_manifest_if_persistent();
+        self.save_query_sources();
         if manifest_ok {
             self.reset_wal_if_safe();
         }
@@ -1015,12 +1039,12 @@ impl Engine {
     pub fn bulk_ingest(&mut self, queries: &[(u64, String)]) -> IngestReport {
         let mut report = IngestReport::default();
         let mut lc = String::new();
-        let mut extracted: Vec<(u64, Extracted)> = Vec::with_capacity(queries.len());
+        let mut extracted: Vec<(u64, Extracted, &str)> = Vec::with_capacity(queries.len());
         for (logical, text) in queries {
             match crate::dsl::parse(text) {
                 Ok(ast) => {
                     let ex = extract(&ast, &self.norm, &mut self.dict, &mut lc);
-                    extracted.push((*logical, ex));
+                    extracted.push((*logical, ex, text));
                 }
                 Err(_) => {
                     self.rejected_parse += 1;
@@ -1032,11 +1056,12 @@ impl Engine {
             self.dict.finalize_mask();
         }
         let mut seg = Segment::new();
-        for (logical, ex) in &extracted {
+        for (logical, ex, text) in &extracted {
             if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
                 self.rejected_class_d += 1;
                 report.rejected_class_d += 1;
             } else {
+                self.query_store.insert(*logical, (*text).to_string());
                 report.ingested += 1;
             }
         }
@@ -1542,6 +1567,16 @@ impl Engine {
         true
     }
 
+    fn save_query_sources(&mut self) {
+        if let Some(ref dir) = self.config.data_dir {
+            let path = dir.join("sources.dat");
+            if let Err(e) = crate::storage::write_query_sources(&self.query_store, &path) {
+                eprintln!("[percolator] query sources write failed: {}", e);
+                self.persistence_healthy = false;
+            }
+        }
+    }
+
     /// Collect paths of mmap'd segments (for cleanup during compaction).
     fn collect_mmap_paths(&self) -> Vec<PathBuf> {
         self.segments.iter().filter_map(|s| {
@@ -1561,7 +1596,9 @@ impl Engine {
         if let Ok(ast) = crate::dsl::parse(text) {
             let mut lc = String::new();
             let ex = extract(&ast, &self.norm, &mut self.dict, &mut lc);
-            let _ = self.memtable.add_compiled(&ex, &self.dict, logical, version);
+            if self.memtable.add_compiled(&ex, &self.dict, logical, version).is_some() {
+                self.query_store.insert(logical, text.to_string());
+            }
         }
     }
 
