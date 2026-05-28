@@ -683,7 +683,7 @@ fn fully_tombstoned_engine_matches_nothing() {
 
     // Tombstone all entries in segment 0
     for local in 0..3u32 {
-        eng.tombstone_in(0, local);
+        eng.tombstone_in(0, local).unwrap();
     }
 
     let mut scratch = MatchScratch::new();
@@ -714,8 +714,8 @@ fn compact_fully_tombstoned_produces_empty_segment() {
     ]);
 
     // Tombstone everything (segment 0 has local 0, segment 1 has local 0)
-    eng.tombstone_in(0, 0);
-    eng.tombstone_in(1, 0);
+    eng.tombstone_in(0, 0).unwrap();
+    eng.tombstone_in(1, 0).unwrap();
 
     let report = eng.compact_all();
     assert!(report.is_some(), "compact_all should run with 2+ base segments");

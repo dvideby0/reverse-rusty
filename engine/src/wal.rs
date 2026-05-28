@@ -23,6 +23,18 @@
 //! On recovery, we scan forward from the beginning, skipping entries with bad CRC
 //! (torn writes from a crash). Entries before the last FlushCheckpoint are skipped
 //! (those mutations are already in sealed segments).
+//!
+//! ## Durability policy
+//!
+//! Appends are `write(2)`-en immediately (reaching the OS page cache). Whether
+//! they are also `fsync`'d per-append is controlled by `fsync_each_write` (see
+//! [`EngineConfig::wal_sync_on_write`](crate::config::EngineConfig::wal_sync_on_write)):
+//! off (default) fsyncs only at flush checkpoints, so an acknowledged write
+//! survives a process crash but not a power loss until the next checkpoint; on
+//! fsyncs every append, so it survives power loss at the cost of one device
+//! flush per mutation. Either way, a failed append is returned to the caller
+//! (never swallowed), so the engine rejects the mutation rather than
+//! acknowledging a write it could not durably log.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -80,12 +92,20 @@ pub struct Wal {
     file: std::fs::File,
     path: PathBuf,
     next_seq: u64,
+    /// When true, every append `fsync`s before returning (durable across power
+    /// loss). When false, appends only reach the OS page cache until the next
+    /// checkpoint (durable across process crash only). See
+    /// [`EngineConfig::wal_sync_on_write`](crate::config::EngineConfig::wal_sync_on_write).
+    fsync_each_write: bool,
 }
 
 impl Wal {
     /// Open or create a WAL file. If the file exists, scans it to find the next
     /// sequence number. If it doesn't exist, creates it with a header.
-    pub fn open(path: &Path) -> io::Result<Self> {
+    ///
+    /// `fsync_each_write` selects the per-append durability policy (see
+    /// [`Wal::fsync_each_write`]).
+    pub fn open(path: &Path, fsync_each_write: bool) -> io::Result<Self> {
         if path.exists() {
             // Open existing, find the max sequence number
             let (entries, _skipped) = Self::read_entries(path)?;
@@ -95,6 +115,7 @@ impl Wal {
                 file,
                 path: path.to_path_buf(),
                 next_seq,
+                fsync_each_write,
             })
         } else {
             // Create new
@@ -106,7 +127,21 @@ impl Wal {
                 file,
                 path: path.to_path_buf(),
                 next_seq: 1,
+                fsync_each_write,
             })
+        }
+    }
+
+    /// Flush an append to its configured durability level: an `fsync` (durable
+    /// across power loss) when `fsync_each_write` is set, otherwise a userspace
+    /// flush that leaves the bytes in the OS page cache until the next
+    /// checkpoint (durable across process crash only).
+    #[inline]
+    fn sync_after_append(&mut self) -> io::Result<()> {
+        if self.fsync_each_write {
+            self.file.sync_all()
+        } else {
+            self.file.flush()
         }
     }
 
@@ -133,7 +168,7 @@ impl Wal {
         self.file.write_all(&(body.len() as u32).to_le_bytes())?;
         self.file.write_all(&crc.to_le_bytes())?;
         self.file.write_all(&body)?;
-        self.file.flush()?;
+        self.sync_after_append()?;
         Ok(seq)
     }
 
@@ -152,7 +187,7 @@ impl Wal {
         self.file.write_all(&(body.len() as u32).to_le_bytes())?;
         self.file.write_all(&crc.to_le_bytes())?;
         self.file.write_all(&body)?;
-        self.file.flush()?;
+        self.sync_after_append()?;
         Ok(seq)
     }
 
@@ -308,5 +343,84 @@ impl Wal {
         self.file.sync_all()?;
         // Don't reset next_seq — keep it monotonic across resets
         Ok(())
+    }
+
+    /// Test-only: swap the underlying file for a read-only handle so subsequent
+    /// appends fail with an `io::Error`, simulating a disk-full / EIO / revoked
+    /// permission fault on a live WAL (an open fd is not affected by `chmod`, so
+    /// this is the deterministic way to inject a write fault).
+    #[cfg(test)]
+    pub(crate) fn break_writes_for_test(&mut self) {
+        self.file = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&self.path)
+            .expect("reopen WAL read-only");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_path(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("percolator_wal_{}_{}.log", name, std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn append_surfaces_write_errors_instead_of_swallowing() {
+        let path = scratch_path("append_err");
+        let mut wal = Wal::open(&path, false).unwrap();
+        // A healthy append succeeds.
+        assert!(wal.append_insert(1, 1, "michael jordan").is_ok());
+        // Once the file can no longer be written, the error is returned (not swallowed).
+        wal.break_writes_for_test();
+        assert!(wal.append_insert(2, 1, "scottie pippen").is_err());
+        assert!(wal.append_tombstone(u32::MAX, 0).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn fsync_each_write_round_trips_through_recovery() {
+        let path = scratch_path("fsync_roundtrip");
+        {
+            let mut wal = Wal::open(&path, true).unwrap();
+            wal.append_insert(7, 2, "wander franco").unwrap();
+            wal.append_tombstone(0, 3).unwrap();
+        }
+        let recovered = Wal::recover(&path).unwrap();
+        assert_eq!(recovered.entries.len(), 2);
+        assert_eq!(recovered.skipped_bytes, 0);
+        match &recovered.entries[0] {
+            WalEntry::Insert { logical, version, text, .. } => {
+                assert_eq!(*logical, 7);
+                assert_eq!(*version, 2);
+                assert_eq!(text, "wander franco");
+            }
+            other => panic!("expected Insert, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Micro-benchmark: per-write fsync vs. checkpoint-only. Ignored by default
+    /// (it does real device flushes). Run with:
+    ///   cargo test --release -p percolator --lib wal::tests::bench_fsync_cost -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_fsync_cost() {
+        use std::time::Instant;
+        const N: u64 = 5_000;
+        for &(label, fsync) in &[("checkpoint-only (fsync=false)", false), ("per-write fsync=true", true)] {
+            let path = scratch_path(&format!("bench_{}", fsync));
+            let mut wal = Wal::open(&path, fsync).unwrap();
+            let t = Instant::now();
+            for i in 0..N {
+                wal.append_insert(i, 1, "1994 upper deck michael jordan sp psa 10").unwrap();
+            }
+            let per = t.elapsed().as_secs_f64() / N as f64;
+            println!("{label:35}: {:.1} us/append   ({:.0} appends/sec)", per * 1e6, 1.0 / per);
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }

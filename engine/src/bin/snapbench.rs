@@ -90,7 +90,7 @@ fn main() {
     let t = Instant::now();
     for i in 0..iters {
         let logical = 10_000_000 + i as u64; // delete the ones we just inserted
-        eng.delete_by_logical_id(logical);
+        let _ = eng.delete_by_logical_id(logical);
         std::hint::black_box(eng.snapshot());
     }
     let per_del = t.elapsed().as_secs_f64() / iters as f64;

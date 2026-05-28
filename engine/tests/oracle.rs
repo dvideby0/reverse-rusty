@@ -282,7 +282,7 @@ fn tombstone_originals(eng: &mut Engine, build_batch: &[(u64, String)], updated:
                 continue;
             }
             if updated.contains(logical) {
-                eng.tombstone_in(0, local);
+                eng.tombstone_in(0, local).unwrap();
             }
             local += 1;
         }

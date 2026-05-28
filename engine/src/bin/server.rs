@@ -122,6 +122,15 @@ struct Cli {
     /// Maximum members in an any-of group.
     #[arg(long, default_value_t = 64)]
     max_anyof_group_size: usize,
+
+    /// Fsync the write-ahead log on every mutation before acknowledging it.
+    /// When false (default), WAL appends reach the OS page cache and are
+    /// fsync'd at the next flush checkpoint — an acknowledged write survives a
+    /// process crash but not power loss until checkpoint (RocksDB sync=false /
+    /// SQLite NORMAL). When true, every write is durable against power loss at
+    /// a large per-write latency cost (SQLite FULL).
+    #[arg(long, default_value_t = false)]
+    wal_sync_on_write: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -596,13 +605,25 @@ async fn put_doc(
                     error: Some("query has no anchorable feature (cost class D)".into()),
                 }))
             }
-            Err(e) => {
+            Err(percolator::WriteError::Parse(e)) => {
                 warn!(query_id = id, error = %e, "query parse error");
                 state.prom.http_requests_total.with_label_values(&["put_doc", "400"]).inc();
                 (StatusCode::BAD_REQUEST, Json(PutDocResponse {
                     _id: id,
                     result: "error",
                     error: Some(format!("parse error: {}", e)),
+                }))
+            }
+            Err(percolator::WriteError::Wal(e)) => {
+                // Durability failure: the mutation was NOT applied. Never
+                // acknowledge a write we couldn't log (see ADR-013). 503 tells
+                // the client to retry — the engine state is unchanged.
+                error!(query_id = id, error = %e, "WAL write failed, mutation rejected");
+                state.prom.http_requests_total.with_label_values(&["put_doc", "503"]).inc();
+                (StatusCode::SERVICE_UNAVAILABLE, Json(PutDocResponse {
+                    _id: id,
+                    result: "error",
+                    error: Some(format!("write-ahead log error: {}", e)),
                 }))
             }
         }
@@ -657,20 +678,34 @@ async fn delete_doc(
     state.publish_snapshot();
     state.prom.http_request_duration.with_label_values(&["delete_doc"])
         .observe(start.elapsed().as_secs_f64());
-    if deleted > 0 {
-        info!(query_id = id, deleted, "query deleted");
-        state.prom.http_requests_total.with_label_values(&["delete_doc", "200"]).inc();
-        (StatusCode::OK, Json(serde_json::json!({
-            "_id": id,
-            "result": "deleted",
-            "deleted_count": deleted
-        })))
-    } else {
-        state.prom.http_requests_total.with_label_values(&["delete_doc", "404"]).inc();
-        (StatusCode::NOT_FOUND, Json(serde_json::json!({
-            "_id": id,
-            "result": "not_found"
-        })))
+    match deleted {
+        Ok(n) if n > 0 => {
+            info!(query_id = id, deleted = n, "query deleted");
+            state.prom.http_requests_total.with_label_values(&["delete_doc", "200"]).inc();
+            (StatusCode::OK, Json(serde_json::json!({
+                "_id": id,
+                "result": "deleted",
+                "deleted_count": n
+            })))
+        }
+        Ok(_) => {
+            state.prom.http_requests_total.with_label_values(&["delete_doc", "404"]).inc();
+            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+                "_id": id,
+                "result": "not_found"
+            })))
+        }
+        Err(e) => {
+            // Tombstone WAL append failed: the delete was NOT applied. Reject
+            // rather than acknowledge a delete we couldn't log (see ADR-013).
+            error!(query_id = id, error = %e, "WAL write failed, delete rejected");
+            state.prom.http_requests_total.with_label_values(&["delete_doc", "503"]).inc();
+            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+                "_id": id,
+                "result": "error",
+                "error": format!("write-ahead log error: {}", e)
+            })))
+        }
     }
 }
 
@@ -1338,6 +1373,7 @@ async fn main() {
         max_query_length: cli.max_query_length,
         max_query_clauses: cli.max_query_clauses,
         max_anyof_group_size: cli.max_anyof_group_size,
+        wal_sync_on_write: cli.wal_sync_on_write,
         ..EngineConfig::default()
     };
     let problems = config.validate();

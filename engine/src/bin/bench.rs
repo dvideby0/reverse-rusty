@@ -232,7 +232,7 @@ fn main() {
         {
             // tombstone the freshly inserted? No: tombstone the *previous* local id.
             // Here we just tombstone an arbitrary earlier id to exercise the path.
-            eng.tombstone(old.saturating_sub(1));
+            let _ = eng.tombstone(old.saturating_sub(1));
         }
         ver = ver.wrapping_add(1);
     }

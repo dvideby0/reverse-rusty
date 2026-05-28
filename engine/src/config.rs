@@ -73,6 +73,21 @@ pub struct EngineConfig {
     /// Default: `None`
     pub data_dir: Option<std::path::PathBuf>,
 
+    /// WAL durability policy. When `false` (default), each `insert`/`tombstone`
+    /// is `write(2)`-en to the WAL (reaching the OS page cache) but only
+    /// `fsync`'d at the next flush checkpoint — so an acknowledged write
+    /// survives a process crash but not a power loss until the next checkpoint
+    /// (equivalent to RocksDB `sync=false` / SQLite `synchronous=NORMAL`).
+    /// When `true`, every WAL append is `fsync`'d before the write is
+    /// acknowledged, so an acknowledged write survives power loss (equivalent
+    /// to SQLite `synchronous=FULL`) — at a large per-write latency cost (one
+    /// device flush per mutation). Independent of error propagation: a failed
+    /// WAL write is always surfaced to the caller and the mutation rejected,
+    /// regardless of this setting.
+    ///
+    /// Default: `false`
+    pub wal_sync_on_write: bool,
+
     // ---- merge scoring ----
 
     // ---- query complexity limits ----
@@ -115,6 +130,7 @@ impl Default for EngineConfig {
             auto_compact_on_flush: true,
             auto_compact_on_ingest: true,
             data_dir: None,
+            wal_sync_on_write: false,
             max_query_length: 10_000,
             max_query_clauses: 256,
             max_anyof_group_size: 64,

@@ -262,7 +262,7 @@ fn delete_removes_all_versions_across_segments() {
     assert!(pre.contains(&1), "query 1 should match before delete");
 
     // Delete by logical ID — should tombstone in both segment and memtable
-    let tombstoned = engine.delete_by_logical_id(1);
+    let tombstoned = engine.delete_by_logical_id(1).unwrap();
     assert_eq!(tombstoned, 2, "should tombstone 2 entries (one per segment/memtable)");
 
     // Query 1 should no longer match
@@ -284,7 +284,7 @@ fn delete_across_many_segments() {
     }
     assert_eq!(engine.metrics().base_segments, 4);
 
-    let tombstoned = engine.delete_by_logical_id(42);
+    let tombstoned = engine.delete_by_logical_id(42).unwrap();
     assert_eq!(tombstoned, 4, "should find and tombstone across all 4 segments");
 
     // Other queries unaffected
@@ -299,7 +299,7 @@ fn delete_nonexistent_id_returns_zero() {
     let mut engine = Engine::new(norm);
     engine.build_from_queries(&sample_queries()[..5]);
 
-    let tombstoned = engine.delete_by_logical_id(999999);
+    let tombstoned = engine.delete_by_logical_id(999999).unwrap();
     assert_eq!(tombstoned, 0);
 }
 
@@ -313,8 +313,8 @@ fn delete_then_compact_reclaims_space() {
 
     let before = engine.metrics().total_queries;
     assert!(before > 0);
-    engine.delete_by_logical_id(1);
-    engine.delete_by_logical_id(7);
+    engine.delete_by_logical_id(1).unwrap();
+    engine.delete_by_logical_id(7).unwrap();
     engine.compact_all();
     let after = engine.metrics().total_queries;
 
@@ -359,8 +359,8 @@ fn full_lifecycle_vocab_delete_persist_compact() {
     assert!(engine.has_stale_segments());
 
     // Phase 4: delete some queries using the reverse index
-    let del1 = engine.delete_by_logical_id(1);
-    let del2 = engine.delete_by_logical_id(25);
+    let del1 = engine.delete_by_logical_id(1).unwrap();
+    let del2 = engine.delete_by_logical_id(25).unwrap();
     assert!(del1 > 0);
     assert!(del2 > 0);
 
@@ -417,7 +417,7 @@ fn interleaved_delete_insert_flush_compact_stress() {
     for round in 0..5 {
         // Delete every 10th query
         for i in (0..100).step_by(10) {
-            engine.delete_by_logical_id(i + round);
+            engine.delete_by_logical_id(i + round).unwrap();
         }
         // Insert new queries
         for i in 0..10 {
@@ -494,7 +494,7 @@ fn persistence_round_trip_with_reverse_index() {
     engine.flush();
 
     // Delete some entries
-    let del = engine.delete_by_logical_id(3);
+    let del = engine.delete_by_logical_id(3).unwrap();
     assert!(del > 0);
     engine.flush();
     drop(engine);
@@ -513,7 +513,7 @@ fn persistence_round_trip_with_reverse_index() {
 
     // Delete via reverse index should work on reopened mmap segments
     let mut engine2 = reopened;
-    let del2 = engine2.delete_by_logical_id(4);
+    let del2 = engine2.delete_by_logical_id(4).unwrap();
     assert!(del2 > 0, "reverse index should be rebuilt for mmap'd segments on open");
 }
 

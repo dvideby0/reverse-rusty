@@ -108,3 +108,45 @@ impl fmt::Display for NormalizerError {
 }
 
 impl std::error::Error for NormalizerError {}
+
+/// An error from the live-write path ([`Engine::try_insert_live`](crate::segment::Engine::try_insert_live)).
+///
+/// A write can fail two ways with very different meanings: the caller's query
+/// DSL was malformed ([`WriteError::Parse`] — a client error), or the mutation
+/// could not be appended to the write-ahead log ([`WriteError::Wal`] — a
+/// durability failure). They are kept distinct so the server can map them to
+/// different HTTP statuses (400 vs 503). A `Wal` error means the write was
+/// *not* durably recorded and was therefore *not* applied — it must not be
+/// acknowledged as success.
+#[derive(Debug)]
+pub enum WriteError {
+    /// The query DSL was malformed. The write never reached the WAL.
+    Parse(ParseError),
+    /// The write-ahead log could not record the mutation, so the mutation was
+    /// rejected (not applied to the in-memory state).
+    Wal(std::io::Error),
+}
+
+impl From<ParseError> for WriteError {
+    fn from(e: ParseError) -> Self {
+        WriteError::Parse(e)
+    }
+}
+
+impl fmt::Display for WriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            WriteError::Parse(e) => write!(f, "{e}"),
+            WriteError::Wal(e) => write!(f, "write-ahead log error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for WriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WriteError::Parse(e) => Some(e),
+            WriteError::Wal(e) => Some(e),
+        }
+    }
+}

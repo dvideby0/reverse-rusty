@@ -5,7 +5,7 @@
 //! never silently dropped, and `try_insert_live` surfaces parse errors as typed
 //! `Err`s rather than folding them into a bare `None`.
 
-use percolator::{Engine, InsertOutcome, Normalizer, ParseErrorKind};
+use percolator::{Engine, InsertOutcome, Normalizer, ParseErrorKind, WriteError};
 
 fn engine() -> Engine {
     Engine::new(Normalizer::default_vocab().expect("built-in vocab"))
@@ -54,8 +54,10 @@ fn try_insert_live_surfaces_typed_error_without_counting() {
 
     // parse failure -> typed Err, and NOT counted (the caller owns it)
     let before_parse = eng.rejected_parse();
-    let err = eng.try_insert_live("(", 99, 2).unwrap_err();
-    assert_eq!(err.kind, ParseErrorKind::UnclosedGroup);
+    match eng.try_insert_live("(", 99, 2).unwrap_err() {
+        WriteError::Parse(pe) => assert_eq!(pe.kind, ParseErrorKind::UnclosedGroup),
+        WriteError::Wal(e) => panic!("expected a parse error, got WAL error: {e}"),
+    }
     assert_eq!(eng.rejected_parse(), before_parse);
 
     // class-D -> Ok(RejectedClassD), and IS counted

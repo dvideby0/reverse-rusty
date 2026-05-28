@@ -266,7 +266,7 @@ fn wal_recovery_reports_corrupt_tail() {
 
     // Write a valid WAL with two inserts
     {
-        let mut wal = Wal::open(&wal_path).unwrap();
+        let mut wal = Wal::open(&wal_path, false).unwrap();
         wal.append_insert(1, 1, "michael jordan card").unwrap();
         wal.append_insert(2, 1, "lebron james rookie").unwrap();
     }

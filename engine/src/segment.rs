@@ -936,7 +936,7 @@ impl Engine {
             std::fs::create_dir_all(dir).ok();
             let seg_dir = dir.join("segments");
             std::fs::create_dir_all(&seg_dir).ok();
-            Wal::open(&dir.join("wal.log")).ok()
+            Wal::open(&dir.join("wal.log"), config.wal_sync_on_write).ok()
         } else {
             None
         };
@@ -1044,11 +1044,7 @@ impl Engine {
 
         // Open WAL and replay
         let wal_path = dir.join("wal.log");
-        let wal = if wal_path.exists() {
-            Some(Wal::open(&wal_path)?)
-        } else {
-            Some(Wal::open(&wal_path)?)
-        };
+        let wal = Some(Wal::open(&wal_path, config.wal_sync_on_write)?);
 
         // Load persisted query sources (if available)
         let sources_path = dir.join("sources.dat");
@@ -1304,32 +1300,50 @@ impl Engine {
                 Some(local)
             }
             Ok(InsertOutcome::RejectedClassD) => None,
-            Err(_) => {
+            Err(crate::error::WriteError::Parse(_)) => {
                 self.rejected_parse += 1;
+                None
+            }
+            Err(crate::error::WriteError::Wal(e)) => {
+                // The mutation was rejected (not applied). This infallible
+                // convenience wrapper can only signal it by returning None;
+                // callers that need to distinguish durability failures from
+                // class-D/parse rejections must use `try_insert_live`.
+                eprintln!("[percolator] WAL insert write failed, mutation dropped: {e}");
                 None
             }
         }
     }
 
-    /// Live insert that surfaces a parse failure as `Err(ParseError)` instead of
-    /// folding it into a silent `None`. On success returns the outcome (inserted
-    /// id, or class-D rejection). Class-D rejections are still counted toward
+    /// Live insert that surfaces failures as a typed [`WriteError`] instead of
+    /// folding them into a silent `None`. Two failure modes: `Parse` (the query
+    /// DSL was malformed — a caller error) and `Wal` (the mutation could not be
+    /// durably logged). On success returns the outcome (inserted id, or class-D
+    /// rejection). Class-D rejections are still counted toward
     /// `rejected_class_d()`; parse errors are the caller's to handle (and are
     /// NOT counted here, since they are returned).
+    ///
+    /// A `Wal` error means the write was *not* applied: the in-memory state is
+    /// left untouched so it never diverges from the durable log. The caller must
+    /// treat it as a failed write (the server returns HTTP 503), not success.
     pub fn try_insert_live(
         &mut self,
         text: &str,
         logical: u64,
         version: u32,
-    ) -> Result<InsertOutcome, crate::error::ParseError> {
-        // Write to WAL FIRST (durability before visibility)
+    ) -> Result<InsertOutcome, crate::error::WriteError> {
+        // Parse first: a malformed query is a caller error and must never reach
+        // the WAL (it carries no replayable mutation).
+        let ast = crate::dsl::parse(text).map_err(crate::error::WriteError::Parse)?;
+        // WAL FIRST (durability before visibility). If the append fails the
+        // mutation is not durable, so reject it and leave in-memory state
+        // untouched rather than acknowledge a write a crash would lose.
         if let Some(ref mut wal) = self.wal {
             if let Err(e) = wal.append_insert(logical, version, text) {
-                eprintln!("[percolator] WAL insert write failed: {}", e);
                 self.wal_healthy = false;
+                return Err(crate::error::WriteError::Wal(e));
             }
         }
-        let ast = crate::dsl::parse(text)?;
         let mut lc = String::new();
         let ex = {
             let dict = Arc::make_mut(&mut self.dict);
@@ -1351,35 +1365,50 @@ impl Engine {
     /// Tombstone a query version in the MEMTABLE (update = insert_live new +
     /// tombstone old). `local_id` is a memtable-local id (as returned by
     /// `insert_live`).
-    pub fn tombstone(&mut self, local_id: u32) {
+    ///
+    /// Returns `Err` if the tombstone could not be durably logged; in that case
+    /// the in-memory tombstone is not applied (the entry stays alive) so the
+    /// memtable never diverges from the WAL.
+    pub fn tombstone(&mut self, local_id: u32) -> std::io::Result<()> {
         // WAL: memtable tombstones use seg_idx = u32::MAX as sentinel
         if let Some(ref mut wal) = self.wal {
             if let Err(e) = wal.append_tombstone(u32::MAX, local_id) {
-                eprintln!("[percolator] WAL tombstone write failed: {}", e);
                 self.wal_healthy = false;
+                return Err(e);
             }
         }
         Arc::make_mut(&mut self.memtable).tombstone(local_id);
+        Ok(())
     }
 
     /// Tombstone a query in a specific base segment (for callers that track
     /// (segment, local) addresses). `seg_idx` indexes `self.segments`.
-    pub fn tombstone_in(&mut self, seg_idx: usize, local_id: u32) {
+    ///
+    /// Returns `Err` (without applying the tombstone) if the WAL append fails.
+    pub fn tombstone_in(&mut self, seg_idx: usize, local_id: u32) -> std::io::Result<()> {
         if let Some(ref mut wal) = self.wal {
             if let Err(e) = wal.append_tombstone(seg_idx as u32, local_id) {
-                eprintln!("[percolator] WAL tombstone write failed: {}", e);
                 self.wal_healthy = false;
+                return Err(e);
             }
         }
         if let Some(seg) = self.segments.get_mut(seg_idx) {
             Arc::make_mut(seg).tombstone(local_id);
         }
+        Ok(())
     }
 
     /// Delete all live entries with a given logical ID across all segments
     /// and the memtable. Uses the per-segment reverse index for O(segments)
-    /// lookup instead of O(total_entries) full scan.
-    pub fn delete_by_logical_id(&mut self, logical_id: u64) -> usize {
+    /// lookup instead of O(total_entries) full scan. Returns the number of
+    /// entries tombstoned.
+    ///
+    /// Each tombstone is WAL-logged before it is applied. If a WAL append
+    /// fails, the delete stops and returns `Err`: the tombstones already
+    /// applied are durably logged (and replay correctly), and the failed one
+    /// is not applied. A retried delete is idempotent, so the caller can treat
+    /// the `Err` as "try again" (the server returns HTTP 503).
+    pub fn delete_by_logical_id(&mut self, logical_id: u64) -> std::io::Result<usize> {
         let mut count = 0usize;
 
         for (seg_idx, seg) in self.segments.iter_mut().enumerate() {
@@ -1390,8 +1419,8 @@ impl Engine {
             for local in locals {
                 if let Some(ref mut wal) = self.wal {
                     if let Err(e) = wal.append_tombstone(seg_idx as u32, local) {
-                        eprintln!("[percolator] WAL tombstone write failed: {}", e);
                         self.wal_healthy = false;
+                        return Err(e);
                     }
                 }
                 Arc::make_mut(seg).tombstone(local);
@@ -1406,8 +1435,8 @@ impl Engine {
         for local in mem_locals {
             if let Some(ref mut wal) = self.wal {
                 if let Err(e) = wal.append_tombstone(u32::MAX, local) {
-                    eprintln!("[percolator] WAL tombstone write failed: {}", e);
                     self.wal_healthy = false;
+                    return Err(e);
                 }
             }
             Arc::make_mut(&mut self.memtable).tombstone(local);
@@ -1417,7 +1446,7 @@ impl Engine {
         if count > 0 {
             qs_write(&self.query_store).remove(&logical_id);
         }
-        count
+        Ok(count)
     }
 
     /// Seal the current memtable into an immutable base segment and start a
@@ -2042,5 +2071,73 @@ impl Engine {
         } else if let Some(seg) = self.segments.get_mut(seg_idx as usize) {
             Arc::make_mut(seg).tombstone(local_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod wal_failure_tests {
+    use super::*;
+    use crate::config::EngineConfig;
+    use crate::error::WriteError;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("percolator_segwal_{}_{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn engine_with_wal(name: &str) -> Engine {
+        let cfg = EngineConfig {
+            data_dir: Some(temp_dir(name)),
+            ..EngineConfig::default()
+        };
+        Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg)
+    }
+
+    // P1-17: a WAL write failure must reject the insert (not apply it and report
+    // success). Verifies the in-memory state is untouched after the failure.
+    #[test]
+    fn wal_insert_failure_is_rejected_not_acknowledged() {
+        let mut eng = engine_with_wal("insert_fail");
+        assert!(matches!(
+            eng.try_insert_live("michael jordan", 1, 1),
+            Ok(InsertOutcome::Inserted(_))
+        ));
+        let before = eng.num_queries();
+        assert!(eng.get_query_source(1).is_some());
+
+        eng.wal.as_mut().unwrap().break_writes_for_test();
+        let err = eng.try_insert_live("scottie pippen", 2, 1).unwrap_err();
+        assert!(matches!(err, WriteError::Wal(_)), "expected Wal error, got {err:?}");
+        assert_eq!(eng.num_queries(), before, "rejected insert must not change the corpus");
+        assert!(eng.get_query_source(2).is_none(), "rejected insert must not be visible");
+        assert!(!eng.wal_healthy, "wal_healthy must flip to false after a failed append");
+    }
+
+    // P1-17: a WAL write failure must reject the delete and leave the entry alive.
+    #[test]
+    fn wal_delete_failure_is_rejected_not_acknowledged() {
+        let mut eng = engine_with_wal("delete_fail");
+        eng.try_insert_live("michael jordan", 1, 1).unwrap();
+        assert!(eng.get_query_source(1).is_some());
+
+        eng.wal.as_mut().unwrap().break_writes_for_test();
+        assert!(eng.delete_by_logical_id(1).is_err(), "delete must surface the WAL error");
+        assert!(
+            eng.get_query_source(1).is_some(),
+            "rejected delete must leave the entry alive"
+        );
+    }
+
+    // A malformed query is a Parse error that never touches the WAL, so it is
+    // distinct from a durability failure and leaves the WAL healthy.
+    #[test]
+    fn parse_failure_is_distinct_from_durability_failure() {
+        let mut eng = engine_with_wal("parse_vs_wal");
+        let err = eng.try_insert_live("(", 9, 1).unwrap_err();
+        assert!(matches!(err, WriteError::Parse(_)));
+        assert!(eng.wal_healthy, "a parse failure must not mark the WAL unhealthy");
     }
 }
