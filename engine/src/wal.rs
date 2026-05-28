@@ -67,6 +67,14 @@ impl WalEntry {
     }
 }
 
+/// Result of WAL recovery — entries to replay plus diagnostic info.
+#[derive(Debug)]
+pub struct WalRecovery {
+    pub entries: Vec<WalEntry>,
+    /// Bytes at the tail that could not be parsed (torn writes / corruption).
+    pub skipped_bytes: usize,
+}
+
 /// Append-only write-ahead log.
 pub struct Wal {
     file: std::fs::File,
@@ -80,7 +88,7 @@ impl Wal {
     pub fn open(path: &Path) -> io::Result<Self> {
         if path.exists() {
             // Open existing, find the max sequence number
-            let entries = Self::read_entries(path)?;
+            let (entries, _skipped) = Self::read_entries(path)?;
             let next_seq = entries.iter().map(|e| e.seq()).max().unwrap_or(0) + 1;
             let file = std::fs::OpenOptions::new().append(true).open(path)?;
             Ok(Wal {
@@ -174,9 +182,9 @@ impl Wal {
         self.file.sync_all()
     }
 
-    /// Read all valid entries from a WAL file. Entries with bad CRC (torn writes)
-    /// are silently skipped.
-    fn read_entries(path: &Path) -> io::Result<Vec<WalEntry>> {
+    /// Read all valid entries from a WAL file. Returns entries and the byte
+    /// count of any trailing data that could not be parsed.
+    fn read_entries(path: &Path) -> io::Result<(Vec<WalEntry>, usize)> {
         let data = std::fs::read(path)?;
         if data.len() < WAL_HEADER_SIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "WAL too small"));
@@ -187,7 +195,7 @@ impl Wal {
         Self::parse_entries(&data[WAL_HEADER_SIZE..])
     }
 
-    fn parse_entries(data: &[u8]) -> io::Result<Vec<WalEntry>> {
+    fn parse_entries(data: &[u8]) -> io::Result<(Vec<WalEntry>, usize)> {
         let mut entries = Vec::new();
         let mut cursor = 0usize;
 
@@ -260,21 +268,23 @@ impl Wal {
             cursor += total_len;
         }
 
-        Ok(entries)
+        let skipped_bytes = data.len() - cursor;
+        Ok((entries, skipped_bytes))
     }
 
     /// Recover: read all entries, then return only those AFTER the last
     /// FlushCheckpoint (those are the un-materialized mutations).
-    pub fn recover(path: &Path) -> io::Result<Vec<WalEntry>> {
-        let all = Self::read_entries(path)?;
-        // Find the last FlushCheckpoint
+    /// Returns a `WalRecovery` with entries to replay and skipped-bytes count.
+    pub fn recover(path: &Path) -> io::Result<WalRecovery> {
+        let (all, skipped_bytes) = Self::read_entries(path)?;
         let last_checkpoint_idx = all.iter().rposition(|e| {
             matches!(e, WalEntry::FlushCheckpoint { .. })
         });
-        match last_checkpoint_idx {
-            Some(idx) => Ok(all[idx + 1..].to_vec()),
-            None => Ok(all), // no checkpoint — replay everything
-        }
+        let entries = match last_checkpoint_idx {
+            Some(idx) => all[idx + 1..].to_vec(),
+            None => all,
+        };
+        Ok(WalRecovery { entries, skipped_bytes })
     }
 
     /// Reset the WAL: truncate to just the header. Called after a successful

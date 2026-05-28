@@ -397,6 +397,18 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.alive_count(),
         }
     }
+    pub fn is_alive(&self, local_id: u32) -> bool {
+        match self {
+            BaseSegment::Memory(s) => *s.alive.get(local_id as usize).unwrap_or(&false),
+            BaseSegment::Mmap(s) => *s.alive_overlay.get(local_id as usize).unwrap_or(&false),
+        }
+    }
+    pub fn logical(&self, local_id: u32) -> u64 {
+        match self {
+            BaseSegment::Memory(s) => s.exact.logical(local_id),
+            BaseSegment::Mmap(s) => s.logical(local_id),
+        }
+    }
     pub fn tombstone(&mut self, local_id: u32) {
         match self {
             BaseSegment::Memory(s) => s.tombstone(local_id),
@@ -689,8 +701,14 @@ impl Engine {
         };
 
         // Replay WAL entries after last checkpoint
-        let replay_entries = Wal::recover(&wal_path)?;
-        for entry in replay_entries {
+        let recovery = Wal::recover(&wal_path)?;
+        if recovery.skipped_bytes > 0 {
+            eprintln!(
+                "WARNING: WAL recovery skipped {} bytes of corrupt/torn data at tail",
+                recovery.skipped_bytes,
+            );
+        }
+        for entry in recovery.entries {
             match entry {
                 WalEntry::Insert { logical, version, text, .. } => {
                     // Replay without re-writing to WAL
@@ -920,6 +938,48 @@ impl Engine {
         if let Some(seg) = self.segments.get_mut(seg_idx) {
             seg.tombstone(local_id);
         }
+    }
+
+    /// Delete all live entries with a given logical ID across all segments
+    /// and the memtable. Returns the number of entries tombstoned.
+    pub fn delete_by_logical_id(&mut self, logical_id: u64) -> usize {
+        let mut count = 0usize;
+
+        // Scan base segments
+        for (seg_idx, seg) in self.segments.iter_mut().enumerate() {
+            let n = seg.len();
+            for local in 0..n as u32 {
+                if seg.is_alive(local) && seg.logical(local) == logical_id {
+                    if let Some(ref mut wal) = self.wal {
+                        if let Err(e) = wal.append_tombstone(seg_idx as u32, local) {
+                            eprintln!("[percolator] WAL tombstone write failed: {}", e);
+                            self.wal_healthy = false;
+                        }
+                    }
+                    seg.tombstone(local);
+                    count += 1;
+                }
+            }
+        }
+
+        // Scan memtable
+        let mem_len = self.memtable.len();
+        for local in 0..mem_len as u32 {
+            if self.memtable.alive[local as usize]
+                && self.memtable.exact.logical(local) == logical_id
+            {
+                if let Some(ref mut wal) = self.wal {
+                    if let Err(e) = wal.append_tombstone(u32::MAX, local) {
+                        eprintln!("[percolator] WAL tombstone write failed: {}", e);
+                        self.wal_healthy = false;
+                    }
+                }
+                self.memtable.tombstone(local);
+                count += 1;
+            }
+        }
+
+        count
     }
 
     /// Seal the current memtable into an immutable base segment and start a

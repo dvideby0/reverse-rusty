@@ -118,22 +118,24 @@ fn frozen_probe<'a>(
     blob: &'a [u32],
     mask: u64,
 ) -> Option<&'a [u32]> {
-    if slots.is_empty() {
+    let cap = slots.len();
+    if cap == 0 {
         return None;
     }
-    let mut idx = key & mask;
-    loop {
-        let slot = unsafe { slots.get_unchecked(idx as usize) };
+    let mut idx = (key & mask) as usize;
+    for _ in 0..cap {
+        let slot = slots.get(idx)?;
         if slot.key == key {
             let start = slot.offset as usize;
             let end = start + slot.len as usize;
-            return Some(&blob[start..end]);
+            return blob.get(start..end);
         }
         if slot.key == 0 {
             return None;
         }
-        idx = (idx + 1) & mask;
+        idx = (idx + 1) & (mask as usize);
     }
+    None
 }
 
 // ---- low-level I/O helpers ----
@@ -448,7 +450,7 @@ pub struct MmapSegment {
     // Meta
     class_arr: *const u8,
     // Alive overlay (in-memory, mutable for tombstones)
-    alive_overlay: Vec<bool>,
+    pub(crate) alive_overlay: Vec<bool>,
     /// O(1) counter of alive (non-tombstoned) entries.
     alive_counter: usize,
     // Path for cleanup/identification
@@ -733,7 +735,7 @@ impl MmapSegment {
     }
 
     #[inline]
-    fn logical(&self, id: u32) -> u64 {
+    pub(crate) fn logical(&self, id: u32) -> u64 {
         unsafe { *self.logical_arr.add(id as usize) }
     }
 

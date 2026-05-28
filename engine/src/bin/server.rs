@@ -2,8 +2,7 @@
 //!
 //! Endpoints:
 //!   PUT  /_doc/{id}          Register a query (body: {"query": "..."})
-//!   GET  /_doc/{id}          (future — reserved)
-//!   DELETE /_doc/{id}        (future — reserved)
+//!   DELETE /_doc/{id}        Remove a stored query
 //!   POST /_search            Percolate title(s) (body: {"document": {"title": "..."}} or "documents")
 //!   POST /_bulk              NDJSON bulk ingest ({action}\n{source}\n...)
 //!   POST /_flush             Flush memtable to immutable segment
@@ -45,11 +44,17 @@ use prometheus::{
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, instrument};
 
+use std::cell::RefCell;
+
 use percolator::config::EngineConfig;
 use percolator::events::EngineEvent;
 use percolator::loader;
 use percolator::normalize::Normalizer;
 use percolator::segment::{Engine, MatchScratch, MatchStats};
+
+thread_local! {
+    static SCRATCH: RefCell<MatchScratch> = RefCell::new(MatchScratch::new());
+}
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -532,6 +537,34 @@ async fn put_doc(
     result
 }
 
+/// DELETE /_doc/{id} — remove a stored query by logical ID.
+#[instrument(skip(state), fields(query_id = id))]
+async fn delete_doc(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    let start = Instant::now();
+    let mut engine = state.engine.write();
+    let deleted = engine.delete_by_logical_id(id);
+    state.prom.http_request_duration.with_label_values(&["delete_doc"])
+        .observe(start.elapsed().as_secs_f64());
+    if deleted > 0 {
+        info!(query_id = id, deleted, "query deleted");
+        state.prom.http_requests_total.with_label_values(&["delete_doc", "200"]).inc();
+        (StatusCode::OK, Json(serde_json::json!({
+            "_id": id,
+            "result": "deleted",
+            "deleted_count": deleted
+        })))
+    } else {
+        state.prom.http_requests_total.with_label_values(&["delete_doc", "404"]).inc();
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "_id": id,
+            "result": "not_found"
+        })))
+    }
+}
+
 /// POST /_search — percolate one or more titles.
 #[instrument(skip_all)]
 async fn search(
@@ -551,12 +584,15 @@ async fn search(
 
             let search_fut = tokio::task::spawn_blocking(move || {
                 let engine = state_inner.engine.read();
-                let mut scratch = MatchScratch::new();
-                let mut out = Vec::new();
-                let stats = state_inner.pool.install(|| {
-                    engine.match_title(&title, &mut scratch, &mut out, include_broad)
-                });
-                (out, stats)
+                state_inner.pool.install(|| {
+                    SCRATCH.with(|cell| {
+                        let mut scratch = cell.borrow_mut();
+                        let mut out = Vec::new();
+                        let stats =
+                            engine.match_title(&title, &mut scratch, &mut out, include_broad);
+                        (out, stats)
+                    })
+                })
             });
 
             let (ids, stats) = match tokio::time::timeout(timeout, search_fut).await {
@@ -1255,7 +1291,7 @@ async fn main() {
     // Build router.
     let app = Router::new()
         .route("/", get(api_root))
-        .route("/_doc/{id}", put(put_doc))
+        .route("/_doc/{id}", put(put_doc).delete(delete_doc))
         .route("/_search", post(search))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))
