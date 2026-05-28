@@ -1,0 +1,56 @@
+╔══════════════════════════════════════════════════════════════╗
+║  Percolator vs mokaccino — head-to-head benchmark          ║
+╠══════════════════════════════════════════════════════════════╣
+║  queries=100000   titles=10000    broad=5% skew=2.0       ║
+╚══════════════════════════════════════════════════════════════╝
+
+[1/5] Generating synthetic data...
+      done in 0.04s
+
+[2/5] Building Percolator engine...
+      indexed: 100000 (A=99570 B=218 C=212 D=0)
+      build: 0.16s (610383 queries/sec)
+
+[3/5] Building mokaccino engine (translating queries)...
+
+      --- mokaccino with n_clause_matchers=2 ---
+      indexed: 100000 (rejected: 0)
+      build: 0.10s (1017941 queries/sec)
+
+  n_clause_matchers=2: 1195 titles/sec  (0.0x vs Percolator)  matches/title=59.89  p50=729416ns  p99=2709666ns
+
+      --- mokaccino with n_clause_matchers=3 ---
+      indexed: 100000 (rejected: 0)
+      build: 0.12s (852759 queries/sec)
+
+╔══════════════════════════════════════════════════════════════════════╗
+║         HEAD-TO-HEAD RESULTS (n_clause_matchers=3)               ║
+╠══════════════════════════════════════════════════════════════════════╣
+║  Metric                             Percolator      mokaccino  ║
+╠══════════════════════════════════════════════════════════════════════╣
+║  Queries indexed                        100000         100000  ║
+║  Build (queries/sec)                    610383         852759  ║
+║  Match (titles/sec/core)                525642           1809  ║
+║  Speedup vs mokaccino                   290.6x           1.0x  ║
+║  Total matches (verify)                 598928         598928  ║
+║  Avg matches/title                       59.89          59.89  ║
+║  Avg candidates/title                    114.0          (N/A)  ║
+║  Latency p50                            1500ns       518792ns  ║
+║  Latency p95                            3584ns      1621750ns  ║
+║  Latency p99                            6250ns      2350208ns  ║
+║  RSS (MB)                                 36.2          243.9  ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+      --- mokaccino with n_clause_matchers=4 ---
+      indexed: 100000 (rejected: 0)
+      build: 0.13s (770520 queries/sec)
+
+  n_clause_matchers=4: 3150 titles/sec  (0.0x vs Percolator)  matches/title=59.89  p50=276375ns  p99=1272834ns
+
+[4/5] Differential correctness check (first 1000 titles)...
+
+══ CORRECTNESS CHECK (1000 titles) ══
+  Titles with identical matches: 1000 (100.0%)
+  Titles with differences: 0
+
+[5/5] Done.

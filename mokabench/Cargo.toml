@@ -1,0 +1,15 @@
+[package]
+name = "mokabench"
+version = "0.1.0"
+edition = "2021"
+description = "Head-to-head benchmark: Percolator vs mokaccino on identical workloads"
+
+[dependencies]
+percolator = { path = "../engine" }
+mokaccino = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

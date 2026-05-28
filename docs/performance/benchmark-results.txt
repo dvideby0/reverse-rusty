@@ -1,0 +1,238 @@
+Percolator PoC — benchmark results (captured 2026-05-27T17:42Z)
+Host: aarch64, 4 cores, 3.8 GiB RAM; rustc 1.95.0 release (opt-level=3, lto, codegen-units=1)
+bench args: <num_queries> <num_titles> <broad_frac> <skew> <reps>
+
+################################################################
+### CONFIG A: 1,000,000 queries, broad_frac=0 (pure selective realtime path)
+################################################################
+[gen] done in 0.18s
+================ BUILD ================
+indexed queries     : 1000000
+cost classes        : A(selective)=1000000  B(arity-2/anyof)=0  C(broad)=0  D(rejected)=0
+dict features       : 34206
+main signatures     : 33319
+main max posting len: 96   (#postings>1024: 0)
+build time          : 1.47s  (678865 queries/sec)
+================ MEMORY ===============
+exact SoA heap      : 73.4 MB
+main index postings : 4.9 MB
+broad index postings: 0.0 MB
+process RSS         : 258.4 MB
+RSS per query       : 258.4 bytes
+================ MATCH ================
+SELECTIVE lane only : 735698 titles/sec/core   (264.8x the 2,778/s target on 1 core)
+with broad inline   : 696961 titles/sec/core   (naive; design batches the broad lane)
+est. 4-core (sel.)  : 2942792 titles/sec  (10.59B titles/hour)
+avg unique cand/title : 54.64   (p95=96, p99=112, max=144)
+  of which broad lane : 0.00 avg  (p99=0)
+avg postings scanned  : 54.64   (p99=112)
+avg matches/title     : 0.000
+latency               : p50=1459ns p95=2125ns p99=2500ns (incl. timer overhead)
+(sanity) total matches over throughput pass: 0
+================ UPDATES ==============
+live updates        : 50000 in 0.063s  (790187 updates/sec)  visibility: immediate (epoch swap)
+queries after updates: 1050000
+
+################################################################
+### CONFIG B: 5,000,000 queries, broad_frac=0 (scale + flat selectivity)
+################################################################
+[gen] done in 1.01s
+================ BUILD ================
+indexed queries     : 5000000
+cost classes        : A(selective)=5000000  B(arity-2/anyof)=0  C(broad)=0  D(rejected)=0
+dict features       : 171056
+main signatures     : 166985
+main max posting len: 96   (#postings>1024: 0)
+build time          : 7.55s  (662358 queries/sec)
+================ MEMORY ===============
+exact SoA heap      : 486.5 MB
+main index postings : 24.3 MB
+broad index postings: 0.0 MB
+process RSS         : 1289.3 MB
+RSS per query       : 257.9 bytes
+================ MATCH ================
+SELECTIVE lane only : 455772 titles/sec/core   (164.1x the 2,778/s target on 1 core)
+with broad inline   : 447360 titles/sec/core   (naive; design batches the broad lane)
+est. 4-core (sel.)  : 1823088 titles/sec  (6.56B titles/hour)
+avg unique cand/title : 54.29   (p95=96, p99=112, max=128)
+  of which broad lane : 0.00 avg  (p99=0)
+avg postings scanned  : 54.29   (p99=112)
+avg matches/title     : 0.000
+latency               : p50=2292ns p95=3042ns p99=3500ns (incl. timer overhead)
+(sanity) total matches over throughput pass: 0
+================ UPDATES ==============
+live updates        : 50000 in 0.069s  (728500 updates/sec)  visibility: immediate (epoch swap)
+queries after updates: 5050000
+
+################################################################
+### CONFIG C: 1,000,000 queries, broad_frac=0.05, skew=2 (broad lane impact)
+################################################################
+[gen] done in 0.19s
+================ BUILD ================
+indexed queries     : 1000000
+cost classes        : A(selective)=995504  B(arity-2/anyof)=2196  C(broad)=2300  D(rejected)=0
+dict features       : 34261
+main signatures     : 33548
+main max posting len: 2196   (#postings>1024: 1)
+build time          : 1.44s  (692521 queries/sec)
+================ MEMORY ===============
+exact SoA heap      : 73.4 MB
+main index postings : 4.9 MB
+broad index postings: 0.0 MB
+process RSS         : 257.0 MB
+RSS per query       : 257.0 bytes
+================ MATCH ================
+SELECTIVE lane only : 234056 titles/sec/core   (84.3x the 2,778/s target on 1 core)
+with broad inline   : 67201 titles/sec/core   (naive; design batches the broad lane)
+est. 4-core (sel.)  : 936224 titles/sec  (3.37B titles/hour)
+avg unique cand/title : 682.20   (p95=2380, p99=4528, max=4625)
+  of which broad lane : 515.66 avg  (p99=2300)
+avg postings scanned  : 793.76   (p99=6724)
+avg matches/title     : 627.494
+latency               : p50=2458ns p95=46334ns p99=86917ns (incl. timer overhead)
+(sanity) total matches over throughput pass: 313747200
+================ UPDATES ==============
+live updates        : 50000 in 0.061s  (825319 updates/sec)  visibility: immediate (epoch swap)
+queries after updates: 1050000
+
+################################################################
+### CONFIG D: 1,000,000 queries, broad_frac=0.05, skew=3.5 (adversarial hot entities)
+################################################################
+[gen] done in 0.17s
+================ BUILD ================
+indexed queries     : 1000000
+cost classes        : A(selective)=995394  B(arity-2/anyof)=2196  C(broad)=2410  D(rejected)=0
+dict features       : 32579
+main signatures     : 32179
+main max posting len: 2196   (#postings>1024: 1)
+build time          : 1.47s  (678564 queries/sec)
+================ MEMORY ===============
+exact SoA heap      : 65.0 MB
+main index postings : 4.9 MB
+broad index postings: 0.0 MB
+process RSS         : 255.5 MB
+RSS per query       : 255.5 bytes
+================ MATCH ================
+SELECTIVE lane only : 285200 titles/sec/core   (102.7x the 2,778/s target on 1 core)
+with broad inline   : 74346 titles/sec/core   (naive; design batches the broad lane)
+est. 4-core (sel.)  : 1140801 titles/sec  (4.11B titles/hour)
+avg unique cand/title : 670.42   (p95=2396, p99=2474, max=4616)
+  of which broad lane : 521.73 avg  (p99=2410)
+avg postings scanned  : 754.31   (p99=4544)
+avg matches/title     : 606.808
+latency               : p50=2917ns p95=48458ns p99=62917ns (incl. timer overhead)
+(sanity) total matches over throughput pass: 303404000
+================ UPDATES ==============
+live updates        : 50000 in 0.062s  (807741 updates/sec)  visibility: immediate (epoch swap)
+queries after updates: 1050000
+
+################################################################
+### CORRECTNESS: differential oracle (brute-force ground truth vs engine)
+### 40,000 queries x 4,000 titles, independent Dict on the oracle side
+################################################################
+oracle: truth_matches=109024 engine_matches=109024 false_neg=0 false_pos=0
+(false_neg=0 => zero-false-negative contract holds; false_pos=0 => exact matcher is exact)
+
+################################################################
+### CORPUS-DRIVEN FEATURE LEARNER (learn binary) — 500k queries, no hand vocab
+################################################################
+corpus: 500000 queries, learning with no hand-coded vocabulary
+params: min_count=50, npmi_tau=0.3
+
+=== iteration 1: discovered 89 multi-token entities (bigrams) ===
+entity (by frequency)              count     npmi
+psa_8                              86317    0.736
+upper_deck                         63696    1.073
+psa_9                              35917    0.592
+bgs_8                              35206    0.589
+psa_9.5                            27369    0.558
+sgc_8                              27341    0.560
+psa_10                             24115    0.547
+base_psa                           17449    0.415
+insert_psa                         17396    0.414
+rc_psa                             17263    0.411
+sp_psa                             17194    0.411
+preview_psa                        17190    0.412
+refractor_psa                      17146    0.412
+rookie_psa                         17036    0.406
+bgs_9                              14862    0.497
+bgs_9.5                            11471    0.476
+sgc_9                              11311    0.472
+bgs_10                              9614    0.456
+
+--- of which 30 are name-like (all-alphabetic), top by binding strength (npmi): ---
+entity                             count     npmi
+upper_deck                         63696    1.073
+michael_jordan                      4239    1.043
+lebron_james                        1811    1.038
+kobe_bryant                         1402    1.037
+ken_griffey                         1162    1.036
+wayne_gretzky                       1002    1.035
+tom_brady                            986    1.035
+mike_trout                           858    1.035
+patrick_mahomes                      816    1.034
+base_psa                           17449    0.415
+insert_psa                         17396    0.414
+preview_psa                        17190    0.412
+
+=== iteration 2: discovered 101 longer entities (trigram+) ===
+entity (by frequency)              count     npmi
+base_psa_8                          8791    0.510
+insert_psa_8                        8673    0.507
+sp_psa_8                            8662    0.508
+rc_psa_8                            8649    0.507
+preview_psa_8                       8642    0.508
+refractor_psa_8                     8609    0.507
+rookie_psa_8                        8343    0.500
+base_psa_9                          3639    0.441
+insert_psa_9                        3617    0.440
+rookie_psa_9                        3605    0.442
+
+=== selectivity gain: learned phrase vs its parts (lower df = better anchor) ===
+learned entity               df(phrase)   min df(part)     gain x
+psa_8                             86317         148864       1.7x
+upper_deck                        63696          63696       1.0x
+psa_9                             35917          62090       1.7x
+bgs_8                             35206          71153       2.0x
+psa_9.5                           27369          47476       1.7x
+sgc_8                             27341          54651       2.0x
+psa_10                            24115          41092       1.7x
+base_psa                          17449          49819       2.9x
+insert_psa                        17396          49783       2.9x
+rc_psa                            17263          49985       2.9x
+sp_psa                            17194          49739       2.9x
+preview_psa                       17190          49386       2.9x
+refractor_psa                     17146          49367       2.9x
+rookie_psa                        17036          50408       3.0x
+
+=== learned feature universe (no hand-coded vocab) ===
+distinct unigrams in corpus : 17196
+entities learned (iter 1)   : 89
+entities learned (iter 2)   : 101
+
+Takeaway: every anchor the matcher needs is derivable from query co-occurrence
+statistics. The learner glues multi-token entities (raising selectivity) and the
+signature optimizer already ranks anchors purely by frequency — no taxonomy required.
+
+################################################################
+### LSM MULTI-SEGMENT READ-AMPLIFICATION (segbench), captured 2026-05-27
+### Same 300k-query / 3k-title corpus split into K equal bulk-ingested base
+### segments. broad_frac=0.0 (isolates the selective path). A title must probe
+### every segment, so per-title probe work scales ~linearly with K. seed=0xC0FFEE.
+### Build: build_from_queries(chunk0) + bulk_ingest(chunk1..K-1); empty memtable.
+### cmd: segbench 300000 3000 0.0
+################################################################
+ segments |   candidates/title |     postings/title |  titles/sec/core
+--------------------------------------------------------------------------
+        1 |              53.48 |              53.48 |           717728
+        2 |              55.11 |              55.11 |           574005
+        4 |              56.67 |              56.67 |           327257
+        8 |              57.68 |              57.68 |           351379
+--------------------------------------------------------------------------
+Notes: titles/sec/core drops ~2x from 1->8 segments — the read-amplification of
+fanning every title across all segments (one signature-map lookup per probe per
+segment). candidates/postings per title stay nearly flat because, over a large
+synthetic entity space, signatures are highly selective: most per-segment probes
+hit empty/tiny postings, so the dominant added cost is the probe (hash-lookup)
+count, not extra exact-verified candidates. Compaction (merging K segments back
+to 1) repays this read tax. Run time ~6.5s (<40s budget).
