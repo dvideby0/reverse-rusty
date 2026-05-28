@@ -148,12 +148,18 @@ fn write_u64(w: &mut impl Write, v: u64) -> io::Result<()> {
     w.write_all(&v.to_le_bytes())
 }
 
-fn read_u32_at(data: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
+fn read_u32_at(data: &[u8], off: usize) -> io::Result<u32> {
+    let b: [u8; 4] = data.get(off..off + 4)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated u32"))?;
+    Ok(u32::from_le_bytes(b))
 }
 
-fn read_u64_at(data: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
+fn read_u64_at(data: &[u8], off: usize) -> io::Result<u64> {
+    let b: [u8; 8] = data.get(off..off + 8)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated u64"))?;
+    Ok(u64::from_le_bytes(b))
 }
 
 /// Align a byte offset up to the next 8-byte boundary.
@@ -216,8 +222,8 @@ fn write_u8_array(w: &mut (impl Write + Seek), data: &[u8]) -> io::Result<()> {
 
 /// Read a u32-element array: [count: u32, data...]. Returns (slice, next_offset).
 /// The slice is cast from the raw bytes (requires alignment — guaranteed by pad_to_8).
-fn read_u32_slice(data: &[u8], off: usize) -> (&[u32], usize) {
-    let count = read_u32_at(data, off) as usize;
+fn read_u32_slice(data: &[u8], off: usize) -> io::Result<(&[u32], usize)> {
+    let count = read_u32_at(data, off)? as usize;
     let data_off = off + 4;
     let slice = unsafe {
         std::slice::from_raw_parts(
@@ -226,12 +232,12 @@ fn read_u32_slice(data: &[u8], off: usize) -> (&[u32], usize) {
         )
     };
     let end = align8((data_off + count * 4) as u64) as usize;
-    (slice, end)
+    Ok((slice, end))
 }
 
 /// Read a u16-element array.
-fn read_u16_slice(data: &[u8], off: usize) -> (&[u16], usize) {
-    let count = read_u32_at(data, off) as usize;
+fn read_u16_slice(data: &[u8], off: usize) -> io::Result<(&[u16], usize)> {
+    let count = read_u32_at(data, off)? as usize;
     let data_off = off + 4;
     let slice = unsafe {
         std::slice::from_raw_parts(
@@ -240,12 +246,12 @@ fn read_u16_slice(data: &[u8], off: usize) -> (&[u16], usize) {
         )
     };
     let end = align8((data_off + count * 2) as u64) as usize;
-    (slice, end)
+    Ok((slice, end))
 }
 
 /// Read a u64-element array: [count: u32, pad(4), data...].
-fn read_u64_slice(data: &[u8], off: usize) -> (&[u64], usize) {
-    let count = read_u32_at(data, off) as usize;
+fn read_u64_slice(data: &[u8], off: usize) -> io::Result<(&[u64], usize)> {
+    let count = read_u32_at(data, off)? as usize;
     let data_off = off + 8; // 4 count + 4 pad
     let slice = unsafe {
         std::slice::from_raw_parts(
@@ -254,16 +260,16 @@ fn read_u64_slice(data: &[u8], off: usize) -> (&[u64], usize) {
         )
     };
     let end = data_off + count * 8; // already aligned
-    (slice, end)
+    Ok((slice, end))
 }
 
 /// Read a u8-element array.
-fn read_u8_slice(data: &[u8], off: usize) -> (&[u8], usize) {
-    let count = read_u32_at(data, off) as usize;
+fn read_u8_slice(data: &[u8], off: usize) -> io::Result<(&[u8], usize)> {
+    let count = read_u32_at(data, off)? as usize;
     let data_off = off + 4;
     let slice = &data[data_off..data_off + count];
     let end = align8((data_off + count) as u64) as usize;
-    (slice, end)
+    Ok((slice, end))
 }
 
 // ---- segment write ----
@@ -455,6 +461,10 @@ pub struct MmapSegment {
     alive_counter: usize,
     // Path for cleanup/identification
     path: std::path::PathBuf,
+    /// Vocab epoch at which this segment's queries were compiled.
+    pub vocab_epoch: u64,
+    /// Reverse index: logical_id → local_ids. Built at open time for O(1) delete.
+    logical_index: crate::util::FastMap<u64, Vec<u32>>,
 }
 
 // SAFETY: MmapSegment is safe to send/share across threads. The raw pointers
@@ -485,9 +495,7 @@ impl MmapSegment {
         // Verify trailing CRC32
         {
             let content = &mmap[..mmap.len() - 4];
-            let stored_crc = u32::from_le_bytes(
-                mmap[mmap.len() - 4..].try_into().unwrap()
-            );
+            let stored_crc = read_u32_at(&mmap, mmap.len() - 4)?;
             if crc32(content) != stored_crc {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -507,7 +515,7 @@ impl MmapSegment {
             if &data[0..4] != &MAGIC {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
             }
-            let version = read_u32_at(data, 4);
+            let version = read_u32_at(data, 4)?;
             if version != FORMAT_VERSION {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -524,40 +532,40 @@ impl MmapSegment {
         let mmap_len = mmap.len();
         let data_for_parse = unsafe { std::slice::from_raw_parts(base, mmap_len) };
 
-        let num_queries = read_u32_at(data_for_parse, 8);
-        let exact_off = read_u64_at(data_for_parse, 16) as usize;
-        let main_off = read_u64_at(data_for_parse, 24) as usize;
-        let broad_off = read_u64_at(data_for_parse, 32) as usize;
-        let filter_off = read_u64_at(data_for_parse, 40) as usize;
-        let meta_off = read_u64_at(data_for_parse, 48) as usize;
+        let num_queries = read_u32_at(data_for_parse, 8)?;
+        let exact_off = read_u64_at(data_for_parse, 16)? as usize;
+        let main_off = read_u64_at(data_for_parse, 24)? as usize;
+        let broad_off = read_u64_at(data_for_parse, 32)? as usize;
+        let filter_off = read_u64_at(data_for_parse, 40)? as usize;
+        let meta_off = read_u64_at(data_for_parse, 48)? as usize;
 
         // ---- Parse exact section ----
         let mut cursor = exact_off;
-        let (req_mask_s, next) = read_u64_slice(data_for_parse, cursor); cursor = next;
-        let (forb_mask_s, next) = read_u64_slice(data_for_parse, cursor); cursor = next;
-        let (req_off_s, next) = read_u32_slice(data_for_parse, cursor); cursor = next;
-        let (req_len_s, next) = read_u16_slice(data_for_parse, cursor); cursor = next;
-        let (req_blob_s, next) = read_u32_slice(data_for_parse, cursor); cursor = next;
-        let (forb_off_s, next) = read_u32_slice(data_for_parse, cursor); cursor = next;
-        let (forb_len_s, next) = read_u16_slice(data_for_parse, cursor); cursor = next;
-        let (forb_blob_s, next) = read_u32_slice(data_for_parse, cursor); cursor = next;
-        let (q_group_start_s, next) = read_u32_slice(data_for_parse, cursor); cursor = next;
-        let (q_group_count_s, next) = read_u16_slice(data_for_parse, cursor); cursor = next;
-        let (group_off_s, next) = read_u32_slice(data_for_parse, cursor); cursor = next;
-        let (group_len_s, next) = read_u16_slice(data_for_parse, cursor); cursor = next;
-        let (anyof_blob_s, next) = read_u32_slice(data_for_parse, cursor); cursor = next;
-        let (version_s, next) = read_u32_slice(data_for_parse, cursor); cursor = next;
-        let (logical_s, _) = read_u64_slice(data_for_parse, cursor);
+        let (req_mask_s, next) = read_u64_slice(data_for_parse, cursor)?; cursor = next;
+        let (forb_mask_s, next) = read_u64_slice(data_for_parse, cursor)?; cursor = next;
+        let (req_off_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
+        let (req_len_s, next) = read_u16_slice(data_for_parse, cursor)?; cursor = next;
+        let (req_blob_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
+        let (forb_off_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
+        let (forb_len_s, next) = read_u16_slice(data_for_parse, cursor)?; cursor = next;
+        let (forb_blob_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
+        let (q_group_start_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
+        let (q_group_count_s, next) = read_u16_slice(data_for_parse, cursor)?; cursor = next;
+        let (group_off_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
+        let (group_len_s, next) = read_u16_slice(data_for_parse, cursor)?; cursor = next;
+        let (anyof_blob_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
+        let (version_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
+        let (logical_s, _) = read_u64_slice(data_for_parse, cursor)?;
 
         // ---- Parse main index ----
-        let (main_slots_s, main_blob_s, main_cap) = parse_frozen_index(data_for_parse, main_off);
+        let (main_slots_s, main_blob_s, main_cap) = parse_frozen_index(data_for_parse, main_off)?;
 
         // ---- Parse broad index ----
-        let (broad_slots_s, broad_blob_s, broad_cap) = parse_frozen_index(data_for_parse, broad_off);
+        let (broad_slots_s, broad_blob_s, broad_cap) = parse_frozen_index(data_for_parse, broad_off)?;
 
         // ---- Parse filter ----
-        let filter_num_blocks = read_u32_at(data_for_parse, filter_off) as usize;
-        let filter_mask_val = read_u64_at(data_for_parse, filter_off + 8);
+        let filter_num_blocks = read_u32_at(data_for_parse, filter_off)? as usize;
+        let filter_mask_val = read_u64_at(data_for_parse, filter_off + 8)?;
         let filter_data_off = filter_off + 16;
         let filter_data_ptr = if filter_num_blocks > 0 {
             unsafe { base.add(filter_data_off) as *const u64 }
@@ -567,12 +575,19 @@ impl MmapSegment {
 
         // ---- Parse meta ----
         cursor = meta_off;
-        let (class_s, next) = read_u8_slice(data_for_parse, cursor); cursor = next;
-        let (alive_s, _) = read_u8_slice(data_for_parse, cursor);
+        let (class_s, next) = read_u8_slice(data_for_parse, cursor)?; cursor = next;
+        let (alive_s, _) = read_u8_slice(data_for_parse, cursor)?;
 
-        // Build alive overlay from on-disk data
+        // Build alive overlay and logical reverse index from on-disk data
         let alive_overlay: Vec<bool> = alive_s.iter().map(|&b| b != 0).collect();
         let alive_counter = alive_overlay.iter().filter(|&&a| a).count();
+        let mut logical_index: crate::util::FastMap<u64, Vec<u32>> = crate::util::fast_map();
+        for i in 0..num_queries as usize {
+            if alive_overlay[i] {
+                let lid = unsafe { *logical_s.as_ptr().add(i) };
+                logical_index.entry(lid).or_default().push(i as u32);
+            }
+        }
 
         Ok(MmapSegment {
             mmap,
@@ -613,6 +628,8 @@ impl MmapSegment {
             alive_overlay,
             alive_counter,
             path: path.to_path_buf(),
+            vocab_epoch: 0,
+            logical_index,
         })
     }
 
@@ -719,6 +736,10 @@ impl MmapSegment {
             }
             *slot = false;
         }
+    }
+
+    pub fn locals_for_logical(&self, logical_id: u64) -> &[u32] {
+        self.logical_index.get(&logical_id).map_or(&[], |v| v.as_slice())
     }
 
     /// Number of alive (non-tombstoned) entries (O(1)).
@@ -932,12 +953,14 @@ impl MmapSegment {
             }
         }
 
-        Segment::from_parts(main, broad, exact, classes, alive)
+        let mut seg = Segment::from_parts(main, broad, exact, classes, alive);
+        seg.vocab_epoch = self.vocab_epoch;
+        seg
     }
 }
 
-fn parse_frozen_index<'a>(data: &'a [u8], off: usize) -> (&'a [FrozenSlot], &'a [u32], usize) {
-    let cap = read_u32_at(data, off) as usize;
+fn parse_frozen_index<'a>(data: &'a [u8], off: usize) -> io::Result<(&'a [FrozenSlot], &'a [u32], usize)> {
+    let cap = read_u32_at(data, off)? as usize;
     let slots_off = off + 8; // 4 count + 4 pad
     let slots = unsafe {
         std::slice::from_raw_parts(
@@ -946,8 +969,8 @@ fn parse_frozen_index<'a>(data: &'a [u8], off: usize) -> (&'a [FrozenSlot], &'a 
         )
     };
     let after_slots = align8((slots_off + cap * std::mem::size_of::<FrozenSlot>()) as u64) as usize;
-    let (blob, _) = read_u32_slice(data, after_slots);
-    (slots, blob, cap)
+    let (blob, _) = read_u32_slice(data, after_slots)?;
+    Ok((slots, blob, cap))
 }
 
 // ---- Dict serialization (for manifest) ----
@@ -980,18 +1003,23 @@ pub fn deserialize_dict(data: &[u8]) -> io::Result<crate::dict::Dict> {
     if data.len() < 4 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "dict too short"));
     }
-    let n = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap()) as usize;
+    let n = read_u32_at(data, cursor)? as usize;
     cursor += 4;
     let mut dict = Dict::new();
     for _ in 0..n {
-        let name_len = u16::from_le_bytes(data[cursor..cursor + 2].try_into().unwrap()) as usize;
+        let name_len = data.get(cursor..cursor + 2)
+            .and_then(|s| <[u8; 2]>::try_from(s).ok())
+            .map(u16::from_le_bytes)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated dict name_len"))? as usize;
         cursor += 2;
-        let name = std::str::from_utf8(&data[cursor..cursor + name_len])
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let name = std::str::from_utf8(
+            data.get(cursor..cursor + name_len)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated dict name"))?
+        ).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         cursor += name_len;
         let kind = u8_to_kind(data[cursor]);
         cursor += 1;
-        let freq = u32::from_le_bytes(data[cursor..cursor + 4].try_into().unwrap());
+        let freq = read_u32_at(data, cursor)?;
         cursor += 4;
         let mask_bit = data[cursor];
         cursor += 1;
@@ -1078,7 +1106,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "no CRC"));
     }
     let content = &data[..data.len() - 4];
-    let stored_crc = u32::from_le_bytes(data[data.len() - 4..].try_into().unwrap());
+    let stored_crc = read_u32_at(&data, data.len() - 4)?;
     if crc32(content) != stored_crc {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest CRC mismatch"));
     }
@@ -1086,7 +1114,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     if &data[0..4] != &MANIFEST_MAGIC {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad manifest magic"));
     }
-    let version = read_u32_at(&data, 4);
+    let version = read_u32_at(&data, 4)?;
     if version != MANIFEST_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1094,14 +1122,14 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         ));
     }
     let mut cursor = 8usize;
-    let next_seg_id = read_u64_at(&data, cursor); cursor += 8;
-    let rejected_parse = read_u64_at(&data, cursor); cursor += 8;
-    let rejected_class_d = read_u64_at(&data, cursor); cursor += 8;
+    let next_seg_id = read_u64_at(&data, cursor)?; cursor += 8;
+    let rejected_parse = read_u64_at(&data, cursor)?; cursor += 8;
+    let rejected_class_d = read_u64_at(&data, cursor)?; cursor += 8;
 
-    let num_files = read_u32_at(&data, cursor) as usize; cursor += 4;
+    let num_files = read_u32_at(&data, cursor)? as usize; cursor += 4;
     let mut segment_files = Vec::with_capacity(num_files);
     for _ in 0..num_files {
-        let len = read_u32_at(&data, cursor) as usize; cursor += 4;
+        let len = read_u32_at(&data, cursor)? as usize; cursor += 4;
         let name = std::str::from_utf8(&data[cursor..cursor + len])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
             .to_string();
@@ -1109,7 +1137,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         segment_files.push(name);
     }
 
-    let dict_len = read_u32_at(&data, cursor) as usize; cursor += 4;
+    let dict_len = read_u32_at(&data, cursor)? as usize; cursor += 4;
     let dict_data = data[cursor..cursor + dict_len].to_vec();
 
     Ok(Manifest {
@@ -1158,14 +1186,14 @@ pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, S
     if &data[0..4] != &SOURCES_MAGIC {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad sources magic"));
     }
-    let version = read_u32_at(&data, 4);
+    let version = read_u32_at(&data, 4)?;
     if version != SOURCES_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported sources version {}", version),
         ));
     }
-    let count = read_u32_at(&data, 8) as usize;
+    let count = read_u32_at(&data, 8)? as usize;
     let mut store = crate::util::FastMap::with_capacity_and_hasher(
         count,
         std::hash::BuildHasherDefault::default(),
@@ -1175,9 +1203,9 @@ pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, S
         if cursor + 12 > data.len() {
             break;
         }
-        let logical_id = read_u64_at(&data, cursor);
+        let logical_id = read_u64_at(&data, cursor)?;
         cursor += 8;
-        let text_len = read_u32_at(&data, cursor) as usize;
+        let text_len = read_u32_at(&data, cursor)? as usize;
         cursor += 4;
         if cursor + text_len > data.len() {
             break;

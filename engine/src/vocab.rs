@@ -123,12 +123,12 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
                     .map(|m| normalize_token(m))
                     .collect();
 
-                // pick canonical: longest, then lexicographic
-                let canonical = normalized
+                // pick canonical: longest, then lexicographic (safe: members.len() >= 2)
+                let Some(canonical) = normalized
                     .iter()
                     .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| b.cmp(a)))
-                    .unwrap()
-                    .clone();
+                    .cloned()
+                else { continue };
 
                 for member in &normalized {
                     if member != &canonical {

@@ -58,6 +58,11 @@ pub struct Segment {
     /// Anchor filter: present only on sealed (immutable) base segments.
     /// `None` for the memtable (mutable, entries added dynamically).
     filter: Option<SegmentFilter>,
+    /// Vocab epoch at which this segment's queries were compiled.
+    pub vocab_epoch: u64,
+    /// Reverse index: logical_id → local_ids in this segment. Enables O(1)
+    /// delete lookups instead of full segment scans.
+    logical_index: crate::util::FastMap<u64, Vec<u32>>,
 }
 
 impl Segment {
@@ -70,6 +75,8 @@ impl Segment {
             alive: Vec::new(),
             alive_counter: 0,
             filter: None,
+            vocab_epoch: 0,
+            logical_index: crate::util::fast_map(),
         }
     }
 
@@ -121,6 +128,7 @@ impl Segment {
         self.class.push(plan.class);
         self.alive.push(true);
         self.alive_counter += 1;
+        self.logical_index.entry(logical).or_default().push(local);
         Some(local)
     }
 
@@ -131,6 +139,10 @@ impl Segment {
             }
             *slot = false;
         }
+    }
+
+    pub fn locals_for_logical(&self, logical_id: u64) -> &[u32] {
+        self.logical_index.get(&logical_id).map_or(&[], |v| v.as_slice())
     }
 
     pub fn class_counts(&self, c: &mut [u64; 4]) {
@@ -294,9 +306,11 @@ impl Segment {
             for old in 0..n {
                 if src.alive[old] {
                     let new_id = src.exact.copy_entry(old as u32, &mut dest.exact);
+                    let logical = dest.exact.logical(new_id);
                     dest.class.push(src.class[old]);
                     dest.alive.push(true);
                     dest.alive_counter += 1;
+                    dest.logical_index.entry(logical).or_default().push(new_id);
                     remap[old] = new_id;
                 }
             }
@@ -323,6 +337,8 @@ impl Segment {
         }
         // Build anchor filter for the newly compacted (sealed) segment.
         dest.build_filter();
+        // Merged segment inherits the minimum epoch — still stale if any source was.
+        dest.vocab_epoch = sources.iter().map(|s| s.vocab_epoch).min().unwrap_or(0);
         dest
     }
 
@@ -336,7 +352,13 @@ impl Segment {
         alive: Vec<bool>,
     ) -> Self {
         let alive_counter = alive.iter().filter(|&&a| a).count();
-        let mut seg = Segment { main, broad, exact, class, alive, alive_counter, filter: None };
+        let mut logical_index: crate::util::FastMap<u64, Vec<u32>> = crate::util::fast_map();
+        for i in 0..exact.len() {
+            if alive[i] {
+                logical_index.entry(exact.logical(i as u32)).or_default().push(i as u32);
+            }
+        }
+        let mut seg = Segment { main, broad, exact, class, alive, alive_counter, filter: None, vocab_epoch: 0, logical_index };
         seg.build_filter();
         seg
     }
@@ -369,6 +391,22 @@ impl Segment {
 pub enum BaseSegment {
     Memory(Segment),
     Mmap(MmapSegment),
+}
+
+impl BaseSegment {
+    /// The vocab epoch at which this segment's queries were compiled.
+    pub fn vocab_epoch(&self) -> u64 {
+        match self {
+            BaseSegment::Memory(s) => s.vocab_epoch,
+            BaseSegment::Mmap(s) => s.vocab_epoch,
+        }
+    }
+    pub fn set_vocab_epoch(&mut self, epoch: u64) {
+        match self {
+            BaseSegment::Memory(s) => s.vocab_epoch = epoch,
+            BaseSegment::Mmap(s) => s.vocab_epoch = epoch,
+        }
+    }
 }
 
 impl std::fmt::Debug for BaseSegment {
@@ -413,6 +451,12 @@ impl BaseSegment {
         match self {
             BaseSegment::Memory(s) => s.tombstone(local_id),
             BaseSegment::Mmap(s) => s.tombstone(local_id),
+        }
+    }
+    pub fn locals_for_logical(&self, logical_id: u64) -> &[u32] {
+        match self {
+            BaseSegment::Memory(s) => s.locals_for_logical(logical_id),
+            BaseSegment::Mmap(s) => s.locals_for_logical(logical_id),
         }
     }
     pub fn match_into(
@@ -559,6 +603,9 @@ pub struct Engine {
     pub skipped_segments: usize,
     /// Maps logical_id → original query text for retrieval and search hit enrichment.
     query_store: crate::util::FastMap<u64, String>,
+    /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
+    /// at an earlier epoch are stale (their normalizer differs from the current one).
+    vocab_epoch: u64,
 }
 
 impl std::fmt::Debug for Engine {
@@ -578,6 +625,7 @@ impl std::fmt::Debug for Engine {
             .field("persistence_healthy", &self.persistence_healthy)
             .field("skipped_segments", &self.skipped_segments)
             .field("query_store_entries", &self.query_store.len())
+            .field("vocab_epoch", &self.vocab_epoch)
             .finish()
     }
 }
@@ -615,6 +663,7 @@ impl Engine {
             persistence_healthy: true,
             skipped_segments: 0,
             query_store: crate::util::fast_map(),
+            vocab_epoch: 0,
         }
     }
 
@@ -638,13 +687,34 @@ impl Engine {
 
     /// Replace the engine's vocabulary and normalizer. Existing compiled
     /// queries become stale — the caller must reingest for consistent matching.
+    /// Returns the number of stale segments that need reingestion.
     pub fn set_vocab(
         &mut self,
         vocab: crate::vocab::Vocab,
-    ) -> Result<(), crate::error::NormalizerError> {
+    ) -> Result<usize, crate::error::NormalizerError> {
         self.norm = vocab.to_normalizer()?;
         self.vocab = Some(vocab);
-        Ok(())
+        self.vocab_epoch += 1;
+        Ok(self.stale_segment_count())
+    }
+
+    /// Number of base segments compiled against an older vocab epoch.
+    pub fn stale_segment_count(&self) -> usize {
+        let current = self.vocab_epoch;
+        self.segments.iter().filter(|s| s.vocab_epoch() < current).count()
+            + if self.memtable.vocab_epoch < current && !self.memtable.is_empty() { 1 } else { 0 }
+    }
+
+    /// True if any segment was compiled with a different normalizer than the
+    /// current one. Matching still works (no panic) but may produce incorrect
+    /// results until stale queries are reingested.
+    pub fn has_stale_segments(&self) -> bool {
+        self.stale_segment_count() > 0
+    }
+
+    /// The current vocab epoch. Segments compiled at this epoch are up-to-date.
+    pub fn vocab_epoch(&self) -> u64 {
+        self.vocab_epoch
     }
 
     /// Open an engine from an existing data directory, recovering state from
@@ -708,6 +778,7 @@ impl Engine {
             persistence_healthy: skipped_segments == 0,
             skipped_segments,
             query_store,
+            vocab_epoch: 0,
         };
 
         // Replay WAL entries after last checkpoint
@@ -856,6 +927,7 @@ impl Engine {
 
         // Pass B -> first base segment
         let mut seg = Segment::new();
+        seg.vocab_epoch = self.vocab_epoch;
         for (logical, ex, text) in &extracted {
             if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
                 self.rejected_class_d += 1;
@@ -961,42 +1033,41 @@ impl Engine {
     }
 
     /// Delete all live entries with a given logical ID across all segments
-    /// and the memtable. Returns the number of entries tombstoned.
+    /// and the memtable. Uses the per-segment reverse index for O(segments)
+    /// lookup instead of O(total_entries) full scan.
     pub fn delete_by_logical_id(&mut self, logical_id: u64) -> usize {
         let mut count = 0usize;
 
-        // Scan base segments
         for (seg_idx, seg) in self.segments.iter_mut().enumerate() {
-            let n = seg.len();
-            for local in 0..n as u32 {
-                if seg.is_alive(local) && seg.logical(local) == logical_id {
-                    if let Some(ref mut wal) = self.wal {
-                        if let Err(e) = wal.append_tombstone(seg_idx as u32, local) {
-                            eprintln!("[percolator] WAL tombstone write failed: {}", e);
-                            self.wal_healthy = false;
-                        }
-                    }
-                    seg.tombstone(local);
-                    count += 1;
-                }
-            }
-        }
-
-        // Scan memtable
-        let mem_len = self.memtable.len();
-        for local in 0..mem_len as u32 {
-            if self.memtable.alive[local as usize]
-                && self.memtable.exact.logical(local) == logical_id
-            {
+            let locals: Vec<u32> = seg.locals_for_logical(logical_id)
+                .iter().copied()
+                .filter(|&local| seg.is_alive(local))
+                .collect();
+            for local in locals {
                 if let Some(ref mut wal) = self.wal {
-                    if let Err(e) = wal.append_tombstone(u32::MAX, local) {
+                    if let Err(e) = wal.append_tombstone(seg_idx as u32, local) {
                         eprintln!("[percolator] WAL tombstone write failed: {}", e);
                         self.wal_healthy = false;
                     }
                 }
-                self.memtable.tombstone(local);
+                seg.tombstone(local);
                 count += 1;
             }
+        }
+
+        let mem_locals: Vec<u32> = self.memtable.locals_for_logical(logical_id)
+            .iter().copied()
+            .filter(|&local| self.memtable.alive.get(local as usize).copied().unwrap_or(false))
+            .collect();
+        for local in mem_locals {
+            if let Some(ref mut wal) = self.wal {
+                if let Err(e) = wal.append_tombstone(u32::MAX, local) {
+                    eprintln!("[percolator] WAL tombstone write failed: {}", e);
+                    self.wal_healthy = false;
+                }
+            }
+            self.memtable.tombstone(local);
+            count += 1;
         }
 
         if count > 0 {
@@ -1013,7 +1084,9 @@ impl Engine {
             return;
         }
         let entries = self.memtable.len();
-        let mut sealed = std::mem::replace(&mut self.memtable, Segment::new());
+        let mut fresh = Segment::new();
+        fresh.vocab_epoch = self.vocab_epoch;
+        let mut sealed = std::mem::replace(&mut self.memtable, fresh);
         sealed.build_filter();
         self.seal_and_push(sealed);
         self.emit(crate::events::EngineEvent::Flush {
@@ -1453,6 +1526,7 @@ impl Engine {
             exact_bytes: self.exact_bytes(),
             index_bytes: self.main_bytes() + self.broad_bytes(),
             filter_bytes: self.filter_bytes(),
+            stale_segments: self.stale_segment_count(),
         }
     }
 

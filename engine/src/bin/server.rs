@@ -489,6 +489,7 @@ struct HealthResponse {
     wal_healthy: bool,
     persistence_healthy: bool,
     skipped_segments: usize,
+    stale_segments: usize,
 }
 
 // -- GET /
@@ -1108,9 +1109,10 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let wal_healthy = engine.wal_healthy;
     let persistence_healthy = engine.persistence_healthy;
     let skipped_segments = engine.skipped_segments;
+    let stale_segments = engine.stale_segment_count();
     let status = if !wal_healthy || !persistence_healthy {
         "red"
-    } else if skipped_segments > 0 {
+    } else if skipped_segments > 0 || stale_segments > 0 {
         "yellow"
     } else {
         "green"
@@ -1121,6 +1123,7 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         wal_healthy,
         persistence_healthy,
         skipped_segments,
+        stale_segments,
     })
 }
 
@@ -1183,11 +1186,10 @@ async fn put_vocab(
     Json(vocab): Json<percolator::vocab::Vocab>,
 ) -> impl IntoResponse {
     let mut engine = state.engine.write();
-    let had_queries = engine.num_queries() > 0;
     match engine.set_vocab(vocab) {
-        Ok(()) => {
-            let mut resp = serde_json::json!({"acknowledged": true});
-            if had_queries {
+        Ok(stale) => {
+            let mut resp = serde_json::json!({"acknowledged": true, "stale_segments": stale});
+            if stale > 0 {
                 resp["warning"] = serde_json::json!(
                     "normalizer changed with existing queries; reingest for consistent matching"
                 );

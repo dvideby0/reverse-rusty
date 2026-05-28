@@ -85,4 +85,6 @@ pub struct EngineMetrics {
     pub index_bytes: usize,
     /// Heap bytes used by per-segment anchor filters (bloom filters).
     pub filter_bytes: usize,
+    /// Segments compiled against an older vocab epoch (need reingestion).
+    pub stale_segments: usize,
 }

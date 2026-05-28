@@ -196,32 +196,44 @@ impl Wal {
     }
 
     fn parse_entries(data: &[u8]) -> io::Result<(Vec<WalEntry>, usize)> {
+        fn get_u32(buf: &[u8], off: usize) -> Option<u32> {
+            buf.get(off..off + 4).and_then(|s| s.try_into().ok()).map(u32::from_le_bytes)
+        }
+        fn get_u64(buf: &[u8], off: usize) -> Option<u64> {
+            buf.get(off..off + 8).and_then(|s| s.try_into().ok()).map(u64::from_le_bytes)
+        }
+
         let mut entries = Vec::new();
         let mut cursor = 0usize;
 
         while cursor + 8 <= data.len() {
-            let total_len = u32::from_le_bytes(
-                data[cursor..cursor + 4].try_into().unwrap()
-            ) as usize;
-            let stored_crc = u32::from_le_bytes(
-                data[cursor + 4..cursor + 8].try_into().unwrap()
-            );
+            let total_len = match get_u32(data, cursor) {
+                Some(v) => v as usize,
+                None => break,
+            };
+            let stored_crc = match get_u32(data, cursor + 4) {
+                Some(v) => v,
+                None => break,
+            };
             cursor += 8;
 
             if cursor + total_len > data.len() {
-                break; // truncated entry (torn write)
+                break;
             }
 
             let body = &data[cursor..cursor + total_len];
             if crc32(body) != stored_crc {
-                break; // corrupt entry (torn write)
+                break;
             }
 
             if total_len < 9 {
-                break; // too short for seq + op
+                break;
             }
 
-            let seq = u64::from_le_bytes(body[0..8].try_into().unwrap());
+            let seq = match get_u64(body, 0) {
+                Some(v) => v,
+                None => break,
+            };
             let op = body[8];
             let payload = &body[9..];
 
@@ -230,9 +242,9 @@ impl Wal {
                     if payload.len() < 16 {
                         break;
                     }
-                    let logical = u64::from_le_bytes(payload[0..8].try_into().unwrap());
-                    let version = u32::from_le_bytes(payload[8..12].try_into().unwrap());
-                    let text_len = u32::from_le_bytes(payload[12..16].try_into().unwrap()) as usize;
+                    let logical = match get_u64(payload, 0) { Some(v) => v, None => break };
+                    let version = match get_u32(payload, 8) { Some(v) => v, None => break };
+                    let text_len = match get_u32(payload, 12) { Some(v) => v as usize, None => break };
                     if payload.len() < 16 + text_len {
                         break;
                     }
@@ -245,15 +257,15 @@ impl Wal {
                     if payload.len() < 8 {
                         break;
                     }
-                    let seg_idx = u32::from_le_bytes(payload[0..4].try_into().unwrap());
-                    let local_id = u32::from_le_bytes(payload[4..8].try_into().unwrap());
+                    let seg_idx = match get_u32(payload, 0) { Some(v) => v, None => break };
+                    let local_id = match get_u32(payload, 4) { Some(v) => v, None => break };
                     entries.push(WalEntry::Tombstone { seq, seg_idx, local_id });
                 }
                 OP_FLUSH_CHECKPOINT => {
                     if payload.len() < 4 {
                         break;
                     }
-                    let name_len = u32::from_le_bytes(payload[0..4].try_into().unwrap()) as usize;
+                    let name_len = match get_u32(payload, 0) { Some(v) => v as usize, None => break };
                     if payload.len() < 4 + name_len {
                         break;
                     }
@@ -262,7 +274,7 @@ impl Wal {
                         .to_string();
                     entries.push(WalEntry::FlushCheckpoint { seq, segment_file });
                 }
-                _ => break, // unknown op
+                _ => break,
             }
 
             cursor += total_len;
