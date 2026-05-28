@@ -19,6 +19,7 @@
 //! All multi-byte values are little-endian. Arrays are padded to 8-byte alignment
 //! between sections so mmap'd slices can be cast directly to typed pointers.
 
+use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -63,6 +64,15 @@ pub fn crc32(data: &[u8]) -> u32 {
         }
     }
     !crc
+}
+
+/// Atomic rename with parent-directory fsync for crash durability.
+fn durable_rename(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::rename(from, to)?;
+    if let Some(parent) = to.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
 }
 
 // ---- frozen hash table for on-disk CandidateIndex ----
@@ -329,7 +339,7 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     write_u32(&mut f, file_crc)?;
     f.sync_all()?;
     drop(f);
-    std::fs::rename(&tmp_path, path)?;
+    durable_rename(&tmp_path, path)?;
     Ok(())
 }
 
@@ -1092,7 +1102,7 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
     write_u32(&mut f, crc)?;
     f.sync_all()?;
     drop(f);
-    std::fs::rename(&tmp, path)?;
+    durable_rename(&tmp, path)?;
     Ok(())
 }
 
@@ -1171,7 +1181,7 @@ pub fn write_query_sources(
     }
     f.sync_all()?;
     drop(f);
-    std::fs::rename(&tmp, path)?;
+    durable_rename(&tmp, path)?;
     Ok(())
 }
 
