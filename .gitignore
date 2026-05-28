@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Rust build artifacts
+**/target/
+
+# Markdown (keep README)
+*.md
+!README.md
+
+# Editor / IDE
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# Environment / secrets
+.env
+.env.*
+
+# Data files that may appear at runtime
+data/
+*.csv
+*.jsonl
