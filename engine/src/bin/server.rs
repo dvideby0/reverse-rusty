@@ -2,8 +2,7 @@
 //!
 //! Endpoints:
 //!   PUT  /_doc/{id}          Register a query (body: {"query": "..."})
-//!   GET  /_doc/{id}          (future — reserved)
-//!   DELETE /_doc/{id}        (future — reserved)
+//!   DELETE /_doc/{id}        Remove a stored query
 //!   POST /_search            Percolate title(s) (body: {"document": {"title": "..."}} or "documents")
 //!   POST /_bulk              NDJSON bulk ingest ({action}\n{source}\n...)
 //!   POST /_flush             Flush memtable to immutable segment
@@ -536,6 +535,34 @@ async fn put_doc(
     state.prom.http_request_duration.with_label_values(&["put_doc"])
         .observe(start.elapsed().as_secs_f64());
     result
+}
+
+/// DELETE /_doc/{id} — remove a stored query by logical ID.
+#[instrument(skip(state), fields(query_id = id))]
+async fn delete_doc(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<u64>,
+) -> impl IntoResponse {
+    let start = Instant::now();
+    let mut engine = state.engine.write();
+    let deleted = engine.delete_by_logical_id(id);
+    state.prom.http_request_duration.with_label_values(&["delete_doc"])
+        .observe(start.elapsed().as_secs_f64());
+    if deleted > 0 {
+        info!(query_id = id, deleted, "query deleted");
+        state.prom.http_requests_total.with_label_values(&["delete_doc", "200"]).inc();
+        (StatusCode::OK, Json(serde_json::json!({
+            "_id": id,
+            "result": "deleted",
+            "deleted_count": deleted
+        })))
+    } else {
+        state.prom.http_requests_total.with_label_values(&["delete_doc", "404"]).inc();
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            "_id": id,
+            "result": "not_found"
+        })))
+    }
 }
 
 /// POST /_search — percolate one or more titles.
@@ -1264,7 +1291,7 @@ async fn main() {
     // Build router.
     let app = Router::new()
         .route("/", get(api_root))
-        .route("/_doc/{id}", put(put_doc))
+        .route("/_doc/{id}", put(put_doc).delete(delete_doc))
         .route("/_search", post(search))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))

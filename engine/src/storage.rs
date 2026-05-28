@@ -450,7 +450,7 @@ pub struct MmapSegment {
     // Meta
     class_arr: *const u8,
     // Alive overlay (in-memory, mutable for tombstones)
-    alive_overlay: Vec<bool>,
+    pub(crate) alive_overlay: Vec<bool>,
     /// O(1) counter of alive (non-tombstoned) entries.
     alive_counter: usize,
     // Path for cleanup/identification
@@ -735,7 +735,7 @@ impl MmapSegment {
     }
 
     #[inline]
-    fn logical(&self, id: u32) -> u64 {
+    pub(crate) fn logical(&self, id: u32) -> u64 {
         unsafe { *self.logical_arr.add(id as usize) }
     }
 
