@@ -17,6 +17,7 @@ const INLINE_CAP: usize = 8;
 /// Postings above this cardinality are promoted to a roaring bitmap.
 const ROARING_THRESHOLD: usize = 256;
 
+#[derive(Clone)]
 pub enum Posting {
     Inline { ids: [u32; INLINE_CAP], len: u8 },
     Heap(Vec<u32>),
@@ -117,6 +118,7 @@ impl Posting {
     }
 }
 
+#[derive(Clone)]
 pub struct CandidateIndex {
     map: FastMap<u64, Posting>,
 }

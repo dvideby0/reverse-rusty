@@ -18,15 +18,18 @@
 //! Usage:
 //!   cargo run --release --bin server -- [--port 9200] [--data-dir ./data] [--load-file queries.csv]
 //!
-//! The engine is wrapped in Arc<RwLock<Engine>>. Matching (reads) takes a read
-//! lock and dispatches to a dedicated rayon thread pool via spawn_blocking.
-//! Writes (ingest, flush, compact) take a write lock.
+//! The engine uses a snapshot-based concurrency model: a `Mutex<Engine>` for
+//! serialized writes and an `ArcSwap<EngineSnapshot>` for lock-free reads.
+//! Search and other read endpoints load the snapshot without any lock;
+//! writes acquire the mutex, mutate the engine, then atomically publish a
+//! new snapshot.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use arc_swap::ArcSwap;
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
     http::{HeaderMap, HeaderValue, StatusCode},
@@ -35,7 +38,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 use clap::Parser;
 use prometheus::{
     Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Histogram,
@@ -50,7 +53,7 @@ use percolator::config::EngineConfig;
 use percolator::events::EngineEvent;
 use percolator::loader;
 use percolator::normalize::Normalizer;
-use percolator::segment::{Engine, MatchScratch, MatchStats};
+use percolator::segment::{Engine, EngineSnapshot, MatchScratch, MatchStats};
 
 thread_local! {
     static SCRATCH: RefCell<MatchScratch> = RefCell::new(MatchScratch::new());
@@ -327,11 +330,19 @@ impl PrometheusMetrics {
 // ---------------------------------------------------------------------------
 
 struct AppState {
-    engine: RwLock<Engine>,
+    engine: Mutex<Engine>,
+    snapshot: ArcSwap<EngineSnapshot>,
     pool: rayon::ThreadPool,
     include_broad: bool,
     prom: PrometheusMetrics,
     slow_query_threshold_ms: u64,
+}
+
+impl AppState {
+    fn publish_snapshot(&self) {
+        let engine = self.engine.lock();
+        self.snapshot.store(Arc::new(engine.snapshot()));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -568,32 +579,35 @@ async fn put_doc(
     Json(body): Json<PutDocBody>,
 ) -> impl IntoResponse {
     let start = Instant::now();
-    let mut engine = state.engine.write();
-    let result = match engine.try_insert_live(&body.query, id, body.version) {
-        Ok(percolator::segment::InsertOutcome::Inserted(_)) => {
-            info!(query_id = id, "query registered");
-            state.prom.http_requests_total.with_label_values(&["put_doc", "201"]).inc();
-            (StatusCode::CREATED, Json(PutDocResponse { _id: id, result: "created", error: None }))
-        }
-        Ok(percolator::segment::InsertOutcome::RejectedClassD) => {
-            warn!(query_id = id, "query rejected: cost class D");
-            state.prom.http_requests_total.with_label_values(&["put_doc", "400"]).inc();
-            (StatusCode::BAD_REQUEST, Json(PutDocResponse {
-                _id: id,
-                result: "rejected",
-                error: Some("query has no anchorable feature (cost class D)".into()),
-            }))
-        }
-        Err(e) => {
-            warn!(query_id = id, error = %e, "query parse error");
-            state.prom.http_requests_total.with_label_values(&["put_doc", "400"]).inc();
-            (StatusCode::BAD_REQUEST, Json(PutDocResponse {
-                _id: id,
-                result: "error",
-                error: Some(format!("parse error: {}", e)),
-            }))
+    let result = {
+        let mut engine = state.engine.lock();
+        match engine.try_insert_live(&body.query, id, body.version) {
+            Ok(percolator::segment::InsertOutcome::Inserted(_)) => {
+                info!(query_id = id, "query registered");
+                state.prom.http_requests_total.with_label_values(&["put_doc", "201"]).inc();
+                (StatusCode::CREATED, Json(PutDocResponse { _id: id, result: "created", error: None }))
+            }
+            Ok(percolator::segment::InsertOutcome::RejectedClassD) => {
+                warn!(query_id = id, "query rejected: cost class D");
+                state.prom.http_requests_total.with_label_values(&["put_doc", "400"]).inc();
+                (StatusCode::BAD_REQUEST, Json(PutDocResponse {
+                    _id: id,
+                    result: "rejected",
+                    error: Some("query has no anchorable feature (cost class D)".into()),
+                }))
+            }
+            Err(e) => {
+                warn!(query_id = id, error = %e, "query parse error");
+                state.prom.http_requests_total.with_label_values(&["put_doc", "400"]).inc();
+                (StatusCode::BAD_REQUEST, Json(PutDocResponse {
+                    _id: id,
+                    result: "error",
+                    error: Some(format!("parse error: {}", e)),
+                }))
+            }
         }
     };
+    state.publish_snapshot();
     state.prom.http_request_duration.with_label_values(&["put_doc"])
         .observe(start.elapsed().as_secs_f64());
     result
@@ -606,8 +620,8 @@ async fn get_doc(
     Path(id): Path<u64>,
 ) -> impl IntoResponse {
     let start = Instant::now();
-    let engine = state.engine.read();
-    let result = match engine.get_query_source(id) {
+    let snap = state.snapshot.load();
+    let result = match snap.get_query_source(id) {
         Some(query_text) => {
             state.prom.http_requests_total.with_label_values(&["get_doc", "200"]).inc();
             (StatusCode::OK, Json(serde_json::json!({
@@ -636,8 +650,11 @@ async fn delete_doc(
     Path(id): Path<u64>,
 ) -> impl IntoResponse {
     let start = Instant::now();
-    let mut engine = state.engine.write();
-    let deleted = engine.delete_by_logical_id(id);
+    let deleted = {
+        let mut engine = state.engine.lock();
+        engine.delete_by_logical_id(id)
+    };
+    state.publish_snapshot();
     state.prom.http_request_duration.with_label_values(&["delete_doc"])
         .observe(start.elapsed().as_secs_f64());
     if deleted > 0 {
@@ -678,16 +695,16 @@ async fn search(
             let title = doc.title;
             let title_for_explain = if include_explain { Some(title.clone()) } else { None };
             let prom = state.prom.clone();
+            let snap = Arc::clone(&state.snapshot.load());
             let state_inner = Arc::clone(&state);
 
             let search_fut = tokio::task::spawn_blocking(move || {
-                let engine = state_inner.engine.read();
                 state_inner.pool.install(|| {
                     SCRATCH.with(|cell| {
                         let mut scratch = cell.borrow_mut();
                         let mut out = Vec::new();
                         let stats =
-                            engine.match_title(&title, &mut scratch, &mut out, include_broad);
+                            snap.match_title(&title, &mut scratch, &mut out, include_broad);
                         (out, stats)
                     })
                 })
@@ -720,19 +737,17 @@ async fn search(
             let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             let total = ids.len();
             let paged_ids: Vec<u64> = ids.into_iter().skip(page_from).take(page_size).collect();
-            let hits = {
-                let engine = state.engine.read();
-                paged_ids.iter().map(|&id| {
-                    let source = if include_source {
-                        engine.get_query_source(id).map(|q| HitSource { query: q.to_string() })
-                    } else {
-                        None
-                    };
-                    let explanation = title_for_explain.as_deref()
-                        .and_then(|t| engine.explain_hit(id, t));
-                    SearchHitItem { _id: id, _source: source, _explanation: explanation }
-                }).collect()
-            };
+            let snap = state.snapshot.load();
+            let hits = paged_ids.iter().map(|&id| {
+                let source = if include_source {
+                    snap.get_query_source(id).map(|q| HitSource { query: q.to_string() })
+                } else {
+                    None
+                };
+                let explanation = title_for_explain.as_deref()
+                    .and_then(|t| snap.explain_hit(id, t));
+                SearchHitItem { _id: id, _source: source, _explanation: explanation }
+            }).collect();
             info!(titles = 1, matches = total, took_ms = format!("{:.2}", took_ms), "search complete");
             SearchResponse {
                 took_ms,
@@ -747,11 +762,11 @@ async fn search(
             let num_docs = docs.len();
             let titles: Vec<String> = docs.into_iter().map(|d| d.title).collect();
             let prom = state.prom.clone();
+            let snap = Arc::clone(&state.snapshot.load());
             let state_inner = Arc::clone(&state);
 
             let search_fut = tokio::task::spawn_blocking(move || {
-                let engine = state_inner.engine.read();
-                state_inner.pool.install(|| engine.match_titles_par(&titles, include_broad))
+                state_inner.pool.install(|| snap.match_titles_par(&titles, include_broad))
             });
 
             let results = match tokio::time::timeout(timeout, search_fut).await {
@@ -791,23 +806,20 @@ async fn search(
             let total = all_ids.len();
             let paged_ids: Vec<u64> = all_ids.into_iter().skip(page_from).take(page_size).collect();
 
-            let (hits, slots) = {
-                let engine = state.engine.read();
-                let make_hit = |id: u64| {
-                    let source = if include_source {
-                        engine.get_query_source(id).map(|q| HitSource { query: q.to_string() })
-                    } else {
-                        None
-                    };
-                    SearchHitItem { _id: id, _source: source, _explanation: None }
+            let snap = state.snapshot.load();
+            let make_hit = |id: u64| {
+                let source = if include_source {
+                    snap.get_query_source(id).map(|q| HitSource { query: q.to_string() })
+                } else {
+                    None
                 };
-                let hits: Vec<_> = paged_ids.iter().map(|&id| make_hit(id)).collect();
-                let slots: Vec<_> = slot_data.into_iter().map(|(slot, ids, stats)| {
-                    let slot_hits = ids.iter().map(|&id| make_hit(id)).collect();
-                    SlotHit { slot, total: ids.len(), hits: slot_hits, stats }
-                }).collect();
-                (hits, slots)
+                SearchHitItem { _id: id, _source: source, _explanation: None }
             };
+            let hits: Vec<_> = paged_ids.iter().map(|&id| make_hit(id)).collect();
+            let slots: Vec<_> = slot_data.into_iter().map(|(slot, ids, stats)| {
+                let slot_hits = ids.iter().map(|&id| make_hit(id)).collect();
+                SlotHit { slot, total: ids.len(), hits: slot_hits, stats }
+            }).collect();
 
             info!(titles = num_docs, matches = total, took_ms = format!("{:.2}", took_ms), "search complete");
             SearchResponse {
@@ -964,8 +976,11 @@ async fn bulk_ingest(
 
     // Ingest the valid pairs.
     if !pairs.is_empty() {
-        let mut engine = state.engine.write();
-        let report = engine.bulk_ingest(&pairs);
+        let report = {
+            let mut engine = state.engine.lock();
+            engine.bulk_ingest(&pairs)
+        };
+        state.publish_snapshot();
 
         info!(
             ingested = report.ingested,
@@ -974,7 +989,6 @@ async fn bulk_ingest(
             "bulk ingest complete"
         );
 
-        // Update statuses for rejected queries if any.
         if report.rejected_parse > 0 || report.rejected_class_d > 0 {
             has_errors = true;
         }
@@ -1008,9 +1022,12 @@ fn extract_bulk_id(action: &serde_json::Value) -> Option<u64> {
 #[instrument(skip_all)]
 async fn flush(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let start = Instant::now();
-    let mut engine = state.engine.write();
-    engine.flush();
-    let metrics = engine.metrics();
+    let metrics = {
+        let mut engine = state.engine.lock();
+        engine.flush();
+        engine.metrics()
+    };
+    state.publish_snapshot();
     info!(
         total_queries = metrics.total_queries,
         base_segments = metrics.base_segments,
@@ -1030,8 +1047,11 @@ async fn flush(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 #[instrument(skip_all)]
 async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let start = Instant::now();
-    let mut engine = state.engine.write();
-    let report = engine.maybe_compact();
+    let report = {
+        let mut engine = state.engine.lock();
+        engine.maybe_compact()
+    };
+    state.publish_snapshot();
     state.prom.http_requests_total.with_label_values(&["compact", "200"]).inc();
     state.prom.http_request_duration.with_label_values(&["compact"])
         .observe(start.elapsed().as_secs_f64());
@@ -1064,9 +1084,9 @@ async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 /// GET /_stats — JSON metrics snapshot.
 async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let engine = state.engine.read();
-    let m = engine.metrics();
-    let cc = engine.class_counts();
+    let snap = state.snapshot.load();
+    let m = snap.metrics();
+    let cc = snap.class_counts();
     Json(EngineStatsResponse {
         total_queries: m.total_queries,
         base_segments: m.base_segments,
@@ -1087,9 +1107,9 @@ async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 /// GET /_cat/stats — human-readable metrics.
 async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let engine = state.engine.read();
-    let m = engine.metrics();
-    let cc = engine.class_counts();
+    let snap = state.snapshot.load();
+    let m = snap.metrics();
+    let cc = snap.class_counts();
     let total_mem = m.exact_bytes + m.index_bytes + m.filter_bytes;
 
     let mut out = String::new();
@@ -1113,12 +1133,12 @@ async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 /// GET /_health
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let engine = state.engine.read();
-    let total = engine.num_queries();
-    let wal_healthy = engine.wal_healthy;
-    let persistence_healthy = engine.persistence_healthy;
-    let skipped_segments = engine.skipped_segments;
-    let stale_segments = engine.stale_segment_count();
+    let snap = state.snapshot.load();
+    let total = snap.num_queries();
+    let wal_healthy = snap.wal_healthy();
+    let persistence_healthy = snap.persistence_healthy();
+    let skipped_segments = snap.skipped_segments();
+    let stale_segments = snap.stale_segment_count();
     let status = if !wal_healthy || !persistence_healthy {
         "red"
     } else if skipped_segments > 0 || stale_segments > 0 {
@@ -1150,10 +1170,10 @@ async fn api_root() -> impl IntoResponse {
 /// On each scrape, refreshes gauge metrics from an EngineMetrics snapshot,
 /// then encodes all registered metrics.
 async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Refresh gauges from current engine state.
+    // Refresh gauges from current snapshot state.
     {
-        let engine = state.engine.read();
-        let m = engine.metrics();
+        let snap = state.snapshot.load();
+        let m = snap.metrics();
         state.prom.refresh_gauges(&m);
     }
 
@@ -1175,7 +1195,7 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// GET /_vocab — return the current vocabulary as JSON.
 async fn get_vocab(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let engine = state.engine.read();
+    let engine = state.engine.lock();
     match engine.vocab() {
         Some(v) => Json(serde_json::to_value(v).unwrap_or_default()).into_response(),
         None => Json(serde_json::json!({
@@ -1194,21 +1214,28 @@ async fn put_vocab(
     State(state): State<Arc<AppState>>,
     Json(vocab): Json<percolator::vocab::Vocab>,
 ) -> impl IntoResponse {
-    let mut engine = state.engine.write();
-    match engine.set_vocab(vocab) {
-        Ok(stale) => {
-            let mut resp = serde_json::json!({"acknowledged": true, "stale_segments": stale});
-            if stale > 0 {
-                resp["warning"] = serde_json::json!(
-                    "normalizer changed with existing queries; reingest for consistent matching"
-                );
+    let result = {
+        let mut engine = state.engine.lock();
+        match engine.set_vocab(vocab) {
+            Ok(stale) => {
+                let mut resp = serde_json::json!({"acknowledged": true, "stale_segments": stale});
+                if stale > 0 {
+                    resp["warning"] = serde_json::json!(
+                        "normalizer changed with existing queries; reingest for consistent matching"
+                    );
+                }
+                Ok((StatusCode::OK, Json(resp)))
             }
-            (StatusCode::OK, Json(resp))
+            Err(e) => Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )),
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+    };
+    state.publish_snapshot();
+    match result {
+        Ok(r) => r,
+        Err(r) => r,
     }
 }
 
@@ -1451,8 +1478,10 @@ async fn main() {
 
     let drain_timeout = cli.drain_timeout;
     let slow_threshold = cli.slow_query_threshold_ms;
+    let initial_snapshot = Arc::new(engine.snapshot());
     let state = Arc::new(AppState {
-        engine: RwLock::new(engine),
+        engine: Mutex::new(engine),
+        snapshot: ArcSwap::new(initial_snapshot),
         pool,
         include_broad: cli.include_broad,
         prom,
@@ -1525,7 +1554,7 @@ async fn main() {
 
     // Flush memtable and log final metrics.
     {
-        let mut engine = state.engine.write();
+        let mut engine = state.engine.lock();
         let pre_metrics = engine.metrics();
 
         if pre_metrics.memtable_entries > 0 {

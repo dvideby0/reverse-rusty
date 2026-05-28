@@ -22,6 +22,7 @@
 use std::fs::File;
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::compile::CostClass;
 use crate::dict::FeatureId;
@@ -424,8 +425,7 @@ fn write_meta_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Result<
 /// The `alive_overlay` is the only mutable state: tombstones are applied here
 /// (since the mmap is read-only). On compaction, dead entries are dropped.
 pub struct MmapSegment {
-    #[allow(dead_code)]
-    mmap: memmap2::Mmap,
+    mmap: Arc<memmap2::Mmap>,
     num_queries: u32,
     // ExactStore slices (offsets into the mmap, cast at load time)
     req_mask: *const u64,
@@ -478,10 +478,57 @@ pub struct MmapSegment {
 }
 
 // SAFETY: MmapSegment is safe to send/share across threads. The raw pointers
-// point into the mmap which lives as long as the struct. The alive_overlay is
-// only mutated through &mut self.
+// point into the Arc<Mmap> which lives as long as any clone. The alive_overlay
+// is only mutated through &mut self.
 unsafe impl Send for MmapSegment {}
 unsafe impl Sync for MmapSegment {}
+
+impl Clone for MmapSegment {
+    fn clone(&self) -> Self {
+        MmapSegment {
+            mmap: Arc::clone(&self.mmap),
+            num_queries: self.num_queries,
+            req_mask: self.req_mask,
+            forb_mask: self.forb_mask,
+            req_off: self.req_off,
+            req_len: self.req_len,
+            req_blob: self.req_blob,
+            req_blob_len: self.req_blob_len,
+            forb_off: self.forb_off,
+            forb_len: self.forb_len,
+            forb_blob: self.forb_blob,
+            forb_blob_len: self.forb_blob_len,
+            q_group_start: self.q_group_start,
+            q_group_count: self.q_group_count,
+            group_off: self.group_off,
+            group_off_len: self.group_off_len,
+            group_len: self.group_len,
+            anyof_blob: self.anyof_blob,
+            anyof_blob_len: self.anyof_blob_len,
+            version_arr: self.version_arr,
+            logical_arr: self.logical_arr,
+            main_slots: self.main_slots,
+            main_cap: self.main_cap,
+            main_mask: self.main_mask,
+            main_blob: self.main_blob,
+            main_blob_len: self.main_blob_len,
+            broad_slots: self.broad_slots,
+            broad_cap: self.broad_cap,
+            broad_mask: self.broad_mask,
+            broad_blob: self.broad_blob,
+            broad_blob_len: self.broad_blob_len,
+            filter_data: self.filter_data,
+            filter_num_blocks: self.filter_num_blocks,
+            filter_mask: self.filter_mask,
+            class_arr: self.class_arr,
+            alive_overlay: self.alive_overlay.clone(),
+            alive_counter: self.alive_counter,
+            path: self.path.clone(),
+            vocab_epoch: self.vocab_epoch,
+            logical_index: self.logical_index.clone(),
+        }
+    }
+}
 
 impl std::fmt::Debug for MmapSegment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -497,7 +544,7 @@ impl MmapSegment {
     /// Load a segment from a file, memory-mapping it.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
-        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        let mmap = Arc::new(unsafe { memmap2::Mmap::map(&file)? });
 
         if mmap.len() < HEADER_SIZE + 4 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "file too small"));

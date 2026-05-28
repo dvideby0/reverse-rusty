@@ -9,6 +9,7 @@ daachorse = "3"
 memmap2 = "0.9"
 rayon = "1"
 roaring = "0.10"
+arc-swap = "1"
 
 # HTTP server (only compiled into the server binary)
 axum = { version = "0.8", features = ["json"] }

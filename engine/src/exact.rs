@@ -83,6 +83,7 @@ pub fn verify_slices(
     true
 }
 
+#[derive(Clone)]
 pub struct ExactStore {
     // common-mask words (the 64 hottest features)
     req_mask: Vec<u64>,

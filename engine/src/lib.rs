@@ -35,7 +35,7 @@ pub use error::{NormalizerError, ParseError, ParseErrorKind};
 pub use events::{CompactionTrigger, EngineEvent, EngineMetrics};
 pub use explain::ExplainDetail;
 pub use normalize::{Normalizer, NormalizerBuilder};
-pub use segment::{CompactionReport, Engine, IngestReport, InsertOutcome, MatchStats};
+pub use segment::{CompactionReport, Engine, EngineSnapshot, IngestReport, InsertOutcome, MatchStats};
 pub use vocab::Vocab;
 
 // Compile-time trait assertions — these ensure key types are safe for
@@ -53,6 +53,7 @@ const _: () = {
     #[allow(dead_code)]
     fn assertions() {
         assert_send::<Engine>();
+        assert_send_sync::<EngineSnapshot>();
         assert_send::<segment::MatchScratch>();
         assert_send_sync::<Normalizer>();
         assert_send_sync::<MatchStats>();

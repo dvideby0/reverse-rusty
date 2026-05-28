@@ -44,6 +44,7 @@ const NUM_PROBES: u32 = 6;
 /// This makes the filter competitive with a hash-map miss (also ~1 memory
 /// access with the identity hasher), while skipping the miss entirely when the
 /// key is absent.
+#[derive(Clone)]
 pub struct SegmentFilter {
     /// Flat array of u64 words. Blocks of WORDS_PER_BLOCK consecutive words
     /// form 512-bit cache-line-aligned logical blocks. Total length is

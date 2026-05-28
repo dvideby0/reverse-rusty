@@ -30,6 +30,7 @@ pub enum FeatureKind {
     Generic,
 }
 
+#[derive(Clone)]
 pub struct Dict {
     map: FastMap<String, FeatureId>,
     names: Vec<String>,

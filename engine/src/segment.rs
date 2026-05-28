@@ -14,6 +14,7 @@
 //! feature space / frequency table across all segments).
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::compile::{build_signatures, extract, is_hot, CostClass, Extracted};
 use crate::config::EngineConfig;
@@ -46,7 +47,7 @@ pub struct MatchStats {
 /// skip probes that would definitely miss, cutting read amplification when
 /// multiple segments exist. The memtable (mutable) has no filter; it's built
 /// at seal time (flush / bulk_ingest / compaction).
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Segment {
     main: CandidateIndex,
     broad: CandidateIndex,
@@ -388,6 +389,7 @@ impl Segment {
 
 /// A sealed (immutable) base segment, either in-memory or backed by mmap.
 /// The memtable is always an in-memory `Segment` (mutable).
+#[derive(Clone)]
 pub enum BaseSegment {
     Memory(Segment),
     Mmap(MmapSegment),
@@ -539,6 +541,255 @@ impl Default for MatchScratch {
     }
 }
 
+// ---------------------------------------------------------------------------
+// EngineSnapshot — immutable, lock-free read view
+// ---------------------------------------------------------------------------
+
+/// An immutable, `Send + Sync` snapshot of the engine's read-path state.
+///
+/// Readers acquire a snapshot via [`Engine::snapshot`] and perform matching
+/// without holding any lock.  Writers atomically publish new snapshots after
+/// mutations (see the server's `ArcSwap<EngineSnapshot>` pattern).
+///
+/// The snapshot is cheap to create: `Arc::clone` for the normalizer, and
+/// clones for the dictionary, segments, memtable, and query store.
+pub struct EngineSnapshot {
+    norm: Arc<Normalizer>,
+    dict: Arc<Dict>,
+    segments: Vec<BaseSegment>,
+    memtable: Segment,
+    query_store: crate::util::FastMap<u64, String>,
+    rejected_parse: u64,
+    rejected_class_d: u64,
+    vocab_epoch: u64,
+    wal_healthy: bool,
+    persistence_healthy: bool,
+    skipped_segments: usize,
+}
+
+impl std::fmt::Debug for EngineSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EngineSnapshot")
+            .field("base_segments", &self.segments.len())
+            .field("memtable_entries", &self.memtable.len())
+            .field("query_store_entries", &self.query_store.len())
+            .field("vocab_epoch", &self.vocab_epoch)
+            .finish()
+    }
+}
+
+impl EngineSnapshot {
+    pub fn normalizer(&self) -> &Normalizer {
+        &self.norm
+    }
+
+    pub fn dict(&self) -> &Dict {
+        &self.dict
+    }
+
+    pub fn num_queries(&self) -> usize {
+        self.segments.iter().map(|s| s.len()).sum::<usize>() + self.memtable.len()
+    }
+
+    pub fn num_segments(&self) -> usize {
+        self.segments.len() + 1
+    }
+
+    pub fn rejected_parse(&self) -> u64 {
+        self.rejected_parse
+    }
+
+    pub fn rejected_class_d(&self) -> u64 {
+        self.rejected_class_d
+    }
+
+    pub fn vocab_epoch(&self) -> u64 {
+        self.vocab_epoch
+    }
+
+    pub fn wal_healthy(&self) -> bool {
+        self.wal_healthy
+    }
+
+    pub fn persistence_healthy(&self) -> bool {
+        self.persistence_healthy
+    }
+
+    pub fn skipped_segments(&self) -> usize {
+        self.skipped_segments
+    }
+
+    pub fn stale_segment_count(&self) -> usize {
+        let current = self.vocab_epoch;
+        self.segments.iter().filter(|s| s.vocab_epoch() < current).count()
+            + if self.memtable.vocab_epoch < current && !self.memtable.is_empty() { 1 } else { 0 }
+    }
+
+    pub fn has_stale_segments(&self) -> bool {
+        self.stale_segment_count() > 0
+    }
+
+    pub fn get_query_source(&self, logical_id: u64) -> Option<&str> {
+        self.query_store.get(&logical_id).map(|s| s.as_str())
+    }
+
+    pub fn explain_hit(
+        &self,
+        logical_id: u64,
+        title: &str,
+    ) -> Option<crate::explain::ExplainDetail> {
+        let source = self.get_query_source(logical_id)?;
+        let mut lc = String::new();
+        let cq = crate::compile::compile_one_readonly(
+            source, logical_id, &self.norm, &self.dict, &mut lc,
+        ).ok()?;
+        Some(crate::explain::explain_match_structured(&cq, title, &self.norm, &self.dict))
+    }
+
+    pub fn class_counts(&self) -> [u64; 4] {
+        let mut c = [0u64; 4];
+        for seg in &self.segments {
+            match seg {
+                BaseSegment::Memory(s) => s.class_counts(&mut c),
+                BaseSegment::Mmap(_) => {}
+            }
+        }
+        self.memtable.class_counts(&mut c);
+        c[3] = self.rejected_class_d;
+        c
+    }
+
+    pub fn metrics(&self) -> crate::events::EngineMetrics {
+        let segment_sizes: Vec<usize> = self.segments.iter().map(|s| s.len()).collect();
+        let segment_holes: Vec<f64> = self.segments.iter().map(|s| s.holes_ratio()).collect();
+        crate::events::EngineMetrics {
+            total_queries: self.num_queries(),
+            base_segments: self.segments.len(),
+            memtable_entries: self.memtable.len(),
+            segment_sizes,
+            segment_holes,
+            rejected_parse: self.rejected_parse,
+            rejected_class_d: self.rejected_class_d,
+            dict_features: self.dict.len(),
+            exact_bytes: self.segments.iter().map(|s| s.exact_bytes()).sum::<usize>()
+                + self.memtable.exact_bytes(),
+            index_bytes: self.segments.iter().map(|s| s.main_bytes() + s.broad_bytes()).sum::<usize>()
+                + self.memtable.main_bytes() + self.memtable.broad_bytes(),
+            filter_bytes: self.segments.iter().map(|s| s.filter_bytes()).sum::<usize>(),
+            stale_segments: self.stale_segment_count(),
+        }
+    }
+
+    /// THE HOT PATH. Match one title against the snapshot, appending matched
+    /// logical IDs to `out`. Identical semantics to [`Engine::match_title`] but
+    /// operates on an immutable snapshot without holding any lock.
+    pub fn match_title(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        out: &mut Vec<u64>,
+        include_broad: bool,
+    ) -> MatchStats {
+        let n_base = self.segments.len();
+        let mut seg_lens: Vec<usize> = Vec::with_capacity(n_base + 1);
+        for seg in &self.segments {
+            seg_lens.push(seg.len());
+        }
+        seg_lens.push(self.memtable.len());
+        s.ensure(&seg_lens);
+
+        s.epoch = s.epoch.wrapping_add(1);
+        if s.epoch == 0 {
+            for buf in s.seen.iter_mut() {
+                for v in buf.iter_mut() {
+                    *v = 0;
+                }
+            }
+            s.epoch = 1;
+        }
+        let epoch = s.epoch;
+        out.clear();
+
+        self.norm
+            .match_features(title, &self.dict, &mut s.lc, &mut s.feats);
+        let feats = std::mem::take(&mut s.feats);
+
+        let mut tmask = 0u64;
+        for &f in &feats {
+            let b = self.dict.mask_bit(f);
+            if b != crate::dict::NO_MASK_BIT {
+                tmask |= 1u64 << b;
+            }
+        }
+
+        let mut stats = MatchStats::default();
+
+        for (i, base) in self.segments.iter().enumerate() {
+            base.match_into(
+                &feats, tmask, &self.dict, epoch,
+                &mut s.seen[i], out, include_broad, &mut stats,
+            );
+        }
+        self.memtable.match_into(
+            &feats, tmask, &self.dict, epoch,
+            &mut s.seen[n_base], out, include_broad, &mut stats,
+        );
+
+        out.sort_unstable();
+        out.dedup();
+
+        s.feats = feats;
+        stats.matches = out.len() as u32;
+        stats
+    }
+
+    /// Parallel matching on the snapshot.
+    pub fn match_titles_par(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        include_broad: bool,
+    ) -> Vec<(usize, Vec<u64>, MatchStats)> {
+        use rayon::prelude::*;
+        titles
+            .par_iter()
+            .enumerate()
+            .map_init(
+                || (MatchScratch::new(), Vec::new()),
+                |(scratch, out), (idx, title)| {
+                    let stats = self.match_title(title.as_ref(), scratch, out, include_broad);
+                    (idx, out.clone(), stats)
+                },
+            )
+            .collect()
+    }
+
+    pub fn match_titles_par_stats(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        include_broad: bool,
+    ) -> MatchStats {
+        use rayon::prelude::*;
+        titles
+            .par_iter()
+            .map_init(
+                || (MatchScratch::new(), Vec::new()),
+                |(scratch, out), title| {
+                    self.match_title(title.as_ref(), scratch, out, include_broad)
+                },
+            )
+            .reduce(MatchStats::default, |mut a, b| {
+                a.unique_candidates += b.unique_candidates;
+                a.postings_scanned += b.postings_scanned;
+                a.main_candidates += b.main_candidates;
+                a.broad_candidates += b.broad_candidates;
+                a.matches += b.matches;
+                a.probes_attempted += b.probes_attempted;
+                a.probes_skipped += b.probes_skipped;
+                a
+            })
+    }
+}
+
 /// Outcome of ingesting a batch of stored queries. Lets callers see how many
 /// queries actually entered the index versus why the rest were dropped, instead
 /// of silently losing them.
@@ -579,7 +830,7 @@ pub struct CompactionReport {
 
 pub struct Engine {
     config: EngineConfig,
-    norm: Normalizer,
+    norm: Arc<Normalizer>,
     /// Vocabulary used to build the normalizer (if set via `with_vocab`).
     vocab: Option<crate::vocab::Vocab>,
     dict: Dict,
@@ -649,7 +900,7 @@ impl Engine {
         };
         Engine {
             config,
-            norm,
+            norm: Arc::new(norm),
             vocab: None,
             dict: Dict::new(),
             segments: Vec::new(),
@@ -692,7 +943,7 @@ impl Engine {
         &mut self,
         vocab: crate::vocab::Vocab,
     ) -> Result<usize, crate::error::NormalizerError> {
-        self.norm = vocab.to_normalizer()?;
+        self.norm = Arc::new(vocab.to_normalizer()?);
         self.vocab = Some(vocab);
         self.vocab_epoch += 1;
         Ok(self.stale_segment_count())
@@ -764,7 +1015,7 @@ impl Engine {
 
         let mut engine = Engine {
             config,
-            norm,
+            norm: Arc::new(norm),
             vocab: None,
             dict,
             segments,
@@ -834,6 +1085,29 @@ impl Engine {
     /// Read-only access to the current configuration.
     pub fn config(&self) -> &EngineConfig {
         &self.config
+    }
+
+    /// Create an immutable [`EngineSnapshot`] of the current read-path state.
+    ///
+    /// The snapshot captures the normalizer (shared via `Arc`), a clone of the
+    /// dictionary, a clone of every base segment (mmap segments share the
+    /// underlying mapping), a clone of the memtable, and a clone of the query
+    /// store.  After creation the snapshot is fully self-contained — readers
+    /// can match against it without holding any lock on the engine.
+    pub fn snapshot(&self) -> EngineSnapshot {
+        EngineSnapshot {
+            norm: Arc::clone(&self.norm),
+            dict: Arc::new(self.dict.clone()),
+            segments: self.segments.clone(),
+            memtable: self.memtable.clone(),
+            query_store: self.query_store.clone(),
+            rejected_parse: self.rejected_parse,
+            rejected_class_d: self.rejected_class_d,
+            vocab_epoch: self.vocab_epoch,
+            wal_healthy: self.wal_healthy,
+            persistence_healthy: self.persistence_healthy,
+            skipped_segments: self.skipped_segments,
+        }
     }
 
     /// Read-only access to the shared feature dictionary.
