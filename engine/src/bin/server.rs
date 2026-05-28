@@ -45,11 +45,17 @@ use prometheus::{
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn, instrument};
 
+use std::cell::RefCell;
+
 use percolator::config::EngineConfig;
 use percolator::events::EngineEvent;
 use percolator::loader;
 use percolator::normalize::Normalizer;
 use percolator::segment::{Engine, MatchScratch, MatchStats};
+
+thread_local! {
+    static SCRATCH: RefCell<MatchScratch> = RefCell::new(MatchScratch::new());
+}
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -551,12 +557,15 @@ async fn search(
 
             let search_fut = tokio::task::spawn_blocking(move || {
                 let engine = state_inner.engine.read();
-                let mut scratch = MatchScratch::new();
-                let mut out = Vec::new();
-                let stats = state_inner.pool.install(|| {
-                    engine.match_title(&title, &mut scratch, &mut out, include_broad)
-                });
-                (out, stats)
+                state_inner.pool.install(|| {
+                    SCRATCH.with(|cell| {
+                        let mut scratch = cell.borrow_mut();
+                        let mut out = Vec::new();
+                        let stats =
+                            engine.match_title(&title, &mut scratch, &mut out, include_broad);
+                        (out, stats)
+                    })
+                })
             });
 
             let (ids, stats) = match tokio::time::timeout(timeout, search_fut).await {
