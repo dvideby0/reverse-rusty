@@ -14,7 +14,7 @@
 //! feature space / frequency table across all segments).
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::compile::{build_signatures, extract, is_hot, CostClass, Extracted};
 use crate::config::EngineConfig;
@@ -26,6 +26,38 @@ use crate::normalize::Normalizer;
 use crate::storage::MmapSegment;
 use crate::util::sig_key;
 use crate::wal::{Wal, WalEntry};
+
+/// Maps `logical_id → original query text`, shared (via `Arc`) between the
+/// engine and every published snapshot. Source text is display-only (it enriches
+/// search hits and feeds `explain`) and never touches the integer match path, so
+/// it lives behind an `RwLock` instead of being deep-cloned into each snapshot —
+/// publishing a snapshot is then an `Arc::clone`, not an O(corpus) string copy.
+/// Reads/writes are eventually consistent across snapshots, which is fine for
+/// display.
+type QueryStore = RwLock<crate::util::FastMap<u64, String>>;
+
+/// Acquire a read guard, recovering from poisoning rather than panicking. The
+/// release build uses `panic = "abort"`, so a guard is never dropped mid-mutation
+/// and poisoning cannot occur there; this only matters under `cargo test`/debug,
+/// where we still prefer graceful recovery over an `unwrap()` panic (the data is
+/// a string cache, not an invariant-bearing structure).
+#[inline]
+fn qs_read(store: &QueryStore) -> RwLockReadGuard<'_, crate::util::FastMap<u64, String>> {
+    store.read().unwrap_or_else(|e| e.into_inner())
+}
+
+#[inline]
+fn qs_write(store: &QueryStore) -> RwLockWriteGuard<'_, crate::util::FastMap<u64, String>> {
+    store.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Materialize an `Arc<BaseSegment>` into an owned in-memory `Segment` (for
+/// compaction). Unwraps the `Arc` in place when uniquely held; otherwise — when
+/// a published snapshot still references the segment — clones it out, leaving
+/// that snapshot's view intact.
+fn arc_into_memory(seg: Arc<BaseSegment>) -> Segment {
+    Arc::try_unwrap(seg).unwrap_or_else(|a| (*a).clone()).into_memory()
+}
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct MatchStats {
@@ -551,14 +583,17 @@ impl Default for MatchScratch {
 /// without holding any lock.  Writers atomically publish new snapshots after
 /// mutations (see the server's `ArcSwap<EngineSnapshot>` pattern).
 ///
-/// The snapshot is cheap to create: `Arc::clone` for the normalizer, and
-/// clones for the dictionary, segments, memtable, and query store.
+/// The snapshot is genuinely cheap to create: every large structure is shared
+/// structurally, so publishing is a handful of `Arc::clone`s, not a deep copy of
+/// the engine (see ADR-016). The dictionary and memtable are copy-on-write
+/// (`Arc<Dict>` / `Arc<Segment>`), the base-segment list shares each segment
+/// (`Arc<BaseSegment>`), and the query store is shared behind an `RwLock`.
 pub struct EngineSnapshot {
     norm: Arc<Normalizer>,
     dict: Arc<Dict>,
-    segments: Vec<BaseSegment>,
-    memtable: Segment,
-    query_store: crate::util::FastMap<u64, String>,
+    segments: Vec<Arc<BaseSegment>>,
+    memtable: Arc<Segment>,
+    query_store: Arc<QueryStore>,
     rejected_parse: u64,
     rejected_class_d: u64,
     vocab_epoch: u64,
@@ -572,7 +607,7 @@ impl std::fmt::Debug for EngineSnapshot {
         f.debug_struct("EngineSnapshot")
             .field("base_segments", &self.segments.len())
             .field("memtable_entries", &self.memtable.len())
-            .field("query_store_entries", &self.query_store.len())
+            .field("query_store_entries", &qs_read(&self.query_store).len())
             .field("vocab_epoch", &self.vocab_epoch)
             .finish()
     }
@@ -629,8 +664,8 @@ impl EngineSnapshot {
         self.stale_segment_count() > 0
     }
 
-    pub fn get_query_source(&self, logical_id: u64) -> Option<&str> {
-        self.query_store.get(&logical_id).map(|s| s.as_str())
+    pub fn get_query_source(&self, logical_id: u64) -> Option<String> {
+        qs_read(&self.query_store).get(&logical_id).cloned()
     }
 
     pub fn explain_hit(
@@ -641,7 +676,7 @@ impl EngineSnapshot {
         let source = self.get_query_source(logical_id)?;
         let mut lc = String::new();
         let cq = crate::compile::compile_one_readonly(
-            source, logical_id, &self.norm, &self.dict, &mut lc,
+            &source, logical_id, &self.norm, &self.dict, &mut lc,
         ).ok()?;
         Some(crate::explain::explain_match_structured(&cq, title, &self.norm, &self.dict))
     }
@@ -649,7 +684,7 @@ impl EngineSnapshot {
     pub fn class_counts(&self) -> [u64; 4] {
         let mut c = [0u64; 4];
         for seg in &self.segments {
-            match seg {
+            match seg.as_ref() {
                 BaseSegment::Memory(s) => s.class_counts(&mut c),
                 BaseSegment::Mmap(_) => {}
             }
@@ -833,11 +868,17 @@ pub struct Engine {
     norm: Arc<Normalizer>,
     /// Vocabulary used to build the normalizer (if set via `with_vocab`).
     vocab: Option<crate::vocab::Vocab>,
-    dict: Dict,
-    /// immutable base segments (sealed; never mutated after creation)
-    segments: Vec<BaseSegment>,
-    /// mutable hot delta — insert_live / tombstone land here
-    memtable: Segment,
+    /// Feature dictionary. `Arc` so a snapshot shares it; writers take a
+    /// copy-on-write handle via `Arc::make_mut` (the dict is O(vocab), which
+    /// saturates, so the occasional CoW clone is bounded — not O(corpus)).
+    dict: Arc<Dict>,
+    /// immutable base segments (sealed; never mutated after creation). Each
+    /// segment is behind `Arc` so publishing a snapshot shares them by pointer
+    /// instead of deep-copying every segment's SoA arrays (ADR-016 / P1-16).
+    segments: Vec<Arc<BaseSegment>>,
+    /// mutable hot delta — insert_live / tombstone land here. `Arc` + CoW: a
+    /// write clones only the (bounded) memtable, never the base segments.
+    memtable: Arc<Segment>,
     rejected_parse: u64,   // queries dropped because the DSL failed to parse
     rejected_class_d: u64, // class-D queries rejected at compile (not stored)
     /// Optional observer callback for engine events (flush, compact, ingest, etc.)
@@ -852,8 +893,9 @@ pub struct Engine {
     pub persistence_healthy: bool,
     /// Number of corrupt segments skipped during Engine::open().
     pub skipped_segments: usize,
-    /// Maps logical_id → original query text for retrieval and search hit enrichment.
-    query_store: crate::util::FastMap<u64, String>,
+    /// Maps logical_id → original query text for retrieval and search hit
+    /// enrichment. Shared (not copied) into every snapshot — see [`QueryStore`].
+    query_store: Arc<QueryStore>,
     /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,
@@ -875,7 +917,7 @@ impl std::fmt::Debug for Engine {
             .field("wal_healthy", &self.wal_healthy)
             .field("persistence_healthy", &self.persistence_healthy)
             .field("skipped_segments", &self.skipped_segments)
-            .field("query_store_entries", &self.query_store.len())
+            .field("query_store_entries", &qs_read(&self.query_store).len())
             .field("vocab_epoch", &self.vocab_epoch)
             .finish()
     }
@@ -902,9 +944,9 @@ impl Engine {
             config,
             norm: Arc::new(norm),
             vocab: None,
-            dict: Dict::new(),
+            dict: Arc::new(Dict::new()),
             segments: Vec::new(),
-            memtable: Segment::new(),
+            memtable: Arc::new(Segment::new()),
             rejected_parse: 0,
             rejected_class_d: 0,
             observer: None,
@@ -913,7 +955,7 @@ impl Engine {
             wal_healthy: true,
             persistence_healthy: true,
             skipped_segments: 0,
-            query_store: crate::util::fast_map(),
+            query_store: Arc::new(RwLock::new(crate::util::fast_map())),
             vocab_epoch: 0,
         }
     }
@@ -992,7 +1034,7 @@ impl Engine {
         for name in &manifest.segment_files {
             let seg_path = seg_dir.join(name);
             match MmapSegment::open(&seg_path) {
-                Ok(mmap_seg) => segments.push(BaseSegment::Mmap(mmap_seg)),
+                Ok(mmap_seg) => segments.push(Arc::new(BaseSegment::Mmap(mmap_seg))),
                 Err(e) => {
                     eprintln!("[percolator] skipping corrupt segment {:?}: {}", seg_path, e);
                     skipped_segments += 1;
@@ -1017,9 +1059,9 @@ impl Engine {
             config,
             norm: Arc::new(norm),
             vocab: None,
-            dict,
+            dict: Arc::new(dict),
             segments,
-            memtable: Segment::new(),
+            memtable: Arc::new(Segment::new()),
             rejected_parse: manifest.rejected_parse,
             rejected_class_d: manifest.rejected_class_d,
             observer: None,
@@ -1028,7 +1070,7 @@ impl Engine {
             wal_healthy: true,
             persistence_healthy: skipped_segments == 0,
             skipped_segments,
-            query_store,
+            query_store: Arc::new(RwLock::new(query_store)),
             vocab_epoch: 0,
         };
 
@@ -1089,18 +1131,20 @@ impl Engine {
 
     /// Create an immutable [`EngineSnapshot`] of the current read-path state.
     ///
-    /// The snapshot captures the normalizer (shared via `Arc`), a clone of the
-    /// dictionary, a clone of every base segment (mmap segments share the
-    /// underlying mapping), a clone of the memtable, and a clone of the query
-    /// store.  After creation the snapshot is fully self-contained — readers
-    /// can match against it without holding any lock on the engine.
+    /// This is O(number of base segments) pointer copies, *not* O(corpus): the
+    /// normalizer, dictionary, each base segment, the memtable, and the query
+    /// store are all shared structurally via `Arc` (segments by per-segment
+    /// pointer; the dict/memtable copy-on-write on the next write). Publishing a
+    /// snapshot after every mutation is therefore cheap — the deep-clone-the-whole-
+    /// engine cost the audit flagged (P1-16) is gone. Readers match against the
+    /// snapshot without holding any lock on the engine.
     pub fn snapshot(&self) -> EngineSnapshot {
         EngineSnapshot {
             norm: Arc::clone(&self.norm),
-            dict: Arc::new(self.dict.clone()),
+            dict: Arc::clone(&self.dict),
             segments: self.segments.clone(),
-            memtable: self.memtable.clone(),
-            query_store: self.query_store.clone(),
+            memtable: Arc::clone(&self.memtable),
+            query_store: Arc::clone(&self.query_store),
             rejected_parse: self.rejected_parse,
             rejected_class_d: self.rejected_class_d,
             vocab_epoch: self.vocab_epoch,
@@ -1121,8 +1165,8 @@ impl Engine {
 
     /// Look up the original query text for a logical ID. Returns `None` if
     /// the ID was never ingested or has been deleted.
-    pub fn get_query_source(&self, logical_id: u64) -> Option<&str> {
-        self.query_store.get(&logical_id).map(|s| s.as_str())
+    pub fn get_query_source(&self, logical_id: u64) -> Option<String> {
+        qs_read(&self.query_store).get(&logical_id).cloned()
     }
 
     /// Explain why a stored query matched (or would match) a given title.
@@ -1137,7 +1181,7 @@ impl Engine {
         let source = self.get_query_source(logical_id)?;
         let mut lc = String::new();
         let cq = crate::compile::compile_one_readonly(
-            source, logical_id, &self.norm, &self.dict, &mut lc,
+            &source, logical_id, &self.norm, &self.dict, &mut lc,
         ).ok()?;
         Some(crate::explain::explain_match_structured(&cq, title, &self.norm, &self.dict))
     }
@@ -1165,13 +1209,13 @@ impl Engine {
     /// First base segment's main index (kept for bench/back-compat callers).
     /// Falls back to the memtable if no base segments exist.
     pub fn main_index(&self) -> &CandidateIndex {
-        match self.segments.first() {
+        match self.segments.first().map(|s| s.as_ref()) {
             Some(BaseSegment::Memory(s)) => s.main_index(),
             _ => self.memtable.main_index(),
         }
     }
     pub fn broad_index(&self) -> &CandidateIndex {
-        match self.segments.first() {
+        match self.segments.first().map(|s| s.as_ref()) {
             Some(BaseSegment::Memory(s)) => s.broad_index(),
             _ => self.memtable.broad_index(),
         }
@@ -1179,7 +1223,7 @@ impl Engine {
     pub fn class_counts(&self) -> [u64; 4] {
         let mut c = [0u64; 4];
         for seg in &self.segments {
-            match seg {
+            match seg.as_ref() {
                 BaseSegment::Memory(s) => s.class_counts(&mut c),
                 BaseSegment::Mmap(_) => {} // mmap segments don't expose class_counts cheaply
             }
@@ -1199,35 +1243,40 @@ impl Engine {
         let mut lc = String::new();
         let mut extracted: Vec<(u64, Extracted, &str)> = Vec::with_capacity(queries.len());
 
-        // Pass A
-        for (logical, text) in queries {
-            match crate::dsl::parse(text) {
-                Ok(ast) => {
-                    let ex = extract(&ast, &self.norm, &mut self.dict, &mut lc);
-                    extracted.push((*logical, ex, text));
-                }
-                Err(_) => {
-                    self.rejected_parse += 1;
-                    report.rejected_parse += 1;
+        // Pass A — intern features + bump frequencies. Take a single copy-on-write
+        // handle to the dict for the whole pass (clones at most once if shared).
+        {
+            let dict = Arc::make_mut(&mut self.dict);
+            for (logical, text) in queries {
+                match crate::dsl::parse(text) {
+                    Ok(ast) => {
+                        let ex = extract(&ast, &self.norm, dict, &mut lc);
+                        extracted.push((*logical, ex, text));
+                    }
+                    Err(_) => {
+                        self.rejected_parse += 1;
+                        report.rejected_parse += 1;
+                    }
                 }
             }
+            // finalize the 64-bit common mask now that all frequencies are known
+            dict.finalize_mask();
         }
-
-        // finalize the 64-bit common mask now that all frequencies are known
-        self.dict.finalize_mask();
 
         // Pass B -> first base segment
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
+        let mut sources = qs_write(&self.query_store);
         for (logical, ex, text) in &extracted {
             if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
                 self.rejected_class_d += 1;
                 report.rejected_class_d += 1;
             } else {
-                self.query_store.insert(*logical, (*text).to_string());
+                sources.insert(*logical, (*text).to_string());
                 report.ingested += 1;
             }
         }
+        drop(sources);
         // Seal: build anchor filter before pushing as immutable base segment.
         seg.build_filter();
         self.seal_and_push(seg);
@@ -1282,10 +1331,14 @@ impl Engine {
         }
         let ast = crate::dsl::parse(text)?;
         let mut lc = String::new();
-        let ex = extract(&ast, &self.norm, &mut self.dict, &mut lc);
-        match self.memtable.add_compiled(&ex, &self.dict, logical, version) {
+        let ex = {
+            let dict = Arc::make_mut(&mut self.dict);
+            extract(&ast, &self.norm, dict, &mut lc)
+        };
+        let outcome = Arc::make_mut(&mut self.memtable).add_compiled(&ex, &self.dict, logical, version);
+        match outcome {
             Some(local) => {
-                self.query_store.insert(logical, text.to_string());
+                qs_write(&self.query_store).insert(logical, text.to_string());
                 Ok(InsertOutcome::Inserted(local))
             }
             None => {
@@ -1306,7 +1359,7 @@ impl Engine {
                 self.wal_healthy = false;
             }
         }
-        self.memtable.tombstone(local_id);
+        Arc::make_mut(&mut self.memtable).tombstone(local_id);
     }
 
     /// Tombstone a query in a specific base segment (for callers that track
@@ -1319,7 +1372,7 @@ impl Engine {
             }
         }
         if let Some(seg) = self.segments.get_mut(seg_idx) {
-            seg.tombstone(local_id);
+            Arc::make_mut(seg).tombstone(local_id);
         }
     }
 
@@ -1341,7 +1394,7 @@ impl Engine {
                         self.wal_healthy = false;
                     }
                 }
-                seg.tombstone(local);
+                Arc::make_mut(seg).tombstone(local);
                 count += 1;
             }
         }
@@ -1357,12 +1410,12 @@ impl Engine {
                     self.wal_healthy = false;
                 }
             }
-            self.memtable.tombstone(local);
+            Arc::make_mut(&mut self.memtable).tombstone(local);
             count += 1;
         }
 
         if count > 0 {
-            self.query_store.remove(&logical_id);
+            qs_write(&self.query_store).remove(&logical_id);
         }
         count
     }
@@ -1375,9 +1428,16 @@ impl Engine {
             return;
         }
         let entries = self.memtable.len();
-        let mut fresh = Segment::new();
-        fresh.vocab_epoch = self.vocab_epoch;
-        let mut sealed = std::mem::replace(&mut self.memtable, fresh);
+        let fresh = Arc::new({
+            let mut s = Segment::new();
+            s.vocab_epoch = self.vocab_epoch;
+            s
+        });
+        let sealed_arc = std::mem::replace(&mut self.memtable, fresh);
+        // Take ownership of the sealed memtable. If a snapshot still references
+        // it (the common case — we publish after every write), clone it out;
+        // that snapshot keeps its pre-flush view, which is correct.
+        let mut sealed = Arc::try_unwrap(sealed_arc).unwrap_or_else(|a| (*a).clone());
         sealed.build_filter();
         self.seal_and_push(sealed);
         self.emit(crate::events::EngineEvent::Flush {
@@ -1404,31 +1464,36 @@ impl Engine {
         let mut report = IngestReport::default();
         let mut lc = String::new();
         let mut extracted: Vec<(u64, Extracted, &str)> = Vec::with_capacity(queries.len());
-        for (logical, text) in queries {
-            match crate::dsl::parse(text) {
-                Ok(ast) => {
-                    let ex = extract(&ast, &self.norm, &mut self.dict, &mut lc);
-                    extracted.push((*logical, ex, text));
-                }
-                Err(_) => {
-                    self.rejected_parse += 1;
-                    report.rejected_parse += 1;
+        {
+            let dict = Arc::make_mut(&mut self.dict);
+            for (logical, text) in queries {
+                match crate::dsl::parse(text) {
+                    Ok(ast) => {
+                        let ex = extract(&ast, &self.norm, dict, &mut lc);
+                        extracted.push((*logical, ex, text));
+                    }
+                    Err(_) => {
+                        self.rejected_parse += 1;
+                        report.rejected_parse += 1;
+                    }
                 }
             }
-        }
-        if !self.dict.is_finalized() {
-            self.dict.finalize_mask();
+            if !dict.is_finalized() {
+                dict.finalize_mask();
+            }
         }
         let mut seg = Segment::new();
+        let mut sources = qs_write(&self.query_store);
         for (logical, ex, text) in &extracted {
             if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
                 self.rejected_class_d += 1;
                 report.rejected_class_d += 1;
             } else {
-                self.query_store.insert(*logical, (*text).to_string());
+                sources.insert(*logical, (*text).to_string());
                 report.ingested += 1;
             }
         }
+        drop(sources);
         // Seal: build anchor filter before pushing as immutable base segment.
         seg.build_filter();
         self.seal_and_push(seg);
@@ -1512,7 +1577,7 @@ impl Engine {
         let old_files = self.collect_mmap_paths();
         // Drain and materialize all segments to in-memory for compaction
         let memory_segs: Vec<Segment> =
-            self.segments.drain(..).map(|s| s.into_memory()).collect();
+            self.segments.drain(..).map(arc_into_memory).collect();
         let refs: Vec<&Segment> = memory_segs.iter().collect();
         let merged = Segment::compact_from(&refs);
         let entries_after = merged.len();
@@ -1544,16 +1609,16 @@ impl Engine {
         let entries_before: usize = self.segments[lo..hi].iter().map(|s| s.len()).sum();
         // Collect old mmap paths before draining
         let old_files: Vec<PathBuf> = self.segments[lo..hi].iter().filter_map(|s| {
-            if let BaseSegment::Mmap(m) = s { Some(m.path().to_path_buf()) } else { None }
+            if let BaseSegment::Mmap(m) = s.as_ref() { Some(m.path().to_path_buf()) } else { None }
         }).collect();
         // Drain the range and materialize to in-memory for compaction
         let memory_segs: Vec<Segment> =
-            self.segments.drain(lo..hi).map(|s| s.into_memory()).collect();
+            self.segments.drain(lo..hi).map(arc_into_memory).collect();
         let refs: Vec<&Segment> = memory_segs.iter().collect();
         let merged = Segment::compact_from(&refs);
         let entries_after = merged.len();
         let merged_base = self.make_base_segment(merged);
-        self.segments.insert(lo, merged_base);
+        self.segments.insert(lo, Arc::new(merged_base));
         self.cleanup_segment_files(&old_files);
         let report = CompactionReport {
             segments_merged,
@@ -1631,16 +1696,16 @@ impl Engine {
         let entries_before: usize = self.segments[lo..hi].iter().map(|s| s.len()).sum();
         // Collect old mmap paths before draining
         let old_files: Vec<PathBuf> = self.segments[lo..hi].iter().filter_map(|s| {
-            if let BaseSegment::Mmap(m) = s { Some(m.path().to_path_buf()) } else { None }
+            if let BaseSegment::Mmap(m) = s.as_ref() { Some(m.path().to_path_buf()) } else { None }
         }).collect();
         // Drain the range and materialize to in-memory for compaction
         let memory_segs: Vec<Segment> =
-            self.segments.drain(lo..hi).map(|s| s.into_memory()).collect();
+            self.segments.drain(lo..hi).map(arc_into_memory).collect();
         let refs: Vec<&Segment> = memory_segs.iter().collect();
         let merged = Segment::compact_from(&refs);
         let entries_after = merged.len();
         let merged_base = self.make_base_segment(merged);
-        self.segments.insert(lo, merged_base);
+        self.segments.insert(lo, Arc::new(merged_base));
         self.cleanup_segment_files(&old_files);
         let report = CompactionReport {
             segments_merged,
@@ -1851,7 +1916,7 @@ impl Engine {
     /// otherwise keep in memory. Pushes onto self.segments.
     fn seal_and_push(&mut self, seg: Segment) {
         let base = self.make_base_segment(seg);
-        self.segments.push(base);
+        self.segments.push(Arc::new(base));
     }
 
     /// Convert a sealed Segment into a BaseSegment (mmap'd if persistent).
@@ -1909,7 +1974,7 @@ impl Engine {
     fn save_manifest_if_persistent(&mut self) -> bool {
         if let Some(ref dir) = self.config.data_dir {
             let segment_files: Vec<String> = self.segments.iter().filter_map(|s| {
-                if let BaseSegment::Mmap(m) = s {
+                if let BaseSegment::Mmap(m) = s.as_ref() {
                     m.path().file_name().and_then(|f| f.to_str()).map(|s| s.to_string())
                 } else {
                     None
@@ -1935,7 +2000,7 @@ impl Engine {
     fn save_query_sources(&mut self) {
         if let Some(ref dir) = self.config.data_dir {
             let path = dir.join("sources.dat");
-            if let Err(e) = crate::storage::write_query_sources(&self.query_store, &path) {
+            if let Err(e) = crate::storage::write_query_sources(&qs_read(&self.query_store), &path) {
                 eprintln!("[percolator] query sources write failed: {}", e);
                 self.persistence_healthy = false;
             }
@@ -1945,7 +2010,7 @@ impl Engine {
     /// Collect paths of mmap'd segments (for cleanup during compaction).
     fn collect_mmap_paths(&self) -> Vec<PathBuf> {
         self.segments.iter().filter_map(|s| {
-            if let BaseSegment::Mmap(m) = s { Some(m.path().to_path_buf()) } else { None }
+            if let BaseSegment::Mmap(m) = s.as_ref() { Some(m.path().to_path_buf()) } else { None }
         }).collect()
     }
 
@@ -1960,9 +2025,12 @@ impl Engine {
     fn replay_insert(&mut self, text: &str, logical: u64, version: u32) {
         if let Ok(ast) = crate::dsl::parse(text) {
             let mut lc = String::new();
-            let ex = extract(&ast, &self.norm, &mut self.dict, &mut lc);
-            if self.memtable.add_compiled(&ex, &self.dict, logical, version).is_some() {
-                self.query_store.insert(logical, text.to_string());
+            let ex = {
+                let dict = Arc::make_mut(&mut self.dict);
+                extract(&ast, &self.norm, dict, &mut lc)
+            };
+            if Arc::make_mut(&mut self.memtable).add_compiled(&ex, &self.dict, logical, version).is_some() {
+                qs_write(&self.query_store).insert(logical, text.to_string());
             }
         }
     }
@@ -1970,9 +2038,9 @@ impl Engine {
     /// Replay a tombstone from WAL recovery.
     fn replay_tombstone(&mut self, seg_idx: u32, local_id: u32) {
         if seg_idx == u32::MAX {
-            self.memtable.tombstone(local_id);
+            Arc::make_mut(&mut self.memtable).tombstone(local_id);
         } else if let Some(seg) = self.segments.get_mut(seg_idx as usize) {
-            seg.tombstone(local_id);
+            Arc::make_mut(seg).tombstone(local_id);
         }
     }
 }

@@ -740,7 +740,7 @@ async fn search(
             let snap = state.snapshot.load();
             let hits = paged_ids.iter().map(|&id| {
                 let source = if include_source {
-                    snap.get_query_source(id).map(|q| HitSource { query: q.to_string() })
+                    snap.get_query_source(id).map(|q| HitSource { query: q })
                 } else {
                     None
                 };
@@ -809,7 +809,7 @@ async fn search(
             let snap = state.snapshot.load();
             let make_hit = |id: u64| {
                 let source = if include_source {
-                    snap.get_query_source(id).map(|q| HitSource { query: q.to_string() })
+                    snap.get_query_source(id).map(|q| HitSource { query: q })
                 } else {
                     None
                 };
