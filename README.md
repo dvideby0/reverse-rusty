@@ -428,6 +428,7 @@ Options:
 | `--include-broad` | false | Include broad-lane (class C) queries in results |
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |
+| `--slow-query-threshold-ms` | 1000 | Log searches exceeding this at `warn` level (0 disables) |
 
 Example with persistence, vocabulary, and pre-loaded queries:
 
@@ -563,6 +564,17 @@ curl -X POST localhost:9200/_search \
   "hits": {"total": 1, "ids": [1]},
   "slots": null
 }
+```
+
+Optional request fields:
+
+| Field | Default | Description |
+|---|---|---|
+| `timeout_ms` | 30000 | Per-request timeout in milliseconds (returns 408 on expiry) |
+| `size` | 1000 | Maximum number of hit IDs to return |
+| `from` | 0 | Offset into the result set for pagination |
+
+`total` always reflects the full match count; `ids` is the paginated window.
 ```
 
 Match multiple titles in a single request:

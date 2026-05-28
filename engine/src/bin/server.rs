@@ -29,7 +29,7 @@ use std::time::Instant;
 
 use axum::{
     extract::{DefaultBodyLimit, Path, State},
-    http::{HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -94,6 +94,11 @@ struct Cli {
     /// Log format: "json" for structured JSON, "pretty" for human-readable.
     #[arg(long, default_value = "pretty")]
     log_format: String,
+
+    /// Slow-query threshold in milliseconds. Searches exceeding this are logged
+    /// at warn level with diagnostic context. 0 disables.
+    #[arg(long, default_value_t = 1000)]
+    slow_query_threshold_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +132,9 @@ struct PrometheusMetrics {
     // Match metrics
     match_candidates_per_title: Histogram,
     match_results_per_title: Histogram,
+
+    // Slow query counter
+    slow_queries_total: IntCounter,
 }
 
 impl PrometheusMetrics {
@@ -213,6 +221,10 @@ impl PrometheusMetrics {
                 .buckets(vec![0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0]),
         ).unwrap();
 
+        let slow_queries_total = IntCounter::with_opts(
+            Opts::new("slow_queries_total", "Searches exceeding the slow-query threshold"),
+        ).unwrap();
+
         // Register all
         registry.register(Box::new(total_queries.clone())).unwrap();
         registry.register(Box::new(base_segments.clone())).unwrap();
@@ -230,6 +242,7 @@ impl PrometheusMetrics {
         registry.register(Box::new(http_request_duration.clone())).unwrap();
         registry.register(Box::new(match_candidates_per_title.clone())).unwrap();
         registry.register(Box::new(match_results_per_title.clone())).unwrap();
+        registry.register(Box::new(slow_queries_total.clone())).unwrap();
 
         Self {
             registry,
@@ -249,6 +262,7 @@ impl PrometheusMetrics {
             http_request_duration,
             match_candidates_per_title,
             match_results_per_title,
+            slow_queries_total,
         }
     }
 
@@ -297,6 +311,7 @@ struct AppState {
     pool: rayon::ThreadPool,
     include_broad: bool,
     prom: PrometheusMetrics,
+    slow_query_threshold_ms: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +342,10 @@ struct SearchBody {
     documents: Option<Vec<DocBody>>,
     /// Optional per-request timeout in milliseconds (default: 30000).
     timeout_ms: Option<u64>,
+    /// Maximum number of hits to return (default: 1000).
+    size: Option<usize>,
+    /// Offset into the result set for pagination (default: 0).
+    from: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -574,6 +593,8 @@ async fn search(
     let start = Instant::now();
     let include_broad = state.include_broad;
     let timeout = tokio::time::Duration::from_millis(body.timeout_ms.unwrap_or(30_000));
+    let page_size = body.size.unwrap_or(1000);
+    let page_from = body.from.unwrap_or(0);
 
     let response = match (body.document, body.documents) {
         // Single document percolation.
@@ -623,10 +644,11 @@ async fn search(
 
             let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             let total = ids.len();
+            let paged_ids = ids.into_iter().skip(page_from).take(page_size).collect();
             info!(titles = 1, matches = total, took_ms = format!("{:.2}", took_ms), "search complete");
             SearchResponse {
                 took_ms,
-                hits: SearchHits { total, ids },
+                hits: SearchHits { total, ids: paged_ids },
                 slots: None,
             }
         }
@@ -683,10 +705,12 @@ async fn search(
             all_ids.sort_unstable();
             all_ids.dedup();
 
-            info!(titles = num_docs, matches = all_ids.len(), took_ms = format!("{:.2}", took_ms), "search complete");
+            let total = all_ids.len();
+            let paged_ids = all_ids.into_iter().skip(page_from).take(page_size).collect();
+            info!(titles = num_docs, matches = total, took_ms = format!("{:.2}", took_ms), "search complete");
             SearchResponse {
                 took_ms,
-                hits: SearchHits { total: all_ids.len(), ids: all_ids },
+                hits: SearchHits { total, ids: paged_ids },
                 slots: Some(slots),
             }
         }
@@ -700,6 +724,22 @@ async fn search(
             ));
         }
     };
+
+    let threshold = state.slow_query_threshold_ms;
+    if threshold > 0 && response.took_ms >= threshold as f64 {
+        state.prom.slow_queries_total.inc();
+        warn!(
+            took_ms = format!("{:.2}", response.took_ms),
+            threshold_ms = threshold,
+            matches = response.hits.total,
+            titles = if response.slots.is_some() {
+                response.slots.as_ref().unwrap().len()
+            } else {
+                1
+            },
+            "slow query"
+        );
+    }
 
     state.prom.http_requests_total.with_label_values(&["search", "200"]).inc();
     state.prom.http_request_duration.with_label_values(&["search"])
@@ -717,9 +757,26 @@ async fn search(
 #[instrument(skip_all)]
 async fn bulk_ingest(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
     let start = Instant::now();
+
+    if let Some(ct) = headers.get("content-type") {
+        if let Ok(ct_str) = ct.to_str() {
+            let ct_lower = ct_str.to_ascii_lowercase();
+            if !ct_lower.starts_with("application/json")
+                && !ct_lower.starts_with("application/x-ndjson")
+            {
+                state.prom.http_requests_total.with_label_values(&["bulk", "415"]).inc();
+                return ApiError::response(
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    "unsupported_media_type",
+                    "Content-Type must be application/json or application/x-ndjson",
+                ).into_response();
+            }
+        }
+    }
 
     // Parse NDJSON action/source pairs.
     let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -824,7 +881,7 @@ async fn bulk_ingest(
     state.prom.http_requests_total.with_label_values(&["bulk", "200"]).inc();
     state.prom.http_request_duration.with_label_values(&["bulk"])
         .observe(start.elapsed().as_secs_f64());
-    Json(BulkResponse { took_ms, errors: has_errors, items })
+    Json(BulkResponse { took_ms, errors: has_errors, items }).into_response()
 }
 
 /// Extract _id from ES-style action line.
@@ -1281,11 +1338,13 @@ async fn main() {
         .expect("failed to build rayon thread pool");
 
     let drain_timeout = cli.drain_timeout;
+    let slow_threshold = cli.slow_query_threshold_ms;
     let state = Arc::new(AppState {
         engine: RwLock::new(engine),
         pool,
         include_broad: cli.include_broad,
         prom,
+        slow_query_threshold_ms: slow_threshold,
     });
 
     // Build router.
@@ -1310,6 +1369,7 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
     info!(
         address = %addr,
+        slow_query_threshold_ms = slow_threshold,
         endpoints = "GET /, PUT /_doc/{id}, POST /_search, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn",
         "server listening"
     );
