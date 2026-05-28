@@ -689,8 +689,14 @@ impl Engine {
         };
 
         // Replay WAL entries after last checkpoint
-        let replay_entries = Wal::recover(&wal_path)?;
-        for entry in replay_entries {
+        let recovery = Wal::recover(&wal_path)?;
+        if recovery.skipped_bytes > 0 {
+            eprintln!(
+                "WARNING: WAL recovery skipped {} bytes of corrupt/torn data at tail",
+                recovery.skipped_bytes,
+            );
+        }
+        for entry in recovery.entries {
             match entry {
                 WalEntry::Insert { logical, version, text, .. } => {
                     // Replay without re-writing to WAL

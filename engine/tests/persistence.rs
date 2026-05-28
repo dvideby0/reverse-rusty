@@ -255,3 +255,32 @@ fn in_memory_backward_compat() {
     // Should find at least query 1 (michael jordan 1986 fleer)
     assert!(ids.contains(&1), "backward compat: query 1 not found");
 }
+
+#[test]
+fn wal_recovery_reports_corrupt_tail() {
+    use percolator::wal::Wal;
+    use std::io::Write;
+
+    let dir = test_dir("wal_corrupt_tail");
+    let wal_path = dir.join("wal.log");
+
+    // Write a valid WAL with two inserts
+    {
+        let mut wal = Wal::open(&wal_path).unwrap();
+        wal.append_insert(1, 1, "michael jordan card").unwrap();
+        wal.append_insert(2, 1, "lebron james rookie").unwrap();
+    }
+
+    // Append garbage to simulate a torn write
+    {
+        let mut f = std::fs::OpenOptions::new().append(true).open(&wal_path).unwrap();
+        f.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF]).unwrap();
+    }
+
+    // Recover and check that we get the valid entries + skipped bytes reported
+    let recovery = Wal::recover(&wal_path).unwrap();
+    assert_eq!(recovery.entries.len(), 2, "should recover both valid entries");
+    assert!(recovery.skipped_bytes > 0, "should report skipped bytes from corrupt tail");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
