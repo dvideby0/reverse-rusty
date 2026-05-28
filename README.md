@@ -362,18 +362,48 @@ containing `womens`, `replica`, `faux`, or `vegan`.
 
 Both queries and titles pass through the same normalization pipeline before matching:
 
-- **Case folding and diacritic removal** — `Cafe` becomes `cafe`, `naive` becomes `naive`
-- **Multiword alias recognition** — configurable multi-token phrases are collapsed into
-  single canonical features (powered by a double-array Aho-Corasick automaton)
-- **Synonym mapping** — single-token aliases are mapped to canonical forms
+- **Case folding and diacritic removal** — `Café` becomes `cafe`, `Jokić` becomes `jokic`
 - **Number disambiguation** — years, quantities, model numbers, and other numeric types are
   classified separately based on context
-- **Domain-extensible** — the `NormalizerBuilder` API lets you register custom phrases,
-  synonyms, and vocabulary for any product domain
+- **Domain-agnostic by default** — the normalizer ships with no hardcoded vocabulary. All
+  domain knowledge (phrases, synonyms, graders) is supplied via vocabulary configuration
 
 Because the same normalizer processes both queries and titles, synonyms and aliases work
 automatically — a query containing `sneakers` will match a title containing `running shoes`
-if those are configured as equivalent in the normalizer vocabulary.
+if those are configured as equivalent in the vocabulary.
+
+### Vocabulary
+
+The engine's domain knowledge is managed through a **vocabulary** — a JSON-serializable
+collection of phrases, synonyms, grader keywords, and grade words. Vocabulary can come from
+three sources:
+
+1. **Learned from queries** — the engine scans any-of groups in your query corpus to discover
+   synonym relationships. If many queries contain `(rookie,rc)`, the engine learns that
+   `rookie ≈ rc` and maps both to the same canonical feature.
+
+2. **Manual configuration** — add phrases, synonyms, graders, and grade words through the
+   `Vocab` API or the `PUT /_vocab` REST endpoint.
+
+3. **File-based** — load a vocabulary JSON file at startup with `--vocab-file`, or save/load
+   at runtime. Vocabularies are composable via `merge()`.
+
+```json
+{
+  "synonyms": [
+    {"token": "rc", "canonical": "term:rookie", "kind": "category"},
+    {"token": "ud", "canonical": "term:upper_deck", "kind": "generic"}
+  ],
+  "phrases": [
+    {"tokens": ["upper", "deck"], "canonical": "term:upper_deck", "kind": "generic"}
+  ],
+  "graders": ["psa", "bgs", "sgc"],
+  "grade_words": ["gem", "mint", "pristine"]
+}
+```
+
+The `NormalizerBuilder` API remains available for programmatic vocabulary construction when
+you need fine-grained control.
 
 ## Usage
 
@@ -393,17 +423,19 @@ Options:
 | `--port` | 9200 | Port to listen on |
 | `--data-dir` | *(in-memory)* | Persistence directory for segments and WAL |
 | `--load-file` | — | Pre-load queries from a CSV or JSONL file at startup |
+| `--vocab-file` | — | Load vocabulary from a JSON file at startup |
 | `--threads` | *(physical cores)* | Number of rayon worker threads |
 | `--include-broad` | false | Include broad-lane (class C) queries in results |
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |
 
-Example with persistence and pre-loaded queries:
+Example with persistence, vocabulary, and pre-loaded queries:
 
 ```bash
 cargo run --release --bin server -- \
   --port 9200 \
   --data-dir ./data \
+  --vocab-file vocab.json \
   --load-file queries.csv \
   --threads 8 \
   --log-format json
@@ -415,18 +447,32 @@ memtable, and syncs the WAL before exiting.
 ### As a Library
 
 ```rust
-use percolator::{Engine, EngineConfig};
+use percolator::{Engine, EngineConfig, Normalizer, Vocab};
 
-let mut engine = Engine::new(EngineConfig::default());
+// Option 1: Empty vocabulary (domain-agnostic, relies on exact token matching)
+let norm = Normalizer::default_vocab().unwrap();
+let mut engine = Engine::new(norm);
+
+// Option 2: Load vocabulary from a file
+let vocab = Vocab::load_json("my-domain.json".as_ref()).unwrap();
+let mut engine = Engine::with_vocab(vocab, EngineConfig::default()).unwrap();
+
+// Option 3: Learn vocabulary from query data, then build the engine
+let queries = vec![
+    (1, "(laptop,notebook) 16gb -refurbished".to_string()),
+    (2, "vintage leather jacket -(replica,faux)".to_string()),
+];
+let learned = percolator::vocab::learn_from_queries(&queries, 2);
+let mut engine = Engine::with_vocab(learned, EngineConfig::default()).unwrap();
 
 // Register queries
-engine.add(1, "(laptop,notebook) 16gb -refurbished").unwrap();
-engine.add(2, "vintage leather jacket -(replica,faux)").unwrap();
-engine.add(3, "\"running shoes\" (nike,adidas) -used").unwrap();
+engine.build_from_queries(&queries);
 
 // Match a title
-let matches = engine.search("Nike Air Max Running Shoes 2024 New");
-// matches contains query IDs: [3]
+let mut scratch = percolator::segment::MatchScratch::new();
+let mut out = Vec::new();
+engine.match_title("Dell XPS 15 Laptop 16GB RAM 512GB SSD New", &mut scratch, &mut out, true);
+// out contains query IDs: [1]
 ```
 
 ### Demo
@@ -710,6 +756,71 @@ curl localhost:9200/_metrics
 Returns metrics in Prometheus text exposition format for scraping by Prometheus, Grafana
 Agent, or compatible collectors.
 
+### `GET /_vocab` — Current Vocabulary
+
+```bash
+curl localhost:9200/_vocab
+```
+
+```json
+{
+  "synonyms": [
+    {"token": "rc", "canonical": "term:rookie", "kind": "generic"}
+  ],
+  "phrases": [
+    {"tokens": ["upper", "deck"], "canonical": "term:upper_deck", "kind": "generic"}
+  ],
+  "graders": ["psa"],
+  "grade_words": ["gem"]
+}
+```
+
+### `PUT /_vocab` — Replace Vocabulary
+
+Replace the engine's vocabulary. If queries have already been ingested, the response includes
+a warning — you should reingest for consistent matching.
+
+```bash
+curl -X PUT localhost:9200/_vocab \
+  -H 'Content-Type: application/json' \
+  -d '{"synonyms": [{"token": "rc", "canonical": "term:rookie", "kind": "category"}], "phrases": [], "graders": [], "grade_words": []}'
+```
+
+```json
+{
+  "acknowledged": true,
+  "warning": "normalizer changed with existing queries; reingest for consistent matching"
+}
+```
+
+### `POST /_vocab/learn` — Learn Vocabulary from Queries
+
+Send raw query text to discover synonym relationships from any-of groups. Returns the
+learned vocabulary without applying it — review and then `PUT /_vocab` to use it.
+
+```bash
+curl -X POST localhost:9200/_vocab/learn \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "queries": [[1, "(rookie,rc) 2024"], [2, "(rookie,rc) 2023"]],
+    "min_count": 2
+  }'
+```
+
+```json
+{
+  "synonyms": [
+    {"token": "rc", "canonical": "term:rookie", "kind": "generic"}
+  ],
+  "phrases": [],
+  "graders": [],
+  "grade_words": []
+}
+```
+
+The `min_count` parameter (default: 2) controls how many times a synonym pair must appear
+across different queries before it's included. Higher values reduce noise.
+
 ### All Endpoints
 
 | Endpoint | Method | Description |
@@ -724,6 +835,9 @@ Agent, or compatible collectors.
 | `/_cat/stats` | GET | Human-readable metrics |
 | `/_health` | GET | Health check (green/yellow/red) |
 | `/_metrics` | GET | Prometheus text exposition format |
+| `/_vocab` | GET | Current vocabulary as JSON |
+| `/_vocab` | PUT | Replace vocabulary |
+| `/_vocab/learn` | POST | Learn synonyms from raw query text |
 
 ## Dependencies
 

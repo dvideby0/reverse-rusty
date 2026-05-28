@@ -12,6 +12,9 @@
 //!   GET  /_cat/stats         Human-readable metrics
 //!   GET  /_health            Health check
 //!   GET  /_metrics           Prometheus text exposition format
+//!   GET  /_vocab             Current vocabulary as JSON
+//!   PUT  /_vocab             Replace vocabulary (body: Vocab JSON)
+//!   POST /_vocab/learn       Learn synonyms from raw query text
 //!
 //! Usage:
 //!   cargo run --release --bin server -- [--port 9200] [--data-dir ./data] [--load-file queries.csv]
@@ -66,6 +69,10 @@ struct Cli {
     /// Pre-load queries from a CSV or JSONL file at startup.
     #[arg(long)]
     load_file: Option<PathBuf>,
+
+    /// Load vocabulary from a JSON file at startup.
+    #[arg(long)]
+    vocab_file: Option<PathBuf>,
 
     /// Include broad-lane queries in match results.
     #[arg(long, default_value_t = false)]
@@ -965,6 +972,69 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResp
 }
 
 // ---------------------------------------------------------------------------
+// Vocabulary management
+// ---------------------------------------------------------------------------
+
+/// GET /_vocab — return the current vocabulary as JSON.
+async fn get_vocab(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let engine = state.engine.read();
+    match engine.vocab() {
+        Some(v) => Json(serde_json::to_value(v).unwrap_or_default()).into_response(),
+        None => Json(serde_json::json!({
+            "synonyms": [],
+            "phrases": [],
+            "graders": [],
+            "grade_words": []
+        }))
+        .into_response(),
+    }
+}
+
+/// PUT /_vocab — replace the vocabulary. Existing compiled queries become
+/// stale; the caller should reingest for consistent matching.
+async fn put_vocab(
+    State(state): State<Arc<AppState>>,
+    Json(vocab): Json<percolator::vocab::Vocab>,
+) -> impl IntoResponse {
+    let mut engine = state.engine.write();
+    let had_queries = engine.num_queries() > 0;
+    match engine.set_vocab(vocab) {
+        Ok(()) => {
+            let mut resp = serde_json::json!({"acknowledged": true});
+            if had_queries {
+                resp["warning"] = serde_json::json!(
+                    "normalizer changed with existing queries; reingest for consistent matching"
+                );
+            }
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+#[derive(Deserialize)]
+struct LearnRequest {
+    queries: Vec<(u64, String)>,
+    #[serde(default = "default_min_count")]
+    min_count: usize,
+}
+
+fn default_min_count() -> usize {
+    2
+}
+
+/// POST /_vocab/learn — learn synonyms from raw query text. Returns the
+/// learned vocabulary without applying it. The caller can review, edit,
+/// and then PUT /_vocab to apply.
+async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoResponse {
+    let vocab = percolator::vocab::learn_from_queries(&req.queries, req.min_count);
+    Json(serde_json::to_value(&vocab).unwrap_or_default())
+}
+
+// ---------------------------------------------------------------------------
 // Graceful shutdown
 // ---------------------------------------------------------------------------
 
@@ -1037,30 +1107,71 @@ async fn main() {
     );
 
     // Build engine.
-    let norm = Normalizer::default_vocab().expect("failed to build normalizer");
     let mut config = EngineConfig::default();
     if let Some(ref dir) = cli.data_dir {
         config.data_dir = Some(dir.clone());
     }
 
+    // Load vocab file if provided, otherwise use minimal (domain-free) normalizer.
+    let vocab = if let Some(ref path) = cli.vocab_file {
+        info!(path = ?path, "loading vocabulary from file");
+        let v = percolator::vocab::Vocab::load_json(path).expect("failed to read vocab file");
+        info!(
+            synonyms = v.synonyms().len(),
+            phrases = v.phrases().len(),
+            graders = v.graders().len(),
+            grade_words = v.grade_words().len(),
+            "vocabulary loaded"
+        );
+        Some(v)
+    } else {
+        None
+    };
+
+    let build_normalizer = |v: &Option<percolator::vocab::Vocab>| -> Normalizer {
+        match v {
+            Some(vocab) => vocab.to_normalizer().expect("failed to build normalizer from vocab"),
+            None => Normalizer::default_vocab().expect("failed to build normalizer"),
+        }
+    };
+
     let mut engine = if cli.data_dir.is_some() {
+        let norm = build_normalizer(&vocab);
         match Engine::open(norm, config) {
-            Ok(e) => {
+            Ok(mut e) => {
                 info!(data_dir = ?cli.data_dir.as_ref().unwrap(), "recovered engine from persistence");
+                if let Some(v) = vocab {
+                    let _ = e.set_vocab(v);
+                }
                 e
             }
             Err(e) => {
                 warn!(error = %e, "no existing data, starting fresh");
-                let norm2 = Normalizer::default_vocab().expect("normalizer");
-                Engine::with_config(norm2, {
-                    let mut c = EngineConfig::default();
-                    c.data_dir = cli.data_dir.clone();
-                    c
-                })
+                match vocab {
+                    Some(v) => Engine::with_vocab(v, {
+                        let mut c = EngineConfig::default();
+                        c.data_dir = cli.data_dir.clone();
+                        c
+                    }).expect("failed to build engine from vocab"),
+                    None => Engine::with_config(
+                        Normalizer::default_vocab().expect("normalizer"),
+                        {
+                            let mut c = EngineConfig::default();
+                            c.data_dir = cli.data_dir.clone();
+                            c
+                        },
+                    ),
+                }
             }
         }
     } else {
-        Engine::with_config(norm, config)
+        match vocab {
+            Some(v) => Engine::with_vocab(v, config).expect("failed to build engine from vocab"),
+            None => {
+                let norm = Normalizer::default_vocab().expect("failed to build normalizer");
+                Engine::with_config(norm, config)
+            }
+        }
     };
 
     // Create Prometheus metrics and wire the engine observer.
@@ -1153,6 +1264,8 @@ async fn main() {
         .route("/_cat/stats", get(cat_stats))
         .route("/_health", get(health))
         .route("/_metrics", get(prometheus_metrics))
+        .route("/_vocab", get(get_vocab).put(put_vocab))
+        .route("/_vocab/learn", post(learn_vocab))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
         .layer(middleware::from_fn(request_id_middleware))
@@ -1161,7 +1274,7 @@ async fn main() {
     let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
     info!(
         address = %addr,
-        endpoints = "GET /, PUT /_doc/{id}, POST /_search, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics",
+        endpoints = "GET /, PUT /_doc/{id}, POST /_search, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn",
         "server listening"
     );
 

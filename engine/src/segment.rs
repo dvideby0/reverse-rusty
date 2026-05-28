@@ -524,6 +524,8 @@ pub struct CompactionReport {
 pub struct Engine {
     config: EngineConfig,
     norm: Normalizer,
+    /// Vocabulary used to build the normalizer (if set via `with_vocab`).
+    vocab: Option<crate::vocab::Vocab>,
     dict: Dict,
     /// immutable base segments (sealed; never mutated after creation)
     segments: Vec<BaseSegment>,
@@ -585,6 +587,7 @@ impl Engine {
         Engine {
             config,
             norm,
+            vocab: None,
             dict: Dict::new(),
             segments: Vec::new(),
             memtable: Segment::new(),
@@ -597,6 +600,35 @@ impl Engine {
             persistence_healthy: true,
             skipped_segments: 0,
         }
+    }
+
+    /// Create an engine from a [`Vocab`](crate::vocab::Vocab), which is
+    /// converted to a Normalizer internally. The vocab is stored so it can
+    /// be queried or serialized later.
+    pub fn with_vocab(
+        vocab: crate::vocab::Vocab,
+        config: EngineConfig,
+    ) -> Result<Self, crate::error::NormalizerError> {
+        let norm = vocab.to_normalizer()?;
+        let mut eng = Self::with_config(norm, config);
+        eng.vocab = Some(vocab);
+        Ok(eng)
+    }
+
+    /// The vocabulary used to build this engine's normalizer, if one was set.
+    pub fn vocab(&self) -> Option<&crate::vocab::Vocab> {
+        self.vocab.as_ref()
+    }
+
+    /// Replace the engine's vocabulary and normalizer. Existing compiled
+    /// queries become stale — the caller must reingest for consistent matching.
+    pub fn set_vocab(
+        &mut self,
+        vocab: crate::vocab::Vocab,
+    ) -> Result<(), crate::error::NormalizerError> {
+        self.norm = vocab.to_normalizer()?;
+        self.vocab = Some(vocab);
+        Ok(())
     }
 
     /// Open an engine from an existing data directory, recovering state from
@@ -642,6 +674,7 @@ impl Engine {
         let mut engine = Engine {
             config,
             norm,
+            vocab: None,
             dict,
             segments,
             memtable: Segment::new(),
