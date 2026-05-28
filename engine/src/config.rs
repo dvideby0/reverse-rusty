@@ -129,4 +129,31 @@ impl EngineConfig {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Validate configuration, returning a list of problems. Empty means valid.
+    pub fn validate(&self) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.max_segments == 0 {
+            problems.push("max_segments must be >= 1".into());
+        }
+        if self.memtable_flush_threshold == 0 {
+            problems.push("memtable_flush_threshold must be >= 1".into());
+        }
+        if self.holes_ratio_threshold < 0.0 || self.holes_ratio_threshold > 1.0 {
+            problems.push("holes_ratio_threshold must be in [0.0, 1.0]".into());
+        }
+        if self.max_query_length == 0 {
+            problems.push("max_query_length must be >= 1".into());
+        }
+        if self.max_query_clauses == 0 {
+            problems.push("max_query_clauses must be >= 1".into());
+        }
+        if self.max_anyof_group_size == 0 {
+            problems.push("max_anyof_group_size must be >= 1".into());
+        }
+        if self.compaction_fixed_cost < 0.0 {
+            problems.push("compaction_fixed_cost must be >= 0".into());
+        }
+        problems
+    }
 }

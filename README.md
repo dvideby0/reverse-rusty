@@ -429,6 +429,11 @@ Options:
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |
 | `--slow-query-threshold-ms` | 1000 | Log searches exceeding this at `warn` level (0 disables) |
+| `--max-segments` | 8 | Max base segments before compaction triggers |
+| `--memtable-flush-threshold` | 100000 | Memtable entries before auto-flush |
+| `--max-query-length` | 10000 | Maximum query string length in bytes |
+| `--max-query-clauses` | 256 | Maximum clauses per query |
+| `--max-anyof-group-size` | 64 | Maximum members in an any-of group |
 
 Example with persistence, vocabulary, and pre-loaded queries:
 

@@ -42,7 +42,7 @@ use prometheus::{
     HistogramOpts, HistogramVec, Opts, Registry, TextEncoder,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn, instrument};
+use tracing::{error, info, warn, instrument};
 
 use std::cell::RefCell;
 
@@ -99,6 +99,26 @@ struct Cli {
     /// at warn level with diagnostic context. 0 disables.
     #[arg(long, default_value_t = 1000)]
     slow_query_threshold_ms: u64,
+
+    /// Max base segments before compaction triggers.
+    #[arg(long, default_value_t = 8)]
+    max_segments: usize,
+
+    /// Memtable entry count that triggers an automatic flush.
+    #[arg(long, default_value_t = 100_000)]
+    memtable_flush_threshold: usize,
+
+    /// Maximum query string length in bytes.
+    #[arg(long, default_value_t = 10_000)]
+    max_query_length: usize,
+
+    /// Maximum number of clauses per query.
+    #[arg(long, default_value_t = 256)]
+    max_query_clauses: usize,
+
+    /// Maximum members in an any-of group.
+    #[arg(long, default_value_t = 64)]
+    max_anyof_group_size: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -1199,10 +1219,25 @@ async fn main() {
         "starting percolator server"
     );
 
-    // Build engine.
-    let mut config = EngineConfig::default();
-    if let Some(ref dir) = cli.data_dir {
-        config.data_dir = Some(dir.clone());
+    // Build engine config from CLI flags.
+    let config = EngineConfig {
+        data_dir: cli.data_dir.clone(),
+        max_segments: cli.max_segments,
+        memtable_flush_threshold: cli.memtable_flush_threshold,
+        max_query_length: cli.max_query_length,
+        max_query_clauses: cli.max_query_clauses,
+        max_anyof_group_size: cli.max_anyof_group_size,
+        ..EngineConfig::default()
+    };
+    let problems = config.validate();
+    if !problems.is_empty() {
+        for p in &problems {
+            error!(problem = %p, "invalid engine config");
+        }
+        std::process::exit(1);
+    }
+    if config.data_dir.is_none() {
+        warn!("no --data-dir specified: engine is in-memory only, data will not survive restarts");
     }
 
     // Load vocab file if provided, otherwise use minimal (domain-free) normalizer.
@@ -1230,7 +1265,7 @@ async fn main() {
 
     let mut engine = if cli.data_dir.is_some() {
         let norm = build_normalizer(&vocab);
-        match Engine::open(norm, config) {
+        match Engine::open(norm, config.clone()) {
             Ok(mut e) => {
                 info!(data_dir = ?cli.data_dir.as_ref().unwrap(), "recovered engine from persistence");
                 if let Some(v) = vocab {
@@ -1241,18 +1276,11 @@ async fn main() {
             Err(e) => {
                 warn!(error = %e, "no existing data, starting fresh");
                 match vocab {
-                    Some(v) => Engine::with_vocab(v, {
-                        let mut c = EngineConfig::default();
-                        c.data_dir = cli.data_dir.clone();
-                        c
-                    }).expect("failed to build engine from vocab"),
+                    Some(v) => Engine::with_vocab(v, config)
+                        .expect("failed to build engine from vocab"),
                     None => Engine::with_config(
                         Normalizer::default_vocab().expect("normalizer"),
-                        {
-                            let mut c = EngineConfig::default();
-                            c.data_dir = cli.data_dir.clone();
-                            c
-                        },
+                        config,
                     ),
                 }
             }
