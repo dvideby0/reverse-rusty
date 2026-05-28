@@ -343,6 +343,20 @@ impl Normalizer {
         ids
     }
 
+    /// Read-only compile: resolve features by name without interning new ones.
+    /// Used for re-deriving a CompiledQuery on the read path (explain).
+    pub fn compile_features_readonly(&self, text: &str, dict: &Dict, lc: &mut String) -> Vec<FeatureId> {
+        let mut ids: Vec<FeatureId> = Vec::new();
+        self.emit(text, lc, &mut |name, _kind| {
+            if let Some(id) = dict.get(name) {
+                ids.push(id);
+            }
+        });
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
     /// Match path: look up existing features only (titles can't create features).
     /// Unknown tokens are skipped — no query references them, so they can't
     /// affect any match. Fills `out` with sorted+deduped existing IDs.

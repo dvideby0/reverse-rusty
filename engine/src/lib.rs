@@ -33,6 +33,7 @@ pub use config::EngineConfig;
 pub use dict::FeatureId;
 pub use error::{NormalizerError, ParseError, ParseErrorKind};
 pub use events::{CompactionTrigger, EngineEvent, EngineMetrics};
+pub use explain::ExplainDetail;
 pub use normalize::{Normalizer, NormalizerBuilder};
 pub use segment::{CompactionReport, Engine, IngestReport, InsertOutcome, MatchStats};
 pub use vocab::Vocab;

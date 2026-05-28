@@ -851,6 +851,23 @@ impl Engine {
         self.query_store.get(&logical_id).map(|s| s.as_str())
     }
 
+    /// Explain why a stored query matched (or would match) a given title.
+    /// Re-derives the CompiledQuery from stored source text using the
+    /// read-only compile path. Returns `None` if the query source is
+    /// unavailable.
+    pub fn explain_hit(
+        &self,
+        logical_id: u64,
+        title: &str,
+    ) -> Option<crate::explain::ExplainDetail> {
+        let source = self.get_query_source(logical_id)?;
+        let mut lc = String::new();
+        let cq = crate::compile::compile_one_readonly(
+            source, logical_id, &self.norm, &self.dict, &mut lc,
+        ).ok()?;
+        Some(crate::explain::explain_match_structured(&cq, title, &self.norm, &self.dict))
+    }
+
     pub fn num_queries(&self) -> usize {
         self.segments.iter().map(|s| s.len()).sum::<usize>() + self.memtable.len()
     }

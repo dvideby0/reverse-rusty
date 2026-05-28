@@ -11,6 +11,19 @@ use crate::compile::{is_hot, CompiledQuery};
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
 use crate::util::sig_key;
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplainDetail {
+    pub title_features: Vec<String>,
+    pub candidate: bool,
+    pub matched: bool,
+    pub cost_class: String,
+    pub required: Vec<String>,
+    pub forbidden: Vec<String>,
+    pub anyof_groups: Vec<Vec<String>>,
+    pub failures: Vec<String>,
+}
 
 pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
     let mut s = String::new();
@@ -122,6 +135,69 @@ pub fn explain_match(
         }
     }
     s
+}
+
+/// Structured explain — same logic as `explain_match` but returns a
+/// serializable struct for API responses.
+pub fn explain_match_structured(
+    cq: &CompiledQuery,
+    title: &str,
+    norm: &Normalizer,
+    dict: &Dict,
+) -> ExplainDetail {
+    let mut lc = String::new();
+    let mut feats = Vec::new();
+    norm.match_features(title, dict, &mut lc, &mut feats);
+
+    let title_features: Vec<String> = feats.iter().map(|&id| dict.name(id).to_string()).collect();
+
+    let mut title_sigs = std::collections::HashSet::new();
+    for &f in &feats {
+        title_sigs.insert(sig_key(&[f]));
+    }
+    for &h in &feats {
+        if is_hot(dict, h) {
+            for &o in &feats {
+                if o != h {
+                    let (a, b) = if h < o { (h, o) } else { (o, h) };
+                    title_sigs.insert(sig_key(&[a, b]));
+                }
+            }
+        }
+    }
+    let candidate = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
+        || cq.broad_sigs.iter().any(|s| title_sigs.contains(s));
+
+    let present = |f: u32| feats.binary_search(&f).is_ok();
+    let mut failures = Vec::new();
+    for &f in &cq.extracted.required {
+        if !present(f) {
+            failures.push(format!("missing required {}", dict.name(f)));
+        }
+    }
+    for &f in &cq.extracted.forbidden {
+        if present(f) {
+            failures.push(format!("present forbidden {}", dict.name(f)));
+        }
+    }
+    for (i, g) in cq.extracted.anyof.iter().enumerate() {
+        if !g.iter().any(|&f| present(f)) {
+            failures.push(format!("any_of[{i}] unsatisfied"));
+        }
+    }
+
+    ExplainDetail {
+        title_features,
+        candidate,
+        matched: failures.is_empty(),
+        cost_class: format!("{:?}", cq.cost_class),
+        required: cq.extracted.required.iter().map(|&id| dict.name(id).to_string()).collect(),
+        forbidden: cq.extracted.forbidden.iter().map(|&id| dict.name(id).to_string()).collect(),
+        anyof_groups: cq.extracted.anyof.iter().map(|g| {
+            g.iter().map(|&id| dict.name(id).to_string()).collect()
+        }).collect(),
+        failures,
+    }
 }
 
 fn names(ids: &[u32], dict: &Dict) -> String {

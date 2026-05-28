@@ -368,6 +368,10 @@ struct SearchBody {
     from: Option<usize>,
     /// Include original query text in each hit (default: true).
     include_source: Option<bool>,
+    /// Include per-hit explain detail showing why each query matched (default: false).
+    explain: Option<bool>,
+    /// Include match profile (candidate/posting stats) in the response (default: false).
+    profile: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -381,6 +385,8 @@ struct SearchResponse {
     hits: SearchHits,
     #[serde(skip_serializing_if = "Option::is_none")]
     slots: Option<Vec<SlotHit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile: Option<StatsResponse>,
 }
 
 #[derive(Serialize)]
@@ -394,6 +400,8 @@ struct SearchHitItem {
     _id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     _source: Option<HitSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    _explanation: Option<percolator::ExplainDetail>,
 }
 
 #[derive(Serialize)]
@@ -658,6 +666,8 @@ async fn search(
     let start = Instant::now();
     let include_broad = state.include_broad;
     let include_source = body.include_source.unwrap_or(true);
+    let include_explain = body.explain.unwrap_or(false);
+    let include_profile = body.profile.unwrap_or(false);
     let timeout = tokio::time::Duration::from_millis(body.timeout_ms.unwrap_or(30_000));
     let page_size = body.size.unwrap_or(1000);
     let page_from = body.from.unwrap_or(0);
@@ -666,6 +676,7 @@ async fn search(
         // Single document percolation.
         (Some(doc), _) => {
             let title = doc.title;
+            let title_for_explain = if include_explain { Some(title.clone()) } else { None };
             let prom = state.prom.clone();
             let state_inner = Arc::clone(&state);
 
@@ -685,7 +696,6 @@ async fn search(
             let (ids, stats) = match tokio::time::timeout(timeout, search_fut).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(e)) => {
-                    // spawn_blocking panicked
                     eprintln!("search task panicked: {e}");
                     state.prom.http_requests_total.with_label_values(&["search", "500"]).inc();
                     return Err(ApiError::response(
@@ -704,27 +714,31 @@ async fn search(
                 }
             };
 
-            // Record match distribution metrics.
             prom.match_candidates_per_title.observe(stats.unique_candidates as f64);
             prom.match_results_per_title.observe(ids.len() as f64);
 
             let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             let total = ids.len();
             let paged_ids: Vec<u64> = ids.into_iter().skip(page_from).take(page_size).collect();
-            let hits = if include_source {
+            let hits = {
                 let engine = state.engine.read();
-                paged_ids.iter().map(|&id| SearchHitItem {
-                    _id: id,
-                    _source: engine.get_query_source(id).map(|q| HitSource { query: q.to_string() }),
+                paged_ids.iter().map(|&id| {
+                    let source = if include_source {
+                        engine.get_query_source(id).map(|q| HitSource { query: q.to_string() })
+                    } else {
+                        None
+                    };
+                    let explanation = title_for_explain.as_deref()
+                        .and_then(|t| engine.explain_hit(id, t));
+                    SearchHitItem { _id: id, _source: source, _explanation: explanation }
                 }).collect()
-            } else {
-                paged_ids.iter().map(|&id| SearchHitItem { _id: id, _source: None }).collect()
             };
             info!(titles = 1, matches = total, took_ms = format!("{:.2}", took_ms), "search complete");
             SearchResponse {
                 took_ms,
                 hits: SearchHits { total, hits },
                 slots: None,
+                profile: if include_profile { Some(stats.into()) } else { None },
             }
         }
 
@@ -777,25 +791,19 @@ async fn search(
             let total = all_ids.len();
             let paged_ids: Vec<u64> = all_ids.into_iter().skip(page_from).take(page_size).collect();
 
-            // Build rich hits and slot hits with optional source lookup
-            let (hits, slots) = if include_source {
+            let (hits, slots) = {
                 let engine = state.engine.read();
-                let hits = paged_ids.iter().map(|&id| SearchHitItem {
-                    _id: id,
-                    _source: engine.get_query_source(id).map(|q| HitSource { query: q.to_string() }),
-                }).collect();
-                let slots = slot_data.into_iter().map(|(slot, ids, stats)| {
-                    let slot_hits = ids.iter().map(|&id| SearchHitItem {
-                        _id: id,
-                        _source: engine.get_query_source(id).map(|q| HitSource { query: q.to_string() }),
-                    }).collect();
-                    SlotHit { slot, total: ids.len(), hits: slot_hits, stats }
-                }).collect();
-                (hits, slots)
-            } else {
-                let hits = paged_ids.iter().map(|&id| SearchHitItem { _id: id, _source: None }).collect();
-                let slots = slot_data.into_iter().map(|(slot, ids, stats)| {
-                    let slot_hits = ids.iter().map(|&id| SearchHitItem { _id: id, _source: None }).collect();
+                let make_hit = |id: u64| {
+                    let source = if include_source {
+                        engine.get_query_source(id).map(|q| HitSource { query: q.to_string() })
+                    } else {
+                        None
+                    };
+                    SearchHitItem { _id: id, _source: source, _explanation: None }
+                };
+                let hits: Vec<_> = paged_ids.iter().map(|&id| make_hit(id)).collect();
+                let slots: Vec<_> = slot_data.into_iter().map(|(slot, ids, stats)| {
+                    let slot_hits = ids.iter().map(|&id| make_hit(id)).collect();
                     SlotHit { slot, total: ids.len(), hits: slot_hits, stats }
                 }).collect();
                 (hits, slots)
@@ -806,6 +814,7 @@ async fn search(
                 took_ms,
                 hits: SearchHits { total, hits },
                 slots: Some(slots),
+                profile: None,
             }
         }
 

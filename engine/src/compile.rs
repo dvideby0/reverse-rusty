@@ -257,3 +257,87 @@ pub fn compile_one(
         cost_class: plan.class,
     })
 }
+
+/// Read-only extract: resolves features via `dict.get()` without interning.
+/// Skips features not already in the dictionary. Safe for the read path.
+fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut String) -> Extracted {
+    let mut required: Vec<FeatureId> = Vec::new();
+    let mut forbidden: Vec<FeatureId> = Vec::new();
+    let mut anyof: Vec<Vec<FeatureId>> = Vec::new();
+
+    let mut pos_words: Vec<&str> = Vec::new();
+
+    for clause in &ast.clauses {
+        match (&clause.atom, clause.negated) {
+            (Atom::Term(w), false) => {
+                pos_words.push(w.as_str());
+            }
+            (Atom::Term(w), true) | (Atom::Phrase(w), true) => {
+                let feats = norm.compile_features_readonly(w, dict, lc);
+                forbidden.extend_from_slice(&feats);
+            }
+            (Atom::Phrase(w), false) => {
+                let feats = norm.compile_features_readonly(w, dict, lc);
+                required.extend_from_slice(&feats);
+            }
+            (Atom::AnyOf(members), neg) => {
+                if neg {
+                    for m in members {
+                        let feats = norm.compile_features_readonly(m, dict, lc);
+                        forbidden.extend_from_slice(&feats);
+                    }
+                } else {
+                    let mut group: Vec<FeatureId> = Vec::new();
+                    for m in members {
+                        let feats = norm.compile_features_readonly(m, dict, lc);
+                        if let Some(&rep) = feats.iter().min_by_key(|&&f| dict.freq(f)) {
+                            group.push(rep);
+                        }
+                    }
+                    group.sort_unstable();
+                    group.dedup();
+                    if group.len() == 1 {
+                        required.push(group[0]);
+                    } else if !group.is_empty() {
+                        anyof.push(group);
+                    }
+                }
+            }
+        }
+    }
+
+    if !pos_words.is_empty() {
+        let joined = pos_words.join(" ");
+        let feats = norm.compile_features_readonly(&joined, dict, lc);
+        required.extend_from_slice(&feats);
+    }
+
+    required.sort_unstable();
+    required.dedup();
+    forbidden.sort_unstable();
+    forbidden.dedup();
+
+    Extracted { required, forbidden, anyof }
+}
+
+/// Read-only compile: re-derives a CompiledQuery from query text without
+/// mutating the Dict. Used for explain on the read path.
+pub fn compile_one_readonly(
+    text: &str,
+    logical_id: u64,
+    norm: &Normalizer,
+    dict: &Dict,
+    lc: &mut String,
+) -> Result<CompiledQuery, crate::error::ParseError> {
+    let ast = crate::dsl::parse(text)?;
+    let ex = extract_readonly(&ast, norm, dict, lc);
+    let plan = build_signatures(&ex, dict);
+    Ok(CompiledQuery {
+        logical_id,
+        version: 0,
+        extracted: ex,
+        main_sigs: plan.main_sigs,
+        broad_sigs: plan.broad_sigs,
+        cost_class: plan.class,
+    })
+}
