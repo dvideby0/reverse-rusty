@@ -531,6 +531,22 @@ includes the error:
 {"_id": 1, "result": "rejected", "error": "query has no anchorable feature (cost class D)"}
 ```
 
+### `DELETE /_doc/{id}` — Remove a Query
+
+```bash
+curl -X DELETE localhost:9200/_doc/1
+```
+
+```json
+{"_id": 1, "result": "deleted", "deleted_count": 1}
+```
+
+If the query ID doesn't exist (or was already deleted):
+
+```json
+{"_id": 1, "result": "not_found"}
+```
+
 ### `POST /_search` — Percolate Titles
 
 Match a single title against all stored queries:
@@ -827,6 +843,7 @@ across different queries before it's included. Higher values reduce noise.
 |---|---|---|
 | `/` | GET | Version info |
 | `/_doc/{id}` | PUT | Register a single query |
+| `/_doc/{id}` | DELETE | Remove a stored query |
 | `/_search` | POST | Percolate one or more titles |
 | `/_bulk` | POST | NDJSON bulk ingest |
 | `/_flush` | POST | Flush memtable to immutable segment |
