@@ -377,30 +377,30 @@ fn broad_lane_queries_only_in_broad_index() {
     let mut queries: Vec<(u64, String)> = Vec::new();
     let mut id = 1u64;
 
-    // 5000 queries mentioning "michael jordan" — makes those features very hot
+    // 5000 queries all mentioning "hottoken" — makes that feature very hot
     for i in 0..5000 {
         queries.push((
             id,
             format!(
-                "michael jordan {} upper deck {}",
+                "hottoken {} somethingrare{:04}",
                 1990 + (i % 30),
-                ["psa", "bgs", "sgc"][i % 3]
+                i
             ),
         ));
         id += 1;
     }
 
-    // A query whose only required features are super-hot (michael, jordan)
-    // This should be class C (broad) if those features get common-mask bits.
+    // A query whose only required feature is super-hot (single token)
+    // This should be class C (broad) since it has one hot feature and nothing to pair.
     let broad_id = id;
-    queries.push((broad_id, "michael jordan".to_string()));
+    queries.push((broad_id, "hottoken".to_string()));
     id += 1;
 
     // A selective query with rare required features
     let selective_id = id;
     queries.push((
         selective_id,
-        "1994 upper deck michael jordan sp preview psa 10".to_string(),
+        "1994 hottoken somethingrare0042".to_string(),
     ));
 
     eng.build_from_queries(&queries);
@@ -414,7 +414,7 @@ fn broad_lane_queries_only_in_broad_index() {
     assert!(classes[2] > 0, "expected some class-C (broad) queries, got 0");
 
     // Test: include_broad=false should NOT return the broad query
-    let title = "Michael Jordan 1994 Upper Deck SP Preview PSA 10";
+    let title = "hottoken 1994 somethingrare0042";
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
 

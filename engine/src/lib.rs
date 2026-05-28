@@ -26,6 +26,7 @@ pub mod wal;
 pub mod explain;
 pub mod gen;
 pub mod loader;
+pub mod vocab;
 
 pub use compile::{CompiledQuery, CostClass};
 pub use config::EngineConfig;
@@ -34,6 +35,7 @@ pub use error::{NormalizerError, ParseError, ParseErrorKind};
 pub use events::{CompactionTrigger, EngineEvent, EngineMetrics};
 pub use normalize::{Normalizer, NormalizerBuilder};
 pub use segment::{CompactionReport, Engine, IngestReport, InsertOutcome, MatchStats};
+pub use vocab::Vocab;
 
 // Compile-time trait assertions — these ensure key types are safe for
 // multi-threaded production use (e.g. Engine behind Arc<Mutex<Engine>>,

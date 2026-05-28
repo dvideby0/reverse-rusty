@@ -57,103 +57,14 @@ impl Normalizer {
     /// Build the default trading-card vocabulary. Rich enough to exercise the
     /// spec's worked example and the synthetic generator; not exhaustive.
     ///
-    /// This is sugar over [`NormalizerBuilder`] — equivalent to calling
-    /// `Normalizer::builder()` with all the card-domain vocabulary pre-loaded.
-    /// Use [`NormalizerBuilder`] directly for other product domains.
+    /// Build a domain-agnostic normalizer with no pre-loaded vocabulary.
     ///
-    /// Returns `Err` if the Aho-Corasick automaton builder rejects the phrase
-    /// patterns (should not happen with the built-in vocabulary, but propagated
-    /// rather than panicking to uphold the no-`unwrap`-in-library-code invariant).
+    /// The normalizer still handles year detection, number disambiguation,
+    /// diacritic folding, and lowercase normalization. Domain-specific vocabulary
+    /// (phrases, synonyms, graders, grade words) should be supplied via
+    /// [`NormalizerBuilder`] or learned from query any-of groups at runtime.
     pub fn default_vocab() -> Result<Self, crate::error::NormalizerError> {
-        let mut b = NormalizerBuilder::new();
-
-        // ---- multiword brand aliases ----
-        b.add_phrase(&["upper", "deck"], "brand:upper_deck", FeatureKind::Brand);
-        b.add_phrase(&["fleer", "ultra"], "brand:fleer_ultra", FeatureKind::Brand);
-        b.add_phrase(&["pro", "set"], "brand:pro_set", FeatureKind::Brand);
-
-        // ---- multiword player aliases ----
-        for (toks, canon) in [
-            (&["michael", "jordan"][..], "player:michael_jordan"),
-            (&["lebron", "james"], "player:lebron_james"),
-            (&["kobe", "bryant"], "player:kobe_bryant"),
-            (&["tom", "brady"], "player:tom_brady"),
-            (&["ken", "griffey"], "player:ken_griffey"),
-            (&["wayne", "gretzky"], "player:wayne_gretzky"),
-            (&["patrick", "mahomes"], "player:patrick_mahomes"),
-            (&["mike", "trout"], "player:mike_trout"),
-        ] {
-            b.add_phrase(toks, canon, FeatureKind::Player);
-        }
-
-        // ---- single-token brands ----
-        for brand in [
-            "topps", "panini", "fleer", "donruss", "bowman", "score", "leaf", "prizm",
-        ] {
-            b.add_synonym(brand, &format!("brand:{brand}"), FeatureKind::Brand);
-        }
-        b.add_synonym("ud", "brand:upper_deck", FeatureKind::Brand);
-
-        // ---- graders ----
-        for g in ["psa", "bgs", "sgc", "cgc", "csg", "beckett"] {
-            b.add_grader(g);
-        }
-
-        // ---- grade words ----
-        for w in ["gem", "mt", "mint", "pristine", "nm", "graded"] {
-            b.add_grade_word(w);
-        }
-
-        // ---- category terms + plural folding ----
-        for (t, canon) in [
-            ("sp", "card_term:sp"),
-            ("ssp", "card_term:ssp"),
-            ("rc", "card_term:rookie"),
-            ("rookie", "card_term:rookie"),
-            ("preview", "card_term:preview"),
-            ("previews", "card_term:preview"),
-            ("insert", "card_term:insert"),
-            ("inserts", "card_term:insert"),
-            ("refractor", "card_term:refractor"),
-            ("refractors", "card_term:refractor"),
-            ("base", "card_term:base"),
-            ("parallel", "card_term:parallel"),
-            ("die", "card_term:diecut"),
-            ("checklist", "term:checklist"),
-            ("checklists", "term:checklist"),
-            ("heroes", "term:heroes"),
-            ("next", "term:next"),
-            ("classic", "term:classic"),
-            ("alumni", "term:alumni"),
-            ("minor", "term:minor"),
-            ("minors", "term:minor"),
-            ("count", "term:count"),
-            ("long", "term:long"),
-            ("top", "term:top"),
-        ] {
-            b.add_synonym(t, canon, FeatureKind::Category);
-        }
-
-        // ---- flags ----
-        for (t, canon) in [
-            ("auto", "flag:auto"),
-            ("autograph", "flag:auto"),
-            ("autographs", "flag:auto"),
-            ("autographed", "flag:auto"),
-            ("signed", "flag:signed"),
-            ("dna", "flag:dna"),
-            ("signature", "flag:signature"),
-            ("reprint", "flag:reprint"),
-            ("rp", "flag:reprint"),
-            ("custom", "flag:custom"),
-            ("proxy", "flag:proxy"),
-            ("lot", "flag:lot"),
-            ("bulk", "flag:lot"),
-        ] {
-            b.add_synonym(t, canon, FeatureKind::Flag);
-        }
-
-        b.build()
+        NormalizerBuilder::new().build()
     }
 
     /// Lowercase + fold diacritics + tokenize punctuation into `out` (reused).
@@ -580,7 +491,7 @@ impl NormalizerBuilder {
 }
 
 /// Fold common Latin diacritics to ASCII so "Jokić"->"jokic", "Acuña"->"acuna".
-fn fold_diacritic(ch: char) -> char {
+pub fn fold_diacritic(ch: char) -> char {
     match ch {
         'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ā' | 'ą' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => {
             'a'
