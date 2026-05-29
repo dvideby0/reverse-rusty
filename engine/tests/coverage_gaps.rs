@@ -821,3 +821,40 @@ fn metrics_consistent_with_known_corpus() {
     assert_eq!(m.rejected_parse as usize, report.rejected_parse);
     assert_eq!(m.rejected_class_d as usize, report.rejected_class_d);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings: the engine config rides in the lock-free snapshot (GET /_settings),
+// and set_config swaps it copy-on-write so in-flight snapshots keep their view.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn settings_snapshot_reflects_set_config_and_is_immutable() {
+    use percolator::config::EngineConfig;
+
+    let mut eng = Engine::with_config(
+        Normalizer::default_vocab().unwrap(),
+        EngineConfig {
+            max_segments: 8,
+            ..EngineConfig::default()
+        },
+    );
+
+    // GET /_settings reads the snapshot, so the snapshot must carry the config.
+    let snap_before = eng.snapshot();
+    assert_eq!(snap_before.config().max_segments, 8);
+
+    // Change a dynamic knob via the public setter.
+    let mut cfg = eng.config().clone();
+    cfg.max_segments = 32;
+    eng.set_config(cfg);
+
+    // A fresh snapshot sees the new value; the engine agrees; the older snapshot
+    // keeps its own view (copy-on-write via Arc).
+    assert_eq!(eng.snapshot().config().max_segments, 32);
+    assert_eq!(eng.config().max_segments, 32);
+    assert_eq!(
+        snap_before.config().max_segments,
+        8,
+        "an already-published snapshot must keep its own config view"
+    );
+}

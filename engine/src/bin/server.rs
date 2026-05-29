@@ -14,6 +14,8 @@
 //!   GET  /_vocab             Current vocabulary as JSON
 //!   PUT  /_vocab             Replace vocabulary (body: Vocab JSON)
 //!   POST /_vocab/learn       Learn synonyms from raw query text
+//!   GET  /_settings          Engine settings as JSON (?include_defaults=true)
+//!   PUT  /_settings          Update dynamic settings (body: flat JSON, e.g. {"max_segments":16})
 //!
 //! Usage:
 //!   cargo run --release --bin server -- [--port 9200] [--data-dir ./data] [--load-file queries.csv]
@@ -31,7 +33,7 @@ use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use axum::{
-    extract::{DefaultBodyLimit, Path, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -168,6 +170,10 @@ struct PrometheusMetrics {
     compaction_total: IntCounter,
     compaction_tombstones_reclaimed: IntCounter,
     segment_cleanup_failures_total: IntCounter,
+    /// Durability/persistence failures, labeled by `op` (e.g. `segment_write`,
+    /// `manifest_write`, `wal_append`). Alert on this — a nonzero rate means
+    /// durability is degraded. See `EngineEvent::DurabilityFailure`.
+    durability_failures_total: IntCounterVec,
     flush_time_seconds_total: Counter,
     compaction_time_seconds_total: Counter,
 
@@ -281,6 +287,15 @@ impl PrometheusMetrics {
         ))
         .unwrap();
 
+        let durability_failures_total = IntCounterVec::new(
+            Opts::new(
+                "durability_failures_total",
+                "Durability/persistence failures by operation (degraded durability — alertable)",
+            ),
+            &["op"],
+        )
+        .unwrap();
+
         let flush_time_seconds_total = Counter::with_opts(Opts::new(
             "flush_time_seconds_total",
             "Cumulative wall-clock seconds spent flushing the memtable into segments",
@@ -373,6 +388,9 @@ impl PrometheusMetrics {
             .register(Box::new(compaction_tombstones_reclaimed.clone()))
             .unwrap();
         registry
+            .register(Box::new(durability_failures_total.clone()))
+            .unwrap();
+        registry
             .register(Box::new(segment_cleanup_failures_total.clone()))
             .unwrap();
         registry
@@ -421,6 +439,7 @@ impl PrometheusMetrics {
             compaction_total,
             compaction_tombstones_reclaimed,
             segment_cleanup_failures_total,
+            durability_failures_total,
             flush_time_seconds_total,
             compaction_time_seconds_total,
             http_requests_total,
@@ -494,6 +513,11 @@ impl PrometheusMetrics {
             }
             EngineEvent::SegmentCleanupFailed { .. } => {
                 self.segment_cleanup_failures_total.inc();
+            }
+            EngineEvent::DurabilityFailure { op, .. } => {
+                self.durability_failures_total
+                    .with_label_values(&[op.as_str()])
+                    .inc();
             }
         }
     }
@@ -1752,12 +1776,13 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResp
 // Vocabulary management
 // ---------------------------------------------------------------------------
 
-/// GET /_vocab — return the current vocabulary as JSON.
+/// GET /_vocab — return the current vocabulary as JSON. Reads the lock-free
+/// `ArcSwap` snapshot (ADR-016) rather than locking the engine, so vocab reads
+/// never block behind a writer — consistent with `/_search` and the other read
+/// endpoints.
 async fn get_vocab(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let vocab = {
-        let engine = state.engine.lock();
-        engine.vocab().cloned().unwrap_or_default()
-    };
+    let snap = state.snapshot.load();
+    let vocab = snap.vocab().cloned().unwrap_or_default();
     Json(vocab)
 }
 
@@ -1808,6 +1833,175 @@ fn default_min_count() -> usize {
 async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoResponse {
     let vocab = percolator::vocab::learn_from_queries(&req.queries, req.min_count);
     Json(vocab)
+}
+
+// ---------------------------------------------------------------------------
+// Settings management (ES-style /_settings)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, Default)]
+struct SettingsQuery {
+    /// When true, `GET /_settings` also returns the default settings (ES-style).
+    #[serde(default)]
+    include_defaults: bool,
+}
+
+#[derive(Serialize)]
+struct GetSettingsResponse {
+    settings: EngineConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    defaults: Option<EngineConfig>,
+}
+
+#[derive(Serialize)]
+struct PutSettingsResponse {
+    acknowledged: bool,
+    /// Whether the change survives a restart. Currently always `false`: settings
+    /// updates are in-memory only (the startup CLI flags are the durable source).
+    /// Surfaced explicitly so clients aren't surprised after a restart.
+    persistent: bool,
+    settings: EngineConfig,
+}
+
+/// GET /_settings — return the live engine settings as JSON. Reads the lock-free
+/// snapshot (ADR-016). `?include_defaults=true` also returns the defaults, like
+/// Elasticsearch's `GET /_cluster/settings?include_defaults`.
+async fn get_settings(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SettingsQuery>,
+) -> impl IntoResponse {
+    let settings = state.snapshot.load().config().clone();
+    let defaults = q.include_defaults.then(EngineConfig::default);
+    Json(GetSettingsResponse { settings, defaults })
+}
+
+/// PUT /_settings — update dynamic engine settings at runtime. The body is a flat
+/// JSON object of setting keys to new values, e.g. `{"max_segments": 16}`.
+/// All-or-nothing: if any key is unknown, non-dynamic, the wrong type, or would
+/// produce an invalid config, nothing changes and the request is rejected with an
+/// ES-style reason. Changes are in-memory (not persisted across restart).
+async fn put_settings(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some(patch) = body.as_object() else {
+        return ApiError::response(
+            StatusCode::BAD_REQUEST,
+            "settings_error",
+            "request body must be a JSON object of settings",
+        )
+        .into_response();
+    };
+    if patch.is_empty() {
+        return ApiError::response(
+            StatusCode::BAD_REQUEST,
+            "settings_error",
+            "no settings provided",
+        )
+        .into_response();
+    }
+
+    let updated = {
+        let mut engine = state.engine.lock();
+        match apply_settings_patch(engine.config().clone(), patch) {
+            Ok(cfg) => {
+                engine.set_config(cfg.clone());
+                cfg
+            }
+            Err(problems) => {
+                return ApiError::response(
+                    StatusCode::BAD_REQUEST,
+                    "settings_error",
+                    problems.join("; "),
+                )
+                .into_response();
+            }
+        }
+    };
+    // Republish so the lock-free snapshot (and GET /_settings) reflects the change.
+    state.publish_snapshot();
+
+    Json(PutSettingsResponse {
+        acknowledged: true,
+        persistent: false,
+        settings: updated,
+    })
+    .into_response()
+}
+
+/// Apply a flat settings patch to `cfg`, enforcing the dynamic/static split, key
+/// validity, value types, and the engine's own `validate()` ranges. Returns the
+/// updated config, or every problem found (all keys are checked, so the caller
+/// sees all errors at once — and on any error nothing is applied). Pure and
+/// side-effect-free, so it is unit-tested directly without the HTTP layer.
+fn apply_settings_patch(
+    mut cfg: EngineConfig,
+    patch: &serde_json::Map<String, serde_json::Value>,
+) -> Result<EngineConfig, Vec<String>> {
+    let mut errors = Vec::new();
+    for (key, val) in patch {
+        match key.as_str() {
+            // ---- dynamic knobs (runtime-tunable) ----
+            "max_segments" => set_usize(&mut cfg.max_segments, key, val, &mut errors),
+            "memtable_flush_threshold" => {
+                set_usize(&mut cfg.memtable_flush_threshold, key, val, &mut errors);
+            }
+            "max_query_length" => set_usize(&mut cfg.max_query_length, key, val, &mut errors),
+            "max_query_clauses" => set_usize(&mut cfg.max_query_clauses, key, val, &mut errors),
+            "max_anyof_group_size" => {
+                set_usize(&mut cfg.max_anyof_group_size, key, val, &mut errors);
+            }
+            "holes_ratio_threshold" => {
+                set_f64(&mut cfg.holes_ratio_threshold, key, val, &mut errors);
+            }
+            "compaction_fixed_cost" => {
+                set_f64(&mut cfg.compaction_fixed_cost, key, val, &mut errors);
+            }
+            "auto_compact_on_flush" => {
+                set_bool(&mut cfg.auto_compact_on_flush, key, val, &mut errors);
+            }
+            "auto_compact_on_ingest" => {
+                set_bool(&mut cfg.auto_compact_on_ingest, key, val, &mut errors);
+            }
+            // ---- static (bound at construction) ----
+            "data_dir" | "wal_sync_on_write" | "retain_source" => errors.push(format!(
+                "setting [{key}] is not dynamically updateable; set it at startup"
+            )),
+            // ---- unknown ----
+            _ => errors.push(format!("unknown setting [{key}]")),
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    // Range/sanity checks from the engine itself (thresholds > 0, ratio in [0,1], …).
+    let problems = cfg.validate();
+    if problems.is_empty() {
+        Ok(cfg)
+    } else {
+        Err(problems)
+    }
+}
+
+fn set_usize(slot: &mut usize, key: &str, val: &serde_json::Value, errors: &mut Vec<String>) {
+    match val.as_u64() {
+        Some(n) => *slot = n as usize,
+        None => errors.push(format!("setting [{key}] must be a non-negative integer")),
+    }
+}
+
+fn set_f64(slot: &mut f64, key: &str, val: &serde_json::Value, errors: &mut Vec<String>) {
+    match val.as_f64() {
+        Some(n) => *slot = n,
+        None => errors.push(format!("setting [{key}] must be a number")),
+    }
+}
+
+fn set_bool(slot: &mut bool, key: &str, val: &serde_json::Value, errors: &mut Vec<String>) {
+    match val.as_bool() {
+        Some(b) => *slot = b,
+        None => errors.push(format!("setting [{key}] must be a boolean")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2030,6 +2224,26 @@ async fn main() {
                     "engine.segment_cleanup_failed: leaked segment file on disk"
                 );
             }
+            EngineEvent::DurabilityFailure { op, detail, error } => {
+                // Data-at-risk failures (lost/uncommitted match data) are errors
+                // worth paging on; display-only and benign-recovery failures are
+                // warnings. See DurabilityOp::is_data_at_risk.
+                if op.is_data_at_risk() {
+                    error!(
+                        op = op.as_str(),
+                        detail = %detail,
+                        error = %error,
+                        "engine.durability_failure: durability degraded"
+                    );
+                } else {
+                    warn!(
+                        op = op.as_str(),
+                        detail = %detail,
+                        error = %error,
+                        "engine.durability_failure"
+                    );
+                }
+            }
         }
     });
 
@@ -2098,6 +2312,7 @@ async fn main() {
         .route("/_metrics", get(prometheus_metrics))
         .route("/_vocab", get(get_vocab).put(put_vocab))
         .route("/_vocab/learn", post(learn_vocab))
+        .route("/_settings", get(get_settings).put(put_settings))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
         .layer(middleware::from_fn_with_state(
@@ -2181,4 +2396,94 @@ async fn main() {
     }
 
     info!("shutdown complete");
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::{apply_settings_patch, EngineConfig};
+
+    fn patch(json: &str) -> serde_json::Map<String, serde_json::Value> {
+        serde_json::from_str(json).expect("test patch must be a JSON object")
+    }
+
+    #[test]
+    fn applies_dynamic_settings() {
+        let cfg = apply_settings_patch(
+            EngineConfig::default(),
+            &patch(
+                r#"{"max_segments": 16, "auto_compact_on_flush": false, "holes_ratio_threshold": 0.5}"#,
+            ),
+        )
+        .expect("valid dynamic patch");
+        assert_eq!(cfg.max_segments, 16);
+        assert!(!cfg.auto_compact_on_flush);
+        assert!((cfg.holes_ratio_threshold - 0.5).abs() < f64::EPSILON);
+        // Untouched fields keep their defaults.
+        assert_eq!(cfg.memtable_flush_threshold, 100_000);
+    }
+
+    #[test]
+    fn rejects_static_settings() {
+        let err = apply_settings_patch(
+            EngineConfig::default(),
+            &patch(r#"{"wal_sync_on_write": true}"#),
+        )
+        .expect_err("static setting must be rejected");
+        assert!(
+            err.iter().any(
+                |e| e.contains("wal_sync_on_write") && e.contains("not dynamically updateable")
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_settings() {
+        let err = apply_settings_patch(EngineConfig::default(), &patch(r#"{"bogus": 1}"#))
+            .expect_err("unknown setting must be rejected");
+        assert!(
+            err.iter().any(|e| e.contains("unknown setting [bogus]")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_value_type() {
+        let err = apply_settings_patch(
+            EngineConfig::default(),
+            &patch(r#"{"max_segments": "lots"}"#),
+        )
+        .expect_err("wrong type must be rejected");
+        assert!(
+            err.iter().any(|e| e.contains("non-negative integer")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_via_validate() {
+        // 0 segments and a ratio > 1 are caught by EngineConfig::validate().
+        let err = apply_settings_patch(
+            EngineConfig::default(),
+            &patch(r#"{"max_segments": 0, "holes_ratio_threshold": 2.0}"#),
+        )
+        .expect_err("invalid ranges must be rejected");
+        assert!(err.iter().any(|e| e.contains("max_segments")), "{err:?}");
+        assert!(
+            err.iter().any(|e| e.contains("holes_ratio_threshold")),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn one_bad_key_rejects_the_whole_patch() {
+        // A valid key alongside a static one → the whole patch is rejected, so the
+        // caller (the handler) leaves the engine config untouched.
+        let err = apply_settings_patch(
+            EngineConfig::default(),
+            &patch(r#"{"max_segments": 12, "data_dir": "/tmp/x"}"#),
+        )
+        .expect_err("a static key alongside a valid one rejects the batch");
+        assert!(err.iter().any(|e| e.contains("data_dir")), "{err:?}");
+    }
 }

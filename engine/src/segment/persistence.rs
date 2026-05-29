@@ -34,16 +34,27 @@ impl Engine {
                 Ok(()) => match MmapSegment::open(&path) {
                     Ok(mmap_seg) => return BaseSegment::Mmap(mmap_seg),
                     Err(e) => {
-                        eprintln!("[percolator] segment mmap failed for {}, falling back to in-memory: {e}", path.display());
                         self.persistence_healthy = false;
+                        self.emit(crate::events::EngineEvent::DurabilityFailure {
+                            op: crate::events::DurabilityOp::SegmentMmap,
+                            detail: format!(
+                                "segment mmap failed for {}, falling back to in-memory",
+                                path.display()
+                            ),
+                            error: e.to_string(),
+                        });
                     }
                 },
                 Err(e) => {
-                    eprintln!(
-                        "[percolator] segment write failed for {}, falling back to in-memory: {e}",
-                        path.display()
-                    );
                     self.persistence_healthy = false;
+                    self.emit(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::SegmentWrite,
+                        detail: format!(
+                            "segment write failed for {}, falling back to in-memory",
+                            path.display()
+                        ),
+                        error: e.to_string(),
+                    });
                 }
             }
             // Fall back to in-memory if write/mmap fails
@@ -133,22 +144,38 @@ impl Engine {
 
     /// Write a WAL flush checkpoint (all prior WAL entries are in segments).
     pub(in crate::segment) fn checkpoint_wal(&mut self) {
-        if let Some(ref mut wal) = self.wal {
+        // Capture the error and release the `&mut self.wal` borrow before `emit`
+        // (which needs `&self`); `.err()` drops the borrowed Result.
+        let err = if let Some(ref mut wal) = self.wal {
             // Use the latest segment name as the checkpoint marker
             let name = format!("seg_{:06}.seg", self.next_seg_id - 1);
-            if let Err(e) = wal.append_flush_checkpoint(&name) {
-                eprintln!("[percolator] WAL flush checkpoint write failed: {e}");
-            }
+            wal.append_flush_checkpoint(&name).err()
+        } else {
+            None
+        };
+        if let Some(e) = err {
+            self.emit(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::WalCheckpoint,
+                detail: "WAL flush checkpoint write failed".to_string(),
+                error: e.to_string(),
+            });
         }
     }
 
     /// Reset the WAL after a successful flush + manifest write. Only call when
     /// both the checkpoint and manifest have been persisted, so no data is lost.
     pub(in crate::segment) fn reset_wal_if_safe(&mut self) {
-        if let Some(ref mut wal) = self.wal {
-            if let Err(e) = wal.reset() {
-                eprintln!("[percolator] WAL reset failed: {e}");
-            }
+        let err = if let Some(ref mut wal) = self.wal {
+            wal.reset().err()
+        } else {
+            None
+        };
+        if let Some(e) = err {
+            self.emit(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::WalReset,
+                detail: "WAL reset failed".to_string(),
+                error: e.to_string(),
+            });
         }
     }
 
@@ -179,8 +206,13 @@ impl Engine {
             };
             let dir = dir.clone();
             if let Err(e) = crate::storage::write_manifest(&manifest, &dir.join("manifest.bin")) {
-                eprintln!("[percolator] manifest write failed: {e}");
                 self.persistence_healthy = false;
+                self.emit(crate::events::EngineEvent::DurabilityFailure {
+                    op: crate::events::DurabilityOp::ManifestWrite,
+                    detail: "manifest write failed (atomic commit point); batch rolled back"
+                        .to_string(),
+                    error: e.to_string(),
+                });
                 return false;
             }
         }
@@ -193,8 +225,12 @@ impl Engine {
         };
         let path = dir.join("sources.dat");
         if let Err(e) = self.query_store.write_to(&path) {
-            eprintln!("[percolator] query sources write failed: {e}");
             self.persistence_healthy = false;
+            self.emit(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::SourceStoreWrite,
+                detail: "query sources write failed (_source/explain may be stale)".to_string(),
+                error: e.to_string(),
+            });
             return;
         }
         // Lazy mode: re-map the freshly written file so reads hit it and the
@@ -204,8 +240,12 @@ impl Engine {
             match crate::storage::SourceStore::open(&path, false) {
                 Ok(s) => self.query_store = Arc::new(s),
                 Err(e) => {
-                    eprintln!("[percolator] query sources re-map failed: {e}");
                     self.persistence_healthy = false;
+                    self.emit(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::SourceStoreRemap,
+                        detail: "query sources re-map failed after write (lazy mode)".to_string(),
+                        error: e.to_string(),
+                    });
                 }
             }
         }

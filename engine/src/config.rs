@@ -27,7 +27,10 @@
 // Config knobs are naturally a flat bag of independent flags; grouping the bools
 // into sub-structs would hurt readability for no gain.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone)]
+// `Serialize` so the server can expose the live config as JSON via `GET /_settings`
+// (the field names are the setting keys). Updates go through the server's flat
+// JSON patch, not `Deserialize`, so the dynamic/static split can be enforced.
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EngineConfig {
     // ---- compaction trigger policy ----
     /// Maximum base segment count before `maybe_compact` triggers a merge.

@@ -55,7 +55,7 @@ pub use compile::{CompiledQuery, CostClass};
 pub use config::EngineConfig;
 pub use dict::FeatureId;
 pub use error::{NormalizerError, ParseError, ParseErrorKind, WriteError};
-pub use events::{CompactionTrigger, EngineEvent, EngineMetrics};
+pub use events::{CompactionTrigger, DurabilityOp, EngineEvent, EngineMetrics};
 pub use explain::ExplainDetail;
 pub use normalize::{Normalizer, NormalizerBuilder};
 pub use segment::{

@@ -553,4 +553,51 @@ mod tests {
         assert!(eng.vocab().is_some());
         assert_eq!(eng.vocab().unwrap().synonyms().len(), 1);
     }
+
+    #[test]
+    fn snapshot_carries_vocab_for_lock_free_reads() {
+        // The lock-free read path (GET /_vocab via ArcSwap) depends on the vocab
+        // living in EngineSnapshot — not just on the Engine behind the write
+        // mutex (ADR-016). Verify the snapshot reflects the vocab at snapshot
+        // time, and that a published snapshot is immutable across a later
+        // set_vocab (an older snapshot keeps its own view).
+        let mut vocab = Vocab::new();
+        vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
+        let mut eng =
+            crate::segment::Engine::with_vocab(vocab, crate::config::EngineConfig::default())
+                .expect("should build engine from vocab");
+
+        // Snapshot taken now sees the initial vocab.
+        let snap_v1 = eng.snapshot();
+        assert_eq!(
+            snap_v1.vocab().map(|v| v.synonyms().len()),
+            Some(1),
+            "snapshot must carry the vocab so /_vocab can read it lock-free"
+        );
+
+        // Swap in a larger vocab on the engine.
+        let mut vocab2 = Vocab::new();
+        vocab2.add_synonym("rc", "term:rookie", FeatureKind::Category);
+        vocab2.add_synonym("ud", "term:upper_deck", FeatureKind::Generic);
+        eng.set_vocab(vocab2).expect("set_vocab should succeed");
+
+        // A fresh snapshot reflects the update; the old snapshot is unchanged.
+        let snap_v2 = eng.snapshot();
+        assert_eq!(snap_v2.vocab().map(|v| v.synonyms().len()), Some(2));
+        assert_eq!(
+            snap_v1.vocab().map(|v| v.synonyms().len()),
+            Some(1),
+            "an already-published snapshot must keep its own vocab view"
+        );
+    }
+
+    #[test]
+    fn snapshot_vocab_is_none_without_vocab() {
+        // An engine built without a vocab (the default path) has no snapshot
+        // vocab; GET /_vocab then serves Vocab::default().
+        let eng = crate::segment::Engine::new(
+            crate::normalize::Normalizer::default_vocab().expect("default vocab"),
+        );
+        assert!(eng.snapshot().vocab().is_none());
+    }
 }

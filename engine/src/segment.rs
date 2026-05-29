@@ -138,6 +138,12 @@ pub struct EngineSnapshot {
     segments: Vec<Arc<BaseSegment>>,
     memtable: Arc<Segment>,
     query_store: Arc<SourceStore>,
+    /// Vocabulary at snapshot time (shared via `Arc`), so vocab reads can use the
+    /// lock-free snapshot instead of locking the engine (ADR-016).
+    vocab: Option<Arc<crate::vocab::Vocab>>,
+    /// Engine configuration at snapshot time (shared via `Arc`), so `GET /_settings`
+    /// reads it lock-free like every other read endpoint (ADR-016).
+    config: Arc<EngineConfig>,
     rejected_parse: u64,
     rejected_class_d: u64,
     vocab_epoch: u64,
@@ -206,10 +212,16 @@ pub struct CompactionReport {
 type EventObserver = Box<dyn Fn(&crate::events::EngineEvent) + Send + Sync>;
 
 pub struct Engine {
-    config: EngineConfig,
+    /// Runtime configuration. `Arc` so the current settings ride in every
+    /// `EngineSnapshot` (an O(1) clone), letting `GET /_settings` read them from
+    /// the lock-free snapshot; `set_config` swaps in a new `Arc` (copy-on-write).
+    config: Arc<EngineConfig>,
     norm: Arc<Normalizer>,
     /// Vocabulary used to build the normalizer (if set via `with_vocab`).
-    vocab: Option<crate::vocab::Vocab>,
+    /// `Arc` so it is shared (not deep-copied) into every `EngineSnapshot`,
+    /// letting `GET /_vocab` read it from the lock-free snapshot instead of the
+    /// write mutex (ADR-016).
+    vocab: Option<Arc<crate::vocab::Vocab>>,
     /// Feature dictionary. `Arc` so a snapshot shares it; writers take a
     /// copy-on-write handle via `Arc::make_mut` (the dict is O(vocab), which
     /// saturates, so the occasional CoW clone is bounded — not O(corpus)).
@@ -225,6 +237,12 @@ pub struct Engine {
     rejected_class_d: u64, // class-D queries rejected at compile (not stored)
     /// Optional observer callback for engine events (flush, compact, ingest, etc.)
     observer: Option<EventObserver>,
+    /// Events emitted during construction/recovery (`with_config`/`open`), before
+    /// an observer could be attached. Delivered to the observer when `set_observer`
+    /// is called, then cleared. Only construction-time `DurabilityFailure`s land
+    /// here (a bounded handful); the runtime `emit` path drops events when no
+    /// observer is set, exactly as before.
+    pending_events: Vec<crate::events::EngineEvent>,
     /// Write-ahead log (present when data_dir is set).
     wal: Option<Wal>,
     /// Next segment file sequence number (for naming: seg_000001.seg, etc.)
@@ -254,6 +272,7 @@ impl std::fmt::Debug for Engine {
             .field("rejected_parse", &self.rejected_parse)
             .field("rejected_class_d", &self.rejected_class_d)
             .field("has_observer", &self.observer.is_some())
+            .field("pending_events", &self.pending_events.len())
             .field("has_wal", &self.wal.is_some())
             .field("next_seg_id", &self.next_seg_id)
             .field("wal_healthy", &self.wal_healthy)
