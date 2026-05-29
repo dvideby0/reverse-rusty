@@ -10,6 +10,108 @@
 
 use crate::segment::CompactionReport;
 
+/// Which durability-related operation failed. Carried in
+/// [`EngineEvent::DurabilityFailure`] so an observer can label metrics and route
+/// alerts by failure kind without string-matching a message.
+///
+/// **Severity.** Use [`is_data_at_risk`](DurabilityOp::is_data_at_risk) to
+/// distinguish failures that mean *match data* may be lost or was never durably
+/// committed (page these) from failures that only affect display-only source
+/// text or are benign recovery housekeeping (log these). The server maps the
+/// former to `error!` + a critical alert and the latter to `warn!`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurabilityOp {
+    /// Initializing the data directory or opening the WAL at startup failed; the
+    /// engine is running **without durability** (writes will not survive a
+    /// restart). Data at risk.
+    WalInit,
+    /// Appending a mutation (insert/tombstone) to the WAL failed; the mutation
+    /// was *rejected* (not applied), so in-memory state stays consistent with the
+    /// log — but the caller's write did not land. Data at risk.
+    WalAppend,
+    /// Writing the post-flush WAL checkpoint marker failed. Benign: the next
+    /// recovery simply replays from an earlier point.
+    WalCheckpoint,
+    /// Truncating/resetting the WAL after a successful checkpoint failed. Benign:
+    /// the WAL keeps already-checkpointed entries that the next recovery re-applies
+    /// idempotently.
+    WalReset,
+    /// Writing a segment file to disk failed; the engine fell back to an
+    /// in-memory segment (`build_*`/`bulk_ingest` instead roll the batch back).
+    /// Data at risk.
+    SegmentWrite,
+    /// Mmapping a freshly written segment file failed; fell back to in-memory.
+    /// Data at risk.
+    SegmentMmap,
+    /// A segment file referenced by the manifest was corrupt/unreadable and was
+    /// skipped during recovery (`Engine::open`). Data at risk: those queries are
+    /// gone until reingested.
+    SegmentRecovery,
+    /// Writing the manifest — the atomic commit point — failed. Data at risk: the
+    /// batch is rolled back.
+    ManifestWrite,
+    /// Persisting query source text (`sources.dat`) failed. Display-only:
+    /// `_source`/explain may be stale, but match data is unaffected.
+    SourceStoreWrite,
+    /// Re-mapping the freshly written source store failed (lazy mode). Display-only.
+    SourceStoreRemap,
+    /// Loading persisted query sources at startup failed (`Engine::open`).
+    /// Display-only: `_source` is unavailable for recovered queries.
+    SourceStoreLoad,
+    /// The WAL tail was corrupt/torn and trailing bytes were skipped during
+    /// recovery. Informational: the torn tail was never acknowledged as durable.
+    WalTornTail,
+    /// An ingest batch could not be durably committed and was rolled back
+    /// entirely (nothing committed). Data at risk: the caller's batch did not land.
+    IngestRollback,
+}
+
+impl DurabilityOp {
+    /// Stable snake_case identifier, suitable as a metric label value or a
+    /// structured-log field. Kept in lockstep with the variant set.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DurabilityOp::WalInit => "wal_init",
+            DurabilityOp::WalAppend => "wal_append",
+            DurabilityOp::WalCheckpoint => "wal_checkpoint",
+            DurabilityOp::WalReset => "wal_reset",
+            DurabilityOp::SegmentWrite => "segment_write",
+            DurabilityOp::SegmentMmap => "segment_mmap",
+            DurabilityOp::SegmentRecovery => "segment_recovery",
+            DurabilityOp::ManifestWrite => "manifest_write",
+            DurabilityOp::SourceStoreWrite => "source_store_write",
+            DurabilityOp::SourceStoreRemap => "source_store_remap",
+            DurabilityOp::SourceStoreLoad => "source_store_load",
+            DurabilityOp::WalTornTail => "wal_torn_tail",
+            DurabilityOp::IngestRollback => "ingest_rollback",
+        }
+    }
+
+    /// True if this failure means *match data* may be lost or was never durably
+    /// committed — the operator should be paged. False for display-only
+    /// (`_source`) failures and benign WAL housekeeping, which only warrant a
+    /// warning. See the per-variant docs for the rationale.
+    #[must_use]
+    pub fn is_data_at_risk(self) -> bool {
+        match self {
+            DurabilityOp::WalInit
+            | DurabilityOp::WalAppend
+            | DurabilityOp::SegmentWrite
+            | DurabilityOp::SegmentMmap
+            | DurabilityOp::SegmentRecovery
+            | DurabilityOp::ManifestWrite
+            | DurabilityOp::IngestRollback => true,
+            DurabilityOp::WalCheckpoint
+            | DurabilityOp::WalReset
+            | DurabilityOp::SourceStoreWrite
+            | DurabilityOp::SourceStoreRemap
+            | DurabilityOp::SourceStoreLoad
+            | DurabilityOp::WalTornTail => false,
+        }
+    }
+}
+
 /// Why a compaction was triggered. Carried in [`EngineEvent::Compaction`] so
 /// callers can distinguish policy-driven merges from explicit ones.
 #[derive(Debug, Clone)]
@@ -70,6 +172,31 @@ pub enum EngineEvent {
         /// The file the engine tried to remove.
         path: std::path::PathBuf,
         /// The OS error encountered.
+        error: String,
+    },
+
+    /// A durability/persistence operation failed. Unlike [`SegmentCleanupFailed`]
+    /// (a leaked file after an otherwise-successful op), this signals that
+    /// durability is *degraded*: a write was lost, fell back to in-memory, was
+    /// rolled back, or could not be recovered. The owning operation has already
+    /// taken its consistency-preserving action (reject the write, roll the batch
+    /// back, or fall back to memory) and set the relevant health flag
+    /// (`wal_healthy`/`persistence_healthy`); this event exists so an observer can
+    /// log the failure through the structured stack and increment an alertable
+    /// counter, rather than the engine writing to stderr where ops can't see it.
+    ///
+    /// Recovery-time failures (raised inside `Engine::open`/`with_config`, before
+    /// an observer can be attached) are buffered and delivered when
+    /// [`set_observer`](crate::segment::Engine::set_observer) is called.
+    DurabilityFailure {
+        /// Which operation failed — a stable, matchable discriminator. Drives the
+        /// metric label and the log severity (see [`DurabilityOp::is_data_at_risk`]).
+        op: DurabilityOp,
+        /// Human-readable context: what was being done, the path involved, and the
+        /// consequence (e.g. "segment write for …, fell back to in-memory").
+        detail: String,
+        /// The underlying cause — an OS error string, or a description of the
+        /// condition where there is no `io::Error` (e.g. "N bytes" for a torn tail).
         error: String,
     },
 }

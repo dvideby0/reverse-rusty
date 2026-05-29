@@ -168,6 +168,10 @@ struct PrometheusMetrics {
     compaction_total: IntCounter,
     compaction_tombstones_reclaimed: IntCounter,
     segment_cleanup_failures_total: IntCounter,
+    /// Durability/persistence failures, labeled by `op` (e.g. `segment_write`,
+    /// `manifest_write`, `wal_append`). Alert on this — a nonzero rate means
+    /// durability is degraded. See `EngineEvent::DurabilityFailure`.
+    durability_failures_total: IntCounterVec,
     flush_time_seconds_total: Counter,
     compaction_time_seconds_total: Counter,
 
@@ -281,6 +285,15 @@ impl PrometheusMetrics {
         ))
         .unwrap();
 
+        let durability_failures_total = IntCounterVec::new(
+            Opts::new(
+                "durability_failures_total",
+                "Durability/persistence failures by operation (degraded durability — alertable)",
+            ),
+            &["op"],
+        )
+        .unwrap();
+
         let flush_time_seconds_total = Counter::with_opts(Opts::new(
             "flush_time_seconds_total",
             "Cumulative wall-clock seconds spent flushing the memtable into segments",
@@ -373,6 +386,9 @@ impl PrometheusMetrics {
             .register(Box::new(compaction_tombstones_reclaimed.clone()))
             .unwrap();
         registry
+            .register(Box::new(durability_failures_total.clone()))
+            .unwrap();
+        registry
             .register(Box::new(segment_cleanup_failures_total.clone()))
             .unwrap();
         registry
@@ -421,6 +437,7 @@ impl PrometheusMetrics {
             compaction_total,
             compaction_tombstones_reclaimed,
             segment_cleanup_failures_total,
+            durability_failures_total,
             flush_time_seconds_total,
             compaction_time_seconds_total,
             http_requests_total,
@@ -494,6 +511,11 @@ impl PrometheusMetrics {
             }
             EngineEvent::SegmentCleanupFailed { .. } => {
                 self.segment_cleanup_failures_total.inc();
+            }
+            EngineEvent::DurabilityFailure { op, .. } => {
+                self.durability_failures_total
+                    .with_label_values(&[op.as_str()])
+                    .inc();
             }
         }
     }
@@ -2029,6 +2051,26 @@ async fn main() {
                     error = %error,
                     "engine.segment_cleanup_failed: leaked segment file on disk"
                 );
+            }
+            EngineEvent::DurabilityFailure { op, detail, error } => {
+                // Data-at-risk failures (lost/uncommitted match data) are errors
+                // worth paging on; display-only and benign-recovery failures are
+                // warnings. See DurabilityOp::is_data_at_risk.
+                if op.is_data_at_risk() {
+                    error!(
+                        op = op.as_str(),
+                        detail = %detail,
+                        error = %error,
+                        "engine.durability_failure: durability degraded"
+                    );
+                } else {
+                    warn!(
+                        op = op.as_str(),
+                        detail = %detail,
+                        error = %error,
+                        "engine.durability_failure"
+                    );
+                }
             }
         }
     });

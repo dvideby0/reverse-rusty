@@ -21,6 +21,10 @@ impl Engine {
     /// initializes the data directory and WAL.
     pub fn with_config(norm: Normalizer, config: EngineConfig) -> Self {
         let mut wal_healthy = true;
+        // Diagnostics raised here predate any observer (it is attached after
+        // construction via `set_observer`), so they are buffered and replayed on
+        // attach rather than dropped — see `pending_events` / `set_observer`.
+        let mut pending_events = Vec::new();
         let wal = if let Some(ref dir) = config.data_dir {
             match Self::init_data_dir(dir, config.wal_sync_on_write) {
                 Ok(wal) => Some(wal),
@@ -28,13 +32,17 @@ impl Engine {
                     // A configured data_dir means durability was requested. If we
                     // cannot create it or open the WAL, do NOT silently run without
                     // durability: mark the engine unhealthy (surfaced via /_health)
-                    // and warn loudly. The previous `.ok()` swallowed this entirely.
+                    // and emit a DurabilityFailure so ops can alert.
                     wal_healthy = false;
-                    eprintln!(
-                        "[percolator] WARNING: failed to initialize data dir / WAL at \
-                         {}: {e} — running WITHOUT durability (writes will not survive restart)",
-                        dir.display()
-                    );
+                    pending_events.push(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::WalInit,
+                        detail: format!(
+                            "failed to initialize data dir / WAL at {} — running WITHOUT \
+                             durability (writes will not survive restart)",
+                            dir.display()
+                        ),
+                        error: e.to_string(),
+                    });
                     None
                 }
             }
@@ -52,6 +60,7 @@ impl Engine {
             rejected_parse: 0,
             rejected_class_d: 0,
             observer: None,
+            pending_events,
             wal,
             next_seg_id: 1,
             wal_healthy,
@@ -148,15 +157,22 @@ impl Engine {
         let seg_dir = dir.join("segments");
         let mut segments = Vec::with_capacity(manifest.segment_files.len());
         let mut skipped_segments = 0usize;
+        // Recovery diagnostics raised here predate any observer; buffer them for
+        // delivery on `set_observer` (see `pending_events`).
+        let mut pending_events = Vec::new();
         for name in &manifest.segment_files {
             let seg_path = seg_dir.join(name);
             match MmapSegment::open(&seg_path) {
                 Ok(mmap_seg) => segments.push(Arc::new(BaseSegment::Mmap(mmap_seg))),
                 Err(e) => {
-                    eprintln!(
-                        "[percolator] skipping corrupt segment {}: {e}",
-                        seg_path.display()
-                    );
+                    pending_events.push(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::SegmentRecovery,
+                        detail: format!(
+                            "skipping corrupt segment {} during recovery",
+                            seg_path.display()
+                        ),
+                        error: e.to_string(),
+                    });
                     skipped_segments += 1;
                 }
             }
@@ -174,13 +190,17 @@ impl Engine {
                 Ok(s) => Arc::new(s),
                 Err(e) => {
                     // An absent file yields an empty store; an error here means a
-                    // corrupt sources.dat — warn rather than silently dropping
-                    // all query _source data.
-                    eprintln!(
-                        "[percolator] WARNING: failed to load query sources from \
-                         {}: {e} — _source will be unavailable for recovered queries",
-                        sources_path.display()
-                    );
+                    // corrupt sources.dat — surface it (display-only data) rather
+                    // than silently dropping all query _source data.
+                    pending_events.push(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::SourceStoreLoad,
+                        detail: format!(
+                            "failed to load query sources from {} — _source will be \
+                             unavailable for recovered queries",
+                            sources_path.display()
+                        ),
+                        error: e.to_string(),
+                    });
                     Arc::new(crate::storage::SourceStore::empty(config.retain_source))
                 }
             };
@@ -195,6 +215,7 @@ impl Engine {
             rejected_parse: manifest.rejected_parse,
             rejected_class_d: manifest.rejected_class_d,
             observer: None,
+            pending_events,
             wal,
             next_seg_id: manifest.next_seg_id,
             wal_healthy: true,
@@ -207,10 +228,13 @@ impl Engine {
         // Replay WAL entries after last checkpoint
         let recovery = Wal::recover(&wal_path)?;
         if recovery.skipped_bytes > 0 {
-            eprintln!(
-                "WARNING: WAL recovery skipped {} bytes of corrupt/torn data at tail",
-                recovery.skipped_bytes,
-            );
+            engine
+                .pending_events
+                .push(crate::events::EngineEvent::DurabilityFailure {
+                    op: crate::events::DurabilityOp::WalTornTail,
+                    detail: "WAL recovery skipped corrupt/torn data at tail".to_string(),
+                    error: format!("{} bytes", recovery.skipped_bytes),
+                });
         }
         for entry in recovery.entries {
             match entry {
@@ -241,11 +265,26 @@ impl Engine {
     /// for flush, compaction, ingest, and other lifecycle events. The callback
     /// must be `Send + Sync` (safe to call from rayon threads). Pass `None` to
     /// clear a previously set observer.
+    ///
+    /// Any events buffered during construction/recovery (e.g. a
+    /// [`DurabilityFailure`](crate::events::EngineEvent::DurabilityFailure) from a
+    /// corrupt segment skipped in [`open`](Self::open)) are delivered to the
+    /// observer synchronously here, before this returns, then cleared — so an
+    /// operator who wires the observer right after `open` still sees the recovery
+    /// diagnostics through the structured stack.
     pub fn set_observer<F: Fn(&crate::events::EngineEvent) + Send + Sync + 'static>(
         &mut self,
         observer: F,
     ) {
         self.observer = Some(Box::new(observer));
+        if !self.pending_events.is_empty() {
+            let pending = std::mem::take(&mut self.pending_events);
+            if let Some(ref cb) = self.observer {
+                for ev in &pending {
+                    cb(ev);
+                }
+            }
+        }
     }
 
     /// Clear the observer callback.

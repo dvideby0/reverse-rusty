@@ -225,6 +225,12 @@ pub struct Engine {
     rejected_class_d: u64, // class-D queries rejected at compile (not stored)
     /// Optional observer callback for engine events (flush, compact, ingest, etc.)
     observer: Option<EventObserver>,
+    /// Events emitted during construction/recovery (`with_config`/`open`), before
+    /// an observer could be attached. Delivered to the observer when `set_observer`
+    /// is called, then cleared. Only construction-time `DurabilityFailure`s land
+    /// here (a bounded handful); the runtime `emit` path drops events when no
+    /// observer is set, exactly as before.
+    pending_events: Vec<crate::events::EngineEvent>,
     /// Write-ahead log (present when data_dir is set).
     wal: Option<Wal>,
     /// Next segment file sequence number (for naming: seg_000001.seg, etc.)
@@ -254,6 +260,7 @@ impl std::fmt::Debug for Engine {
             .field("rejected_parse", &self.rejected_parse)
             .field("rejected_class_d", &self.rejected_class_d)
             .field("has_observer", &self.observer.is_some())
+            .field("pending_events", &self.pending_events.len())
             .field("has_wal", &self.wal.is_some())
             .field("next_seg_id", &self.next_seg_id)
             .field("wal_healthy", &self.wal_healthy)

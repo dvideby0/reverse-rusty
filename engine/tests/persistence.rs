@@ -687,3 +687,138 @@ fn lazy_overlay_insert_and_tombstone() {
     assert!(s2.get(1).is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn durability_failure_surfaces_as_event() {
+    // A persistence failure must reach the observability stack as a
+    // `DurabilityFailure` event (not just stderr), so an operator can alert.
+    // We isolate a single failure: make only `segments/` read-only, so the
+    // flush's segment write fails while the WAL/manifest writes (data-dir root)
+    // still succeed.
+    use percolator::events::{DurabilityOp, EngineEvent};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex};
+
+    let dir = test_dir("durability_event");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        auto_compact_on_flush: false,
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::with_config(make_norm(), config);
+
+    let captured: Arc<Mutex<Vec<(DurabilityOp, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&captured);
+    engine.set_observer(move |ev: &EngineEvent| {
+        if let EngineEvent::DurabilityFailure { op, error, .. } = ev {
+            sink.lock().unwrap().push((*op, error.clone()));
+        }
+    });
+
+    // Make segments/ read-only up front, then queue a mutation (WAL + memtable
+    // only — both succeed) and flush (the segment write fails).
+    let seg_dir = dir.join("segments");
+    let orig = std::fs::metadata(&seg_dir).unwrap().permissions();
+    std::fs::set_permissions(&seg_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    engine.insert_live("michael jordan 1986 fleer", 1, 1);
+    engine.flush();
+
+    // Restore perms BEFORE asserting so temp-dir cleanup always works.
+    std::fs::set_permissions(&seg_dir, orig).unwrap();
+
+    let events = captured.lock().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|(op, _)| *op == DurabilityOp::SegmentWrite),
+        "a failed segment write must emit a SegmentWrite DurabilityFailure; got {events:?}"
+    );
+    assert!(
+        events.iter().all(|(_, err)| !err.is_empty()),
+        "each DurabilityFailure must carry the underlying error string"
+    );
+    assert!(
+        !engine.persistence_healthy,
+        "persistence must be marked unhealthy after the write failed"
+    );
+    // SegmentWrite means match data is at risk — operators should page on it.
+    assert!(DurabilityOp::SegmentWrite.is_data_at_risk());
+
+    drop(events);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn recovery_diagnostics_buffered_until_observer_attaches() {
+    // Failures raised during `Engine::open` predate any observer. They must be
+    // buffered and replayed when `set_observer` is called, so recovery
+    // diagnostics (here: a corrupt segment skipped on reopen) still reach the
+    // structured stack rather than being lost.
+    use percolator::events::{DurabilityOp, EngineEvent};
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    let dir = test_dir("recovery_buffered_events");
+
+    // 1) Build a persistent engine with one flushed base segment, then drop it.
+    {
+        let config = EngineConfig {
+            data_dir: Some(dir.clone()),
+            auto_compact_on_flush: false,
+            ..EngineConfig::default()
+        };
+        let mut eng = Engine::with_config(make_norm(), config);
+        eng.insert_live("michael jordan 1986 fleer", 1, 1);
+        eng.flush();
+        assert!(eng.num_segments() >= 1, "expected a flushed base segment");
+    }
+
+    // 2) Corrupt the on-disk .seg so MmapSegment::open fails on reopen.
+    let seg_dir = dir.join("segments");
+    let seg_file = std::fs::read_dir(&seg_dir)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "seg"))
+        .expect("a .seg file should exist after flush");
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&seg_file)
+            .unwrap();
+        f.write_all(b"not a valid percolator segment").unwrap();
+    }
+
+    // 3) Reopen: the corrupt segment is skipped and the diagnostic is buffered
+    //    (no observer attached yet).
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let mut eng =
+        Engine::open(make_norm(), config).expect("open should succeed, skipping corrupt segment");
+    assert!(
+        eng.skipped_segments >= 1,
+        "a corrupt segment should be skipped on recovery"
+    );
+
+    // 4) Attaching the observer must replay the buffered SegmentRecovery event.
+    let captured: Arc<Mutex<Vec<DurabilityOp>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&captured);
+    eng.set_observer(move |ev: &EngineEvent| {
+        if let EngineEvent::DurabilityFailure { op, .. } = ev {
+            sink.lock().unwrap().push(*op);
+        }
+    });
+
+    {
+        let ops = captured.lock().unwrap();
+        assert!(
+            ops.contains(&DurabilityOp::SegmentRecovery),
+            "set_observer must replay the buffered SegmentRecovery diagnostic; got {ops:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

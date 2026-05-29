@@ -22,10 +22,14 @@ impl Engine {
         match self.try_build_from_queries(queries) {
             Ok(report) => report,
             Err(e) => {
-                eprintln!(
-                    "[percolator] build_from_queries persistence failed, batch rolled back: {e}"
-                );
                 self.persistence_healthy = false;
+                self.emit(crate::events::EngineEvent::DurabilityFailure {
+                    op: crate::events::DurabilityOp::IngestRollback,
+                    detail: "initial build_from_queries could not be durably committed; \
+                             batch rolled back"
+                        .to_string(),
+                    error: e.to_string(),
+                });
                 IngestReport::default()
             }
         }
@@ -106,7 +110,11 @@ impl Engine {
                 // convenience wrapper can only signal it by returning None;
                 // callers that need to distinguish durability failures from
                 // class-D/parse rejections must use `try_insert_live`.
-                eprintln!("[percolator] WAL insert write failed, mutation dropped: {e}");
+                self.emit(crate::events::EngineEvent::DurabilityFailure {
+                    op: crate::events::DurabilityOp::WalAppend,
+                    detail: "WAL insert write failed; mutation rejected (not applied)".to_string(),
+                    error: e.to_string(),
+                });
                 None
             }
         }
@@ -263,8 +271,13 @@ impl Engine {
         match self.try_bulk_ingest(queries) {
             Ok(report) => report,
             Err(e) => {
-                eprintln!("[percolator] bulk_ingest persistence failed, batch rolled back: {e}");
                 self.persistence_healthy = false;
+                self.emit(crate::events::EngineEvent::DurabilityFailure {
+                    op: crate::events::DurabilityOp::IngestRollback,
+                    detail: "bulk_ingest could not be durably committed; batch rolled back"
+                        .to_string(),
+                    error: e.to_string(),
+                });
                 IngestReport::default()
             }
         }
