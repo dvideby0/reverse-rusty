@@ -89,13 +89,13 @@ impl Engine {
     ) -> Result<Self, crate::error::NormalizerError> {
         let norm = vocab.to_normalizer()?;
         let mut eng = Self::with_config(norm, config);
-        eng.vocab = Some(vocab);
+        eng.vocab = Some(Arc::new(vocab));
         Ok(eng)
     }
 
     /// The vocabulary used to build this engine's normalizer, if one was set.
     pub fn vocab(&self) -> Option<&crate::vocab::Vocab> {
-        self.vocab.as_ref()
+        self.vocab.as_deref()
     }
 
     /// Replace the engine's vocabulary and normalizer. Existing compiled
@@ -106,7 +106,7 @@ impl Engine {
         vocab: crate::vocab::Vocab,
     ) -> Result<usize, crate::error::NormalizerError> {
         self.norm = Arc::new(vocab.to_normalizer()?);
-        self.vocab = Some(vocab);
+        self.vocab = Some(Arc::new(vocab));
         self.vocab_epoch += 1;
         Ok(self.stale_segment_count())
     }
@@ -324,6 +324,7 @@ impl Engine {
             segments: self.segments.clone(),
             memtable: Arc::clone(&self.memtable),
             query_store: Arc::clone(&self.query_store),
+            vocab: self.vocab.clone(),
             rejected_parse: self.rejected_parse,
             rejected_class_d: self.rejected_class_d,
             vocab_epoch: self.vocab_epoch,

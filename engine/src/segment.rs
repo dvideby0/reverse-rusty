@@ -138,6 +138,9 @@ pub struct EngineSnapshot {
     segments: Vec<Arc<BaseSegment>>,
     memtable: Arc<Segment>,
     query_store: Arc<SourceStore>,
+    /// Vocabulary at snapshot time (shared via `Arc`), so vocab reads can use the
+    /// lock-free snapshot instead of locking the engine (ADR-016).
+    vocab: Option<Arc<crate::vocab::Vocab>>,
     rejected_parse: u64,
     rejected_class_d: u64,
     vocab_epoch: u64,
@@ -209,7 +212,10 @@ pub struct Engine {
     config: EngineConfig,
     norm: Arc<Normalizer>,
     /// Vocabulary used to build the normalizer (if set via `with_vocab`).
-    vocab: Option<crate::vocab::Vocab>,
+    /// `Arc` so it is shared (not deep-copied) into every `EngineSnapshot`,
+    /// letting `GET /_vocab` read it from the lock-free snapshot instead of the
+    /// write mutex (ADR-016).
+    vocab: Option<Arc<crate::vocab::Vocab>>,
     /// Feature dictionary. `Arc` so a snapshot shares it; writers take a
     /// copy-on-write handle via `Arc::make_mut` (the dict is O(vocab), which
     /// saturates, so the occasional CoW clone is bounded — not O(corpus)).

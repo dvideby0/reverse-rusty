@@ -5,6 +5,7 @@
 use super::{BaseSegment, EngineSnapshot, MatchScratch, MatchStats};
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
+use crate::vocab::Vocab;
 
 impl MatchScratch {
     pub fn new() -> Self {
@@ -54,6 +55,13 @@ impl EngineSnapshot {
 
     pub fn dict(&self) -> &Dict {
         &self.dict
+    }
+
+    /// The vocabulary captured at snapshot time, if one was set. Lets read
+    /// endpoints (`GET /_vocab`) serve the vocab from the lock-free snapshot
+    /// without locking the engine (ADR-016).
+    pub fn vocab(&self) -> Option<&Vocab> {
+        self.vocab.as_deref()
     }
 
     pub fn num_queries(&self) -> usize {

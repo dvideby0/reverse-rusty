@@ -1774,12 +1774,13 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResp
 // Vocabulary management
 // ---------------------------------------------------------------------------
 
-/// GET /_vocab — return the current vocabulary as JSON.
+/// GET /_vocab — return the current vocabulary as JSON. Reads the lock-free
+/// `ArcSwap` snapshot (ADR-016) rather than locking the engine, so vocab reads
+/// never block behind a writer — consistent with `/_search` and the other read
+/// endpoints.
 async fn get_vocab(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let vocab = {
-        let engine = state.engine.lock();
-        engine.vocab().cloned().unwrap_or_default()
-    };
+    let snap = state.snapshot.load();
+    let vocab = snap.vocab().cloned().unwrap_or_default();
     Json(vocab)
 }
 
