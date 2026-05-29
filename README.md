@@ -1,4 +1,6 @@
-<img height="258" alt="reverse_rusty" src="https://github.com/user-attachments/assets/ab6aeedb-0934-445e-8cb3-de6b726b19a0" />
+<p align="center">
+  <img height="280" alt="reverse_rusty" src="https://github.com/user-attachments/assets/ab6aeedb-0934-445e-8cb3-de6b726b19a0" />
+</p>
 
 
 # Reverse Rusty
