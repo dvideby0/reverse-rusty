@@ -99,4 +99,17 @@ pub struct EngineMetrics {
     pub filter_bytes: usize,
     /// Segments compiled against an older vocab epoch (need reingestion).
     pub stale_segments: usize,
+    /// Resident heap bytes used by the shared feature dictionary. Unlike
+    /// `exact_bytes`/`index_bytes` (which report 0 for mmap'd segments because
+    /// that data is file-backed/paged), the four `*_bytes` fields below are
+    /// resident RAM even at scale — the structures this measures are what
+    /// dominate per-node memory once the SoA and index are mmap'd.
+    pub dict_bytes: usize,
+    /// Resident heap bytes used by the query source store (source text held for
+    /// `_source`/explain).
+    pub query_store_bytes: usize,
+    /// Resident heap bytes used by per-segment logical→local reverse indexes.
+    pub logical_index_bytes: usize,
+    /// Resident heap bytes used by per-segment liveness (alive) overlays.
+    pub alive_bytes: usize,
 }

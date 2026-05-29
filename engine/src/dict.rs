@@ -139,6 +139,24 @@ impl Dict {
     pub fn mark_finalized(&mut self) {
         self.finalized = true;
     }
+
+    /// Resident heap bytes used by the dictionary. The existing per-segment
+    /// accounting (exact/index/filter) ignores the dict entirely, yet the dict is
+    /// held resident (`Arc<Dict>`) and stores every feature name *twice* — once as
+    /// a `map` key and once in `names` — so it is a real, uncounted resident cost.
+    /// Counts both string copies plus the parallel metadata vectors.
+    pub fn heap_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let names_chars: usize = self.names.iter().map(String::capacity).sum();
+        let map_key_chars: usize = self.map.keys().map(String::capacity).sum();
+        names_chars
+            + self.names.capacity() * size_of::<String>()
+            + map_key_chars
+            + self.map.capacity() * size_of::<(String, FeatureId)>()
+            + self.kinds.capacity() * size_of::<FeatureKind>()
+            + self.freq.capacity() * size_of::<u32>()
+            + self.mask_bit.capacity() * size_of::<u8>()
+    }
 }
 
 impl std::fmt::Debug for Dict {
