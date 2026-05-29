@@ -32,7 +32,10 @@ use crate::segment::{MatchStats, Segment};
 // ---- constants ----
 
 const MAGIC: [u8; 4] = *b"PERC";
-const FORMAT_VERSION: u32 = 1;
+// v1: original layout. v2 (ADR-020 Item 2): adds a sorted logical-index column
+// section (logical_index_off at header bytes 56..64); v1 files are still read
+// (the reverse index is reconstructed in memory on open).
+const FORMAT_VERSION: u32 = 2;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -46,7 +49,8 @@ const HEADER_SIZE: usize = 80;
 //   32..40  broad_index_off (u64 LE)
 //   40..48  filter_off (u64 LE)
 //   48..56  meta_off (u64 LE)
-//   56..80  reserved (24 bytes, zeroed)
+//   56..64  logical_index_off (u64 LE; 0 or absent in v1)
+//   64..80  reserved (16 bytes, zeroed)
 
 // ---- CRC-32 (IEEE / ISO 3309) ----
 
@@ -323,6 +327,15 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     let meta_off = f.stream_position()?;
     write_meta_section(&mut f, seg)?;
 
+    // ---- Logical index columns (sorted reverse index; ADR-020 Item 2) ----
+    // Two parallel sorted arrays so a reader can binary-search a logical id and
+    // return its contiguous local-id run, without rebuilding a resident map.
+    pad_to_8(&mut f)?;
+    let logical_off = f.stream_position()?;
+    let (li_logical, li_local) = seg.logical_columns();
+    write_u64_array(&mut f, &li_logical)?;
+    write_u32_array(&mut f, &li_local)?;
+
     // ---- Write header ----
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&MAGIC)?;
@@ -334,6 +347,7 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     write_u64(&mut f, broad_off)?;
     write_u64(&mut f, filter_off)?;
     write_u64(&mut f, meta_off)?;
+    write_u64(&mut f, logical_off)?;
     // remaining header bytes are already zero (reserved)
 
     // Compute CRC32 of the entire file and append it as the trailing 4 bytes
@@ -442,6 +456,25 @@ fn write_meta_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Result<
 ///
 /// The `alive_overlay` is the only mutable state: tombstones are applied here
 /// (since the mmap is read-only). On compaction, dead entries are dropped.
+/// The logical→local reverse index for an `MmapSegment` (ADR-020 Item 2). Two
+/// sorted parallel columns: a binary search over `logical` yields the contiguous
+/// run in `local`. `Mapped` borrows the columns straight from the mmap (v2 files —
+/// ~zero resident heap, paged on demand); `Owned` holds them in RAM (reconstructed
+/// from a v1 file that predates the column section, far smaller than the old
+/// per-logical `Vec` map, and reclaimed once the segment is recompacted to v2).
+#[derive(Clone)]
+enum MmapLogicalIndex {
+    Mapped {
+        logical: *const u64,
+        local: *const u32,
+        count: usize,
+    },
+    Owned {
+        logical: Vec<u64>,
+        local: Vec<u32>,
+    },
+}
+
 pub struct MmapSegment {
     mmap: Arc<memmap2::Mmap>,
     num_queries: u32,
@@ -491,8 +524,9 @@ pub struct MmapSegment {
     path: std::path::PathBuf,
     /// Vocab epoch at which this segment's queries were compiled.
     pub vocab_epoch: u64,
-    /// Reverse index: logical_id → local_ids. Built at open time for O(1) delete.
-    logical_index: crate::util::FastMap<u64, Vec<u32>>,
+    /// Reverse index (logical_id → local_ids) as sorted parallel columns —
+    /// borrowed from the mmap (v2) or reconstructed (v1). See [`MmapLogicalIndex`].
+    logical_index: MmapLogicalIndex,
 }
 
 // SAFETY: every raw pointer in MmapSegment points into the read-only `Arc<Mmap>`
@@ -596,19 +630,21 @@ impl MmapSegment {
         // offsets/lengths, then construct pointers from the base after move.
 
         // Phase 1: validate and parse offsets/lengths from a temporary borrow
-        {
+        let format_version = {
             let data = &mmap[..];
             if data[0..4] != MAGIC {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
             }
             let version = read_u32_at(data, 4)?;
-            if version != FORMAT_VERSION {
+            // v1 and v2 are both supported (v1 reconstructs the reverse index).
+            if version != 1 && version != FORMAT_VERSION {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("unsupported format version {version}"),
                 ));
             }
-        }
+            version
+        };
 
         // Phase 2: extract section layout using raw pointer arithmetic.
         // All pointers are derived from `base` which points into `mmap`.
@@ -689,19 +725,40 @@ impl MmapSegment {
         cursor = next;
         let (alive_s, _) = read_u8_slice(data_for_parse, cursor)?;
 
-        // Build alive overlay and logical reverse index from on-disk data
+        // Build alive overlay from on-disk data.
         let alive_overlay: Vec<bool> = alive_s.iter().map(|&b| b != 0).collect();
         let alive_counter = alive_overlay.iter().filter(|&&a| a).count();
-        let mut logical_index: crate::util::FastMap<u64, Vec<u32>> = crate::util::fast_map();
-        for (i, &alive) in alive_overlay.iter().enumerate().take(num_queries as usize) {
-            if alive {
-                // SAFETY: `logical_s` is the `num_queries`-long u64 slice parsed
-                // from the mmap above; `i < num_queries` here (the loop is bounded
-                // by `take(num_queries)`), so the index is in bounds.
-                let lid = unsafe { *logical_s.as_ptr().add(i) };
-                logical_index.entry(lid).or_default().push(i as u32);
+
+        // Reverse index (ADR-020 Item 2): v2 borrows the sorted columns straight
+        // from the mmap (zero resident heap); v1 reconstructs them in RAM from
+        // `logical_arr` (one logical id per local).
+        let logical_index = if format_version >= 2 {
+            let loff = read_u64_at(data_for_parse, 56)? as usize;
+            let (li_logical_s, after) = read_u64_slice(data_for_parse, loff)?;
+            let (li_local_s, _) = read_u32_slice(data_for_parse, after)?;
+            if li_logical_s.len() != li_local_s.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "logical index column length mismatch",
+                ));
             }
-        }
+            MmapLogicalIndex::Mapped {
+                logical: li_logical_s.as_ptr(),
+                local: li_local_s.as_ptr(),
+                count: li_logical_s.len(),
+            }
+        } else {
+            let mut pairs: Vec<(u64, u32)> = logical_s
+                .iter()
+                .take(num_queries as usize)
+                .enumerate()
+                .map(|(i, &lid)| (lid, i as u32))
+                .collect();
+            pairs.sort_unstable();
+            let logical = pairs.iter().map(|&(l, _)| l).collect();
+            let local = pairs.iter().map(|&(_, c)| c).collect();
+            MmapLogicalIndex::Owned { logical, local }
+        };
 
         Ok(MmapSegment {
             mmap,
@@ -893,10 +950,30 @@ impl MmapSegment {
         }
     }
 
+    /// The sorted `logical_id` column (borrowed from the mmap for v2, owned for v1).
+    #[inline]
+    fn li_logical(&self) -> &[u64] {
+        match &self.logical_index {
+            MmapLogicalIndex::Mapped { logical, count, .. } => self.mmap_slice(*logical, *count),
+            MmapLogicalIndex::Owned { logical, .. } => logical,
+        }
+    }
+    /// The parallel `local_id` column.
+    #[inline]
+    fn li_local(&self) -> &[u32] {
+        match &self.logical_index {
+            MmapLogicalIndex::Mapped { local, count, .. } => self.mmap_slice(*local, *count),
+            MmapLogicalIndex::Owned { local, .. } => local,
+        }
+    }
+
     pub fn locals_for_logical(&self, logical_id: u64) -> &[u32] {
-        self.logical_index
-            .get(&logical_id)
-            .map_or(&[], |v| v.as_slice())
+        // Columns are sorted by (logical_id, local_id), so a logical id's local
+        // ids form a contiguous run — binary-search its bounds and slice.
+        let logs = self.li_logical();
+        let lo = logs.partition_point(|&l| l < logical_id);
+        let hi = logs.partition_point(|&l| l <= logical_id);
+        &self.li_local()[lo..hi]
     }
 
     /// Number of alive (non-tombstoned) entries (O(1)).
@@ -910,6 +987,29 @@ impl MmapSegment {
             return 0.0;
         }
         1.0 - (self.alive_count() as f64 / total as f64)
+    }
+
+    /// Resident heap bytes used by the logical→local reverse index. The SoA and
+    /// candidate index are mmap'd (file-backed, paged), but this reverse index is
+    /// rebuilt resident at `open` — a `Vec` per logical id — so it is a real
+    /// resident cost the file-backed accounting misses.
+    pub fn logical_index_bytes(&self) -> usize {
+        match &self.logical_index {
+            // v2 columns live in the mmap (file-backed/paged) — ~zero resident heap.
+            MmapLogicalIndex::Mapped { .. } => 0,
+            // v1 reconstruct holds flat owned columns (12 B/query, vs the old
+            // per-logical Vec map) until the segment is recompacted to v2.
+            MmapLogicalIndex::Owned { logical, local } => {
+                logical.capacity() * std::mem::size_of::<u64>()
+                    + local.capacity() * std::mem::size_of::<u32>()
+            }
+        }
+    }
+
+    /// Resident heap bytes used by the mutable alive overlay (tombstones). This
+    /// stays in RAM even for an mmap'd segment because the mapping is read-only.
+    pub fn alive_bytes(&self) -> usize {
+        self.alive_overlay.capacity() * std::mem::size_of::<bool>()
     }
 
     #[inline]
@@ -1370,78 +1470,423 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
 // -- Query source store persistence ------------------------------------------
 
 const SOURCES_MAGIC: [u8; 4] = *b"SRCS";
-const SOURCES_VERSION: u32 = 1;
+const SOURCES_VERSION_V1: u32 = 1; // legacy: unordered (logical, len, text)*
+const SOURCES_VERSION: u32 = 2; // current: sorted index + blob + CRC trailer
+const SRC_HEADER: usize = 16; // magic(4) + version(4) + count(4) + reserved(4)
+const SRC_IDX_REC: usize = 24; // logical(8) + blob_off(8) + text_len(4) + pad(4)
 
-// `FastMap` pins the FNV-1a hasher on purpose (stable hashing across runs — see
-// util.rs); a generic `S: BuildHasher` param would defeat that determinism.
-#[allow(clippy::implicit_hasher)]
-pub fn write_query_sources(
-    store: &crate::util::FastMap<u64, String>,
-    path: &Path,
-) -> io::Result<()> {
+#[inline]
+fn rw_read<T>(l: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    l.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+#[inline]
+fn rw_write<T>(l: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    l.write().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn bad_sources() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "corrupt sources file")
+}
+
+/// Per-query source text store (`logical_id → original query text`) for
+/// `_source`/explain. Source text never touches the match hot path. `Resident`
+/// keeps everything in RAM (the historical default, `retain_source = true`);
+/// `Lazy` keeps only an in-memory overlay of post-flush mutations over an mmap'd,
+/// binary-searchable v2 file, so it fetches text on demand instead of holding the
+/// whole corpus resident (the production-scale memory win — ADR-020 Item 1).
+pub enum SourceStore {
+    Resident(std::sync::RwLock<crate::util::FastMap<u64, String>>),
+    Lazy {
+        base: Option<LazyBase>,
+        overlay: std::sync::RwLock<crate::util::FastMap<u64, Option<String>>>,
+    },
+}
+
+/// An mmap'd v2 `sources.dat`: a sorted index + a text blob. Naturally
+/// `Send`+`Sync` — the only shared state is the read-only `Arc<Mmap>`, accessed
+/// via safe `&[u8]` slicing (no raw pointers, unlike `MmapSegment`).
+pub struct LazyBase {
+    mmap: Arc<memmap2::Mmap>,
+    index_off: usize,
+    count: usize,
+    blob_off: usize,
+}
+
+impl LazyBase {
+    #[inline]
+    fn logical_at(&self, i: usize) -> Option<u64> {
+        read_u64_at(&self.mmap, self.index_off + i * SRC_IDX_REC).ok()
+    }
+
+    fn get(&self, logical: u64) -> Option<String> {
+        let data: &[u8] = &self.mmap;
+        let (mut lo, mut hi) = (0usize, self.count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match self.logical_at(mid)?.cmp(&logical) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => {
+                    let rec = self.index_off + mid * SRC_IDX_REC;
+                    let boff = read_u64_at(data, rec + 8).ok()? as usize;
+                    let len = read_u32_at(data, rec + 16).ok()? as usize;
+                    let start = self.blob_off + boff;
+                    let bytes = data.get(start..start + len)?;
+                    return std::str::from_utf8(bytes).ok().map(str::to_owned);
+                }
+            }
+        }
+        None
+    }
+
+    /// The `(logical, text)` pair at index `i`, with the text borrowed from the
+    /// mmap (lifetime tied to `&self`, so callers can collect it). Returns `None`
+    /// on a bounds/UTF-8 check failure (the file is CRC-checked at open, so this
+    /// is belt-and-suspenders). Used to rewrite the file on flush.
+    fn record(&self, i: usize) -> Option<(u64, &str)> {
+        let data: &[u8] = &self.mmap;
+        let rec = self.index_off + i * SRC_IDX_REC;
+        let logical = read_u64_at(data, rec).ok()?;
+        let boff = read_u64_at(data, rec + 8).ok()? as usize;
+        let len = read_u32_at(data, rec + 16).ok()? as usize;
+        let start = self.blob_off + boff;
+        let bytes = data.get(start..start + len)?;
+        let text = std::str::from_utf8(bytes).ok()?;
+        Some((logical, text))
+    }
+}
+
+impl SourceStore {
+    pub fn new_resident() -> Self {
+        SourceStore::Resident(std::sync::RwLock::new(crate::util::fast_map()))
+    }
+
+    /// An empty store of the kind selected by `retain` (no persisted file yet).
+    pub fn empty(retain: bool) -> Self {
+        if retain {
+            Self::new_resident()
+        } else {
+            SourceStore::Lazy {
+                base: None,
+                overlay: std::sync::RwLock::new(crate::util::fast_map()),
+            }
+        }
+    }
+
+    /// Open a store from `path` per `retain`. `retain = true` loads everything
+    /// resident (reads v1 or v2). `retain = false` mmaps a v2 file lazily,
+    /// first migrating a v1 file to v2; an absent file yields an empty lazy store.
+    pub fn open(path: &Path, retain: bool) -> io::Result<Self> {
+        if retain {
+            return Ok(SourceStore::Resident(std::sync::RwLock::new(
+                load_query_sources(path)?,
+            )));
+        }
+        if !path.exists() {
+            return Ok(SourceStore::Lazy {
+                base: None,
+                overlay: std::sync::RwLock::new(crate::util::fast_map()),
+            });
+        }
+        if peek_sources_version(path)? == SOURCES_VERSION_V1 {
+            // Migrate v1 → v2 so the file can be mmap'd and binary-searched.
+            let map = load_query_sources(path)?;
+            let mut entries: Vec<(u64, &str)> = map.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            entries.sort_unstable_by_key(|&(k, _)| k);
+            write_sources_v2(&entries, path)?;
+        }
+        Ok(SourceStore::Lazy {
+            base: Some(open_lazy_base(path)?),
+            overlay: std::sync::RwLock::new(crate::util::fast_map()),
+        })
+    }
+
+    pub fn get(&self, logical: u64) -> Option<String> {
+        match self {
+            SourceStore::Resident(m) => rw_read(m).get(&logical).cloned(),
+            SourceStore::Lazy { base, overlay } => {
+                // Overlay (post-flush mutations) wins over the mmap base; a `None`
+                // overlay entry is a tombstone (deleted since the last flush).
+                if let Some(v) = rw_read(overlay).get(&logical) {
+                    return v.clone();
+                }
+                base.as_ref().and_then(|b| b.get(logical))
+            }
+        }
+    }
+
+    pub fn insert(&self, logical: u64, text: String) {
+        match self {
+            SourceStore::Resident(m) => {
+                rw_write(m).insert(logical, text);
+            }
+            SourceStore::Lazy { overlay, .. } => {
+                rw_write(overlay).insert(logical, Some(text));
+            }
+        }
+    }
+
+    pub fn remove(&self, logical: u64) {
+        match self {
+            SourceStore::Resident(m) => {
+                rw_write(m).remove(&logical);
+            }
+            SourceStore::Lazy { overlay, .. } => {
+                rw_write(overlay).insert(logical, None);
+            }
+        }
+    }
+
+    /// Best-effort live entry count (Debug/stats only — not a hot path).
+    pub fn len(&self) -> usize {
+        match self {
+            SourceStore::Resident(m) => rw_read(m).len(),
+            SourceStore::Lazy { base, overlay } => {
+                let ov = rw_read(overlay);
+                let mut n = ov.values().filter(|v| v.is_some()).count();
+                if let Some(b) = base {
+                    for i in 0..b.count {
+                        if let Some(l) = b.logical_at(i) {
+                            if !ov.contains_key(&l) {
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+                n
+            }
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn is_lazy(&self) -> bool {
+        matches!(self, SourceStore::Lazy { .. })
+    }
+
+    /// Resident heap bytes. For `Lazy` this is just the overlay; the mmap'd base
+    /// is file-backed (paged), not resident heap.
+    pub fn resident_bytes(&self) -> usize {
+        use std::mem::size_of;
+        match self {
+            SourceStore::Resident(m) => {
+                let g = rw_read(m);
+                let chars: usize = g.values().map(String::capacity).sum();
+                chars + g.capacity() * size_of::<(u64, String)>()
+            }
+            SourceStore::Lazy { overlay, .. } => {
+                let g = rw_read(overlay);
+                let chars: usize = g.values().flatten().map(String::capacity).sum();
+                chars + g.capacity() * size_of::<(u64, Option<String>)>()
+            }
+        }
+    }
+
+    /// Durably write the store's live entries to `path` as a v2 file, borrowing
+    /// text (no `String` clones). `Resident` writes the whole map; `Lazy` merges
+    /// the mmap base with the overlay (overlay wins; `None` = tombstone).
+    pub fn write_to(&self, path: &Path) -> io::Result<()> {
+        match self {
+            SourceStore::Resident(m) => {
+                let g = rw_read(m);
+                let mut entries: Vec<(u64, &str)> =
+                    g.iter().map(|(k, v)| (*k, v.as_str())).collect();
+                entries.sort_unstable_by_key(|&(k, _)| k);
+                write_sources_v2(&entries, path)
+            }
+            SourceStore::Lazy { base, overlay } => {
+                let ov = rw_read(overlay);
+                let mut entries: Vec<(u64, &str)> = Vec::new();
+                if let Some(b) = base {
+                    for i in 0..b.count {
+                        if let Some((logical, text)) = b.record(i) {
+                            // overlay (incl. tombstones) shadows the mmap base
+                            if !ov.contains_key(&logical) {
+                                entries.push((logical, text));
+                            }
+                        }
+                    }
+                }
+                for (k, v) in ov.iter() {
+                    if let Some(s) = v {
+                        entries.push((*k, s.as_str()));
+                    }
+                }
+                entries.sort_unstable_by_key(|&(k, _)| k);
+                write_sources_v2(&entries, path)
+            }
+        }
+    }
+}
+
+/// Peek the version field of a sources file (magic-checked).
+fn peek_sources_version(path: &Path) -> io::Result<u32> {
+    use std::io::Read;
+    let mut f = File::open(path)?;
+    let mut head = [0u8; 8];
+    f.read_exact(&mut head)?;
+    if head[0..4] != SOURCES_MAGIC {
+        return Err(bad_sources());
+    }
+    Ok(u32::from_le_bytes([head[4], head[5], head[6], head[7]]))
+}
+
+/// Write a caller-sorted set of `(logical, text)` entries as a v2 sources file:
+/// a sorted index + a text blob + a CRC-32 trailer, written atomically.
+fn write_sources_v2(entries: &[(u64, &str)], path: &Path) -> io::Result<()> {
+    let mut buf: Vec<u8> = Vec::with_capacity(SRC_HEADER + entries.len() * SRC_IDX_REC + 64);
+    buf.extend_from_slice(&SOURCES_MAGIC);
+    buf.extend_from_slice(&SOURCES_VERSION.to_le_bytes());
+    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    let mut blob: Vec<u8> = Vec::new();
+    let mut blob_off: u64 = 0;
+    let mut prev: Option<u64> = None;
+    for &(logical, text) in entries {
+        debug_assert!(
+            prev.is_none_or(|p| p <= logical),
+            "write_sources_v2 requires entries sorted by logical id"
+        );
+        prev = Some(logical);
+        let bytes = text.as_bytes();
+        buf.extend_from_slice(&logical.to_le_bytes());
+        buf.extend_from_slice(&blob_off.to_le_bytes());
+        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes()); // pad
+        blob.extend_from_slice(bytes);
+        blob_off += bytes.len() as u64;
+    }
+    buf.extend_from_slice(&blob);
+    let crc = crc32(&buf);
+    buf.extend_from_slice(&crc.to_le_bytes());
+
     let tmp = path.with_extension("sources.tmp");
     let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&SOURCES_MAGIC)?;
-    write_u32(&mut f, SOURCES_VERSION)?;
-    write_u32(&mut f, store.len() as u32)?;
-    for (logical_id, text) in store {
-        write_u64(&mut f, *logical_id)?;
-        let bytes = text.as_bytes();
-        write_u32(&mut f, bytes.len() as u32)?;
-        f.write_all(bytes)?;
-    }
+    f.write_all(&buf)?;
     f.sync_all()?;
     drop(f);
     durable_rename(&tmp, path)?;
     Ok(())
 }
 
+/// mmap a v2 sources file as a `LazyBase` (validates magic/version/CRC/bounds).
+fn open_lazy_base(path: &Path) -> io::Result<LazyBase> {
+    let file = File::open(path)?;
+    // SAFETY: `path` is an immutable, atomically-renamed sources file written by
+    // this single-writer engine and never mutated in place (a rewrite goes to a
+    // tmp file + rename, leaving this inode untouched). The mapping is read-only,
+    // accessed only via safe `&[u8]` slicing, and the `Arc<Mmap>` keeps it alive
+    // for as long as any `LazyBase` (or clone) references it — mirroring the
+    // `MmapSegment` mmap-open invariant.
+    let mmap = Arc::new(unsafe { memmap2::Mmap::map(&file)? });
+    let (count, index_off, blob_off) = {
+        let data: &[u8] = &mmap;
+        if data.len() < SRC_HEADER + 4 || data[0..4] != SOURCES_MAGIC {
+            return Err(bad_sources());
+        }
+        let version = read_u32_at(data, 4)?;
+        if version != SOURCES_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected sources v{SOURCES_VERSION}, got v{version}"),
+            ));
+        }
+        let count = read_u32_at(data, 8)? as usize;
+        let index_off = SRC_HEADER;
+        let blob_off = index_off
+            .checked_add(count.checked_mul(SRC_IDX_REC).ok_or_else(bad_sources)?)
+            .ok_or_else(bad_sources)?;
+        if blob_off + 4 > data.len() {
+            return Err(bad_sources());
+        }
+        // CRC over everything but the trailing 4-byte checksum.
+        let want = read_u32_at(data, data.len() - 4)?;
+        if crc32(&data[..data.len() - 4]) != want {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sources CRC mismatch",
+            ));
+        }
+        (count, index_off, blob_off)
+    };
+    Ok(LazyBase {
+        mmap,
+        index_off,
+        count,
+        blob_off,
+    })
+}
+
+/// Read a v1 or v2 `sources.dat` fully into a map (the `Resident` path, and the
+/// v1→v2 migration source). `FastMap` pins the FNV-1a hasher on purpose (stable
+/// hashing across runs — see util.rs).
+#[allow(clippy::implicit_hasher)]
 pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, String>> {
     if !path.exists() {
         return Ok(crate::util::fast_map());
     }
     let data = std::fs::read(path)?;
-    if data.len() < 12 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "sources file too small",
-        ));
-    }
-    if data[0..4] != SOURCES_MAGIC {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "bad sources magic",
-        ));
+    if data.len() < 12 || data[0..4] != SOURCES_MAGIC {
+        return Err(bad_sources());
     }
     let version = read_u32_at(&data, 4)?;
-    if version != SOURCES_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsupported sources version {version}"),
-        ));
-    }
     let count = read_u32_at(&data, 8)? as usize;
     let mut store = crate::util::FastMap::with_capacity_and_hasher(
         count,
         std::hash::BuildHasherDefault::default(),
     );
-    let mut cursor = 12;
-    for _ in 0..count {
-        if cursor + 12 > data.len() {
-            break;
+    match version {
+        SOURCES_VERSION_V1 => {
+            let mut cursor = 12;
+            for _ in 0..count {
+                if cursor + 12 > data.len() {
+                    break;
+                }
+                let logical_id = read_u64_at(&data, cursor)?;
+                cursor += 8;
+                let text_len = read_u32_at(&data, cursor)? as usize;
+                cursor += 4;
+                if cursor + text_len > data.len() {
+                    break;
+                }
+                let text = std::str::from_utf8(&data[cursor..cursor + text_len])
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                    .to_string();
+                cursor += text_len;
+                store.insert(logical_id, text);
+            }
         }
-        let logical_id = read_u64_at(&data, cursor)?;
-        cursor += 8;
-        let text_len = read_u32_at(&data, cursor)? as usize;
-        cursor += 4;
-        if cursor + text_len > data.len() {
-            break;
+        SOURCES_VERSION => {
+            let index_off = SRC_HEADER;
+            let blob_off = index_off
+                .checked_add(count.checked_mul(SRC_IDX_REC).ok_or_else(bad_sources)?)
+                .ok_or_else(bad_sources)?;
+            if blob_off + 4 > data.len() {
+                return Err(bad_sources());
+            }
+            let blob_limit = data.len() - 4;
+            for i in 0..count {
+                let rec = index_off + i * SRC_IDX_REC;
+                let logical_id = read_u64_at(&data, rec)?;
+                let boff = read_u64_at(&data, rec + 8)? as usize;
+                let len = read_u32_at(&data, rec + 16)? as usize;
+                let start = blob_off + boff;
+                if start + len > blob_limit {
+                    break;
+                }
+                let text = std::str::from_utf8(&data[start..start + len])
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                    .to_string();
+                store.insert(logical_id, text);
+            }
         }
-        let text = std::str::from_utf8(&data[cursor..cursor + text_len])
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-            .to_string();
-        cursor += text_len;
-        store.insert(logical_id, text);
+        other => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unsupported sources version {other}"),
+            ));
+        }
     }
     Ok(store)
 }

@@ -24,6 +24,9 @@
 ///     ..EngineConfig::default()
 /// };
 /// ```
+// Config knobs are naturally a flat bag of independent flags; grouping the bools
+// into sub-structs would hurt readability for no gain.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     // ---- compaction trigger policy ----
@@ -86,6 +89,19 @@ pub struct EngineConfig {
     /// Default: `false`
     pub wal_sync_on_write: bool,
 
+    /// Whether to keep every query's source text resident in RAM. When `true`
+    /// (default), the source store is fully in-memory — `_source`/explain reads
+    /// are instant, matching historical behavior. When `false`, source text is
+    /// kept on disk (`sources.dat`, mmap'd) and fetched on demand; this trades a
+    /// cold binary-search + possible page fault per `_source`/explain lookup
+    /// (never the match hot path) for a large resident-memory saving at scale —
+    /// at ~100M queries the source text is the single largest resident structure
+    /// (see ADR-020). Mutations between flushes are held in a small in-memory
+    /// overlay regardless of this setting.
+    ///
+    /// Default: `true`
+    pub retain_source: bool,
+
     // ---- merge scoring ----
 
     // ---- query complexity limits ----
@@ -127,6 +143,7 @@ impl Default for EngineConfig {
             auto_compact_on_ingest: true,
             data_dir: None,
             wal_sync_on_write: false,
+            retain_source: true,
             max_query_length: 10_000,
             max_query_clauses: 256,
             max_anyof_group_size: 64,

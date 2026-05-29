@@ -131,6 +131,15 @@ struct Cli {
     /// a large per-write latency cost (SQLite FULL).
     #[arg(long, default_value_t = false)]
     wal_sync_on_write: bool,
+
+    /// Keep every query's source text resident in RAM (default true — instant
+    /// `_source`/explain, historical behavior). Set false to store source text on
+    /// disk (`sources.dat`, mmap'd) and fetch it lazily — a large resident-memory
+    /// saving at scale (the source store is the single largest resident structure
+    /// at ~100M queries), at the cost of a cold binary-search + page fault per
+    /// `_source`/explain lookup (never the match hot path). See ADR-020.
+    #[arg(long, default_value_t = true)]
+    retain_source: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1735,6 +1744,7 @@ async fn main() {
         max_query_clauses: cli.max_query_clauses,
         max_anyof_group_size: cli.max_anyof_group_size,
         wal_sync_on_write: cli.wal_sync_on_write,
+        retain_source: cli.retain_source,
         ..EngineConfig::default()
     };
     let problems = config.validate();

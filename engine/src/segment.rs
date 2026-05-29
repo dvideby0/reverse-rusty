@@ -14,7 +14,7 @@
 //! feature space / frequency table across all segments).
 
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::Arc;
 
 use crate::compile::{build_signatures, extract, is_hot, CostClass, Extracted};
 use crate::config::EngineConfig;
@@ -27,33 +27,14 @@ use crate::storage::MmapSegment;
 use crate::util::sig_key;
 use crate::wal::{Wal, WalEntry};
 
-/// Maps `logical_id → original query text`, shared (via `Arc`) between the
-/// engine and every published snapshot. Source text is display-only (it enriches
-/// search hits and feeds `explain`) and never touches the integer match path, so
-/// it lives behind an `RwLock` instead of being deep-cloned into each snapshot —
-/// publishing a snapshot is then an `Arc::clone`, not an O(corpus) string copy.
-/// Reads/writes are eventually consistent across snapshots, which is fine for
-/// display.
-type QueryStore = RwLock<crate::util::FastMap<u64, String>>;
-
-/// Acquire a read guard, recovering from poisoning rather than panicking. The
-/// release build uses `panic = "abort"`, so a guard is never dropped mid-mutation
-/// and poisoning cannot occur there; this only matters under `cargo test`/debug,
-/// where we still prefer graceful recovery over an `unwrap()` panic (the data is
-/// a string cache, not an invariant-bearing structure).
-#[inline]
-fn qs_read(store: &QueryStore) -> RwLockReadGuard<'_, crate::util::FastMap<u64, String>> {
-    store
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[inline]
-fn qs_write(store: &QueryStore) -> RwLockWriteGuard<'_, crate::util::FastMap<u64, String>> {
-    store
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
+// Per-query source text (`logical_id → original query text`), shared via `Arc`
+// between the engine and every published snapshot. Display-only — it enriches
+// search hits and feeds `explain`, and never touches the integer match path.
+// Backed by `SourceStore`: fully resident, or lazily mmap'd from `sources.dat`
+// per `EngineConfig::retain_source` (ADR-020 Item 1). Publishing a snapshot is an
+// `Arc::clone`, not an O(corpus) copy; reads/writes are eventually consistent
+// across snapshots, which is fine for display.
+use crate::storage::SourceStore;
 
 /// Materialize an `Arc<BaseSegment>` into an owned in-memory `Segment` (for
 /// compaction). Unwraps the `Arc` in place when uniquely held; otherwise — when
@@ -439,6 +420,24 @@ impl Segment {
     pub fn exact_store(&self) -> &ExactStore {
         &self.exact
     }
+
+    /// Sorted `(logical_id, local_id)` columns for the `.seg` v2 reverse-index
+    /// section (ADR-020 Item 2). Sorted by `(logical_id, local_id)` so each
+    /// logical id's local ids form a contiguous, binary-searchable run on read.
+    /// Mirrors exactly what `logical_index` holds, so a reader reproduces
+    /// `locals_for_logical` identically.
+    pub fn logical_columns(&self) -> (Vec<u64>, Vec<u32>) {
+        let mut pairs: Vec<(u64, u32)> = Vec::with_capacity(self.exact.len());
+        for (&logical, locals) in &self.logical_index {
+            for &local in locals {
+                pairs.push((logical, local));
+            }
+        }
+        pairs.sort_unstable();
+        let logical = pairs.iter().map(|&(l, _)| l).collect();
+        let local = pairs.iter().map(|&(_, c)| c).collect();
+        (logical, local)
+    }
     pub fn classes(&self) -> &[CostClass] {
         &self.class
     }
@@ -463,6 +462,26 @@ impl Segment {
         self.filter
             .as_ref()
             .map_or(0, super::filter::SegmentFilter::heap_bytes)
+    }
+
+    /// Resident heap bytes used by the logical→local reverse index. This is
+    /// resident even when the segment's SoA/index are mmap'd, and is uncounted by
+    /// the file-backed accounting above — a `Vec` per logical id is a real cost.
+    pub fn logical_index_bytes(&self) -> usize {
+        use std::mem::size_of;
+        let buckets = self.logical_index.capacity() * size_of::<(u64, Vec<u32>)>();
+        let vecs: usize = self
+            .logical_index
+            .values()
+            .map(|v| v.capacity() * size_of::<u32>())
+            .sum();
+        buckets + vecs
+    }
+
+    /// Resident heap bytes used by the liveness array. Resident even for mmap'd
+    /// segments (it is the mutable tombstone overlay).
+    pub fn alive_bytes(&self) -> usize {
+        self.alive.capacity() * std::mem::size_of::<bool>()
     }
 }
 
@@ -594,6 +613,25 @@ impl BaseSegment {
         }
     }
 
+    /// Resident reverse-index bytes. Unlike the file-backed accounting above,
+    /// this returns the REAL value for both arms — the reverse index is resident
+    /// heap even for mmap segments (rebuilt at open).
+    pub fn logical_index_bytes(&self) -> usize {
+        match self {
+            BaseSegment::Memory(s) => s.logical_index_bytes(),
+            BaseSegment::Mmap(s) => s.logical_index_bytes(),
+        }
+    }
+
+    /// Resident liveness-overlay bytes. Real value for both arms (the alive
+    /// overlay is a mutable in-RAM structure even for mmap segments).
+    pub fn alive_bytes(&self) -> usize {
+        match self {
+            BaseSegment::Memory(s) => s.alive_bytes(),
+            BaseSegment::Mmap(s) => s.alive_bytes(),
+        }
+    }
+
     /// Convert to an owned in-memory Segment (needed by compact_from).
     /// Memory segments are returned directly; mmap segments are materialized.
     fn into_memory(self) -> Segment {
@@ -665,7 +703,7 @@ pub struct EngineSnapshot {
     dict: Arc<Dict>,
     segments: Vec<Arc<BaseSegment>>,
     memtable: Arc<Segment>,
-    query_store: Arc<QueryStore>,
+    query_store: Arc<SourceStore>,
     rejected_parse: u64,
     rejected_class_d: u64,
     vocab_epoch: u64,
@@ -679,7 +717,7 @@ impl std::fmt::Debug for EngineSnapshot {
         f.debug_struct("EngineSnapshot")
             .field("base_segments", &self.segments.len())
             .field("memtable_entries", &self.memtable.len())
-            .field("query_store_entries", &qs_read(&self.query_store).len())
+            .field("query_store_entries", &self.query_store.len())
             .field("vocab_epoch", &self.vocab_epoch)
             .finish()
     }
@@ -740,7 +778,7 @@ impl EngineSnapshot {
     }
 
     pub fn get_query_source(&self, logical_id: u64) -> Option<String> {
-        qs_read(&self.query_store).get(&logical_id).cloned()
+        self.query_store.get(logical_id)
     }
 
     pub fn explain_hit(
@@ -799,6 +837,16 @@ impl EngineSnapshot {
                 .map(|s| s.filter_bytes())
                 .sum::<usize>(),
             stale_segments: self.stale_segment_count(),
+            dict_bytes: self.dict.heap_bytes(),
+            query_store_bytes: self.query_store.resident_bytes(),
+            logical_index_bytes: self
+                .segments
+                .iter()
+                .map(|s| s.logical_index_bytes())
+                .sum::<usize>()
+                + self.memtable.logical_index_bytes(),
+            alive_bytes: self.segments.iter().map(|s| s.alive_bytes()).sum::<usize>()
+                + self.memtable.alive_bytes(),
         }
     }
 
@@ -1013,7 +1061,7 @@ pub struct Engine {
     pub skipped_segments: usize,
     /// Maps logical_id → original query text for retrieval and search hit
     /// enrichment. Shared (not copied) into every snapshot — see [`QueryStore`].
-    query_store: Arc<QueryStore>,
+    query_store: Arc<SourceStore>,
     /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,
@@ -1035,7 +1083,7 @@ impl std::fmt::Debug for Engine {
             .field("wal_healthy", &self.wal_healthy)
             .field("persistence_healthy", &self.persistence_healthy)
             .field("skipped_segments", &self.skipped_segments)
-            .field("query_store_entries", &qs_read(&self.query_store).len())
+            .field("query_store_entries", &self.query_store.len())
             .field("vocab_epoch", &self.vocab_epoch)
             .finish()
     }
@@ -1071,6 +1119,7 @@ impl Engine {
         } else {
             None
         };
+        let query_store = Arc::new(SourceStore::empty(config.retain_source));
         Engine {
             config,
             norm: Arc::new(norm),
@@ -1086,7 +1135,7 @@ impl Engine {
             wal_healthy,
             persistence_healthy: wal_healthy,
             skipped_segments: 0,
-            query_store: Arc::new(RwLock::new(crate::util::fast_map())),
+            query_store,
             vocab_epoch: 0,
         }
     }
@@ -1195,22 +1244,24 @@ impl Engine {
         let wal_path = dir.join("wal.log");
         let wal = Some(Wal::open(&wal_path, config.wal_sync_on_write)?);
 
-        // Load persisted query sources (if available)
+        // Load persisted query sources — resident, or lazily mmap'd per
+        // config.retain_source (ADR-020 Item 1).
         let sources_path = dir.join("sources.dat");
-        let query_store = match crate::storage::load_query_sources(&sources_path) {
-            Ok(qs) => qs,
-            Err(e) => {
-                // load_query_sources returns Ok(empty) when the file is absent, so
-                // an error here means a corrupt sources.dat — warn rather than
-                // silently dropping all query _source data.
-                eprintln!(
-                    "[percolator] WARNING: failed to load query sources from \
-                     {}: {e} — _source will be unavailable for recovered queries",
-                    sources_path.display()
-                );
-                crate::util::fast_map()
-            }
-        };
+        let query_store =
+            match crate::storage::SourceStore::open(&sources_path, config.retain_source) {
+                Ok(s) => Arc::new(s),
+                Err(e) => {
+                    // An absent file yields an empty store; an error here means a
+                    // corrupt sources.dat — warn rather than silently dropping
+                    // all query _source data.
+                    eprintln!(
+                        "[percolator] WARNING: failed to load query sources from \
+                         {}: {e} — _source will be unavailable for recovered queries",
+                        sources_path.display()
+                    );
+                    Arc::new(crate::storage::SourceStore::empty(config.retain_source))
+                }
+            };
 
         let mut engine = Engine {
             config,
@@ -1227,7 +1278,7 @@ impl Engine {
             wal_healthy: true,
             persistence_healthy: skipped_segments == 0,
             skipped_segments,
-            query_store: Arc::new(RwLock::new(query_store)),
+            query_store,
             vocab_epoch: 0,
         };
 
@@ -1351,7 +1402,7 @@ impl Engine {
     /// Look up the original query text for a logical ID. Returns `None` if
     /// the ID was never ingested or has been deleted.
     pub fn get_query_source(&self, logical_id: u64) -> Option<String> {
-        qs_read(&self.query_store).get(&logical_id).cloned()
+        self.query_store.get(logical_id)
     }
 
     /// Explain why a stored query matched (or would match) a given title.
@@ -1563,7 +1614,7 @@ impl Engine {
         let outcome =
             Arc::make_mut(&mut self.memtable).add_compiled(&ex, &self.dict, logical, version);
         if let Some(local) = outcome {
-            qs_write(&self.query_store).insert(logical, text.to_string());
+            self.query_store.insert(logical, text.to_string());
             Ok(InsertOutcome::Inserted(local))
         } else {
             self.rejected_class_d += 1;
@@ -1664,7 +1715,7 @@ impl Engine {
         }
 
         if count > 0 {
-            qs_write(&self.query_store).remove(&logical_id);
+            self.query_store.remove(logical_id);
         }
         Ok(count)
     }
@@ -2178,6 +2229,16 @@ impl Engine {
             index_bytes: self.main_bytes() + self.broad_bytes(),
             filter_bytes: self.filter_bytes(),
             stale_segments: self.stale_segment_count(),
+            dict_bytes: self.dict.heap_bytes(),
+            query_store_bytes: self.query_store.resident_bytes(),
+            logical_index_bytes: self
+                .segments
+                .iter()
+                .map(|s| s.logical_index_bytes())
+                .sum::<usize>()
+                + self.memtable.logical_index_bytes(),
+            alive_bytes: self.segments.iter().map(|s| s.alive_bytes()).sum::<usize>()
+                + self.memtable.alive_bytes(),
         }
     }
 
@@ -2311,11 +2372,8 @@ impl Engine {
         }
 
         // Past the commit point — the match data is durable. Publish source text.
-        {
-            let mut sources = qs_write(&self.query_store);
-            for (logical, text) in accepted {
-                sources.insert(logical, text);
-            }
+        for (logical, text) in accepted {
+            self.query_store.insert(logical, text);
         }
         self.save_query_sources();
 
@@ -2385,12 +2443,25 @@ impl Engine {
     }
 
     fn save_query_sources(&mut self) {
-        if let Some(ref dir) = self.config.data_dir {
-            let path = dir.join("sources.dat");
-            if let Err(e) = crate::storage::write_query_sources(&qs_read(&self.query_store), &path)
-            {
-                eprintln!("[percolator] query sources write failed: {e}");
-                self.persistence_healthy = false;
+        let Some(dir) = self.config.data_dir.clone() else {
+            return;
+        };
+        let path = dir.join("sources.dat");
+        if let Err(e) = self.query_store.write_to(&path) {
+            eprintln!("[percolator] query sources write failed: {e}");
+            self.persistence_healthy = false;
+            return;
+        }
+        // Lazy mode: re-map the freshly written file so reads hit it and the
+        // in-memory overlay resets (reclaiming the post-flush deltas). Resident
+        // mode keeps its in-RAM map as the source of truth (no re-map needed).
+        if self.query_store.is_lazy() {
+            match crate::storage::SourceStore::open(&path, false) {
+                Ok(s) => self.query_store = Arc::new(s),
+                Err(e) => {
+                    eprintln!("[percolator] query sources re-map failed: {e}");
+                    self.persistence_healthy = false;
+                }
             }
         }
     }
@@ -2428,7 +2499,7 @@ impl Engine {
                 .add_compiled(&ex, &self.dict, logical, version)
                 .is_some()
             {
-                qs_write(&self.query_store).insert(logical, text.to_string());
+                self.query_store.insert(logical, text.to_string());
             }
         }
     }

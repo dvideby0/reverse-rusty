@@ -7,6 +7,7 @@
 //! and a live-update micro-benchmark. Designed to push scale and fall back
 //! gracefully (it just uses whatever N you give it).
 
+use percolator::config::EngineConfig;
 use percolator::gen::{generate, GenConfig};
 use percolator::segment::{Engine, MatchScratch};
 use percolator::Normalizer;
@@ -77,7 +78,7 @@ fn main() {
     let broad_mb = eng.broad_bytes() as f64 / 1e6;
     let filter_mb = eng.filter_bytes() as f64 / 1e6;
     let rss_mb = read_rss_mb();
-    println!("================ MEMORY ===============");
+    println!("========== MEMORY (in-memory build) ==========");
     println!("exact SoA heap      : {exact_mb:.1} MB");
     println!("main index postings : {main_mb:.1} MB");
     println!("broad index postings: {broad_mb:.1} MB");
@@ -89,6 +90,16 @@ fn main() {
             rss_mb * 1e6 / eng.num_queries() as f64
         );
     }
+
+    // Resident-memory breakdown on a PERSISTENT (mmap) engine — the profile that
+    // matters at production scale. In the in-memory build above the exact SoA and
+    // candidate index are heap-resident, but in production they are mmap'd and
+    // paged from disk; what truly stays in RAM is the auxiliary structures below.
+    // (ADR-020 / Phase 0.) Two profiles so the combined Item 1 + Item 2 win is
+    // visible: the default (resident source text) vs retain_source=false (lazy
+    // on-disk sources) — where query_store and logical_index both drop to ~0.
+    report_persistent_memory(&data.queries, true, "retain_source=true (default)");
+    report_persistent_memory(&data.queries, false, "retain_source=false (lazy sources)");
 
     // ---- match throughput (warm), single thread ----
     let mut scratch = MatchScratch::new();
@@ -280,6 +291,114 @@ fn read_rss_mb() -> f64 {
         }
     }
     0.0
+}
+
+/// Build a PERSISTENT engine, drop it, and reopen so base segments load as
+/// `MmapSegment` (the exact SoA + candidate index become file-backed/paged, so
+/// they report 0 resident heap). Then print the per-component RESIDENT breakdown
+/// from `Engine::metrics()` — the structures that actually stay in RAM at scale —
+/// plus a 100M extrapolation of the corpus-scaling components. This is the
+/// authoritative Phase 0 measurement; the in-memory numbers above count heap that
+/// is paged from disk in production. (ADR-020.)
+fn report_persistent_memory(queries: &[(u64, String)], retain: bool, label: &str) {
+    let dir = std::env::temp_dir().join(format!("perc-bench-mem-{}-{retain}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        println!("\n(memory) could not create temp dir; skipping persistent breakdown");
+        return;
+    }
+    // Build persistent: build_from_queries durably writes a base segment +
+    // manifest + sources.dat to disk (ADR-017). Dropped before reopen so the
+    // reopened engine pages segment data from disk rather than holding it in RAM.
+    {
+        let norm = Normalizer::default_vocab().expect("built-in vocab");
+        let cfg = EngineConfig {
+            data_dir: Some(dir.clone()),
+            retain_source: retain,
+            ..EngineConfig::default()
+        };
+        let mut eng = Engine::with_config(norm, cfg);
+        eng.build_from_queries(queries);
+    }
+    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let cfg = EngineConfig {
+        data_dir: Some(dir.clone()),
+        retain_source: retain,
+        ..EngineConfig::default()
+    };
+    let eng = match Engine::open(norm, cfg) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("\n(memory) reopen failed: {e}; skipping persistent breakdown");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+    };
+
+    let m = eng.metrics();
+    let mb = |b: usize| b as f64 / 1e6;
+    let n = m.total_queries.max(1);
+    let perq = |b: usize| b as f64 / n as f64;
+    // Resident = the structures that stay in RAM even when segments are mmap'd.
+    // exact/index/filter are file-backed for mmap segments (report 0 heap).
+    let resident = m.dict_bytes + m.query_store_bytes + m.logical_index_bytes + m.alive_bytes;
+
+    println!(
+        "\n===== MEMORY (persistent / mmap, {label}; {} base seg, {} queries) =====",
+        m.base_segments, m.total_queries
+    );
+    println!(
+        "exact SoA  (file-backed): {:.1} MB   [paged; 0 = mmap]",
+        mb(m.exact_bytes)
+    );
+    println!(
+        "index post (file-backed): {:.1} MB   [paged; 0 = mmap]",
+        mb(m.index_bytes)
+    );
+    println!("anchor filters          : {:.1} MB", mb(m.filter_bytes));
+    println!("-- RESIDENT (in RAM even when segments are mmap'd) --");
+    println!(
+        "dict                    : {:.1} MB   ({:.1} B/query)  [bounded: saturates with vocab]",
+        mb(m.dict_bytes),
+        perq(m.dict_bytes)
+    );
+    println!(
+        "query_store (sources)   : {:.1} MB   ({:.1} B/query)",
+        mb(m.query_store_bytes),
+        perq(m.query_store_bytes)
+    );
+    println!(
+        "logical_index           : {:.1} MB   ({:.1} B/query)",
+        mb(m.logical_index_bytes),
+        perq(m.logical_index_bytes)
+    );
+    println!(
+        "alive overlay           : {:.1} MB   ({:.1} B/query)",
+        mb(m.alive_bytes),
+        perq(m.alive_bytes)
+    );
+    println!(
+        "RESIDENT total          : {:.1} MB   ({:.1} B/query)",
+        mb(resident),
+        perq(resident)
+    );
+    let rss = read_rss_mb();
+    if rss > 0.0 {
+        println!(
+            "process VmRSS           : {rss:.1} MB   (whole process: also holds the corpus + the in-memory throughput engine — not a clean attribution)"
+        );
+    }
+    // Extrapolate the corpus-scaling resident components to 100M (dict is bounded
+    // by vocabulary, so it is held ~constant, not multiplied).
+    let scaling = m.query_store_bytes + m.logical_index_bytes + m.alive_bytes;
+    println!(
+        "--- extrapolation to 100M queries ---\nscaling resident @100M  : ~{:.1} GB  ({:.0} B/query) + ~{:.0} MB dict (bounded)",
+        perq(scaling) * 100e6 / 1e9,
+        perq(scaling),
+        mb(m.dict_bytes)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn arg_usize(a: &[String], i: usize, d: usize) -> usize {

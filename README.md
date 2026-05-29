@@ -439,6 +439,7 @@ Options:
 | `--max-query-length` | 10000 | Maximum query string length in bytes |
 | `--max-query-clauses` | 256 | Maximum clauses per query |
 | `--max-anyof-group-size` | 64 | Maximum members in an any-of group |
+| `--retain-source` | true | Keep query source text resident; set `false` to store it on disk and fetch `_source`/explain lazily (large memory saving at scale) |
 
 Example with persistence, vocabulary, and pre-loaded queries:
 
