@@ -94,7 +94,11 @@ impl SegmentFilter {
             set_probes(&mut data, block_start, key);
         }
 
-        SegmentFilter { data, num_blocks, mask }
+        SegmentFilter {
+            data,
+            num_blocks,
+            mask,
+        }
     }
 
     /// Check if a key is *possibly* present. Returns `false` only when the key
@@ -117,9 +121,15 @@ impl SegmentFilter {
     }
 
     // ---- accessors for serialization (storage.rs) ----
-    pub fn num_blocks_raw(&self) -> usize { self.num_blocks }
-    pub fn mask_raw(&self) -> u64 { self.mask }
-    pub fn data_raw(&self) -> &[u64] { &self.data }
+    pub fn num_blocks_raw(&self) -> usize {
+        self.num_blocks
+    }
+    pub fn mask_raw(&self) -> u64 {
+        self.mask
+    }
+    pub fn data_raw(&self) -> &[u64] {
+        &self.data
+    }
 }
 
 /// Check bloom filter membership on raw slices (used by MmapSegment).
@@ -154,13 +164,13 @@ fn block_offset(key: u64, mask: u64) -> usize {
 #[inline]
 fn set_probes(data: &mut [u64], block_start: usize, key: u64) {
     let lo = key as u32;
-    let h1 = lo & 0x1FF;           // bits 0..8  → 9 bits → range [0, 511]
-    let h2 = (lo >> 9) | 1;        // bits 9..   → odd number (ensures full period mod 512)
+    let h1 = lo & 0x1FF; // bits 0..8  → 9 bits → range [0, 511]
+    let h2 = (lo >> 9) | 1; // bits 9..   → odd number (ensures full period mod 512)
 
     for i in 0..NUM_PROBES {
         let bit_pos = (h1.wrapping_add(i.wrapping_mul(h2))) & 0x1FF;
-        let word_idx = (bit_pos >> 6) as usize;    // which of the 8 words
-        let bit_idx = bit_pos & 63;                 // which bit in that word
+        let word_idx = (bit_pos >> 6) as usize; // which of the 8 words
+        let bit_idx = bit_pos & 63; // which bit in that word
         data[block_start + word_idx] |= 1u64 << bit_idx;
     }
 }
@@ -201,7 +211,7 @@ mod tests {
         let keys: Vec<u64> = (0..10_000).map(|i| crate::util::sig_key(&[i])).collect();
         let f = SegmentFilter::build(&keys);
         for &k in &keys {
-            assert!(f.may_contain(k), "false negative for key {}", k);
+            assert!(f.may_contain(k), "false negative for key {k}");
         }
     }
 
@@ -211,7 +221,7 @@ mod tests {
         let keys: Vec<u64> = (0..200_000).map(|i| crate::util::sig_key(&[i])).collect();
         let f = SegmentFilter::build(&keys);
         for &k in &keys {
-            assert!(f.may_contain(k), "false negative for key {}", k);
+            assert!(f.may_contain(k), "false negative for key {k}");
         }
     }
 
@@ -233,15 +243,14 @@ mod tests {
         let fpr = false_positives as f64 / test_count as f64;
         assert!(
             fpr < 0.05,
-            "FPR too high: {:.4} ({} / {})",
-            fpr,
-            false_positives,
-            test_count
+            "FPR too high: {fpr:.4} ({false_positives} / {test_count})"
         );
         // Also print for visibility
         eprintln!(
             "cache-line blocked bloom FPR: {:.4}% ({}/{})",
-            fpr * 100.0, false_positives, test_count
+            fpr * 100.0,
+            false_positives,
+            test_count
         );
     }
 
@@ -252,11 +261,13 @@ mod tests {
         let f = SegmentFilter::build(&keys);
         let bytes = f.heap_bytes();
         // At ~1.25 bytes/key: 100k → ~125 KB. Power-of-2 rounding may double.
-        assert!(bytes <= 512_000, "filter too large: {} bytes", bytes);
-        assert!(bytes >= 64_000, "filter too small: {} bytes", bytes);
+        assert!(bytes <= 512_000, "filter too large: {bytes} bytes");
+        assert!(bytes >= 64_000, "filter too small: {bytes} bytes");
         eprintln!(
             "cache-line blocked bloom: {} keys → {} bytes ({:.1} bytes/key)",
-            100_000, bytes, bytes as f64 / 100_000.0
+            100_000,
+            bytes,
+            bytes as f64 / 100_000.0
         );
     }
 
@@ -277,7 +288,11 @@ mod tests {
     #[test]
     fn block_size_is_cache_line() {
         // Verify each block is exactly 64 bytes (512 bits).
-        assert_eq!(WORDS_PER_BLOCK * 8, 64, "block size must be 64 bytes (one cache line)");
+        assert_eq!(
+            WORDS_PER_BLOCK * 8,
+            64,
+            "block size must be 64 bytes (one cache line)"
+        );
     }
 
     #[test]
@@ -289,7 +304,10 @@ mod tests {
             let h2 = (lo >> 9) | 1;
             for i in 0..NUM_PROBES {
                 let bit_pos = (h1.wrapping_add(i.wrapping_mul(h2))) & 0x1FF;
-                assert!(bit_pos < 512, "probe bit_pos {} out of range for key {}", bit_pos, key);
+                assert!(
+                    bit_pos < 512,
+                    "probe bit_pos {bit_pos} out of range for key {key}"
+                );
             }
         }
     }

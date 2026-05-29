@@ -3,6 +3,10 @@ name = "percolator"
 version = "0.1.0"
 edition = "2021"
 description = "Domain-aware reverse product-query matcher. daachorse for multiword aliases, roaring for large postings, rayon for parallel matching."
+# Single-node proof of concept — not published to crates.io. This lets
+# `cargo deny` skip the (intentionally) unlicensed local crate via
+# `licenses.private.ignore`.
+publish = false
 
 [dependencies]
 daachorse = "3"
@@ -24,7 +28,10 @@ uuid = { version = "1", features = ["v4"] }
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-prometheus = "0.13"
+# default-features disabled to drop the `protobuf` feature (pulls vulnerable
+# protobuf 2.x, RUSTSEC-2024-0437). We only emit the text exposition format
+# (TextEncoder), which is in the core and needs neither protobuf nor procfs.
+prometheus = { version = "0.13", default-features = false }
 
 [[bin]]
 name = "bench"
@@ -55,3 +62,73 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# ---- Lint policy (see check.sh, which promotes these to errors with -D warnings) ----
+#
+# Strictness: clippy::pedantic enforced crate-wide, plus the restriction lints
+# below. The unwrap/expect/panic restriction lints are NOT here — they are
+# scoped to the library in src/lib.rs, because binaries and tests may legitimately
+# unwrap/panic. The allows below are by-design exceptions, each justified inline.
+
+[lints.rust]
+# Future-proofing: if an `unsafe fn` is ever added, its unsafe operations must be
+# wrapped in an explicit `unsafe {}` block rather than riding the fn signature.
+unsafe_op_in_unsafe_fn = "warn"
+
+[lints.clippy]
+# Group lint: priority -1 so the individual `allow`s below override it.
+pedantic = { level = "warn", priority = -1 }
+
+# Restriction lint we want everywhere: every `unsafe` block must carry a
+# `// SAFETY:` justification immediately above it.
+undocumented_unsafe_blocks = "warn"
+
+# --- Justified allows (by-design for this codebase, not defects) ---
+
+# The match hot path is deliberately integer-only: `as` casts on segment-local
+# u32 IDs, feature ids, masks, and counts, all bounded by construction. Switching
+# to fallible `try_into` would add branches and error paths the design explicitly
+# forbids (CLAUDE.md: "no allocation/branchy work on the match hot path").
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+# mmap section readers reinterpret `*const u8` as more-aligned element pointers;
+# alignment is guaranteed by the writer's 8-byte section padding and proven in the
+# SAFETY docs in src/storage.rs.
+cast_ptr_alignment = "allow"
+
+# `#[must_use]` on every getter/accessor is noise for an internal PoC (~150 sites)
+# and does not catch real bugs here.
+must_use_candidate = "allow"
+
+# Errors are typed (ParseError / NormalizerError / WriteError / io::Error) and the
+# surface is internal; per-fn `# Errors` / `# Panics` doc sections add churn
+# without improving safety.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+# `write!`-to-String would force either `.unwrap()` or `let _ =` on an infallible
+# write, colliding with the library's no-unwrap / no-silent-discard rules.
+format_push_string = "allow"
+
+# A few Debug impls intentionally omit raw-pointer / bulky internal fields that are
+# not meaningful to print (e.g. MmapSegment's mmap base pointers).
+missing_fields_in_debug = "allow"
+
+# Refactoring long functions is out of scope for the hardening pass and risks
+# behavior changes in the match/compaction paths.
+too_many_lines = "allow"
+
+# Internal design/docs reference many product and identifier names; backtick
+# pedantry on doc comments adds churn without changing the public API.
+doc_markdown = "allow"
+
+# The matcher deliberately uses parallel names for paired concepts (e.g.
+# `req_mask`/`forb_mask`, `main_sigs`/`broad_sigs`, `lo`/`hi`). These are clearer
+# than artificially divergent names, so the "names too similar" heuristic is noise.
+similar_names = "allow"
+
+# Builder methods (e.g. NormalizerBuilder) return `Self` by design; `#[must_use]`
+# on each is the same noise we already reject via `must_use_candidate` above.
+return_self_not_must_use = "allow"

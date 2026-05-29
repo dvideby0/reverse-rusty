@@ -123,7 +123,10 @@ fn parse_csv(lines: &[String]) -> LoadResult {
                 // It's data — parse it.
                 match parse_csv_line(trimmed) {
                     Ok(pair) => queries.push(pair),
-                    Err(msg) => errors.push(LoadError { line: 1, message: msg }),
+                    Err(msg) => errors.push(LoadError {
+                        line: 1,
+                        message: msg,
+                    }),
                 }
             }
             // else: it's a header row, skip it
@@ -138,7 +141,10 @@ fn parse_csv(lines: &[String]) -> LoadResult {
         let line_num = idx + 1; // 1-indexed
         match parse_csv_line(trimmed) {
             Ok(pair) => queries.push(pair),
-            Err(msg) => errors.push(LoadError { line: line_num, message: msg }),
+            Err(msg) => errors.push(LoadError {
+                line: line_num,
+                message: msg,
+            }),
         }
     }
 
@@ -159,9 +165,13 @@ fn csv_first_field(line: &str) -> &str {
 /// Parse one CSV line into (id, query).
 /// Supports: `123,pokemon base set` and `123,"pokemon, base set"` (quoted commas).
 fn parse_csv_line(line: &str) -> Result<(u64, String), String> {
-    let comma = line.find(',').ok_or_else(|| "no comma separator found".to_string())?;
+    let comma = line
+        .find(',')
+        .ok_or_else(|| "no comma separator found".to_string())?;
     let id_str = line[..comma].trim();
-    let id: u64 = id_str.parse().map_err(|e| format!("invalid id '{}': {}", id_str, e))?;
+    let id: u64 = id_str
+        .parse()
+        .map_err(|e| format!("invalid id '{id_str}': {e}"))?;
 
     let rest = line[comma + 1..].trim();
     let query = if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
@@ -194,7 +204,10 @@ fn parse_jsonl(lines: &[String]) -> LoadResult {
         let line_num = idx + 1;
         match parse_jsonl_line(trimmed) {
             Ok(pair) => queries.push(pair),
-            Err(msg) => errors.push(LoadError { line: line_num, message: msg }),
+            Err(msg) => errors.push(LoadError {
+                line: line_num,
+                message: msg,
+            }),
         }
     }
 
@@ -203,7 +216,7 @@ fn parse_jsonl(lines: &[String]) -> LoadResult {
 
 fn parse_jsonl_line(line: &str) -> Result<(u64, String), String> {
     let val: serde_json::Value =
-        serde_json::from_str(line).map_err(|e| format!("invalid JSON: {}", e))?;
+        serde_json::from_str(line).map_err(|e| format!("invalid JSON: {e}"))?;
 
     let obj = val.as_object().ok_or("expected JSON object")?;
 

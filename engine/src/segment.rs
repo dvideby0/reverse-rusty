@@ -43,12 +43,16 @@ type QueryStore = RwLock<crate::util::FastMap<u64, String>>;
 /// a string cache, not an invariant-bearing structure).
 #[inline]
 fn qs_read(store: &QueryStore) -> RwLockReadGuard<'_, crate::util::FastMap<u64, String>> {
-    store.read().unwrap_or_else(|e| e.into_inner())
+    store
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[inline]
 fn qs_write(store: &QueryStore) -> RwLockWriteGuard<'_, crate::util::FastMap<u64, String>> {
-    store.write().unwrap_or_else(|e| e.into_inner())
+    store
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Materialize an `Arc<BaseSegment>` into an owned in-memory `Segment` (for
@@ -56,7 +60,9 @@ fn qs_write(store: &QueryStore) -> RwLockWriteGuard<'_, crate::util::FastMap<u64
 /// a published snapshot still references the segment — clones it out, leaving
 /// that snapshot's view intact.
 fn arc_into_memory(seg: Arc<BaseSegment>) -> Segment {
-    Arc::try_unwrap(seg).unwrap_or_else(|a| (*a).clone()).into_memory()
+    Arc::try_unwrap(seg)
+        .unwrap_or_else(|a| (*a).clone())
+        .into_memory()
 }
 
 #[derive(Default, Clone, Copy, Debug)]
@@ -66,8 +72,8 @@ pub struct MatchStats {
     pub main_candidates: u32,
     pub broad_candidates: u32,
     pub matches: u32,
-    pub probes_attempted: u32,  // total signature probes (before filter)
-    pub probes_skipped: u32,    // probes skipped by anchor filter (definitely-not-present)
+    pub probes_attempted: u32, // total signature probes (before filter)
+    pub probes_skipped: u32,   // probes skipped by anchor filter (definitely-not-present)
 }
 
 /// One immutable (or, for the memtable, mutable) slice of the index. Owns the
@@ -175,7 +181,9 @@ impl Segment {
     }
 
     pub fn locals_for_logical(&self, logical_id: u64) -> &[u32] {
-        self.logical_index.get(&logical_id).map_or(&[], |v| v.as_slice())
+        self.logical_index
+            .get(&logical_id)
+            .map_or(&[], |v| v.as_slice())
     }
 
     pub fn class_counts(&self, c: &mut [u64; 4]) {
@@ -220,7 +228,9 @@ impl Segment {
                     continue;
                 }
             }
-            self.probe(key, &self.main, epoch, tmask, feats, seen, out, stats, false);
+            self.probe(
+                key, &self.main, epoch, tmask, feats, seen, out, stats, false,
+            );
         }
         // arity-2 signatures: {hot feature} x {every other feature}
         for &h in feats {
@@ -237,15 +247,7 @@ impl Segment {
                             }
                         }
                         self.probe(
-                            key,
-                            &self.main,
-                            epoch,
-                            tmask,
-                            feats,
-                            seen,
-                            out,
-                            stats,
-                            false,
+                            key, &self.main, epoch, tmask, feats, seen, out, stats, false,
                         );
                     }
                 }
@@ -262,7 +264,17 @@ impl Segment {
                         continue;
                     }
                 }
-                self.probe(key, &self.broad, epoch, tmask, feats, seen, out, stats, true);
+                self.probe(
+                    key,
+                    &self.broad,
+                    epoch,
+                    tmask,
+                    feats,
+                    seen,
+                    out,
+                    stats,
+                    true,
+                );
             }
         }
     }
@@ -388,25 +400,54 @@ impl Segment {
         // by the same segment-local id (here, in `compact_from`, and in `class_counts`).
         // A length mismatch would silently drop entries from the reverse index below,
         // leaving alive queries that can never be deleted — fail loudly instead.
-        assert_eq!(alive.len(), exact.len(), "from_parts: alive/exact length mismatch");
-        assert_eq!(class.len(), exact.len(), "from_parts: class/exact length mismatch");
+        assert_eq!(
+            alive.len(),
+            exact.len(),
+            "from_parts: alive/exact length mismatch"
+        );
+        assert_eq!(
+            class.len(),
+            exact.len(),
+            "from_parts: class/exact length mismatch"
+        );
         let alive_counter = alive.iter().filter(|&&a| a).count();
         let mut logical_index: crate::util::FastMap<u64, Vec<u32>> = crate::util::fast_map();
         for (i, &is_alive) in alive.iter().enumerate() {
             if is_alive {
-                logical_index.entry(exact.logical(i as u32)).or_default().push(i as u32);
+                logical_index
+                    .entry(exact.logical(i as u32))
+                    .or_default()
+                    .push(i as u32);
             }
         }
-        let mut seg = Segment { main, broad, exact, class, alive, alive_counter, filter: None, vocab_epoch: 0, logical_index };
+        let mut seg = Segment {
+            main,
+            broad,
+            exact,
+            class,
+            alive,
+            alive_counter,
+            filter: None,
+            vocab_epoch: 0,
+            logical_index,
+        };
         seg.build_filter();
         seg
     }
 
     // ---- accessors for serialization (storage.rs) ----
-    pub fn exact_store(&self) -> &ExactStore { &self.exact }
-    pub fn classes(&self) -> &[CostClass] { &self.class }
-    pub fn alive_flags(&self) -> &[bool] { &self.alive }
-    pub fn filter_ref(&self) -> Option<&SegmentFilter> { self.filter.as_ref() }
+    pub fn exact_store(&self) -> &ExactStore {
+        &self.exact
+    }
+    pub fn classes(&self) -> &[CostClass] {
+        &self.class
+    }
+    pub fn alive_flags(&self) -> &[bool] {
+        &self.alive
+    }
+    pub fn filter_ref(&self) -> Option<&SegmentFilter> {
+        self.filter.as_ref()
+    }
 
     // ---- memory accounting for the perf report ----
     pub fn exact_bytes(&self) -> usize {
@@ -419,7 +460,9 @@ impl Segment {
         self.broad.heap_bytes()
     }
     pub fn filter_bytes(&self) -> usize {
-        self.filter.as_ref().map_or(0, |f| f.heap_bytes())
+        self.filter
+            .as_ref()
+            .map_or(0, super::filter::SegmentFilter::heap_bytes)
     }
 }
 
@@ -460,9 +503,14 @@ impl std::fmt::Debug for BaseSegment {
 
 impl BaseSegment {
     pub fn len(&self) -> usize {
-        match self { BaseSegment::Memory(s) => s.len(), BaseSegment::Mmap(s) => s.len() }
+        match self {
+            BaseSegment::Memory(s) => s.len(),
+            BaseSegment::Mmap(s) => s.len(),
+        }
     }
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     pub fn holes_ratio(&self) -> f64 {
         match self {
             BaseSegment::Memory(s) => s.holes_ratio(),
@@ -513,21 +561,37 @@ impl BaseSegment {
         stats: &mut MatchStats,
     ) {
         match self {
-            BaseSegment::Memory(s) => s.match_into(feats, tmask, dict, epoch, seen, out, include_broad, stats),
-            BaseSegment::Mmap(s) => s.match_into(feats, tmask, dict, epoch, seen, out, include_broad, stats),
+            BaseSegment::Memory(s) => {
+                s.match_into(feats, tmask, dict, epoch, seen, out, include_broad, stats);
+            }
+            BaseSegment::Mmap(s) => {
+                s.match_into(feats, tmask, dict, epoch, seen, out, include_broad, stats);
+            }
         }
     }
     pub fn exact_bytes(&self) -> usize {
-        match self { BaseSegment::Memory(s) => s.exact_bytes(), BaseSegment::Mmap(_) => 0 }
+        match self {
+            BaseSegment::Memory(s) => s.exact_bytes(),
+            BaseSegment::Mmap(_) => 0,
+        }
     }
     pub fn main_bytes(&self) -> usize {
-        match self { BaseSegment::Memory(s) => s.main_bytes(), BaseSegment::Mmap(_) => 0 }
+        match self {
+            BaseSegment::Memory(s) => s.main_bytes(),
+            BaseSegment::Mmap(_) => 0,
+        }
     }
     pub fn broad_bytes(&self) -> usize {
-        match self { BaseSegment::Memory(s) => s.broad_bytes(), BaseSegment::Mmap(_) => 0 }
+        match self {
+            BaseSegment::Memory(s) => s.broad_bytes(),
+            BaseSegment::Mmap(_) => 0,
+        }
     }
     pub fn filter_bytes(&self) -> usize {
-        match self { BaseSegment::Memory(s) => s.filter_bytes(), BaseSegment::Mmap(_) => 0 }
+        match self {
+            BaseSegment::Memory(s) => s.filter_bytes(),
+            BaseSegment::Mmap(_) => 0,
+        }
     }
 
     /// Convert to an owned in-memory Segment (needed by compact_from).
@@ -664,8 +728,11 @@ impl EngineSnapshot {
 
     pub fn stale_segment_count(&self) -> usize {
         let current = self.vocab_epoch;
-        self.segments.iter().filter(|s| s.vocab_epoch() < current).count()
-            + if self.memtable.vocab_epoch < current && !self.memtable.is_empty() { 1 } else { 0 }
+        self.segments
+            .iter()
+            .filter(|s| s.vocab_epoch() < current)
+            .count()
+            + usize::from(self.memtable.vocab_epoch < current && !self.memtable.is_empty())
     }
 
     pub fn has_stale_segments(&self) -> bool {
@@ -685,8 +752,11 @@ impl EngineSnapshot {
         let mut lc = String::new();
         let cq = crate::compile::compile_one_readonly(
             &source, logical_id, &self.norm, &self.dict, &mut lc,
-        ).ok()?;
-        Some(crate::explain::explain_match_structured(&cq, title, &self.norm, &self.dict))
+        )
+        .ok()?;
+        Some(crate::explain::explain_match_structured(
+            &cq, title, &self.norm, &self.dict,
+        ))
     }
 
     pub fn class_counts(&self) -> [u64; 4] {
@@ -716,9 +786,18 @@ impl EngineSnapshot {
             dict_features: self.dict.len(),
             exact_bytes: self.segments.iter().map(|s| s.exact_bytes()).sum::<usize>()
                 + self.memtable.exact_bytes(),
-            index_bytes: self.segments.iter().map(|s| s.main_bytes() + s.broad_bytes()).sum::<usize>()
-                + self.memtable.main_bytes() + self.memtable.broad_bytes(),
-            filter_bytes: self.segments.iter().map(|s| s.filter_bytes()).sum::<usize>(),
+            index_bytes: self
+                .segments
+                .iter()
+                .map(|s| s.main_bytes() + s.broad_bytes())
+                .sum::<usize>()
+                + self.memtable.main_bytes()
+                + self.memtable.broad_bytes(),
+            filter_bytes: self
+                .segments
+                .iter()
+                .map(|s| s.filter_bytes())
+                .sum::<usize>(),
             stale_segments: self.stale_segment_count(),
         }
     }
@@ -743,7 +822,7 @@ impl EngineSnapshot {
 
         s.epoch = s.epoch.wrapping_add(1);
         if s.epoch == 0 {
-            for buf in s.seen.iter_mut() {
+            for buf in &mut s.seen {
                 for v in buf.iter_mut() {
                     *v = 0;
                 }
@@ -769,13 +848,25 @@ impl EngineSnapshot {
 
         for (i, base) in self.segments.iter().enumerate() {
             base.match_into(
-                &feats, tmask, &self.dict, epoch,
-                &mut s.seen[i], out, include_broad, &mut stats,
+                &feats,
+                tmask,
+                &self.dict,
+                epoch,
+                &mut s.seen[i],
+                out,
+                include_broad,
+                &mut stats,
             );
         }
         self.memtable.match_into(
-            &feats, tmask, &self.dict, epoch,
-            &mut s.seen[n_base], out, include_broad, &mut stats,
+            &feats,
+            tmask,
+            &self.dict,
+            epoch,
+            &mut s.seen[n_base],
+            out,
+            include_broad,
+            &mut stats,
         );
 
         out.sort_unstable();
@@ -959,11 +1050,24 @@ impl Engine {
     /// Create an engine with explicit configuration. If `config.data_dir` is set,
     /// initializes the data directory and WAL.
     pub fn with_config(norm: Normalizer, config: EngineConfig) -> Self {
+        let mut wal_healthy = true;
         let wal = if let Some(ref dir) = config.data_dir {
-            std::fs::create_dir_all(dir).ok();
-            let seg_dir = dir.join("segments");
-            std::fs::create_dir_all(&seg_dir).ok();
-            Wal::open(&dir.join("wal.log"), config.wal_sync_on_write).ok()
+            match Self::init_data_dir(dir, config.wal_sync_on_write) {
+                Ok(wal) => Some(wal),
+                Err(e) => {
+                    // A configured data_dir means durability was requested. If we
+                    // cannot create it or open the WAL, do NOT silently run without
+                    // durability: mark the engine unhealthy (surfaced via /_health)
+                    // and warn loudly. The previous `.ok()` swallowed this entirely.
+                    wal_healthy = false;
+                    eprintln!(
+                        "[percolator] WARNING: failed to initialize data dir / WAL at \
+                         {}: {e} — running WITHOUT durability (writes will not survive restart)",
+                        dir.display()
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -979,12 +1083,21 @@ impl Engine {
             observer: None,
             wal,
             next_seg_id: 1,
-            wal_healthy: true,
-            persistence_healthy: true,
+            wal_healthy,
+            persistence_healthy: wal_healthy,
             skipped_segments: 0,
             query_store: Arc::new(RwLock::new(crate::util::fast_map())),
             vocab_epoch: 0,
         }
+    }
+
+    /// Create the data directory (and its `segments` subdirectory) and open the
+    /// WAL. Returns an error if any filesystem operation fails so callers can
+    /// surface loss of durability instead of silently running without a WAL.
+    fn init_data_dir(dir: &std::path::Path, wal_sync_on_write: bool) -> std::io::Result<Wal> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(dir.join("segments"))?;
+        Wal::open(&dir.join("wal.log"), wal_sync_on_write)
     }
 
     /// Create an engine from a [`Vocab`](crate::vocab::Vocab), which is
@@ -1021,8 +1134,11 @@ impl Engine {
     /// Number of base segments compiled against an older vocab epoch.
     pub fn stale_segment_count(&self) -> usize {
         let current = self.vocab_epoch;
-        self.segments.iter().filter(|s| s.vocab_epoch() < current).count()
-            + if self.memtable.vocab_epoch < current && !self.memtable.is_empty() { 1 } else { 0 }
+        self.segments
+            .iter()
+            .filter(|s| s.vocab_epoch() < current)
+            .count()
+            + usize::from(self.memtable.vocab_epoch < current && !self.memtable.is_empty())
     }
 
     /// True if any segment was compiled with a different normalizer than the
@@ -1042,7 +1158,10 @@ impl Engine {
     /// engine was originally built (feature spaces must align).
     pub fn open(norm: Normalizer, config: EngineConfig) -> std::io::Result<Self> {
         let dir = config.data_dir.as_ref().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "data_dir required for open")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "data_dir required for open",
+            )
         })?;
 
         let manifest_path = dir.join("manifest.bin");
@@ -1063,7 +1182,10 @@ impl Engine {
             match MmapSegment::open(&seg_path) {
                 Ok(mmap_seg) => segments.push(Arc::new(BaseSegment::Mmap(mmap_seg))),
                 Err(e) => {
-                    eprintln!("[percolator] skipping corrupt segment {:?}: {}", seg_path, e);
+                    eprintln!(
+                        "[percolator] skipping corrupt segment {}: {e}",
+                        seg_path.display()
+                    );
                     skipped_segments += 1;
                 }
             }
@@ -1075,8 +1197,20 @@ impl Engine {
 
         // Load persisted query sources (if available)
         let sources_path = dir.join("sources.dat");
-        let query_store = crate::storage::load_query_sources(&sources_path)
-            .unwrap_or_default();
+        let query_store = match crate::storage::load_query_sources(&sources_path) {
+            Ok(qs) => qs,
+            Err(e) => {
+                // load_query_sources returns Ok(empty) when the file is absent, so
+                // an error here means a corrupt sources.dat — warn rather than
+                // silently dropping all query _source data.
+                eprintln!(
+                    "[percolator] WARNING: failed to load query sources from \
+                     {}: {e} — _source will be unavailable for recovered queries",
+                    sources_path.display()
+                );
+                crate::util::fast_map()
+            }
+        };
 
         let mut engine = Engine {
             config,
@@ -1107,11 +1241,18 @@ impl Engine {
         }
         for entry in recovery.entries {
             match entry {
-                WalEntry::Insert { logical, version, text, .. } => {
+                WalEntry::Insert {
+                    logical,
+                    version,
+                    text,
+                    ..
+                } => {
                     // Replay without re-writing to WAL
                     engine.replay_insert(&text, logical, version);
                 }
-                WalEntry::Tombstone { seg_idx, local_id, .. } => {
+                WalEntry::Tombstone {
+                    seg_idx, local_id, ..
+                } => {
                     engine.replay_tombstone(seg_idx, local_id);
                 }
                 WalEntry::FlushCheckpoint { .. } => {
@@ -1140,10 +1281,31 @@ impl Engine {
     }
 
     /// Emit an event to the observer (if set). No-op when no observer is registered.
+    // The event is built at the call site solely to be emitted, then dropped; taking
+    // it by value (vs `&`) costs nothing and keeps every call site free of `&` noise.
+    #[allow(clippy::needless_pass_by_value)]
     #[inline]
     fn emit(&self, event: crate::events::EngineEvent) {
         if let Some(ref cb) = self.observer {
             cb(&event);
+        }
+    }
+
+    /// Best-effort removal of a segment file on a cleanup/rollback path.
+    ///
+    /// The caller's primary result already reflects the operation outcome, so a
+    /// removal failure must not change control flow. But rather than silently
+    /// discarding the error (which could leak orphan files unnoticed), we surface
+    /// it through the observer as [`EngineEvent::SegmentCleanupFailed`]. A missing
+    /// file is the expected, benign case and is not reported.
+    fn best_effort_remove_segment(&self, path: &std::path::Path) {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => self.emit(crate::events::EngineEvent::SegmentCleanupFailed {
+                path: path.to_path_buf(),
+                error: e.to_string(),
+            }),
         }
     }
 
@@ -1205,8 +1367,11 @@ impl Engine {
         let mut lc = String::new();
         let cq = crate::compile::compile_one_readonly(
             &source, logical_id, &self.norm, &self.dict, &mut lc,
-        ).ok()?;
-        Some(crate::explain::explain_match_structured(&cq, title, &self.norm, &self.dict))
+        )
+        .ok()?;
+        Some(crate::explain::explain_match_structured(
+            &cq, title, &self.norm, &self.dict,
+        ))
     }
 
     pub fn num_queries(&self) -> usize {
@@ -1232,13 +1397,13 @@ impl Engine {
     /// First base segment's main index (kept for bench/back-compat callers).
     /// Falls back to the memtable if no base segments exist.
     pub fn main_index(&self) -> &CandidateIndex {
-        match self.segments.first().map(|s| s.as_ref()) {
+        match self.segments.first().map(std::convert::AsRef::as_ref) {
             Some(BaseSegment::Memory(s)) => s.main_index(),
             _ => self.memtable.main_index(),
         }
     }
     pub fn broad_index(&self) -> &CandidateIndex {
-        match self.segments.first().map(|s| s.as_ref()) {
+        match self.segments.first().map(std::convert::AsRef::as_ref) {
             Some(BaseSegment::Memory(s)) => s.broad_index(),
             _ => self.memtable.broad_index(),
         }
@@ -1271,7 +1436,9 @@ impl Engine {
         match self.try_build_from_queries(queries) {
             Ok(report) => report,
             Err(e) => {
-                eprintln!("[percolator] build_from_queries persistence failed, batch rolled back: {e}");
+                eprintln!(
+                    "[percolator] build_from_queries persistence failed, batch rolled back: {e}"
+                );
                 self.persistence_healthy = false;
                 IngestReport::default()
             }
@@ -1298,15 +1465,12 @@ impl Engine {
         {
             let dict = Arc::make_mut(&mut self.dict);
             for (logical, text) in queries {
-                match crate::dsl::parse(text) {
-                    Ok(ast) => {
-                        let ex = extract(&ast, &self.norm, dict, &mut lc);
-                        extracted.push((*logical, ex, text));
-                    }
-                    Err(_) => {
-                        self.rejected_parse += 1;
-                        report.rejected_parse += 1;
-                    }
+                if let Ok(ast) = crate::dsl::parse(text) {
+                    let ex = extract(&ast, &self.norm, dict, &mut lc);
+                    extracted.push((*logical, ex, text));
+                } else {
+                    self.rejected_parse += 1;
+                    report.rejected_parse += 1;
                 }
             }
             // finalize the 64-bit common mask now that all frequencies are known
@@ -1396,16 +1560,14 @@ impl Engine {
             let dict = Arc::make_mut(&mut self.dict);
             extract(&ast, &self.norm, dict, &mut lc)
         };
-        let outcome = Arc::make_mut(&mut self.memtable).add_compiled(&ex, &self.dict, logical, version);
-        match outcome {
-            Some(local) => {
-                qs_write(&self.query_store).insert(logical, text.to_string());
-                Ok(InsertOutcome::Inserted(local))
-            }
-            None => {
-                self.rejected_class_d += 1;
-                Ok(InsertOutcome::RejectedClassD)
-            }
+        let outcome =
+            Arc::make_mut(&mut self.memtable).add_compiled(&ex, &self.dict, logical, version);
+        if let Some(local) = outcome {
+            qs_write(&self.query_store).insert(logical, text.to_string());
+            Ok(InsertOutcome::Inserted(local))
+        } else {
+            self.rejected_class_d += 1;
+            Ok(InsertOutcome::RejectedClassD)
         }
     }
 
@@ -1459,8 +1621,10 @@ impl Engine {
         let mut count = 0usize;
 
         for (seg_idx, seg) in self.segments.iter_mut().enumerate() {
-            let locals: Vec<u32> = seg.locals_for_logical(logical_id)
-                .iter().copied()
+            let locals: Vec<u32> = seg
+                .locals_for_logical(logical_id)
+                .iter()
+                .copied()
                 .filter(|&local| seg.is_alive(local))
                 .collect();
             for local in locals {
@@ -1475,9 +1639,18 @@ impl Engine {
             }
         }
 
-        let mem_locals: Vec<u32> = self.memtable.locals_for_logical(logical_id)
-            .iter().copied()
-            .filter(|&local| self.memtable.alive.get(local as usize).copied().unwrap_or(false))
+        let mem_locals: Vec<u32> = self
+            .memtable
+            .locals_for_logical(logical_id)
+            .iter()
+            .copied()
+            .filter(|&local| {
+                self.memtable
+                    .alive
+                    .get(local as usize)
+                    .copied()
+                    .unwrap_or(false)
+            })
             .collect();
         for local in mem_locals {
             if let Some(ref mut wal) = self.wal {
@@ -1555,11 +1728,9 @@ impl Engine {
     /// reported, not silently degraded to an in-memory segment. All-or-nothing:
     /// on failure nothing is committed. Parse / cost-class-D rejections are
     /// non-fatal and counted in the returned [`IngestReport`].
-    pub fn try_bulk_ingest(
-        &mut self,
-        queries: &[(u64, String)],
-    ) -> std::io::Result<IngestReport> {
-        self.try_bulk_ingest_detailed(queries).map(|(report, _)| report)
+    pub fn try_bulk_ingest(&mut self, queries: &[(u64, String)]) -> std::io::Result<IngestReport> {
+        self.try_bulk_ingest_detailed(queries)
+            .map(|(report, _)| report)
     }
 
     /// [`try_bulk_ingest`](Self::try_bulk_ingest) that additionally returns a
@@ -1689,8 +1860,7 @@ impl Engine {
         // Collect old mmap paths before draining
         let old_files = self.collect_mmap_paths();
         // Drain and materialize all segments to in-memory for compaction
-        let memory_segs: Vec<Segment> =
-            self.segments.drain(..).map(arc_into_memory).collect();
+        let memory_segs: Vec<Segment> = self.segments.drain(..).map(arc_into_memory).collect();
         let refs: Vec<&Segment> = memory_segs.iter().collect();
         let merged = Segment::compact_from(&refs);
         let entries_after = merged.len();
@@ -1721,12 +1891,18 @@ impl Engine {
         let segments_merged = hi - lo;
         let entries_before: usize = self.segments[lo..hi].iter().map(|s| s.len()).sum();
         // Collect old mmap paths before draining
-        let old_files: Vec<PathBuf> = self.segments[lo..hi].iter().filter_map(|s| {
-            if let BaseSegment::Mmap(m) = s.as_ref() { Some(m.path().to_path_buf()) } else { None }
-        }).collect();
+        let old_files: Vec<PathBuf> = self.segments[lo..hi]
+            .iter()
+            .filter_map(|s| {
+                if let BaseSegment::Mmap(m) = s.as_ref() {
+                    Some(m.path().to_path_buf())
+                } else {
+                    None
+                }
+            })
+            .collect();
         // Drain the range and materialize to in-memory for compaction
-        let memory_segs: Vec<Segment> =
-            self.segments.drain(lo..hi).map(arc_into_memory).collect();
+        let memory_segs: Vec<Segment> = self.segments.drain(lo..hi).map(arc_into_memory).collect();
         let refs: Vec<&Segment> = memory_segs.iter().collect();
         let merged = Segment::compact_from(&refs);
         let entries_after = merged.len();
@@ -1808,12 +1984,18 @@ impl Engine {
         let segments_merged = hi - lo;
         let entries_before: usize = self.segments[lo..hi].iter().map(|s| s.len()).sum();
         // Collect old mmap paths before draining
-        let old_files: Vec<PathBuf> = self.segments[lo..hi].iter().filter_map(|s| {
-            if let BaseSegment::Mmap(m) = s.as_ref() { Some(m.path().to_path_buf()) } else { None }
-        }).collect();
+        let old_files: Vec<PathBuf> = self.segments[lo..hi]
+            .iter()
+            .filter_map(|s| {
+                if let BaseSegment::Mmap(m) = s.as_ref() {
+                    Some(m.path().to_path_buf())
+                } else {
+                    None
+                }
+            })
+            .collect();
         // Drain the range and materialize to in-memory for compaction
-        let memory_segs: Vec<Segment> =
-            self.segments.drain(lo..hi).map(arc_into_memory).collect();
+        let memory_segs: Vec<Segment> = self.segments.drain(lo..hi).map(arc_into_memory).collect();
         let refs: Vec<&Segment> = memory_segs.iter().collect();
         let merged = Segment::compact_from(&refs);
         let entries_after = merged.len();
@@ -1866,7 +2048,7 @@ impl Engine {
         s.epoch = s.epoch.wrapping_add(1);
         if s.epoch == 0 {
             // epoch wrapped: reset all stamps
-            for buf in s.seen.iter_mut() {
+            for buf in &mut s.seen {
                 for v in buf.iter_mut() {
                     *v = 0;
                 }
@@ -2010,7 +2192,10 @@ impl Engine {
         self.segments.iter().map(|s| s.broad_bytes()).sum::<usize>() + self.memtable.broad_bytes()
     }
     pub fn filter_bytes(&self) -> usize {
-        self.segments.iter().map(|s| s.filter_bytes()).sum::<usize>()
+        self.segments
+            .iter()
+            .map(|s| s.filter_bytes())
+            .sum::<usize>()
     }
     pub fn dict_len(&self) -> usize {
         self.dict.len()
@@ -2040,17 +2225,18 @@ impl Engine {
             let seg_dir = dir.join("segments");
             let path = seg_dir.join(&name);
             match crate::storage::write_segment(&seg, &path) {
-                Ok(()) => {
-                    match MmapSegment::open(&path) {
-                        Ok(mmap_seg) => return BaseSegment::Mmap(mmap_seg),
-                        Err(e) => {
-                            eprintln!("[percolator] segment mmap failed for {:?}, falling back to in-memory: {}", path, e);
-                            self.persistence_healthy = false;
-                        }
+                Ok(()) => match MmapSegment::open(&path) {
+                    Ok(mmap_seg) => return BaseSegment::Mmap(mmap_seg),
+                    Err(e) => {
+                        eprintln!("[percolator] segment mmap failed for {}, falling back to in-memory: {e}", path.display());
+                        self.persistence_healthy = false;
                     }
-                }
+                },
                 Err(e) => {
-                    eprintln!("[percolator] segment write failed for {:?}, falling back to in-memory: {}", path, e);
+                    eprintln!(
+                        "[percolator] segment write failed for {}, falling back to in-memory: {e}",
+                        path.display()
+                    );
                     self.persistence_healthy = false;
                 }
             }
@@ -2083,7 +2269,7 @@ impl Engine {
             Ok(mmap_seg) => Ok((BaseSegment::Mmap(mmap_seg), Some(path))),
             Err(e) => {
                 self.persistence_healthy = false;
-                let _ = std::fs::remove_file(&path);
+                self.best_effort_remove_segment(&path);
                 Err(e)
             }
         }
@@ -2117,7 +2303,7 @@ impl Engine {
         if !self.save_manifest_if_persistent() {
             self.segments.pop();
             if let Some(p) = seg_path {
-                let _ = std::fs::remove_file(p);
+                self.best_effort_remove_segment(&p);
             }
             return Err(std::io::Error::other(
                 "manifest write failed during ingest; batch rolled back",
@@ -2148,7 +2334,7 @@ impl Engine {
             // Use the latest segment name as the checkpoint marker
             let name = format!("seg_{:06}.seg", self.next_seg_id - 1);
             if let Err(e) = wal.append_flush_checkpoint(&name) {
-                eprintln!("[percolator] WAL flush checkpoint write failed: {}", e);
+                eprintln!("[percolator] WAL flush checkpoint write failed: {e}");
             }
         }
     }
@@ -2158,7 +2344,7 @@ impl Engine {
     fn reset_wal_if_safe(&mut self) {
         if let Some(ref mut wal) = self.wal {
             if let Err(e) = wal.reset() {
-                eprintln!("[percolator] WAL reset failed: {}", e);
+                eprintln!("[percolator] WAL reset failed: {e}");
             }
         }
     }
@@ -2167,13 +2353,20 @@ impl Engine {
     /// write succeeded (or persistence is not enabled), false on failure.
     fn save_manifest_if_persistent(&mut self) -> bool {
         if let Some(ref dir) = self.config.data_dir {
-            let segment_files: Vec<String> = self.segments.iter().filter_map(|s| {
-                if let BaseSegment::Mmap(m) = s.as_ref() {
-                    m.path().file_name().and_then(|f| f.to_str()).map(|s| s.to_string())
-                } else {
-                    None
-                }
-            }).collect();
+            let segment_files: Vec<String> = self
+                .segments
+                .iter()
+                .filter_map(|s| {
+                    if let BaseSegment::Mmap(m) = s.as_ref() {
+                        m.path()
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .map(std::string::ToString::to_string)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             let manifest = crate::storage::Manifest {
                 segment_files,
                 next_seg_id: self.next_seg_id,
@@ -2183,7 +2376,7 @@ impl Engine {
             };
             let dir = dir.clone();
             if let Err(e) = crate::storage::write_manifest(&manifest, &dir.join("manifest.bin")) {
-                eprintln!("[percolator] manifest write failed: {}", e);
+                eprintln!("[percolator] manifest write failed: {e}");
                 self.persistence_healthy = false;
                 return false;
             }
@@ -2194,8 +2387,9 @@ impl Engine {
     fn save_query_sources(&mut self) {
         if let Some(ref dir) = self.config.data_dir {
             let path = dir.join("sources.dat");
-            if let Err(e) = crate::storage::write_query_sources(&qs_read(&self.query_store), &path) {
-                eprintln!("[percolator] query sources write failed: {}", e);
+            if let Err(e) = crate::storage::write_query_sources(&qs_read(&self.query_store), &path)
+            {
+                eprintln!("[percolator] query sources write failed: {e}");
                 self.persistence_healthy = false;
             }
         }
@@ -2203,15 +2397,22 @@ impl Engine {
 
     /// Collect paths of mmap'd segments (for cleanup during compaction).
     fn collect_mmap_paths(&self) -> Vec<PathBuf> {
-        self.segments.iter().filter_map(|s| {
-            if let BaseSegment::Mmap(m) = s.as_ref() { Some(m.path().to_path_buf()) } else { None }
-        }).collect()
+        self.segments
+            .iter()
+            .filter_map(|s| {
+                if let BaseSegment::Mmap(m) = s.as_ref() {
+                    Some(m.path().to_path_buf())
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     /// Remove old segment files after compaction replaces them.
     fn cleanup_segment_files(&self, paths: &[PathBuf]) {
         for p in paths {
-            let _ = std::fs::remove_file(p);
+            self.best_effort_remove_segment(p);
         }
     }
 
@@ -2223,7 +2424,10 @@ impl Engine {
                 let dict = Arc::make_mut(&mut self.dict);
                 extract(&ast, &self.norm, dict, &mut lc)
             };
-            if Arc::make_mut(&mut self.memtable).add_compiled(&ex, &self.dict, logical, version).is_some() {
+            if Arc::make_mut(&mut self.memtable)
+                .add_compiled(&ex, &self.dict, logical, version)
+                .is_some()
+            {
                 qs_write(&self.query_store).insert(logical, text.to_string());
             }
         }
@@ -2246,8 +2450,8 @@ mod wal_failure_tests {
     use crate::error::WriteError;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("percolator_segwal_{}_{}", name, std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("percolator_segwal_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -2268,7 +2472,7 @@ mod wal_failure_tests {
     /// does real disk writes). Run with:
     ///   cargo test --release --lib wal_failure_tests::bench_bulk_persist_cost -- --ignored --nocapture
     #[test]
-    #[ignore]
+    #[ignore = "benchmark: does real disk writes; run with --ignored"]
     fn bench_bulk_persist_cost() {
         use crate::gen::{generate, GenConfig};
         use std::time::Instant;
@@ -2286,7 +2490,9 @@ mod wal_failure_tests {
             // Time a single small bulk_ingest into the now-large corpus.
             let batch: Vec<(u64, String)> = data.queries[base_n..base_n + 200].to_vec();
             let t = Instant::now();
-            let report = eng.try_bulk_ingest(&batch).expect("bulk ingest should be durable");
+            let report = eng
+                .try_bulk_ingest(&batch)
+                .expect("bulk ingest should be durable");
             let elapsed = t.elapsed();
             assert!(report.ingested > 0);
             println!(
@@ -2311,10 +2517,23 @@ mod wal_failure_tests {
 
         eng.wal.as_mut().unwrap().break_writes_for_test();
         let err = eng.try_insert_live("scottie pippen", 2, 1).unwrap_err();
-        assert!(matches!(err, WriteError::Wal(_)), "expected Wal error, got {err:?}");
-        assert_eq!(eng.num_queries(), before, "rejected insert must not change the corpus");
-        assert!(eng.get_query_source(2).is_none(), "rejected insert must not be visible");
-        assert!(!eng.wal_healthy, "wal_healthy must flip to false after a failed append");
+        assert!(
+            matches!(err, WriteError::Wal(_)),
+            "expected Wal error, got {err:?}"
+        );
+        assert_eq!(
+            eng.num_queries(),
+            before,
+            "rejected insert must not change the corpus"
+        );
+        assert!(
+            eng.get_query_source(2).is_none(),
+            "rejected insert must not be visible"
+        );
+        assert!(
+            !eng.wal_healthy,
+            "wal_healthy must flip to false after a failed append"
+        );
     }
 
     // P1-17: a WAL write failure must reject the delete and leave the entry alive.
@@ -2325,7 +2544,10 @@ mod wal_failure_tests {
         assert!(eng.get_query_source(1).is_some());
 
         eng.wal.as_mut().unwrap().break_writes_for_test();
-        assert!(eng.delete_by_logical_id(1).is_err(), "delete must surface the WAL error");
+        assert!(
+            eng.delete_by_logical_id(1).is_err(),
+            "delete must surface the WAL error"
+        );
         assert!(
             eng.get_query_source(1).is_some(),
             "rejected delete must leave the entry alive"
@@ -2339,6 +2561,9 @@ mod wal_failure_tests {
         let mut eng = engine_with_wal("parse_vs_wal");
         let err = eng.try_insert_live("(", 9, 1).unwrap_err();
         assert!(matches!(err, WriteError::Parse(_)));
-        assert!(eng.wal_healthy, "a parse failure must not mark the WAL unhealthy");
+        assert!(
+            eng.wal_healthy,
+            "a parse failure must not mark the WAL unhealthy"
+        );
     }
 }

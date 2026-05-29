@@ -1,0 +1,5 @@
+# Stable-only rustfmt config so `cargo fmt` works on the pinned stable toolchain
+# (no nightly-only options). Pinning the edition keeps formatting reproducible
+# regardless of how rustfmt infers it from the environment.
+edition = "2021"
+max_width = 100

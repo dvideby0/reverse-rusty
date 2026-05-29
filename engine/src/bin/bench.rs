@@ -18,7 +18,7 @@ fn main() {
     let num_titles = arg_usize(&args, 2, 20_000);
     let broad_frac = arg_f64(&args, 3, 0.05);
     let skew = arg_f64(&args, 4, 2.0);
-    let seed = arg_u64(&args, 5, 0xC0FFEE);
+    let seed = arg_u64(&args, 5, 0x00C0_FFEE);
 
     let cfg = GenConfig {
         num_queries,
@@ -35,8 +35,7 @@ fn main() {
     };
 
     eprintln!(
-        "[gen] queries={} titles={} broad_frac={} skew={}",
-        num_queries, num_titles, broad_frac, skew
+        "[gen] queries={num_queries} titles={num_titles} broad_frac={broad_frac} skew={skew}"
     );
     let t0 = Instant::now();
     let data = generate(&cfg);
@@ -57,7 +56,10 @@ fn main() {
         cc[0], cc[1], cc[2], cc[3]
     );
     println!("dict features       : {}", eng.dict_len());
-    println!("main signatures     : {}", eng.main_index().num_signatures());
+    println!(
+        "main signatures     : {}",
+        eng.main_index().num_signatures()
+    );
     println!(
         "main max posting len: {}   (#postings>1024: {})",
         eng.main_index().max_posting_len(),
@@ -76,11 +78,11 @@ fn main() {
     let filter_mb = eng.filter_bytes() as f64 / 1e6;
     let rss_mb = read_rss_mb();
     println!("================ MEMORY ===============");
-    println!("exact SoA heap      : {:.1} MB", exact_mb);
-    println!("main index postings : {:.1} MB", main_mb);
-    println!("broad index postings: {:.1} MB", broad_mb);
-    println!("anchor filters      : {:.1} MB", filter_mb);
-    println!("process RSS         : {:.1} MB", rss_mb);
+    println!("exact SoA heap      : {exact_mb:.1} MB");
+    println!("main index postings : {main_mb:.1} MB");
+    println!("broad index postings: {broad_mb:.1} MB");
+    println!("anchor filters      : {filter_mb:.1} MB");
+    println!("process RSS         : {rss_mb:.1} MB");
     if eng.num_queries() > 0 {
         println!(
             "RSS per query       : {:.1} bytes",
@@ -117,7 +119,7 @@ fn main() {
     for _ in 0..reps {
         for t in &data.titles {
             let st = eng.match_title(t, &mut scratch, &mut out, true);
-            total_matches += st.matches as u64;
+            total_matches += u64::from(st.matches);
         }
     }
     let match_s = tm.elapsed().as_secs_f64();
@@ -140,10 +142,10 @@ fn main() {
         cand.push(st.unique_candidates);
         broadc.push(st.broad_candidates);
         posts.push(st.postings_scanned);
-        sum_unique += st.unique_candidates as u64;
-        sum_broad += st.broad_candidates as u64;
-        sum_posts += st.postings_scanned as u64;
-        sum_matches += st.matches as u64;
+        sum_unique += u64::from(st.unique_candidates);
+        sum_broad += u64::from(st.broad_candidates);
+        sum_posts += u64::from(st.postings_scanned);
+        sum_matches += u64::from(st.matches);
     }
     let n = data.titles.len() as f64;
 
@@ -154,8 +156,7 @@ fn main() {
         per_core / 2778.0
     );
     println!(
-        "with broad inline   : {:.0} titles/sec/core   (naive; design batches the broad lane)",
-        per_core_broad
+        "with broad inline   : {per_core_broad:.0} titles/sec/core   (naive; design batches the broad lane)"
     );
     println!(
         "est. 4-core (sel.)  : {:.0} titles/sec  ({:.2}B titles/hour)",
@@ -186,7 +187,7 @@ fn main() {
         pct_u64(&mut lat_ns.clone(), 0.95),
         pct_u64(&mut lat_ns.clone(), 0.99)
     );
-    println!("(sanity) total matches over throughput pass: {}", total_matches);
+    println!("(sanity) total matches over throughput pass: {total_matches}");
 
     // ---- parallel match throughput ----
     let ncpu = rayon::current_num_threads();
@@ -206,7 +207,7 @@ fn main() {
     let par_broad_s = tp2.elapsed().as_secs_f64();
     let par_broad = total_titles as f64 / par_broad_s;
 
-    println!("================ PARALLEL MATCH ({} threads) ====", ncpu);
+    println!("================ PARALLEL MATCH ({ncpu} threads) ====");
     println!(
         "SELECTIVE lane only : {:.0} titles/sec total   ({:.0}/thread, {:.1}x single-thread)",
         par_sel,
@@ -227,9 +228,11 @@ fn main() {
     for i in 0..n_upd {
         // update = insert new version of an existing logical id + tombstone old
         let logical = (i as u64) % (eng.num_queries() as u64).max(1);
-        if let Some(old) =
-            eng.insert_live("1994 upper deck michael jordan sp psa 10 -auto", logical, ver)
-        {
+        if let Some(old) = eng.insert_live(
+            "1994 upper deck michael jordan sp psa 10 -auto",
+            logical,
+            ver,
+        ) {
             // tombstone the freshly inserted? No: tombstone the *previous* local id.
             // Here we just tombstone an arbitrary earlier id to exercise the path.
             let _ = eng.tombstone(old.saturating_sub(1));

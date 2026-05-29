@@ -53,12 +53,12 @@ const HEADER_SIZE: usize = 80;
 /// Simple CRC-32 using the standard polynomial. Used for WAL entry integrity;
 /// segment files use atomic rename (write-to-tmp + rename) for integrity.
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFFFFFF;
+    let mut crc: u32 = 0xFFFF_FFFF;
     for &b in data {
-        crc ^= b as u32;
+        crc ^= u32::from(b);
         for _ in 0..8 {
             if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
+                crc = (crc >> 1) ^ 0xEDB8_8320;
             } else {
                 crc >>= 1;
             }
@@ -160,14 +160,16 @@ fn write_u64(w: &mut impl Write, v: u64) -> io::Result<()> {
 }
 
 fn read_u32_at(data: &[u8], off: usize) -> io::Result<u32> {
-    let b: [u8; 4] = data.get(off..off + 4)
+    let b: [u8; 4] = data
+        .get(off..off + 4)
         .and_then(|s| s.try_into().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated u32"))?;
     Ok(u32::from_le_bytes(b))
 }
 
 fn read_u64_at(data: &[u8], off: usize) -> io::Result<u64> {
-    let b: [u8; 8] = data.get(off..off + 8)
+    let b: [u8; 8] = data
+        .get(off..off + 8)
         .and_then(|s| s.try_into().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated u64"))?;
     Ok(u64::from_le_bytes(b))
@@ -192,10 +194,10 @@ fn pad_to_8(w: &mut (impl Write + Seek)) -> io::Result<()> {
 /// Write a slice of u32 values: [count: u32, data: [u32; count], pad_to_8].
 fn write_u32_array(w: &mut (impl Write + Seek), data: &[u32]) -> io::Result<()> {
     write_u32(w, data.len() as u32)?;
-    // 4 bytes for count + data — write raw bytes
-    let bytes = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-    };
+    // SAFETY: a `&[u32]` can always be viewed as `len * 4` bytes — every bit
+    // pattern is a valid `u8`, the view aliases the same memory read-only, and
+    // its lifetime is bound to `data`.
+    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 4) };
     w.write_all(bytes)?;
     pad_to_8(w)
 }
@@ -203,9 +205,9 @@ fn write_u32_array(w: &mut (impl Write + Seek), data: &[u32]) -> io::Result<()> 
 /// Write a slice of u16 values: [count: u32, data: [u16; count], pad_to_8].
 fn write_u16_array(w: &mut (impl Write + Seek), data: &[u16]) -> io::Result<()> {
     write_u32(w, data.len() as u32)?;
-    let bytes = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 2)
-    };
+    // SAFETY: viewing a `&[u16]` as `len * 2` bytes is always valid (every bit
+    // pattern is a valid `u8`); the read-only view's lifetime is bound to `data`.
+    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 2) };
     w.write_all(bytes)?;
     pad_to_8(w)
 }
@@ -214,10 +216,11 @@ fn write_u16_array(w: &mut (impl Write + Seek), data: &[u16]) -> io::Result<()> 
 /// Already 8-byte aligned after data (u64 elements).
 fn write_u64_array(w: &mut (impl Write + Seek), data: &[u64]) -> io::Result<()> {
     write_u32(w, data.len() as u32)?;
-    w.write_all(&[0u8; 4])?; // pad count to 8 bytes
-    let bytes = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 8)
-    };
+    // pad count to 8 bytes
+    w.write_all(&[0u8; 4])?;
+    // SAFETY: viewing a `&[u64]` as `len * 8` bytes is always valid (every bit
+    // pattern is a valid `u8`); the read-only view's lifetime is bound to `data`.
+    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 8) };
     w.write_all(bytes)?;
     Ok(())
 }
@@ -236,12 +239,13 @@ fn write_u8_array(w: &mut (impl Write + Seek), data: &[u8]) -> io::Result<()> {
 fn read_u32_slice(data: &[u8], off: usize) -> io::Result<(&[u32], usize)> {
     let count = read_u32_at(data, off)? as usize;
     let data_off = off + 4;
-    let slice = unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr().add(data_off) as *const u32,
-            count,
-        )
-    };
+    // SAFETY: `count` was read from `data`, which this crate only passes after
+    // verifying the segment's trailing CRC32 (see `MmapSegment::open`), so the
+    // `count` u32s are present and in-bounds. `off` is 8-aligned and the mmap
+    // base is page-aligned, so `data_off` meets `u32`'s alignment. The slice
+    // borrows `data`.
+    let slice =
+        unsafe { std::slice::from_raw_parts(data.as_ptr().add(data_off).cast::<u32>(), count) };
     let end = align8((data_off + count * 4) as u64) as usize;
     Ok((slice, end))
 }
@@ -250,12 +254,12 @@ fn read_u32_slice(data: &[u8], off: usize) -> io::Result<(&[u32], usize)> {
 fn read_u16_slice(data: &[u8], off: usize) -> io::Result<(&[u16], usize)> {
     let count = read_u32_at(data, off)? as usize;
     let data_off = off + 4;
-    let slice = unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr().add(data_off) as *const u16,
-            count,
-        )
-    };
+    // SAFETY: `count` was read from CRC-verified `data` (see `MmapSegment::open`),
+    // so the `count` u16s are present and in-bounds. `off` is 8-aligned and the
+    // mmap base is page-aligned, so `data_off` (= off + 4) meets `u16`'s
+    // 2-byte alignment. The slice borrows `data`.
+    let slice =
+        unsafe { std::slice::from_raw_parts(data.as_ptr().add(data_off).cast::<u16>(), count) };
     let end = align8((data_off + count * 2) as u64) as usize;
     Ok((slice, end))
 }
@@ -263,13 +267,14 @@ fn read_u16_slice(data: &[u8], off: usize) -> io::Result<(&[u16], usize)> {
 /// Read a u64-element array: [count: u32, pad(4), data...].
 fn read_u64_slice(data: &[u8], off: usize) -> io::Result<(&[u64], usize)> {
     let count = read_u32_at(data, off)? as usize;
-    let data_off = off + 8; // 4 count + 4 pad
-    let slice = unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr().add(data_off) as *const u64,
-            count,
-        )
-    };
+    // 4 count + 4 pad
+    let data_off = off + 8;
+    // SAFETY: `count` was read from CRC-verified `data` (see `MmapSegment::open`),
+    // so the `count` u64s are present and in-bounds. `off` is 8-aligned and the
+    // mmap base is page-aligned, so `data_off` (= off + 8) meets `u64`'s 8-byte
+    // alignment. The slice borrows `data`.
+    let slice =
+        unsafe { std::slice::from_raw_parts(data.as_ptr().add(data_off).cast::<u64>(), count) };
     let end = data_off + count * 8; // already aligned
     Ok((slice, end))
 }
@@ -366,15 +371,23 @@ fn write_exact_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Result
     Ok(())
 }
 
-fn write_frozen_index_section(w: &mut (impl Write + Seek), index: &CandidateIndex) -> io::Result<()> {
+fn write_frozen_index_section(
+    w: &mut (impl Write + Seek),
+    index: &CandidateIndex,
+) -> io::Result<()> {
     let (slots, blob) = freeze_index(index);
     // Write slots as a u64-aligned array (each slot is 16 bytes = 2 u64s)
     let cap = slots.len();
     write_u32(w, cap as u32)?;
-    w.write_all(&[0u8; 4])?; // pad to 8
+    // pad to 8
+    w.write_all(&[0u8; 4])?;
+    // SAFETY: `FrozenSlot` is `#[repr(C)]` and padding-free ({u64,u32,u32} = 16
+    // bytes), so a `&[FrozenSlot]` of `cap` elements can be viewed as
+    // `cap * size_of::<FrozenSlot>()` initialized bytes; the read-only view's
+    // lifetime is bound to `slots`.
     let slot_bytes = unsafe {
         std::slice::from_raw_parts(
-            slots.as_ptr() as *const u8,
+            slots.as_ptr().cast::<u8>(),
             cap * std::mem::size_of::<FrozenSlot>(),
         )
     };
@@ -391,9 +404,10 @@ fn write_filter_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Resul
         w.write_all(&[0u8; 4])?; // pad
         write_u64(w, filter.mask_raw())?;
         let data = filter.data_raw();
-        let bytes = unsafe {
-            std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 8)
-        };
+        // SAFETY: viewing a `&[u64]` as `len * 8` bytes is always valid (every
+        // bit pattern is a valid `u8`); the read-only view borrows `data`.
+        let bytes =
+            unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 8) };
         w.write_all(bytes)?;
     } else {
         write_u32(w, 0)?; // no filter
@@ -404,14 +418,18 @@ fn write_filter_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Resul
 }
 
 fn write_meta_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Result<()> {
-    let classes: Vec<u8> = seg.classes().iter().map(|c| match c {
-        CostClass::A => 0,
-        CostClass::B => 1,
-        CostClass::C => 2,
-        CostClass::D => 3,
-    }).collect();
+    let classes: Vec<u8> = seg
+        .classes()
+        .iter()
+        .map(|c| match c {
+            CostClass::A => 0,
+            CostClass::B => 1,
+            CostClass::C => 2,
+            CostClass::D => 3,
+        })
+        .collect();
     write_u8_array(w, &classes)?;
-    let alive: Vec<u8> = seg.alive_flags().iter().map(|&a| if a { 1 } else { 0 }).collect();
+    let alive: Vec<u8> = seg.alive_flags().iter().map(|&a| u8::from(a)).collect();
     write_u8_array(w, &alive)?;
     Ok(())
 }
@@ -477,10 +495,15 @@ pub struct MmapSegment {
     logical_index: crate::util::FastMap<u64, Vec<u32>>,
 }
 
-// SAFETY: MmapSegment is safe to send/share across threads. The raw pointers
-// point into the Arc<Mmap> which lives as long as any clone. The alive_overlay
-// is only mutated through &mut self.
+// SAFETY: every raw pointer in MmapSegment points into the read-only `Arc<Mmap>`
+// it owns. The mapping is never written through, does not move, and stays alive
+// for as long as any clone (clones share the Arc). All other fields are Send,
+// and `alive_overlay`/`alive_counter` are only mutated through `&mut self`, so
+// moving a MmapSegment between threads cannot race.
 unsafe impl Send for MmapSegment {}
+// SAFETY: as argued for the `Send` impl above, all shared state behind the raw
+// pointers is immutable for the segment's lifetime, so `&MmapSegment` can be
+// shared across threads without data races.
 unsafe impl Sync for MmapSegment {}
 
 impl Clone for MmapSegment {
@@ -544,6 +567,12 @@ impl MmapSegment {
     /// Load a segment from a file, memory-mapping it.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
+        // SAFETY: memory-mapping is unsafe because the mapping aliases the file's
+        // bytes and the borrow checker cannot prove the file is not mutated
+        // underneath us. Percolator segment files are immutable once written
+        // (segments are append-only and never edited in place; compaction writes
+        // a new file and atomically swaps it), so the mapped region is effectively
+        // read-only for the lifetime of this `Arc<Mmap>`.
         let mmap = Arc::new(unsafe { memmap2::Mmap::map(&file)? });
 
         if mmap.len() < HEADER_SIZE + 4 {
@@ -556,7 +585,7 @@ impl MmapSegment {
             if crc32(content) != stored_crc {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("segment file CRC mismatch: {:?}", path),
+                    format!("segment file CRC mismatch: {}", path.display()),
                 ));
             }
         }
@@ -576,7 +605,7 @@ impl MmapSegment {
             if version != FORMAT_VERSION {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("unsupported format version {}", version),
+                    format!("unsupported format version {version}"),
                 ));
             }
         }
@@ -587,6 +616,10 @@ impl MmapSegment {
         // (it's OS-mapped), so the pointers remain valid for the struct's lifetime.
         let base = mmap.as_ptr();
         let mmap_len = mmap.len();
+        // SAFETY: `base`/`mmap_len` come straight from the live `mmap` (still owned
+        // on the stack here), so the pointer is valid and aligned for `mmap_len`
+        // bytes of `u8`. This borrow is read-only and dropped before `mmap` moves
+        // into the struct.
         let data_for_parse = unsafe { std::slice::from_raw_parts(base, mmap_len) };
 
         let num_queries = read_u32_at(data_for_parse, 8)?;
@@ -598,41 +631,62 @@ impl MmapSegment {
 
         // ---- Parse exact section ----
         let mut cursor = exact_off;
-        let (req_mask_s, next) = read_u64_slice(data_for_parse, cursor)?; cursor = next;
-        let (forb_mask_s, next) = read_u64_slice(data_for_parse, cursor)?; cursor = next;
-        let (req_off_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
-        let (req_len_s, next) = read_u16_slice(data_for_parse, cursor)?; cursor = next;
-        let (req_blob_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
-        let (forb_off_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
-        let (forb_len_s, next) = read_u16_slice(data_for_parse, cursor)?; cursor = next;
-        let (forb_blob_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
-        let (q_group_start_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
-        let (q_group_count_s, next) = read_u16_slice(data_for_parse, cursor)?; cursor = next;
-        let (group_off_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
-        let (group_len_s, next) = read_u16_slice(data_for_parse, cursor)?; cursor = next;
-        let (anyof_blob_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
-        let (version_s, next) = read_u32_slice(data_for_parse, cursor)?; cursor = next;
+        let (req_mask_s, next) = read_u64_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (forb_mask_s, next) = read_u64_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (req_off_s, next) = read_u32_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (req_len_s, next) = read_u16_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (req_blob_s, next) = read_u32_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (forb_off_s, next) = read_u32_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (forb_len_s, next) = read_u16_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (forb_blob_s, next) = read_u32_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (q_group_start_s, next) = read_u32_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (q_group_count_s, next) = read_u16_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (group_off_s, next) = read_u32_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (group_len_s, next) = read_u16_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (anyof_blob_s, next) = read_u32_slice(data_for_parse, cursor)?;
+        cursor = next;
+        let (version_s, next) = read_u32_slice(data_for_parse, cursor)?;
+        cursor = next;
         let (logical_s, _) = read_u64_slice(data_for_parse, cursor)?;
 
         // ---- Parse main index ----
         let (main_slots_s, main_blob_s, main_cap) = parse_frozen_index(data_for_parse, main_off)?;
 
         // ---- Parse broad index ----
-        let (broad_slots_s, broad_blob_s, broad_cap) = parse_frozen_index(data_for_parse, broad_off)?;
+        let (broad_slots_s, broad_blob_s, broad_cap) =
+            parse_frozen_index(data_for_parse, broad_off)?;
 
         // ---- Parse filter ----
         let filter_num_blocks = read_u32_at(data_for_parse, filter_off)? as usize;
         let filter_mask_val = read_u64_at(data_for_parse, filter_off + 8)?;
         let filter_data_off = filter_off + 16;
         let filter_data_ptr = if filter_num_blocks > 0 {
-            unsafe { base.add(filter_data_off) as *const u64 }
+            // SAFETY: `filter_data_off` is an offset within the CRC-verified mmap
+            // (derived from `filter_off`, itself read from the validated header),
+            // so `base.add(filter_data_off)` stays in bounds of the mapping. The
+            // result is only read back through `filter_data()`, which bounds it to
+            // `filter_num_blocks * 8` u64s laid down by the writer.
+            unsafe { base.add(filter_data_off).cast::<u64>() }
         } else {
             std::ptr::null()
         };
 
         // ---- Parse meta ----
         cursor = meta_off;
-        let (class_s, next) = read_u8_slice(data_for_parse, cursor)?; cursor = next;
+        let (class_s, next) = read_u8_slice(data_for_parse, cursor)?;
+        cursor = next;
         let (alive_s, _) = read_u8_slice(data_for_parse, cursor)?;
 
         // Build alive overlay and logical reverse index from on-disk data
@@ -641,6 +695,9 @@ impl MmapSegment {
         let mut logical_index: crate::util::FastMap<u64, Vec<u32>> = crate::util::fast_map();
         for (i, &alive) in alive_overlay.iter().enumerate().take(num_queries as usize) {
             if alive {
+                // SAFETY: `logical_s` is the `num_queries`-long u64 slice parsed
+                // from the mmap above; `i < num_queries` here (the loop is bounded
+                // by `take(num_queries)`), so the index is in bounds.
                 let lid = unsafe { *logical_s.as_ptr().add(i) };
                 logical_index.entry(lid).or_default().push(i as u32);
             }
@@ -670,12 +727,20 @@ impl MmapSegment {
             logical_arr: logical_s.as_ptr(),
             main_slots: main_slots_s.as_ptr(),
             main_cap,
-            main_mask: if main_cap > 0 { (main_cap - 1) as u64 } else { 0 },
+            main_mask: if main_cap > 0 {
+                (main_cap - 1) as u64
+            } else {
+                0
+            },
             main_blob: main_blob_s.as_ptr(),
             main_blob_len: main_blob_s.len(),
             broad_slots: broad_slots_s.as_ptr(),
             broad_cap,
-            broad_mask: if broad_cap > 0 { (broad_cap - 1) as u64 } else { 0 },
+            broad_mask: if broad_cap > 0 {
+                (broad_cap - 1) as u64
+            } else {
+                0
+            },
             broad_blob: broad_blob_s.as_ptr(),
             broad_blob_len: broad_blob_s.len(),
             filter_data: filter_data_ptr,
@@ -692,84 +757,117 @@ impl MmapSegment {
 
     // ---- slice accessors (zero-cost, just pointer arithmetic) ----
 
+    /// View `len` elements of `T` at `ptr` as a slice borrowed from `&self`.
+    ///
+    /// Every section accessor below funnels through this one helper so the
+    /// pointer-to-slice reconstruction has a single audited `unsafe` site.
+    ///
+    /// # The invariant that makes every caller sound
+    ///
+    /// All `(ptr, len)` pairs are the ones captured in [`MmapSegment::open`] from
+    /// the mmap that `self` owns. At that point:
+    /// * the mapping was fully validated — trailing CRC32 over the file body, plus
+    ///   magic bytes and format version — before any pointer was taken, so the
+    ///   bytes are exactly what the writer produced and `len` matches the section;
+    /// * the writer pads every section to an 8-byte boundary, and the element
+    ///   types used here (`u64`/`u32`/`u16`/`FrozenSlot`) all have alignment
+    ///   dividing 8, so `ptr` is properly aligned;
+    /// * `self` owns the backing `Arc<Mmap>`, which is immutable and never moves,
+    ///   and it outlives the returned borrow, so the slice can neither dangle nor
+    ///   be mutated underneath the reader.
+    ///
+    /// Callers must therefore only pass pointer/length pairs originating from
+    /// `open`'s validated parse (never a null pointer — see `filter_data`).
+    // `&self` is load-bearing: it ties the returned slice's lifetime to the mmap
+    // owner so the borrow checker forbids use-after-unmap. clippy can't see that
+    // the body's safety contract depends on the borrow.
+    #[allow(clippy::unused_self)]
+    #[inline]
+    fn mmap_slice<T>(&self, ptr: *const T, len: usize) -> &[T] {
+        // SAFETY: upheld by the construction invariant documented above — `ptr`
+        // references `len` correctly-aligned, initialized `T`s inside the live,
+        // immutable mmap owned by `self`.
+        unsafe { std::slice::from_raw_parts(ptr, len) }
+    }
+
     #[inline]
     fn req_mask(&self) -> &[u64] {
-        unsafe { std::slice::from_raw_parts(self.req_mask, self.num_queries as usize) }
+        self.mmap_slice(self.req_mask, self.num_queries as usize)
     }
     #[inline]
     fn forb_mask(&self) -> &[u64] {
-        unsafe { std::slice::from_raw_parts(self.forb_mask, self.num_queries as usize) }
+        self.mmap_slice(self.forb_mask, self.num_queries as usize)
     }
     #[inline]
     fn req_off(&self) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(self.req_off, self.num_queries as usize) }
+        self.mmap_slice(self.req_off, self.num_queries as usize)
     }
     #[inline]
     fn req_len(&self) -> &[u16] {
-        unsafe { std::slice::from_raw_parts(self.req_len, self.num_queries as usize) }
+        self.mmap_slice(self.req_len, self.num_queries as usize)
     }
     #[inline]
     fn req_blob(&self) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(self.req_blob, self.req_blob_len) }
+        self.mmap_slice(self.req_blob, self.req_blob_len)
     }
     #[inline]
     fn forb_off(&self) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(self.forb_off, self.num_queries as usize) }
+        self.mmap_slice(self.forb_off, self.num_queries as usize)
     }
     #[inline]
     fn forb_len(&self) -> &[u16] {
-        unsafe { std::slice::from_raw_parts(self.forb_len, self.num_queries as usize) }
+        self.mmap_slice(self.forb_len, self.num_queries as usize)
     }
     #[inline]
     fn forb_blob(&self) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(self.forb_blob, self.forb_blob_len) }
+        self.mmap_slice(self.forb_blob, self.forb_blob_len)
     }
     #[inline]
     fn q_group_start(&self) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(self.q_group_start, self.num_queries as usize) }
+        self.mmap_slice(self.q_group_start, self.num_queries as usize)
     }
     #[inline]
     fn q_group_count(&self) -> &[u16] {
-        unsafe { std::slice::from_raw_parts(self.q_group_count, self.num_queries as usize) }
+        self.mmap_slice(self.q_group_count, self.num_queries as usize)
     }
     #[inline]
     fn group_off(&self) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(self.group_off, self.group_off_len) }
+        self.mmap_slice(self.group_off, self.group_off_len)
     }
     #[inline]
     fn group_len(&self) -> &[u16] {
-        unsafe { std::slice::from_raw_parts(self.group_len, self.group_off_len) }
+        self.mmap_slice(self.group_len, self.group_off_len)
     }
     #[inline]
     fn anyof_blob(&self) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(self.anyof_blob, self.anyof_blob_len) }
+        self.mmap_slice(self.anyof_blob, self.anyof_blob_len)
     }
 
     #[inline]
     fn main_slots(&self) -> &[FrozenSlot] {
-        unsafe { std::slice::from_raw_parts(self.main_slots, self.main_cap) }
+        self.mmap_slice(self.main_slots, self.main_cap)
     }
     #[inline]
     fn main_blob(&self) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(self.main_blob, self.main_blob_len) }
+        self.mmap_slice(self.main_blob, self.main_blob_len)
     }
     #[inline]
     fn broad_slots(&self) -> &[FrozenSlot] {
-        unsafe { std::slice::from_raw_parts(self.broad_slots, self.broad_cap) }
+        self.mmap_slice(self.broad_slots, self.broad_cap)
     }
     #[inline]
     fn broad_blob(&self) -> &[u32] {
-        unsafe { std::slice::from_raw_parts(self.broad_blob, self.broad_blob_len) }
+        self.mmap_slice(self.broad_blob, self.broad_blob_len)
     }
 
     #[inline]
     fn filter_data(&self) -> &[u64] {
+        // Guard the null sentinel: a segment with no filter stores a null
+        // `filter_data` pointer, which `mmap_slice`/`from_raw_parts` forbid.
         if self.filter_num_blocks == 0 {
             return &[];
         }
-        unsafe {
-            std::slice::from_raw_parts(self.filter_data, self.filter_num_blocks * 8)
-        }
+        self.mmap_slice(self.filter_data, self.filter_num_blocks * 8)
     }
 
     // ---- public interface ----
@@ -796,7 +894,9 @@ impl MmapSegment {
     }
 
     pub fn locals_for_logical(&self, logical_id: u64) -> &[u32] {
-        self.logical_index.get(&logical_id).map_or(&[], |v| v.as_slice())
+        self.logical_index
+            .get(&logical_id)
+            .map_or(&[], |v| v.as_slice())
     }
 
     /// Number of alive (non-tombstoned) entries (O(1)).
@@ -814,21 +914,34 @@ impl MmapSegment {
 
     #[inline]
     pub(crate) fn logical(&self, id: u32) -> u64 {
+        // SAFETY: `logical_arr` is the `num_queries`-long u64 array parsed from the
+        // mmap in `open`. Callers only pass local ids `< num_queries` (they come
+        // from posting lists built over this segment's own entries), so the offset
+        // is in bounds of the immutable mapping `self` owns.
         unsafe { *self.logical_arr.add(id as usize) }
     }
-
 
     /// Integer-only exact verification — same logic as ExactStore::verify but
     /// operating on mmap'd slices.
     #[inline]
     pub fn verify(&self, id: u32, tmask: u64, tfeats: &[FeatureId]) -> bool {
         crate::exact::verify_slices(
-            id, tmask, tfeats,
-            self.req_mask(), self.forb_mask(),
-            self.req_off(), self.req_len(), self.req_blob(),
-            self.forb_off(), self.forb_len(), self.forb_blob(),
-            self.q_group_start(), self.q_group_count(),
-            self.group_off(), self.group_len(), self.anyof_blob(),
+            id,
+            tmask,
+            tfeats,
+            self.req_mask(),
+            self.forb_mask(),
+            self.req_off(),
+            self.req_len(),
+            self.req_blob(),
+            self.forb_off(),
+            self.forb_len(),
+            self.forb_blob(),
+            self.q_group_start(),
+            self.q_group_count(),
+            self.group_off(),
+            self.group_len(),
+            self.anyof_blob(),
         )
     }
 
@@ -864,9 +977,7 @@ impl MmapSegment {
                 stats.probes_skipped += 1;
                 continue;
             }
-            self.probe_index(
-                key, true, epoch, tmask, feats, seen, out, stats, false,
-            );
+            self.probe_index(key, true, epoch, tmask, feats, seen, out, stats, false);
         }
         // arity-2 signatures
         for &h in feats {
@@ -880,9 +991,7 @@ impl MmapSegment {
                             stats.probes_skipped += 1;
                             continue;
                         }
-                        self.probe_index(
-                            key, true, epoch, tmask, feats, seen, out, stats, false,
-                        );
+                        self.probe_index(key, true, epoch, tmask, feats, seen, out, stats, false);
                     }
                 }
             }
@@ -896,9 +1005,7 @@ impl MmapSegment {
                     stats.probes_skipped += 1;
                     continue;
                 }
-                self.probe_index(
-                    key, false, epoch, tmask, feats, seen, out, stats, true,
-                );
+                self.probe_index(key, false, epoch, tmask, feats, seen, out, stats, true);
             }
         }
     }
@@ -966,17 +1073,31 @@ impl MmapSegment {
             let fl = self.forb_len()[i] as usize;
             let gs = self.q_group_start()[i] as usize;
             let gc = self.q_group_count()[i] as usize;
-            let ver = unsafe { *self.version_arr.add(i) };
-            let log = unsafe { *self.logical_arr.add(i) };
+            // SAFETY: the loop runs `i` over `0..n` where `n == num_queries`, and
+            // `version_arr`/`logical_arr` are both `num_queries`-long arrays parsed
+            // from the mmap in `open`, so both offsets are in bounds of the
+            // immutable mapping `self` owns.
+            let (ver, log) = unsafe { (*self.version_arr.add(i), *self.logical_arr.add(i)) };
 
             exact.push_raw(
-                rm, fm,
+                rm,
+                fm,
                 &self.req_blob()[ro..ro + rl],
                 &self.forb_blob()[fo..fo + fl],
-                (gs, gc, self.group_off(), self.group_len(), self.anyof_blob()),
-                ver, log,
+                (
+                    gs,
+                    gc,
+                    self.group_off(),
+                    self.group_len(),
+                    self.anyof_blob(),
+                ),
+                ver,
+                log,
             );
 
+            // SAFETY: `i < n == num_queries`, and `class_arr` is the
+            // `num_queries`-long class byte array parsed from the mmap, so the
+            // offset is in bounds of the immutable mapping.
             let class_byte = unsafe { *self.class_arr.add(i) };
             classes.push(match class_byte {
                 0 => CostClass::A,
@@ -1018,12 +1139,17 @@ impl MmapSegment {
 
 fn parse_frozen_index(data: &[u8], off: usize) -> io::Result<(&[FrozenSlot], &[u32], usize)> {
     let cap = read_u32_at(data, off)? as usize;
-    let slots_off = off + 8; // 4 count + 4 pad
+    // 4 count + 4 pad
+    let slots_off = off + 8;
+    // SAFETY: `data` is the CRC-verified mmap (validated in `MmapSegment::open`
+    // before any of this runs). `off` is a section offset from the validated
+    // header and the writer pads sections to 8 bytes, so `slots_off = off + 8` is
+    // 8-aligned — and `FrozenSlot` is `#[repr(C)]`, 16 bytes, padding-free (see
+    // its definition), with alignment 8, so the reinterpret is correctly aligned.
+    // The writer laid down exactly `cap` slots here, so `cap` elements are in
+    // bounds of the mapping.
     let slots = unsafe {
-        std::slice::from_raw_parts(
-            data.as_ptr().add(slots_off) as *const FrozenSlot,
-            cap,
-        )
+        std::slice::from_raw_parts(data.as_ptr().add(slots_off).cast::<FrozenSlot>(), cap)
     };
     let after_slots = align8((slots_off + cap * std::mem::size_of::<FrozenSlot>()) as u64) as usize;
     let (blob, _) = read_u32_slice(data, after_slots)?;
@@ -1049,7 +1175,7 @@ pub fn serialize_dict(dict: &crate::dict::Dict) -> Vec<u8> {
         buf.extend_from_slice(&dict.freq(id).to_le_bytes());
         buf.push(dict.mask_bit(id));
     }
-    buf.push(if dict.is_finalized() { 1 } else { 0 });
+    buf.push(u8::from(dict.is_finalized()));
     buf
 }
 
@@ -1064,15 +1190,18 @@ pub fn deserialize_dict(data: &[u8]) -> io::Result<crate::dict::Dict> {
     cursor += 4;
     let mut dict = Dict::new();
     for _ in 0..n {
-        let name_len = data.get(cursor..cursor + 2)
+        let name_len = data
+            .get(cursor..cursor + 2)
             .and_then(|s| <[u8; 2]>::try_from(s).ok())
             .map(u16::from_le_bytes)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated dict name_len"))? as usize;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated dict name_len"))?
+            as usize;
         cursor += 2;
-        let name = std::str::from_utf8(
-            data.get(cursor..cursor + name_len)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated dict name"))?
-        ).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let name =
+            std::str::from_utf8(data.get(cursor..cursor + name_len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "truncated dict name")
+            })?)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         cursor += name_len;
         let kind = u8_to_kind(data[cursor]);
         cursor += 1;
@@ -1090,18 +1219,35 @@ pub fn deserialize_dict(data: &[u8]) -> io::Result<crate::dict::Dict> {
 }
 
 fn kind_to_u8(k: crate::dict::FeatureKind) -> u8 {
-    use crate::dict::FeatureKind::*;
+    use crate::dict::FeatureKind::{
+        Brand, Category, Flag, Generic, Grade, Grader, GraderGrade, Player, Year,
+    };
     match k {
-        Year => 0, Brand => 1, Player => 2, Category => 3,
-        Grader => 4, Grade => 5, GraderGrade => 6, Flag => 7, Generic => 8,
+        Year => 0,
+        Brand => 1,
+        Player => 2,
+        Category => 3,
+        Grader => 4,
+        Grade => 5,
+        GraderGrade => 6,
+        Flag => 7,
+        Generic => 8,
     }
 }
 
 fn u8_to_kind(b: u8) -> crate::dict::FeatureKind {
-    use crate::dict::FeatureKind::*;
+    use crate::dict::FeatureKind::{
+        Brand, Category, Flag, Generic, Grade, Grader, GraderGrade, Player, Year,
+    };
     match b {
-        0 => Year, 1 => Brand, 2 => Player, 3 => Category,
-        4 => Grader, 5 => Grade, 6 => GraderGrade, 7 => Flag,
+        0 => Year,
+        1 => Brand,
+        2 => Player,
+        3 => Category,
+        4 => Grader,
+        5 => Grade,
+        6 => GraderGrade,
+        7 => Flag,
         _ => Generic,
     }
 }
@@ -1156,7 +1302,10 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
 pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     let data = std::fs::read(path)?;
     if data.len() < 12 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest too small"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manifest too small",
+        ));
     }
     // Verify CRC (last 4 bytes)
     if data.len() < 4 {
@@ -1165,28 +1314,39 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     let content = &data[..data.len() - 4];
     let stored_crc = read_u32_at(&data, data.len() - 4)?;
     if crc32(content) != stored_crc {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest CRC mismatch"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "manifest CRC mismatch",
+        ));
     }
 
     if data[0..4] != MANIFEST_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad manifest magic"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad manifest magic",
+        ));
     }
     let version = read_u32_at(&data, 4)?;
     if version != MANIFEST_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("unsupported manifest version {} (expected {})", version, MANIFEST_VERSION),
+            format!("unsupported manifest version {version} (expected {MANIFEST_VERSION})"),
         ));
     }
     let mut cursor = 8usize;
-    let next_seg_id = read_u64_at(&data, cursor)?; cursor += 8;
-    let rejected_parse = read_u64_at(&data, cursor)?; cursor += 8;
-    let rejected_class_d = read_u64_at(&data, cursor)?; cursor += 8;
+    let next_seg_id = read_u64_at(&data, cursor)?;
+    cursor += 8;
+    let rejected_parse = read_u64_at(&data, cursor)?;
+    cursor += 8;
+    let rejected_class_d = read_u64_at(&data, cursor)?;
+    cursor += 8;
 
-    let num_files = read_u32_at(&data, cursor)? as usize; cursor += 4;
+    let num_files = read_u32_at(&data, cursor)? as usize;
+    cursor += 4;
     let mut segment_files = Vec::with_capacity(num_files);
     for _ in 0..num_files {
-        let len = read_u32_at(&data, cursor)? as usize; cursor += 4;
+        let len = read_u32_at(&data, cursor)? as usize;
+        cursor += 4;
         let name = std::str::from_utf8(&data[cursor..cursor + len])
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
             .to_string();
@@ -1194,7 +1354,8 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         segment_files.push(name);
     }
 
-    let dict_len = read_u32_at(&data, cursor)? as usize; cursor += 4;
+    let dict_len = read_u32_at(&data, cursor)? as usize;
+    cursor += 4;
     let dict_data = data[cursor..cursor + dict_len].to_vec();
 
     Ok(Manifest {
@@ -1211,6 +1372,9 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
 const SOURCES_MAGIC: [u8; 4] = *b"SRCS";
 const SOURCES_VERSION: u32 = 1;
 
+// `FastMap` pins the FNV-1a hasher on purpose (stable hashing across runs — see
+// util.rs); a generic `S: BuildHasher` param would defeat that determinism.
+#[allow(clippy::implicit_hasher)]
 pub fn write_query_sources(
     store: &crate::util::FastMap<u64, String>,
     path: &Path,
@@ -1238,16 +1402,22 @@ pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, S
     }
     let data = std::fs::read(path)?;
     if data.len() < 12 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "sources file too small"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "sources file too small",
+        ));
     }
     if data[0..4] != SOURCES_MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "bad sources magic"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad sources magic",
+        ));
     }
     let version = read_u32_at(&data, 4)?;
     if version != SOURCES_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("unsupported sources version {}", version),
+            format!("unsupported sources version {version}"),
         ));
     }
     let count = read_u32_at(&data, 8)? as usize;

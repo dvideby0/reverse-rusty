@@ -13,14 +13,14 @@
 pub struct Rng(u64);
 impl Rng {
     pub fn new(seed: u64) -> Self {
-        Rng(seed.wrapping_add(0x9e3779b97f4a7c15))
+        Rng(seed.wrapping_add(0x9e37_79b9_7f4a_7c15))
     }
     #[inline]
     pub fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     }
     #[inline]
@@ -64,7 +64,15 @@ pub const BRANDS: &[&str] = &[
 pub const BRAND_ALT: &[&str] = &[
     "ud", "topps", "panini", "fleer", "donruss", "bowman", "score", "prizm",
 ];
-pub const CARD_TERMS: &[&str] = &["sp", "rc", "rookie", "refractor", "insert", "base", "preview"];
+pub const CARD_TERMS: &[&str] = &[
+    "sp",
+    "rc",
+    "rookie",
+    "refractor",
+    "insert",
+    "base",
+    "preview",
+];
 pub const GRADERS: &[&str] = &["psa", "bgs", "sgc"];
 pub const GRADES: &[&str] = &["8", "9", "9.5", "10"];
 pub const NEGATIVES: &[&str] = &["auto", "signed", "reprint", "lot", "checklist", "minor"];
@@ -77,7 +85,7 @@ pub struct GenConfig {
     pub num_queries: usize,
     pub num_titles: usize,
     pub broad_query_frac: f64,
-    pub hot_skew: f64, // >1 = more skew toward popular players/graders
+    pub hot_skew: f64,      // >1 = more skew toward popular players/graders
     pub family_size: usize, // near-duplicate variants per family base
     pub seed: u64,
     /// Size of the synthetic entity space. Real marketplaces have millions of
@@ -95,7 +103,7 @@ impl Default for GenConfig {
             broad_query_frac: 0.05,
             hot_skew: 2.0,
             family_size: 8,
-            seed: 0xC0FFEE,
+            seed: 0x00C0_FFEE,
             num_players: 20_000,
             num_sets: 8_000,
         }
@@ -113,7 +121,10 @@ struct Pools {
     sets: Vec<String>,
 }
 fn build_pools(cfg: &GenConfig) -> Pools {
-    let mut players: Vec<String> = PLAYERS.iter().map(|s| s.to_string()).collect();
+    let mut players: Vec<String> = PLAYERS
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     for i in 0..cfg.num_players {
         // single-token synthetic player; normalizes to a distinct generic feature
         players.push(format!("athlete{i:05}"));
@@ -191,7 +202,11 @@ fn gen_titles(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<String> {
         let year = 1986 + rng.below(39);
         let bi = rng.below(BRANDS.len());
         // alternate brand form sometimes (UD vs Upper Deck)
-        let brand = if rng.frac() < 0.3 { BRAND_ALT[bi] } else { BRANDS[bi] };
+        let brand = if rng.frac() < 0.3 {
+            BRAND_ALT[bi]
+        } else {
+            BRANDS[bi]
+        };
         let set = &pools.sets[rng.below(pools.sets.len())];
 
         let mut t = format!("{year} {brand} {set} {player}");

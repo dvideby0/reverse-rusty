@@ -71,7 +71,7 @@ fn zero_false_negatives_against_oracle() {
         broad_query_frac: 0.06,
         hot_skew: 2.0,
         family_size: 8,
-        seed: 0xABCDEF,
+        seed: 0x00AB_CDEF,
         num_players: 3_000,
         num_sets: 1_200,
     };
@@ -115,8 +115,7 @@ fn zero_false_negatives_against_oracle() {
     }
 
     eprintln!(
-        "oracle: truth_matches={} engine_matches={} false_neg={} false_pos={}",
-        total_truth, total_engine, false_neg, false_pos
+        "oracle: truth_matches={total_truth} engine_matches={total_engine} false_neg={false_neg} false_pos={false_pos}"
     );
     assert_eq!(false_neg, 0, "FALSE NEGATIVES detected — contract violated");
     assert_eq!(false_pos, 0, "false positives — exact matcher is not exact");
@@ -169,7 +168,7 @@ fn multi_segment_identical_to_single_build() {
     eng.build_from_queries(&q[..n_init]); // base segment 0
     eng.bulk_ingest(b0); // base segment 1
     eng.bulk_ingest(b1); // base segment 2
-    // exercise the memtable + flush in the middle of the lifecycle
+                         // exercise the memtable + flush in the middle of the lifecycle
     for (logical, text) in &updates {
         // tombstone the old copy of this logical id (it lives in base segment 0)
         // by finding its local id is non-trivial across segments, so instead we
@@ -178,7 +177,7 @@ fn multi_segment_identical_to_single_build() {
     }
     eng.flush(); // seal the updates' memtable into a base segment
     eng.bulk_ingest(b2); // base segment after flush
-    // a second round of live updates that stay in the (new) memtable, unflushed
+                         // a second round of live updates that stay in the (new) memtable, unflushed
     let mut mt_old: Vec<u32> = Vec::new();
     for (logical, text) in updates.iter().take(50) {
         if let Some(local) = eng.insert_live(text, *logical, 3) {
@@ -315,11 +314,11 @@ fn compaction_preserves_correctness() {
     // Build 5 base segments + some tombstones (simulating update churn)
     let chunk = n / 5;
     let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
-    eng.build_from_queries(&q[..chunk]);        // segment 0
-    eng.bulk_ingest(&q[chunk..2 * chunk]);      // segment 1
-    eng.bulk_ingest(&q[2 * chunk..3 * chunk]);  // segment 2
-    eng.bulk_ingest(&q[3 * chunk..4 * chunk]);  // segment 3
-    eng.bulk_ingest(&q[4 * chunk..]);           // segment 4
+    eng.build_from_queries(&q[..chunk]); // segment 0
+    eng.bulk_ingest(&q[chunk..2 * chunk]); // segment 1
+    eng.bulk_ingest(&q[2 * chunk..3 * chunk]); // segment 2
+    eng.bulk_ingest(&q[3 * chunk..4 * chunk]); // segment 3
+    eng.bulk_ingest(&q[4 * chunk..]); // segment 4
 
     // Simulate updates: re-insert some queries with new text, tombstone originals
     let new_text = "1994 upper deck michael jordan sp preview psa 10 -(auto,signed)".to_string();
@@ -336,7 +335,10 @@ fn compaction_preserves_correctness() {
     tombstone_originals(&mut eng, &q[..chunk], &updated_ids);
 
     let pre_compact_segments = eng.num_segments();
-    assert!(pre_compact_segments > 4, "need multiple segments to test compaction");
+    assert!(
+        pre_compact_segments > 4,
+        "need multiple segments to test compaction"
+    );
 
     // Snapshot pre-compaction matches
     let mut s = MatchScratch::new();
@@ -353,11 +355,21 @@ fn compaction_preserves_correctness() {
     let report = report.unwrap();
     eprintln!(
         "compaction: merged={} segs, before={} entries, after={} entries, reclaimed={} tombstones",
-        report.segments_merged, report.entries_before, report.entries_after, report.tombstones_reclaimed
+        report.segments_merged,
+        report.entries_before,
+        report.entries_after,
+        report.tombstones_reclaimed
     );
-    assert!(report.tombstones_reclaimed > 0, "should have reclaimed some tombstones");
+    assert!(
+        report.tombstones_reclaimed > 0,
+        "should have reclaimed some tombstones"
+    );
     // base segments collapsed to 1 + memtable = 2
-    assert_eq!(eng.num_segments(), 2, "post-compact should be 1 base + 1 memtable");
+    assert_eq!(
+        eng.num_segments(),
+        2,
+        "post-compact should be 1 base + 1 memtable"
+    );
 
     // Verify post-compaction matches are identical to pre-compaction
     let mut post_mismatches = 0usize;
@@ -405,9 +417,15 @@ fn compaction_preserves_correctness() {
     }
     eprintln!(
         "compaction oracle: truth={} false_neg={} segments_before={} segments_after={}",
-        total_truth, false_neg, pre_compact_segments, eng.num_segments()
+        total_truth,
+        false_neg,
+        pre_compact_segments,
+        eng.num_segments()
     );
-    assert_eq!(false_neg, 0, "compaction introduced FALSE NEGATIVES — contract violated");
+    assert_eq!(
+        false_neg, 0,
+        "compaction introduced FALSE NEGATIVES — contract violated"
+    );
     assert!(total_truth > 0, "degenerate test: no matches");
 }
 
@@ -479,17 +497,20 @@ fn spec_example_matches_expected() {
     ];
     for t in pass {
         eng.match_title(t, &mut s, &mut out, true);
-        assert!(out.contains(&1), "expected match for {:?}, got {:?}", t, out);
+        assert!(out.contains(&1), "expected match for {t:?}, got {out:?}");
     }
 
     let fail = [
         "1994 Upper Deck Michael Jordan SP Preview PSA 10 auto", // forbidden
-        "1994 Upper Deck Michael Jordan SP Preview BGS 9.5",     // wrong grader/grade + forbidden bgs
-        "1993 Upper Deck Michael Jordan SP Preview PSA 10",      // wrong year
-        "1994 Topps Michael Jordan SP Preview PSA 10",           // wrong brand
+        "1994 Upper Deck Michael Jordan SP Preview BGS 9.5", // wrong grader/grade + forbidden bgs
+        "1993 Upper Deck Michael Jordan SP Preview PSA 10",  // wrong year
+        "1994 Topps Michael Jordan SP Preview PSA 10",       // wrong brand
     ];
     for t in fail {
         eng.match_title(t, &mut s, &mut out, true);
-        assert!(!out.contains(&1), "did NOT expect match for {:?}, got {:?}", t, out);
+        assert!(
+            !out.contains(&1),
+            "did NOT expect match for {t:?}, got {out:?}"
+        );
     }
 }

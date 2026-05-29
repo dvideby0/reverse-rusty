@@ -76,7 +76,10 @@ pub fn parse(input: &str) -> Result<Ast, ParseError> {
                         ',' => {
                             push_member(&mut members, &mut cur);
                         }
-                        c if c.is_whitespace() => { /* allow spaces inside group */ cur.push(' '); }
+                        c if c.is_whitespace() => {
+                            /* allow spaces inside group */
+                            cur.push(' ');
+                        }
                         c => cur.push(c),
                     }
                     i += 1;
@@ -160,12 +163,15 @@ mod tests {
             .clauses
             .iter()
             .any(|c| !c.negated && c.atom == Atom::Term("1994".into())));
-        assert!(ast.clauses.iter().any(
-            |c| matches!(&c.atom, Atom::AnyOf(m) if m.contains(&"upper deck".to_string()))
-        ));
-        assert!(ast.clauses.iter().any(
-            |c| c.negated && matches!(&c.atom, Atom::AnyOf(m) if m.contains(&"bgs".to_string()))
-        ));
+        assert!(ast
+            .clauses
+            .iter()
+            .any(|c| matches!(&c.atom, Atom::AnyOf(m) if m.contains(&"upper deck".to_string()))));
+        assert!(ast
+            .clauses
+            .iter()
+            .any(|c| c.negated
+                && matches!(&c.atom, Atom::AnyOf(m) if m.contains(&"bgs".to_string()))));
     }
 
     #[test]

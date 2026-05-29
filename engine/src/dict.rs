@@ -109,7 +109,7 @@ impl Dict {
     pub fn finalize_mask(&mut self) {
         let mut idx: Vec<FeatureId> = (0..self.names.len() as FeatureId).collect();
         idx.sort_unstable_by_key(|&id| std::cmp::Reverse(self.freq[id as usize]));
-        for b in self.mask_bit.iter_mut() {
+        for b in &mut self.mask_bit {
             *b = NO_MASK_BIT;
         }
         for (bit, &id) in idx.iter().take(64).enumerate() {

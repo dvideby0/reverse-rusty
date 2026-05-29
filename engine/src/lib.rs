@@ -9,24 +9,47 @@
 //!   raw title -> normalize -> dense feature IDs -> title signatures
 //!             -> tiny candidate set -> integer-only exact verification -> matched IDs
 
-pub mod error;
-pub mod util;
-pub mod dict;
-pub mod normalize;
-pub mod dsl;
+// Library-scoped restriction lints. These encode the correctness invariants for
+// *library* code only — binaries (src/bin/*) and integration tests are separate
+// crate roots and do not inherit them, so they may unwrap/panic freely. The
+// crate-wide pedantic + undocumented_unsafe policy lives in Cargo.toml [lints].
+#![warn(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::let_underscore_must_use
+)]
+// Inline `#[cfg(test)]` modules live in library files, so they inherit the
+// restriction lints above. Test code legitimately unwraps/panics on failed
+// assertions — exempt it rather than littering tests with per-line allows.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::let_underscore_must_use
+    )
+)]
+
 pub mod compile;
 pub mod config;
-pub mod filter;
-pub mod index;
-pub mod exact;
+pub mod dict;
+pub mod dsl;
+pub mod error;
 pub mod events;
+pub mod exact;
+pub mod explain;
+pub mod filter;
+pub mod gen;
+pub mod index;
+pub mod loader;
+pub mod normalize;
 pub mod segment;
 pub mod storage;
-pub mod wal;
-pub mod explain;
-pub mod gen;
-pub mod loader;
+pub mod util;
 pub mod vocab;
+pub mod wal;
 
 pub use compile::{CompiledQuery, CostClass};
 pub use config::EngineConfig;

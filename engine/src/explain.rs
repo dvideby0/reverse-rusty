@@ -44,23 +44,18 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
     s.push('\n');
     s.push_str("  signatures (main): ");
     for sg in &cq.main_sigs {
-        s.push_str(&format!("{:#018x} ", sg));
+        s.push_str(&format!("{sg:#018x} "));
     }
     s.push('\n');
     if !cq.broad_sigs.is_empty() {
         s.push_str("  signatures (broad lane): ");
         for sg in &cq.broad_sigs {
-            s.push_str(&format!("{:#018x} ", sg));
+            s.push_str(&format!("{sg:#018x} "));
         }
         s.push('\n');
     }
     // anchor commentary
-    if let Some(&r1) = cq
-        .extracted
-        .required
-        .iter()
-        .min_by_key(|&&f| dict.freq(f))
-    {
+    if let Some(&r1) = cq.extracted.required.iter().min_by_key(|&&f| dict.freq(f)) {
         s.push_str(&format!(
             "  rarest required feature: {} (freq={}, hot={})\n",
             dict.name(r1),
@@ -72,18 +67,13 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
 }
 
 /// Explain a single title against a single compiled query.
-pub fn explain_match(
-    cq: &CompiledQuery,
-    title: &str,
-    norm: &Normalizer,
-    dict: &Dict,
-) -> String {
+pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &Dict) -> String {
     let mut lc = String::new();
     let mut feats = Vec::new();
     norm.match_features(title, dict, &mut lc, &mut feats);
 
     let mut s = String::new();
-    s.push_str(&format!("title: {:?}\n", title));
+    s.push_str(&format!("title: {title:?}\n"));
     s.push_str(&format!("  title features: {}\n", names(&feats, dict)));
 
     // would any signature retrieve this query?
@@ -104,8 +94,7 @@ pub fn explain_match(
     let retrieved = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
         || cq.broad_sigs.iter().any(|s| title_sigs.contains(s));
     s.push_str(&format!(
-        "  candidate? {} (title generates a signature in this query's cover)\n",
-        retrieved
+        "  candidate? {retrieved} (title generates a signature in this query's cover)\n"
     ));
 
     // exact reasons
@@ -131,7 +120,7 @@ pub fn explain_match(
     } else {
         s.push_str("  exact match: FAIL\n");
         for r in fail {
-            s.push_str(&format!("    - {}\n", r));
+            s.push_str(&format!("    - {r}\n"));
         }
     }
     s
@@ -191,11 +180,24 @@ pub fn explain_match_structured(
         candidate,
         matched: failures.is_empty(),
         cost_class: format!("{:?}", cq.cost_class),
-        required: cq.extracted.required.iter().map(|&id| dict.name(id).to_string()).collect(),
-        forbidden: cq.extracted.forbidden.iter().map(|&id| dict.name(id).to_string()).collect(),
-        anyof_groups: cq.extracted.anyof.iter().map(|g| {
-            g.iter().map(|&id| dict.name(id).to_string()).collect()
-        }).collect(),
+        required: cq
+            .extracted
+            .required
+            .iter()
+            .map(|&id| dict.name(id).to_string())
+            .collect(),
+        forbidden: cq
+            .extracted
+            .forbidden
+            .iter()
+            .map(|&id| dict.name(id).to_string())
+            .collect(),
+        anyof_groups: cq
+            .extracted
+            .anyof
+            .iter()
+            .map(|g| g.iter().map(|&id| dict.name(id).to_string()).collect())
+            .collect(),
         failures,
     }
 }

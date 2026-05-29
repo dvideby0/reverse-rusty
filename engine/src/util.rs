@@ -12,10 +12,10 @@ use std::hash::{BuildHasherDefault, Hasher};
 /// stable so segments built at different times agree). Not used for security.
 #[inline]
 pub fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
     }
     h
 }
@@ -23,17 +23,17 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
 /// Mix a sequence of u32 feature IDs into a stable signature key.
 #[inline]
 pub fn sig_key(features: &[u32]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for &f in features {
         // process 4 bytes of the feature id
-        h ^= f as u64;
-        h = h.wrapping_mul(0x100000001b3);
-        h ^= (f as u64) >> 13;
-        h = h.wrapping_mul(0x100000001b3);
+        h ^= u64::from(f);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+        h ^= u64::from(f) >> 13;
+        h = h.wrapping_mul(0x0100_0000_01b3);
     }
     // final avalanche
     h ^= h >> 33;
-    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
     h ^= h >> 33;
     h
 }
@@ -53,8 +53,8 @@ impl Hasher for IdentityU64Hasher {
         // Fallback for non-u64 writes (e.g. string keys in the dictionary).
         let mut h = self.0;
         for &b in bytes {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
         }
         self.0 = h;
     }
@@ -63,7 +63,7 @@ impl Hasher for IdentityU64Hasher {
         // already-mixed key; one more avalanche step for good measure
         let mut x = i;
         x ^= x >> 33;
-        x = x.wrapping_mul(0xff51afd7ed558ccd);
+        x = x.wrapping_mul(0xff51_afd7_ed55_8ccd);
         self.0 = x;
     }
 }

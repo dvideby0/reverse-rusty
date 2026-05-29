@@ -72,9 +72,9 @@ pub enum WalEntry {
 impl WalEntry {
     pub fn seq(&self) -> u64 {
         match self {
-            WalEntry::Insert { seq, .. } => *seq,
-            WalEntry::Tombstone { seq, .. } => *seq,
-            WalEntry::FlushCheckpoint { seq, .. } => *seq,
+            WalEntry::Insert { seq, .. }
+            | WalEntry::Tombstone { seq, .. }
+            | WalEntry::FlushCheckpoint { seq, .. } => *seq,
         }
     }
 }
@@ -109,7 +109,7 @@ impl Wal {
         if path.exists() {
             // Open existing, find the max sequence number
             let (entries, _skipped) = Self::read_entries(path)?;
-            let next_seq = entries.iter().map(|e| e.seq()).max().unwrap_or(0) + 1;
+            let next_seq = entries.iter().map(WalEntry::seq).max().unwrap_or(0) + 1;
             let file = std::fs::OpenOptions::new().append(true).open(path)?;
             Ok(Wal {
                 file,
@@ -232,10 +232,14 @@ impl Wal {
 
     fn parse_entries(data: &[u8]) -> io::Result<(Vec<WalEntry>, usize)> {
         fn get_u32(buf: &[u8], off: usize) -> Option<u32> {
-            buf.get(off..off + 4).and_then(|s| s.try_into().ok()).map(u32::from_le_bytes)
+            buf.get(off..off + 4)
+                .and_then(|s| s.try_into().ok())
+                .map(u32::from_le_bytes)
         }
         fn get_u64(buf: &[u8], off: usize) -> Option<u64> {
-            buf.get(off..off + 8).and_then(|s| s.try_into().ok()).map(u64::from_le_bytes)
+            buf.get(off..off + 8)
+                .and_then(|s| s.try_into().ok())
+                .map(u64::from_le_bytes)
         }
 
         let mut entries = Vec::new();
@@ -246,9 +250,8 @@ impl Wal {
                 Some(v) => v as usize,
                 None => break,
             };
-            let stored_crc = match get_u32(data, cursor + 4) {
-                Some(v) => v,
-                None => break,
+            let Some(stored_crc) = get_u32(data, cursor + 4) else {
+                break;
             };
             cursor += 8;
 
@@ -265,9 +268,8 @@ impl Wal {
                 break;
             }
 
-            let seq = match get_u64(body, 0) {
-                Some(v) => v,
-                None => break,
+            let Some(seq) = get_u64(body, 0) else {
+                break;
             };
             let op = body[8];
             let payload = &body[9..];
@@ -277,30 +279,53 @@ impl Wal {
                     if payload.len() < 16 {
                         break;
                     }
-                    let logical = match get_u64(payload, 0) { Some(v) => v, None => break };
-                    let version = match get_u32(payload, 8) { Some(v) => v, None => break };
-                    let text_len = match get_u32(payload, 12) { Some(v) => v as usize, None => break };
+                    let Some(logical) = get_u64(payload, 0) else {
+                        break;
+                    };
+                    let Some(version) = get_u32(payload, 8) else {
+                        break;
+                    };
+                    let text_len = match get_u32(payload, 12) {
+                        Some(v) => v as usize,
+                        None => break,
+                    };
                     if payload.len() < 16 + text_len {
                         break;
                     }
                     let text = std::str::from_utf8(&payload[16..16 + text_len])
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                         .to_string();
-                    entries.push(WalEntry::Insert { seq, logical, version, text });
+                    entries.push(WalEntry::Insert {
+                        seq,
+                        logical,
+                        version,
+                        text,
+                    });
                 }
                 OP_TOMBSTONE => {
                     if payload.len() < 8 {
                         break;
                     }
-                    let seg_idx = match get_u32(payload, 0) { Some(v) => v, None => break };
-                    let local_id = match get_u32(payload, 4) { Some(v) => v, None => break };
-                    entries.push(WalEntry::Tombstone { seq, seg_idx, local_id });
+                    let Some(seg_idx) = get_u32(payload, 0) else {
+                        break;
+                    };
+                    let Some(local_id) = get_u32(payload, 4) else {
+                        break;
+                    };
+                    entries.push(WalEntry::Tombstone {
+                        seq,
+                        seg_idx,
+                        local_id,
+                    });
                 }
                 OP_FLUSH_CHECKPOINT => {
                     if payload.len() < 4 {
                         break;
                     }
-                    let name_len = match get_u32(payload, 0) { Some(v) => v as usize, None => break };
+                    let name_len = match get_u32(payload, 0) {
+                        Some(v) => v as usize,
+                        None => break,
+                    };
                     if payload.len() < 4 + name_len {
                         break;
                     }
@@ -324,14 +349,17 @@ impl Wal {
     /// Returns a `WalRecovery` with entries to replay and skipped-bytes count.
     pub fn recover(path: &Path) -> io::Result<WalRecovery> {
         let (all, skipped_bytes) = Self::read_entries(path)?;
-        let last_checkpoint_idx = all.iter().rposition(|e| {
-            matches!(e, WalEntry::FlushCheckpoint { .. })
-        });
+        let last_checkpoint_idx = all
+            .iter()
+            .rposition(|e| matches!(e, WalEntry::FlushCheckpoint { .. }));
         let entries = match last_checkpoint_idx {
             Some(idx) => all[idx + 1..].to_vec(),
             None => all,
         };
-        Ok(WalRecovery { entries, skipped_bytes })
+        Ok(WalRecovery {
+            entries,
+            skipped_bytes,
+        })
     }
 
     /// Reset the WAL: truncate to just the header. Called after a successful
@@ -363,7 +391,11 @@ mod tests {
     use super::*;
 
     fn scratch_path(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("percolator_wal_{}_{}.log", name, std::process::id()));
+        let p = std::env::temp_dir().join(format!(
+            "percolator_wal_{}_{}.log",
+            name,
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&p);
         p
     }
@@ -393,7 +425,12 @@ mod tests {
         assert_eq!(recovered.entries.len(), 2);
         assert_eq!(recovered.skipped_bytes, 0);
         match &recovered.entries[0] {
-            WalEntry::Insert { logical, version, text, .. } => {
+            WalEntry::Insert {
+                logical,
+                version,
+                text,
+                ..
+            } => {
                 assert_eq!(*logical, 7);
                 assert_eq!(*version, 2);
                 assert_eq!(text, "wander franco");
@@ -407,19 +444,27 @@ mod tests {
     /// (it does real device flushes). Run with:
     ///   cargo test --release -p percolator --lib wal::tests::bench_fsync_cost -- --ignored --nocapture
     #[test]
-    #[ignore]
+    #[ignore = "benchmark: does real device flushes; run with --ignored"]
     fn bench_fsync_cost() {
         use std::time::Instant;
         const N: u64 = 5_000;
-        for &(label, fsync) in &[("checkpoint-only (fsync=false)", false), ("per-write fsync=true", true)] {
-            let path = scratch_path(&format!("bench_{}", fsync));
+        for &(label, fsync) in &[
+            ("checkpoint-only (fsync=false)", false),
+            ("per-write fsync=true", true),
+        ] {
+            let path = scratch_path(&format!("bench_{fsync}"));
             let mut wal = Wal::open(&path, fsync).unwrap();
             let t = Instant::now();
             for i in 0..N {
-                wal.append_insert(i, 1, "1994 upper deck michael jordan sp psa 10").unwrap();
+                wal.append_insert(i, 1, "1994 upper deck michael jordan sp psa 10")
+                    .unwrap();
             }
             let per = t.elapsed().as_secs_f64() / N as f64;
-            println!("{label:35}: {:.1} us/append   ({:.0} appends/sec)", per * 1e6, 1.0 / per);
+            println!(
+                "{label:35}: {:.1} us/append   ({:.0} appends/sec)",
+                per * 1e6,
+                1.0 / per
+            );
             let _ = std::fs::remove_file(&path);
         }
     }

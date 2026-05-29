@@ -38,14 +38,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use parking_lot::Mutex;
 use clap::Parser;
+use parking_lot::Mutex;
 use prometheus::{
-    Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Histogram,
-    HistogramOpts, HistogramVec, Opts, Registry, TextEncoder,
+    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, warn, instrument};
+use tracing::{error, info, instrument, warn};
 
 use std::cell::RefCell;
 
@@ -156,6 +156,7 @@ struct PrometheusMetrics {
     ingest_rejected: IntCounterVec,
     compaction_total: IntCounter,
     compaction_tombstones_reclaimed: IntCounter,
+    segment_cleanup_failures_total: IntCounter,
 
     // Request metrics
     http_requests_total: IntCounterVec,
@@ -176,105 +177,175 @@ impl PrometheusMetrics {
 
         // --- Engine gauges (refreshed on each /_metrics scrape) ---
 
-        let total_queries = IntGauge::with_opts(
-            Opts::new("total_queries", "Total queries stored across all segments and memtable"),
-        ).unwrap();
+        let total_queries = IntGauge::with_opts(Opts::new(
+            "total_queries",
+            "Total queries stored across all segments and memtable",
+        ))
+        .unwrap();
 
-        let base_segments = IntGauge::with_opts(
-            Opts::new("base_segments", "Number of sealed immutable base segments"),
-        ).unwrap();
+        let base_segments = IntGauge::with_opts(Opts::new(
+            "base_segments",
+            "Number of sealed immutable base segments",
+        ))
+        .unwrap();
 
-        let memtable_entries = IntGauge::with_opts(
-            Opts::new("memtable_entries", "Entries currently in the mutable memtable"),
-        ).unwrap();
+        let memtable_entries = IntGauge::with_opts(Opts::new(
+            "memtable_entries",
+            "Entries currently in the mutable memtable",
+        ))
+        .unwrap();
 
-        let dict_features = IntGauge::with_opts(
-            Opts::new("dict_features", "Distinct features in the shared dictionary"),
-        ).unwrap();
+        let dict_features = IntGauge::with_opts(Opts::new(
+            "dict_features",
+            "Distinct features in the shared dictionary",
+        ))
+        .unwrap();
 
         let memory_bytes = IntGaugeVec::new(
             Opts::new("memory_bytes", "Heap memory usage by component"),
             &["component"],
-        ).unwrap();
+        )
+        .unwrap();
 
         // --- Event counters ---
 
-        let flush_total = IntCounter::with_opts(
-            Opts::new("flush_total", "Total number of memtable flushes"),
-        ).unwrap();
+        let flush_total =
+            IntCounter::with_opts(Opts::new("flush_total", "Total number of memtable flushes"))
+                .unwrap();
 
-        let flush_entries_total = IntCounter::with_opts(
-            Opts::new("flush_entries_total", "Total entries flushed across all flushes"),
-        ).unwrap();
+        let flush_entries_total = IntCounter::with_opts(Opts::new(
+            "flush_entries_total",
+            "Total entries flushed across all flushes",
+        ))
+        .unwrap();
 
-        let ingest_total = IntCounter::with_opts(
-            Opts::new("ingest_total", "Total number of bulk ingest operations"),
-        ).unwrap();
+        let ingest_total = IntCounter::with_opts(Opts::new(
+            "ingest_total",
+            "Total number of bulk ingest operations",
+        ))
+        .unwrap();
 
-        let ingest_queries_total = IntCounter::with_opts(
-            Opts::new("ingest_queries_total", "Total queries ingested successfully"),
-        ).unwrap();
+        let ingest_queries_total = IntCounter::with_opts(Opts::new(
+            "ingest_queries_total",
+            "Total queries ingested successfully",
+        ))
+        .unwrap();
 
         let ingest_rejected = IntCounterVec::new(
             Opts::new("ingest_rejected_total", "Queries rejected during ingest"),
             &["reason"],
-        ).unwrap();
+        )
+        .unwrap();
 
-        let compaction_total = IntCounter::with_opts(
-            Opts::new("compaction_total", "Total number of compaction operations"),
-        ).unwrap();
+        let compaction_total = IntCounter::with_opts(Opts::new(
+            "compaction_total",
+            "Total number of compaction operations",
+        ))
+        .unwrap();
 
-        let compaction_tombstones_reclaimed = IntCounter::with_opts(
-            Opts::new("compaction_tombstones_reclaimed_total", "Tombstones reclaimed by compaction"),
-        ).unwrap();
+        let compaction_tombstones_reclaimed = IntCounter::with_opts(Opts::new(
+            "compaction_tombstones_reclaimed_total",
+            "Tombstones reclaimed by compaction",
+        ))
+        .unwrap();
+
+        let segment_cleanup_failures_total = IntCounter::with_opts(Opts::new(
+            "segment_cleanup_failures_total",
+            "Segment files that failed best-effort removal (orphan/stale cleanup)",
+        ))
+        .unwrap();
 
         // --- HTTP request metrics ---
 
         let http_requests_total = IntCounterVec::new(
-            Opts::new("http_requests_total", "Total HTTP requests by endpoint and status"),
+            Opts::new(
+                "http_requests_total",
+                "Total HTTP requests by endpoint and status",
+            ),
             &["endpoint", "status"],
-        ).unwrap();
+        )
+        .unwrap();
 
         let http_request_duration = HistogramVec::new(
-            HistogramOpts::new("http_request_duration_seconds", "HTTP request duration in seconds")
-                .buckets(vec![0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]),
+            HistogramOpts::new(
+                "http_request_duration_seconds",
+                "HTTP request duration in seconds",
+            )
+            .buckets(vec![
+                0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0,
+            ]),
             &["endpoint"],
-        ).unwrap();
+        )
+        .unwrap();
 
         // --- Match metrics ---
 
         let match_candidates_per_title = Histogram::with_opts(
-            HistogramOpts::new("match_candidates_per_title", "Candidate queries evaluated per title")
-                .buckets(vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]),
-        ).unwrap();
+            HistogramOpts::new(
+                "match_candidates_per_title",
+                "Candidate queries evaluated per title",
+            )
+            .buckets(vec![
+                1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0,
+            ]),
+        )
+        .unwrap();
 
         let match_results_per_title = Histogram::with_opts(
             HistogramOpts::new("match_results_per_title", "Confirmed matches per title")
                 .buckets(vec![0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0]),
-        ).unwrap();
+        )
+        .unwrap();
 
-        let slow_queries_total = IntCounter::with_opts(
-            Opts::new("slow_queries_total", "Searches exceeding the slow-query threshold"),
-        ).unwrap();
+        let slow_queries_total = IntCounter::with_opts(Opts::new(
+            "slow_queries_total",
+            "Searches exceeding the slow-query threshold",
+        ))
+        .unwrap();
 
         // Register all
         registry.register(Box::new(total_queries.clone())).unwrap();
         registry.register(Box::new(base_segments.clone())).unwrap();
-        registry.register(Box::new(memtable_entries.clone())).unwrap();
+        registry
+            .register(Box::new(memtable_entries.clone()))
+            .unwrap();
         registry.register(Box::new(dict_features.clone())).unwrap();
         registry.register(Box::new(memory_bytes.clone())).unwrap();
         registry.register(Box::new(flush_total.clone())).unwrap();
-        registry.register(Box::new(flush_entries_total.clone())).unwrap();
+        registry
+            .register(Box::new(flush_entries_total.clone()))
+            .unwrap();
         registry.register(Box::new(ingest_total.clone())).unwrap();
-        registry.register(Box::new(ingest_queries_total.clone())).unwrap();
-        registry.register(Box::new(ingest_rejected.clone())).unwrap();
-        registry.register(Box::new(compaction_total.clone())).unwrap();
-        registry.register(Box::new(compaction_tombstones_reclaimed.clone())).unwrap();
-        registry.register(Box::new(http_requests_total.clone())).unwrap();
-        registry.register(Box::new(http_request_duration.clone())).unwrap();
-        registry.register(Box::new(match_candidates_per_title.clone())).unwrap();
-        registry.register(Box::new(match_results_per_title.clone())).unwrap();
-        registry.register(Box::new(slow_queries_total.clone())).unwrap();
+        registry
+            .register(Box::new(ingest_queries_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(ingest_rejected.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(compaction_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(compaction_tombstones_reclaimed.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(segment_cleanup_failures_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(http_requests_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(http_request_duration.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(match_candidates_per_title.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(match_results_per_title.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(slow_queries_total.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -290,6 +361,7 @@ impl PrometheusMetrics {
             ingest_rejected,
             compaction_total,
             compaction_tombstones_reclaimed,
+            segment_cleanup_failures_total,
             http_requests_total,
             http_request_duration,
             match_candidates_per_title,
@@ -304,9 +376,15 @@ impl PrometheusMetrics {
         self.base_segments.set(m.base_segments as i64);
         self.memtable_entries.set(m.memtable_entries as i64);
         self.dict_features.set(m.dict_features as i64);
-        self.memory_bytes.with_label_values(&["exact"]).set(m.exact_bytes as i64);
-        self.memory_bytes.with_label_values(&["index"]).set(m.index_bytes as i64);
-        self.memory_bytes.with_label_values(&["filter"]).set(m.filter_bytes as i64);
+        self.memory_bytes
+            .with_label_values(&["exact"])
+            .set(m.exact_bytes as i64);
+        self.memory_bytes
+            .with_label_values(&["index"])
+            .set(m.index_bytes as i64);
+        self.memory_bytes
+            .with_label_values(&["filter"])
+            .set(m.filter_bytes as i64);
     }
 
     /// Handle an EngineEvent — increment counters. Called from the observer.
@@ -316,19 +394,32 @@ impl PrometheusMetrics {
                 self.flush_total.inc();
                 self.flush_entries_total.inc_by(*entries as u64);
             }
-            EngineEvent::Ingest { ingested, rejected_parse, rejected_class_d, .. } => {
+            EngineEvent::Ingest {
+                ingested,
+                rejected_parse,
+                rejected_class_d,
+                ..
+            } => {
                 self.ingest_total.inc();
                 self.ingest_queries_total.inc_by(*ingested as u64);
                 if *rejected_parse > 0 {
-                    self.ingest_rejected.with_label_values(&["parse"]).inc_by(*rejected_parse as u64);
+                    self.ingest_rejected
+                        .with_label_values(&["parse"])
+                        .inc_by(*rejected_parse as u64);
                 }
                 if *rejected_class_d > 0 {
-                    self.ingest_rejected.with_label_values(&["class_d"]).inc_by(*rejected_class_d as u64);
+                    self.ingest_rejected
+                        .with_label_values(&["class_d"])
+                        .inc_by(*rejected_class_d as u64);
                 }
             }
             EngineEvent::Compaction { report, .. } => {
                 self.compaction_total.inc();
-                self.compaction_tombstones_reclaimed.inc_by(report.tombstones_reclaimed as u64);
+                self.compaction_tombstones_reclaimed
+                    .inc_by(report.tombstones_reclaimed as u64);
+            }
+            EngineEvent::SegmentCleanupFailed { .. } => {
+                self.segment_cleanup_failures_total.inc();
             }
         }
     }
@@ -365,7 +456,9 @@ struct PutDocBody {
     #[serde(default = "default_version")]
     version: u32,
 }
-fn default_version() -> u32 { 1 }
+fn default_version() -> u32 {
+    1
+}
 
 #[derive(Serialize)]
 struct PutDocResponse {
@@ -503,6 +596,9 @@ struct ClassCounts {
 }
 
 #[derive(Serialize)]
+// Field names are the serialized JSON keys (public API); the shared `_bytes`
+// suffix is the contract, not an accident — don't rename it away.
+#[allow(clippy::struct_field_names)]
 struct MemoryStats {
     exact_bytes: usize,
     index_bytes: usize,
@@ -543,15 +639,22 @@ struct ApiErrorBody {
 }
 
 impl ApiError {
-    fn response(status: StatusCode, error_type: &str, reason: impl Into<String>) -> (StatusCode, Json<ApiError>) {
+    fn response(
+        status: StatusCode,
+        error_type: &str,
+        reason: impl Into<String>,
+    ) -> (StatusCode, Json<ApiError>) {
         let code = status.as_u16();
-        (status, Json(ApiError {
-            error: ApiErrorBody {
-                error_type: error_type.to_string(),
-                reason: reason.into(),
-            },
-            status: code,
-        }))
+        (
+            status,
+            Json(ApiError {
+                error: ApiErrorBody {
+                    error_type: error_type.to_string(),
+                    reason: reason.into(),
+                },
+                status: code,
+            }),
+        )
     }
 }
 
@@ -593,118 +696,185 @@ async fn put_doc(
         match engine.try_insert_live(&body.query, id, body.version) {
             Ok(percolator::segment::InsertOutcome::Inserted(_)) => {
                 info!(query_id = id, "query registered");
-                state.prom.http_requests_total.with_label_values(&["put_doc", "201"]).inc();
-                (StatusCode::CREATED, Json(PutDocResponse { _id: id, result: "created", error: None }))
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["put_doc", "201"])
+                    .inc();
+                (
+                    StatusCode::CREATED,
+                    Json(PutDocResponse {
+                        _id: id,
+                        result: "created",
+                        error: None,
+                    }),
+                )
             }
             Ok(percolator::segment::InsertOutcome::RejectedClassD) => {
                 warn!(query_id = id, "query rejected: cost class D");
-                state.prom.http_requests_total.with_label_values(&["put_doc", "400"]).inc();
-                (StatusCode::BAD_REQUEST, Json(PutDocResponse {
-                    _id: id,
-                    result: "rejected",
-                    error: Some("query has no anchorable feature (cost class D)".into()),
-                }))
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["put_doc", "400"])
+                    .inc();
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(PutDocResponse {
+                        _id: id,
+                        result: "rejected",
+                        error: Some("query has no anchorable feature (cost class D)".into()),
+                    }),
+                )
             }
             Err(percolator::WriteError::Parse(e)) => {
                 warn!(query_id = id, error = %e, "query parse error");
-                state.prom.http_requests_total.with_label_values(&["put_doc", "400"]).inc();
-                (StatusCode::BAD_REQUEST, Json(PutDocResponse {
-                    _id: id,
-                    result: "error",
-                    error: Some(format!("parse error: {}", e)),
-                }))
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["put_doc", "400"])
+                    .inc();
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(PutDocResponse {
+                        _id: id,
+                        result: "error",
+                        error: Some(format!("parse error: {e}")),
+                    }),
+                )
             }
             Err(percolator::WriteError::Wal(e)) => {
                 // Durability failure: the mutation was NOT applied. Never
                 // acknowledge a write we couldn't log (see ADR-013). 503 tells
                 // the client to retry — the engine state is unchanged.
                 error!(query_id = id, error = %e, "WAL write failed, mutation rejected");
-                state.prom.http_requests_total.with_label_values(&["put_doc", "503"]).inc();
-                (StatusCode::SERVICE_UNAVAILABLE, Json(PutDocResponse {
-                    _id: id,
-                    result: "error",
-                    error: Some(format!("write-ahead log error: {}", e)),
-                }))
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["put_doc", "503"])
+                    .inc();
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(PutDocResponse {
+                        _id: id,
+                        result: "error",
+                        error: Some(format!("write-ahead log error: {e}")),
+                    }),
+                )
             }
         }
     };
     state.publish_snapshot();
-    state.prom.http_request_duration.with_label_values(&["put_doc"])
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["put_doc"])
         .observe(start.elapsed().as_secs_f64());
     result
 }
 
 /// GET /_doc/{id} — retrieve a stored query by logical ID.
 #[instrument(skip(state), fields(query_id = id))]
-async fn get_doc(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<u64>,
-) -> impl IntoResponse {
+async fn get_doc(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> impl IntoResponse {
     let start = Instant::now();
     let snap = state.snapshot.load();
-    let result = match snap.get_query_source(id) {
-        Some(query_text) => {
-            state.prom.http_requests_total.with_label_values(&["get_doc", "200"]).inc();
-            (StatusCode::OK, Json(serde_json::json!({
+    let result = if let Some(query_text) = snap.get_query_source(id) {
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["get_doc", "200"])
+            .inc();
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
                 "_id": id,
                 "found": true,
                 "_source": { "query": query_text }
-            })))
-        }
-        None => {
-            state.prom.http_requests_total.with_label_values(&["get_doc", "404"]).inc();
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
+            })),
+        )
+    } else {
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["get_doc", "404"])
+            .inc();
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
                 "_id": id,
                 "found": false
-            })))
-        }
+            })),
+        )
     };
-    state.prom.http_request_duration.with_label_values(&["get_doc"])
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["get_doc"])
         .observe(start.elapsed().as_secs_f64());
     result
 }
 
 /// DELETE /_doc/{id} — remove a stored query by logical ID.
 #[instrument(skip(state), fields(query_id = id))]
-async fn delete_doc(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<u64>,
-) -> impl IntoResponse {
+async fn delete_doc(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> impl IntoResponse {
     let start = Instant::now();
     let deleted = {
         let mut engine = state.engine.lock();
         engine.delete_by_logical_id(id)
     };
     state.publish_snapshot();
-    state.prom.http_request_duration.with_label_values(&["delete_doc"])
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["delete_doc"])
         .observe(start.elapsed().as_secs_f64());
     match deleted {
         Ok(n) if n > 0 => {
             info!(query_id = id, deleted = n, "query deleted");
-            state.prom.http_requests_total.with_label_values(&["delete_doc", "200"]).inc();
-            (StatusCode::OK, Json(serde_json::json!({
-                "_id": id,
-                "result": "deleted",
-                "deleted_count": n
-            })))
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["delete_doc", "200"])
+                .inc();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "_id": id,
+                    "result": "deleted",
+                    "deleted_count": n
+                })),
+            )
         }
         Ok(_) => {
-            state.prom.http_requests_total.with_label_values(&["delete_doc", "404"]).inc();
-            (StatusCode::NOT_FOUND, Json(serde_json::json!({
-                "_id": id,
-                "result": "not_found"
-            })))
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["delete_doc", "404"])
+                .inc();
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "_id": id,
+                    "result": "not_found"
+                })),
+            )
         }
         Err(e) => {
             // Tombstone WAL append failed: the delete was NOT applied. Reject
             // rather than acknowledge a delete we couldn't log (see ADR-013).
             error!(query_id = id, error = %e, "WAL write failed, delete rejected");
-            state.prom.http_requests_total.with_label_values(&["delete_doc", "503"]).inc();
-            (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-                "_id": id,
-                "result": "error",
-                "error": format!("write-ahead log error: {}", e)
-            })))
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["delete_doc", "503"])
+                .inc();
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "_id": id,
+                    "result": "error",
+                    "error": format!("write-ahead log error: {}", e)
+                })),
+            )
         }
     }
 }
@@ -728,7 +898,11 @@ async fn search(
         // Single document percolation.
         (Some(doc), _) => {
             let title = doc.title;
-            let title_for_explain = if include_explain { Some(title.clone()) } else { None };
+            let title_for_explain = if include_explain {
+                Some(title.clone())
+            } else {
+                None
+            };
             let prom = state.prom.clone();
             let snap = Arc::clone(&state.snapshot.load());
             let state_inner = Arc::clone(&state);
@@ -738,8 +912,7 @@ async fn search(
                     SCRATCH.with(|cell| {
                         let mut scratch = cell.borrow_mut();
                         let mut out = Vec::new();
-                        let stats =
-                            snap.match_title(&title, &mut scratch, &mut out, include_broad);
+                        let stats = snap.match_title(&title, &mut scratch, &mut out, include_broad);
                         (out, stats)
                     })
                 })
@@ -749,7 +922,11 @@ async fn search(
                 Ok(Ok(result)) => result,
                 Ok(Err(e)) => {
                     eprintln!("search task panicked: {e}");
-                    state.prom.http_requests_total.with_label_values(&["search", "500"]).inc();
+                    state
+                        .prom
+                        .http_requests_total
+                        .with_label_values(&["search", "500"])
+                        .inc();
                     return Err(ApiError::response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "search_error",
@@ -757,7 +934,11 @@ async fn search(
                     ));
                 }
                 Err(_) => {
-                    state.prom.http_requests_total.with_label_values(&["search", "408"]).inc();
+                    state
+                        .prom
+                        .http_requests_total
+                        .with_label_values(&["search", "408"])
+                        .inc();
                     return Err(ApiError::response(
                         StatusCode::REQUEST_TIMEOUT,
                         "timeout",
@@ -766,29 +947,47 @@ async fn search(
                 }
             };
 
-            prom.match_candidates_per_title.observe(stats.unique_candidates as f64);
+            prom.match_candidates_per_title
+                .observe(f64::from(stats.unique_candidates));
             prom.match_results_per_title.observe(ids.len() as f64);
 
             let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             let total = ids.len();
             let paged_ids: Vec<u64> = ids.into_iter().skip(page_from).take(page_size).collect();
             let snap = state.snapshot.load();
-            let hits = paged_ids.iter().map(|&id| {
-                let source = if include_source {
-                    snap.get_query_source(id).map(|q| HitSource { query: q })
-                } else {
-                    None
-                };
-                let explanation = title_for_explain.as_deref()
-                    .and_then(|t| snap.explain_hit(id, t));
-                SearchHitItem { _id: id, _source: source, _explanation: explanation }
-            }).collect();
-            info!(titles = 1, matches = total, took_ms = format!("{:.2}", took_ms), "search complete");
+            let hits = paged_ids
+                .iter()
+                .map(|&id| {
+                    let source = if include_source {
+                        snap.get_query_source(id).map(|q| HitSource { query: q })
+                    } else {
+                        None
+                    };
+                    let explanation = title_for_explain
+                        .as_deref()
+                        .and_then(|t| snap.explain_hit(id, t));
+                    SearchHitItem {
+                        _id: id,
+                        _source: source,
+                        _explanation: explanation,
+                    }
+                })
+                .collect();
+            info!(
+                titles = 1,
+                matches = total,
+                took_ms = format!("{:.2}", took_ms),
+                "search complete"
+            );
             SearchResponse {
                 took_ms,
                 hits: SearchHits { total, hits },
                 slots: None,
-                profile: if include_profile { Some(stats.into()) } else { None },
+                profile: if include_profile {
+                    Some(stats.into())
+                } else {
+                    None
+                },
             }
         }
 
@@ -801,14 +1000,20 @@ async fn search(
             let state_inner = Arc::clone(&state);
 
             let search_fut = tokio::task::spawn_blocking(move || {
-                state_inner.pool.install(|| snap.match_titles_par(&titles, include_broad))
+                state_inner
+                    .pool
+                    .install(|| snap.match_titles_par(&titles, include_broad))
             });
 
             let results = match tokio::time::timeout(timeout, search_fut).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(e)) => {
                     eprintln!("search task panicked: {e}");
-                    state.prom.http_requests_total.with_label_values(&["search", "500"]).inc();
+                    state
+                        .prom
+                        .http_requests_total
+                        .with_label_values(&["search", "500"])
+                        .inc();
                     return Err(ApiError::response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "search_error",
@@ -816,7 +1021,11 @@ async fn search(
                     ));
                 }
                 Err(_) => {
-                    state.prom.http_requests_total.with_label_values(&["search", "408"]).inc();
+                    state
+                        .prom
+                        .http_requests_total
+                        .with_label_values(&["search", "408"])
+                        .inc();
                     return Err(ApiError::response(
                         StatusCode::REQUEST_TIMEOUT,
                         "timeout",
@@ -829,7 +1038,8 @@ async fn search(
             let mut all_ids = Vec::new();
             let mut slot_data: Vec<(usize, Vec<u64>, StatsResponse)> = Vec::new();
             for (slot, ids, stats) in results {
-                prom.match_candidates_per_title.observe(stats.unique_candidates as f64);
+                prom.match_candidates_per_title
+                    .observe(f64::from(stats.unique_candidates));
                 prom.match_results_per_title.observe(ids.len() as f64);
 
                 all_ids.extend_from_slice(&ids);
@@ -839,7 +1049,11 @@ async fn search(
             all_ids.dedup();
 
             let total = all_ids.len();
-            let paged_ids: Vec<u64> = all_ids.into_iter().skip(page_from).take(page_size).collect();
+            let paged_ids: Vec<u64> = all_ids
+                .into_iter()
+                .skip(page_from)
+                .take(page_size)
+                .collect();
 
             let snap = state.snapshot.load();
             let make_hit = |id: u64| {
@@ -848,15 +1062,32 @@ async fn search(
                 } else {
                     None
                 };
-                SearchHitItem { _id: id, _source: source, _explanation: None }
+                SearchHitItem {
+                    _id: id,
+                    _source: source,
+                    _explanation: None,
+                }
             };
             let hits: Vec<_> = paged_ids.iter().map(|&id| make_hit(id)).collect();
-            let slots: Vec<_> = slot_data.into_iter().map(|(slot, ids, stats)| {
-                let slot_hits = ids.iter().map(|&id| make_hit(id)).collect();
-                SlotHit { slot, total: ids.len(), hits: slot_hits, stats }
-            }).collect();
+            let slots: Vec<_> = slot_data
+                .into_iter()
+                .map(|(slot, ids, stats)| {
+                    let slot_hits = ids.iter().map(|&id| make_hit(id)).collect();
+                    SlotHit {
+                        slot,
+                        total: ids.len(),
+                        hits: slot_hits,
+                        stats,
+                    }
+                })
+                .collect();
 
-            info!(titles = num_docs, matches = total, took_ms = format!("{:.2}", took_ms), "search complete");
+            info!(
+                titles = num_docs,
+                matches = total,
+                took_ms = format!("{:.2}", took_ms),
+                "search complete"
+            );
             SearchResponse {
                 took_ms,
                 hits: SearchHits { total, hits },
@@ -866,7 +1097,11 @@ async fn search(
         }
 
         (None, None) => {
-            state.prom.http_requests_total.with_label_values(&["search", "400"]).inc();
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["search", "400"])
+                .inc();
             return Err(ApiError::response(
                 StatusCode::BAD_REQUEST,
                 "validation_error",
@@ -882,13 +1117,20 @@ async fn search(
             took_ms = format!("{:.2}", response.took_ms),
             threshold_ms = threshold,
             matches = response.hits.total,
-            titles = response.slots.as_ref().map_or(1, |s| s.len()),
+            titles = response.slots.as_ref().map_or(1, std::vec::Vec::len),
             "slow query"
         );
     }
 
-    state.prom.http_requests_total.with_label_values(&["search", "200"]).inc();
-    state.prom.http_request_duration.with_label_values(&["search"])
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["search", "200"])
+        .inc();
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["search"])
         .observe(start.elapsed().as_secs_f64());
     Ok(Json(response))
 }
@@ -914,12 +1156,17 @@ async fn bulk_ingest(
             if !ct_lower.starts_with("application/json")
                 && !ct_lower.starts_with("application/x-ndjson")
             {
-                state.prom.http_requests_total.with_label_values(&["bulk", "415"]).inc();
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["bulk", "415"])
+                    .inc();
                 return ApiError::response(
                     StatusCode::UNSUPPORTED_MEDIA_TYPE,
                     "unsupported_media_type",
                     "Content-Type must be application/json or application/x-ndjson",
-                ).into_response();
+                )
+                .into_response();
             }
         }
     }
@@ -943,12 +1190,17 @@ async fn bulk_ingest(
             Ok(v) => v,
             Err(e) => {
                 has_errors = true;
-                items.push(BulkItem { index: BulkItemInner {
-                    _id: 0, status: 400,
-                    error: Some(format!("invalid action JSON: {}", e)),
-                }});
+                items.push(BulkItem {
+                    index: BulkItemInner {
+                        _id: 0,
+                        status: 400,
+                        error: Some(format!("invalid action JSON: {e}")),
+                    },
+                });
                 // Try to skip the source line too.
-                if i < lines.len() { i += 1; }
+                if i < lines.len() {
+                    i += 1;
+                }
                 continue;
             }
         };
@@ -958,57 +1210,71 @@ async fn bulk_ingest(
         // Next line is the source document.
         if i >= lines.len() {
             has_errors = true;
-            items.push(BulkItem { index: BulkItemInner {
-                _id: id.unwrap_or(0), status: 400,
-                error: Some("missing source line after action".into()),
-            }});
+            items.push(BulkItem {
+                index: BulkItemInner {
+                    _id: id.unwrap_or(0),
+                    status: 400,
+                    error: Some("missing source line after action".into()),
+                },
+            });
             break;
         }
 
         let source_line = lines[i];
         i += 1;
 
-        let id = match id {
-            Some(id) => id,
-            None => {
-                has_errors = true;
-                items.push(BulkItem { index: BulkItemInner {
-                    _id: 0, status: 400,
+        let Some(id) = id else {
+            has_errors = true;
+            items.push(BulkItem {
+                index: BulkItemInner {
+                    _id: 0,
+                    status: 400,
                     error: Some("could not extract _id from action".into()),
-                }});
-                continue;
-            }
+                },
+            });
+            continue;
         };
 
         let source: serde_json::Value = match serde_json::from_str(source_line) {
             Ok(v) => v,
             Err(e) => {
                 has_errors = true;
-                items.push(BulkItem { index: BulkItemInner {
-                    _id: id, status: 400,
-                    error: Some(format!("invalid source JSON: {}", e)),
-                }});
+                items.push(BulkItem {
+                    index: BulkItemInner {
+                        _id: id,
+                        status: 400,
+                        error: Some(format!("invalid source JSON: {e}")),
+                    },
+                });
                 continue;
             }
         };
 
-        let query = match source.get("query").and_then(|v| v.as_str()) {
-            Some(q) => q.to_string(),
-            None => {
-                has_errors = true;
-                items.push(BulkItem { index: BulkItemInner {
-                    _id: id, status: 400,
+        let query = if let Some(q) = source.get("query").and_then(|v| v.as_str()) {
+            q.to_string()
+        } else {
+            has_errors = true;
+            items.push(BulkItem {
+                index: BulkItemInner {
+                    _id: id,
+                    status: 400,
                     error: Some("missing or non-string 'query' field".into()),
-                }});
-                continue;
-            }
+                },
+            });
+            continue;
         };
 
         pairs.push((id, query));
         // Provisional success; the engine outcome (below) may downgrade this
         // item to a 400 once the batch is compiled.
         pair_item_idx.push(items.len());
-        items.push(BulkItem { index: BulkItemInner { _id: id, status: 201, error: None } });
+        items.push(BulkItem {
+            index: BulkItemInner {
+                _id: id,
+                status: 201,
+                error: None,
+            },
+        });
     }
 
     // Ingest the valid pairs.
@@ -1028,12 +1294,17 @@ async fn bulk_ingest(
                 // ADR-017). 503 tells the client to retry — engine state is
                 // unchanged, so no snapshot republish is needed.
                 error!(error = %e, "bulk ingest persistence failed, batch rolled back");
-                state.prom.http_requests_total.with_label_values(&["bulk", "503"]).inc();
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["bulk", "503"])
+                    .inc();
                 return ApiError::response(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "persistence_unavailable",
-                    format!("bulk ingest could not be durably persisted: {}", e),
-                ).into_response();
+                    format!("bulk ingest could not be durably persisted: {e}"),
+                )
+                .into_response();
             }
         };
 
@@ -1067,10 +1338,22 @@ async fn bulk_ingest(
     }
 
     let took_ms = start.elapsed().as_secs_f64() * 1000.0;
-    state.prom.http_requests_total.with_label_values(&["bulk", "200"]).inc();
-    state.prom.http_request_duration.with_label_values(&["bulk"])
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["bulk", "200"])
+        .inc();
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["bulk"])
         .observe(start.elapsed().as_secs_f64());
-    Json(BulkResponse { took_ms, errors: has_errors, items }).into_response()
+    Json(BulkResponse {
+        took_ms,
+        errors: has_errors,
+        items,
+    })
+    .into_response()
 }
 
 /// Extract _id from ES-style action line.
@@ -1078,16 +1361,16 @@ async fn bulk_ingest(
 fn extract_bulk_id(action: &serde_json::Value) -> Option<u64> {
     // ES style: {"index": {"_id": N}}
     if let Some(inner) = action.get("index") {
-        if let Some(id) = inner.get("_id").and_then(|v| v.as_u64()) {
+        if let Some(id) = inner.get("_id").and_then(serde_json::Value::as_u64) {
             return Some(id);
         }
     }
     // Flat style: {"_id": N}
-    if let Some(id) = action.get("_id").and_then(|v| v.as_u64()) {
+    if let Some(id) = action.get("_id").and_then(serde_json::Value::as_u64) {
         return Some(id);
     }
     // Also try "id" without underscore.
-    action.get("id").and_then(|v| v.as_u64())
+    action.get("id").and_then(serde_json::Value::as_u64)
 }
 
 /// POST /_flush
@@ -1105,8 +1388,15 @@ async fn flush(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         base_segments = metrics.base_segments,
         "flush complete"
     );
-    state.prom.http_requests_total.with_label_values(&["flush", "200"]).inc();
-    state.prom.http_request_duration.with_label_values(&["flush"])
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["flush", "200"])
+        .inc();
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["flush"])
         .observe(start.elapsed().as_secs_f64());
     Json(serde_json::json!({
         "acknowledged": true,
@@ -1124,33 +1414,37 @@ async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         engine.maybe_compact()
     };
     state.publish_snapshot();
-    state.prom.http_requests_total.with_label_values(&["compact", "200"]).inc();
-    state.prom.http_request_duration.with_label_values(&["compact"])
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["compact", "200"])
+        .inc();
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["compact"])
         .observe(start.elapsed().as_secs_f64());
-    match report {
-        Some(r) => {
-            info!(
-                segments_merged = r.segments_merged,
-                entries_before = r.entries_before,
-                entries_after = r.entries_after,
-                tombstones_reclaimed = r.tombstones_reclaimed,
-                "compaction complete"
-            );
-            Json(serde_json::json!({
-                "acknowledged": true,
-                "segments_merged": r.segments_merged,
-                "entries_before": r.entries_before,
-                "entries_after": r.entries_after,
-                "tombstones_reclaimed": r.tombstones_reclaimed,
-            }))
-        }
-        None => {
-            info!("compaction skipped: not needed");
-            Json(serde_json::json!({
-                "acknowledged": true,
-                "message": "no compaction needed",
-            }))
-        }
+    if let Some(r) = report {
+        info!(
+            segments_merged = r.segments_merged,
+            entries_before = r.entries_before,
+            entries_after = r.entries_after,
+            tombstones_reclaimed = r.tombstones_reclaimed,
+            "compaction complete"
+        );
+        Json(serde_json::json!({
+            "acknowledged": true,
+            "segments_merged": r.segments_merged,
+            "entries_before": r.entries_before,
+            "entries_after": r.entries_after,
+            "tombstones_reclaimed": r.tombstones_reclaimed,
+        }))
+    } else {
+        info!("compaction skipped: not needed");
+        Json(serde_json::json!({
+            "acknowledged": true,
+            "message": "no compaction needed",
+        }))
     }
 }
 
@@ -1166,7 +1460,12 @@ async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         dict_features: m.dict_features,
         rejected_parse: m.rejected_parse,
         rejected_class_d: m.rejected_class_d,
-        class_counts: ClassCounts { a: cc[0], b: cc[1], c: cc[2], d: cc[3] },
+        class_counts: ClassCounts {
+            a: cc[0],
+            b: cc[1],
+            c: cc[2],
+            d: cc[3],
+        },
         segment_sizes: m.segment_sizes,
         segment_holes: m.segment_holes,
         memory: MemoryStats {
@@ -1186,21 +1485,40 @@ async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
     let mut out = String::new();
     out.push_str(&format!("queries          {}\n", m.total_queries));
-    out.push_str(&format!("segments         {} (+ memtable: {})\n", m.base_segments, m.memtable_entries));
+    out.push_str(&format!(
+        "segments         {} (+ memtable: {})\n",
+        m.base_segments, m.memtable_entries
+    ));
     out.push_str(&format!("features         {}\n", m.dict_features));
-    out.push_str(&format!("class A/B/C/D    {} / {} / {} / {}\n", cc[0], cc[1], cc[2], cc[3]));
+    out.push_str(&format!(
+        "class A/B/C/D    {} / {} / {} / {}\n",
+        cc[0], cc[1], cc[2], cc[3]
+    ));
     out.push_str(&format!("rejected parse   {}\n", m.rejected_parse));
     out.push_str(&format!("rejected classD  {}\n", m.rejected_class_d));
-    out.push_str(&format!("memory           {} bytes (~{:.1} MB)\n", total_mem, total_mem as f64 / 1_048_576.0));
+    out.push_str(&format!(
+        "memory           {} bytes (~{:.1} MB)\n",
+        total_mem,
+        total_mem as f64 / 1_048_576.0
+    ));
 
     if !m.segment_sizes.is_empty() {
         out.push_str("\nsegment  entries  holes\n");
-        for (i, (&sz, &h)) in m.segment_sizes.iter().zip(m.segment_holes.iter()).enumerate() {
+        for (i, (&sz, &h)) in m
+            .segment_sizes
+            .iter()
+            .zip(m.segment_holes.iter())
+            .enumerate()
+        {
             out.push_str(&format!("{:<8} {:<8} {:.2}%\n", i, sz, h * 100.0));
         }
     }
 
-    (StatusCode::OK, [("content-type", "text/plain; charset=utf-8")], out)
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; charset=utf-8")],
+        out,
+    )
 }
 
 /// GET /_health
@@ -1252,7 +1570,14 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResp
     let encoder = TextEncoder::new();
     let metric_families = state.prom.registry.gather();
     let mut buffer = Vec::new();
-    encoder.encode(&metric_families, &mut buffer).unwrap();
+    if let Err(e) = encoder.encode(&metric_families, &mut buffer) {
+        error!(error = %e, "failed to encode prometheus metrics");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [("content-type", "text/plain; charset=utf-8")],
+            Vec::new(),
+        );
+    }
 
     (
         StatusCode::OK,
@@ -1306,8 +1631,7 @@ async fn put_vocab(
     };
     state.publish_snapshot();
     match result {
-        Ok(r) => r,
-        Err(r) => r,
+        Ok(r) | Err(r) => r,
     }
 }
 
@@ -1354,10 +1678,10 @@ async fn shutdown_signal() {
     let sigterm = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {
+        () = ctrl_c => {
             info!("received SIGINT (ctrl-c)");
         }
-        _ = sigterm => {
+        () = sigterm => {
             info!("received SIGTERM");
         }
     }
@@ -1442,7 +1766,9 @@ async fn main() {
 
     let build_normalizer = |v: &Option<percolator::vocab::Vocab>| -> Normalizer {
         match v {
-            Some(vocab) => vocab.to_normalizer().expect("failed to build normalizer from vocab"),
+            Some(vocab) => vocab
+                .to_normalizer()
+                .expect("failed to build normalizer from vocab"),
             None => Normalizer::default_vocab().expect("failed to build normalizer"),
         }
     };
@@ -1453,30 +1779,41 @@ async fn main() {
             Ok(mut e) => {
                 info!(data_dir = ?data_dir, "recovered engine from persistence");
                 if let Some(v) = vocab {
-                    let _ = e.set_vocab(v);
+                    match e.set_vocab(v) {
+                        Ok(stale) if stale > 0 => warn!(
+                            stale_segments = stale,
+                            "recovered segments were compiled against an older vocab \
+                             epoch; reingest affected queries for consistent matching"
+                        ),
+                        Ok(_) => {}
+                        Err(err) => warn!(
+                            error = %err,
+                            "failed to apply vocab file to recovered engine; \
+                             continuing with the recovered normalizer"
+                        ),
+                    }
                 }
                 e
             }
             Err(e) => {
-                warn!(error = %e, "no existing data, starting fresh");
-                match vocab {
-                    Some(v) => Engine::with_vocab(v, config)
-                        .expect("failed to build engine from vocab"),
-                    None => Engine::with_config(
-                        Normalizer::default_vocab().expect("normalizer"),
-                        config,
-                    ),
-                }
+                // Engine::open returns Ok for a genuinely empty/new data dir, so an
+                // error here is real corruption or an I/O failure — never "no data".
+                // Refuse to start rather than silently overwriting recoverable data
+                // with a fresh (empty) engine.
+                error!(
+                    data_dir = ?data_dir,
+                    error = %e,
+                    "failed to open existing data directory; refusing to start to \
+                     avoid overwriting recoverable data"
+                );
+                std::process::exit(1);
             }
         }
+    } else if let Some(v) = vocab {
+        Engine::with_vocab(v, config).expect("failed to build engine from vocab")
     } else {
-        match vocab {
-            Some(v) => Engine::with_vocab(v, config).expect("failed to build engine from vocab"),
-            None => {
-                let norm = Normalizer::default_vocab().expect("failed to build normalizer");
-                Engine::with_config(norm, config)
-            }
-        }
+        let norm = Normalizer::default_vocab().expect("failed to build normalizer");
+        Engine::with_config(norm, config)
     };
 
     // Create Prometheus metrics and wire the engine observer.
@@ -1488,14 +1825,22 @@ async fn main() {
 
         // Emit structured tracing events.
         match event {
-            EngineEvent::Flush { entries, base_segments_after } => {
+            EngineEvent::Flush {
+                entries,
+                base_segments_after,
+            } => {
                 info!(
                     entries = entries,
                     base_segments_after = base_segments_after,
                     "engine.flush"
                 );
             }
-            EngineEvent::Ingest { ingested, rejected_parse, rejected_class_d, base_segments_after } => {
+            EngineEvent::Ingest {
+                ingested,
+                rejected_parse,
+                rejected_class_d,
+                base_segments_after,
+            } => {
                 info!(
                     ingested = ingested,
                     rejected_parse = rejected_parse,
@@ -1504,7 +1849,11 @@ async fn main() {
                     "engine.ingest"
                 );
             }
-            EngineEvent::Compaction { report, trigger, base_segments_after } => {
+            EngineEvent::Compaction {
+                report,
+                trigger,
+                base_segments_after,
+            } => {
                 info!(
                     segments_merged = report.segments_merged,
                     entries_before = report.entries_before,
@@ -1513,6 +1862,13 @@ async fn main() {
                     trigger = ?trigger,
                     base_segments_after = base_segments_after,
                     "engine.compaction"
+                );
+            }
+            EngineEvent::SegmentCleanupFailed { path, error } => {
+                warn!(
+                    path = ?path,
+                    error = %error,
+                    "engine.segment_cleanup_failed: leaked segment file on disk"
                 );
             }
         }
@@ -1526,7 +1882,7 @@ async fn main() {
         if !result.errors.is_empty() {
             warn!(
                 error_count = result.errors.len(),
-                first_error = %result.errors.first().map(|e| e.to_string()).unwrap_or_default(),
+                first_error = %result.errors.first().map(std::string::ToString::to_string).unwrap_or_default(),
                 "query file had load errors"
             );
         }
@@ -1596,7 +1952,9 @@ async fn main() {
         "server listening"
     );
 
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("bind failed");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("bind failed");
 
     // Graceful shutdown with drain timeout enforcement.
     // 1. Wait for SIGINT/SIGTERM.
@@ -1610,8 +1968,7 @@ async fn main() {
         signal_received2.notify_one();
     };
 
-    let server_fut = axum::serve(listener, app)
-        .with_graceful_shutdown(graceful_shutdown);
+    let server_fut = axum::serve(listener, app).with_graceful_shutdown(graceful_shutdown);
 
     // After signal fires, race the drain against the timeout.
     let drain_deadline = async {
@@ -1626,12 +1983,15 @@ async fn main() {
                 eprintln!("server error: {e}");
             }
         }
-        _ = drain_deadline => {
+        () = drain_deadline => {
             // Drain took too long — fall through to cleanup.
         }
     }
 
-    info!(drain_timeout = drain_timeout, "connection drain complete, running shutdown sequence");
+    info!(
+        drain_timeout = drain_timeout,
+        "connection drain complete, running shutdown sequence"
+    );
 
     // Flush memtable and log final metrics.
     {
@@ -1639,7 +1999,10 @@ async fn main() {
         let pre_metrics = engine.metrics();
 
         if pre_metrics.memtable_entries > 0 {
-            info!(memtable_entries = pre_metrics.memtable_entries, "flushing memtable before shutdown");
+            info!(
+                memtable_entries = pre_metrics.memtable_entries,
+                "flushing memtable before shutdown"
+            );
             engine.flush();
         }
 

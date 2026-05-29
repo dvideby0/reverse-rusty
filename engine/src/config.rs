@@ -27,7 +27,6 @@
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     // ---- compaction trigger policy ----
-
     /// Maximum base segment count before `maybe_compact` triggers a merge.
     /// When the number of sealed base segments exceeds this, the engine picks
     /// the best merge range (score-based) and compacts it. Set to `usize::MAX`
@@ -65,7 +64,6 @@ pub struct EngineConfig {
     pub auto_compact_on_ingest: bool,
 
     // ---- persistence ----
-
     /// Directory for persisting segments and WAL. When `Some`, sealed segments
     /// are written to disk and mmap'd back; the WAL records mutations for crash
     /// recovery. When `None` (default), the engine is fully in-memory.
@@ -91,7 +89,6 @@ pub struct EngineConfig {
     // ---- merge scoring ----
 
     // ---- query complexity limits ----
-
     /// Maximum query string length in bytes. Queries exceeding this are
     /// rejected at parse time with `ParseErrorKind::QueryTooLong`.
     ///
@@ -110,7 +107,6 @@ pub struct EngineConfig {
     pub max_anyof_group_size: usize,
 
     // ---- merge scoring ----
-
     /// Fixed-cost bias in the ClickHouse-inspired merge score formula:
     ///   `score = (sum_size + fixed_cost * count) / (count - 1.9)`
     ///

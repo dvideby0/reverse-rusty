@@ -23,7 +23,7 @@ fn main() {
     let num_queries = arg_usize(&args, 1, 300_000);
     let num_titles = arg_usize(&args, 2, 3_000);
     let broad_frac = arg_f64(&args, 3, 0.0);
-    let seed = arg_u64(&args, 4, 0xC0FFEE);
+    let seed = arg_u64(&args, 4, 0x00C0_FFEE);
 
     let cfg = GenConfig {
         num_queries,
@@ -36,12 +36,13 @@ fn main() {
         num_sets: (num_queries / 100).max(1_000),
     };
 
-    eprintln!(
-        "[gen] queries={} titles={} broad_frac={}",
-        num_queries, num_titles, broad_frac
-    );
+    eprintln!("[gen] queries={num_queries} titles={num_titles} broad_frac={broad_frac}");
     let data = generate(&cfg);
-    eprintln!("[gen] done; {} queries, {} titles", data.queries.len(), data.titles.len());
+    eprintln!(
+        "[gen] done; {} queries, {} titles",
+        data.queries.len(),
+        data.titles.len()
+    );
 
     // include_broad = false to isolate the selective path (broad_frac is 0.0).
     let include_broad = broad_frac > 0.0;
@@ -80,11 +81,11 @@ fn build_k_segments(queries: &[(u64, String)], k: usize) -> Engine {
     while start < total {
         let end = (start + per).min(total);
         let chunk = &queries[start..end];
-        if !built_first {
+        if built_first {
+            eng.bulk_ingest(chunk);
+        } else {
             eng.build_from_queries(chunk);
             built_first = true;
-        } else {
-            eng.bulk_ingest(chunk);
         }
         start = end;
     }
@@ -116,10 +117,10 @@ fn measure(eng: &Engine, titles: &[String], include_broad: bool) -> MeasureResul
     let mut sum_skipped: u64 = 0;
     for t in titles {
         let st = eng.match_title(t, &mut scratch, &mut out, include_broad);
-        sum_cand += st.unique_candidates as u64;
-        sum_post += st.postings_scanned as u64;
-        sum_probes += st.probes_attempted as u64;
-        sum_skipped += st.probes_skipped as u64;
+        sum_cand += u64::from(st.unique_candidates);
+        sum_post += u64::from(st.postings_scanned);
+        sum_probes += u64::from(st.probes_attempted);
+        sum_skipped += u64::from(st.probes_skipped);
     }
     let n = titles.len() as f64;
     let skip_pct = if sum_probes > 0 {

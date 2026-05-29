@@ -33,10 +33,10 @@ fn main() {
     println!("===== EXPLAIN: title vs query =====");
     let titles = [
         "1994 Upper Deck Michael Jordan SP Preview PSA GEM MT 10", // should PASS
-        "1994 UD Michael Jordan SP Previews PSA10",                // missing grade->? has psa10 => grade 10, PASS
-        "1994 Upper Deck Michael Jordan SP Preview PSA 10 auto",   // forbidden auto -> FAIL
-        "1994 Upper Deck Michael Jordan SP Preview BGS 9.5",       // wrong grader/grade -> FAIL
-        "1993 Upper Deck Michael Jordan SP Preview PSA 10",        // wrong year -> FAIL
+        "1994 UD Michael Jordan SP Previews PSA10", // missing grade->? has psa10 => grade 10, PASS
+        "1994 Upper Deck Michael Jordan SP Preview PSA 10 auto", // forbidden auto -> FAIL
+        "1994 Upper Deck Michael Jordan SP Preview BGS 9.5", // wrong grader/grade -> FAIL
+        "1993 Upper Deck Michael Jordan SP Preview PSA 10", // wrong year -> FAIL
     ];
     for t in titles {
         print!("{}", explain_match(&cq, t, &norm, &dict));

@@ -106,9 +106,8 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
     let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
 
     for (_id, text) in queries {
-        let ast = match dsl::parse(text) {
-            Ok(a) => a,
-            Err(_) => continue,
+        let Ok(ast) = dsl::parse(text) else {
+            continue;
         };
         for clause in &ast.clauses {
             if clause.negated {
@@ -118,17 +117,16 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
                 if members.len() < 2 {
                     continue;
                 }
-                let normalized: Vec<String> = members
-                    .iter()
-                    .map(|m| normalize_token(m))
-                    .collect();
+                let normalized: Vec<String> = members.iter().map(|m| normalize_token(m)).collect();
 
                 // pick canonical: longest, then lexicographic (safe: members.len() >= 2)
                 let Some(canonical) = normalized
                     .iter()
                     .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| b.cmp(a)))
                     .cloned()
-                else { continue };
+                else {
+                    continue;
+                };
 
                 for member in &normalized {
                     if member != &canonical {
@@ -165,7 +163,10 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
             let already = vocab.phrases.iter().any(|p| p.canonical == canon_feature);
             if !already {
                 vocab.phrases.push(PhraseEntry {
-                    tokens: canon_tokens.iter().map(|s| s.to_string()).collect(),
+                    tokens: canon_tokens
+                        .iter()
+                        .map(std::string::ToString::to_string)
+                        .collect(),
                     canonical: canon_feature.clone(),
                     kind: FeatureKindSer::Generic,
                 });
@@ -175,7 +176,10 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
         // register the alias
         if alias_tokens.len() > 1 {
             vocab.phrases.push(PhraseEntry {
-                tokens: alias_tokens.iter().map(|s| s.to_string()).collect(),
+                tokens: alias_tokens
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
                 canonical: canon_feature,
                 kind: FeatureKindSer::Generic,
             });
@@ -201,10 +205,8 @@ fn normalize_token(text: &str) -> String {
         let c = crate::normalize::fold_diacritic(ch);
         if c.is_ascii_alphanumeric() {
             out.push(c.to_ascii_lowercase());
-        } else {
-            if !out.is_empty() && !out.ends_with('_') {
-                out.push('_');
-            }
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
         }
     }
     out.trim_end_matches('_').to_string()
@@ -222,7 +224,11 @@ impl Vocab {
         let mut b = NormalizerBuilder::new();
 
         for entry in &self.phrases {
-            let toks: Vec<&str> = entry.tokens.iter().map(|s| s.as_str()).collect();
+            let toks: Vec<&str> = entry
+                .tokens
+                .iter()
+                .map(std::string::String::as_str)
+                .collect();
             b.add_phrase(&toks, &entry.canonical, entry.kind.into());
         }
         for entry in &self.synonyms {
@@ -241,22 +247,16 @@ impl Vocab {
     /// Merge another vocab into this one. Entries from `other` are appended;
     /// duplicate synonyms (same token) are skipped (first wins).
     pub fn merge(&mut self, other: &Vocab) {
-        let existing_syns: std::collections::HashSet<String> = self
-            .synonyms
-            .iter()
-            .map(|e| e.token.clone())
-            .collect();
+        let existing_syns: std::collections::HashSet<String> =
+            self.synonyms.iter().map(|e| e.token.clone()).collect();
         for entry in &other.synonyms {
             if !existing_syns.contains(&entry.token) {
                 self.synonyms.push(entry.clone());
             }
         }
 
-        let existing_phrases: std::collections::HashSet<Vec<String>> = self
-            .phrases
-            .iter()
-            .map(|e| e.tokens.clone())
-            .collect();
+        let existing_phrases: std::collections::HashSet<Vec<String>> =
+            self.phrases.iter().map(|e| e.tokens.clone()).collect();
         for entry in &other.phrases {
             if !existing_phrases.contains(&entry.tokens) {
                 self.phrases.push(entry.clone());
@@ -305,7 +305,10 @@ impl Vocab {
     // ── Phrase management ───────────────────────────────────────────────
 
     pub fn add_phrase(&mut self, tokens: &[&str], canonical: &str, kind: FeatureKind) {
-        let tok_vec: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
+        let tok_vec: Vec<String> = tokens
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         if self.phrases.iter().any(|e| e.tokens == tok_vec) {
             return;
         }
@@ -317,7 +320,10 @@ impl Vocab {
     }
 
     pub fn remove_phrase(&mut self, tokens: &[&str]) -> bool {
-        let tok_vec: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
+        let tok_vec: Vec<String> = tokens
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
         let before = self.phrases.len();
         self.phrases.retain(|e| e.tokens != tok_vec);
         self.phrases.len() < before
@@ -366,15 +372,13 @@ impl Vocab {
     // ── Serialization ───────────────────────────────────────────────────
 
     pub fn save_json(&self, path: &Path) -> io::Result<()> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(io::Error::other)?;
+        let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
         std::fs::write(path, json)
     }
 
     pub fn load_json(path: &Path) -> io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        serde_json::from_str(&content)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        serde_json::from_str(&content).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
@@ -413,11 +417,12 @@ mod tests {
 
     #[test]
     fn learn_ignores_below_threshold() {
-        let queries = vec![
-            (1, "(alpha,beta) stuff".to_string()),
-        ];
+        let queries = vec![(1, "(alpha,beta) stuff".to_string())];
         let vocab = learn_from_queries(&queries, 5);
-        assert!(vocab.is_empty(), "single occurrence should be below threshold of 5");
+        assert!(
+            vocab.is_empty(),
+            "single occurrence should be below threshold of 5"
+        );
     }
 
     #[test]
@@ -426,7 +431,10 @@ mod tests {
             .map(|i| (i, format!("-(badterm,anotherbad) good{i:03}")))
             .collect();
         let vocab = learn_from_queries(&queries, 2);
-        assert!(vocab.is_empty(), "negated groups should not produce synonyms");
+        assert!(
+            vocab.is_empty(),
+            "negated groups should not produce synonyms"
+        );
     }
 
     #[test]
@@ -435,7 +443,10 @@ mod tests {
             .map(|i| (i, format!("(\"michael jordan\",mj) rare{i:03}")))
             .collect();
         let vocab = learn_from_queries(&queries, 2);
-        let has_phrase = vocab.phrases.iter().any(|p| p.tokens == vec!["michael", "jordan"]);
+        let has_phrase = vocab
+            .phrases
+            .iter()
+            .any(|p| p.tokens == vec!["michael", "jordan"]);
         assert!(has_phrase, "should learn 'michael jordan' as a phrase");
         let has_syn = vocab.synonyms.iter().any(|s| s.token == "mj");
         assert!(has_syn, "should learn 'mj' as a synonym");
@@ -475,7 +486,11 @@ mod tests {
     fn json_round_trip() {
         let mut vocab = Vocab::new();
         vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
-        vocab.add_phrase(&["michael", "jordan"], "term:michael_jordan", FeatureKind::Generic);
+        vocab.add_phrase(
+            &["michael", "jordan"],
+            "term:michael_jordan",
+            FeatureKind::Generic,
+        );
         vocab.add_grader("psa");
         vocab.add_grade_word("gem");
 
@@ -514,7 +529,7 @@ mod tests {
         v1.merge(&v2);
         assert_eq!(v1.synonyms().len(), 2); // rc + ud
         assert_eq!(v1.graders().len(), 2); // psa + bgs
-        // rc should keep original mapping (first wins)
+                                           // rc should keep original mapping (first wins)
         assert_eq!(v1.get_synonym("rc").unwrap().canonical, "term:rookie");
     }
 
@@ -533,11 +548,8 @@ mod tests {
         let mut vocab = Vocab::new();
         vocab.add_synonym("rc", "term:rookie", FeatureKind::Category);
 
-        let eng = crate::segment::Engine::with_vocab(
-            vocab,
-            crate::config::EngineConfig::default(),
-        )
-        .expect("should build engine from vocab");
+        let eng = crate::segment::Engine::with_vocab(vocab, crate::config::EngineConfig::default())
+            .expect("should build engine from vocab");
         assert!(eng.vocab().is_some());
         assert_eq!(eng.vocab().unwrap().synonyms().len(), 1);
     }

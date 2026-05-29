@@ -42,7 +42,11 @@ impl Brute {
             }
         }
         dict.finalize_mask();
-        Brute { norm, dict, queries: qs }
+        Brute {
+            norm,
+            dict,
+            queries: qs,
+        }
     }
 
     fn matches(&self, title: &str, lc: &mut String, feats: &mut Vec<u32>) -> HashSet<u64> {
@@ -127,8 +131,7 @@ fn parallel_matches_equal_sequential() {
     );
     assert_eq!(
         mismatches, 0,
-        "parallel matching diverged from sequential on {} titles",
-        mismatches
+        "parallel matching diverged from sequential on {mismatches} titles"
     );
 }
 
@@ -167,7 +170,10 @@ fn parallel_matches_equal_sequential_no_broad() {
             mismatches += 1;
         }
     }
-    assert_eq!(mismatches, 0, "parallel (no broad) diverged from sequential");
+    assert_eq!(
+        mismatches, 0,
+        "parallel (no broad) diverged from sequential"
+    );
 }
 
 /// match_titles_par_stats aggregate stats should equal the sum of per-title stats.
@@ -192,7 +198,10 @@ fn parallel_stats_aggregate_correctly() {
     let agg = eng.match_titles_par_stats(&data.titles, true);
 
     let sum_matches: u32 = par_results.iter().map(|(_, _, s)| s.matches).sum();
-    let sum_candidates: u32 = par_results.iter().map(|(_, _, s)| s.unique_candidates).sum();
+    let sum_candidates: u32 = par_results
+        .iter()
+        .map(|(_, _, s)| s.unique_candidates)
+        .sum();
 
     // Aggregate stats should match the sum of individual stats
     assert_eq!(
@@ -262,7 +271,7 @@ fn repeated_compaction_preserves_correctness() {
     assert!(r_final.is_some());
 
     // Verify against oracle over the full query set (including the extra variants)
-    let mut all_queries: Vec<(u64, String)> = q.to_vec();
+    let mut all_queries: Vec<(u64, String)> = q.clone();
     for i in (0..100).step_by(7) {
         all_queries.push((q[i].0 + 1_000_000, format!("{} extra variant", q[i].1)));
     }
@@ -324,10 +333,7 @@ fn compaction_under_churn() {
     for round in 0..5 {
         // add 50 queries
         for i in 0..50 {
-            let text = format!(
-                "round {} item {} michael jordan upper deck 1994",
-                round, i
-            );
+            let text = format!("round {round} item {i} michael jordan upper deck 1994");
             let _ = eng.insert_live(&text, extra_id, (round + 2) as u32);
             extra_id += 1;
         }
@@ -381,11 +387,7 @@ fn broad_lane_queries_only_in_broad_index() {
     for i in 0..5000 {
         queries.push((
             id,
-            format!(
-                "hottoken {} somethingrare{:04}",
-                1990 + (i % 30),
-                i
-            ),
+            format!("hottoken {} somethingrare{:04}", 1990 + (i % 30), i),
         ));
         id += 1;
     }
@@ -398,10 +400,7 @@ fn broad_lane_queries_only_in_broad_index() {
 
     // A selective query with rare required features
     let selective_id = id;
-    queries.push((
-        selective_id,
-        "1994 hottoken somethingrare0042".to_string(),
-    ));
+    queries.push((selective_id, "1994 hottoken somethingrare0042".to_string()));
 
     eng.build_from_queries(&queries);
 
@@ -411,7 +410,10 @@ fn broad_lane_queries_only_in_broad_index() {
         classes[0], classes[1], classes[2], classes[3]
     );
     // We should have at least some class-C queries
-    assert!(classes[2] > 0, "expected some class-C (broad) queries, got 0");
+    assert!(
+        classes[2] > 0,
+        "expected some class-C (broad) queries, got 0"
+    );
 
     // Test: include_broad=false should NOT return the broad query
     let title = "hottoken 1994 somethingrare0042";
@@ -428,8 +430,7 @@ fn broad_lane_queries_only_in_broad_index() {
     for id in &no_broad {
         assert!(
             with_broad.contains(id),
-            "include_broad=true lost a match that include_broad=false had: {}",
-            id
+            "include_broad=true lost a match that include_broad=false had: {id}"
         );
     }
 
@@ -476,14 +477,11 @@ fn match_stats_separate_main_and_broad_candidates() {
 
     for title in &data.titles {
         let stats = eng.match_title(title, &mut scratch, &mut out, true);
-        total_main += stats.main_candidates as u64;
-        total_broad += stats.broad_candidates as u64;
+        total_main += u64::from(stats.main_candidates);
+        total_broad += u64::from(stats.broad_candidates);
     }
 
-    eprintln!(
-        "stats: total_main_candidates={} total_broad_candidates={}",
-        total_main, total_broad
-    );
+    eprintln!("stats: total_main_candidates={total_main} total_broad_candidates={total_broad}");
 
     // Main candidates should always exist (we have 20k queries)
     assert!(total_main > 0, "no main candidates at all");
@@ -501,7 +499,7 @@ fn match_stats_separate_main_and_broad_candidates() {
     let mut total_broad_off = 0u64;
     for title in &data.titles {
         let stats = eng.match_title(title, &mut scratch, &mut out, false);
-        total_broad_off += stats.broad_candidates as u64;
+        total_broad_off += u64::from(stats.broad_candidates);
     }
     assert_eq!(
         total_broad_off, 0,
@@ -549,7 +547,12 @@ fn empty_corpus_matches_nothing() {
 
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
-    eng.match_title("michael jordan 1994 upper deck", &mut scratch, &mut out, true);
+    eng.match_title(
+        "michael jordan 1994 upper deck",
+        &mut scratch,
+        &mut out,
+        true,
+    );
     assert!(out.is_empty(), "empty corpus should produce no matches");
 }
 
@@ -562,7 +565,7 @@ fn very_long_title_does_not_panic() {
     // Build a ~100KB title
     let mut long_title = String::with_capacity(100_000);
     for i in 0..5000 {
-        long_title.push_str(&format!("word{} ", i));
+        long_title.push_str(&format!("word{i} "));
     }
     long_title.push_str("michael jordan");
 
@@ -586,7 +589,12 @@ fn unicode_diacritics_handled() {
     let mut out = Vec::new();
 
     // Diacritic folding: "Michaël Jördàn" should match "michael jordan"
-    eng.match_title("Michaël Jördàn 1994 upper deck", &mut scratch, &mut out, true);
+    eng.match_title(
+        "Michaël Jördàn 1994 upper deck",
+        &mut scratch,
+        &mut out,
+        true,
+    );
     // Whether this matches depends on normalizer diacritic folding behavior.
     // The test ensures no panic regardless.
     eprintln!(
@@ -614,8 +622,7 @@ fn case_insensitive_matching() {
         eng.match_title(title, &mut scratch, &mut out, true);
         assert!(
             out.contains(&1),
-            "case-insensitive match failed for {:?}",
-            title
+            "case-insensitive match failed for {title:?}"
         );
     }
 }
@@ -644,8 +651,7 @@ fn duplicate_logical_ids_deduped_in_results() {
     let count_42 = out.iter().filter(|&&id| id == 42).count();
     assert!(
         count_42 <= 1,
-        "logical ID 42 appeared {} times in results (should be deduped to <=1)",
-        count_42
+        "logical ID 42 appeared {count_42} times in results (should be deduped to <=1)"
     );
 }
 
@@ -656,7 +662,10 @@ fn all_forbidden_query_rejected() {
     let report = eng.build_from_queries(&[
         (1, "-(auto,signed,graded)".to_string()), // only negatives
     ]);
-    assert_eq!(report.rejected_class_d, 1, "all-forbidden should be class D");
+    assert_eq!(
+        report.rejected_class_d, 1,
+        "all-forbidden should be class D"
+    );
     assert_eq!(report.ingested, 0);
 }
 
@@ -696,8 +705,7 @@ fn fully_tombstoned_engine_matches_nothing() {
     );
     assert!(
         out.is_empty(),
-        "fully tombstoned engine should return no matches, got {:?}",
-        out
+        "fully tombstoned engine should return no matches, got {out:?}"
     );
 }
 
@@ -706,19 +714,18 @@ fn fully_tombstoned_engine_matches_nothing() {
 fn compact_fully_tombstoned_produces_empty_segment() {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
     // Use two separate ingests to create 2 base segments (compact_all requires >=2)
-    eng.build_from_queries(&[
-        (1, "michael jordan".to_string()),
-    ]);
-    eng.bulk_ingest(&[
-        (2, "lebron james".to_string()),
-    ]);
+    eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+    eng.bulk_ingest(&[(2, "lebron james".to_string())]);
 
     // Tombstone everything (segment 0 has local 0, segment 1 has local 0)
     eng.tombstone_in(0, 0).unwrap();
     eng.tombstone_in(1, 0).unwrap();
 
     let report = eng.compact_all();
-    assert!(report.is_some(), "compact_all should run with 2+ base segments");
+    assert!(
+        report.is_some(),
+        "compact_all should run with 2+ base segments"
+    );
     let report = report.unwrap();
     assert_eq!(report.entries_after, 0, "compacted segment should be empty");
     assert_eq!(report.tombstones_reclaimed, 2);
@@ -794,15 +801,20 @@ fn metrics_consistent_with_known_corpus() {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
     let report = eng.build_from_queries(&data.queries);
 
-    assert!(report.ingested > 0, "need some ingested queries for this test");
+    assert!(
+        report.ingested > 0,
+        "need some ingested queries for this test"
+    );
 
     let m = eng.metrics();
     assert_eq!(
-        m.total_queries,
-        report.ingested as usize,
+        m.total_queries, report.ingested as usize,
         "metrics total_queries must equal ingested count"
     );
-    assert_eq!(m.base_segments, 1, "one base segment after build_from_queries");
+    assert_eq!(
+        m.base_segments, 1,
+        "one base segment after build_from_queries"
+    );
     assert!(m.dict_features > 0, "dictionary should have features");
     assert!(m.exact_bytes > 0, "exact store should use memory");
     assert!(m.index_bytes > 0, "index should use memory");

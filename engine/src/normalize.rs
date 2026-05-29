@@ -205,7 +205,7 @@ impl Normalizer {
                 scratch.push_str(&gcanon);
                 emit(&scratch, FeatureKind::Grader);
                 if let Some(num) = rest {
-                    self.emit_grade(&gcanon, &num, &mut scratch, emit);
+                    Self::emit_grade(&gcanon, &num, &mut scratch, emit);
                     pending_grader = None;
                 } else {
                     pending_grader = Some(gcanon);
@@ -232,9 +232,7 @@ impl Normalizer {
                 let next = tokens.get(i + 1).copied();
                 let is_cardnum = prev == Some("#");
                 let is_serial = prev == Some("/") || next == Some("/");
-                let is_pop = prev
-                    .map(|p| p.eq_ignore_ascii_case("pop"))
-                    .unwrap_or(false);
+                let is_pop = prev.is_some_and(|p| p.eq_ignore_ascii_case("pop"));
 
                 if is_cardnum || is_serial || is_pop {
                     emit_generic(&numstr, &mut scratch, emit);
@@ -245,7 +243,7 @@ impl Normalizer {
                     emit(&scratch, FeatureKind::Year);
                 } else if let Some(g) = pending_grader.clone() {
                     if is_grade_value(&numstr) {
-                        self.emit_grade(&g, &numstr, &mut scratch, emit);
+                        Self::emit_grade(&g, &numstr, &mut scratch, emit);
                         pending_grader = None;
                     } else {
                         emit_generic(&numstr, &mut scratch, emit);
@@ -292,7 +290,6 @@ impl Normalizer {
     }
 
     fn emit_grade<F: FnMut(&str, FeatureKind)>(
-        &self,
         grader: &str,
         num: &str,
         scratch: &mut String,
@@ -333,7 +330,7 @@ impl Normalizer {
         let mut ids: Vec<FeatureId> = Vec::new();
         let mut names: Vec<(String, FeatureKind)> = Vec::new();
         self.emit(text, lc, &mut |name, kind| {
-            names.push((name.to_string(), kind))
+            names.push((name.to_string(), kind));
         });
         for (name, kind) in names {
             ids.push(dict.intern(&name, kind));
@@ -345,7 +342,12 @@ impl Normalizer {
 
     /// Read-only compile: resolve features by name without interning new ones.
     /// Used for re-deriving a CompiledQuery on the read path (explain).
-    pub fn compile_features_readonly(&self, text: &str, dict: &Dict, lc: &mut String) -> Vec<FeatureId> {
+    pub fn compile_features_readonly(
+        &self,
+        text: &str,
+        dict: &Dict,
+        lc: &mut String,
+    ) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
         self.emit(text, lc, &mut |name, _kind| {
             if let Some(id) = dict.get(name) {
@@ -446,7 +448,8 @@ impl NormalizerBuilder {
         if self.syn_index.contains_key(token) {
             return;
         }
-        self.syn_index.insert(token.to_string(), self.synonyms.len());
+        self.syn_index
+            .insert(token.to_string(), self.synonyms.len());
         self.synonyms
             .push((token.to_string(), canon.to_string(), kind));
     }

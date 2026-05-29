@@ -33,12 +33,12 @@ fn main() {
         broad_query_frac: 0.05,
         hot_skew: 2.0,
         family_size: 8,
-        seed: 0xC0FFEE,
+        seed: 0x00C0_FFEE,
         num_players: (num_queries / 40).max(2_000),
         num_sets: (num_queries / 100).max(1_000),
     };
 
-    eprintln!("[gen] queries={}", num_queries);
+    eprintln!("[gen] queries={num_queries}");
     let data = generate(&cfg);
 
     let norm = Normalizer::default_vocab().expect("built-in vocab");
@@ -108,7 +108,10 @@ fn main() {
         let batch: Vec<(u64, String)> = (0..bulk_n)
             .map(|j| {
                 let logical = 20_000_000 + (b * bulk_n + j) as u64;
-                (logical, "1994 upper deck michael jordan sp psa 10".to_string())
+                (
+                    logical,
+                    "1994 upper deck michael jordan sp psa 10".to_string(),
+                )
             })
             .collect();
         eng.bulk_ingest(&batch);

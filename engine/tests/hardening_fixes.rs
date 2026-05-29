@@ -13,7 +13,7 @@ use percolator::vocab::Vocab;
 use std::path::PathBuf;
 
 fn test_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("percolator_hardening_{}", name));
+    let dir = std::env::temp_dir().join(format!("percolator_hardening_{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -27,7 +27,7 @@ fn match_ids(engine: &Engine, title: &str) -> Vec<u64> {
     let mut scratch = MatchScratch::new();
     let mut out = Vec::new();
     engine.match_title(title, &mut scratch, &mut out, true);
-    out.sort();
+    out.sort_unstable();
     out
 }
 
@@ -78,7 +78,9 @@ fn set_vocab_increments_epoch_and_marks_segments_stale() {
     // Change vocab — all existing segments become stale
     let mut vocab = Vocab::new();
     vocab.add_synonym("rc", "term:rookie", percolator::dict::FeatureKind::Category);
-    let stale = engine.set_vocab(vocab).expect("vocab change should succeed");
+    let stale = engine
+        .set_vocab(vocab)
+        .expect("vocab change should succeed");
 
     assert_eq!(engine.vocab_epoch(), 1);
     assert!(stale > 0, "should report stale segments");
@@ -196,13 +198,19 @@ fn corrupt_wal_file_recovers_gracefully() {
     let wal_path = dir.join("wal.log");
     if wal_path.exists() {
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&wal_path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wal_path)
+            .unwrap();
         f.write_all(&[0xFF; 37]).unwrap(); // corrupt trailing data
     }
 
     // Reopen should succeed — corrupt tail is skipped
     let reopened = Engine::open(make_norm(), config);
-    assert!(reopened.is_ok(), "engine should open despite corrupt WAL tail");
+    assert!(
+        reopened.is_ok(),
+        "engine should open despite corrupt WAL tail"
+    );
 }
 
 #[test]
@@ -238,9 +246,15 @@ fn corrupt_segment_file_skipped_on_open() {
 
     // Reopen should succeed — corrupt segment is skipped
     let reopened = Engine::open(make_norm(), config);
-    assert!(reopened.is_ok(), "engine should open despite corrupt segment");
+    assert!(
+        reopened.is_ok(),
+        "engine should open despite corrupt segment"
+    );
     let engine = reopened.unwrap();
-    assert!(engine.skipped_segments > 0, "should report skipped segments");
+    assert!(
+        engine.skipped_segments > 0,
+        "should report skipped segments"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +277,10 @@ fn delete_removes_all_versions_across_segments() {
 
     // Delete by logical ID — should tombstone in both segment and memtable
     let tombstoned = engine.delete_by_logical_id(1).unwrap();
-    assert_eq!(tombstoned, 2, "should tombstone 2 entries (one per segment/memtable)");
+    assert_eq!(
+        tombstoned, 2,
+        "should tombstone 2 entries (one per segment/memtable)"
+    );
 
     // Query 1 should no longer match
     let post = match_ids(&engine, "michael jordan 1986 fleer rookie card");
@@ -278,14 +295,17 @@ fn delete_across_many_segments() {
     // Spread query 42 across 4 segments
     for i in 0..4 {
         engine.build_from_queries(&[
-            (42, format!("michael jordan 1986 fleer version{}", i)),
+            (42, format!("michael jordan 1986 fleer version{i}")),
             (100 + i, "kobe bryant psa 10".into()),
         ]);
     }
     assert_eq!(engine.metrics().base_segments, 4);
 
     let tombstoned = engine.delete_by_logical_id(42).unwrap();
-    assert_eq!(tombstoned, 4, "should find and tombstone across all 4 segments");
+    assert_eq!(
+        tombstoned, 4,
+        "should find and tombstone across all 4 segments"
+    );
 
     // Other queries unaffected
     let matches = match_ids(&engine, "kobe bryant psa 10 gem mint");
@@ -299,7 +319,7 @@ fn delete_nonexistent_id_returns_zero() {
     let mut engine = Engine::new(norm);
     engine.build_from_queries(&sample_queries()[..5]);
 
-    let tombstoned = engine.delete_by_logical_id(999999).unwrap();
+    let tombstoned = engine.delete_by_logical_id(999_999).unwrap();
     assert_eq!(tombstoned, 0);
 }
 
@@ -318,7 +338,10 @@ fn delete_then_compact_reclaims_space() {
     engine.compact_all();
     let after = engine.metrics().total_queries;
 
-    assert!(after < before, "compaction should reclaim tombstoned entries: before={}, after={}", before, after);
+    assert!(
+        after < before,
+        "compaction should reclaim tombstoned entries: before={before}, after={after}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -345,11 +368,14 @@ fn full_lifecycle_vocab_delete_persist_compact() {
 
     // Phase 2: live inserts (some will auto-flush due to threshold=5)
     for i in 20..30 {
-        engine.insert_live(&format!("topps chrome {} base", i), i, 1);
+        engine.insert_live(&format!("topps chrome {i} base"), i, 1);
     }
 
     let metrics_mid = engine.metrics();
-    assert!(metrics_mid.base_segments >= 2, "should have multiple segments");
+    assert!(
+        metrics_mid.base_segments >= 2,
+        "should have multiple segments"
+    );
 
     // Phase 3: change vocab — everything becomes stale
     let mut vocab = Vocab::new();
@@ -372,8 +398,10 @@ fn full_lifecycle_vocab_delete_persist_compact() {
     // The new segment should NOT be stale
     let new_stale = engine.stale_segment_count();
     assert!(new_stale > 0, "old segments still stale");
-    assert!(new_stale < engine.metrics().base_segments + 1,
-        "not all segments+memtable should be stale — new ones are fresh");
+    assert!(
+        new_stale < engine.metrics().base_segments + 1,
+        "not all segments+memtable should be stale — new ones are fresh"
+    );
 
     // Phase 6: compact everything
     engine.compact_all();
@@ -382,8 +410,14 @@ fn full_lifecycle_vocab_delete_persist_compact() {
 
     // Phase 7: verify matching still works correctly
     let deleted_match = match_ids(&engine, "michael jordan 1986 fleer rookie");
-    assert!(!deleted_match.contains(&1), "deleted query should not match");
-    assert!(!deleted_match.contains(&25), "deleted query should not match");
+    assert!(
+        !deleted_match.contains(&1),
+        "deleted query should not match"
+    );
+    assert!(
+        !deleted_match.contains(&25),
+        "deleted query should not match"
+    );
 
     let new_match = match_ids(&engine, "lebron james rookie card 2003 topps");
     assert!(new_match.contains(&50), "newly inserted query should match");
@@ -395,10 +429,16 @@ fn full_lifecycle_vocab_delete_persist_compact() {
 
     // Verify same match results after reopen
     let post_reopen = match_ids(&reopened, "lebron james rookie card 2003 topps");
-    assert!(post_reopen.contains(&50), "match results should survive reopen");
+    assert!(
+        post_reopen.contains(&50),
+        "match results should survive reopen"
+    );
 
     let post_del = match_ids(&reopened, "michael jordan 1986 fleer rookie");
-    assert!(!post_del.contains(&1), "deleted query should stay deleted after reopen");
+    assert!(
+        !post_del.contains(&1),
+        "deleted query should stay deleted after reopen"
+    );
 }
 
 #[test]
@@ -409,7 +449,10 @@ fn interleaved_delete_insert_flush_compact_stress() {
     // Build initial corpus
     let mut queries: Vec<(u64, String)> = Vec::new();
     for i in 0..100 {
-        queries.push((i, format!("player{} team{} 2024 topps chrome", i % 20, i % 5)));
+        queries.push((
+            i,
+            format!("player{} team{} 2024 topps chrome", i % 20, i % 5),
+        ));
     }
     engine.build_from_queries(&queries);
 
@@ -422,11 +465,7 @@ fn interleaved_delete_insert_flush_compact_stress() {
         // Insert new queries
         for i in 0..10 {
             let id = 1000 + round * 10 + i;
-            engine.insert_live(
-                &format!("newplayer{} team{} 2025 prizm", id, i % 3),
-                id,
-                1,
-            );
+            engine.insert_live(&format!("newplayer{} team{} 2025 prizm", id, i % 3), id, 1);
         }
         // Flush every other round
         if round % 2 == 0 {
@@ -449,12 +488,20 @@ fn interleaved_delete_insert_flush_compact_stress() {
             let del_id = i + round;
             if del_id < 100 {
                 engine.match_title(
-                    &format!("player{} team{} 2024 topps chrome refractor", del_id % 20, del_id % 5),
-                    &mut scratch, &mut out, true,
+                    &format!(
+                        "player{} team{} 2024 topps chrome refractor",
+                        del_id % 20,
+                        del_id % 5
+                    ),
+                    &mut scratch,
+                    &mut out,
+                    true,
                 );
                 // The deleted ID should NOT appear (though others in the same "slot" might)
-                assert!(!out.contains(&del_id),
-                    "deleted query {} should not match after stress test", del_id);
+                assert!(
+                    !out.contains(&del_id),
+                    "deleted query {del_id} should not match after stress test"
+                );
                 out.clear();
             }
         }
@@ -466,10 +513,14 @@ fn interleaved_delete_insert_flush_compact_stress() {
             let id = 1000 + round * 10 + i;
             engine.match_title(
                 &format!("newplayer{} team{} 2025 prizm silver", id, i % 3),
-                &mut scratch, &mut out, true,
+                &mut scratch,
+                &mut out,
+                true,
             );
-            assert!(out.contains(&id),
-                "newly inserted query {} should still match", id);
+            assert!(
+                out.contains(&id),
+                "newly inserted query {id} should still match"
+            );
             out.clear();
         }
     }
@@ -505,7 +556,10 @@ fn persistence_round_trip_with_reverse_index() {
 
     // The deleted ID should not match
     let results = match_ids(&reopened, "kobe bryant psa 10 gem mint");
-    assert!(!results.contains(&3), "deleted query should stay deleted after reopen");
+    assert!(
+        !results.contains(&3),
+        "deleted query should stay deleted after reopen"
+    );
 
     // Other queries should still work
     let results2 = match_ids(&reopened, "mike trout 2011 topps update us175");
@@ -514,7 +568,10 @@ fn persistence_round_trip_with_reverse_index() {
     // Delete via reverse index should work on reopened mmap segments
     let mut engine2 = reopened;
     let del2 = engine2.delete_by_logical_id(4).unwrap();
-    assert!(del2 > 0, "reverse index should be rebuilt for mmap'd segments on open");
+    assert!(
+        del2 > 0,
+        "reverse index should be rebuilt for mmap'd segments on open"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -537,13 +594,25 @@ fn explain_hit_returns_structured_detail_for_matched_query() {
     assert!(ids.contains(&1), "query 1 should match");
 
     let detail = engine.explain_hit(1, title);
-    assert!(detail.is_some(), "explain_hit should return detail for stored query");
+    assert!(
+        detail.is_some(),
+        "explain_hit should return detail for stored query"
+    );
     let detail = detail.unwrap();
     assert!(detail.candidate, "matched query must be a candidate");
     assert!(detail.matched, "matched query must pass exact verification");
-    assert!(detail.failures.is_empty(), "no failures for a passing match");
-    assert!(!detail.title_features.is_empty(), "should extract title features");
-    assert!(!detail.required.is_empty(), "compiled query should have required features");
+    assert!(
+        detail.failures.is_empty(),
+        "no failures for a passing match"
+    );
+    assert!(
+        !detail.title_features.is_empty(),
+        "should extract title features"
+    );
+    assert!(
+        !detail.required.is_empty(),
+        "compiled query should have required features"
+    );
 }
 
 #[test]

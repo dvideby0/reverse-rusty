@@ -142,11 +142,11 @@ impl ExactStore {
         let mut r_len = 0u16;
         for &f in &ex.required {
             let b = dict.mask_bit(f);
-            if b != NO_MASK_BIT {
-                rmask |= 1u64 << b;
-            } else {
+            if b == NO_MASK_BIT {
                 self.req_blob.push(f);
                 r_len += 1;
+            } else {
+                rmask |= 1u64 << b;
             }
         }
 
@@ -155,11 +155,11 @@ impl ExactStore {
         let mut f_len = 0u16;
         for &f in &ex.forbidden {
             let b = dict.mask_bit(f);
-            if b != NO_MASK_BIT {
-                fmask |= 1u64 << b;
-            } else {
+            if b == NO_MASK_BIT {
                 self.forb_blob.push(f);
                 f_len += 1;
+            } else {
+                fmask |= 1u64 << b;
             }
         }
 
@@ -272,7 +272,8 @@ impl ExactStore {
         let fo = self.forb_off[i] as usize;
         let fl = self.forb_len[i] as usize;
         let new_fo = dest.forb_blob.len() as u32;
-        dest.forb_blob.extend_from_slice(&self.forb_blob[fo..fo + fl]);
+        dest.forb_blob
+            .extend_from_slice(&self.forb_blob[fo..fo + fl]);
         dest.forb_off.push(new_fo);
         dest.forb_len.push(fl as u16);
 
@@ -284,7 +285,8 @@ impl ExactStore {
             let go = self.group_off[gi] as usize;
             let gl = self.group_len[gi] as usize;
             let new_go = dest.anyof_blob.len() as u32;
-            dest.anyof_blob.extend_from_slice(&self.anyof_blob[go..go + gl]);
+            dest.anyof_blob
+                .extend_from_slice(&self.anyof_blob[go..go + gl]);
             dest.group_off.push(new_go);
             dest.group_len.push(gl as u16);
         }
@@ -298,21 +300,51 @@ impl ExactStore {
     }
 
     // ---- slice accessors for serialization (storage.rs) ----
-    pub fn req_masks(&self) -> &[u64] { &self.req_mask }
-    pub fn forb_masks(&self) -> &[u64] { &self.forb_mask }
-    pub fn req_offs(&self) -> &[u32] { &self.req_off }
-    pub fn req_lens(&self) -> &[u16] { &self.req_len }
-    pub fn req_blobs(&self) -> &[u32] { &self.req_blob }
-    pub fn forb_offs(&self) -> &[u32] { &self.forb_off }
-    pub fn forb_lens(&self) -> &[u16] { &self.forb_len }
-    pub fn forb_blobs(&self) -> &[u32] { &self.forb_blob }
-    pub fn q_group_starts(&self) -> &[u32] { &self.q_group_start }
-    pub fn q_group_counts(&self) -> &[u16] { &self.q_group_count }
-    pub fn group_offs(&self) -> &[u32] { &self.group_off }
-    pub fn group_lens(&self) -> &[u16] { &self.group_len }
-    pub fn anyof_blobs(&self) -> &[u32] { &self.anyof_blob }
-    pub fn versions(&self) -> &[u32] { &self.version }
-    pub fn logicals(&self) -> &[u64] { &self.logical }
+    pub fn req_masks(&self) -> &[u64] {
+        &self.req_mask
+    }
+    pub fn forb_masks(&self) -> &[u64] {
+        &self.forb_mask
+    }
+    pub fn req_offs(&self) -> &[u32] {
+        &self.req_off
+    }
+    pub fn req_lens(&self) -> &[u16] {
+        &self.req_len
+    }
+    pub fn req_blobs(&self) -> &[u32] {
+        &self.req_blob
+    }
+    pub fn forb_offs(&self) -> &[u32] {
+        &self.forb_off
+    }
+    pub fn forb_lens(&self) -> &[u16] {
+        &self.forb_len
+    }
+    pub fn forb_blobs(&self) -> &[u32] {
+        &self.forb_blob
+    }
+    pub fn q_group_starts(&self) -> &[u32] {
+        &self.q_group_start
+    }
+    pub fn q_group_counts(&self) -> &[u16] {
+        &self.q_group_count
+    }
+    pub fn group_offs(&self) -> &[u32] {
+        &self.group_off
+    }
+    pub fn group_lens(&self) -> &[u16] {
+        &self.group_len
+    }
+    pub fn anyof_blobs(&self) -> &[u32] {
+        &self.anyof_blob
+    }
+    pub fn versions(&self) -> &[u32] {
+        &self.version
+    }
+    pub fn logicals(&self) -> &[u64] {
+        &self.logical
+    }
 
     /// Push a raw entry (pre-computed masks and blobs). Used by MmapSegment::to_memory_segment
     /// to reconstruct an in-memory ExactStore from mmap'd data.

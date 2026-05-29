@@ -18,6 +18,11 @@
 //!
 //! Usage: learn [num_queries] [min_count] [npmi_tau]
 
+// This exploratory CLI uses `HashMap<_, ()>` as insertion sets that sit next to
+// the NPMI counting maps (`HashMap<_, usize>`), keeping the analysis passes
+// visually parallel. It's a throwaway research tool, not library code.
+#![allow(clippy::zero_sized_map_values)]
+
 use percolator::gen::{generate, GenConfig};
 use std::collections::HashMap;
 
@@ -43,30 +48,39 @@ fn main() {
 
     // Tokenize every query into a token stream (DSL punctuation stripped, so
     // "-(a,b)" contributes tokens a,b just like the raw words do).
-    let corpus: Vec<Vec<String>> = data
-        .queries
-        .iter()
-        .map(|(_, q)| tokenize(q))
-        .collect();
+    let corpus: Vec<Vec<String>> = data.queries.iter().map(|(_, q)| tokenize(q)).collect();
 
-    println!("corpus: {} queries, learning with no hand-coded vocabulary", corpus.len());
+    println!(
+        "corpus: {} queries, learning with no hand-coded vocabulary",
+        corpus.len()
+    );
     println!("params: min_count={min_count}, npmi_tau={tau}\n");
 
     // ---- ITERATION 1: bigrams -> phrases ----
     let phrases1 = learn_phrases(&corpus, min_count, tau);
-    println!("=== iteration 1: discovered {} multi-token entities (bigrams) ===", phrases1.len());
+    println!(
+        "=== iteration 1: discovered {} multi-token entities (bigrams) ===",
+        phrases1.len()
+    );
     print_top(&phrases1, 18);
 
     // surface the NAME-LIKE entities (all-alphabetic parts) — these are the
     // "players"/"brands" the learner found without ever being told they exist.
     let mut name_like: Vec<&Phrase> = phrases1
         .iter()
-        .filter(|p| p.token.split('_').all(|t| t.chars().all(|c| c.is_ascii_alphabetic())))
+        .filter(|p| {
+            p.token
+                .split('_')
+                .all(|t| t.chars().all(|c| c.is_ascii_alphabetic()))
+        })
         .collect();
     // sort by NPMI: tightly-bound pairs (players/brands appear ONLY together)
     // float to the top, above loosely co-occurring word pairs.
     name_like.sort_by(|a, b| b.npmi.partial_cmp(&a.npmi).unwrap());
-    println!("\n--- of which {} are name-like (all-alphabetic), top by binding strength (npmi): ---", name_like.len());
+    println!(
+        "\n--- of which {} are name-like (all-alphabetic), top by binding strength (npmi): ---",
+        name_like.len()
+    );
     println!("{:<30} {:>9} {:>8}", "entity", "count", "npmi");
     for p in name_like.iter().take(12) {
         println!("{:<30} {:>9} {:>8.3}", p.token, p.count, p.npmi);
@@ -80,14 +94,20 @@ fn main() {
         .filter(|p| p.token.contains('_') && p.token.matches('_').count() >= 2)
         .cloned()
         .collect();
-    println!("\n=== iteration 2: discovered {} longer entities (trigram+) ===", new_trigrams.len());
+    println!(
+        "\n=== iteration 2: discovered {} longer entities (trigram+) ===",
+        new_trigrams.len()
+    );
     print_top(&new_trigrams, 10);
 
     // ---- SELECTIVITY GAIN ----
     // Document-frequency (how many queries contain the token at least once).
     let df_uni = doc_freq_unigrams(&corpus);
     println!("\n=== selectivity gain: learned phrase vs its parts (lower df = better anchor) ===");
-    println!("{:<28} {:>10} {:>14} {:>10}", "learned entity", "df(phrase)", "min df(part)", "gain x");
+    println!(
+        "{:<28} {:>10} {:>14} {:>10}",
+        "learned entity", "df(phrase)", "min df(part)", "gain x"
+    );
     let mut shown = 0;
     for p in &phrases1 {
         let parts: Vec<&str> = p.token.split('_').collect();
@@ -144,10 +164,8 @@ fn tokenize(q: &str) -> Vec<String> {
     for ch in q.chars() {
         if ch.is_ascii_alphanumeric() || ch == '.' {
             cur.push(ch.to_ascii_lowercase());
-        } else {
-            if !cur.is_empty() {
-                out.push(std::mem::take(&mut cur));
-            }
+        } else if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
         }
     }
     if !cur.is_empty() {
@@ -251,7 +269,10 @@ fn doc_freq_unigrams(corpus: &[Vec<String>]) -> HashMap<String, usize> {
 }
 
 fn print_top(phrases: &[Phrase], k: usize) {
-    println!("{:<30} {:>9} {:>8}", "entity (by frequency)", "count", "npmi");
+    println!(
+        "{:<30} {:>9} {:>8}",
+        "entity (by frequency)", "count", "npmi"
+    );
     for p in phrases.iter().take(k) {
         println!("{:<30} {:>9} {:>8.3}", p.token, p.count, p.npmi);
     }

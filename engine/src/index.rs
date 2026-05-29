@@ -27,7 +27,7 @@ pub enum Posting {
 impl std::fmt::Debug for Posting {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Posting::Inline { len, .. } => write!(f, "Posting::Inline({})", len),
+            Posting::Inline { len, .. } => write!(f, "Posting::Inline({len})"),
             Posting::Heap(v) => write!(f, "Posting::Heap({})", v.len()),
             Posting::Roaring(bm) => write!(f, "Posting::Roaring({})", bm.len()),
         }
@@ -89,7 +89,7 @@ impl Posting {
                 }
             }
             Posting::Roaring(bm) => {
-                for id in bm.iter() {
+                for id in bm {
                     f(id);
                 }
             }
@@ -161,11 +161,11 @@ impl CandidateIndex {
     }
 
     pub fn total_postings(&self) -> usize {
-        self.map.values().map(|p| p.len()).sum()
+        self.map.values().map(Posting::len).sum()
     }
 
     pub fn heap_bytes(&self) -> usize {
-        self.map.values().map(|p| p.heap_bytes()).sum()
+        self.map.values().map(Posting::heap_bytes).sum()
     }
 
     /// Iterate all (sig_key, posting) pairs. Used by compaction to remap and
@@ -184,7 +184,7 @@ impl CandidateIndex {
 
     /// Posting-length distribution for the perf report (max, and count over a threshold).
     pub fn max_posting_len(&self) -> usize {
-        self.map.values().map(|p| p.len()).max().unwrap_or(0)
+        self.map.values().map(Posting::len).max().unwrap_or(0)
     }
     pub fn count_over(&self, threshold: usize) -> usize {
         self.map.values().filter(|p| p.len() > threshold).count()

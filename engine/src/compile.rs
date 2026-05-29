@@ -11,7 +11,7 @@
 //! features.
 
 use crate::dict::{Dict, FeatureId};
-use crate::dsl::{Atom, Ast};
+use crate::dsl::{Ast, Atom};
 use crate::normalize::Normalizer;
 use crate::util::sig_key;
 
@@ -30,9 +30,9 @@ pub enum CostClass {
 /// The positive/negative integer form of a query (no signatures yet).
 #[derive(Clone, Debug)]
 pub struct Extracted {
-    pub required: Vec<FeatureId>,        // AND
-    pub forbidden: Vec<FeatureId>,       // none may be present
-    pub anyof: Vec<Vec<FeatureId>>,      // each group: >=1 member-proxy present
+    pub required: Vec<FeatureId>,   // AND
+    pub forbidden: Vec<FeatureId>,  // none may be present
+    pub anyof: Vec<Vec<FeatureId>>, // each group: >=1 member-proxy present
 }
 
 /// Fully compiled query (used for explain/demo; the at-scale path streams into
@@ -72,7 +72,7 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
             (Atom::Term(w), false) => {
                 pos_words.push(w.as_str());
             }
-            (Atom::Term(w), true) | (Atom::Phrase(w), true) => {
+            (Atom::Term(w) | Atom::Phrase(w), true) => {
                 let feats = norm.compile_features(w, dict, lc);
                 forbidden.extend_from_slice(&feats);
             }
@@ -159,7 +159,43 @@ pub fn build_signatures(ex: &Extracted, dict: &Dict) -> SigPlan {
         };
     }
 
-    if !ex.required.is_empty() {
+    if ex.required.is_empty() {
+        // required empty: cover via the most-selective any-of group.
+        // choose the group whose worst (most frequent) member is least frequent.
+        // `anyof` is non-empty here (the both-empty case returned class D above),
+        // but handle None defensively rather than panicking on the hot build path.
+        let Some(best) = ex
+            .anyof
+            .iter()
+            .min_by_key(|g| g.iter().map(|&f| dict.freq(f)).max().unwrap_or(u32::MAX))
+        else {
+            return SigPlan {
+                main_sigs,
+                broad_sigs,
+                class: CostClass::D,
+            };
+        };
+        let all_selective = best.iter().all(|&f| !is_hot(dict, f));
+        if all_selective {
+            for &f in best {
+                main_sigs.push(sig_key(&[f]));
+            }
+            SigPlan {
+                main_sigs,
+                broad_sigs,
+                class: CostClass::B,
+            }
+        } else {
+            for &f in best {
+                broad_sigs.push(sig_key(&[f]));
+            }
+            SigPlan {
+                main_sigs,
+                broad_sigs,
+                class: CostClass::C,
+            }
+        }
+    } else {
         // required features sorted rarest-first
         let mut r = ex.required.clone();
         r.sort_by_key(|&f| dict.freq(f));
@@ -185,45 +221,6 @@ pub fn build_signatures(ex: &Extracted, dict: &Dict) -> SigPlan {
         } else {
             // single, hot required feature and nothing to pair -> broad lane
             broad_sigs.push(sig_key(&[r1]));
-            SigPlan {
-                main_sigs,
-                broad_sigs,
-                class: CostClass::C,
-            }
-        }
-    } else {
-        // required empty: cover via the most-selective any-of group.
-        // choose the group whose worst (most frequent) member is least frequent.
-        // `anyof` is non-empty here (the both-empty case returned class D above),
-        // but handle None defensively rather than panicking on the hot build path.
-        let best = match ex
-            .anyof
-            .iter()
-            .min_by_key(|g| g.iter().map(|&f| dict.freq(f)).max().unwrap_or(u32::MAX))
-        {
-            Some(best) => best,
-            None => {
-                return SigPlan {
-                    main_sigs,
-                    broad_sigs,
-                    class: CostClass::D,
-                }
-            }
-        };
-        let all_selective = best.iter().all(|&f| !is_hot(dict, f));
-        if all_selective {
-            for &f in best {
-                main_sigs.push(sig_key(&[f]));
-            }
-            SigPlan {
-                main_sigs,
-                broad_sigs,
-                class: CostClass::B,
-            }
-        } else {
-            for &f in best {
-                broad_sigs.push(sig_key(&[f]));
-            }
             SigPlan {
                 main_sigs,
                 broad_sigs,
@@ -272,7 +269,7 @@ fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut String) 
             (Atom::Term(w), false) => {
                 pos_words.push(w.as_str());
             }
-            (Atom::Term(w), true) | (Atom::Phrase(w), true) => {
+            (Atom::Term(w) | Atom::Phrase(w), true) => {
                 let feats = norm.compile_features_readonly(w, dict, lc);
                 forbidden.extend_from_slice(&feats);
             }
@@ -317,7 +314,11 @@ fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut String) 
     forbidden.sort_unstable();
     forbidden.dedup();
 
-    Extracted { required, forbidden, anyof }
+    Extracted {
+        required,
+        forbidden,
+        anyof,
+    }
 }
 
 /// Read-only compile: re-derives a CompiledQuery from query text without

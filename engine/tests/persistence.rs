@@ -7,12 +7,12 @@
 //! 4. The full lifecycle: build → persist → close → reopen → match
 
 use percolator::config::EngineConfig;
-use percolator::segment::Engine;
 use percolator::normalize::Normalizer;
+use percolator::segment::Engine;
 use std::path::PathBuf;
 
 fn test_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("percolator_test_{}", name));
+    let dir = std::env::temp_dir().join(format!("percolator_test_{name}"));
     // Clean up from previous runs
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -43,7 +43,7 @@ fn match_ids(engine: &Engine, title: &str) -> Vec<u64> {
     let mut scratch = percolator::segment::MatchScratch::new();
     let mut out = Vec::new();
     engine.match_title(title, &mut scratch, &mut out, true);
-    out.sort();
+    out.sort_unstable();
     out
 }
 
@@ -81,8 +81,7 @@ fn segment_round_trip() {
         let disk_result = match_ids(&disk_engine, title);
         assert_eq!(
             mem_result, disk_result,
-            "Mismatch for title '{}': in-memory={:?} vs disk={:?}",
-            title, mem_result, disk_result
+            "Mismatch for title '{title}': in-memory={mem_result:?} vs disk={disk_result:?}"
         );
     }
 
@@ -151,8 +150,14 @@ fn wal_recovery_inserts() {
     let actual_wander = match_ids(&engine2, title_wander);
     let actual_tatis = match_ids(&engine2, title_tatis);
 
-    assert_eq!(expected_wander, actual_wander, "WAL recovery lost wander insert");
-    assert_eq!(expected_tatis, actual_tatis, "WAL recovery lost tatis insert");
+    assert_eq!(
+        expected_wander, actual_wander,
+        "WAL recovery lost wander insert"
+    );
+    assert_eq!(
+        expected_tatis, actual_tatis,
+        "WAL recovery lost tatis insert"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -228,7 +233,7 @@ fn flush_creates_mmap_segment() {
     let seg_dir = dir.join("segments");
     let seg_files: Vec<_> = std::fs::read_dir(&seg_dir)
         .unwrap()
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|e| e.path().extension().is_some_and(|ext| ext == "seg"))
         .collect();
     assert!(!seg_files.is_empty(), "no .seg file created after flush");
@@ -273,14 +278,25 @@ fn wal_recovery_reports_corrupt_tail() {
 
     // Append garbage to simulate a torn write
     {
-        let mut f = std::fs::OpenOptions::new().append(true).open(&wal_path).unwrap();
-        f.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF]).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&wal_path)
+            .unwrap();
+        f.write_all(&[0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF])
+            .unwrap();
     }
 
     // Recover and check that we get the valid entries + skipped bytes reported
     let recovery = Wal::recover(&wal_path).unwrap();
-    assert_eq!(recovery.entries.len(), 2, "should recover both valid entries");
-    assert!(recovery.skipped_bytes > 0, "should report skipped bytes from corrupt tail");
+    assert_eq!(
+        recovery.entries.len(),
+        2,
+        "should recover both valid entries"
+    );
+    assert!(
+        recovery.skipped_bytes > 0,
+        "should report skipped bytes from corrupt tail"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -304,16 +320,26 @@ fn bulk_ingest_persists_sources_across_reopen() {
     ];
     let report = engine.bulk_ingest(&batch);
     assert_eq!(report.ingested, 2);
-    assert_eq!(engine.get_query_source(100).as_deref(), Some("wander franco prospect"));
+    assert_eq!(
+        engine.get_query_source(100).as_deref(),
+        Some("wander franco prospect")
+    );
 
     let title = "Wander Franco 2019 Bowman Chrome Prospect";
     let expected = match_ids(&engine, title);
-    assert!(expected.contains(&100), "bulk query should match before reopen");
+    assert!(
+        expected.contains(&100),
+        "bulk query should match before reopen"
+    );
     drop(engine);
 
     // Reopen: both the match data AND the bulk source text must survive.
     let engine2 = Engine::open(make_norm(), config).unwrap();
-    assert_eq!(match_ids(&engine2, title), expected, "bulk matches lost after reopen");
+    assert_eq!(
+        match_ids(&engine2, title),
+        expected,
+        "bulk matches lost after reopen"
+    );
     assert_eq!(
         engine2.get_query_source(100).as_deref(),
         Some("wander franco prospect"),
@@ -351,7 +377,10 @@ fn bulk_ingest_failure_is_all_or_nothing() {
     // Restore perms BEFORE asserting so temp-dir cleanup always works.
     std::fs::set_permissions(&seg_dir, orig).unwrap();
 
-    assert!(failed.is_err(), "bulk ingest into a read-only dir should fail");
+    assert!(
+        failed.is_err(),
+        "bulk ingest into a read-only dir should fail"
+    );
     assert_eq!(
         engine.num_segments(),
         segs_before,
@@ -368,9 +397,15 @@ fn bulk_ingest_failure_is_all_or_nothing() {
 
     // Once the dir is writable again, a fresh bulk ingest commits cleanly.
     let ok = engine.try_bulk_ingest(&batch);
-    assert!(ok.is_ok(), "bulk ingest should succeed after the dir is writable");
+    assert!(
+        ok.is_ok(),
+        "bulk ingest should succeed after the dir is writable"
+    );
     assert_eq!(engine.num_segments(), segs_before + 1);
-    assert_eq!(engine.get_query_source(100).as_deref(), Some("wander franco prospect"));
+    assert_eq!(
+        engine.get_query_source(100).as_deref(),
+        Some("wander franco prospect")
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

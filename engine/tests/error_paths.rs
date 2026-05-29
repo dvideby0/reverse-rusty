@@ -23,7 +23,10 @@ fn build_report_splits_parse_and_class_d() {
 
     assert_eq!(report.ingested, 1, "one good query should be indexed");
     assert_eq!(report.rejected_parse, 1, "the '(' should be a parse reject");
-    assert_eq!(report.rejected_class_d, 1, "'-auto' has no anchor => class D");
+    assert_eq!(
+        report.rejected_class_d, 1,
+        "'-auto' has no anchor => class D"
+    );
 
     // engine-level counters agree with the per-batch report
     assert_eq!(eng.rejected_parse(), 1);
@@ -65,13 +68,33 @@ fn bulk_detailed_reports_per_item_outcomes() {
     }
 
     // The per-item view and the aggregate report never disagree.
-    assert_eq!((report.ingested, report.rejected_parse, report.rejected_class_d), (1, 1, 1));
-    let ingested = items.iter().filter(|s| matches!(s, IngestItemStatus::Ingested)).count();
-    let parsed = items.iter().filter(|s| matches!(s, IngestItemStatus::RejectedParse(_))).count();
-    let class_d = items.iter().filter(|s| matches!(s, IngestItemStatus::RejectedClassD)).count();
+    assert_eq!(
+        (
+            report.ingested,
+            report.rejected_parse,
+            report.rejected_class_d
+        ),
+        (1, 1, 1)
+    );
+    let ingested = items
+        .iter()
+        .filter(|s| matches!(s, IngestItemStatus::Ingested))
+        .count();
+    let parsed = items
+        .iter()
+        .filter(|s| matches!(s, IngestItemStatus::RejectedParse(_)))
+        .count();
+    let class_d = items
+        .iter()
+        .filter(|s| matches!(s, IngestItemStatus::RejectedClassD))
+        .count();
     assert_eq!(
         (ingested, parsed, class_d),
-        (report.ingested, report.rejected_parse, report.rejected_class_d),
+        (
+            report.ingested,
+            report.rejected_parse,
+            report.rejected_class_d
+        ),
     );
 }
 
@@ -84,7 +107,11 @@ fn insert_live_now_counts_parse_failures() {
 
     let before = eng.rejected_parse();
     assert_eq!(eng.insert_live("(", 99, 2), None);
-    assert_eq!(eng.rejected_parse(), before + 1, "parse failure must be counted");
+    assert_eq!(
+        eng.rejected_parse(),
+        before + 1,
+        "parse failure must be counted"
+    );
 }
 
 #[test]
@@ -106,8 +133,9 @@ fn try_insert_live_surfaces_typed_error_without_counting() {
     assert_eq!(eng.rejected_class_d(), 1);
 
     // good insert -> Ok(Inserted(_))
-    match eng.try_insert_live("scottie pippen", 101, 2).unwrap() {
-        InsertOutcome::Inserted(_) => {}
-        other => panic!("expected Inserted, got {other:?}"),
-    }
+    let outcome = eng.try_insert_live("scottie pippen", 101, 2).unwrap();
+    assert!(
+        matches!(outcome, InsertOutcome::Inserted(_)),
+        "expected Inserted, got {outcome:?}"
+    );
 }

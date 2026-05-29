@@ -54,6 +54,18 @@ pub enum EngineEvent {
         /// Total base segment count after compaction.
         base_segments_after: usize,
     },
+
+    /// A best-effort removal of a segment file failed (e.g. orphan cleanup after
+    /// a write error, or stale-file cleanup after compaction). The owning
+    /// operation has already succeeded or reported its own error; this only
+    /// signals a leaked file on disk that may warrant manual cleanup. A missing
+    /// file is *not* reported here (that is the expected, benign case).
+    SegmentCleanupFailed {
+        /// The file the engine tried to remove.
+        path: std::path::PathBuf,
+        /// The OS error encountered.
+        error: String,
+    },
 }
 
 /// Point-in-time snapshot of engine state. Obtain via

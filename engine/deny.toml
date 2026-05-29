@@ -1,0 +1,41 @@
+# cargo-deny configuration for Percolator.
+#
+# Run via `./check.sh` or directly from this directory: `cargo deny check`.
+# Checks four things: security advisories, license policy, dependency bans,
+# and crate sources.
+
+[advisories]
+# Pull from the RustSec advisory DB. Vulnerabilities and unmaintained crates are
+# denied by default in this cargo-deny version, so they need no explicit key.
+# Refuse any dependency pinned to a yanked release.
+yanked = "deny"
+
+[licenses]
+# Permissive licenses only — the tree is MIT / Apache / BSD-family today. Adding
+# anything copyleft (GPL/LGPL/MPL) is a deliberate decision that must be made
+# here, not silently pulled in transitively.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "Unlicense",
+    "Zlib",
+    "BSL-1.0",
+    "Unicode-3.0",
+]
+# `percolator` is `publish = false` and intentionally unlicensed; skip the local
+# crate rather than forcing a license field on a proof of concept.
+private = { ignore = true }
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate versions bloat the build but aren't fatal; surface them as warnings.
+multiple-versions = "warn"
+# A wildcard ("*") version requirement is a footgun in a dependency spec.
+wildcards = "warn"
+
+[sources]
+# Only crates.io and explicitly-allowed git sources are acceptable.
+unknown-registry = "deny"
+unknown-git = "deny"
