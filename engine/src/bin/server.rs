@@ -41,7 +41,7 @@ use axum::{
 use clap::Parser;
 use parking_lot::Mutex;
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    Counter, Encoder, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
     IntGaugeVec, Opts, Registry, TextEncoder,
 };
 use serde::{Deserialize, Serialize};
@@ -156,6 +156,8 @@ struct PrometheusMetrics {
     memtable_entries: IntGauge,
     dict_features: IntGauge,
     memory_bytes: IntGaugeVec,
+    wal_size_bytes: IntGauge,
+    wal_pending_entries: IntGauge,
 
     // Cumulative counters (incremented via EngineEvent observer)
     flush_total: IntCounter,
@@ -166,10 +168,13 @@ struct PrometheusMetrics {
     compaction_total: IntCounter,
     compaction_tombstones_reclaimed: IntCounter,
     segment_cleanup_failures_total: IntCounter,
+    flush_time_seconds_total: Counter,
+    compaction_time_seconds_total: Counter,
 
     // Request metrics
     http_requests_total: IntCounterVec,
     http_request_duration: HistogramVec,
+    in_flight_requests: IntGauge,
 
     // Match metrics
     match_candidates_per_title: Histogram,
@@ -214,6 +219,18 @@ impl PrometheusMetrics {
             Opts::new("memory_bytes", "Heap memory usage by component"),
             &["component"],
         )
+        .unwrap();
+
+        let wal_size_bytes = IntGauge::with_opts(Opts::new(
+            "wal_size_bytes",
+            "Current on-disk size of the write-ahead log in bytes",
+        ))
+        .unwrap();
+
+        let wal_pending_entries = IntGauge::with_opts(Opts::new(
+            "wal_pending_entries",
+            "Un-checkpointed WAL entries (mutations not yet in a sealed segment)",
+        ))
         .unwrap();
 
         // --- Event counters ---
@@ -264,6 +281,18 @@ impl PrometheusMetrics {
         ))
         .unwrap();
 
+        let flush_time_seconds_total = Counter::with_opts(Opts::new(
+            "flush_time_seconds_total",
+            "Cumulative wall-clock seconds spent flushing the memtable into segments",
+        ))
+        .unwrap();
+
+        let compaction_time_seconds_total = Counter::with_opts(Opts::new(
+            "compaction_time_seconds_total",
+            "Cumulative wall-clock seconds spent compacting base segments",
+        ))
+        .unwrap();
+
         // --- HTTP request metrics ---
 
         let http_requests_total = IntCounterVec::new(
@@ -285,6 +314,12 @@ impl PrometheusMetrics {
             ]),
             &["endpoint"],
         )
+        .unwrap();
+
+        let in_flight_requests = IntGauge::with_opts(Opts::new(
+            "in_flight_requests",
+            "HTTP requests currently being processed",
+        ))
         .unwrap();
 
         // --- Match metrics ---
@@ -355,6 +390,19 @@ impl PrometheusMetrics {
         registry
             .register(Box::new(slow_queries_total.clone()))
             .unwrap();
+        registry.register(Box::new(wal_size_bytes.clone())).unwrap();
+        registry
+            .register(Box::new(wal_pending_entries.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(flush_time_seconds_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(compaction_time_seconds_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(in_flight_requests.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -363,6 +411,8 @@ impl PrometheusMetrics {
             memtable_entries,
             dict_features,
             memory_bytes,
+            wal_size_bytes,
+            wal_pending_entries,
             flush_total,
             flush_entries_total,
             ingest_total,
@@ -371,8 +421,11 @@ impl PrometheusMetrics {
             compaction_total,
             compaction_tombstones_reclaimed,
             segment_cleanup_failures_total,
+            flush_time_seconds_total,
+            compaction_time_seconds_total,
             http_requests_total,
             http_request_duration,
+            in_flight_requests,
             match_candidates_per_title,
             match_results_per_title,
             slow_queries_total,
@@ -394,14 +447,21 @@ impl PrometheusMetrics {
         self.memory_bytes
             .with_label_values(&["filter"])
             .set(m.filter_bytes as i64);
+        self.wal_size_bytes.set(m.wal_size_bytes as i64);
+        self.wal_pending_entries.set(m.wal_pending_entries as i64);
     }
 
     /// Handle an EngineEvent — increment counters. Called from the observer.
     fn observe_event(&self, event: &EngineEvent) {
         match event {
-            EngineEvent::Flush { entries, .. } => {
+            EngineEvent::Flush {
+                entries,
+                duration_secs,
+                ..
+            } => {
                 self.flush_total.inc();
                 self.flush_entries_total.inc_by(*entries as u64);
+                self.flush_time_seconds_total.inc_by(*duration_secs);
             }
             EngineEvent::Ingest {
                 ingested,
@@ -422,10 +482,15 @@ impl PrometheusMetrics {
                         .inc_by(*rejected_class_d as u64);
                 }
             }
-            EngineEvent::Compaction { report, .. } => {
+            EngineEvent::Compaction {
+                report,
+                duration_secs,
+                ..
+            } => {
                 self.compaction_total.inc();
                 self.compaction_tombstones_reclaimed
                     .inc_by(report.tombstones_reclaimed as u64);
+                self.compaction_time_seconds_total.inc_by(*duration_secs);
             }
             EngineEvent::SegmentCleanupFailed { .. } => {
                 self.segment_cleanup_failures_total.inc();
@@ -475,6 +540,61 @@ struct PutDocResponse {
     result: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+// -- GET /_doc/{id}
+#[derive(Serialize)]
+struct GetDocResponse {
+    _id: u64,
+    found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    _source: Option<HitSource>,
+}
+
+// -- DELETE /_doc/{id}
+#[derive(Serialize)]
+struct DeleteDocResponse {
+    _id: u64,
+    result: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deleted_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+// -- POST /_flush
+#[derive(Serialize)]
+struct FlushResponse {
+    took_ms: f64,
+    acknowledged: bool,
+    total_queries: usize,
+    base_segments: usize,
+}
+
+// -- POST /_compact
+#[derive(Serialize)]
+struct CompactResponse {
+    took_ms: f64,
+    acknowledged: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    segments_merged: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entries_before: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entries_after: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tombstones_reclaimed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<&'static str>,
+}
+
+// -- PUT /_vocab
+#[derive(Serialize)]
+struct PutVocabResponse {
+    acknowledged: bool,
+    stale_segments: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning: Option<&'static str>,
 }
 
 // -- POST /_search
@@ -671,12 +791,32 @@ impl ApiError {
 // Request ID middleware
 // ---------------------------------------------------------------------------
 
-/// Adds a unique X-Request-Id header to every response and includes it in the
-/// tracing span for request correlation.
+/// RAII guard for the in-flight request gauge: increments on construction and
+/// decrements on drop, so every exit path of the request stays balanced.
+struct InFlightGuard<'a>(&'a IntGauge);
+
+impl<'a> InFlightGuard<'a> {
+    fn new(gauge: &'a IntGauge) -> Self {
+        gauge.inc();
+        Self(gauge)
+    }
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.dec();
+    }
+}
+
+/// Adds a unique X-Request-Id header to every response, tracks the in-flight
+/// request gauge, and includes the request ID in the tracing span for
+/// correlation.
 async fn request_id_middleware(
+    State(state): State<Arc<AppState>>,
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let _in_flight = InFlightGuard::new(&state.prom.in_flight_requests);
     let request_id = uuid::Uuid::new_v4().to_string();
     let span = tracing::info_span!("request", request_id = %request_id);
     let _guard = span.enter();
@@ -794,11 +934,11 @@ async fn get_doc(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> imp
             .inc();
         (
             StatusCode::OK,
-            Json(serde_json::json!({
-                "_id": id,
-                "found": true,
-                "_source": { "query": query_text }
-            })),
+            Json(GetDocResponse {
+                _id: id,
+                found: true,
+                _source: Some(HitSource { query: query_text }),
+            }),
         )
     } else {
         state
@@ -808,10 +948,11 @@ async fn get_doc(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> imp
             .inc();
         (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "_id": id,
-                "found": false
-            })),
+            Json(GetDocResponse {
+                _id: id,
+                found: false,
+                _source: None,
+            }),
         )
     };
     state
@@ -846,11 +987,12 @@ async fn delete_doc(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> 
                 .inc();
             (
                 StatusCode::OK,
-                Json(serde_json::json!({
-                    "_id": id,
-                    "result": "deleted",
-                    "deleted_count": n
-                })),
+                Json(DeleteDocResponse {
+                    _id: id,
+                    result: "deleted",
+                    deleted_count: Some(n as u64),
+                    error: None,
+                }),
             )
         }
         Ok(_) => {
@@ -861,10 +1003,12 @@ async fn delete_doc(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> 
                 .inc();
             (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({
-                    "_id": id,
-                    "result": "not_found"
-                })),
+                Json(DeleteDocResponse {
+                    _id: id,
+                    result: "not_found",
+                    deleted_count: None,
+                    error: None,
+                }),
             )
         }
         Err(e) => {
@@ -878,11 +1022,12 @@ async fn delete_doc(State(state): State<Arc<AppState>>, Path(id): Path<u64>) -> 
                 .inc();
             (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({
-                    "_id": id,
-                    "result": "error",
-                    "error": format!("write-ahead log error: {}", e)
-                })),
+                Json(DeleteDocResponse {
+                    _id: id,
+                    result: "error",
+                    deleted_count: None,
+                    error: Some(format!("write-ahead log error: {e}")),
+                }),
             )
         }
     }
@@ -1407,11 +1552,12 @@ async fn flush(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .http_request_duration
         .with_label_values(&["flush"])
         .observe(start.elapsed().as_secs_f64());
-    Json(serde_json::json!({
-        "acknowledged": true,
-        "total_queries": metrics.total_queries,
-        "base_segments": metrics.base_segments,
-    }))
+    Json(FlushResponse {
+        took_ms: start.elapsed().as_secs_f64() * 1000.0,
+        acknowledged: true,
+        total_queries: metrics.total_queries,
+        base_segments: metrics.base_segments,
+    })
 }
 
 /// POST /_compact
@@ -1441,19 +1587,26 @@ async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             tombstones_reclaimed = r.tombstones_reclaimed,
             "compaction complete"
         );
-        Json(serde_json::json!({
-            "acknowledged": true,
-            "segments_merged": r.segments_merged,
-            "entries_before": r.entries_before,
-            "entries_after": r.entries_after,
-            "tombstones_reclaimed": r.tombstones_reclaimed,
-        }))
+        Json(CompactResponse {
+            took_ms: start.elapsed().as_secs_f64() * 1000.0,
+            acknowledged: true,
+            segments_merged: Some(r.segments_merged),
+            entries_before: Some(r.entries_before),
+            entries_after: Some(r.entries_after),
+            tombstones_reclaimed: Some(r.tombstones_reclaimed),
+            message: None,
+        })
     } else {
         info!("compaction skipped: not needed");
-        Json(serde_json::json!({
-            "acknowledged": true,
-            "message": "no compaction needed",
-        }))
+        Json(CompactResponse {
+            took_ms: start.elapsed().as_secs_f64() * 1000.0,
+            acknowledged: true,
+            segments_merged: None,
+            entries_before: None,
+            entries_after: None,
+            tombstones_reclaimed: None,
+            message: Some("no compaction needed"),
+        })
     }
 }
 
@@ -1601,17 +1754,11 @@ async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// GET /_vocab — return the current vocabulary as JSON.
 async fn get_vocab(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let engine = state.engine.lock();
-    match engine.vocab() {
-        Some(v) => Json(serde_json::to_value(v).unwrap_or_default()).into_response(),
-        None => Json(serde_json::json!({
-            "synonyms": [],
-            "phrases": [],
-            "graders": [],
-            "grade_words": []
-        }))
-        .into_response(),
-    }
+    let vocab = {
+        let engine = state.engine.lock();
+        engine.vocab().cloned().unwrap_or_default()
+    };
+    Json(vocab)
 }
 
 /// PUT /_vocab — replace the vocabulary. Existing compiled queries become
@@ -1623,25 +1770,25 @@ async fn put_vocab(
     let result = {
         let mut engine = state.engine.lock();
         match engine.set_vocab(vocab) {
-            Ok(stale) => {
-                let mut resp = serde_json::json!({"acknowledged": true, "stale_segments": stale});
-                if stale > 0 {
-                    resp["warning"] = serde_json::json!(
-                        "normalizer changed with existing queries; reingest for consistent matching"
-                    );
-                }
-                Ok((StatusCode::OK, Json(resp)))
+            Ok(stale) => (
+                StatusCode::OK,
+                Json(PutVocabResponse {
+                    acknowledged: true,
+                    stale_segments: stale,
+                    warning: (stale > 0).then_some(
+                        "normalizer changed with existing queries; reingest for consistent matching",
+                    ),
+                }),
+            )
+                .into_response(),
+            Err(e) => {
+                ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
+                    .into_response()
             }
-            Err(e) => Err((
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": e.to_string()})),
-            )),
         }
     };
     state.publish_snapshot();
-    match result {
-        Ok(r) | Err(r) => r,
-    }
+    result
 }
 
 #[derive(Deserialize)]
@@ -1660,7 +1807,7 @@ fn default_min_count() -> usize {
 /// and then PUT /_vocab to apply.
 async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoResponse {
     let vocab = percolator::vocab::learn_from_queries(&req.queries, req.min_count);
-    Json(serde_json::to_value(&vocab).unwrap_or_default())
+    Json(vocab)
 }
 
 // ---------------------------------------------------------------------------
@@ -1838,6 +1985,7 @@ async fn main() {
             EngineEvent::Flush {
                 entries,
                 base_segments_after,
+                ..
             } => {
                 info!(
                     entries = entries,
@@ -1863,6 +2011,7 @@ async fn main() {
                 report,
                 trigger,
                 base_segments_after,
+                ..
             } => {
                 info!(
                     segments_merged = report.segments_merged,
@@ -1951,7 +2100,10 @@ async fn main() {
         .route("/_vocab/learn", post(learn_vocab))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
-        .layer(middleware::from_fn(request_id_middleware))
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            request_id_middleware,
+        ))
         .with_state(Arc::clone(&state));
 
     let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));

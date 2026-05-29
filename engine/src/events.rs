@@ -36,6 +36,10 @@ pub enum EngineEvent {
         entries: usize,
         /// Total base segment count after the flush.
         base_segments_after: usize,
+        /// Wall-clock seconds spent sealing the memtable into a base segment
+        /// (covers the seal + anchor-filter build, not the subsequent WAL
+        /// checkpoint or manifest save).
+        duration_secs: f64,
     },
 
     /// A batch of queries was ingested (via `build_from_queries` or `bulk_ingest`).
@@ -53,6 +57,8 @@ pub enum EngineEvent {
         trigger: CompactionTrigger,
         /// Total base segment count after compaction.
         base_segments_after: usize,
+        /// Wall-clock seconds spent merging the selected range of base segments.
+        duration_secs: f64,
     },
 
     /// A best-effort removal of a segment file failed (e.g. orphan cleanup after
@@ -112,4 +118,13 @@ pub struct EngineMetrics {
     pub logical_index_bytes: usize,
     /// Resident heap bytes used by per-segment liveness (alive) overlays.
     pub alive_bytes: usize,
+    /// Current on-disk size of the write-ahead log in bytes (0 when running
+    /// without durability). Analogous to Elasticsearch's translog
+    /// `size_in_bytes` — indicates recovery cost on restart.
+    pub wal_size_bytes: u64,
+    /// Number of un-checkpointed WAL entries (mutations since the last flush
+    /// checkpoint; 0 when running without durability). Analogous to
+    /// Elasticsearch's translog `operations` — shows whether checkpointing keeps
+    /// up with the write rate.
+    pub wal_pending_entries: u64,
 }
