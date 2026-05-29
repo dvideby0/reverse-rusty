@@ -569,7 +569,7 @@ impl MmapSegment {
         // Phase 1: validate and parse offsets/lengths from a temporary borrow
         {
             let data = &mmap[..];
-            if &data[0..4] != &MAGIC {
+            if data[0..4] != MAGIC {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
             }
             let version = read_u32_at(data, 4)?;
@@ -639,8 +639,8 @@ impl MmapSegment {
         let alive_overlay: Vec<bool> = alive_s.iter().map(|&b| b != 0).collect();
         let alive_counter = alive_overlay.iter().filter(|&&a| a).count();
         let mut logical_index: crate::util::FastMap<u64, Vec<u32>> = crate::util::fast_map();
-        for i in 0..num_queries as usize {
-            if alive_overlay[i] {
+        for (i, &alive) in alive_overlay.iter().enumerate().take(num_queries as usize) {
+            if alive {
                 let lid = unsafe { *logical_s.as_ptr().add(i) };
                 logical_index.entry(lid).or_default().push(i as u32);
             }
@@ -1016,7 +1016,7 @@ impl MmapSegment {
     }
 }
 
-fn parse_frozen_index<'a>(data: &'a [u8], off: usize) -> io::Result<(&'a [FrozenSlot], &'a [u32], usize)> {
+fn parse_frozen_index(data: &[u8], off: usize) -> io::Result<(&[FrozenSlot], &[u32], usize)> {
     let cap = read_u32_at(data, off)? as usize;
     let slots_off = off + 8; // 4 count + 4 pad
     let slots = unsafe {
@@ -1168,7 +1168,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest CRC mismatch"));
     }
 
-    if &data[0..4] != &MANIFEST_MAGIC {
+    if data[0..4] != MANIFEST_MAGIC {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad manifest magic"));
     }
     let version = read_u32_at(&data, 4)?;
@@ -1240,7 +1240,7 @@ pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, S
     if data.len() < 12 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "sources file too small"));
     }
-    if &data[0..4] != &SOURCES_MAGIC {
+    if data[0..4] != SOURCES_MAGIC {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "bad sources magic"));
     }
     let version = read_u32_at(&data, 4)?;

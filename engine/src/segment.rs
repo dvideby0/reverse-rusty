@@ -336,8 +336,8 @@ impl Segment {
             // Dead entries get u32::MAX (sentinel); alive entries get dense IDs.
             let n = src.len();
             let mut remap: Vec<u32> = vec![u32::MAX; n];
-            for old in 0..n {
-                if src.alive[old] {
+            for (old, &is_alive) in src.alive.iter().enumerate() {
+                if is_alive {
                     let new_id = src.exact.copy_entry(old as u32, &mut dest.exact);
                     let logical = dest.exact.logical(new_id);
                     dest.class.push(src.class[old]);
@@ -386,8 +386,8 @@ impl Segment {
     ) -> Self {
         let alive_counter = alive.iter().filter(|&&a| a).count();
         let mut logical_index: crate::util::FastMap<u64, Vec<u32>> = crate::util::fast_map();
-        for i in 0..exact.len() {
-            if alive[i] {
+        for (i, &is_alive) in alive.iter().enumerate() {
+            if is_alive {
                 logical_index.entry(exact.logical(i as u32)).or_default().push(i as u32);
             }
         }
@@ -493,6 +493,8 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.locals_for_logical(logical_id),
         }
     }
+    // Dispatch wrapper — signature must mirror the inner segment's match_into.
+    #[allow(clippy::too_many_arguments)]
     pub fn match_into(
         &self,
         feats: &[FeatureId],
@@ -879,6 +881,9 @@ pub struct CompactionReport {
     pub tombstones_reclaimed: usize,
 }
 
+/// Boxed observer callback for engine events.
+type EventObserver = Box<dyn Fn(&crate::events::EngineEvent) + Send + Sync>;
+
 pub struct Engine {
     config: EngineConfig,
     norm: Arc<Normalizer>,
@@ -898,7 +903,7 @@ pub struct Engine {
     rejected_parse: u64,   // queries dropped because the DSL failed to parse
     rejected_class_d: u64, // class-D queries rejected at compile (not stored)
     /// Optional observer callback for engine events (flush, compact, ingest, etc.)
-    observer: Option<Box<dyn Fn(&crate::events::EngineEvent) + Send + Sync>>,
+    observer: Option<EventObserver>,
     /// Write-ahead log (present when data_dir is set).
     wal: Option<Wal>,
     /// Next segment file sequence number (for naming: seg_000001.seg, etc.)
@@ -2108,8 +2113,7 @@ impl Engine {
             if let Some(p) = seg_path {
                 let _ = std::fs::remove_file(p);
             }
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 "manifest write failed during ingest; batch rolled back",
             ));
         }

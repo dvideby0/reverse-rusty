@@ -367,7 +367,7 @@ impl Vocab {
 
     pub fn save_json(&self, path: &Path) -> io::Result<()> {
         let json = serde_json::to_string_pretty(self)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         std::fs::write(path, json)
     }
 

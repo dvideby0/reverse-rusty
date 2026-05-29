@@ -103,7 +103,7 @@ fn main() {
     // ---- bulk(1k) + publish ----
     let bulk_n = 1_000usize;
     let t = Instant::now();
-    let bulk_iters = iters.min(20).max(1);
+    let bulk_iters = iters.clamp(1, 20);
     for b in 0..bulk_iters {
         let batch: Vec<(u64, String)> = (0..bulk_n)
             .map(|j| {

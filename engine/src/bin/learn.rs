@@ -207,7 +207,7 @@ fn learn_phrases(corpus: &[Vec<String>], min_count: usize, tau: f64) -> Vec<Phra
             });
         }
     }
-    phrases.sort_by(|x, y| y.count.cmp(&x.count));
+    phrases.sort_by_key(|p| std::cmp::Reverse(p.count));
     phrases
 }
 

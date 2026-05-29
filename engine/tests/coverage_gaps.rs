@@ -220,7 +220,7 @@ fn repeated_compaction_preserves_correctness() {
         broad_query_frac: 0.05,
         hot_skew: 2.0,
         family_size: 8,
-        seed: 0xC0_AC7_2,
+        seed: 0x00C0_AC72,
         num_players: 2_500,
         num_sets: 1_000,
     };
@@ -310,7 +310,7 @@ fn compaction_under_churn() {
         broad_query_frac: 0.05,
         hot_skew: 2.0,
         family_size: 8,
-        seed: 0xC40_20,
+        seed: 0x000C_4020,
         num_players: 1_500,
         num_sets: 600,
     };
@@ -454,7 +454,7 @@ fn match_stats_separate_main_and_broad_candidates() {
         broad_query_frac: 0.10, // 10% broad to ensure we get some
         hot_skew: 2.0,
         family_size: 8,
-        seed: 0xB20AD_57,
+        seed: 0x0B20_AD57,
         num_players: 2_000,
         num_sets: 800,
     };

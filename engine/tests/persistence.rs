@@ -229,7 +229,7 @@ fn flush_creates_mmap_segment() {
     let seg_files: Vec<_> = std::fs::read_dir(&seg_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "seg"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "seg"))
         .collect();
     assert!(!seg_files.is_empty(), "no .seg file created after flush");
 

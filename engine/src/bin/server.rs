@@ -882,11 +882,7 @@ async fn search(
             took_ms = format!("{:.2}", response.took_ms),
             threshold_ms = threshold,
             matches = response.hits.total,
-            titles = if response.slots.is_some() {
-                response.slots.as_ref().unwrap().len()
-            } else {
-                1
-            },
+            titles = response.slots.as_ref().map_or(1, |s| s.len()),
             "slow query"
         );
     }
@@ -1451,11 +1447,11 @@ async fn main() {
         }
     };
 
-    let mut engine = if cli.data_dir.is_some() {
+    let mut engine = if let Some(data_dir) = cli.data_dir.as_ref() {
         let norm = build_normalizer(&vocab);
         match Engine::open(norm, config.clone()) {
             Ok(mut e) => {
-                info!(data_dir = ?cli.data_dir.as_ref().unwrap(), "recovered engine from persistence");
+                info!(data_dir = ?data_dir, "recovered engine from persistence");
                 if let Some(v) = vocab {
                     let _ = e.set_vocab(v);
                 }

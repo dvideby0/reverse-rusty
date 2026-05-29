@@ -224,7 +224,7 @@ impl Wal {
         if data.len() < WAL_HEADER_SIZE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "WAL too small"));
         }
-        if &data[0..4] != &WAL_MAGIC {
+        if data[0..4] != WAL_MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad WAL magic"));
         }
         Self::parse_entries(&data[WAL_HEADER_SIZE..])

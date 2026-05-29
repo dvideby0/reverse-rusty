@@ -147,10 +147,10 @@ fn parse_csv(lines: &[String]) -> LoadResult {
 
 /// Extract the first CSV field (before the first unquoted comma).
 fn csv_first_field(line: &str) -> &str {
-    if line.starts_with('"') {
+    if let Some(rest) = line.strip_prefix('"') {
         // Quoted field — find closing quote.
-        if let Some(end) = line[1..].find('"') {
-            return &line[1..end + 1];
+        if let Some(end) = rest.find('"') {
+            return &rest[..end];
         }
     }
     line.split(',').next().unwrap_or(line)

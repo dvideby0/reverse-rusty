@@ -221,7 +221,7 @@ fn corrupt_segment_file_skipped_on_open() {
     let seg_dir = dir.join("segments");
     if let Ok(entries) = std::fs::read_dir(&seg_dir) {
         for entry in entries.flatten() {
-            if entry.path().extension().map_or(false, |e| e == "seg") {
+            if entry.path().extension().is_some_and(|e| e == "seg") {
                 // Overwrite the middle of the file with garbage
                 let data = std::fs::read(entry.path()).unwrap();
                 if data.len() > 20 {
@@ -424,7 +424,7 @@ fn interleaved_delete_insert_flush_compact_stress() {
             let id = 1000 + round * 10 + i;
             engine.insert_live(
                 &format!("newplayer{} team{} 2025 prizm", id, i % 3),
-                id as u64,
+                id,
                 1,
             );
         }

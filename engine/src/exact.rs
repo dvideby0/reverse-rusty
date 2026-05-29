@@ -14,6 +14,9 @@ use crate::dict::{Dict, FeatureId, NO_MASK_BIT};
 
 /// Shared exact-verification logic operating on raw slices. Used by both
 /// in-memory ExactStore::verify and MmapSegment::verify to avoid duplication.
+// Args mirror the SoA columns one-to-one; bundling them into a struct would add
+// indirection on the match hot path for no readability gain.
+#[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn verify_slices(
     id: u32,
@@ -83,7 +86,7 @@ pub fn verify_slices(
     true
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ExactStore {
     // common-mask words (the 64 hottest features)
     req_mask: Vec<u64>,
@@ -105,28 +108,6 @@ pub struct ExactStore {
     // identity, resolved only on a confirmed match
     version: Vec<u32>,
     logical: Vec<u64>,
-}
-
-impl Default for ExactStore {
-    fn default() -> Self {
-        ExactStore {
-            req_mask: Vec::new(),
-            forb_mask: Vec::new(),
-            req_off: Vec::new(),
-            req_len: Vec::new(),
-            req_blob: Vec::new(),
-            forb_off: Vec::new(),
-            forb_len: Vec::new(),
-            forb_blob: Vec::new(),
-            q_group_start: Vec::new(),
-            q_group_count: Vec::new(),
-            group_off: Vec::new(),
-            group_len: Vec::new(),
-            anyof_blob: Vec::new(),
-            version: Vec::new(),
-            logical: Vec::new(),
-        }
-    }
 }
 
 impl std::fmt::Debug for ExactStore {
@@ -335,6 +316,8 @@ impl ExactStore {
 
     /// Push a raw entry (pre-computed masks and blobs). Used by MmapSegment::to_memory_segment
     /// to reconstruct an in-memory ExactStore from mmap'd data.
+    // Args mirror the SoA columns being reconstructed; a struct would add no clarity.
+    #[allow(clippy::too_many_arguments)]
     pub fn push_raw(
         &mut self,
         rmask: u64,
