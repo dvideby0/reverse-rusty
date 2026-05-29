@@ -1,0 +1,252 @@
+//! `impl Engine` — the durability layer: segment file naming, sealing a segment
+//! to disk (mmap'd back), the all-or-nothing commit point (ADR-017), WAL
+//! checkpoint/reset, and manifest + query-source persistence.
+
+use super::{BaseSegment, Engine, IngestReport, Segment};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::storage::MmapSegment;
+
+impl Engine {
+    /// Generate the next segment filename and increment the counter.
+    fn next_segment_filename(&mut self) -> String {
+        let name = format!("seg_{:06}.seg", self.next_seg_id);
+        self.next_seg_id += 1;
+        name
+    }
+
+    /// Seal a segment: if persistent, write to disk and mmap back;
+    /// otherwise keep in memory. Pushes onto self.segments.
+    pub(in crate::segment) fn seal_and_push(&mut self, seg: Segment) {
+        let base = self.make_base_segment(seg);
+        self.segments.push(Arc::new(base));
+    }
+
+    /// Convert a sealed Segment into a BaseSegment (mmap'd if persistent).
+    pub(in crate::segment) fn make_base_segment(&mut self, seg: Segment) -> BaseSegment {
+        let data_dir = self.config.data_dir.clone();
+        if let Some(ref dir) = data_dir {
+            let name = self.next_segment_filename();
+            let seg_dir = dir.join("segments");
+            let path = seg_dir.join(&name);
+            match crate::storage::write_segment(&seg, &path) {
+                Ok(()) => match MmapSegment::open(&path) {
+                    Ok(mmap_seg) => return BaseSegment::Mmap(mmap_seg),
+                    Err(e) => {
+                        eprintln!("[percolator] segment mmap failed for {}, falling back to in-memory: {e}", path.display());
+                        self.persistence_healthy = false;
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "[percolator] segment write failed for {}, falling back to in-memory: {e}",
+                        path.display()
+                    );
+                    self.persistence_healthy = false;
+                }
+            }
+            // Fall back to in-memory if write/mmap fails
+            BaseSegment::Memory(seg)
+        } else {
+            BaseSegment::Memory(seg)
+        }
+    }
+
+    /// Persist a sealed segment to disk and mmap it back, propagating any I/O
+    /// error instead of silently falling back to an in-memory segment (that
+    /// silent fallback is the false-durability bug behind ADR-017). Returns the
+    /// base segment plus its on-disk path, so a later commit failure can delete
+    /// the orphaned file. In-memory mode (no `data_dir`) returns a `Memory` base
+    /// and `None`.
+    fn build_durable_base(
+        &mut self,
+        seg: Segment,
+    ) -> std::io::Result<(BaseSegment, Option<PathBuf>)> {
+        let Some(dir) = self.config.data_dir.clone() else {
+            return Ok((BaseSegment::Memory(seg), None));
+        };
+        let path = dir.join("segments").join(self.next_segment_filename());
+        if let Err(e) = crate::storage::write_segment(&seg, &path) {
+            self.persistence_healthy = false;
+            return Err(e);
+        }
+        match MmapSegment::open(&path) {
+            Ok(mmap_seg) => Ok((BaseSegment::Mmap(mmap_seg), Some(path))),
+            Err(e) => {
+                self.persistence_healthy = false;
+                self.best_effort_remove_segment(&path);
+                Err(e)
+            }
+        }
+    }
+
+    /// Durably commit a freshly-built segment as a new base segment,
+    /// all-or-nothing (ADR-017). Writes the segment file (fsync'd + atomic rename
+    /// via `write_segment`), appends it in memory, then writes the manifest — the
+    /// atomic commit point, which both references the new segment file and embeds
+    /// the updated dict. If the segment or manifest write fails, the in-memory
+    /// segment is dropped and the orphan file deleted, so nothing is committed
+    /// (mirrors RocksDB's `IngestExternalFile`).
+    ///
+    /// `accepted` carries the `(logical_id, source_text)` of queries that
+    /// compiled. It is applied to the query store (display-only, never on the
+    /// match path) *after* the commit point and then persisted to `sources.dat`.
+    /// Bulk ingest has no WAL backstop, so this is the sole point at which bulk
+    /// source text becomes durable; a `sources.dat` write failure is surfaced via
+    /// `persistence_healthy` but does not un-commit the already-durable match data.
+    pub(in crate::segment) fn commit_base_segment(
+        &mut self,
+        seg: Segment,
+        accepted: Vec<(u64, String)>,
+        report: IngestReport,
+    ) -> std::io::Result<IngestReport> {
+        let (base, seg_path) = self.build_durable_base(seg)?;
+        self.segments.push(Arc::new(base));
+
+        // The manifest write is the atomic commit point. If it fails, roll the
+        // batch back entirely: drop the in-memory segment and delete the orphan.
+        if !self.save_manifest_if_persistent() {
+            self.segments.pop();
+            if let Some(p) = seg_path {
+                self.best_effort_remove_segment(&p);
+            }
+            return Err(std::io::Error::other(
+                "manifest write failed during ingest; batch rolled back",
+            ));
+        }
+
+        // Past the commit point — the match data is durable. Publish source text.
+        for (logical, text) in accepted {
+            self.query_store.insert(logical, text);
+        }
+        self.save_query_sources();
+
+        self.emit(crate::events::EngineEvent::Ingest {
+            ingested: report.ingested,
+            rejected_parse: report.rejected_parse,
+            rejected_class_d: report.rejected_class_d,
+            base_segments_after: self.segments.len(),
+        });
+        Ok(report)
+    }
+
+    /// Write a WAL flush checkpoint (all prior WAL entries are in segments).
+    pub(in crate::segment) fn checkpoint_wal(&mut self) {
+        if let Some(ref mut wal) = self.wal {
+            // Use the latest segment name as the checkpoint marker
+            let name = format!("seg_{:06}.seg", self.next_seg_id - 1);
+            if let Err(e) = wal.append_flush_checkpoint(&name) {
+                eprintln!("[percolator] WAL flush checkpoint write failed: {e}");
+            }
+        }
+    }
+
+    /// Reset the WAL after a successful flush + manifest write. Only call when
+    /// both the checkpoint and manifest have been persisted, so no data is lost.
+    pub(in crate::segment) fn reset_wal_if_safe(&mut self) {
+        if let Some(ref mut wal) = self.wal {
+            if let Err(e) = wal.reset() {
+                eprintln!("[percolator] WAL reset failed: {e}");
+            }
+        }
+    }
+
+    /// Save the manifest file if persistence is enabled. Returns true if the
+    /// write succeeded (or persistence is not enabled), false on failure.
+    pub(in crate::segment) fn save_manifest_if_persistent(&mut self) -> bool {
+        if let Some(ref dir) = self.config.data_dir {
+            let segment_files: Vec<String> = self
+                .segments
+                .iter()
+                .filter_map(|s| {
+                    if let BaseSegment::Mmap(m) = s.as_ref() {
+                        m.path()
+                            .file_name()
+                            .and_then(|f| f.to_str())
+                            .map(std::string::ToString::to_string)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let manifest = crate::storage::Manifest {
+                segment_files,
+                next_seg_id: self.next_seg_id,
+                dict_data: crate::storage::serialize_dict(&self.dict),
+                rejected_parse: self.rejected_parse,
+                rejected_class_d: self.rejected_class_d,
+            };
+            let dir = dir.clone();
+            if let Err(e) = crate::storage::write_manifest(&manifest, &dir.join("manifest.bin")) {
+                eprintln!("[percolator] manifest write failed: {e}");
+                self.persistence_healthy = false;
+                return false;
+            }
+        }
+        true
+    }
+
+    pub(in crate::segment) fn save_query_sources(&mut self) {
+        let Some(dir) = self.config.data_dir.clone() else {
+            return;
+        };
+        let path = dir.join("sources.dat");
+        if let Err(e) = self.query_store.write_to(&path) {
+            eprintln!("[percolator] query sources write failed: {e}");
+            self.persistence_healthy = false;
+            return;
+        }
+        // Lazy mode: re-map the freshly written file so reads hit it and the
+        // in-memory overlay resets (reclaiming the post-flush deltas). Resident
+        // mode keeps its in-RAM map as the source of truth (no re-map needed).
+        if self.query_store.is_lazy() {
+            match crate::storage::SourceStore::open(&path, false) {
+                Ok(s) => self.query_store = Arc::new(s),
+                Err(e) => {
+                    eprintln!("[percolator] query sources re-map failed: {e}");
+                    self.persistence_healthy = false;
+                }
+            }
+        }
+    }
+
+    /// Collect paths of mmap'd segments (for cleanup during compaction).
+    pub(in crate::segment) fn collect_mmap_paths(&self) -> Vec<PathBuf> {
+        self.segments
+            .iter()
+            .filter_map(|s| {
+                if let BaseSegment::Mmap(m) = s.as_ref() {
+                    Some(m.path().to_path_buf())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Remove old segment files after compaction replaces them.
+    pub(in crate::segment) fn cleanup_segment_files(&self, paths: &[PathBuf]) {
+        for p in paths {
+            self.best_effort_remove_segment(p);
+        }
+    }
+
+    /// Best-effort removal of a segment file on a cleanup/rollback path.
+    ///
+    /// The caller's primary result already reflects the operation outcome, so a
+    /// removal failure must not change control flow. But rather than silently
+    /// discarding the error (which could leak orphan files unnoticed), we surface
+    /// it through the observer as [`EngineEvent::SegmentCleanupFailed`]. A missing
+    /// file is the expected, benign case and is not reported.
+    fn best_effort_remove_segment(&self, path: &std::path::Path) {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => self.emit(crate::events::EngineEvent::SegmentCleanupFailed {
+                path: path.to_path_buf(),
+                error: e.to_string(),
+            }),
+        }
+    }
+}
