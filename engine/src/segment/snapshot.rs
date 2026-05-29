@@ -3,6 +3,7 @@
 //! batch matchers). Type definitions live in the `segment` module root.
 
 use super::{BaseSegment, EngineSnapshot, MatchScratch, MatchStats};
+use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
 use crate::vocab::Vocab;
@@ -62,6 +63,12 @@ impl EngineSnapshot {
     /// without locking the engine (ADR-016).
     pub fn vocab(&self) -> Option<&Vocab> {
         self.vocab.as_deref()
+    }
+
+    /// The engine configuration captured at snapshot time. Lets `GET /_settings`
+    /// serve the live settings from the lock-free snapshot (ADR-016).
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
     }
 
     pub fn num_queries(&self) -> usize {

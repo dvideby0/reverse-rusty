@@ -51,7 +51,7 @@ impl Engine {
         };
         let query_store = Arc::new(SourceStore::empty(config.retain_source));
         Engine {
-            config,
+            config: Arc::new(config),
             norm: Arc::new(norm),
             vocab: None,
             dict: Arc::new(Dict::new()),
@@ -206,7 +206,7 @@ impl Engine {
             };
 
         let mut engine = Engine {
-            config,
+            config: Arc::new(config),
             norm: Arc::new(norm),
             vocab: None,
             dict: Arc::new(dict),
@@ -308,6 +308,21 @@ impl Engine {
         &self.config
     }
 
+    /// Replace the runtime tuning configuration (copy-on-write: swaps in a new
+    /// `Arc`, so any already-published snapshot keeps its own view).
+    ///
+    /// Only the **dynamic** knobs take effect retroactively — compaction/flush
+    /// thresholds, query-complexity limits, merge cost, and the auto-compact
+    /// flags are re-read on the next maintenance decision. The **static** fields
+    /// (`data_dir`, `wal_sync_on_write`, `retain_source`) are bound at
+    /// construction — the data dirs, WAL fsync policy, and source-store mode are
+    /// already established — so they must equal the current values; changing them
+    /// here has no retroactive effect and may split on-disk state. The server's
+    /// `PUT /_settings` enforces this by rejecting those keys as non-dynamic.
+    pub fn set_config(&mut self, config: EngineConfig) {
+        self.config = Arc::new(config);
+    }
+
     /// Create an immutable [`EngineSnapshot`] of the current read-path state.
     ///
     /// This is O(number of base segments) pointer copies, *not* O(corpus): the
@@ -325,6 +340,7 @@ impl Engine {
             memtable: Arc::clone(&self.memtable),
             query_store: Arc::clone(&self.query_store),
             vocab: self.vocab.clone(),
+            config: Arc::clone(&self.config),
             rejected_parse: self.rejected_parse,
             rejected_class_d: self.rejected_class_d,
             vocab_epoch: self.vocab_epoch,

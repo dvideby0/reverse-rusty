@@ -141,6 +141,9 @@ pub struct EngineSnapshot {
     /// Vocabulary at snapshot time (shared via `Arc`), so vocab reads can use the
     /// lock-free snapshot instead of locking the engine (ADR-016).
     vocab: Option<Arc<crate::vocab::Vocab>>,
+    /// Engine configuration at snapshot time (shared via `Arc`), so `GET /_settings`
+    /// reads it lock-free like every other read endpoint (ADR-016).
+    config: Arc<EngineConfig>,
     rejected_parse: u64,
     rejected_class_d: u64,
     vocab_epoch: u64,
@@ -209,7 +212,10 @@ pub struct CompactionReport {
 type EventObserver = Box<dyn Fn(&crate::events::EngineEvent) + Send + Sync>;
 
 pub struct Engine {
-    config: EngineConfig,
+    /// Runtime configuration. `Arc` so the current settings ride in every
+    /// `EngineSnapshot` (an O(1) clone), letting `GET /_settings` read them from
+    /// the lock-free snapshot; `set_config` swaps in a new `Arc` (copy-on-write).
+    config: Arc<EngineConfig>,
     norm: Arc<Normalizer>,
     /// Vocabulary used to build the normalizer (if set via `with_vocab`).
     /// `Arc` so it is shared (not deep-copied) into every `EngineSnapshot`,
