@@ -384,6 +384,12 @@ impl Segment {
         class: Vec<CostClass>,
         alive: Vec<bool>,
     ) -> Self {
+        // Precondition: `class`, `alive`, and `exact` are parallel columns indexed
+        // by the same segment-local id (here, in `compact_from`, and in `class_counts`).
+        // A length mismatch would silently drop entries from the reverse index below,
+        // leaving alive queries that can never be deleted — fail loudly instead.
+        assert_eq!(alive.len(), exact.len(), "from_parts: alive/exact length mismatch");
+        assert_eq!(class.len(), exact.len(), "from_parts: class/exact length mismatch");
         let alive_counter = alive.iter().filter(|&&a| a).count();
         let mut logical_index: crate::util::FastMap<u64, Vec<u32>> = crate::util::fast_map();
         for (i, &is_alive) in alive.iter().enumerate() {
