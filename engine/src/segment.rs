@@ -710,6 +710,8 @@ pub struct EngineSnapshot {
     wal_healthy: bool,
     persistence_healthy: bool,
     skipped_segments: usize,
+    wal_size_bytes: u64,
+    wal_pending_entries: u64,
 }
 
 impl std::fmt::Debug for EngineSnapshot {
@@ -847,6 +849,8 @@ impl EngineSnapshot {
                 + self.memtable.logical_index_bytes(),
             alive_bytes: self.segments.iter().map(|s| s.alive_bytes()).sum::<usize>()
                 + self.memtable.alive_bytes(),
+            wal_size_bytes: self.wal_size_bytes,
+            wal_pending_entries: self.wal_pending_entries,
         }
     }
 
@@ -1387,6 +1391,8 @@ impl Engine {
             wal_healthy: self.wal_healthy,
             persistence_healthy: self.persistence_healthy,
             skipped_segments: self.skipped_segments,
+            wal_size_bytes: self.wal.as_ref().map_or(0, Wal::size_bytes),
+            wal_pending_entries: self.wal.as_ref().map_or(0, Wal::pending_entries),
         }
     }
 
@@ -1728,6 +1734,7 @@ impl Engine {
             return;
         }
         let entries = self.memtable.len();
+        let flush_start = std::time::Instant::now();
         let fresh = Arc::new({
             let mut s = Segment::new();
             s.vocab_epoch = self.vocab_epoch;
@@ -1743,6 +1750,7 @@ impl Engine {
         self.emit(crate::events::EngineEvent::Flush {
             entries,
             base_segments_after: self.segments.len(),
+            duration_secs: flush_start.elapsed().as_secs_f64(),
         });
         // Write WAL checkpoint + save manifest + query sources, then reset WAL
         self.checkpoint_wal();
@@ -1906,6 +1914,7 @@ impl Engine {
         if self.segments.len() < 2 {
             return None;
         }
+        let compact_start = std::time::Instant::now();
         let segments_merged = self.segments.len();
         let entries_before: usize = self.segments.iter().map(|s| s.len()).sum();
         // Collect old mmap paths before draining
@@ -1927,6 +1936,7 @@ impl Engine {
             report,
             trigger: crate::events::CompactionTrigger::ExplicitAll,
             base_segments_after: self.segments.len(),
+            duration_secs: compact_start.elapsed().as_secs_f64(),
         });
         self.save_manifest_if_persistent();
         Some(report)
@@ -1939,6 +1949,7 @@ impl Engine {
         if hi <= lo + 1 || hi > self.segments.len() {
             return None;
         }
+        let compact_start = std::time::Instant::now();
         let segments_merged = hi - lo;
         let entries_before: usize = self.segments[lo..hi].iter().map(|s| s.len()).sum();
         // Collect old mmap paths before draining
@@ -1970,6 +1981,7 @@ impl Engine {
             report,
             trigger: crate::events::CompactionTrigger::ExplicitRange { lo, hi },
             base_segments_after: self.segments.len(),
+            duration_secs: compact_start.elapsed().as_secs_f64(),
         });
         self.save_manifest_if_persistent();
         Some(report)
@@ -2032,6 +2044,7 @@ impl Engine {
         if hi <= lo + 1 || hi > self.segments.len() {
             return None;
         }
+        let compact_start = std::time::Instant::now();
         let segments_merged = hi - lo;
         let entries_before: usize = self.segments[lo..hi].iter().map(|s| s.len()).sum();
         // Collect old mmap paths before draining
@@ -2063,6 +2076,7 @@ impl Engine {
             report,
             trigger,
             base_segments_after: self.segments.len(),
+            duration_secs: compact_start.elapsed().as_secs_f64(),
         });
         self.save_manifest_if_persistent();
         Some(report)
@@ -2239,6 +2253,8 @@ impl Engine {
                 + self.memtable.logical_index_bytes(),
             alive_bytes: self.segments.iter().map(|s| s.alive_bytes()).sum::<usize>()
                 + self.memtable.alive_bytes(),
+            wal_size_bytes: self.wal.as_ref().map_or(0, Wal::size_bytes),
+            wal_pending_entries: self.wal.as_ref().map_or(0, Wal::pending_entries),
         }
     }
 

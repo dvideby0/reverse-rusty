@@ -97,6 +97,13 @@ pub struct Wal {
     /// checkpoint (durable across process crash only). See
     /// [`EngineConfig::wal_sync_on_write`](crate::config::EngineConfig::wal_sync_on_write).
     fsync_each_write: bool,
+    /// Running on-disk size in bytes (header + all framed entries), maintained
+    /// incrementally so it can be read without a `stat(2)`.
+    size_bytes: u64,
+    /// Count of data entries (Insert/Tombstone) appended since the last flush
+    /// checkpoint or reset — mutations not yet materialized into a sealed
+    /// segment. Mirrors the set replayed by [`Wal::recover`].
+    pending_entries: u64,
 }
 
 impl Wal {
@@ -107,15 +114,26 @@ impl Wal {
     /// [`Wal::fsync_each_write`]).
     pub fn open(path: &Path, fsync_each_write: bool) -> io::Result<Self> {
         if path.exists() {
-            // Open existing, find the max sequence number
+            // Open existing, find the max sequence number and current pending count.
             let (entries, _skipped) = Self::read_entries(path)?;
             let next_seq = entries.iter().map(WalEntry::seq).max().unwrap_or(0) + 1;
+            // Pending = entries after the last checkpoint (same set recover() replays).
+            let pending_entries = match entries
+                .iter()
+                .rposition(|e| matches!(e, WalEntry::FlushCheckpoint { .. }))
+            {
+                Some(idx) => (entries.len() - idx - 1) as u64,
+                None => entries.len() as u64,
+            };
+            let size_bytes = std::fs::metadata(path)?.len();
             let file = std::fs::OpenOptions::new().append(true).open(path)?;
             Ok(Wal {
                 file,
                 path: path.to_path_buf(),
                 next_seq,
                 fsync_each_write,
+                size_bytes,
+                pending_entries,
             })
         } else {
             // Create new
@@ -128,6 +146,8 @@ impl Wal {
                 path: path.to_path_buf(),
                 next_seq: 1,
                 fsync_each_write,
+                size_bytes: WAL_HEADER_SIZE as u64,
+                pending_entries: 0,
             })
         }
     }
@@ -169,6 +189,9 @@ impl Wal {
         self.file.write_all(&crc.to_le_bytes())?;
         self.file.write_all(&body)?;
         self.sync_after_append()?;
+        // Framed on disk as a 4-byte length prefix + 4-byte CRC + body.
+        self.size_bytes += 8 + body.len() as u64;
+        self.pending_entries += 1;
         Ok(seq)
     }
 
@@ -188,6 +211,9 @@ impl Wal {
         self.file.write_all(&crc.to_le_bytes())?;
         self.file.write_all(&body)?;
         self.sync_after_append()?;
+        // Framed on disk as a 4-byte length prefix + 4-byte CRC + body.
+        self.size_bytes += 8 + body.len() as u64;
+        self.pending_entries += 1;
         Ok(seq)
     }
 
@@ -209,12 +235,24 @@ impl Wal {
         self.file.write_all(&crc.to_le_bytes())?;
         self.file.write_all(&body)?;
         self.file.sync_all()?; // fsync on checkpoint
+        self.size_bytes += 8 + body.len() as u64; // length prefix + CRC + body
+        self.pending_entries = 0; // checkpoint materializes all prior mutations
         Ok(seq)
     }
 
     /// Sync the WAL to disk.
     pub fn sync(&mut self) -> io::Result<()> {
         self.file.sync_all()
+    }
+
+    /// Current on-disk WAL size in bytes (header + framed entries).
+    pub fn size_bytes(&self) -> u64 {
+        self.size_bytes
+    }
+
+    /// Number of un-checkpointed entries (mutations not yet in a sealed segment).
+    pub fn pending_entries(&self) -> u64 {
+        self.pending_entries
     }
 
     /// Read all valid entries from a WAL file. Returns entries and the byte
@@ -369,6 +407,8 @@ impl Wal {
         self.file.write_all(&WAL_MAGIC)?;
         self.file.write_all(&WAL_VERSION.to_le_bytes())?;
         self.file.sync_all()?;
+        self.size_bytes = WAL_HEADER_SIZE as u64;
+        self.pending_entries = 0;
         // Don't reset next_seq — keep it monotonic across resets
         Ok(())
     }
