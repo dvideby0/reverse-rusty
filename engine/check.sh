@@ -5,7 +5,8 @@
 # security advisories, and dependency/license policy. Run it before pushing or
 # opening a PR — every step must pass for the gate to succeed.
 #
-#   Usage:  ./check.sh
+#   Usage:  ./check.sh           # full gate (fmt + clippy + test + audit + deny)
+#           ./check.sh --fast    # quick gate (fmt + clippy only) — used by the pre-commit hook
 #
 # Requires the rustfmt + clippy components (rustup) and two cargo plugins:
 #   cargo install cargo-audit cargo-deny
@@ -14,6 +15,14 @@
 # every problem at once; the script exits non-zero if any step failed.
 
 set -uo pipefail
+
+# --fast skips the slow steps (test/audit/deny) so it can run on every commit;
+# the full gate still runs on push and in CI. Keeping both behind one script
+# means the checks are defined in exactly one place.
+fast=0
+if [ "${1:-}" = "--fast" ]; then
+    fast=1
+fi
 
 # Operate on the crate this script lives in, regardless of the caller's CWD.
 cd "$(dirname "$0")"
@@ -38,9 +47,11 @@ run() {
 
 run "rustfmt (--check)"    cargo fmt --check
 run "clippy (-D warnings)" cargo clippy --all-targets --release -- -D warnings
-run "tests (--release)"    cargo test --release
-run "cargo audit"          cargo audit
-run "cargo deny"           cargo deny check
+if [ "$fast" -eq 0 ]; then
+    run "tests (--release)"    cargo test --release
+    run "cargo audit"          cargo audit
+    run "cargo deny"           cargo deny check
+fi
 
 printf '\n'
 if [ "${#failures[@]}" -eq 0 ]; then

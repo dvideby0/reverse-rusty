@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Fast pre-commit gate: formatting + lints only, so committing stays quick.
+# The full suite (tests + audit + deny) runs on push via the pre-push hook and
+# in CI. Activate these hooks once per clone with ./setup-hooks.sh.
+#
+# Bypass in an emergency with `git commit --no-verify` (CI is still the backstop).
+exec ./engine/check.sh --fast

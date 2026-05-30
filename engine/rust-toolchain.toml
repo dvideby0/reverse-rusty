@@ -1,0 +1,8 @@
+# Pin the toolchain so local builds, the check.sh gate, and CI all use the same
+# rustc — formatting, lints, and the release profile are then reproducible
+# regardless of what's installed system-wide. Bump `channel` deliberately when
+# adopting a newer Rust; `rustfmt`/`clippy` are pulled in so `check.sh` works on
+# a fresh `rustup` install with no extra `component add` step.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

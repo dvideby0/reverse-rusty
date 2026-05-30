@@ -21,11 +21,10 @@
 .env
 .env.*
 
-# Local stress / load tests (not part of CI suite)
-engine/tests/stress.rs
-
 # Data files that may appear at runtime
 data/
 *.csv
 *.jsonl
 *.txt
+# ...but the benchmark regression baseline is a tracked doc despite *.txt above.
+!docs/performance/benchmark-results.txt

@@ -69,10 +69,13 @@ history showed that cache-line blocked bloom was a better match for our 1-memory
   **Versions are pinned in [`engine/Cargo.toml`](engine/Cargo.toml) — that file is authoritative; do
   not restate pins here** (it also documents the one security-motivated feature exclusion).
 - **Build:** `cd engine && export CARGO_TARGET_DIR=/tmp/perc-target && cargo build --release`
-- **Test:** `cargo test --release` (oracle + parser + error-path + persistence + hardening suites)
-- **Lint/gate:** `engine/check.sh` (fmt + clippy + test + audit + deny — the local CI substitute)
+- **Test:** `cargo test --release` (oracle + parser + error-path + persistence + hardening + coverage-gap + pressure/stress suites). How-we-test guide → [`docs/testing.md`](docs/testing.md).
+- **Lint/gate:** `engine/check.sh` (fmt + clippy + test + audit + deny) — the local gate; `--fast` runs fmt + clippy only. **CI runs this same script**, so a green `check.sh` locally means a green PR.
+- **Git hooks:** `./setup-hooks.sh` once per clone — pre-commit runs the fast gate, pre-push runs the full gate (bypass with `--no-verify`; CI is the backstop).
+- **CI:** GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `check.sh` + benchmarks on every PR and push to `main`; the 10M soak is on-demand (`workflow_dispatch` → `run_soak`). Rationale → [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-024.
+- **Toolchain:** pinned in [`engine/rust-toolchain.toml`](engine/rust-toolchain.toml) (rustc + rustfmt + clippy) so local and CI builds match.
 - **Demo:** `cargo run --release --bin demo` (worked example end-to-end with explain output)
-- **Benchmark:** `cargo run --release --bin bench -- <queries> <titles> <broad_frac> <skew> <reps>`
+- **Benchmark:** `cargo run --release --bin bench -- [num_queries] [num_titles] [broad_frac] [skew] [seed]` (run-and-print; regression gate → [`docs/performance/benchmark-results.txt`](docs/performance/benchmark-results.txt))
 - **Server:** `cargo run --release --bin server -- [--port 9200] [--data-dir ./data] [--load-file queries.csv] ...`
   (all flags + endpoints: [`docs/reference/api.md`](docs/reference/api.md))
 - **Build profile:** LTO, codegen-units=1, opt-level=3, panic=abort
@@ -121,6 +124,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `tests/persistence.rs` | Persistence tests: segment round-trip, WAL recovery, mmap compaction | — |
 | `tests/hardening_fixes.rs` | Integration tests: vocab epoch, fallible deser, reverse-index delete | — |
 | `tests/coverage_gaps.rs` | Regression tests closing specific coverage gaps | — |
+| `tests/stress.rs` | Pressure/soak suite: mixed read/write/delete churn, par==seq under mutation; one `#[ignore]`d 10M-query soak | [testing.md](docs/testing.md) |
 | `src/bin/demo.rs` | Worked example end-to-end | — |
 | `src/bin/bench.rs` | Benchmark harness | — |
 | `src/bin/learn.rs` | Corpus feature learner (NPMI) | [corpus-feature-learning.md](docs/research/corpus-feature-learning.md) |
@@ -129,7 +133,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/bin/snapbench.rs` | Snapshot read/publish concurrency benchmark | ADR-016 |
 | `src/bin/server.rs` | HTTP server (axum) — ES-style REST API, snapshot-based concurrency, structured logging, Prometheus metrics, graceful shutdown. Endpoint reference: [`docs/reference/api.md`](docs/reference/api.md) | ADR-014, ADR-016, ADR-021, ADR-022, ADR-023 |
 
-*(A local-only `tests/stress.rs` exists but is gitignored — not part of the committed tree.)*
+*(All test files above are committed and run by `cargo test --release`. `tests/stress.rs`'s one 10M-query soak is `#[ignore]`d — run it explicitly or via the CI `run_soak` dispatch input. How-we-test guide: [`docs/testing.md`](docs/testing.md).)*
 
 ## Where to go — find the ONE doc for your task
 
@@ -147,6 +151,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | "Is X built or just designed?" / what to work on next | [`docs/STATUS.md`](docs/STATUS.md) |
 | "Why was it done this way?" / "why was X NOT built?" | [`docs/DECISIONS.md`](docs/DECISIONS.md) (ADR index; declined → ADR-019) |
 | Performance numbers / 100M extrapolation | [`docs/performance/results.md`](docs/performance/results.md); regression gate: `benchmark-results.txt` INVARIANTS |
+| Run/change tests, benchmarks, pressure tests, hooks, or CI | [`docs/testing.md`](docs/testing.md) (gate: `engine/check.sh`; CI: `.github/workflows/ci.yml`) |
 | Clustering / sharding / scale-out | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md) (design-only) |
 | Prior art (Lucene / ES / Tantivy) | [`docs/research/prior-art.md`](docs/research/prior-art.md) |
 | Dependency versions / why a crate | [`engine/Cargo.toml`](engine/Cargo.toml) |

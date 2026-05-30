@@ -26,8 +26,10 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 ### Status & decisions
 - [`STATUS.md`](STATUS.md) — **what's built vs design-only**, the measured numbers in brief, and the
   prioritized roadmap. Read when asking "is X implemented?" or "what's next?".
-- [`DECISIONS.md`](DECISIONS.md) — the 23 ADRs (architecture decision records) with an index at the
+- [`DECISIONS.md`](DECISIONS.md) — the 24 ADRs (architecture decision records) with an index at the
   top. Read when asking "why was it done this way?" or "why was X *not* built?" (declined → ADR-019).
+- [`testing.md`](testing.md) — **how we test**: the suites, pressure/soak tests, benchmarks, the git
+  hooks, and the CI pipeline. Read when running or changing tests, benchmarks, or the gate.
 
 ### Design — how it works
 - [`design/README.md`](design/README.md) — mental model (the two-phase diagram) + the correctness
@@ -80,6 +82,7 @@ never a second copy. This is what keeps the docs from drifting.
 | Roadmap / next steps | [`STATUS.md`](STATUS.md) | design docs point here with "tracked in STATUS Tier N". |
 | Architecture decisions / "why" | [`DECISIONS.md`](DECISIONS.md) | referenced by `ADR-NNN` (pointers, never copies). |
 | Test count | `cargo test` | docs describe the suites qualitatively; no hand-maintained integer. |
+| Testing / benchmark / CI workflow | [`testing.md`](testing.md) | `../CLAUDE.md` Build/test/run keeps the commands; CI rationale in [`DECISIONS.md`](DECISIONS.md) ADR-024; benchmark numbers in `performance/`. |
 | REST API / query DSL | [`reference/api.md`](reference/api.md) / [`reference/dsl.md`](reference/dsl.md) | `../README.md` links here instead of inlining. |
 
 ---
@@ -87,8 +90,8 @@ never a second copy. This is what keeps the docs from drifting.
 ## Documentation conventions
 
 Read before adding or moving docs. These rules are the only thing keeping a flat, duplicative wall of
-text from growing back (the repo is maintained largely by an LLM agent, and `docs/` is gitignored, so
-there is no CI link-checker — the discipline has to live here).
+text from growing back (the repo is maintained largely by an LLM agent, and there is no automated doc
+link-checker in CI — the discipline has to live here).
 
 - **Progressive disclosure.** `CLAUDE.md` (rails + router) → gateways → deep dives. Any fact should be
   reachable in ≤1 hop from a gateway. Don't make a reader open three files to answer one question.
@@ -105,6 +108,8 @@ there is no CI link-checker — the discipline has to live here).
     first, then narrate in [`performance/results.md`](performance/results.md).
   - Dependency version → `engine/Cargo.toml` only. Docs describe a crate's purpose, never its version.
   - A new `src/` file → update the module map in [`../CLAUDE.md`](../CLAUDE.md).
+  - Testing / benchmark / CI workflow → [`testing.md`](testing.md) (the gate itself is `engine/check.sh`,
+    which CI runs; decision rationale → [`DECISIONS.md`](DECISIONS.md) ADR-024).
   - User-facing API/DSL change → [`reference/api.md`](reference/api.md) / [`reference/dsl.md`](reference/dsl.md).
   - Prior art / research → [`research/`](research/).
 - **Numbers convention.** Round in prose (`~710k titles/sec`); keep exact figures (six-significant-figure

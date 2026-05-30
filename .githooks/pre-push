@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Full pre-push gate: the same checks CI runs (fmt + clippy + test + audit +
+# deny), so problems surface before code leaves your machine. Activate these
+# hooks once per clone with ./setup-hooks.sh.
+#
+# Bypass in an emergency with `git push --no-verify` (CI is still the backstop).
+exec ./engine/check.sh
