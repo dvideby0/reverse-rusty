@@ -1,0 +1,118 @@
+# Percolator documentation
+
+The index for everything under `docs/`. It also defines **where each fact lives** (the SSOT registry)
+and **the rules for editing docs** (the conventions). If you only read one thing, read the right
+gateway for your task — you should never have to scan every file.
+
+- **Building on the code (AI agent or contributor)?** Start at [`../CLAUDE.md`](../CLAUDE.md) — safety
+  rails + a task→doc router.
+- **Evaluating or using the project (human)?** Start at [`../README.md`](../README.md) — overview,
+  quickstart, and links into the reference.
+
+## How these docs are organized
+
+Three levels, each giving *just enough* to decide whether to go deeper:
+
+- **Level 0 — `../CLAUDE.md`:** the agent entry point. Inlines the correctness contract + invariants
+  (safety) and routes to one doc per task. Not a reference manual.
+- **Level 1 — gateways:** this hub, plus [`STATUS.md`](STATUS.md), [`DECISIONS.md`](DECISIONS.md),
+  [`design/README.md`](design/README.md), [`performance/README.md`](performance/README.md),
+  [`research/README.md`](research/README.md), and the top [`../README.md`](../README.md). Each answers
+  its domain's top question and links deeper.
+- **Level 2 — deep dives:** the topic files below. Read only when a task needs the detail.
+
+## Map — what to read when
+
+### Status & decisions
+- [`STATUS.md`](STATUS.md) — **what's built vs design-only**, the measured numbers in brief, and the
+  prioritized roadmap. Read when asking "is X implemented?" or "what's next?".
+- [`DECISIONS.md`](DECISIONS.md) — the 23 ADRs (architecture decision records) with an index at the
+  top. Read when asking "why was it done this way?" or "why was X *not* built?" (declined → ADR-019).
+
+### Design — how it works
+- [`design/README.md`](design/README.md) — mental model (the two-phase diagram) + the correctness
+  contract + how the design answers the spec. **Start here to understand the system.**
+- [`design/normalization.md`](design/normalization.md) — DSL internals, the shared normalizer, the
+  feature dictionary, eBay-data hardening.
+- [`design/matching.md`](design/matching.md) — signature-cover optimizer, candidate index, integer
+  exact matcher, broad-query cost classes, explain.
+- [`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) — LSM write path, segments,
+  tombstones, compaction, feature-model versioning.
+- [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) — sharding and horizontal
+  scale (entirely design-only).
+
+### Reference — how to use it
+- [`reference/api.md`](reference/api.md) — the complete REST API (every endpoint + server flags).
+- [`reference/dsl.md`](reference/dsl.md) — the query DSL, normalization, and vocabulary.
+
+### Performance
+- [`performance/README.md`](performance/README.md) — headline numbers + how to reproduce.
+- [`performance/results.md`](performance/results.md) — **the canonical, detailed measurements**,
+  bottleneck analysis, and the 100M-query extrapolation.
+- [`performance/benchmark-results.txt`](performance/benchmark-results.txt) — the runbook + the
+  machine-independent **invariants** (the regression gate) + the dated capture log.
+
+### Research — where the ideas came from
+- [`research/README.md`](research/README.md) — index of the prior-art studies.
+- [`research/prior-art.md`](research/prior-art.md) — Lucene Monitor, ES/OS percolator, Tantivy,
+  roaring, Aho-Corasick, set-containment joins.
+- [`research/corpus-feature-learning.md`](research/corpus-feature-learning.md) — learning the feature
+  extractor from the query corpus (NPMI).
+- [`research/real-data-findings.md`](research/real-data-findings.md) — testing the normalizer against
+  real eBay titles.
+
+---
+
+## Single source of truth (SSOT) registry
+
+Each fact has exactly **one** canonical home. Everywhere else carries a one-line summary plus a link —
+never a second copy. This is what keeps the docs from drifting.
+
+| Fact | Canonical home | Everywhere else |
+|---|---|---|
+| Two-phase architecture diagram | [`design/README.md`](design/README.md) §1 | `../README.md` keeps a product-facing version; `../CLAUDE.md` a skeleton. Both link here. |
+| Correctness contract (lossless cover) | [`design/README.md`](design/README.md) §2 | `../CLAUDE.md` inlines the one-sentence form (safety); others link. |
+| Critical invariants | [`../CLAUDE.md`](../CLAUDE.md) | design docs cite the one invariant local to each + link. |
+| Dependency versions | `engine/Cargo.toml` | `../README.md` lists crate *purposes* (no versions); docs never pin versions. |
+| Performance numbers | [`performance/results.md`](performance/results.md) (exact) + [`performance/benchmark-results.txt`](performance/benchmark-results.txt) (invariants) | everywhere else rounds (`~710k`) and links. |
+| Module map (file → purpose → ADR) | [`../CLAUDE.md`](../CLAUDE.md) | `design/README.md` §4 keeps a coarser design-topic↔module view + link. |
+| Implemented vs design-only | [`STATUS.md`](STATUS.md) | `../CLAUDE.md` keeps a 3–4 line skeleton + link. |
+| Roadmap / next steps | [`STATUS.md`](STATUS.md) | design docs point here with "tracked in STATUS Tier N". |
+| Architecture decisions / "why" | [`DECISIONS.md`](DECISIONS.md) | referenced by `ADR-NNN` (pointers, never copies). |
+| Test count | `cargo test` | docs describe the suites qualitatively; no hand-maintained integer. |
+| REST API / query DSL | [`reference/api.md`](reference/api.md) / [`reference/dsl.md`](reference/dsl.md) | `../README.md` links here instead of inlining. |
+
+---
+
+## Documentation conventions
+
+Read before adding or moving docs. These rules are the only thing keeping a flat, duplicative wall of
+text from growing back (the repo is maintained largely by an LLM agent, and `docs/` is gitignored, so
+there is no CI link-checker — the discipline has to live here).
+
+- **Progressive disclosure.** `CLAUDE.md` (rails + router) → gateways → deep dives. Any fact should be
+  reachable in ≤1 hop from a gateway. Don't make a reader open three files to answer one question.
+- **Single source of truth.** Each fact has one owner (registry above). Elsewhere: a one-line summary
+  + a section link, or nothing. Before adding a paragraph, ask "does this already live somewhere?" —
+  if yes, link it.
+- **Where new information goes:**
+  - New architecture decision → [`DECISIONS.md`](DECISIONS.md) (new ADR at the bottom, next number,
+    **never renumber or delete** — superseded ones are marked, not removed).
+  - Component/algorithm design → the matching `design/<topic>.md` (extend, don't fork).
+  - "Is it built / what's next?" → [`STATUS.md`](STATUS.md) (the only home for implemented-vs-design
+    and the prioritized roadmap; design docs link here, they don't re-list).
+  - Benchmark numbers → append a dated entry to [`performance/benchmark-results.txt`](performance/benchmark-results.txt)
+    first, then narrate in [`performance/results.md`](performance/results.md).
+  - Dependency version → `engine/Cargo.toml` only. Docs describe a crate's purpose, never its version.
+  - A new `src/` file → update the module map in [`../CLAUDE.md`](../CLAUDE.md).
+  - User-facing API/DSL change → [`reference/api.md`](reference/api.md) / [`reference/dsl.md`](reference/dsl.md).
+  - Prior art / research → [`research/`](research/).
+- **Numbers convention.** Round in prose (`~710k titles/sec`); keep exact figures (six-significant-figure
+  throughputs, p99 latencies) only in `performance/results.md` and `benchmark-results.txt`.
+- **No dangling links.** If you rename or remove a doc/section, `grep -rn 'old-name' --include='*.md'`
+  and repoint or delete every reference in the same change.
+- **The two sanctioned duplications — keep them, keep them in sync.** (1) The correctness contract +
+  critical invariants are inlined in `CLAUDE.md` *and* canonical in `design/README.md` §2 — an agent
+  must see them without a hop. (2) The two-phase diagram exists in product form (`../README.md`) and
+  engineering form (`design/README.md` §1) for different audiences. Don't add a third copy of either,
+  and if you change one, change its twin.

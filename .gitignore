@@ -9,13 +9,6 @@
 # Rust build artifacts
 **/target/
 
-# Documentation (private design docs, research notes)
-docs/
-
-# Markdown (keep README)
-*.md
-!README.md
-
 # Editor / IDE
 *.swp
 *.swo
