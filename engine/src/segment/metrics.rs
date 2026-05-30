@@ -2,9 +2,66 @@
 //! snapshot, per-component byte accounting, and the count/index accessors used by
 //! the server's `/_stats` and bench harnesses.
 
-use super::{BaseSegment, Engine};
+use std::sync::Arc;
+
+use super::{BaseSegment, Engine, Segment};
+use crate::events::{SegmentInfo, SegmentKind};
 use crate::index::CandidateIndex;
 use crate::wal::Wal;
+
+/// Build the per-segment introspection rows shared by [`Engine::segment_infos`]
+/// and [`EngineSnapshot::segment_infos`](crate::segment::EngineSnapshot::segment_infos).
+/// Base segments come first (ordinal `0..n`, oldest first); the mutable memtable
+/// is appended as the final row at ordinal `n`. `current_epoch` is the engine's
+/// live vocab epoch, used to flag segments compiled against an older normalizer.
+pub(in crate::segment) fn collect_segment_infos(
+    segments: &[Arc<BaseSegment>],
+    memtable: &Segment,
+    current_epoch: u64,
+) -> Vec<SegmentInfo> {
+    let mut infos = Vec::with_capacity(segments.len() + 1);
+    for (ordinal, seg) in segments.iter().enumerate() {
+        let entries = seg.len();
+        let alive = seg.alive_count();
+        let epoch = seg.vocab_epoch();
+        infos.push(SegmentInfo {
+            ordinal,
+            kind: seg.storage_kind(),
+            entries,
+            alive,
+            deleted: entries - alive,
+            holes_ratio: seg.holes_ratio(),
+            vocab_epoch: epoch,
+            stale: epoch < current_epoch,
+            resident_bytes: seg.exact_bytes()
+                + seg.main_bytes()
+                + seg.broad_bytes()
+                + seg.filter_bytes(),
+            overhead_bytes: seg.logical_index_bytes() + seg.alive_bytes(),
+        });
+    }
+    // The memtable is the live tail — always reported, even when empty, so an
+    // operator can see the hot delta. An empty memtable is never flagged stale.
+    let entries = memtable.len();
+    let alive = memtable.alive_count();
+    let epoch = memtable.vocab_epoch;
+    infos.push(SegmentInfo {
+        ordinal: segments.len(),
+        kind: SegmentKind::Memtable,
+        entries,
+        alive,
+        deleted: entries - alive,
+        holes_ratio: memtable.holes_ratio(),
+        vocab_epoch: epoch,
+        stale: epoch < current_epoch && !memtable.is_empty(),
+        resident_bytes: memtable.exact_bytes()
+            + memtable.main_bytes()
+            + memtable.broad_bytes()
+            + memtable.filter_bytes(),
+        overhead_bytes: memtable.logical_index_bytes() + memtable.alive_bytes(),
+    });
+    infos
+}
 
 impl Engine {
     pub fn num_queries(&self) -> usize {
@@ -52,6 +109,13 @@ impl Engine {
         self.memtable.class_counts(&mut c);
         c[3] = self.rejected_class_d; // D never enters any segment's `class`
         c
+    }
+
+    /// Per-segment introspection rows for the whole LSM layout (base segments
+    /// oldest-first, then the memtable). Powers the server's `GET /_cat/segments`.
+    /// See [`SegmentInfo`](crate::events::SegmentInfo).
+    pub fn segment_infos(&self) -> Vec<SegmentInfo> {
+        collect_segment_infos(&self.segments, &self.memtable, self.vocab_epoch)
     }
 
     /// Snapshot of current engine metrics for monitoring and introspection.

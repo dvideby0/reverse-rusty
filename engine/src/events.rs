@@ -255,3 +255,73 @@ pub struct EngineMetrics {
     /// up with the write rate.
     pub wal_pending_entries: u64,
 }
+
+/// How a segment's payload is backed. Mirrors the engine's two sealed-segment
+/// representations plus the mutable memtable, so per-segment introspection can
+/// tell an operator which segments are off-heap (page cache) versus resident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentKind {
+    /// Sealed, in-memory `Segment` — its SoA + indexes are resident heap.
+    Memory,
+    /// Sealed, file-backed `MmapSegment` — its SoA + indexes live in the page
+    /// cache (off-heap); only the liveness overlay + reverse index are resident.
+    Mmap,
+    /// The mutable hot delta. Always in-memory; sealed into a base segment on flush.
+    Memtable,
+}
+
+impl SegmentKind {
+    /// Stable lowercase identifier, suitable for a JSON value or a `_cat` table
+    /// cell. Kept in lockstep with the variant set.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SegmentKind::Memory => "memory",
+            SegmentKind::Mmap => "mmap",
+            SegmentKind::Memtable => "memtable",
+        }
+    }
+}
+
+/// Per-segment introspection record — one row of the LSM layout, including the
+/// mutable memtable as the final row. Powers the server's ES-style
+/// `GET /_cat/segments`, which exposes the segment-level detail that the
+/// aggregate [`EngineMetrics`] flattens away: which segments carry compaction
+/// pressure (`holes_ratio`), how memory is distributed (resident vs off-heap),
+/// and which segments are stale against the current vocab epoch.
+///
+/// Like [`EngineMetrics`], this is a plain data record with no serialization
+/// dependency; the server builds its own `Serialize` response type from it.
+#[derive(Debug, Clone)]
+pub struct SegmentInfo {
+    /// Position in the LSM layout: base segments are `0..base_segments` (0 is the
+    /// oldest), and the memtable is reported last at ordinal `base_segments`.
+    pub ordinal: usize,
+    /// How this segment's payload is backed (see [`SegmentKind`]).
+    pub kind: SegmentKind,
+    /// Total entries, alive + tombstoned. This is the denominator compaction
+    /// scores against, so it is reported even though `alive + deleted` recovers it.
+    pub entries: usize,
+    /// Alive (non-tombstoned) entries — the queries this segment can still match.
+    pub alive: usize,
+    /// Tombstoned (logically deleted) entries awaiting reclamation by compaction.
+    pub deleted: usize,
+    /// Tombstone fraction in `[0.0, 1.0]` (`deleted / entries`). Drives the
+    /// holes-ratio compaction trigger.
+    pub holes_ratio: f64,
+    /// Vocab epoch this segment's queries were compiled at.
+    pub vocab_epoch: u64,
+    /// True if `vocab_epoch` is behind the engine's current epoch — this segment's
+    /// normalizer differs from the live one, so its queries should be reingested
+    /// for consistent matching. The (empty) memtable is never flagged stale.
+    pub stale: bool,
+    /// Resident heap bytes for the match payload: exact SoA + candidate indexes +
+    /// anchor filter. **0 for `Mmap` segments** — their payload is file-backed and
+    /// paged through the OS cache, not the heap (matching the byte accounting in
+    /// [`EngineMetrics`]). A 0 here is informative: the segment is off-heap.
+    pub resident_bytes: usize,
+    /// Resident heap bytes for the always-in-RAM overhead: the logical→local
+    /// reverse index + the liveness overlay. Real for **both** kinds (an mmap'd
+    /// segment still keeps these structures resident).
+    pub overhead_bytes: usize,
+}

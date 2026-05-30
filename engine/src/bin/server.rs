@@ -9,6 +9,7 @@
 //!   POST /_compact           Force compaction
 //!   GET  /_stats             JSON metrics snapshot
 //!   GET  /_cat/stats         Human-readable metrics
+//!   GET  /_cat/segments      Per-segment LSM detail (text table; ?format=json)
 //!   GET  /_health            Health check
 //!   GET  /_metrics           Prometheus text exposition format
 //!   GET  /_vocab             Current vocabulary as JSON
@@ -52,7 +53,7 @@ use tracing::{error, info, instrument, warn};
 use std::cell::RefCell;
 
 use percolator::config::EngineConfig;
-use percolator::events::EngineEvent;
+use percolator::events::{EngineEvent, SegmentInfo};
 use percolator::loader;
 use percolator::normalize::Normalizer;
 use percolator::segment::{Engine, EngineSnapshot, IngestItemStatus, MatchScratch, MatchStats};
@@ -756,6 +757,48 @@ struct MemoryStats {
     exact_bytes: usize,
     index_bytes: usize,
     filter_bytes: usize,
+}
+
+// -- GET /_cat/segments
+/// Query string for the `_cat` endpoints. `?format=json` switches the default
+/// text table to a JSON array (ES convention).
+#[derive(Deserialize, Default)]
+struct CatQuery {
+    format: Option<String>,
+}
+
+/// One row of `GET /_cat/segments?format=json` — the JSON projection of an
+/// engine [`SegmentInfo`]. Byte fields are raw integers (machine-readable); the
+/// text table humanizes them instead.
+#[derive(Serialize)]
+struct SegmentRow {
+    ordinal: usize,
+    kind: &'static str,
+    entries: usize,
+    alive: usize,
+    deleted: usize,
+    holes_ratio: f64,
+    vocab_epoch: u64,
+    stale: bool,
+    resident_bytes: usize,
+    overhead_bytes: usize,
+}
+
+impl From<&SegmentInfo> for SegmentRow {
+    fn from(s: &SegmentInfo) -> Self {
+        Self {
+            ordinal: s.ordinal,
+            kind: s.kind.as_str(),
+            entries: s.entries,
+            alive: s.alive,
+            deleted: s.deleted,
+            holes_ratio: s.holes_ratio,
+            vocab_epoch: s.vocab_epoch,
+            stale: s.stale,
+            resident_bytes: s.resident_bytes,
+            overhead_bytes: s.overhead_bytes,
+        }
+    }
 }
 
 // -- GET /_health
@@ -1707,6 +1750,87 @@ async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 }
 
+/// GET /_cat/segments — per-segment detail of the LSM layout (one row per base
+/// segment, oldest first, then the memtable). Defaults to a human-readable text
+/// table like the other `_cat` endpoints; `?format=json` returns a JSON array of
+/// row objects (ES `_cat?format=json` convention). Reads the lock-free snapshot.
+///
+/// This exposes the segment-level detail the aggregate `/_stats` flattens: which
+/// segments carry compaction pressure (`holes`), how memory is distributed
+/// (resident vs off-heap `mmap`), and which segments are stale against the
+/// current vocab epoch.
+async fn cat_segments(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<CatQuery>,
+) -> impl IntoResponse {
+    let infos = state.snapshot.load().segment_infos();
+    if q.format.as_deref() == Some("json") {
+        let rows: Vec<SegmentRow> = infos.iter().map(SegmentRow::from).collect();
+        Json(rows).into_response()
+    } else {
+        (
+            StatusCode::OK,
+            [("content-type", "text/plain; charset=utf-8")],
+            render_segments_table(&infos),
+        )
+            .into_response()
+    }
+}
+
+/// Render the `_cat/segments` text table: a header row plus one row per segment.
+/// Numbers are right-aligned, byte counts humanized; the memtable is the final
+/// row (kind `memtable`). Pure so it is unit-tested without the HTTP layer.
+fn render_segments_table(infos: &[SegmentInfo]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<7} {:<8} {:>9} {:>9} {:>9} {:>7} {:>6} {:>5} {:>12} {:>12}\n",
+        "segment",
+        "kind",
+        "entries",
+        "alive",
+        "deleted",
+        "holes",
+        "epoch",
+        "stale",
+        "resident",
+        "overhead",
+    ));
+    for s in infos {
+        out.push_str(&format!(
+            "{:<7} {:<8} {:>9} {:>9} {:>9} {:>6.2}% {:>6} {:>5} {:>12} {:>12}\n",
+            s.ordinal,
+            s.kind.as_str(),
+            s.entries,
+            s.alive,
+            s.deleted,
+            s.holes_ratio * 100.0,
+            s.vocab_epoch,
+            if s.stale { "yes" } else { "no" },
+            fmt_bytes(s.resident_bytes),
+            fmt_bytes(s.overhead_bytes),
+        ));
+    }
+    out
+}
+
+/// Humanize a byte count for the `_cat` text tables (binary units, 2 dp).
+/// JSON callers get the raw integer instead (see [`SegmentRow`]).
+fn fmt_bytes(n: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let f = n as f64;
+    if f >= GB {
+        format!("{:.2} GB", f / GB)
+    } else if f >= MB {
+        format!("{:.2} MB", f / MB)
+    } else if f >= KB {
+        format!("{:.2} KB", f / KB)
+    } else {
+        format!("{n} B")
+    }
+}
+
 /// GET /_health
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = state.snapshot.load();
@@ -2308,6 +2432,7 @@ async fn main() {
         .route("/_compact", post(compact))
         .route("/_stats", get(stats))
         .route("/_cat/stats", get(cat_stats))
+        .route("/_cat/segments", get(cat_segments))
         .route("/_health", get(health))
         .route("/_metrics", get(prometheus_metrics))
         .route("/_vocab", get(get_vocab).put(put_vocab))
@@ -2485,5 +2610,88 @@ mod settings_tests {
         )
         .expect_err("a static key alongside a valid one rejects the batch");
         assert!(err.iter().any(|e| e.contains("data_dir")), "{err:?}");
+    }
+}
+
+#[cfg(test)]
+mod cat_segments_tests {
+    use super::{fmt_bytes, render_segments_table, SegmentRow};
+    use percolator::events::{SegmentInfo, SegmentKind};
+
+    fn info(ordinal: usize, kind: SegmentKind, alive: usize, deleted: usize) -> SegmentInfo {
+        let entries = alive + deleted;
+        SegmentInfo {
+            ordinal,
+            kind,
+            entries,
+            alive,
+            deleted,
+            holes_ratio: if entries == 0 {
+                0.0
+            } else {
+                deleted as f64 / entries as f64
+            },
+            vocab_epoch: 3,
+            stale: false,
+            resident_bytes: 0,
+            overhead_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn fmt_bytes_scales_by_unit() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(1024), "1.00 KB");
+        assert_eq!(fmt_bytes(1_572_864), "1.50 MB");
+        assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.00 GB");
+    }
+
+    #[test]
+    fn table_has_header_and_one_row_per_segment() {
+        let infos = vec![
+            info(0, SegmentKind::Mmap, 98_000, 2_000),
+            info(1, SegmentKind::Memory, 50_000, 0),
+            info(2, SegmentKind::Memtable, 1_200, 0),
+        ];
+        let table = render_segments_table(&infos);
+        let lines: Vec<&str> = table.lines().collect();
+        // 1 header + 3 data rows.
+        assert_eq!(lines.len(), 4, "table:\n{table}");
+        assert!(lines[0].contains("segment") && lines[0].contains("holes"));
+        assert!(lines[1].contains("mmap"));
+        assert!(lines[2].contains("memory"));
+        assert!(lines[3].contains("memtable"));
+        // 2000/100000 = 2.00% holes on the first base segment.
+        assert!(lines[1].contains("2.00%"), "row:\n{}", lines[1]);
+    }
+
+    #[test]
+    fn stale_flag_renders_yes_no() {
+        let mut stale = info(0, SegmentKind::Memory, 10, 0);
+        stale.stale = true;
+        let table = render_segments_table(&[stale]);
+        let row = table.lines().nth(1).expect("data row");
+        assert!(row.contains("yes"), "row: {row}");
+
+        let fresh = info(0, SegmentKind::Memory, 10, 0);
+        let table = render_segments_table(&[fresh]);
+        let row = table.lines().nth(1).expect("data row");
+        assert!(row.contains(" no "), "row: {row}");
+    }
+
+    #[test]
+    fn json_row_projects_segment_info() {
+        let mut s = info(2, SegmentKind::Memtable, 1_200, 0);
+        s.resident_bytes = 145_000;
+        s.overhead_bytes = 18_000;
+        let row = SegmentRow::from(&s);
+        let json = serde_json::to_value(&row).expect("serialize");
+        assert_eq!(json["kind"], "memtable");
+        assert_eq!(json["ordinal"], 2);
+        assert_eq!(json["alive"], 1_200);
+        // Byte fields are raw integers in JSON (humanized only in the text table).
+        assert_eq!(json["resident_bytes"], 145_000);
+        assert_eq!(json["overhead_bytes"], 18_000);
     }
 }

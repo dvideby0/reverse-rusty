@@ -149,6 +149,13 @@ impl EngineSnapshot {
         c
     }
 
+    /// Per-segment introspection rows (base segments oldest-first, then the
+    /// memtable), read lock-free from this snapshot. Backs the server's
+    /// `GET /_cat/segments`. See [`SegmentInfo`](crate::events::SegmentInfo).
+    pub fn segment_infos(&self) -> Vec<crate::events::SegmentInfo> {
+        super::metrics::collect_segment_infos(&self.segments, &self.memtable, self.vocab_epoch)
+    }
+
     pub fn metrics(&self) -> crate::events::EngineMetrics {
         let segment_sizes: Vec<usize> = self.segments.iter().map(|s| s.len()).collect();
         let segment_holes: Vec<f64> = self.segments.iter().map(|s| s.holes_ratio()).collect();
