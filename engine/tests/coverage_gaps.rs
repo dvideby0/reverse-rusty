@@ -858,3 +858,84 @@ fn settings_snapshot_reflects_set_config_and_is_immutable() {
         "an already-published snapshot must keep its own config view"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-segment introspection (segment_infos — backs GET /_cat/segments)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `segment_infos()` reports one row per base segment plus the memtable, with
+/// consistent per-row arithmetic, and a deletion surfaces as a hole. The engine
+/// and its published snapshot must agree.
+#[test]
+fn segment_infos_reports_layout_and_holes() {
+    use percolator::events::SegmentKind;
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    // First (sealed) base segment with a handful of anchorable queries.
+    eng.build_from_queries(&[
+        (1, "michael jordan 1994".to_string()),
+        (2, "larry bird 1986".to_string()),
+        (3, "magic johnson 1987".to_string()),
+    ]);
+    // Two live inserts land in the mutable memtable.
+    let _ = eng.insert_live("kobe bryant 2000", 4, 1);
+    let _ = eng.insert_live("tim duncan 1998", 5, 1);
+
+    let infos = eng.segment_infos();
+    assert!(!infos.is_empty(), "always at least the memtable row");
+
+    // Ordinals are dense 0..n; per-row arithmetic holds; the final row is the memtable.
+    for (i, s) in infos.iter().enumerate() {
+        assert_eq!(s.ordinal, i, "ordinals must be dense and in order");
+        assert_eq!(
+            s.alive + s.deleted,
+            s.entries,
+            "alive + deleted must equal entries"
+        );
+        assert!((0.0..=1.0).contains(&s.holes_ratio));
+    }
+    let last = infos.last().expect("memtable row");
+    assert_eq!(last.kind, SegmentKind::Memtable);
+    assert_eq!(last.alive, 2, "two live inserts sit in the memtable");
+
+    // Base rows account for the three bulk-built queries.
+    let base_alive: usize = infos
+        .iter()
+        .filter(|s| s.kind != SegmentKind::Memtable)
+        .map(|s| s.alive)
+        .sum();
+    assert_eq!(base_alive, 3);
+
+    // Total entries across rows == the engine's reported query count.
+    let total: usize = infos.iter().map(|s| s.entries).sum();
+    assert_eq!(total, eng.num_queries());
+
+    // The lock-free snapshot path returns the same view.
+    let snap_infos = eng.snapshot().segment_infos();
+    assert_eq!(snap_infos.len(), infos.len());
+    for (a, b) in snap_infos.iter().zip(infos.iter()) {
+        assert_eq!(a.ordinal, b.ordinal);
+        assert_eq!(a.entries, b.entries);
+        assert_eq!(a.alive, b.alive);
+    }
+
+    // Deleting a bulk-built query tombstones it in its base segment → a hole.
+    let removed = eng.delete_by_logical_id(2).expect("delete ok");
+    assert_eq!(removed, 1);
+    let infos = eng.segment_infos();
+    let holes: usize = infos
+        .iter()
+        .filter(|s| s.kind != SegmentKind::Memtable)
+        .map(|s| s.deleted)
+        .sum();
+    assert_eq!(
+        holes, 1,
+        "the deleted query is now a hole in its base segment"
+    );
+    assert!(
+        infos
+            .iter()
+            .any(|s| s.kind != SegmentKind::Memtable && s.holes_ratio > 0.0),
+        "a base segment should report a non-zero holes ratio after deletion"
+    );
+}

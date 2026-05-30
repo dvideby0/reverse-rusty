@@ -6,6 +6,16 @@ use super::{BaseSegment, MatchStats, Segment};
 use crate::dict::{Dict, FeatureId};
 
 impl BaseSegment {
+    /// How this sealed segment's payload is backed — in-memory heap (`Memory`) or
+    /// file-backed/paged (`Mmap`). Lets introspection report off-heap vs resident
+    /// without matching on the enum at the call site.
+    pub fn storage_kind(&self) -> crate::events::SegmentKind {
+        match self {
+            BaseSegment::Memory(_) => crate::events::SegmentKind::Memory,
+            BaseSegment::Mmap(_) => crate::events::SegmentKind::Mmap,
+        }
+    }
+
     /// The vocab epoch at which this segment's queries were compiled.
     pub fn vocab_epoch(&self) -> u64 {
         match self {
