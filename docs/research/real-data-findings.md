@@ -125,7 +125,7 @@ showed the assumptions were thin.
 
 ```bash
 cd engine
-export CARGO_TARGET_DIR=/tmp/perc-target
+export CARGO_TARGET_DIR=/tmp/reverse-rusty-target
 cargo run --release --bin norm -- /path/to/titles.txt   # prints extracted features per title
 ```
 The sample of real titles used here is in the conversation; drop any set of titles into a file to

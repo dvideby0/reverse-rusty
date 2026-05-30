@@ -17,9 +17,9 @@
 //! segment), so `snapshot()` must reckon with the full corpus — exactly the
 //! server's steady state.
 
-use percolator::gen::{generate, GenConfig};
-use percolator::segment::Engine;
-use percolator::Normalizer;
+use reverse_rusty::gen::{generate, GenConfig};
+use reverse_rusty::segment::Engine;
+use reverse_rusty::Normalizer;
 use std::time::Instant;
 
 fn main() {

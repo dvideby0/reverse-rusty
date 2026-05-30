@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-Lightweight record of the key design decisions in Percolator. Each entry captures the context,
+Lightweight record of the key design decisions in Reverse Rusty. Each entry captures the context,
 the decision, and the consequences — so that future contributors (human or agent) understand
 *why* things are the way they are, not just *what* they are. Add new entries at the bottom;
 ADRs are **append-only and never renumbered** — a superseded or reversed decision is marked, not
@@ -90,7 +90,7 @@ Find an ADR by its number in the records below. (Implementation status of each d
 
 ### ADR-005: Typed errors over stringly-typed Results
 
-- **Context:** Early PoC used `Result<_, String>` for parse failures and silently dropped
+- **Context:** Early on, Reverse Rusty used `Result<_, String>` for parse failures and silently dropped
   rejections during ingest. This made debugging and accounting difficult.
 - **Decision:** Introduce `ParseError { kind, pos }` with a `#[non_exhaustive]`
   `ParseErrorKind` enum implementing `Display` + `std::error::Error`. Ingest paths return
@@ -112,10 +112,10 @@ Find an ADR by its number in the records below. (Implementation status of each d
 
 ### ADR-007: Three production dependencies (daachorse, roaring, rayon)
 
-- **Context:** The PoC started std-only with hand-rolled alternatives (token-trie for alias
+- **Context:** Reverse Rusty started std-only with hand-rolled alternatives (token-trie for alias
   matching, Vec-only postings, single-threaded matching).
-- **Decision:** Replace each hand-rolled component with the production-grade crate when the
-  PoC validated the design: daachorse v3 for O(n) multiword alias matching, roaring v0.10
+- **Decision:** Replace each hand-rolled component with the production-grade crate once the
+  design was validated: daachorse v3 for O(n) multiword alias matching, roaring v0.10
   for compressed bitmaps on large postings, rayon v1 for data-parallel matching.
 - **Consequence:** Identical semantics with better performance characteristics. daachorse
   gives O(n) scan time regardless of vocab size. Roaring compresses large postings (>256
@@ -203,7 +203,7 @@ Find an ADR by its number in the records below. (Implementation status of each d
   comes when segments are mmap'd from disk — a hash-map miss against an mmap'd segment is a
   potential page fault (microseconds), while the in-memory filter check stays at nanoseconds.
   No percolation system in the literature (Lucene Monitor, ES Percolator, Luwak) implements
-  segment-skip filters — this is novel to Percolator.
+  segment-skip filters — this is novel to Reverse Rusty.
 - **See also:** [ingestion-and-updates.md](design/ingestion-and-updates.md) §6
 
 ### ADR-012: mmap'd segment file format with frozen hash tables

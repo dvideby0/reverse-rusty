@@ -5,7 +5,9 @@
 //! never silently dropped, and `try_insert_live` surfaces parse errors as typed
 //! `Err`s rather than folding them into a bare `None`.
 
-use percolator::{Engine, IngestItemStatus, InsertOutcome, Normalizer, ParseErrorKind, WriteError};
+use reverse_rusty::{
+    Engine, IngestItemStatus, InsertOutcome, Normalizer, ParseErrorKind, WriteError,
+};
 
 fn engine() -> Engine {
     Engine::new(Normalizer::default_vocab().expect("built-in vocab"))

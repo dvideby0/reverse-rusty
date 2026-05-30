@@ -6,13 +6,13 @@
 //! 3. Compaction works correctly with mmap'd segments
 //! 4. The full lifecycle: build → persist → close → reopen → match
 
-use percolator::config::EngineConfig;
-use percolator::normalize::Normalizer;
-use percolator::segment::Engine;
+use reverse_rusty::config::EngineConfig;
+use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::segment::Engine;
 use std::path::PathBuf;
 
 fn test_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("percolator_test_{name}"));
+    let dir = std::env::temp_dir().join(format!("reverse_rusty_test_{name}"));
     // Clean up from previous runs
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -40,7 +40,7 @@ fn sample_queries() -> Vec<(u64, String)> {
 
 /// Helper: match a title and return sorted logical IDs.
 fn match_ids(engine: &Engine, title: &str) -> Vec<u64> {
-    let mut scratch = percolator::segment::MatchScratch::new();
+    let mut scratch = reverse_rusty::segment::MatchScratch::new();
     let mut out = Vec::new();
     engine.match_title(title, &mut scratch, &mut out, true);
     out.sort_unstable();
@@ -263,7 +263,7 @@ fn in_memory_backward_compat() {
 
 #[test]
 fn wal_recovery_reports_corrupt_tail() {
-    use percolator::wal::Wal;
+    use reverse_rusty::wal::Wal;
     use std::io::Write;
 
     let dir = test_dir("wal_corrupt_tail");
@@ -533,7 +533,7 @@ fn logical_index_v1_backcompat_reconstruct() {
         bytes[4..8].copy_from_slice(&1u32.to_le_bytes()); // FORMAT_VERSION → 1
         bytes[56..64].copy_from_slice(&0u64.to_le_bytes()); // logical_index_off → 0
         let n = bytes.len();
-        let crc = percolator::storage::crc32(&bytes[..n - 4]);
+        let crc = reverse_rusty::storage::crc32(&bytes[..n - 4]);
         bytes[n - 4..].copy_from_slice(&crc.to_le_bytes());
         std::fs::write(&path, bytes).unwrap();
     }
@@ -640,7 +640,7 @@ fn lazy_sources_round_trip_and_reopen() {
 
 #[test]
 fn sources_v1_backcompat_and_migration() {
-    use percolator::storage::SourceStore;
+    use reverse_rusty::storage::SourceStore;
     let dir = test_dir("sources_v1");
     let path = dir.join("sources.dat");
     write_v1_sources(&path, &[(1, "alpha"), (2, "bravo"), (5, "echo")]);
@@ -665,7 +665,7 @@ fn sources_v1_backcompat_and_migration() {
 
 #[test]
 fn lazy_overlay_insert_and_tombstone() {
-    use percolator::storage::SourceStore;
+    use reverse_rusty::storage::SourceStore;
     let dir = test_dir("lazy_overlay");
     let path = dir.join("sources.dat");
 
@@ -695,7 +695,7 @@ fn durability_failure_surfaces_as_event() {
     // We isolate a single failure: make only `segments/` read-only, so the
     // flush's segment write fails while the WAL/manifest writes (data-dir root)
     // still succeed.
-    use percolator::events::{DurabilityOp, EngineEvent};
+    use reverse_rusty::events::{DurabilityOp, EngineEvent};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex};
 
@@ -754,7 +754,7 @@ fn recovery_diagnostics_buffered_until_observer_attaches() {
     // buffered and replayed when `set_observer` is called, so recovery
     // diagnostics (here: a corrupt segment skipped on reopen) still reach the
     // structured stack rather than being lost.
-    use percolator::events::{DurabilityOp, EngineEvent};
+    use reverse_rusty::events::{DurabilityOp, EngineEvent};
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -787,7 +787,7 @@ fn recovery_diagnostics_buffered_until_observer_attaches() {
             .truncate(true)
             .open(&seg_file)
             .unwrap();
-        f.write_all(b"not a valid percolator segment").unwrap();
+        f.write_all(b"not a valid reverse-rusty segment").unwrap();
     }
 
     // 3) Reopen: the corrupt segment is skipped and the diagnostic is buffered

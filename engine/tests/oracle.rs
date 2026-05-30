@@ -9,11 +9,11 @@
 //! The brute-force side uses its own independent Dict/Normalizer so it can't
 //! share a bug with the engine's index.
 
-use percolator::compile::{extract, Extracted};
-use percolator::dict::Dict;
-use percolator::gen::{generate, GenConfig};
-use percolator::normalize::Normalizer;
-use percolator::segment::{Engine, MatchScratch};
+use reverse_rusty::compile::{extract, Extracted};
+use reverse_rusty::dict::Dict;
+use reverse_rusty::gen::{generate, GenConfig};
+use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::segment::{Engine, MatchScratch};
 use std::collections::HashSet;
 
 /// Independent ground-truth matcher over extracted queries.
@@ -30,7 +30,7 @@ impl Brute {
         let mut lc = String::new();
         let mut qs = Vec::new();
         for (logical, text) in queries {
-            if let Ok(ast) = percolator::dsl::parse(text) {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
                 let ex = extract(&ast, &norm, &mut dict, &mut lc);
                 // mirror the engine's class-D rejection: no required & no anyof
                 if ex.required.is_empty() && ex.anyof.is_empty() {
@@ -274,7 +274,7 @@ fn tombstone_originals(eng: &mut Engine, build_batch: &[(u64, String)], updated:
     let mut lc = String::new();
     let mut local: u32 = 0;
     for (logical, text) in build_batch {
-        if let Ok(ast) = percolator::dsl::parse(text) {
+        if let Ok(ast) = reverse_rusty::dsl::parse(text) {
             let ex = extract(&ast, &norm, &mut dict, &mut lc);
             // mirror class-D rejection (these are NOT assigned a local id)
             if ex.required.is_empty() && ex.anyof.is_empty() {

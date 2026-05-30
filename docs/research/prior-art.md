@@ -205,8 +205,8 @@ allocation-free.
 
 **What we reject / improve:** we run the automaton over **canonicalized token boundaries**, not raw
 bytes, so we sidestep Unicode/substring pitfalls and keep matches aligned to word units relevant to
-titles. (The PoC ships a straightforward trie/hash extractor and documents daachorse as the
-production swap-in — the interface is identical.)
+titles. (Reverse Rusty ships daachorse's double-array Aho-Corasick as the alias extractor; an
+earlier hand-rolled trie used the identical interface.)
 
 ---
 
@@ -253,12 +253,12 @@ frequent updates and a fixed small probe set (one title at a time, or a small ba
   ("does this title contain *any* excluded feature for this query?") and for segment-level "could any
   query here match?" gates. Immutability matches our segment model. Staged for a later iteration.
 - **SIMD set intersection** (e.g. shuffle/`_mm_cmpestrm`-style on x86, NEON on aarch64). Applies to
-  medium sorted-array postings. The PoC uses sorted-array galloping/merge intersection that
+  medium sorted-array postings. Reverse Rusty uses sorted-array galloping/merge intersection that
   auto-vectorizes; explicit SIMD kernels are a documented optimization.
 - **Learned Bloom filters.** Interesting but add ML inference and model-drift risk on the hot path —
   contrary to the spec's "no ML inference per candidate." Rejected for the hot path.
 - **NUMA-aware sharding & mmap.** 100M queries → multiple shards. Pin shards to NUMA nodes, mmap
-  immutable segments per node, avoid cross-NUMA shared mutable state. Design-level concern; the PoC is
+  immutable segments per node, avoid cross-NUMA shared mutable state. Design-level concern; Reverse Rusty is
   single-node but the segment model is shard-ready.
 
 ---

@@ -13,7 +13,7 @@ See the [overview](README.md) for the mental model and correctness contract.*
 - **Key invariant:** The same normalizer must process both queries and titles — feature spaces must align
 - **DSL:** `word` = MUST, `"phrase"` = MUST, `(a,b,c)` = required any-of, `-x` = MUST_NOT (user-facing syntax + vocabulary reference: [`../reference/dsl.md`](../reference/dsl.md))
 - **Normalizer pipeline:** clean bytes → daachorse multiword alias scan → tokenize → grader/grade/year patterns → synonyms → generic features
-- **Status:** Fully implemented; daachorse v3 Aho-Corasick replaced the PoC token-trie
+- **Status:** Fully implemented; daachorse v3 Aho-Corasick replaced the original token-trie
 - **Gotchas:** Grade detection is context-aware (§3.2); diacritic folding is lossy by design; `#`-prefixed card numbers need disambiguation from serial numbers
 
 ---

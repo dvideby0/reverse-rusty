@@ -1,4 +1,4 @@
-//! Corpus-driven feature learner (PoC).
+//! Corpus-driven feature learner.
 //!
 //! Question: can we build the "tokenizer"/feature extractor FROM the supplied
 //! queries, with zero hand-coded vocabulary — so we never have to enumerate
@@ -23,7 +23,7 @@
 // visually parallel. It's a throwaway research tool, not library code.
 #![allow(clippy::zero_sized_map_values)]
 
-use percolator::gen::{generate, GenConfig};
+use reverse_rusty::gen::{generate, GenConfig};
 use std::collections::HashMap;
 
 fn main() {

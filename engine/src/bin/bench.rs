@@ -7,10 +7,10 @@
 //! and a live-update micro-benchmark. Designed to push scale and fall back
 //! gracefully (it just uses whatever N you give it).
 
-use percolator::config::EngineConfig;
-use percolator::gen::{generate, GenConfig};
-use percolator::segment::{Engine, MatchScratch};
-use percolator::Normalizer;
+use reverse_rusty::config::EngineConfig;
+use reverse_rusty::gen::{generate, GenConfig};
+use reverse_rusty::segment::{Engine, MatchScratch};
+use reverse_rusty::Normalizer;
 use std::time::Instant;
 
 fn main() {
@@ -301,7 +301,10 @@ fn read_rss_mb() -> f64 {
 /// authoritative Phase 0 measurement; the in-memory numbers above count heap that
 /// is paged from disk in production. (ADR-020.)
 fn report_persistent_memory(queries: &[(u64, String)], retain: bool, label: &str) {
-    let dir = std::env::temp_dir().join(format!("perc-bench-mem-{}-{retain}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "reverse-rusty-bench-mem-{}-{retain}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     if std::fs::create_dir_all(&dir).is_err() {
         println!("\n(memory) could not create temp dir; skipping persistent breakdown");

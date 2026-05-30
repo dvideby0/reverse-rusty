@@ -1,4 +1,4 @@
-# Percolator documentation
+# Reverse Rusty documentation
 
 The index for everything under `docs/`. It also defines **where each fact lives** (the SSOT registry)
 and **the rules for editing docs** (the conventions). If you only read one thing, read the right

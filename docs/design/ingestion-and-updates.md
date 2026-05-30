@@ -219,7 +219,7 @@ versions interoperate (frozen mask), majors are isolated behind a blue/green swa
 
 ---
 
-## 10. How this maps onto / extends the current PoC
+## 10. How this maps onto / extends the current engine
 
 - **Today (implemented):** a multi-segment LSM-shaped engine — `Vec<base Segment>` + a mutable
   `memtable` Segment; matching unions across all segments with per-segment epoch-dedup; `flush()`

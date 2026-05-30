@@ -603,7 +603,7 @@ impl MmapSegment {
         let file = std::fs::File::open(path)?;
         // SAFETY: memory-mapping is unsafe because the mapping aliases the file's
         // bytes and the borrow checker cannot prove the file is not mutated
-        // underneath us. Percolator segment files are immutable once written
+        // underneath us. Reverse Rusty segment files are immutable once written
         // (segments are append-only and never edited in place; compaction writes
         // a new file and atomically swaps it), so the mapped region is effectively
         // read-only for the lifetime of this `Arc<Mmap>`.

@@ -1,4 +1,4 @@
-# CLAUDE.md — agent context for Percolator
+# CLAUDE.md — agent context for Reverse Rusty
 
 **Agent entry point — read this first.** It carries the safety rails (the correctness contract + the
 invariants you must not break) and a router to the *one* doc for any task. It is deliberately **not** a
@@ -10,9 +10,9 @@ canonical docs, linked from the router below.
 
 ## What this project is
 
-Percolator is a high-performance **reverse product-query matcher** for eBay-style listings.
+Reverse Rusty is a high-performance **reverse product-query matcher** for eBay-style listings.
 Given millions of stored product-intent queries and an incoming listing title, it finds which
-queries match ("percolation"). Written in Rust, single-node PoC with a design-complete
+queries match ("percolation"). Written in Rust; a single-node engine with a design-complete
 clustering story. It gates candidates on **semantic signatures** (not raw terms), verifies
 with **integer-only match plans**, quarantines broad queries, and supports frequent updates —
 with a hard guarantee of **zero false negatives**. (Selective path ≈250× the spec target, a flat
@@ -51,7 +51,7 @@ roadmap item, **research first, implement second:**
 2. Look at how peer systems and state-of-the-art literature solve that same problem — RocksDB,
    ClickHouse, Lucene, DuckDB, academic papers, whatever is relevant. Don't limit yourself to
    what the design doc suggested.
-3. Evaluate the candidates against Percolator's specific constraints (the invariants above, the
+3. Evaluate the candidates against Reverse Rusty's specific constraints (the invariants above, the
    hot-path budget, the dependency philosophy).
 4. Then implement the winner.
 
@@ -68,7 +68,7 @@ history showed that cache-line blocked bloom was a better match for our 1-memory
   server/observability crates that are not yet feature-gated (see [`docs/STATUS.md`](docs/STATUS.md)).
   **Versions are pinned in [`engine/Cargo.toml`](engine/Cargo.toml) — that file is authoritative; do
   not restate pins here** (it also documents the one default-feature exclusion — `prometheus`).
-- **Build:** `cd engine && export CARGO_TARGET_DIR=/tmp/perc-target && cargo build --release`
+- **Build:** `cd engine && export CARGO_TARGET_DIR=/tmp/reverse-rusty-target && cargo build --release`
 - **Test:** `cargo test --release` (oracle + parser + error-path + persistence + hardening + coverage-gap + pressure/stress suites). How-we-test guide → [`docs/testing.md`](docs/testing.md).
 - **Lint/gate:** `engine/check.sh` (fmt + clippy + test + audit + deny) — the local gate; `--fast` runs fmt + clippy only. **CI runs this same script**, so a green `check.sh` locally means a green PR.
 - **Git hooks:** `./setup-hooks.sh` once per clone — pre-commit runs the fast gate, pre-push runs the full gate (bypass with `--no-verify`; CI is the backstop).

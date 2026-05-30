@@ -37,7 +37,7 @@ For each query we must choose a set of signatures that (a) satisfies the lossles
 - A valid signature must be **hittable by every matching title**. So a signature is any combination
   that is a subset of `R` (always present) — and, to incorporate any-of groups losslessly, we must
   emit a *cross-product family*: pick at most one representative from each group we include. The
-  cheapest correct scheme used by the PoC:
+  cheapest correct scheme used by the engine:
   - Build the anchor from the **rarest features of `R`** (1–3 of them).
   - If `R` alone is empty or too common, we must cover via groups: emit one signature per element of
     the rarest group (so whichever branch the title satisfies, a signature fires) — exactly the
@@ -126,7 +126,7 @@ sorted tail):
 
 No strings, no regex, no virtual dispatch, no allocation. A "bytecode VM" variant is described as an
 alternative (a tiny opcode stream per query) but the SoA mask+slice form is faster for this shape and
-is what the PoC implements.
+is what the engine implements.
 
 ---
 

@@ -152,7 +152,7 @@ Full endpoint and flag reference: [`docs/reference/api.md`](docs/reference/api.m
 **Use as a library:**
 
 ```rust
-use percolator::{Engine, Normalizer};
+use reverse_rusty::{Engine, Normalizer};
 
 let norm = Normalizer::default_vocab().unwrap();
 let mut engine = Engine::new(norm);
@@ -160,7 +160,7 @@ let mut engine = Engine::new(norm);
 let queries = vec![(1u64, "(laptop,notebook) 16gb -refurbished".to_string())];
 engine.build_from_queries(&queries);
 
-let mut scratch = percolator::segment::MatchScratch::new();
+let mut scratch = reverse_rusty::segment::MatchScratch::new();
 let mut out = Vec::new();
 engine.match_title("Dell XPS 15 Laptop 16GB RAM 512GB SSD New", &mut scratch, &mut out, true);
 // out contains the matching query IDs: [1]
@@ -203,5 +203,5 @@ pulled in by the server binary (today they are not yet feature-gated — see
 
 ## License
 
-This is an unpublished single-node proof of concept and is **intentionally unlicensed** — there is no
+This is an unpublished, single-node engine and is **intentionally unlicensed** — there is no
 distribution license at this time (see the note in [`engine/Cargo.toml`](engine/Cargo.toml)).

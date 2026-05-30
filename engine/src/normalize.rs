@@ -11,7 +11,7 @@
 //!              -> synonyms -> generic.
 //!
 //! The multiword phase uses a daachorse double-array Aho-Corasick automaton in
-//! leftmost-longest mode. This replaced the PoC token-trie with identical
+//! leftmost-longest mode. This replaced the original token-trie with identical
 //! semantics but O(n) scan time regardless of vocabulary size.
 
 use crate::dict::{Dict, FeatureId, FeatureKind};
@@ -397,8 +397,8 @@ impl Normalizer {
 /// # Example
 ///
 /// ```
-/// use percolator::normalize::NormalizerBuilder;
-/// use percolator::dict::FeatureKind;
+/// use reverse_rusty::normalize::NormalizerBuilder;
+/// use reverse_rusty::dict::FeatureKind;
 ///
 /// let norm = NormalizerBuilder::new()
 ///     .phrase(&["michael", "jordan"], "player:michael_jordan", FeatureKind::Player)

@@ -1,6 +1,6 @@
-# Performance Results — Percolator PoC
+# Performance Results — Reverse Rusty
 
-All numbers below are **measured**, not modeled, on the PoC in `engine/`. The benchmark runbook,
+All numbers below are **measured**, not modeled, on Reverse Rusty in `engine/`. The benchmark runbook,
 the machine-independent **invariants** to verify on any box, and the dated **capture log** are in
 [`benchmark-results.txt`](benchmark-results.txt). Where the report extrapolates to the 100M-query
 target, the assumptions are stated explicitly. See [`README.md`](README.md) for the headline numbers
@@ -124,7 +124,7 @@ one small node, which is exactly why the design shards (see
 - **~8 shards** of ~12.5M queries each (≈3.3 GB/shard) on commodity 8–16 GB nodes, or **~16 shards**
   for headroom and per-shard cache residency.
 - Production would shrink the 256 B/query materially: intern feature *strings* once per segment
-  (the PoC keeps per-feature `String`s in the dict — a large fraction of the 256 B), use mmap'd
+  (the engine keeps per-feature `String`s in the dict — a large fraction of the 256 B), use mmap'd
   immutable segments so the OS page cache (not RSS) holds cold data, and pack the SoA tighter. A
   realistic target is **80–140 B/query**, i.e. **8–14 GB for 100M** — a handful of nodes.
 - Throughput: the measured **per-core selective rate of 158–710k titles/sec** is **57–255× the
@@ -188,7 +188,7 @@ added cost is the probe (hash-lookup) *count*, not extra exact-verified candidat
   flat candidate counts — popular players don't poison the selective lane because class-A queries
   anchor on the *rarer* required feature (the set), not the hot player.
 - **Broad queries:** isolated by classification. Inline they cost ~9× throughput; the design batches
-  them. The PoC measures and reports the broad contribution separately every run (`of which broad
+  them. The engine measures and reports the broad contribution separately every run (`of which broad
   lane`), so the cost is always visible.
 - **Near-duplicate query clusters:** generated at `family_size=8`; the signature index naturally
   shares anchors across a cluster, so a single failed anchor probe eliminates the whole cluster's
@@ -197,13 +197,13 @@ added cost is the probe (hash-lookup) *count*, not extra exact-verified candidat
 
 ---
 
-## 9. Bottleneck analysis & where the PoC is honest about its limits
+## 9. Bottleneck analysis & where Reverse Rusty is honest about its limits
 
 - **#1 bottleneck: the broad lane.** Confirmed, quantified, and architecturally addressed
   (quarantine + batch). This is the single most important operational lever.
 - **#2: memory bandwidth at scale.** Candidate counts are flat but absolute throughput drops as the
   index leaves cache. Mitigation: sharding for cache residency, tighter SoA packing, mmap segments.
-- **PoC simplifications at the time of this capture (status updated inline):**
+- **Simplifications at the time of this capture (status updated inline):**
   - ~~The alias extractor is a token trie, not the daachorse double-array automaton.~~ **Resolved:**
     daachorse v3 double-array Aho-Corasick (leftmost-longest) is now the shipped alias matcher
     (`src/normalize.rs`).
@@ -227,7 +227,7 @@ added cost is the probe (hash-lookup) *count*, not extra exact-verified candidat
 > *Produce a design and prototype … that can plausibly outperform Lucene/OpenSearch-style generic
 > percolation by one or more orders of magnitude on eBay-style product listing titles.*
 
-On the selective realtime path the PoC sustains **158–255× the throughput target on a single core**
+On the selective realtime path Reverse Rusty sustains **158–255× the throughput target on a single core**
 with **flat ~54 candidates/title** and **zero false negatives**, and it reproduces and then
 neutralizes the broad-query failure mode that dominates generic percolators. The order-of-magnitude
 claim is supported by measurement for the selective majority of the workload; the remaining work
