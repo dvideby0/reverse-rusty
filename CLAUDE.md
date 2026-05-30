@@ -67,7 +67,7 @@ history showed that cache-line blocked bloom was a better match for our 1-memory
   `daachorse`, `memmap2`, `roaring`, `rayon` (+ `arc-swap` for snapshot reads); the rest are
   server/observability crates that are not yet feature-gated (see [`docs/STATUS.md`](docs/STATUS.md)).
   **Versions are pinned in [`engine/Cargo.toml`](engine/Cargo.toml) — that file is authoritative; do
-  not restate pins here** (it also documents the one security-motivated feature exclusion).
+  not restate pins here** (it also documents the one default-feature exclusion — `prometheus`).
 - **Build:** `cd engine && export CARGO_TARGET_DIR=/tmp/perc-target && cargo build --release`
 - **Test:** `cargo test --release` (oracle + parser + error-path + persistence + hardening + coverage-gap + pressure/stress suites). How-we-test guide → [`docs/testing.md`](docs/testing.md).
 - **Lint/gate:** `engine/check.sh` (fmt + clippy + test + audit + deny) — the local gate; `--fast` runs fmt + clippy only. **CI runs this same script**, so a green `check.sh` locally means a green PR.

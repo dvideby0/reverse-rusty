@@ -12,7 +12,7 @@ publish = false
 daachorse = "3"
 memmap2 = "0.9"
 rayon = "1"
-roaring = "0.10"
+roaring = "0.11"
 arc-swap = "1"
 
 # HTTP server (only compiled into the server binary)
@@ -28,10 +28,12 @@ uuid = { version = "1", features = ["v4"] }
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
-# default-features disabled to drop the `protobuf` feature (pulls vulnerable
-# protobuf 2.x, RUSTSEC-2024-0437). We only emit the text exposition format
-# (TextEncoder), which is in the core and needs neither protobuf nor procfs.
-prometheus = { version = "0.13", default-features = false }
+# default-features disabled to drop the optional `protobuf` feature: we only emit
+# the text exposition format (TextEncoder), which lives in prometheus core and
+# needs no protobuf. (Under 0.13 this also dodged RUSTSEC-2024-0437's vulnerable
+# protobuf 2.x; 0.14 ships protobuf 3.7.2, so disabling it is now a lean-deps
+# choice, not a security workaround.)
+prometheus = { version = "0.14", default-features = false }
 
 [[bin]]
 name = "bench"
