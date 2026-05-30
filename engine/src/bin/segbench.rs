@@ -13,9 +13,9 @@
 //! Defaults: 300k queries, 3k titles, broad_frac 0.0 (isolates the selective
 //! path), seed 0xC0FFEE. Bounded to run in well under 40s.
 
-use percolator::gen::{generate, GenConfig};
-use percolator::segment::{Engine, MatchScratch};
-use percolator::Normalizer;
+use reverse_rusty::gen::{generate, GenConfig};
+use reverse_rusty::segment::{Engine, MatchScratch};
+use reverse_rusty::Normalizer;
 use std::time::Instant;
 
 fn main() {

@@ -4,8 +4,8 @@
 //!
 //! Usage: norm <file-with-one-title-per-line>
 
-use percolator::dict::Dict;
-use percolator::normalize::Normalizer;
+use reverse_rusty::dict::Dict;
+use reverse_rusty::normalize::Normalizer;
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: norm <titles.txt>");

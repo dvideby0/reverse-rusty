@@ -1,4 +1,4 @@
-//! Percolator HTTP server — Elasticsearch-inspired REST API.
+//! Reverse Rusty HTTP server — Elasticsearch-inspired REST API.
 //!
 //! Endpoints:
 //!   PUT  /_doc/{id}          Register a query (body: {"query": "..."})
@@ -52,11 +52,11 @@ use tracing::{error, info, instrument, warn};
 
 use std::cell::RefCell;
 
-use percolator::config::EngineConfig;
-use percolator::events::{EngineEvent, SegmentInfo};
-use percolator::loader;
-use percolator::normalize::Normalizer;
-use percolator::segment::{Engine, EngineSnapshot, IngestItemStatus, MatchScratch, MatchStats};
+use reverse_rusty::config::EngineConfig;
+use reverse_rusty::events::{EngineEvent, SegmentInfo};
+use reverse_rusty::loader;
+use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::segment::{Engine, EngineSnapshot, IngestItemStatus, MatchScratch, MatchStats};
 
 thread_local! {
     static SCRATCH: RefCell<MatchScratch> = RefCell::new(MatchScratch::new());
@@ -67,7 +67,7 @@ thread_local! {
 // ---------------------------------------------------------------------------
 
 #[derive(Parser, Debug)]
-#[command(name = "percolator-server", about = "Percolator HTTP server")]
+#[command(name = "reverse-rusty-server", about = "Reverse Rusty HTTP server")]
 struct Cli {
     /// Port to listen on.
     #[arg(long, default_value_t = 9200)]
@@ -193,7 +193,7 @@ struct PrometheusMetrics {
 
 impl PrometheusMetrics {
     fn new() -> Self {
-        let registry = Registry::new_custom(Some("percolator".to_string()), None)
+        let registry = Registry::new_custom(Some("reverse_rusty".to_string()), None)
             .expect("failed to create prometheus registry");
 
         // --- Engine gauges (refreshed on each /_metrics scrape) ---
@@ -453,7 +453,7 @@ impl PrometheusMetrics {
     }
 
     /// Update gauge metrics from an EngineMetrics snapshot.
-    fn refresh_gauges(&self, m: &percolator::events::EngineMetrics) {
+    fn refresh_gauges(&self, m: &reverse_rusty::events::EngineMetrics) {
         self.total_queries.set(m.total_queries as i64);
         self.base_segments.set(m.base_segments as i64);
         self.memtable_entries.set(m.memtable_entries as i64);
@@ -668,7 +668,7 @@ struct SearchHitItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     _source: Option<HitSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    _explanation: Option<percolator::ExplainDetail>,
+    _explanation: Option<reverse_rusty::ExplainDetail>,
 }
 
 #[derive(Serialize)]
@@ -910,7 +910,7 @@ async fn put_doc(
     let result = {
         let mut engine = state.engine.lock();
         match engine.try_insert_live(&body.query, id, body.version) {
-            Ok(percolator::segment::InsertOutcome::Inserted(_)) => {
+            Ok(reverse_rusty::segment::InsertOutcome::Inserted(_)) => {
                 info!(query_id = id, "query registered");
                 state
                     .prom
@@ -926,7 +926,7 @@ async fn put_doc(
                     }),
                 )
             }
-            Ok(percolator::segment::InsertOutcome::RejectedClassD) => {
+            Ok(reverse_rusty::segment::InsertOutcome::RejectedClassD) => {
                 warn!(query_id = id, "query rejected: cost class D");
                 state
                     .prom
@@ -942,7 +942,7 @@ async fn put_doc(
                     }),
                 )
             }
-            Err(percolator::WriteError::Parse(e)) => {
+            Err(reverse_rusty::WriteError::Parse(e)) => {
                 warn!(query_id = id, error = %e, "query parse error");
                 state
                     .prom
@@ -958,7 +958,7 @@ async fn put_doc(
                     }),
                 )
             }
-            Err(percolator::WriteError::Wal(e)) => {
+            Err(reverse_rusty::WriteError::Wal(e)) => {
                 // Durability failure: the mutation was NOT applied. Never
                 // acknowledge a write we couldn't log (see ADR-013). 503 tells
                 // the client to retry — the engine state is unchanged.
@@ -1859,7 +1859,7 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// GET / — API root.
 async fn api_root() -> impl IntoResponse {
     Json(RootResponse {
-        name: "percolator",
+        name: "reverse-rusty",
         version: env!("CARGO_PKG_VERSION"),
         tagline: "you know, for matching",
     })
@@ -1914,7 +1914,7 @@ async fn get_vocab(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// stale; the caller should reingest for consistent matching.
 async fn put_vocab(
     State(state): State<Arc<AppState>>,
-    Json(vocab): Json<percolator::vocab::Vocab>,
+    Json(vocab): Json<reverse_rusty::vocab::Vocab>,
 ) -> impl IntoResponse {
     let result = {
         let mut engine = state.engine.lock();
@@ -1955,7 +1955,7 @@ fn default_min_count() -> usize {
 /// learned vocabulary without applying it. The caller can review, edit,
 /// and then PUT /_vocab to apply.
 async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoResponse {
-    let vocab = percolator::vocab::learn_from_queries(&req.queries, req.min_count);
+    let vocab = reverse_rusty::vocab::learn_from_queries(&req.queries, req.min_count);
     Json(vocab)
 }
 
@@ -2197,7 +2197,7 @@ async fn main() {
         data_dir = ?cli.data_dir,
         log_format = %cli.log_format,
         drain_timeout = cli.drain_timeout,
-        "starting percolator server"
+        "starting reverse-rusty server"
     );
 
     // Build engine config from CLI flags.
@@ -2226,7 +2226,7 @@ async fn main() {
     // Load vocab file if provided, otherwise use minimal (domain-free) normalizer.
     let vocab = if let Some(ref path) = cli.vocab_file {
         info!(path = ?path, "loading vocabulary from file");
-        let v = percolator::vocab::Vocab::load_json(path).expect("failed to read vocab file");
+        let v = reverse_rusty::vocab::Vocab::load_json(path).expect("failed to read vocab file");
         info!(
             synonyms = v.synonyms().len(),
             phrases = v.phrases().len(),
@@ -2239,7 +2239,7 @@ async fn main() {
         None
     };
 
-    let build_normalizer = |v: &Option<percolator::vocab::Vocab>| -> Normalizer {
+    let build_normalizer = |v: &Option<reverse_rusty::vocab::Vocab>| -> Normalizer {
         match v {
             Some(vocab) => vocab
                 .to_normalizer()
@@ -2616,7 +2616,7 @@ mod settings_tests {
 #[cfg(test)]
 mod cat_segments_tests {
     use super::{fmt_bytes, render_segments_table, SegmentRow};
-    use percolator::events::{SegmentInfo, SegmentKind};
+    use reverse_rusty::events::{SegmentInfo, SegmentKind};
 
     fn info(ordinal: usize, kind: SegmentKind, alive: usize, deleted: usize) -> SegmentInfo {
         let entries = alive + deleted;

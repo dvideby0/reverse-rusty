@@ -1,6 +1,6 @@
 # Performance
 
-Measured results for the PoC engine (single core, aarch64 4-core / 3.8 GiB sandbox, std-only).
+Measured results for Reverse Rusty (single core, aarch64 4-core / 3.8 GiB sandbox, std-only).
 
 ## Headline numbers
 
@@ -19,7 +19,7 @@ verify, and the dated **capture log** — is in [`benchmark-results.txt`](benchm
 
 ```bash
 cd engine
-export CARGO_TARGET_DIR=/tmp/perc-target                      # build off the synced folder
+export CARGO_TARGET_DIR=/tmp/reverse-rusty-target                      # build off the synced folder
 
 cargo test --release                                          # correctness oracle (zero false negatives)
 cargo run --release --bin bench -- 1000000 5000 0.0 2.0 60    # selective path benchmark

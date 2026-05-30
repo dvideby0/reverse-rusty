@@ -1,4 +1,4 @@
-//! Percolator — a domain-aware reverse product-query matcher (proof of concept).
+//! Reverse Rusty — a domain-aware reverse product-query matcher.
 //!
 //! Design: docs/design/README.md (architecture overview); CLAUDE.md (agent entry point)
 //! Invariant: Lossless signature cover — if a title could positively match a

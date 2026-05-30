@@ -9,14 +9,14 @@
 //! production workloads. The knobs here are engine-level: flush cadence,
 //! compaction trigger policy, and merge-score tuning.
 
-/// Configuration for the percolator [`Engine`](crate::segment::Engine).
+/// Configuration for the Reverse Rusty [`Engine`](crate::segment::Engine).
 ///
 /// All fields have sensible defaults via `Default`. Pass to
 /// [`Engine::with_config`](crate::segment::Engine::with_config) to override.
 ///
 /// # Example
 /// ```
-/// use percolator::config::EngineConfig;
+/// use reverse_rusty::config::EngineConfig;
 ///
 /// let config = EngineConfig {
 ///     max_segments: 6,

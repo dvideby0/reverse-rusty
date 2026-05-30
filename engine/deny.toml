@@ -1,4 +1,4 @@
-# cargo-deny configuration for Percolator.
+# cargo-deny configuration for Reverse Rusty.
 #
 # Run via `./check.sh` or directly from this directory: `cargo deny check`.
 # Checks four things: security advisories, license policy, dependency bans,
@@ -24,8 +24,8 @@ allow = [
     "BSL-1.0",
     "Unicode-3.0",
 ]
-# `percolator` is `publish = false` and intentionally unlicensed; skip the local
-# crate rather than forcing a license field on a proof of concept.
+# `reverse-rusty` is `publish = false` and intentionally unlicensed; skip the local
+# crate rather than forcing a license field on it.
 private = { ignore = true }
 confidence-threshold = 0.9
 

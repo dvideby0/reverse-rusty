@@ -121,7 +121,7 @@ the selective candidate count further.
 
 ### Tier 4 — ES/OS percolator parity (not fully verified — based on initial gap analysis)
 
-These items would close the remaining gaps between Percolator's DSL/normalizer and what
+These items would close the remaining gaps between Reverse Rusty's DSL/normalizer and what
 production ES/OS percolator deployments typically rely on. They are based on a preliminary
 comparison with a real-world percolator workload; the scope of each may shrink or grow once
 implementation begins.
@@ -141,13 +141,13 @@ implementation begins.
   outside of code.
 - **Metadata-aware result filtering.** ES/OS percolator queries are typically stored alongside
   structured metadata (entity type, category, status) and filtered at search time via bool
-  clauses. Percolator today returns raw query-ID sets with no metadata awareness. Options:
+  clauses. Reverse Rusty today returns raw query-ID sets with no metadata awareness. Options:
   per-query tag storage with post-match filtering, or partitioned indices. Design TBD —
   the goal is to support the common pattern of "percolate title, then narrow by category"
   without requiring a separate metadata lookup.
 - **Match scoring / ranking hooks.** ES/OS percolator returns `_score` from the stored
   query's relevance model; production consumers use `function_score` wrappers to boost
-  results by metadata (e.g. status priority). Percolator currently returns binary
+  results by metadata (e.g. status priority). Reverse Rusty currently returns binary
   match/no-match. Add an optional scoring callback or rank-annotation layer so callers
   can order results without a separate pass.
 

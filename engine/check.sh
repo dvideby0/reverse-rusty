@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local hardening gate for the Percolator engine crate.
+# Local hardening gate for the Reverse Rusty engine crate.
 #
 # Runs the checks a CI pipeline would, in one shot: formatting, lints, tests,
 # security advisories, and dependency/license policy. Run it before pushing or
@@ -29,7 +29,7 @@ cd "$(dirname "$0")"
 
 # Keep build artifacts out of the source tree; share the dir the rest of the
 # project uses (see CLAUDE.md). Respect an explicit override if already set.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/perc-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/reverse-rusty-target}"
 
 failures=()
 

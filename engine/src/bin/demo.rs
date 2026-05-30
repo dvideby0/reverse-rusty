@@ -1,11 +1,11 @@
 //! Demo: compile the spec's worked example, show its compiled form + chosen
 //! signatures, then match a few titles and explain each pass/fail.
 
-use percolator::compile::compile_one;
-use percolator::dict::Dict;
-use percolator::explain::{explain_compiled, explain_match};
-use percolator::normalize::Normalizer;
-use percolator::segment::{Engine, MatchScratch};
+use reverse_rusty::compile::compile_one;
+use reverse_rusty::dict::Dict;
+use reverse_rusty::explain::{explain_compiled, explain_match};
+use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::segment::{Engine, MatchScratch};
 
 fn main() {
     let norm = Normalizer::default_vocab().expect("built-in vocab");

@@ -1,4 +1,4 @@
-//! Engine events and metrics — zero-dependency observability for the percolator.
+//! Engine events and metrics — zero-dependency observability for Reverse Rusty.
 //!
 //! Design philosophy: the engine emits structured events through an optional
 //! callback (no logging crate dependency). Callers wire these into whatever

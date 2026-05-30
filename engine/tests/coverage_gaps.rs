@@ -8,11 +8,11 @@
 //!   * Broad-lane isolation (class-C routing, include_broad flag)
 //!   * Edge-case inputs (empty, oversized, Unicode, adversarial)
 
-use percolator::compile::{extract, Extracted};
-use percolator::dict::Dict;
-use percolator::gen::{generate, GenConfig};
-use percolator::normalize::Normalizer;
-use percolator::segment::{Engine, MatchScratch};
+use reverse_rusty::compile::{extract, Extracted};
+use reverse_rusty::dict::Dict;
+use reverse_rusty::gen::{generate, GenConfig};
+use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::segment::{Engine, MatchScratch};
 use std::collections::HashSet;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,7 +33,7 @@ impl Brute {
         let mut lc = String::new();
         let mut qs = Vec::new();
         for (logical, text) in queries {
-            if let Ok(ast) = percolator::dsl::parse(text) {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
                 let ex = extract(&ast, &norm, &mut dict, &mut lc);
                 if ex.required.is_empty() && ex.anyof.is_empty() {
                     continue;
@@ -829,7 +829,7 @@ fn metrics_consistent_with_known_corpus() {
 
 #[test]
 fn settings_snapshot_reflects_set_config_and_is_immutable() {
-    use percolator::config::EngineConfig;
+    use reverse_rusty::config::EngineConfig;
 
     let mut eng = Engine::with_config(
         Normalizer::default_vocab().unwrap(),
@@ -868,7 +868,7 @@ fn settings_snapshot_reflects_set_config_and_is_immutable() {
 /// and its published snapshot must agree.
 #[test]
 fn segment_infos_reports_layout_and_holes() {
-    use percolator::events::SegmentKind;
+    use reverse_rusty::events::SegmentKind;
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
     // First (sealed) base segment with a handful of anchorable queries.

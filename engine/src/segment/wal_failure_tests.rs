@@ -6,8 +6,11 @@ use crate::config::EngineConfig;
 use crate::error::WriteError;
 
 fn temp_dir(name: &str) -> std::path::PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("percolator_segwal_{}_{}", name, std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "reverse_rusty_segwal_{}_{}",
+        name,
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

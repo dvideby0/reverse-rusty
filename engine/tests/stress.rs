@@ -14,13 +14,13 @@
 //!   * Correct delete/update visibility
 //!   * Parallel vs sequential agreement under mutation
 
-use percolator::compile::{extract, Extracted};
-use percolator::config::EngineConfig;
-use percolator::dict::Dict;
-use percolator::events::{EngineEvent, EngineMetrics};
-use percolator::gen::{generate, GenConfig};
-use percolator::normalize::Normalizer;
-use percolator::segment::{Engine, MatchScratch};
+use reverse_rusty::compile::{extract, Extracted};
+use reverse_rusty::config::EngineConfig;
+use reverse_rusty::dict::Dict;
+use reverse_rusty::events::{EngineEvent, EngineMetrics};
+use reverse_rusty::gen::{generate, GenConfig};
+use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::segment::{Engine, MatchScratch};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -59,7 +59,7 @@ impl Brute {
         let mut lc = String::new();
         let mut qs = Vec::new();
         for (logical, text) in queries {
-            if let Ok(ast) = percolator::dsl::parse(text) {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
                 let ex = extract(&ast, &norm, &mut dict, &mut lc);
                 if ex.required.is_empty() && ex.anyof.is_empty() {
                     continue;
@@ -1513,10 +1513,10 @@ fn match_while_inserting_varied_queries() {
         for (logical_id, query_text) in family {
             let result = eng.try_insert_live(query_text, *logical_id, 1);
             match &result {
-                Ok(percolator::segment::InsertOutcome::Inserted(_)) => {
+                Ok(reverse_rusty::segment::InsertOutcome::Inserted(_)) => {
                     eprintln!("    + id={logical_id} {query_text:?}");
                 }
-                Ok(percolator::segment::InsertOutcome::RejectedClassD) => {
+                Ok(reverse_rusty::segment::InsertOutcome::RejectedClassD) => {
                     eprintln!("    D id={logical_id} {query_text:?} (class D rejected)");
                 }
                 Err(e) => {
@@ -1531,7 +1531,7 @@ fn match_while_inserting_varied_queries() {
 
             // Verify doc source is retrievable for successfully inserted queries
             source_lookups_total += 1;
-            if let Ok(percolator::segment::InsertOutcome::Inserted(_)) = result {
+            if let Ok(reverse_rusty::segment::InsertOutcome::Inserted(_)) = result {
                 let source = eng.get_query_source(*logical_id);
                 if let Some(src) = source {
                     assert_eq!(
@@ -2172,8 +2172,8 @@ fn mixed_synthetic_and_handcrafted_parallel() {
     for (id, text) in &handcrafted {
         let result = eng.try_insert_live(text, *id, 1);
         match &result {
-            Ok(percolator::segment::InsertOutcome::Inserted(_)) => {}
-            Ok(percolator::segment::InsertOutcome::RejectedClassD) => {
+            Ok(reverse_rusty::segment::InsertOutcome::Inserted(_)) => {}
+            Ok(reverse_rusty::segment::InsertOutcome::RejectedClassD) => {
                 eprintln!("    class-D rejected: id={id} {text:?}");
             }
             Err(e) => {

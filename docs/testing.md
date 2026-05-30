@@ -1,6 +1,6 @@
 # Testing, benchmarks & CI
 
-How Percolator is verified — the suites, the pressure/soak tests, the benchmarks, the local git
+How Reverse Rusty is verified — the suites, the pressure/soak tests, the benchmarks, the local git
 hooks, and the GitHub Actions pipeline. There is **one gate**, [`engine/check.sh`](../engine/check.sh);
 everything here is either that gate or a layer around it. Why it's shaped this way →
 [`DECISIONS.md`](DECISIONS.md) ADR-024.
@@ -16,7 +16,7 @@ everything here is either that gate or a layer around it. Why it's shaped this w
 ## The one gate: `check.sh`
 
 ```
-cd engine && export CARGO_TARGET_DIR=/tmp/perc-target   # or just ./engine/check.sh from the root
+cd engine && export CARGO_TARGET_DIR=/tmp/reverse-rusty-target   # or just ./engine/check.sh from the root
 ./check.sh          # full gate: fmt + clippy + test + audit + deny
 ./check.sh --fast   # quick gate: fmt + clippy only (what the pre-commit hook runs)
 ```

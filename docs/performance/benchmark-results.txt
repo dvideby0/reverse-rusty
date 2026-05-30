@@ -1,8 +1,8 @@
-PERCOLATOR — BENCHMARK RUNBOOK & CAPTURE LOG
+REVERSE RUSTY — BENCHMARK RUNBOOK & CAPTURE LOG
 ============================================================================================
 
 PURPOSE
-  The reference for running Percolator's benchmarks and judging the result. It answers three
+  The reference for running Reverse Rusty's benchmarks and judging the result. It answers three
   questions for whoever runs them next:
     1. WHAT to run (commands, args, runtime budget) ................ "How to run"
     2. WHAT must hold regardless of hardware (the regression gate) . "Invariants"
@@ -24,7 +24,7 @@ PURPOSE
 HOW TO RUN
 --------------------------------------------------------------------------------------------
   cd engine
-  export CARGO_TARGET_DIR=/tmp/perc-target            # build off-tree (see CLAUDE.md)
+  export CARGO_TARGET_DIR=/tmp/reverse-rusty-target            # build off-tree (see CLAUDE.md)
 
   # ---- correctness (the contract; fast) ----
   cargo test --release --test oracle                  # differential oracle: false_neg/pos = 0

@@ -1,9 +1,9 @@
 [package]
-name = "percolator"
+name = "reverse-rusty"
 version = "0.1.0"
 edition = "2021"
 description = "Domain-aware reverse product-query matcher. daachorse for multiword aliases, roaring for large postings, rayon for parallel matching."
-# Single-node proof of concept — not published to crates.io. This lets
+# Internal crate — not published to crates.io. This lets
 # `cargo deny` skip the (intentionally) unlicensed local crate via
 # `licenses.private.ignore`.
 publish = false
@@ -100,7 +100,7 @@ cast_possible_wrap = "allow"
 # SAFETY docs in src/storage.rs.
 cast_ptr_alignment = "allow"
 
-# `#[must_use]` on every getter/accessor is noise for an internal PoC (~150 sites)
+# `#[must_use]` on every getter/accessor is noise for an internal library (~150 sites)
 # and does not catch real bugs here.
 must_use_candidate = "allow"
 

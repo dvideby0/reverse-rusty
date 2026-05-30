@@ -14,7 +14,7 @@
 //! accesses. The key's upper bits select the block; the lower bits derive
 //! multiple independent hash probes placed within that single block.
 //!
-//! This is the right design for Percolator's hot path because the comparison
+//! This is the right design for Reverse Rusty's hot path because the comparison
 //! point (hash-map miss with an identity hasher) costs ~1 memory access. A
 //! classic bloom with scattered probes is *slower* than no filter at all (we
 //! confirmed this empirically). Cache-line blocking matches the 1-access budget.

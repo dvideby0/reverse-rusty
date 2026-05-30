@@ -64,8 +64,8 @@ impl Engine {
     /// Evaluates every contiguous range of ≥2 base segments and picks the one
     /// with the lowest score = `(sum_size + FIXED_COST * count) / (count - 1.9)`.
     /// This minimizes time-integrated average segment count — exactly the right
-    /// objective when reads must probe every segment (as in ClickHouse and our
-    /// percolator). `max_segments` is the threshold: if the current base segment
+    /// objective when reads must probe every segment (as in ClickHouse and
+    /// Reverse Rusty). `max_segments` is the threshold: if the current base segment
     /// count is ≤ max_segments, no compaction runs.
     ///
     /// Correctness: the merged segment contains exactly the alive entries from

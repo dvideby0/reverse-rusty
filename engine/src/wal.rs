@@ -432,7 +432,7 @@ mod tests {
 
     fn scratch_path(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!(
-            "percolator_wal_{}_{}.log",
+            "reverse_rusty_wal_{}_{}.log",
             name,
             std::process::id()
         ));
@@ -482,7 +482,7 @@ mod tests {
 
     /// Micro-benchmark: per-write fsync vs. checkpoint-only. Ignored by default
     /// (it does real device flushes). Run with:
-    ///   cargo test --release -p percolator --lib wal::tests::bench_fsync_cost -- --ignored --nocapture
+    ///   cargo test --release -p reverse-rusty --lib wal::tests::bench_fsync_cost -- --ignored --nocapture
     #[test]
     #[ignore = "benchmark: does real device flushes; run with --ignored"]
     fn bench_fsync_cost() {

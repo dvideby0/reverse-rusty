@@ -6,14 +6,14 @@
 //! This file exercises all three interacting simultaneously: build → vocab change
 //! → delete → flush → compact → persist → reopen → verify correctness throughout.
 
-use percolator::config::EngineConfig;
-use percolator::normalize::Normalizer;
-use percolator::segment::{Engine, MatchScratch};
-use percolator::vocab::Vocab;
+use reverse_rusty::config::EngineConfig;
+use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::segment::{Engine, MatchScratch};
+use reverse_rusty::vocab::Vocab;
 use std::path::PathBuf;
 
 fn test_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("percolator_hardening_{name}"));
+    let dir = std::env::temp_dir().join(format!("reverse_rusty_hardening_{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -77,7 +77,11 @@ fn set_vocab_increments_epoch_and_marks_segments_stale() {
 
     // Change vocab — all existing segments become stale
     let mut vocab = Vocab::new();
-    vocab.add_synonym("rc", "term:rookie", percolator::dict::FeatureKind::Category);
+    vocab.add_synonym(
+        "rc",
+        "term:rookie",
+        reverse_rusty::dict::FeatureKind::Category,
+    );
     let stale = engine
         .set_vocab(vocab)
         .expect("vocab change should succeed");
@@ -379,7 +383,11 @@ fn full_lifecycle_vocab_delete_persist_compact() {
 
     // Phase 3: change vocab — everything becomes stale
     let mut vocab = Vocab::new();
-    vocab.add_synonym("rc", "term:rookie", percolator::dict::FeatureKind::Category);
+    vocab.add_synonym(
+        "rc",
+        "term:rookie",
+        reverse_rusty::dict::FeatureKind::Category,
+    );
     let stale = engine.set_vocab(vocab).unwrap();
     assert!(stale > 0);
     assert!(engine.has_stale_segments());

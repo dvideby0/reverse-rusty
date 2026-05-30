@@ -2,7 +2,7 @@
 
 *Architecture overview, the correctness contract, and the module map. The per-component detail lives
 in the topic files linked below. Read [`../research/prior-art.md`](../research/prior-art.md) first for
-the borrowed ideas. The PoC in `engine/` implements the core of this design at reduced scale to
+the borrowed ideas. Reverse Rusty (in `engine/`) implements the core of this design at reduced scale to
 validate the numbers (see [`../STATUS.md`](../STATUS.md) for what's built vs design-only).*
 
 ## Topic files
@@ -79,7 +79,7 @@ literally cannot see forbidden features).
 and *required any-of groups* (see [`matching.md`](matching.md) §1). Because each signature is a subset
 of features that must be present for the query to match, any matching title contains all of them, hence
 generates that signature. Disjunctions are covered by emitting one signature family per branch
-(mirroring the "extract from every OR branch" rule). The PoC includes a randomized **differential
+(mirroring the "extract from every OR branch" rule). Reverse Rusty includes a randomized **differential
 oracle** test (brute-force matcher vs. engine) asserting zero false negatives across millions of
 (title, query) pairs — this is how we *verify*, not just *assert*, the contract.
 
@@ -107,13 +107,13 @@ oracle** test (brute-force matcher vs. engine) asserting zero false negatives ac
 
 ---
 
-## 4. Module map (PoC ↔ design)
+## 4. Module map (code ↔ design)
 
 This maps design *topics* to their implementing module. The exhaustive per-file index — every source
 file, test, and binary, with ADR cross-references — is the module map in
 [`../../CLAUDE.md`](../../CLAUDE.md).
 
-| Design topic | PoC module |
+| Design topic | Code module |
 |---|---|
 | DSL ([normalization](normalization.md)) | `src/dsl.rs` (parser + AST) |
 | Normalizer ([normalization](normalization.md)) | `src/normalize.rs` |

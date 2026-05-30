@@ -9,27 +9,27 @@ shares), [`matching.md`](matching.md) (the per-shard hot path), [`normalization.
 Read the [overview](README.md) for the correctness contract; the self-tuning draws on the feature model
 in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learning.md).*
 
-> **Implementation status:** Design-only — not yet coded. The PoC is single-node.
+> **Implementation status:** Design-only — not yet coded. Reverse Rusty is single-node today.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** OpenSearch cluster formation, Aurora log-is-the-database, consistent hashing
-- **Status:** Entirely design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); single-node PoC extrapolates to 100M with stated assumptions
+- **Status:** Entirely design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary
 
 ---
 
 ## 1. Sharding sketch (the design baseline)
 
-100M compiled queries do not fit in a small node's RAM (the PoC sandbox is 3.8 GiB; see
+100M compiled queries do not fit in a small node's RAM (the benchmark sandbox is 3.8 GiB; see
 [`../performance/results.md`](../performance/results.md)). The design shards by a stable hash of the
 query's primary entity (player/brand) so that (a) an entity's near-duplicate queries stay co-resident
 and (b) a title is routed
 to the few shards whose entities it contains. Each shard is the segment+delta engine from
 [`ingestion-and-updates.md`](ingestion-and-updates.md). Shards are NUMA-pinned; segments are mmap'd per
-node; no cross-NUMA mutable sharing. The PoC runs one shard and reports per-shard numbers plus an
+node; no cross-NUMA mutable sharing. Reverse Rusty runs one shard and reports per-shard numbers plus an
 explicit extrapolation to the 100M target with stated assumptions. The rest of this doc develops that
 sketch into a full cluster design.
 
@@ -146,7 +146,7 @@ shape:
 
 ## 5. Pattern-borrowing scorecard
 
-| Concern | OpenSearch | Aurora | What Percolator does |
+| Concern | OpenSearch | Aurora | What Reverse Rusty does |
 |---|---|---|---|
 | Cluster formation | seed hosts, gossip, **quorum manager election** | — | same: quorum-elected cluster-manager holds the ring + epoch |
 | Source of truth | replicated cluster state | **redo log → shared storage** | **mutation log** (quorum), segments are materialized views |
@@ -183,8 +183,8 @@ analogue of the broad-query quarantine in [`matching.md`](matching.md) §4.
 
 The operator experience should be: **one binary, one join command, everything else automatic.**
 
-1. **One binary, auto-roles.** `percolatord` starts, discovers peers via a seed/gossip list, and the
-   cluster negotiates who is manager / coordinator / data — no per-role config. (`percolatord join
+1. **One binary, auto-roles.** `reverse-rustyd` starts, discovers peers via a seed/gossip list, and the
+   cluster negotiates who is manager / coordinator / data — no per-role config. (`reverse-rustyd join
    <seed>` is the entire setup step; a single node just runs standalone.)
 2. **Auto shard count.** Default primary-shard count is *derived*, not chosen: from the measured
    ~256 B/query (→ a target like ~5–10M queries/shard within a node's RAM budget) and the live corpus
@@ -212,7 +212,7 @@ The operator experience should be: **one binary, one join command, everything el
 ```
 Data plane (client):     add_query(dsl[, id]) · update_query(id, dsl) · remove_query(id)
                          percolate(listing) -> [qid]            // routing/sharding hidden
-Cluster ops:             percolatord join <seed>                // that's it
+Cluster ops:             reverse-rustyd join <seed>             // that's it
                          (optional) set desired_capacity | fully serverless
 Observability:           /cluster/state · /shards · explain(qid) · explain(listing, qid)
 ```
@@ -234,7 +234,7 @@ without operator action. The defaults are the product.
 
 ---
 
-## 10. Incremental build path from today's PoC
+## 10. Incremental build path from today's single-node engine
 1. **Wrap the current engine as a single shard** behind a `ShardServer` (gRPC): `add/remove/percolate`.
 2. **Add a coordinator** with the consistent-hash ring + content routing (§3) over K local shards in
    one process — validates routing/fan-out and the cross-shard correctness oracle.
@@ -245,7 +245,7 @@ without operator action. The defaults are the product.
 6. Each step is independently testable; the differential oracle (`tests/oracle.rs`) extends naturally
    to a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
-(All of this is design-only — the PoC is single-node; see [`../STATUS.md`](../STATUS.md).)
+(All of this is design-only — Reverse Rusty is single-node today; see [`../STATUS.md`](../STATUS.md).)
 
 ---
 
