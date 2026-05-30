@@ -5,6 +5,10 @@
 
 # Reverse Rusty
 
+<p align="center">
+  <a href="https://github.com/dvideby0/reverse-rusty/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/dvideby0/reverse-rusty/actions/workflows/ci.yml/badge.svg" /></a>
+</p>
+
 A high-performance reverse query matching engine written in Rust. Given millions of stored
 queries and an incoming document title, Reverse Rusty finds every query that matches — with
 **zero false negatives guaranteed**.

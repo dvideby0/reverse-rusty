@@ -5,8 +5,10 @@ what's implemented vs design-only**. Component detail lives in the [design docs]
 the [ADRs](DECISIONS.md); the per-file index is the module map in [`../CLAUDE.md`](../CLAUDE.md), and
 dependency versions in [`../engine/Cargo.toml`](../engine/Cargo.toml). The full suite passes —
 differential oracle, unit, server, coverage-gap, error-path, hardening, and persistence suites (the
-last now covering durability-failure events + recovery-event buffering), plus doc-tests; a local-only
-`tests/stress.rs` adds more (gitignored). Run `cargo test --release` for the current count.
+last now covering durability-failure events + recovery-event buffering), plus doc-tests and the
+pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`; its 10M soak is
+`#[ignore]`d). Run `cargo test --release` for the current count. GitHub Actions runs the full
+`check.sh` gate + benchmarks on every PR — see [`testing.md`](testing.md) and [`DECISIONS.md`](DECISIONS.md) ADR-024.
 
 ---
 

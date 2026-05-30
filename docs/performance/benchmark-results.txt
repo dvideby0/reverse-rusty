@@ -1,0 +1,200 @@
+PERCOLATOR — BENCHMARK RUNBOOK & CAPTURE LOG
+============================================================================================
+
+PURPOSE
+  The reference for running Percolator's benchmarks and judging the result. It answers three
+  questions for whoever runs them next:
+    1. WHAT to run (commands, args, runtime budget) ................ "How to run"
+    2. WHAT must hold regardless of hardware (the regression gate) . "Invariants"
+    3. WHAT the numbers were last time, and on what machine ........ "Capture log"
+
+  Read INVARIANTS first. Those numbers are fixed by the data + the algorithm, NOT the CPU, so
+  they must reproduce on ANY machine. If one drifts, the engine's *behaviour* changed —
+  investigate before trusting anything else. THROUGHPUT, by contrast, is hardware- and
+  load-dependent: only compare it against a prior run ON THE SAME MACHINE, never across
+  machines, and never treat a cross-machine delta as a regression.
+
+  Numbers here are distilled. Full console output of a run is ephemeral (e.g. /tmp at capture
+  time); record the distilled result in the capture log below — append, don't overwrite. This
+  file is the durable, version-controlled record. CI (GitHub Actions) also runs the benchmarks on
+  every PR and uploads the raw console output as an artifact, but does NOT gate on them: throughput
+  is machine-dependent, so the invariants below stay a manual comparison (see DECISIONS ADR-024).
+
+--------------------------------------------------------------------------------------------
+HOW TO RUN
+--------------------------------------------------------------------------------------------
+  cd engine
+  export CARGO_TARGET_DIR=/tmp/perc-target            # build off-tree (see CLAUDE.md)
+
+  # ---- correctness (the contract; fast) ----
+  cargo test --release --test oracle                  # differential oracle: false_neg/pos = 0
+  cargo test --release --test stress                  # 15 pressure tests (churn, par==seq, ghosts)
+  cargo test --release --test stress \
+      ten_million_queries_mixed_ops -- --ignored --nocapture   # 10M-scale soak (needs ~4+ GiB)
+
+  # ---- throughput / structure ----
+  cargo run --release --bin bench -- 1000000 20000 0.0      # PURE SELECTIVE (clean cand count)
+  cargo run --release --bin bench -- 1000000 20000 0.05     # +broad lane (shows its ~5-9x cost)
+  cargo run --release --bin segbench -- 300000 3000 0.0     # read-amp vs 1/2/4/8 segments
+  cargo run --release --bin snapbench -- 1000000 200        # snapshot-publish cost (ADR-016)
+  cargo run --release --bin learn -- 500000 50 0.30         # NPMI corpus learner (see appendix)
+
+  bench args:     <num_queries> <num_titles> <broad_frac> <skew> <seed> [reps]
+  segbench args:  <num_queries> <num_titles> <broad_frac> <seed>
+  snapbench args: <num_queries> <iters>
+  Seeds default to 0x00C0FFEE so runs are reproducible. Budget: each is <~30s except the 5M+
+  bench memory passes (they build the corpus to disk twice — a few minutes) and the 10M soak.
+
+--------------------------------------------------------------------------------------------
+INVARIANTS — the regression gate (machine-INDEPENDENT; must reproduce)
+--------------------------------------------------------------------------------------------
+  Last verified 2026-05-30 (Apple M4 Max, 16-core) AND 2026-05-27 (aarch64, 4-core): identical.
+
+  CANDIDATES / TITLE  (the core selectivity metric — the whole engine exists to keep this small
+  and FLAT as the corpus grows):
+    segbench 300000 3000 0.0    K=1 -> 53.48   K=2 -> 55.11   K=4 -> 56.67   K=8 -> 57.68
+    bench 1000000 20000 0.0     avg 54.5  (p95 96, p99 112)   [postings/title == cands/title]
+    -> ~54, flat regardless of corpus size; postings == cands on the selective (no-broad) path.
+
+  FILTER SKIP %  (per-segment anchor filter; rises with segment count):
+    segbench K=1/2/4/8   ->   ~46% / ~63% / ~76% / ~86%      (filter heap 0.02–0.07 MB)
+
+  COST-CLASS SPLIT  (bench 1000000 20000 0.05):   ~99.5% A | ~0.2% B | ~0.2% C | 0 D
+    (broad_frac=0.0 -> 100% A.  class D must always be 0 for generated data.)
+
+  CORRECTNESS  (must be exactly these — this is the contract):
+    oracle:   false_neg = 0,  false_pos = 0      (~109k matches over 40k queries x 4k titles)
+    stress:   15/15 pass;  ghosts (deleted ids in results) = 0;  par == seq, 0 mismatches
+    10M soak: 0 ghosts, par==seq 0 mismatches, compaction reclaims tombstones, sources consistent
+
+  RESIDENT MEMORY  (persistent/mmap profile — machine-independent; ADR-020), bench @1M:
+    retain_source=false -> ~5–6 B/query     (sources off-heap — the production profile)
+    retain_source=true  -> ~115–120 B/query (the source store, ~113 B/q, dominates)
+    components: dict ~5 B/q (bounded by vocab), alive overlay ~1 B/q, logical_index ~0 (mmap'd)
+
+--------------------------------------------------------------------------------------------
+MACHINE-DEPENDENT — record the machine; compare only same-machine over time
+--------------------------------------------------------------------------------------------
+  Throughput (titles/sec/core selective & broad, build q/s, updates/s, snapshot publish/s,
+  parallel speedup) scales with the CPU, memory bandwidth, and current machine load. Do NOT
+  compare across machines or call a delta a regression without re-running the prior machine.
+  Parallel speedup saturates on memory bandwidth (and on big.LITTLE CPUs the efficiency cores
+  drag the rayon reduce), so expect sub-linear scaling past ~4 threads — the 4-core reference's
+  "~3.8x on 4 threads" does NOT extrapolate to a 16-core box.
+
+  macOS caveat: bench's "process RSS" reads /proc/self/status (Linux-only) and prints 0 on
+  macOS. Ignore it; use the persistent/mmap RESIDENT breakdown above, which is computed from
+  Engine::metrics() and is machine-independent.
+
+--------------------------------------------------------------------------------------------
+CAPTURE LOG  (newest first — append a block per run; lead with the machine)
+--------------------------------------------------------------------------------------------
+[2026-05-30]  Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  Verification pass after the
+              /_cat/segments work (ADR-023).  Loaded interactive box — throughput is indicative.
+  INVARIANTS — all reproduced:
+    segbench cands/title 53.48 / 55.11 / 56.67 / 57.68  (EXACT match to reference); skip 46/63/76/86%
+    bench 1M selective:  54.52 cands/title (p95 96, p99 112);  postings==cands;  matches 0
+    cost classes @5% broad:  A 995660 / B 2116 / C 2224 / D 0
+    resident @1M:  retain_source=false 5.9 B/q;  sources 113.5 B/q;  dict 4.9 B/q;  alive 1.0 B/q
+    stress 15/15 pass;  10M soak: 0 ghosts, par==seq 0 mismatches, compact 4->1 reclaimed 550k
+  THROUGHPUT — indicative (single core unless noted):
+    build ~510–535k q/s;  selective match ~590–700k titles/s/core;  +broad inline ~184k
+    updates ~205–825k/s;  snapshot() publish 52M/s;  PUT+publish 488k/s;  bulk(1k)+publish 733k q/s
+    parallel selective, 16 threads ~1.0M titles/s total (~1.7–2.6x single-thread — bandwidth-bound)
+    10M mixed-ops full cycle (insert/delete/update/flush/compact/search): 30.3s
+
+[2026-05-27]  aarch64, 4 cores, 3.8 GiB, rustc 1.95.0 (release: opt-level=3, lto, cgu=1).
+              ORIGINAL REFERENCE.  NOTE: results.md §1's headline throughput table predates the
+              daachorse/roaring/rayon swap-ins; the structural numbers below + segbench are
+              current-engine and reproduce today (see 2026-05-30).
+  bench 1M  broad=0    : build 1.47s (679k q/s); 54.64 cands/title (p95 96, p99 112); 735k titles/s/core; RSS 258 B/q
+  bench 5M  broad=0    : build 7.55s (662k q/s); 54.29 cands/title;                    455k titles/s/core; RSS 258 B/q
+  bench 1M  broad=.05  : 682 cands/title (broad-inline);  selective 234k vs broad-inline 67k titles/s/core (~3.5x)
+  bench 1M  broad,skew3.5: 670 cands/title;  selective 285k titles/s/core  (hot-entity skew tolerated)
+  segbench             : 53.48/55.11/56.67/57.68 cands/title;  717728/574005/327257/351379 titles/s/core
+  oracle               : 109024 == 109024 matches, false_neg=0, false_pos=0
+  updates              : ~730–825k/s/core, immediate (epoch) visibility
+
+============================================================================================
+APPENDIX — NPMI corpus-feature learner capture (2026-05-27, 4-core; preserved here as the only
+recorded copy of this one-time run).  Reproduce: learn 500000 50 0.30.  This is a
+one-time demonstration that every anchor the matcher needs is derivable from query
+co-occurrence statistics — not a recurring benchmark.
+============================================================================================
+corpus: 500000 queries, learning with no hand-coded vocabulary
+params: min_count=50, npmi_tau=0.3
+
+=== iteration 1: discovered 89 multi-token entities (bigrams) ===
+entity (by frequency)              count     npmi
+psa_8                              86317    0.736
+upper_deck                         63696    1.073
+psa_9                              35917    0.592
+bgs_8                              35206    0.589
+psa_9.5                            27369    0.558
+sgc_8                              27341    0.560
+psa_10                             24115    0.547
+base_psa                          17449    0.415
+insert_psa                        17396    0.414
+rc_psa                            17263    0.411
+sp_psa                            17194    0.411
+preview_psa                       17190    0.412
+refractor_psa                     17146    0.412
+rookie_psa                        17036    0.406
+bgs_9                             14862    0.497
+bgs_9.5                           11471    0.476
+sgc_9                             11311    0.472
+bgs_10                             9614    0.456
+
+--- of which 30 are name-like (all-alphabetic), top by binding strength (npmi): ---
+entity                             count     npmi
+upper_deck                         63696    1.073
+michael_jordan                      4239    1.043
+lebron_james                        1811    1.038
+kobe_bryant                         1402    1.037
+ken_griffey                         1162    1.036
+wayne_gretzky                       1002    1.035
+tom_brady                            986    1.035
+mike_trout                           858    1.035
+patrick_mahomes                      816    1.034
+base_psa                           17449    0.415
+insert_psa                         17396    0.414
+preview_psa                        17190    0.412
+
+=== iteration 2: discovered 101 longer entities (trigram+) ===
+entity (by frequency)              count     npmi
+base_psa_8                          8791    0.510
+insert_psa_8                        8673    0.507
+sp_psa_8                            8662    0.508
+rc_psa_8                            8649    0.507
+preview_psa_8                       8642    0.508
+refractor_psa_8                     8609    0.507
+rookie_psa_8                        8343    0.500
+base_psa_9                          3639    0.441
+insert_psa_9                        3617    0.440
+rookie_psa_9                        3605    0.442
+
+=== selectivity gain: learned phrase vs its parts (lower df = better anchor) ===
+learned entity               df(phrase)   min df(part)     gain x
+psa_8                             86317         148864       1.7x
+upper_deck                        63696          63696       1.0x
+psa_9                             35917          62090       1.7x
+bgs_8                             35206          71153       2.0x
+psa_9.5                           27369          47476       1.7x
+sgc_8                             27341          54651       2.0x
+psa_10                            24115          41092       1.7x
+base_psa                          17449          49819       2.9x
+insert_psa                        17396          49783       2.9x
+rc_psa                            17263          49985       2.9x
+sp_psa                            17194          49739       2.9x
+preview_psa                       17190          49386       2.9x
+refractor_psa                     17146          49367       2.9x
+rookie_psa                        17036          50408       3.0x
+
+=== learned feature universe (no hand-coded vocab) ===
+distinct unigrams in corpus : 17196
+entities learned (iter 1)   : 89
+entities learned (iter 2)   : 101
+
+Takeaway: every anchor the matcher needs is derivable from query co-occurrence statistics.
+The learner glues multi-token entities (raising selectivity) and the signature optimizer
+already ranks anchors purely by frequency — no taxonomy required.

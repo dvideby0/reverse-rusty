@@ -1,0 +1,89 @@
+name: CI
+
+# Runs the exact same gate as engine/check.sh (fmt + clippy + test + audit +
+# deny) on every PR and on pushes to main, then runs the benchmarks for
+# informational output. check.sh is the single source of truth for what "green"
+# means — this workflow just runs it in the cloud so nothing merges unchecked.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run_soak:
+        description: "Also run the ignored 10M-query soak test (slow, multi-GiB RAM)"
+        type: boolean
+        default: false
+
+# A newer push to the same branch/PR cancels the in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Keep the build inside the workspace so Swatinem/rust-cache can cache it.
+  # check.sh respects an externally-set CARGO_TARGET_DIR (defaults to /tmp
+  # locally), so this just redirects it for CI without changing the script.
+  CARGO_TARGET_DIR: ${{ github.workspace }}/engine/target
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  gate:
+    name: gate + benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Materialize the toolchain pinned in engine/rust-toolchain.toml (rustup
+      # auto-installs it, with the rustfmt + clippy components, on first use).
+      - name: Install pinned toolchain
+        working-directory: engine
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+
+      # Prebuilt binaries — far faster than `cargo install` from source.
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
+      # The must-pass gate: fmt + clippy + cargo test --release (now including
+      # the committed stress/pressure tests) + audit + deny.
+      - name: check.sh (fmt + clippy + test + audit + deny)
+        run: ./engine/check.sh
+
+      # Benchmarks are run-and-print only: throughput is machine-dependent, so CI
+      # captures the numbers for review but never fails on them. The structural
+      # regression gate stays a manual comparison (docs/performance/benchmark-results.txt).
+      - name: Benchmarks (informational)
+        continue-on-error: true
+        working-directory: engine
+        run: |
+          mkdir -p ../bench-output
+          echo "== bench (1M queries, 20k titles, 5% broad) =="      | tee ../bench-output/bench.txt
+          cargo run --release --bin bench    -- 1000000 20000 0.05   2>&1 | tee -a ../bench-output/bench.txt
+          echo "== segbench (300k queries, 3k titles) =="            | tee ../bench-output/segbench.txt
+          cargo run --release --bin segbench -- 300000 3000 0.0      2>&1 | tee -a ../bench-output/segbench.txt
+          echo "== snapbench (200k queries) =="                      | tee ../bench-output/snapbench.txt
+          cargo run --release --bin snapbench -- 200000             2>&1 | tee -a ../bench-output/snapbench.txt
+
+      - name: Upload benchmark output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-output
+          path: bench-output/
+          if-no-files-found: ignore
+
+      # The 10M soak is too heavy for every PR; run it on demand only.
+      - name: Soak (10M queries, on-demand)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_soak }}
+        working-directory: engine
+        run: cargo test --release --test stress -- --ignored --nocapture
