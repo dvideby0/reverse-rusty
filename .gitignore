@@ -12,9 +12,6 @@
 # Documentation (private design docs, research notes)
 docs/
 
-# Benchmarking comparison crate
-mokabench/
-
 # Markdown (keep README)
 *.md
 !README.md
