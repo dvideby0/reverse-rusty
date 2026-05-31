@@ -47,6 +47,10 @@ run() {
 
 run "rustfmt (--check)"    cargo fmt --check
 run "clippy (-D warnings)" cargo clippy --all-targets --release -- -D warnings
+# Lean-core lane: lints the library + non-server bins with the server/observability
+# stack gated off, so a stray `use` of a server-only crate in library code fails the
+# gate. Keeps the `--no-default-features` build (the lean dependency surface) honest.
+run "clippy (lean core)"   cargo clippy --no-default-features --release -- -D warnings
 if [ "$fast" -eq 0 ]; then
     run "tests (--release)"    cargo test --release
     run "cargo audit"          cargo audit

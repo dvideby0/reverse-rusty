@@ -65,11 +65,13 @@ history showed that cache-line blocked bloom was a better match for our 1-memory
 
 ## Build, test, run
 
-- **Language:** Rust 2021 edition, std-only core. **16 dependencies** — the core library needs only
-  `daachorse`, `memmap2`, `roaring`, `rayon` (+ `arc-swap` for snapshot reads); the rest are
-  server/observability crates that are not yet feature-gated (see [`docs/STATUS.md`](docs/STATUS.md)).
-  **Versions are pinned in [`engine/Cargo.toml`](engine/Cargo.toml) — that file is authoritative; do
-  not restate pins here** (it also documents the one default-feature exclusion — `prometheus`).
+- **Language:** Rust 2021 edition, std-only core. **16 dependencies** — the lean core
+  (`cargo build --no-default-features`) needs only `daachorse`, `memmap2`, `roaring`, `rayon`,
+  `arc-swap` (snapshot reads), `serde`/`serde_json` (vocab/config/loader JSON); the rest are
+  server/observability crates behind the default-on `server` feature ([ADR-028](docs/DECISIONS.md);
+  lean build enforced by a `check.sh` lane). **Versions are pinned in
+  [`engine/Cargo.toml`](engine/Cargo.toml) — that file is authoritative; do not restate pins here** (it
+  also documents the one default-feature exclusion — `prometheus`).
 - **Build:** `cd engine && export CARGO_TARGET_DIR=/tmp/reverse-rusty-target && cargo build --release`
 - **Test:** `cargo test --release` (oracle + parser + error-path + persistence + hardening + coverage-gap + pressure/stress suites). How-we-test guide → [`docs/testing.md`](docs/testing.md).
 - **Lint/gate:** `engine/check.sh` (fmt + clippy + test + audit + deny) — the local gate; `--fast` runs fmt + clippy only. **CI runs this same script**, so a green `check.sh` locally means a green PR.

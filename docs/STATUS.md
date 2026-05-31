@@ -239,9 +239,13 @@ from the audit's former P3 list). Roughly grouped:
   publish), and `get_vocab` reads `state.snapshot.load().vocab()` instead of locking the engine. Vocab
   reads are now lock-free like every other read endpoint, closing the last ADR-016 violation. (No new
   ADR — this completes ADR-016's stated design.)
-- **Server/observability deps are not feature-gated** — the library crate unconditionally compiles
-  `axum`/`tokio`/`tower`/`uuid`/`prometheus` even for pure-engine embeddings. Add an optional `server`
-  feature to keep the embeddable core lean (compile time, binary size, supply-chain surface).
+- ~~**Server/observability deps are not feature-gated.**~~ **✅ Fixed (ADR-028).** The nine
+  HTTP/observability crates (`axum`/`tokio`/`clap`/`parking_lot`/`tower`/`uuid`/`tracing`/
+  `tracing-subscriber`/`prometheus`) are now `optional` behind a default-on `server` feature, and the
+  server bin carries `required-features = ["server"]`. `cargo build --no-default-features` yields the
+  lean embeddable core (daachorse/memmap2/rayon/roaring/arc-swap/serde/serde_json + transitives),
+  enforced by the new `clippy (lean core)` lane in `check.sh`. `serde`/`serde_json` stay core (Vocab
+  JSON, `EngineConfig`, `ExplainDetail`, JSONL loader are all library code).
 - ~~**Durability/persistence failures log to stderr, not the observability stack.**~~ **✅ Shipped
   (ADR-021).** All 14 durability/persistence failure sites in
   `src/segment/{lifecycle,ingest,persistence}.rs` (WAL init/append/checkpoint/reset, manifest write,
