@@ -417,4 +417,25 @@ impl EngineSnapshot {
             opts,
         )
     }
+
+    /// Batch match returning per-title `(index, matched_logical_ids)` AND the
+    /// aggregate [`MatchStats`] in a single pass — for callers that need both the
+    /// results and the broad-lane meters (the HTTP `/_mpercolate` handler) without
+    /// matching twice. Same result contract as [`Self::match_titles_batch`].
+    pub fn match_titles_batch_with_stats(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        opts: BatchMatchOptions,
+    ) -> (Vec<(usize, Vec<u64>)>, MatchStats) {
+        super::broad_batch::batch_results_with_stats(
+            &MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+            },
+            titles,
+            opts,
+        )
+    }
 }

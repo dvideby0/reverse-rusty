@@ -123,4 +123,24 @@ impl Engine {
             opts,
         )
     }
+
+    /// Batch match returning per-title `(index, matched_logical_ids)` AND the
+    /// aggregate [`MatchStats`] in a single pass. Snapshot twin:
+    /// [`EngineSnapshot::match_titles_batch_with_stats`](super::EngineSnapshot::match_titles_batch_with_stats).
+    pub fn match_titles_batch_with_stats(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        opts: BatchMatchOptions,
+    ) -> (Vec<(usize, Vec<u64>)>, MatchStats) {
+        super::broad_batch::batch_results_with_stats(
+            &MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+            },
+            titles,
+            opts,
+        )
+    }
 }

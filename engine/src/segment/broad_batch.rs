@@ -571,8 +571,24 @@ pub(in crate::segment) fn batch_results(
     titles: &[impl AsRef<str> + Sync],
     opts: BatchMatchOptions,
 ) -> Vec<(usize, Vec<u64>)> {
+    batch_results_with_stats(view, titles, opts).0
+}
+
+/// Per-title batch results paired with an aggregate [`MatchStats`] — the return of
+/// [`batch_results_with_stats`] and the per-chunk output it merges.
+type BatchResults = (Vec<(usize, Vec<u64>)>, MatchStats);
+
+/// Batch match returning per-title results AND the aggregate [`MatchStats`] in a
+/// SINGLE pass — for callers (the HTTP `/_mpercolate` handler) that need both the
+/// matches and the broad-lane meters without matching twice. `stats.matches` is
+/// the total (query, title) match pairs across the batch.
+pub(in crate::segment) fn batch_results_with_stats(
+    view: &MatchView,
+    titles: &[impl AsRef<str> + Sync],
+    opts: BatchMatchOptions,
+) -> BatchResults {
     let chunk = opts.broad_batch_size.max(1);
-    titles
+    let per_chunk: Vec<BatchResults> = titles
         .par_chunks(chunk)
         .enumerate()
         .map_init(
@@ -587,13 +603,23 @@ pub(in crate::segment) fn batch_results(
                 let mut st = MatchStats::default();
                 match_batch_chunk(view, ct, opts, ms, bs, outs, &mut st);
                 let base = ci * chunk;
-                (0..ct.len())
+                let results: Vec<(usize, Vec<u64>)> = (0..ct.len())
                     .map(|ti| (base + ti, std::mem::take(&mut outs[ti])))
-                    .collect::<Vec<_>>()
+                    .collect();
+                st.matches += results.iter().map(|(_, v)| v.len() as u32).sum::<u32>();
+                (results, st)
             },
         )
-        .flatten_iter()
-        .collect()
+        .collect();
+    // Merge chunk outputs in order (the parallel matching above dominates; this
+    // serial append + stats reduce is O(num_titles) pointer moves).
+    let mut all = Vec::with_capacity(titles.len());
+    let mut stats = MatchStats::default();
+    for (mut chunk_results, st) in per_chunk {
+        all.append(&mut chunk_results);
+        stats = add_stats(stats, st);
+    }
+    (all, stats)
 }
 
 /// Batch match returning only aggregate [`MatchStats`] (for benchmarks).
