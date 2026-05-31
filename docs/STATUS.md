@@ -269,6 +269,12 @@ from the audit's former P3 list). Roughly grouped:
   transport (ADR-029) are built — the `distributed` feature can already run a coordinator over remote
   shards (on localhost today). A full multi-node deployment — a durable shared log, Raft cluster-manager,
   object storage, cross-node dict shipping, and autoscaling — is designed but not built; see Tier 3.
+  **Correctness caveat (ADR-029 "known sharp edges"):** the gRPC transport is proven only in the
+  *shared-dict* configuration (in-process / the localhost oracle share one `Arc<Dict>`). Cross-process use
+  is currently **unguarded** — a coordinator wired to servers with a diverged frozen dict drops matches
+  *silently* — and the transport is unauthenticated/plaintext. Treat the gRPC surface as a proven
+  mechanism, not yet a safe multi-process deployment (the planned dict-fingerprint handshake + TLS/auth
+  close this).
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
   runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving it from the corpus is the
   NPMI-wiring item in Tier 2.

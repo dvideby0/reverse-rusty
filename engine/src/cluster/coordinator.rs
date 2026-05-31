@@ -200,7 +200,9 @@ impl ClusterEngine {
     /// the distributed analog of `build`'s pass B. Buckets each query by placement
     /// (compiling read-only against the shared frozen dict) and ingests each bucket
     /// into its shard through the seam. Parse failures and class-D queries are skipped
-    /// (mirroring `build`); a shard write error propagates.
+    /// (mirroring `build`); a shard write error propagates. Intended for a freshly
+    /// assembled (empty) cluster — calling it on an already-populated one re-indexes
+    /// those queries (duplicate entries).
     pub fn ingest(&self, queries: &[(u64, String)]) -> Result<(), ShardError> {
         let mut buckets: Vec<Vec<(u64, Extracted, String, u32)>> =
             (0..self.ring.num_shards()).map(|_| Vec::new()).collect();
@@ -400,6 +402,12 @@ impl ClusterEngine {
     /// invariant extended across the wire). `endpoints.len()` must equal
     /// `config.num_shards`; endpoint `i` serves shard `i`. Load the corpus afterwards
     /// with [`Self::ingest`].
+    ///
+    /// CAVEAT — TODO(ADR-029): the dict match is currently **unverified**. A coordinator
+    /// pointed at servers whose frozen dict diverged drops matches *silently* (the one
+    /// false-negative path the fallible seam cannot catch). Until a connect-time
+    /// dict-fingerprint handshake lands, only the shared-`Arc<Dict>` configuration
+    /// (in-process, or the localhost oracle) is guaranteed correct.
     pub fn connect_remote(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,

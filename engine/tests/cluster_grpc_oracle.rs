@@ -235,6 +235,9 @@ fn grpc_cluster_matches_single_node_and_oracle() {
     assert!(cc[2] > 0, "no class-C (broad) queries: {cc:?}");
 
     // The differential contract, over gRPC, for every title.
+    // TODO(ADR-029): this asserts matched-ID *sets* only — it does NOT verify the 11
+    // round-tripped `MatchStats` fields, so a transposition in `cluster/proto.rs`'s wire
+    // map would go undetected. Add a stats round-trip assertion (cheap, high-value).
     for (i, title) in titles.iter().enumerate() {
         let got: HashSet<u64> = cluster
             .percolate(title)

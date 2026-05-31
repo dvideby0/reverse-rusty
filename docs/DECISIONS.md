@@ -1045,6 +1045,22 @@ Find an ADR by its number in the records below. (Implementation status of each d
   (later steps):** durable externalized log / read-your-writes quorum, Raft cluster-manager, object-store
   segments, multi-process dict shipping + a connect-time dict-hash handshake, autoscaling, auto-split,
   TLS/auth, async remote fan-out, and production panic-isolation at the RPC boundary.
+- **Known sharp edges (live in the shipped surface, distinct from the unbuilt work above):**
+  - *Unchecked cross-process dict identity → silent false negatives.* `ShardServer::new` and
+    `connect_remote` both take the frozen dict from the caller with NO verification that the coordinator's
+    and the servers' dicts match. In-process and the localhost oracle share one `Arc<Dict>`, so it holds;
+    across a real process boundary a diverged dict drops matches **silently** — the one false-negative
+    path the fallible seam does not catch. The `shardserver` bin builds its own dict and exposes no way to
+    ship it, so it is **not yet correctly consumable by a separate coordinator**. *Cheap mitigation before
+    full dict-shipping: exchange a dict fingerprint at connect / first RPC and error on mismatch — turns a
+    silent FN into a loud failure.*
+  - *The `MatchStats` wire map is unverified.* `cluster_grpc_oracle.rs` asserts matched-ID sets, not the
+    11 round-tripped stats fields, so a transposition in `cluster/proto.rs` would go undetected. *Cheap
+    fix: assert a stats round-trip.*
+  - *No transport auth + plaintext:* any client can call `Delete`/`Flush`/`IngestExtracted`. Localhost-only.
+  - *`panic = "abort"`* fail-stops a shard process on a handler panic.
+  - *Grown audit surface:* the workspace now locks the full tonic tree, so `cargo audit`/`deny` cover
+    crates a non-`distributed` build never compiles (the compiled lean core is unchanged).
 - **See also:** ADR-027 (the in-process core this extends), ADR-028 (the feature-gating seam `distributed`
   reuses), [`clustering-and-scaling.md`](design/clustering-and-scaling.md) §10 (step 1),
   `engine/grpc/` (the proto sub-crate), `src/cluster/{shard,remote,server,proto}.rs`,
