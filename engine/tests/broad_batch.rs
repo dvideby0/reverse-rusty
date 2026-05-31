@@ -81,6 +81,7 @@ fn assert_equiv(
     include_broad: bool,
     batch_size: usize,
     strat: BroadStrategy,
+    materialize: bool,
 ) {
     let scalar = scalar_baseline(eng, titles, include_broad);
     let batch = batch_result(
@@ -90,13 +91,14 @@ fn assert_equiv(
             include_broad,
             broad_batch_size: batch_size,
             broad_strategy: strat,
+            broad_materialize: materialize,
         },
     );
     assert_eq!(batch.len(), scalar.len(), "length mismatch");
     for (i, (b, s)) in batch.iter().zip(scalar.iter()).enumerate() {
         assert_eq!(
             b, s,
-            "title {i} mismatch (broad={include_broad}, batch_size={batch_size}, strategy={strat:?})"
+            "title {i} mismatch (broad={include_broad}, batch_size={batch_size}, strategy={strat:?}, materialize={materialize})"
         );
     }
 }
@@ -108,12 +110,15 @@ fn run_matrix(eng: &Engine, titles: &[String]) {
     let n = titles.len().max(1);
     let sizes = [1usize, 2, 7, 63, 64, 65, 256, n, n + 1, 2 * n + 3];
     for &bs in &sizes {
-        // broad ON: the case that matters — columnar must equal scalar.
-        assert_equiv(eng, titles, true, bs, BroadStrategy::Columnar);
+        // broad ON, columnar: the case that matters — BOTH materialization modes
+        // must equal scalar (pure-anchor fast path on, and forced through full
+        // verification when off).
+        assert_equiv(eng, titles, true, bs, BroadStrategy::Columnar, true);
+        assert_equiv(eng, titles, true, bs, BroadStrategy::Columnar, false);
         // broad OFF: the batch wrapper must not perturb the selective lane.
-        assert_equiv(eng, titles, false, bs, BroadStrategy::Columnar);
+        assert_equiv(eng, titles, false, bs, BroadStrategy::Columnar, true);
         // Inline strategy (kill-switch) must also equal scalar.
-        assert_equiv(eng, titles, true, bs, BroadStrategy::Inline);
+        assert_equiv(eng, titles, true, bs, BroadStrategy::Inline, true);
     }
 }
 
@@ -164,6 +169,7 @@ fn batch_inline_equals_columnar() {
                 include_broad: true,
                 broad_batch_size: bs,
                 broad_strategy: BroadStrategy::Inline,
+                broad_materialize: true,
             },
         );
         let columnar = batch_result(
@@ -173,9 +179,30 @@ fn batch_inline_equals_columnar() {
                 include_broad: true,
                 broad_batch_size: bs,
                 broad_strategy: BroadStrategy::Columnar,
+                broad_materialize: true,
             },
         );
         assert_eq!(inline, columnar, "Inline != Columnar at batch_size {bs}");
+    }
+}
+
+#[test]
+fn batch_materialize_on_equals_off() {
+    // The pure-anchor materialization fast path is a kill-switch: turning it off
+    // forces those queries through full bitmap verification, which must yield
+    // byte-identical results (only slower). Independent of the scalar baseline.
+    let data = gen(0x11_1A7E, 12_000, 1_000, 0.25);
+    let eng = build_multi(&data);
+    for &bs in &[1usize, 64, 256, 999] {
+        let opts = |materialize| BatchMatchOptions {
+            include_broad: true,
+            broad_batch_size: bs,
+            broad_strategy: BroadStrategy::Columnar,
+            broad_materialize: materialize,
+        };
+        let on = batch_result(&eng, &data.titles, opts(true));
+        let off = batch_result(&eng, &data.titles, opts(false));
+        assert_eq!(on, off, "materialize on != off at batch_size {bs}");
     }
 }
 
@@ -197,8 +224,8 @@ fn batch_empty_and_singleton() {
 
     // Singleton batch equals scalar for that one title.
     let one = vec![data.titles[0].clone()];
-    assert_equiv(&eng, &one, true, 256, BroadStrategy::Columnar);
-    assert_equiv(&eng, &one, true, 1, BroadStrategy::Columnar);
+    assert_equiv(&eng, &one, true, 256, BroadStrategy::Columnar, true);
+    assert_equiv(&eng, &one, true, 1, BroadStrategy::Columnar, true);
 }
 
 #[test]
@@ -214,6 +241,7 @@ fn batch_size_never_changes_results() {
             include_broad: true,
             broad_batch_size: 256,
             broad_strategy: BroadStrategy::Columnar,
+            broad_materialize: true,
         },
     );
     for &bs in &[1usize, 3, 64, 65, 1000, 5000] {
@@ -224,6 +252,7 @@ fn batch_size_never_changes_results() {
                 include_broad: true,
                 broad_batch_size: bs,
                 broad_strategy: BroadStrategy::Columnar,
+                broad_materialize: true,
             },
         );
         assert_eq!(other, reference, "results changed at batch_size {bs}");

@@ -288,6 +288,7 @@ fn eval_one_segment<B: BroadBackend>(
     acc: &mut [u64],
     grp: &mut [u64],
     outs: &mut [Vec<u64>],
+    materialize: bool,
     stats: &mut MatchStats,
 ) {
     cands.clear();
@@ -315,7 +316,12 @@ fn eval_one_segment<B: BroadBackend>(
             if !backend.alive(local) {
                 continue;
             }
-            if backend.pure_anchor(local) {
+            // Pure-anchor fast path: emit straight from the anchor bitmap. When
+            // materialization is off, fall through to full verification — eval_into
+            // on a pure-anchor query computes the same bitmap (its mask gate alone
+            // selects exactly the titles containing the anchor), so results are
+            // identical, just slower.
+            if materialize && backend.pure_anchor(local) {
                 let logical = backend.logical_id(local);
                 for_each_set_bit(fbits, |ti| outs[ti].push(logical));
             } else {
@@ -462,6 +468,7 @@ fn match_batch_chunk(
     } = bs;
     let acc: &mut [u64] = &mut acc[..words];
     let grp: &mut [u64] = &mut grp[..words];
+    let materialize = opts.broad_materialize;
 
     for (si, base) in view.segments.iter().enumerate() {
         *broad_epoch = (*broad_epoch).wrapping_add(1);
@@ -490,6 +497,7 @@ fn match_batch_chunk(
                 acc,
                 grp,
                 outs,
+                materialize,
                 stats,
             ),
             BaseSegment::Mmap(m) => eval_one_segment(
@@ -506,6 +514,7 @@ fn match_batch_chunk(
                 acc,
                 grp,
                 outs,
+                materialize,
                 stats,
             ),
         }
@@ -537,6 +546,7 @@ fn match_batch_chunk(
             acc,
             grp,
             outs,
+            materialize,
             stats,
         );
     }

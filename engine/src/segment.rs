@@ -99,6 +99,12 @@ pub struct BatchMatchOptions {
     pub broad_batch_size: usize,
     /// Columnar (new) vs Inline (original per-title broad) — the kill-switch.
     pub broad_strategy: BroadStrategy,
+    /// Use the pure-anchor materialization fast path (emit pure-anchor broad
+    /// queries straight from the anchor's title bitmap, skipping verification).
+    /// When false, those queries go through full bitmap verification instead —
+    /// identical results, slower. A kill-switch for the optimization; only
+    /// consulted on the [`BroadStrategy::Columnar`] path.
+    pub broad_materialize: bool,
 }
 
 impl Default for BatchMatchOptions {
@@ -107,6 +113,7 @@ impl Default for BatchMatchOptions {
             include_broad: false,
             broad_batch_size: 256,
             broad_strategy: BroadStrategy::Columnar,
+            broad_materialize: true,
         }
     }
 }

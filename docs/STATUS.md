@@ -59,6 +59,14 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   (`SourceStore`, `sources.dat` v2 sorted index+blob+CRC, `EngineConfig::retain_source`); flat mmap'd
   logical-index columns (`.seg` v2, binary-searched, v1-reconstruct back-compat). Resident drops from
   ~148 → ~4.5 B/query (`retain_source=false`). Both formats keep v1 read paths; oracle unchanged.
+- **Broad-lane batch / columnar evaluation (ADR-026)** — the broad lane (`segment/broad_batch.rs`)
+  now runs once per title-batch instead of per-title: a per-batch inverted index (feature → title
+  bitmap), one probe per broad anchor per batch, and bitmap-algebra verification (`exact::eval_batch`,
+  the transpose of `verify`), plus a pure-anchor skip-verify fast path. Exposed as `match_titles_batch`
+  (Engine + snapshot) and `POST /_mpercolate` (ES `_msearch`-shaped). Byte-identical to the per-title
+  path (`tests/broad_batch.rs` + batch oracle); broad postings scanned amortize ~1/batch_size (29× at
+  256). Four dynamic knobs (`broad_batch_size`/`broad_columnar`/`broad_materialize`/`max_percolate_batch`)
+  + broad Prometheus counters; `broad_columnar=false` is the inline kill-switch.
 
 ## Measured
 
@@ -85,10 +93,15 @@ the selective candidate count further.
 
 ### Tier 1 — highest leverage (the measured bottlenecks)
 
-- **Broad-lane batch / columnar evaluation.** Class-C queries are classified and isolated today but
-  still evaluated per-title (~9× slower than selective). Specified design: batch/columnar scans over a
-  title batch + precomputed/materialized subscriptions for the broadest, metered to a higher cost
-  class. The single biggest matching-performance lever. ([`design/matching.md`](design/matching.md) §4.)
+- ~~**Broad-lane batch / columnar evaluation.**~~ **✅ Shipped (ADR-026).** The broad lane now runs
+  once per title-batch (columnar): per-batch feature→title inverted index, one probe per broad anchor
+  per batch, bitmap-algebra verification, and a pure-anchor skip-verify fast path (the
+  materialized-subscription analog). Exposed as `match_titles_batch` + `POST /_mpercolate`; byte-identical
+  to the per-title path; broad postings scanned amortize ~1/batch_size (29× at batch 256, ~2.4× end-to-end
+  throughput over the inline path). The "metered to a higher cost class" intent is satisfied by the new
+  broad `MatchStats`/Prometheus meters. The single biggest matching-performance lever — now resolved.
+  Remaining follow-ups: class-C ingest warnings/rewrite suggestions (its own feature), SIMD posting
+  intersection. ([`design/matching.md`](design/matching.md) §4; details in the Implemented section above.)
 - ~~**Memory: resident-footprint reduction.**~~ **✅ Shipped (ADR-020).** Phase-0 measurement showed
   resident RAM (once the SoA/index are mmap'd) is dominated by the **source store** (91 B/q) and the
   **reverse index** (53 B/q), *not* the dict. Both are now off-heap — lazy on-disk source store +

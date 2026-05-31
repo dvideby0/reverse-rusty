@@ -243,6 +243,7 @@ fn main() {
         include_broad: true,
         broad_batch_size: bs,
         broad_strategy: BroadStrategy::Columnar,
+        broad_materialize: true,
     };
     // Selective-only through the SAME batch path (broad off, same par_chunks
     // granularity) — the fair baseline for the broad lane's marginal cost (the
@@ -252,6 +253,7 @@ fn main() {
         include_broad: false,
         broad_batch_size: 256,
         broad_strategy: BroadStrategy::Columnar,
+        broad_materialize: true,
     };
     let _ = eng.match_titles_batch_stats(&data.titles, selective_batch); // warmup
     let tselb = Instant::now();
