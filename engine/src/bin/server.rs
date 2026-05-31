@@ -115,15 +115,15 @@ struct Cli {
     memtable_flush_threshold: usize,
 
     /// Maximum query string length in bytes.
-    #[arg(long, default_value_t = 10_000)]
+    #[arg(long, default_value_t = reverse_rusty::dsl::MAX_QUERY_LENGTH)]
     max_query_length: usize,
 
     /// Maximum number of clauses per query.
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = reverse_rusty::dsl::MAX_CLAUSES)]
     max_query_clauses: usize,
 
     /// Maximum members in an any-of group.
-    #[arg(long, default_value_t = 64)]
+    #[arg(long, default_value_t = reverse_rusty::dsl::MAX_ANY_OF_SIZE)]
     max_anyof_group_size: usize,
 
     /// Fsync the write-ahead log on every mutation before acknowledging it.

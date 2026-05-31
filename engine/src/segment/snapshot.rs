@@ -2,11 +2,12 @@
 //! lock-free read view and THE HOT PATH (`match_title` and the rayon-parallel
 //! batch matchers). Type definitions live in the `segment` module root.
 
-use super::{BaseSegment, EngineSnapshot, MatchScratch, MatchStats};
+use super::{BaseSegment, EngineSnapshot, MatchScratch, MatchStats, Segment};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
 use crate::vocab::Vocab;
+use std::sync::Arc;
 
 impl MatchScratch {
     pub fn new() -> Self {
@@ -18,16 +19,29 @@ impl MatchScratch {
         }
     }
 
-    /// Make sure we have one seen-buffer per segment, each at least as large as
-    /// that segment's length. Reuses existing allocations (steady-state: no-op).
-    pub(in crate::segment) fn ensure(&mut self, seg_lens: &[usize]) {
-        if self.seen.len() < seg_lens.len() {
-            self.seen.resize_with(seg_lens.len(), Vec::new);
+    /// Make sure we have one seen-buffer per segment (base segments first, then
+    /// the memtable last), each at least as large as that segment's length.
+    /// Reuses existing allocations (steady-state: no-op) and — unlike taking a
+    /// materialized `&[usize]` — allocates no per-call scratch on the hot path.
+    pub(in crate::segment) fn ensure(
+        &mut self,
+        segments: &[Arc<BaseSegment>],
+        memtable_len: usize,
+    ) {
+        let n = segments.len() + 1;
+        if self.seen.len() < n {
+            self.seen.resize_with(n, Vec::new);
         }
-        for (buf, &n) in self.seen.iter_mut().zip(seg_lens.iter()) {
-            if buf.len() < n {
-                buf.resize(n, 0);
+        for (buf, seg) in self.seen.iter_mut().zip(segments.iter()) {
+            let len = seg.len();
+            if buf.len() < len {
+                buf.resize(len, 0);
             }
+        }
+        // The memtable's seen-buffer is the last one (index `segments.len()`).
+        let mbuf = &mut self.seen[segments.len()];
+        if mbuf.len() < memtable_len {
+            mbuf.resize(memtable_len, 0);
         }
     }
 }
@@ -35,6 +49,103 @@ impl MatchScratch {
 impl Default for MatchScratch {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A borrowed view over the read-path state needed to match a title: the
+/// normalizer, dictionary, base segments, and memtable. Both the mutable
+/// [`Engine`](super::Engine) and an immutable [`EngineSnapshot`] expose exactly
+/// these four, so [`MatchView::match_title`] is the single hot-path body for
+/// both — there is no second copy to drift (a fix or new counter lands once).
+pub(in crate::segment) struct MatchView<'a> {
+    pub(in crate::segment) norm: &'a Normalizer,
+    pub(in crate::segment) dict: &'a Dict,
+    pub(in crate::segment) segments: &'a [Arc<BaseSegment>],
+    pub(in crate::segment) memtable: &'a Segment,
+}
+
+impl MatchView<'_> {
+    /// THE HOT PATH. Probe every base segment plus the memtable, union the
+    /// matched logical IDs into `out`, then dedup. `#[inline]` + monomorphic, so
+    /// each caller compiles to exactly the code it had when the body was
+    /// duplicated (no call overhead, no dynamic dispatch). Allocation-free:
+    /// scratch is reused via [`MatchScratch`].
+    #[inline]
+    pub(in crate::segment) fn match_title(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        out: &mut Vec<u64>,
+        include_broad: bool,
+    ) -> MatchStats {
+        // per-segment seen-buffer sizing (base segments first, memtable last)
+        let segments = self.segments;
+        let n_base = segments.len();
+        s.ensure(segments, self.memtable.len());
+
+        s.epoch = s.epoch.wrapping_add(1);
+        if s.epoch == 0 {
+            // epoch wrapped: reset all stamps
+            for buf in &mut s.seen {
+                for v in buf.iter_mut() {
+                    *v = 0;
+                }
+            }
+            s.epoch = 1;
+        }
+        let epoch = s.epoch;
+        out.clear();
+
+        // 1) normalize -> dense feature ids (sorted). Take the buffer out so we
+        // can iterate it while mutating `s.seen` (no aliasing, no allocation).
+        self.norm
+            .match_features(title, self.dict, &mut s.lc, &mut s.feats);
+        let feats = std::mem::take(&mut s.feats);
+
+        // 2) title common-mask word
+        let mut tmask = 0u64;
+        for &f in &feats {
+            let b = self.dict.mask_bit(f);
+            if b != crate::dict::NO_MASK_BIT {
+                tmask |= 1u64 << b;
+            }
+        }
+
+        let mut stats = MatchStats::default();
+
+        // 3) probe every base segment, each with its own seen buffer
+        for (i, base) in segments.iter().enumerate() {
+            base.match_into(
+                &feats,
+                tmask,
+                self.dict,
+                epoch,
+                &mut s.seen[i],
+                out,
+                include_broad,
+                &mut stats,
+            );
+        }
+        self.memtable.match_into(
+            &feats,
+            tmask,
+            self.dict,
+            epoch,
+            &mut s.seen[n_base],
+            out,
+            include_broad,
+            &mut stats,
+        );
+
+        // 4) dedup logical ids across segments (a logical id can live in more
+        // than one segment, e.g. base + an updated copy in a later segment).
+        out.sort_unstable();
+        out.dedup();
+
+        // restore the reusable buffer
+        s.feats = feats;
+        stats.matches = out.len() as u32;
+        stats
     }
 }
 
@@ -199,8 +310,10 @@ impl EngineSnapshot {
     }
 
     /// THE HOT PATH. Match one title against the snapshot, appending matched
-    /// logical IDs to `out`. Identical semantics to [`Engine::match_title`] but
-    /// operates on an immutable snapshot without holding any lock.
+    /// logical IDs to `out`. Identical semantics to [`Engine::match_title`]:
+    /// both build a [`MatchView`] over their read-path state and call its
+    /// `match_title`, so the engine and snapshot paths share one body and cannot
+    /// drift.
     pub fn match_title(
         &self,
         title: &str,
@@ -208,69 +321,13 @@ impl EngineSnapshot {
         out: &mut Vec<u64>,
         include_broad: bool,
     ) -> MatchStats {
-        let n_base = self.segments.len();
-        let mut seg_lens: Vec<usize> = Vec::with_capacity(n_base + 1);
-        for seg in &self.segments {
-            seg_lens.push(seg.len());
+        MatchView {
+            norm: &self.norm,
+            dict: &self.dict,
+            segments: &self.segments,
+            memtable: &self.memtable,
         }
-        seg_lens.push(self.memtable.len());
-        s.ensure(&seg_lens);
-
-        s.epoch = s.epoch.wrapping_add(1);
-        if s.epoch == 0 {
-            for buf in &mut s.seen {
-                for v in buf.iter_mut() {
-                    *v = 0;
-                }
-            }
-            s.epoch = 1;
-        }
-        let epoch = s.epoch;
-        out.clear();
-
-        self.norm
-            .match_features(title, &self.dict, &mut s.lc, &mut s.feats);
-        let feats = std::mem::take(&mut s.feats);
-
-        let mut tmask = 0u64;
-        for &f in &feats {
-            let b = self.dict.mask_bit(f);
-            if b != crate::dict::NO_MASK_BIT {
-                tmask |= 1u64 << b;
-            }
-        }
-
-        let mut stats = MatchStats::default();
-
-        for (i, base) in self.segments.iter().enumerate() {
-            base.match_into(
-                &feats,
-                tmask,
-                &self.dict,
-                epoch,
-                &mut s.seen[i],
-                out,
-                include_broad,
-                &mut stats,
-            );
-        }
-        self.memtable.match_into(
-            &feats,
-            tmask,
-            &self.dict,
-            epoch,
-            &mut s.seen[n_base],
-            out,
-            include_broad,
-            &mut stats,
-        );
-
-        out.sort_unstable();
-        out.dedup();
-
-        s.feats = feats;
-        stats.matches = out.len() as u32;
-        stats
+        .match_title(title, s, out, include_broad)
     }
 
     /// Parallel matching on the snapshot.

@@ -49,13 +49,14 @@ impl Engine {
         let mut report = IngestReport::default();
         let mut lc = String::new();
         let mut extracted: Vec<(u64, Extracted, &str)> = Vec::with_capacity(queries.len());
+        let limits = self.config.parse_limits();
 
         // Pass A — intern features + bump frequencies. Take a single copy-on-write
         // handle to the dict for the whole pass (clones at most once if shared).
         {
             let dict = Arc::make_mut(&mut self.dict);
             for (logical, text) in queries {
-                if let Ok(ast) = crate::dsl::parse(text) {
+                if let Ok(ast) = crate::dsl::parse_with_limits(text, &limits) {
                     let ex = extract(&ast, &self.norm, dict, &mut lc);
                     extracted.push((*logical, ex, text));
                 } else {
@@ -138,8 +139,10 @@ impl Engine {
         version: u32,
     ) -> Result<InsertOutcome, crate::error::WriteError> {
         // Parse first: a malformed query is a caller error and must never reach
-        // the WAL (it carries no replayable mutation).
-        let ast = crate::dsl::parse(text).map_err(crate::error::WriteError::Parse)?;
+        // the WAL (it carries no replayable mutation). Enforce the configured
+        // complexity limits here, at the front door.
+        let ast = crate::dsl::parse_with_limits(text, &self.config.parse_limits())
+            .map_err(crate::error::WriteError::Parse)?;
         // WAL FIRST (durability before visibility). If the append fails the
         // mutation is not durable, so reject it and leave in-memory state
         // untouched rather than acknowledge a write a crash would lose.
@@ -314,10 +317,11 @@ impl Engine {
         let mut lc = String::new();
         let mut extracted: Vec<(usize, u64, Extracted, &str)> = Vec::with_capacity(queries.len());
         let mut item_status: Vec<IngestItemStatus> = Vec::with_capacity(queries.len());
+        let limits = self.config.parse_limits();
         {
             let dict = Arc::make_mut(&mut self.dict);
             for (idx, (logical, text)) in queries.iter().enumerate() {
-                match crate::dsl::parse(text) {
+                match crate::dsl::parse_with_limits(text, &limits) {
                     Ok(ast) => {
                         let ex = extract(&ast, &self.norm, dict, &mut lc);
                         extracted.push((idx, *logical, ex, text));
@@ -358,6 +362,12 @@ impl Engine {
     }
 
     /// Replay an insert from WAL recovery (does NOT write back to WAL).
+    ///
+    /// Replay uses the default (compiled-in) parse ceiling, NOT the configured
+    /// `parse_limits()`: a WAL entry was already accepted at its front-door write,
+    /// so re-applying a (possibly since-tightened) limit here could silently drop
+    /// an already-acknowledged write and diverge the recovered state from the log.
+    /// The compiled-in ceiling still bounds resource use during replay.
     pub(in crate::segment) fn replay_insert(&mut self, text: &str, logical: u64, version: u32) {
         if let Ok(ast) = crate::dsl::parse(text) {
             let mut lc = String::new();

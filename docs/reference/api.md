@@ -30,7 +30,7 @@ Options:
 | `--slow-query-threshold-ms` | 1000 | Log searches exceeding this at `warn` level (0 disables) |
 | `--max-segments` | 8 | Max base segments before compaction triggers |
 | `--memtable-flush-threshold` | 100000 | Memtable entries before auto-flush |
-| `--max-query-length` | 10000 | Maximum query string length in bytes |
+| `--max-query-length` | 10240 | Maximum query string length in bytes (10 KiB) |
 | `--max-query-clauses` | 256 | Maximum clauses per query |
 | `--max-anyof-group-size` | 64 | Maximum members in an any-of group |
 | `--retain-source` | true | Keep query source text resident; set `false` to store it on disk and fetch `_source`/explain lazily (large memory saving at scale — ADR-020) |
@@ -496,7 +496,7 @@ curl localhost:9200/_settings
     "data_dir": null,
     "wal_sync_on_write": false,
     "retain_source": true,
-    "max_query_length": 10000,
+    "max_query_length": 10240,
     "max_query_clauses": 256,
     "max_anyof_group_size": 64,
     "compaction_fixed_cost": 1000.0
@@ -532,6 +532,11 @@ curl -X PUT localhost:9200/_settings \
   `max_query_clauses`, `max_anyof_group_size`, `holes_ratio_threshold`, `compaction_fixed_cost`,
   `auto_compact_on_flush`, `auto_compact_on_ingest`.
 - **Static (startup only):** `data_dir`, `wal_sync_on_write`, `retain_source`.
+
+The query-complexity limits (`max_query_length`, `max_query_clauses`, `max_anyof_group_size`) are
+enforced by the parser on every ingest path; a change applies to **subsequent** ingests, not
+retroactively, and WAL replay on recovery uses the compiled-in ceiling rather than the live limit so a
+tightened limit never drops an already-acknowledged write (ADR-025).
 
 Attempting to set a static or unknown key returns `400`:
 
