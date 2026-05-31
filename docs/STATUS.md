@@ -77,7 +77,10 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   `compile::anchor_plan` (refactored out of `build_signatures`, byte-identical) is the placement SSOT.
   Proven by `tests/cluster_oracle.rs`: cluster ≡ single-node ≡ independent brute-force oracle across
   K∈{1,3,8,16} × broad on/off, zero false negatives / false positives, every placement class + small
-  fan-out asserted. This is build-path steps 1–2; the distributed layers remain design-only (see Tier 3).
+  fan-out asserted. This is build-path steps 1–2 plus step 1's gRPC transport (ADR-029): behind the
+  off-by-default `distributed` feature a `ShardServer` + gRPC `RemoteShard` carry a shard over the
+  network — proven by `tests/cluster_grpc_oracle.rs` (gRPC cluster ≡ single-node ≡ brute, broad on/off).
+  The remaining distributed layers stay design-only (see Tier 3).
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §3/§7/§10.)
 
 ## Measured
@@ -138,11 +141,13 @@ the selective candidate count further.
 
 - **Feature-model versioning + blue/green re-materialize.** Frozen common-mask across minor versions;
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
-- **Clustering.** The 100M-query horizontal-scale story. **In-process core (build-path steps 1–2) is
-  built and oracle-proven** — consistent-hash entity-anchor sharding + content routing + a designated
-  broad-lane replicated shard, over K shards in one process (ADR-027; see Implemented above). **Still
-  design-only:** the distributed layers — gRPC `ShardServer`, durable externalized mutation log,
-  Raft quorum cluster-manager, object-store segments, autoscaling, auto-split, and replicate-broad-to-all.
+- **Clustering.** The 100M-query horizontal-scale story. **In-process core (build-path steps 1–2) plus
+  step 1's gRPC transport are built and oracle-proven** — consistent-hash entity-anchor sharding +
+  content routing + a designated broad-lane replicated shard over K shards in one process (ADR-027), and
+  a `distributed`-gated gRPC `ShardServer` + `RemoteShard` so a shard can be remote (ADR-029; see
+  Implemented above). **Still design-only:** the remaining distributed layers — a durable externalized
+  mutation log, Raft quorum cluster-manager, object-store segments, cross-node dict shipping, autoscaling,
+  auto-split, replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
@@ -260,9 +265,10 @@ from the audit's former P3 list). Roughly grouped:
 
 ## Current limitations
 
-- **Single-node deployment.** The in-process multi-shard core is built (ADR-027), but it runs K shards
-  in *one* process. Multi-node deployment (gRPC, durable shared log, Raft, object storage, autoscaling)
-  is designed but not built — see Tier 3 above.
+- **Single-node deployment.** The multi-shard core (ADR-027) and the gRPC `ShardServer`/`RemoteShard`
+  transport (ADR-029) are built — the `distributed` feature can already run a coordinator over remote
+  shards (on localhost today). A full multi-node deployment — a durable shared log, Raft cluster-manager,
+  object storage, cross-node dict shipping, and autoscaling — is designed but not built; see Tier 3.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
   runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving it from the corpus is the
   NPMI-wiring item in Tier 2.

@@ -1,24 +1,40 @@
-//! In-process multi-shard core — clustering build-path steps 1–2.
+//! Multi-shard core — clustering build-path steps 1–2 plus step 1's gRPC transport.
 //!
 //! Design: docs/design/clustering-and-scaling.md (§3 sharding model, §7 broad
-//! queries, §10 build path). Status: the FIRST, dependency-free step of the
-//! clustering roadmap — a consistent-hash ring + content-routing coordinator over
-//! K shards in ONE process, validated by a multi-shard differential oracle
-//! (`tests/cluster_oracle.rs`). gRPC, a durable externalized log, Raft, object
-//! storage, autoscaling, and auto-split are deferred to later steps.
+//! queries, §10 build path). The dependency-free heart — a consistent-hash ring +
+//! content-routing coordinator over K shards, validated by a multi-shard differential
+//! oracle (`tests/cluster_oracle.rs`) — runs in ONE process. Behind the off-by-default
+//! `distributed` feature, the [`Shard`](shard::Shard) seam also has a gRPC
+//! implementation: [`ShardServer`] serves one shard, and a [`RemoteShard`] client lets
+//! the coordinator drive a shard across the network ([`ClusterEngine::connect_remote`]).
+//! A durable externalized log, Raft, object storage, autoscaling, and auto-split
+//! remain later steps.
 //!
 //! Correctness rests on a single decision: the coordinator owns ONE authoritative
 //! [`Dict`](crate::dict::Dict), built over the whole corpus and then frozen and
-//! shared read-only into every shard. With one feature space, `FeatureId`s,
-//! `sig_key`s, and hotness are globally consistent, so a shard's internal indexing
-//! matches the coordinator's placement decision by construction — and the
-//! cross-shard cover stays lossless (zero false negatives). See
-//! [`coordinator`] for the placement/routing rules and the no-false-negative
-//! argument.
+//! shared read-only into every shard (the same `Arc<Dict>` in-process; a byte-identical
+//! copy per node when remote). With one feature space, `FeatureId`s, `sig_key`s, and
+//! hotness are globally consistent, so a shard's internal indexing matches the
+//! coordinator's placement decision by construction — and the cross-shard cover stays
+//! lossless (zero false negatives). See [`coordinator`] for the placement/routing rules
+//! and the no-false-negative argument.
 
 mod coordinator;
 mod ring;
 mod shard;
 
+#[cfg(feature = "distributed")]
+mod proto;
+#[cfg(feature = "distributed")]
+mod remote;
+#[cfg(feature = "distributed")]
+mod server;
+
 pub use coordinator::{AddOutcome, ClusterConfig, ClusterEngine};
 pub use ring::{HashRing, DEFAULT_VNODES};
+pub use shard::ShardError;
+
+#[cfg(feature = "distributed")]
+pub use remote::RemoteShard;
+#[cfg(feature = "distributed")]
+pub use server::ShardServer;

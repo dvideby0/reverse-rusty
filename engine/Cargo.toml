@@ -11,6 +11,13 @@ license = "MIT"
 # this local crate regardless, and "MIT" is allow-listed in deny.toml anyway.
 publish = false
 
+# `engine` is the workspace root package; `grpc` is the generated gRPC proto crate
+# (reverse-rusty-shard-proto), pulled in only under the `distributed` feature. The
+# root package + every documented command stay unchanged — the member is built only
+# when something activates the optional dependency on it.
+[workspace]
+members = ["grpc"]
+
 [dependencies]
 # ---- Core library (always compiled; this is the lean `--no-default-features` build) ----
 daachorse = "3"
@@ -45,6 +52,13 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 # choice, not a security workaround.)
 prometheus = { version = "0.14", default-features = false, optional = true }
 
+# ---- Distributed: gRPC ShardServer / RemoteShard (behind the `distributed` feature; ADR-029) ----
+# The generated proto crate is the workspace member `grpc/`; `tonic` is the runtime.
+# Off by default — pulls in the tonic/hyper/tokio-net stack only when enabled, so the
+# lean core and the standard server build never compile it.
+reverse-rusty-shard-proto = { path = "grpc", optional = true }
+tonic = { version = "0.14", optional = true }
+
 [features]
 # Default-on so every documented command (`cargo build --release`,
 # `cargo run --release --bin server`, `cargo test --release`) behaves exactly as
@@ -62,6 +76,11 @@ server = [
     "dep:tracing-subscriber",
     "dep:prometheus",
 ]
+# gRPC shard transport (ADR-029): the generated proto crate + tonic + tokio's `net`
+# stack. Off by default, so neither the lean core nor the standard server build sees
+# it. `dep:tokio` re-enables tokio (optional since the lean split) with its declared
+# features; `tokio/net` adds the socket support tonic's transport needs.
+distributed = ["dep:reverse-rusty-shard-proto", "dep:tonic", "dep:tokio", "tokio/net"]
 
 [[bin]]
 name = "bench"
@@ -94,6 +113,13 @@ path = "src/bin/server.rs"
 # so it only builds when the `server` feature is on. Under `--no-default-features`
 # Cargo skips this bin (its `use axum::…` etc. never compile).
 required-features = ["server"]
+
+[[bin]]
+name = "shardserver"
+path = "src/bin/shardserver.rs"
+# A deployable shard node: serves ShardService over gRPC. Builds only with the
+# `distributed` feature (and its tonic/proto deps).
+required-features = ["distributed"]
 
 [profile.release]
 opt-level = 3

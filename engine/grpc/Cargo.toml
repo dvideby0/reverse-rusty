@@ -1,0 +1,20 @@
+[package]
+name = "reverse-rusty-shard-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Generated gRPC ShardService (protobuf messages + tonic client/server) for reverse-rusty's distributed shard transport. Compiled only when the engine's `distributed` feature pulls it in."
+license = "MIT"
+publish = false
+
+[dependencies]
+# tonic default features include `transport` (server + channel/client), plaintext —
+# TLS is a separate opt-in feature we deliberately do NOT enable (no ring/openssl).
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+
+[build-dependencies]
+# Pure-Rust protobuf compiler — no system `protoc` needed in dev or CI. `protox`
+# produces a FileDescriptorSet that tonic-prost-build turns into client+server code.
+tonic-prost-build = "0.14"
+protox = "0.9"

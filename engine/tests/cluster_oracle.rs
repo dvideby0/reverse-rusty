@@ -176,7 +176,7 @@ fn cluster_matches_single_node_and_oracle() {
         assert_eq!(cluster.num_shards(), k);
 
         // Every placement branch is exercised (A, B, C all present).
-        let cc = cluster.class_counts();
+        let cc = cluster.class_counts().unwrap();
         assert!(cc[0] > 0, "K={k}: no class-A queries");
         assert!(
             cc[1] > 0,
@@ -185,7 +185,7 @@ fn cluster_matches_single_node_and_oracle() {
         assert!(cc[2] > 0, "K={k}: no class-C (broad) queries");
 
         for (i, title) in titles.iter().enumerate() {
-            let got: HashSet<u64> = cluster.percolate(title).into_iter().collect();
+            let got: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
             assert_eq!(
                 got, oracle[i],
                 "K={k} broad=on: cluster vs brute-force oracle on {title:?}"
@@ -199,6 +199,7 @@ fn cluster_matches_single_node_and_oracle() {
             // exclude class-C broad matches; class-B-arity-2 stays in the main lane).
             let got_sel: HashSet<u64> = cluster
                 .percolate_with_broad(title, false)
+                .unwrap()
                 .into_iter()
                 .collect();
             assert_eq!(
@@ -223,7 +224,7 @@ fn single_shard_cluster_equals_single_node_engine() {
     let mut s = MatchScratch::new();
     let mut out = Vec::new();
     for title in &titles {
-        let got: HashSet<u64> = cluster.percolate(title).into_iter().collect();
+        let got: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
         reference.match_title(title, &mut s, &mut out, true);
         let want: HashSet<u64> = out.iter().copied().collect();
         assert_eq!(got, want, "K=1 must reduce to the single-node engine");
@@ -246,7 +247,10 @@ fn placement_by_cost_class() {
     };
 
     // class A: a rare anchor -> exactly one selective shard.
-    match cluster.add_query(next(), "1994 upper deck rareplayer0") {
+    match cluster
+        .add_query(next(), "1994 upper deck rareplayer0")
+        .unwrap()
+    {
         AddOutcome::Placed { shards } => {
             assert_eq!(shards.len(), 1, "class A should hit exactly one shard");
             assert!(shards[0] < 8);
@@ -256,20 +260,23 @@ fn placement_by_cost_class() {
 
     // class B arity-2: all-hot required, no rare anchor -> replicated lane.
     assert_eq!(
-        cluster.add_query(next(), "1994 upper deck"),
+        cluster.add_query(next(), "1994 upper deck").unwrap(),
         AddOutcome::Replicated,
         "all-hot {{year}} {{brand}} should be class-B arity-2 -> replicated lane"
     );
 
     // class C: a single hot anchor (broad) -> replicated lane.
     assert_eq!(
-        cluster.add_query(next(), "rookie"),
+        cluster.add_query(next(), "rookie").unwrap(),
         AddOutcome::Replicated,
         "broad single-hot anchor should be replicated"
     );
 
     // class B any-of: pure any-of of two rare players -> selective (1..=2 shards).
-    match cluster.add_query(next(), "(rareplayer0,rareplayer1000)") {
+    match cluster
+        .add_query(next(), "(rareplayer0,rareplayer1000)")
+        .unwrap()
+    {
         AddOutcome::Placed { shards } => {
             assert!(
                 (1..=2).contains(&shards.len()),
@@ -282,7 +289,7 @@ fn placement_by_cost_class() {
     // a malformed query is surfaced, not silently dropped.
     assert!(
         matches!(
-            cluster.add_query(next(), "((("),
+            cluster.add_query(next(), "(((").unwrap(),
             AddOutcome::RejectedParse(_)
         ),
         "malformed DSL should be RejectedParse"
@@ -304,8 +311,9 @@ fn anyof_query_can_place_on_multiple_shards() {
     let mut saw_two = false;
     for i in 0..150u64 {
         id += 1;
-        if let AddOutcome::Placed { shards } =
-            cluster.add_query(id, &format!("(rareplayer{i},rareplayer{})", i + 1000))
+        if let AddOutcome::Placed { shards } = cluster
+            .add_query(id, &format!("(rareplayer{i},rareplayer{})", i + 1000))
+            .unwrap()
         {
             if shards.len() == 2 {
                 saw_two = true;
@@ -363,7 +371,9 @@ fn add_then_percolate_then_remove_roundtrip() {
 
     let qid = 7_777_777u64;
     // class A: rare anchor (rareplayer0 is in the frozen dict via the any-of injection).
-    let placed = cluster.add_query(qid, "1994 upper deck rareplayer0");
+    let placed = cluster
+        .add_query(qid, "1994 upper deck rareplayer0")
+        .unwrap();
     assert!(
         matches!(placed, AddOutcome::Placed { .. }),
         "expected class-A Placed, got {placed:?}"
@@ -371,17 +381,17 @@ fn add_then_percolate_then_remove_roundtrip() {
 
     let title = "1994 upper deck rareplayer0 psa 10";
     assert!(
-        cluster.percolate(title).contains(&qid),
+        cluster.percolate(title).unwrap().contains(&qid),
         "a live-added query must match a title that satisfies it"
     );
 
-    let removed = cluster.remove_query(qid);
+    let removed = cluster.remove_query(qid).unwrap();
     assert!(
         removed >= 1,
         "remove_query should tombstone the holding shard's entry, got {removed}"
     );
     assert!(
-        !cluster.percolate(title).contains(&qid),
+        !cluster.percolate(title).unwrap().contains(&qid),
         "a removed query must no longer match"
     );
 }

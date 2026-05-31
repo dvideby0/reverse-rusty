@@ -69,7 +69,9 @@ history showed that cache-line blocked bloom was a better match for our 1-memory
   (`cargo build --no-default-features`) needs only `daachorse`, `memmap2`, `roaring`, `rayon`,
   `arc-swap` (snapshot reads), `serde`/`serde_json` (vocab/config/loader JSON); the rest are
   server/observability crates behind the default-on `server` feature ([ADR-028](docs/DECISIONS.md);
-  lean build enforced by a `check.sh` lane). **Versions are pinned in
+  lean build enforced by a `check.sh` lane). The optional `distributed` feature adds `tonic`/`prost`
+  (via the `engine/grpc/` workspace member) for the gRPC `ShardServer` ([ADR-029](docs/DECISIONS.md)).
+  **Versions are pinned in
   [`engine/Cargo.toml`](engine/Cargo.toml) — that file is authoritative; do not restate pins here** (it
   also documents the one default-feature exclusion — `prometheus`).
 - **Build:** `cd engine && export CARGO_TARGET_DIR=/tmp/reverse-rusty-target && cargo build --release`
@@ -82,6 +84,9 @@ history showed that cache-line blocked bloom was a better match for our 1-memory
 - **Benchmark:** `cargo run --release --bin bench -- [num_queries] [num_titles] [broad_frac] [skew] [seed]` (run-and-print; regression gate → [`docs/performance/benchmark-results.txt`](docs/performance/benchmark-results.txt))
 - **Server:** `cargo run --release --bin server -- [--port 9200] [--data-dir ./data] [--load-file queries.csv] ...`
   (all flags + endpoints: [`docs/reference/api.md`](docs/reference/api.md))
+- **Shard server (gRPC):** `cargo run --release --bin shardserver --features distributed -- [127.0.0.1:50051]`
+  — serves one shard's `ShardService`. The `distributed` feature (gRPC `ShardServer`/`RemoteShard`) is off
+  by default; its differential oracle runs under `cargo test --features distributed` (and the full `check.sh`).
 - **Build profile:** LTO, codegen-units=1, opt-level=3, panic=abort
 
 ## Architecture at a glance
@@ -117,7 +122,8 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/storage.rs` | Mmap'd segment file format: frozen hash tables, `MmapSegment`, `BaseSegment`, manifest, Dict serialization, query source persistence (`sources.dat`) | ADR-012, ADR-014 |
 | `src/wal.rs` | Write-ahead log: append-only CRC-framed entries, crash recovery replay | ADR-013 |
 | `src/segment.rs` + `src/segment/` | LSM engine (module). Root holds the shared type *defs* (`Engine`, `Segment`, `BaseSegment`, `EngineSnapshot`, `BatchMatchOptions`/`BroadStrategy`, report types); `impl` blocks split into submodules — `seg`/`base`/`snapshot` (the data/read types) and `lifecycle`/`ingest`/`compaction`/`matching`/`persistence`/`metrics` (the `Engine` controller), plus `broad_batch` (the columnar broad-lane batch evaluator behind `match_titles_batch`). Same responsibilities: memtable + flush + bulk_ingest + tombstones + compaction + auto-trigger policy + persistence. Submodule-internal helpers are `pub(in crate::segment)`. A `#[cfg(test)]` `wal_failure_tests` submodule holds WAL-failure integration tests for the write path. | [ingestion-and-updates.md](docs/design/ingestion-and-updates.md); broad lane → [matching.md](docs/design/matching.md) §4 |
-| `src/cluster.rs` + `src/cluster/` | In-process multi-shard core (module): `ClusterEngine` coordinator (placement + content routing + cross-shard merge), `HashRing` (consistent hash over anchor `FeatureId`), `Shard` (wraps an `Engine` + `ArcSwap<EngineSnapshot>`). One shared frozen dict across shards; class C / B-arity-2 → designated replicated lane (shard 0). Build path steps 1–2; dependency-free. | [clustering-and-scaling.md](docs/design/clustering-and-scaling.md) §3/§7/§10; ADR-027 |
+| `src/cluster.rs` + `src/cluster/` | Multi-shard core (module): `ClusterEngine` coordinator (placement + content routing + cross-shard merge), `HashRing` (consistent hash over anchor `FeatureId`), the local↔remote `trait Shard` seam + `LocalShard` (wraps an `Engine` + `ArcSwap<EngineSnapshot>`), `ShardError`. One shared frozen dict across shards; class C / B-arity-2 → designated replicated lane (shard 0). Behind the off-by-default `distributed` feature: `remote` (`RemoteShard` gRPC client, sync→async `block_on` bridge), `server` (`ShardServer`), `proto` (mappers over the generated crate) — build-path steps 1–2 + step 1's gRPC transport. | [clustering-and-scaling.md](docs/design/clustering-and-scaling.md) §3/§7/§10; ADR-027, ADR-029 |
+| `grpc/` (member `reverse-rusty-shard-proto`) | Workspace member holding the generated gRPC `ShardService` (protobuf messages + tonic client/server). Built only under `distributed`; codegen via pure-Rust `protox` in `build.rs` (no system `protoc`), nothing checked in. | ADR-029 |
 | `src/explain.rs` | Debug/explain tooling (first-class, not bolt-on) + structured `ExplainDetail` for API | [matching.md](docs/design/matching.md) §6 |
 | `src/gen.rs` | Synthetic data generator (deterministic, seeded) | — |
 | `src/vocab.rs` | Runtime vocabulary learning from query any-of groups, `Vocab` struct, JSON persistence | ADR-015 |
@@ -127,6 +133,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `tests/oracle.rs` | Differential correctness oracle (brute force vs engine; per-title AND batch path) | — |
 | `tests/broad_batch.rs` | Broad-lane batch≡scalar equivalence matrix (the load-bearing batch correctness deliverable) | [matching.md](docs/design/matching.md) §4 |
 | `tests/cluster_oracle.rs` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad on/off, all placement classes + fan-out asserted | ADR-027 |
+| `tests/cluster_grpc_oracle.rs` | gRPC differential oracle (feature `distributed`): K real `ShardServer`s on localhost, cluster-over-gRPC ≡ single-node ≡ brute + live add/percolate/remove RPCs | ADR-029 |
 | `tests/error_paths.rs` | API error handling regression tests | — |
 | `tests/persistence.rs` | Persistence tests: segment round-trip, WAL recovery, mmap compaction | — |
 | `tests/hardening_fixes.rs` | Integration tests: vocab epoch, fallible deser, reverse-index delete | — |
@@ -134,6 +141,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `tests/stress.rs` | Pressure/soak suite: mixed read/write/delete churn, par==seq under mutation; one `#[ignore]`d 10M-query soak | [testing.md](docs/testing.md) |
 | `src/bin/demo.rs` | Worked example end-to-end | — |
 | `src/bin/clusterdemo.rs` | Cluster worked example: per-class placement + content-routed fan-out | ADR-027 |
+| `src/bin/shardserver.rs` | Deployable shard node: serves `ShardService` over gRPC (feature `distributed`) | ADR-029 |
 | `src/bin/bench.rs` | Benchmark harness | — |
 | `src/bin/learn.rs` | Corpus feature learner (NPMI) | [corpus-feature-learning.md](docs/research/corpus-feature-learning.md) |
 | `src/bin/norm.rs` | Title introspection tool | — |
@@ -160,7 +168,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | "Why was it done this way?" / "why was X NOT built?" | [`docs/DECISIONS.md`](docs/DECISIONS.md) (ADR index; declined → ADR-019) |
 | Performance numbers / 100M extrapolation | [`docs/performance/results.md`](docs/performance/results.md); regression gate: `benchmark-results.txt` INVARIANTS |
 | Run/change tests, benchmarks, pressure tests, hooks, or CI | [`docs/testing.md`](docs/testing.md) (gate: `engine/check.sh`; CI: `.github/workflows/ci.yml`) |
-| Clustering / sharding / scale-out | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md); in-process core (steps 1–2) built → `src/cluster/`, [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-027 |
+| Clustering / sharding / scale-out | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md); in-process core (steps 1–2) + gRPC transport built → `src/cluster/`, `engine/grpc/`, [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-027 + ADR-029 |
 | Prior art (Lucene / ES / Tantivy) | [`docs/research/prior-art.md`](docs/research/prior-art.md) |
 | Dependency versions / why a crate | [`engine/Cargo.toml`](engine/Cargo.toml) |
 | Full docs index + where-new-info-goes rules | [`docs/README.md`](docs/README.md) |

@@ -12,8 +12,13 @@
 //! writes go through the read-only `*_extracted` paths so the shared `Arc<Dict>` is
 //! never forked.
 //!
-//! The remote implementation (`RemoteShard`, behind the `distributed` feature) lives
-//! in `super::remote` and satisfies the same trait by issuing gRPC calls.
+//! Every operation returns [`Result<_, ShardError>`]: a `LocalShard` is infallible
+//! (it always returns `Ok`), but a remote shard can fail on the wire. Surfacing that
+//! as an error — rather than swallowing it into an empty result — is load-bearing for
+//! the zero-false-negative contract: a dropped shard probe must fail the percolate,
+//! not silently shrink the answer. The remote implementation (`RemoteShard`, behind
+//! the `distributed` feature) lives in `super::remote` and satisfies the same trait
+//! by issuing gRPC calls.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -24,6 +29,27 @@ use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
 use crate::segment::{Engine, EngineSnapshot, IngestReport, MatchScratch, MatchStats};
+
+/// An error from a shard operation. In-process ([`LocalShard`]) operations are
+/// infallible and never produce this; a `RemoteShard` produces it on gRPC transport
+/// or status failure. Kept transport-agnostic (a `String` detail, not a
+/// `tonic::Status`) so it lives in the always-compiled core alongside the trait,
+/// rather than dragging the gated networking stack into the lean build.
+#[derive(Debug, Clone)]
+pub enum ShardError {
+    /// A remote shard was unreachable or returned an error status (detail included).
+    Remote(String),
+}
+
+impl std::fmt::Display for ShardError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShardError::Remote(m) => write!(f, "remote shard error: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for ShardError {}
 
 /// One shard, local or remote — the seam that lets a coordinator hold a mix of
 /// in-process and (eventually) networked shards behind one type.
@@ -41,16 +67,27 @@ use crate::segment::{Engine, EngineSnapshot, IngestReport, MatchScratch, MatchSt
 pub(crate) trait Shard: Send + Sync {
     // ---- reads ----
     /// Probe this shard for one title; returns matched logical ids + match stats.
-    fn percolate(&self, title: &str, include_broad: bool) -> (Vec<u64>, MatchStats);
+    fn percolate(
+        &self,
+        title: &str,
+        include_broad: bool,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError>;
     /// Physical query count held by this shard (a replicated/any-of query is counted
     /// once per local entry, so it is counted on each shard holding it).
-    fn num_queries(&self) -> usize;
+    fn num_queries(&self) -> Result<usize, ShardError>;
     /// Per-class entry tally `[A, B, C, D]` for this shard (introspection/tests).
-    fn class_counts(&self) -> [u64; 4];
+    fn class_counts(&self) -> Result<[u64; 4], ShardError>;
 
     // ---- writes ----
-    /// Bulk-ingest a pre-extracted bucket into a new immutable base segment.
-    fn ingest_extracted(&self, items: &[(u64, Extracted, String, u32)]) -> IngestReport;
+    /// Bulk-ingest a pre-extracted bucket into a new immutable base segment — the
+    /// distributed load path ([`crate::cluster::ClusterEngine::ingest`]). NOTE:
+    /// `ClusterEngine::build` does NOT use this; it ingests via the infallible inherent
+    /// [`LocalShard::ingest_local`] so that constructing an in-process cluster stays
+    /// infallible. This seam method is what lets the coordinator load a *remote* shard.
+    fn ingest_extracted(
+        &self,
+        items: &[(u64, Extracted, String, u32)],
+    ) -> Result<IngestReport, ShardError>;
     /// Insert one pre-extracted query into the memtable (live add).
     fn insert_extracted(
         &self,
@@ -58,12 +95,12 @@ pub(crate) trait Shard: Send + Sync {
         logical: u64,
         version: u32,
         text: &str,
-    ) -> Option<u32>;
+    ) -> Result<Option<u32>, ShardError>;
     /// Tombstone every live entry for `logical` (idempotent; a cheap no-op on a shard
     /// that doesn't hold it).
-    fn delete_by_logical_id(&self, logical: u64) -> usize;
+    fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError>;
     /// Seal the memtable into an immutable base segment.
-    fn flush(&self);
+    fn flush(&self) -> Result<(), ShardError>;
 }
 
 /// One in-process shard: owned engine for writes + lock-free snapshot for reads.
@@ -81,6 +118,16 @@ impl LocalShard {
             engine: Mutex::new(engine),
             snapshot,
         }
+    }
+
+    /// Bulk-ingest, infallibly — the build path uses this directly on a concrete
+    /// `LocalShard` (before boxing) so `ClusterEngine::build` stays infallible. The
+    /// trait's `ingest_extracted` is the `Result`-wrapped view of the same work.
+    pub(crate) fn ingest_local(&self, items: &[(u64, Extracted, String, u32)]) -> IngestReport {
+        let mut eng = self.lock();
+        let report = eng.ingest_extracted(items);
+        Self::publish(&eng, &self.snapshot);
+        report
     }
 
     /// Lock the engine, recovering the guard if a prior writer panicked: a poisoned
@@ -105,29 +152,34 @@ impl LocalShard {
 
 impl Shard for LocalShard {
     /// Verbatim the body of the coordinator's old `query_shard`: allocate scratch,
-    /// match one title against the lock-free snapshot, return ids + stats.
-    fn percolate(&self, title: &str, include_broad: bool) -> (Vec<u64>, MatchStats) {
+    /// match one title against the lock-free snapshot, return ids + stats. Infallible
+    /// — wrapped in `Ok` to satisfy the (remote-capable) trait.
+    fn percolate(
+        &self,
+        title: &str,
+        include_broad: bool,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         let mut scratch = MatchScratch::new();
         let mut out = Vec::new();
         let stats = self
             .snapshot()
             .match_title(title, &mut scratch, &mut out, include_broad);
-        (out, stats)
+        Ok((out, stats))
     }
 
-    fn num_queries(&self) -> usize {
-        self.snapshot.load().num_queries()
+    fn num_queries(&self) -> Result<usize, ShardError> {
+        Ok(self.snapshot.load().num_queries())
     }
 
-    fn class_counts(&self) -> [u64; 4] {
-        self.snapshot.load().class_counts()
+    fn class_counts(&self) -> Result<[u64; 4], ShardError> {
+        Ok(self.snapshot.load().class_counts())
     }
 
-    fn ingest_extracted(&self, items: &[(u64, Extracted, String, u32)]) -> IngestReport {
-        let mut eng = self.lock();
-        let report = eng.ingest_extracted(items);
-        Self::publish(&eng, &self.snapshot);
-        report
+    fn ingest_extracted(
+        &self,
+        items: &[(u64, Extracted, String, u32)],
+    ) -> Result<IngestReport, ShardError> {
+        Ok(self.ingest_local(items))
     }
 
     fn insert_extracted(
@@ -136,25 +188,26 @@ impl Shard for LocalShard {
         logical: u64,
         version: u32,
         text: &str,
-    ) -> Option<u32> {
+    ) -> Result<Option<u32>, ShardError> {
         let mut eng = self.lock();
         let out = eng.insert_extracted(ex, logical, version, text);
         Self::publish(&eng, &self.snapshot);
-        out
+        Ok(out)
     }
 
-    fn delete_by_logical_id(&self, logical: u64) -> usize {
+    fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
         let mut eng = self.lock();
         // In-memory shards have no WAL, so the delete never errors; `0` on the
         // impossible error rather than panicking.
         let n = eng.delete_by_logical_id(logical).unwrap_or(0);
         Self::publish(&eng, &self.snapshot);
-        n
+        Ok(n)
     }
 
-    fn flush(&self) {
+    fn flush(&self) -> Result<(), ShardError> {
         let mut eng = self.lock();
         eng.flush();
         Self::publish(&eng, &self.snapshot);
+        Ok(())
     }
 }

@@ -44,15 +44,15 @@ fn main() {
     };
     let cluster = ClusterEngine::build(norm, &ccfg, &queries);
 
-    let cc = cluster.class_counts();
+    let cc = cluster.class_counts().expect("class_counts (in-process)");
+    let total = cluster.num_queries().expect("num_queries (in-process)");
+    let per_shard = cluster
+        .shard_query_counts()
+        .expect("shard_query_counts (in-process)");
     println!("===== CLUSTER: {} shards =====", cluster.num_shards());
     println!(
-        "indexed {} physical entries (A={} B={} C={}); per-shard counts {:?}",
-        cluster.num_queries(),
-        cc[0],
-        cc[1],
-        cc[2],
-        cluster.shard_query_counts(),
+        "indexed {total} physical entries (A={} B={} C={}); per-shard counts {per_shard:?}",
+        cc[0], cc[1], cc[2],
     );
     println!("(class C + class-B-arity-2 concentrate on shard 0 — the replicated lane)");
 
@@ -66,7 +66,7 @@ fn main() {
     ];
     for (label, dsl) in examples {
         id += 1;
-        let outcome = cluster.add_query(id, dsl);
+        let outcome = cluster.add_query(id, dsl).expect("add_query (in-process)");
         let where_ = match &outcome {
             AddOutcome::Placed { shards } => format!("selective shard(s) {shards:?}"),
             AddOutcome::Replicated => "replicated lane (shard 0)".to_string(),
@@ -85,7 +85,9 @@ fn main() {
     ];
     for t in titles {
         let fanout = cluster.shard_fanout(t);
-        let (ids, stats) = cluster.percolate_with_stats(t);
+        let (ids, stats) = cluster
+            .percolate_with_stats(t)
+            .expect("percolate (in-process)");
         println!("  title {t:?}");
         println!(
             "    routed to shards {:?}  (fan-out {}/{}),  matched {} queries,  candidates examined {}",

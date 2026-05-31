@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+// gRPC transport for ONE reverse-rusty shard. The coordinator (client) owns
+// placement + content routing + cross-shard merge; the server is a dumb executor
+// of percolate / ingest / etc. over its `LocalShard`.
+//
+// The write path carries the raw query DSL (not pre-extracted feature ids) so the
+// wire stays dict-agnostic: the server re-compiles read-only against ITS OWN frozen
+// dict, exactly like in-process `ClusterEngine::add_query`. Raw `FeatureId`s would
+// only be valid if both sides' dicts were byte-identical; sending DSL fails loud
+// (a term absent from the server's dict is dropped) instead of corrupting matches.
+// See engine ADR-029.
+package reverse_rusty.shard.v1;
+
+service ShardService {
+  // ---- reads ----
+  rpc Percolate   (PercolateRequest) returns (PercolateReply);
+  rpc NumQueries  (Empty)            returns (CountReply);
+  rpc ClassCounts (Empty)            returns (ClassCountsReply);
+  // ---- writes ----
+  rpc IngestExtracted (IngestRequest) returns (IngestReply);
+  rpc InsertExtracted (InsertRequest) returns (InsertReply);
+  rpc Delete          (DeleteRequest) returns (DeleteReply);
+  rpc Flush           (FlushRequest)  returns (FlushReply);
+}
+
+message Empty {}
+
+message PercolateRequest {
+  string title = 1;
+  // ALREADY-RESOLVED per-shard broad toggle: the coordinator applies the
+  // "broad lane only on shard 0" rule (`include_broad && s == 0`) before sending.
+  bool include_broad = 2;
+}
+message PercolateReply {
+  repeated uint64 ids = 1;
+  MatchStats stats = 2;
+}
+
+// Field order pinned to engine `segment.rs` MatchStats (11 u32 fields). The
+// engine-side mapper in src/cluster/proto.rs converts field-by-field; keep in sync.
+message MatchStats {
+  uint32 unique_candidates       = 1;
+  uint32 postings_scanned        = 2;
+  uint32 broad_postings_scanned  = 3;
+  uint32 main_candidates         = 4;
+  uint32 broad_candidates        = 5;
+  uint32 matches                 = 6;
+  uint32 probes_attempted        = 7;
+  uint32 probes_skipped          = 8;
+  uint32 broad_queries_evaluated = 9;
+  uint32 broad_anchors_scanned   = 10;
+  uint32 broad_batches           = 11;
+}
+
+// One query to (re)compile on the server, identified by logical id. `dsl` is the
+// raw query DSL; `version` is the engine version tag (1 for in-process shards).
+message AddItem {
+  uint64 logical_id = 1;
+  string dsl = 2;
+  uint32 version = 3;
+}
+
+message IngestRequest { repeated AddItem items = 1; }
+// Mirrors engine IngestReport { ingested, rejected_parse, rejected_class_d }.
+message IngestReply {
+  uint64 ingested = 1;
+  uint64 rejected_parse = 2;
+  uint64 rejected_class_d = 3;
+}
+
+message InsertRequest { AddItem item = 1; }
+// Option<u32>: present => Some(local_id); !present => None (class-D rejection).
+message InsertReply {
+  bool present = 1;
+  uint32 local_id = 2;
+}
+
+message DeleteRequest { uint64 logical_id = 1; }
+message DeleteReply   { uint64 removed = 1; }  // # tombstones written (usize)
+
+message FlushRequest {}
+message FlushReply   {}
+
+message CountReply       { uint64 count = 1; }            // usize num_queries
+message ClassCountsReply { repeated uint64 counts = 1; }  // exactly 4: [A, B, C, D]

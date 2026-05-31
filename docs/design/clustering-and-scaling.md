@@ -11,9 +11,11 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 
 > **Implementation status:** The in-process multi-shard core (build-path §10 steps 1–2) is **built and
 > oracle-proven** — `src/cluster/` (ADR-027): entity-anchor sharding, content routing, and a designated
-> broad-lane shard over K shards in **one process**, dependency-free. Still design-only: the multi-node
-> layers — gRPC `ShardServer`, the durable shared mutation log, the Raft quorum, object-store segments,
-> and autoscaling/auto-split.
+> broad-lane shard over K shards in **one process**, dependency-free. Step 1's **gRPC transport is also
+> built** — a `ShardServer` + `RemoteShard` behind the off-by-default `distributed` feature (ADR-029),
+> proven by `tests/cluster_grpc_oracle.rs`. Still design-only: the remaining multi-node layers — the
+> durable shared mutation log, the Raft quorum, object-store segments, cross-node dict shipping, and
+> autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
@@ -239,9 +241,10 @@ without operator action. The defaults are the product.
 ---
 
 ## 10. Incremental build path from today's single-node engine
-1. **Wrap the current engine as a shard.** ✅ **Done in-process** (ADR-027): the `Shard` wrapper owns an
-   `Engine` + `ArcSwap<EngineSnapshot>` and exposes add/remove/percolate. *Remaining:* lift it behind a
-   `ShardServer` (gRPC) so a shard can be remote (the local↔remote `trait Shard` seam).
+1. **Wrap the current engine as a shard.** ✅ **Done** (ADR-027, ADR-029): the in-process `LocalShard`
+   owns an `Engine` + `ArcSwap<EngineSnapshot>`; the local↔remote `trait Shard` seam abstracts the
+   per-shard operation, and behind the `distributed` feature a gRPC `ShardServer` + `RemoteShard` lift it
+   onto the network (`ClusterEngine::connect_remote`), proven by `tests/cluster_grpc_oracle.rs`.
 2. **Add a coordinator** with the consistent-hash ring + content routing (§3) over K local shards in
    one process. ✅ **Done** (ADR-027): `cluster::ClusterEngine` + `HashRing` over anchor `FeatureId`,
    entity-anchor placement, a designated broad-lane shard (§7), cross-shard merge — validated by the
@@ -253,7 +256,7 @@ without operator action. The defaults are the product.
 6. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
-(Steps 1–2 — the in-process core — are built; ADR-027. The rest is design-only. See [`../STATUS.md`](../STATUS.md).)
+(Steps 1–2 — the in-process core — and step 1's gRPC transport are built; ADR-027 + ADR-029. Steps 3–5 are design-only. See [`../STATUS.md`](../STATUS.md).)
 
 ---
 
