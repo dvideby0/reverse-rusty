@@ -9,7 +9,10 @@ shares), [`matching.md`](matching.md) (the per-shard hot path), [`normalization.
 Read the [overview](README.md) for the correctness contract; the self-tuning draws on the feature model
 in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learning.md).*
 
-> **Implementation status:** Design-only — not yet coded. Reverse Rusty is single-node today.
+> **Implementation status:** Design-only — not yet coded. Reverse Rusty is single-node today. The
+> hashing variant (ring + virtual nodes) and the cross-shard correctness argument are now **decided** in
+> [`../DECISIONS.md`](../DECISIONS.md) ADR-027; prior art in
+> [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md).
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
@@ -55,6 +58,10 @@ That is the central idea; everything else is borrowed plumbing.
 ---
 
 ## 3. Sharding model — entity-anchor consistent hashing
+
+> **Decided (ADR-027):** the consistent-hash ring uses **virtual nodes**, keyed by the stable feature
+> token `fnv1a64(feature_name)`. The variant comparison (vs jump hash / rendezvous / Maglev) and the
+> rationale are in [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md) §1.
 
 **Placement.** Each compiled query is stored on the shard that owns its **anchor feature**:
 
@@ -235,6 +242,10 @@ without operator action. The defaults are the product.
 ---
 
 ## 10. Incremental build path from today's single-node engine
+
+> **Decided (ADR-027):** steps 1–2 (an in-process K-shard coordinator + content routing + the
+> differential oracle) are the committed first slice — no networking, no new dependencies — before
+> steps 3–5.
 1. **Wrap the current engine as a single shard** behind a `ShardServer` (gRPC): `add/remove/percolate`.
 2. **Add a coordinator** with the consistent-hash ring + content routing (§3) over K local shards in
    one process — validates routing/fan-out and the cross-shard correctness oracle.

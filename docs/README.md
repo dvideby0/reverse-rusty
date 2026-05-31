@@ -26,7 +26,7 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 ### Status & decisions
 - [`STATUS.md`](STATUS.md) — **what's built vs design-only**, the measured numbers in brief, and the
   prioritized roadmap. Read when asking "is X implemented?" or "what's next?".
-- [`DECISIONS.md`](DECISIONS.md) — the 24 ADRs (architecture decision records) with an index at the
+- [`DECISIONS.md`](DECISIONS.md) — the 27 ADRs (architecture decision records) with an index at the
   top. Read when asking "why was it done this way?" or "why was X *not* built?" (declined → ADR-019).
 - [`testing.md`](testing.md) — **how we test**: the suites, pressure/soak tests, benchmarks, the git
   hooks, and the CI pipeline. Read when running or changing tests, benchmarks, or the gate.
@@ -58,6 +58,8 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`research/README.md`](research/README.md) — index of the prior-art studies.
 - [`research/prior-art.md`](research/prior-art.md) — Lucene Monitor, ES/OS percolator, Tantivy,
   roaring, Aho-Corasick, set-containment joins.
+- [`research/clustering-prior-art.md`](research/clustering-prior-art.md) — consistent-hashing variants,
+  content-based routing, and the ES distributed-percolator contrast (clustering design; → ADR-027).
 - [`research/corpus-feature-learning.md`](research/corpus-feature-learning.md) — learning the feature
   extractor from the query corpus (NPMI).
 - [`research/real-data-findings.md`](research/real-data-findings.md) — testing the normalizer against
