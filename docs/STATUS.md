@@ -157,9 +157,11 @@ the selective candidate count further.
   entity-anchor sharding + content routing + a designated broad-lane replicated shard over K shards in one
   process (ADR-027), a `distributed`-gated gRPC `ShardServer` + `RemoteShard` so a shard can be remote
   (ADR-029), and an externalized single-node coordinator mutation log with crash-rebuild (ADR-031; all in
-  Implemented above). **Still design-only:** the remaining distributed layers — the *shared/Raft* mutation
-  log + object-store segments (step 3b), Raft quorum cluster-manager, cross-node dict shipping, autoscaling,
-  auto-split, replicate-broad-to-all, and TLS/auth.
+  Implemented above). The hashing-variant survey + the cross-shard correctness argument behind ADR-027 are
+  written up in [`research/clustering-prior-art.md`](research/clustering-prior-art.md). **Still design-only:**
+  the remaining distributed layers — the *shared/Raft* mutation log + object-store segments (step 3b), Raft
+  quorum cluster-manager, cross-node dict shipping, autoscaling, auto-split, replicate-broad-to-all, and
+  TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.

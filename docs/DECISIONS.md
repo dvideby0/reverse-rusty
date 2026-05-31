@@ -891,11 +891,16 @@ Find an ADR by its number in the records below. (Implementation status of each d
      index via the new non-mutating `Engine::ingest_extracted` / `insert_extracted` (which call
      `Segment::add_compiled`, read-only over the dict), so the `Arc` is never forked. This is the
      in-process model of the design's "feature-model version in cluster state" (§4.3/§8.7).
-  2. **Consistent-hash ring keyed on `FeatureId`** (not on `sig_key`). Safe *because* of the shared dict
-     (ids are globally stable), and it gives the design's true ~2–5 fan-out: a title routes on its few
-     rare features, not on the combinatorial set of probe-signatures it generates. (A `sig_key`-keyed
+  2. **Consistent-hash ring (virtual nodes) keyed on `FeatureId`** (not on `sig_key`). Safe *because* of
+     the shared dict (ids are globally stable), and it gives the design's true ~2–5 fan-out: a title routes
+     on its few rare features, not on the combinatorial set of probe-signatures it generates. (A `sig_key`-keyed
      ring would be correct but blow fan-out up to ~all shards for titles with several hot features.)
-     `ring_hash` = FNV-1a + a murmur3 finalizer; FNV alone clusters sequential ids and skews shard load.
+     `ring_hash` = FNV-1a + a murmur3 finalizer over the id (FNV alone clusters sequential ids and skews
+     shard load); virtual nodes balance shard load at small K. The prior-art survey
+     ([research/clustering-prior-art.md](research/clustering-prior-art.md) §1) compares ring+vnodes against
+     jump-hash / rendezvous / Maglev and the *feature-token* (`fnv1a64(feature_name)`) keying a per-shard-dict
+     design would require; the shared dict (sub-decision 1) lets us key on the integer id directly — simpler,
+     faster (no name re-hash on the routing path), and the shared dict is mandatory anyway.
   3. **`compile::anchor_plan` is the single source of truth for placement.** `build_signatures` was
      refactored to compute the pre-hash anchor feature *groups* and then hash them (byte-identical
      output — the existing oracle is the guard), so the coordinator places by anchor *identity* without
@@ -936,7 +941,9 @@ Find an ADR by its number in the records below. (Implementation status of each d
   replicate-broad-to-*all*-nodes (§7; in-process uses one designated evaluator), and incremental
   **new-vocabulary** adds (the dict is frozen post-build; `add_query` compiles read-only against it).
 - **See also:** the clustering design ([clustering-and-scaling.md](design/clustering-and-scaling.md) §3,
-  §7, §10), ADR-001 (semantic signatures — the anchor the ring hashes), ADR-003 (broad-query quarantine —
+  §7, §10) and the prior-art survey ([research/clustering-prior-art.md](research/clustering-prior-art.md) —
+  the hashing-variant comparison + the formal cross-shard correctness argument behind this ADR), ADR-001
+  (semantic signatures — the anchor the ring hashes), ADR-003 (broad-query quarantine —
   the lane that gets replicated), ADR-006 (forbidden never gates — preserved in placement + routing),
   ADR-016 (the lock-free snapshot each shard reads), the lossless-cover contract
   ([design/README.md](design/README.md) §2), `src/cluster/{ring,shard,coordinator}.rs`,

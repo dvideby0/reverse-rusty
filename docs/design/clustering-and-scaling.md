@@ -15,9 +15,10 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > built** — a `ShardServer` + `RemoteShard` behind the off-by-default `distributed` feature (ADR-029),
 > proven by `tests/cluster_grpc_oracle.rs`. **Step 3a — a durable single-node coordinator mutation log**
 > (`trait ClusterLog` + crash-rebuild via `ClusterEngine::open`) — **is built** (ADR-031), proven by
-> `tests/cluster_durability_oracle.rs`. Still design-only: the remaining multi-node layers — the
-> *shared/Raft* mutation log, the Raft quorum, object-store segments, cross-node dict shipping, and
-> autoscaling/auto-split.
+> `tests/cluster_durability_oracle.rs`. The prior-art survey + the locked hashing-variant/correctness
+> rationale behind ADR-027 are in [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md).
+> Still design-only: the remaining multi-node layers — the *shared/Raft* mutation log, the Raft quorum,
+> object-store segments, cross-node dict shipping, and autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
@@ -63,6 +64,12 @@ That is the central idea; everything else is borrowed plumbing.
 ---
 
 ## 3. Sharding model — entity-anchor consistent hashing
+
+> **Decided (ADR-027), as built:** the consistent-hash ring uses **virtual nodes** and is keyed on the
+> **globally-stable `FeatureId`** — the one shared frozen dict (ADR-027) makes integer ids identical across
+> shards, so the ring keys on the id directly instead of re-hashing the feature *token* `fnv1a64(feature_name)`
+> a per-shard-dict design would have needed. The variant comparison (token-vs-id; ring+vnodes vs jump hash /
+> rendezvous / Maglev) and the rationale are in [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md) §1.
 
 **Placement.** Each compiled query is stored on the shard that owns its **anchor feature**:
 
