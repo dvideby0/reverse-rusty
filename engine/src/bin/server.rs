@@ -4,6 +4,7 @@
 //!   PUT  /_doc/{id}          Register a query (body: {"query": "..."})
 //!   DELETE /_doc/{id}        Remove a stored query
 //!   POST /_search            Percolate title(s) (body: {"document": {"title": "..."}} or "documents")
+//!   POST /_mpercolate        Batch percolate (body: {"documents":[...]}, responses[] envelope)
 //!   POST /_bulk              NDJSON bulk ingest ({action}\n{source}\n...)
 //!   POST /_flush             Flush memtable to immutable segment
 //!   POST /_compact           Force compaction
@@ -56,7 +57,10 @@ use reverse_rusty::config::EngineConfig;
 use reverse_rusty::events::{EngineEvent, SegmentInfo};
 use reverse_rusty::loader;
 use reverse_rusty::normalize::Normalizer;
-use reverse_rusty::segment::{Engine, EngineSnapshot, IngestItemStatus, MatchScratch, MatchStats};
+use reverse_rusty::segment::{
+    BatchMatchOptions, BroadStrategy, Engine, EngineSnapshot, IngestItemStatus, MatchScratch,
+    MatchStats,
+};
 
 thread_local! {
     static SCRATCH: RefCell<MatchScratch> = RefCell::new(MatchScratch::new());
@@ -66,6 +70,9 @@ thread_local! {
 // CLI
 // ---------------------------------------------------------------------------
 
+// CLI flags are naturally a flat bag of independent toggles (mirroring the
+// EngineConfig knobs); grouping the bools into sub-structs would not help.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Parser, Debug)]
 #[command(name = "reverse-rusty-server", about = "Reverse Rusty HTTP server")]
 struct Cli {
@@ -143,6 +150,29 @@ struct Cli {
     /// `_source`/explain lookup (never the match hot path). See ADR-020.
     #[arg(long, default_value_t = true)]
     retain_source: bool,
+
+    /// Title sub-batch size for the columnar broad lane on `POST /_mpercolate`
+    /// (ADR-026). Larger amortizes broad-posting scans over more titles. Dynamic
+    /// via `PUT /_settings`.
+    #[arg(long, default_value_t = 256)]
+    broad_batch_size: usize,
+
+    /// Use the columnar broad evaluator (once per batch). Set false to fall back
+    /// to the inline per-title broad probe — the kill-switch (identical results,
+    /// no amortization). Dynamic via `PUT /_settings`.
+    #[arg(long, default_value_t = true)]
+    broad_columnar: bool,
+
+    /// Use the pure-anchor materialization fast path (emit pure-anchor broad
+    /// queries straight from the anchor bitmap, skipping verification). Dynamic
+    /// via `PUT /_settings`.
+    #[arg(long, default_value_t = true)]
+    broad_materialize: bool,
+
+    /// Maximum documents accepted in one `POST /_mpercolate` batch; larger
+    /// requests are rejected with 400. Dynamic via `PUT /_settings`.
+    #[arg(long, default_value_t = 10_000)]
+    max_percolate_batch: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +216,14 @@ struct PrometheusMetrics {
     // Match metrics
     match_candidates_per_title: Histogram,
     match_results_per_title: Histogram,
+
+    // Broad-lane batch metrics (POST /_mpercolate columnar evaluation, ADR-026).
+    // Cumulative across requests; the amortization shows as broad_postings_scanned
+    // rising far slower than broad_candidates as batch size grows.
+    broad_batches_total: IntCounter,
+    broad_postings_scanned_total: IntCounter,
+    broad_queries_evaluated_total: IntCounter,
+    broad_candidates_total: IntCounter,
 
     // Slow query counter
     slow_queries_total: IntCounter,
@@ -363,6 +401,32 @@ impl PrometheusMetrics {
         ))
         .unwrap();
 
+        // --- Broad-lane batch metrics (POST /_mpercolate) ---
+
+        let broad_batches_total = IntCounter::with_opts(Opts::new(
+            "broad_batches_total",
+            "Broad-lane sub-batches (title chunks) evaluated columnar",
+        ))
+        .unwrap();
+
+        let broad_postings_scanned_total = IntCounter::with_opts(Opts::new(
+            "broad_postings_scanned_total",
+            "Broad posting entries scanned (the quantity batch evaluation amortizes)",
+        ))
+        .unwrap();
+
+        let broad_queries_evaluated_total = IntCounter::with_opts(Opts::new(
+            "broad_queries_evaluated_total",
+            "Broad queries exact-checked via bitmap evaluation (non pure-anchor)",
+        ))
+        .unwrap();
+
+        let broad_candidates_total = IntCounter::with_opts(Opts::new(
+            "broad_candidates_total",
+            "Broad-lane candidate queries retrieved across batches",
+        ))
+        .unwrap();
+
         // Register all
         registry.register(Box::new(total_queries.clone())).unwrap();
         registry.register(Box::new(base_segments.clone())).unwrap();
@@ -407,6 +471,18 @@ impl PrometheusMetrics {
             .register(Box::new(match_results_per_title.clone()))
             .unwrap();
         registry
+            .register(Box::new(broad_batches_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(broad_postings_scanned_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(broad_queries_evaluated_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(broad_candidates_total.clone()))
+            .unwrap();
+        registry
             .register(Box::new(slow_queries_total.clone()))
             .unwrap();
         registry.register(Box::new(wal_size_bytes.clone())).unwrap();
@@ -448,6 +524,10 @@ impl PrometheusMetrics {
             in_flight_requests,
             match_candidates_per_title,
             match_results_per_title,
+            broad_batches_total,
+            broad_postings_scanned_total,
+            broad_queries_evaluated_total,
+            broad_candidates_total,
             slow_queries_total,
         }
     }
@@ -687,6 +767,9 @@ struct SlotHit {
 #[derive(Serialize, Clone)]
 struct StatsResponse {
     unique_candidates: u32,
+    /// Broad-lane subset of `unique_candidates` — how much of the work came from
+    /// quarantined broad (class-C) queries (0 unless `include_broad`).
+    broad_candidates: u32,
     postings_scanned: u32,
     matches: u32,
     probes_attempted: u32,
@@ -697,6 +780,7 @@ impl From<MatchStats> for StatsResponse {
     fn from(s: MatchStats) -> Self {
         Self {
             unique_candidates: s.unique_candidates,
+            broad_candidates: s.broad_candidates,
             postings_scanned: s.postings_scanned,
             matches: s.matches,
             probes_attempted: s.probes_attempted,
@@ -724,6 +808,53 @@ struct BulkItemInner {
     status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+// -- POST /_mpercolate (batch percolation; ES `_msearch`-shaped responses[])
+#[derive(Deserialize)]
+struct MPercolateBody {
+    /// The batch of documents to percolate. Each entry is matched independently;
+    /// `responses[i]` corresponds to `documents[i]`.
+    documents: Option<Vec<DocBody>>,
+    /// Per-request override of the server's broad-lane default. When set, controls
+    /// whether class-C (broad) queries are evaluated for this batch.
+    include_broad: Option<bool>,
+    /// Include original query text in each hit (default: true).
+    include_source: Option<bool>,
+    /// Maximum hits to return per document (default: 1000).
+    size: Option<usize>,
+    /// Per-request timeout in milliseconds (default: 30000).
+    timeout_ms: Option<u64>,
+    /// Include the top-level broad-lane summary in the response (default: false).
+    profile: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct MPercolateResponse {
+    took_ms: f64,
+    /// One entry per input document, in submission order.
+    responses: Vec<PercolateItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    broad: Option<BroadSummary>,
+}
+
+#[derive(Serialize)]
+struct PercolateItem {
+    hits: SearchHits,
+}
+
+/// Top-level broad-lane summary for a `/_mpercolate` batch — surfaces the columnar
+/// evaluator's amortization (see `MatchStats` / ADR-026). `broad_postings_scanned`
+/// rising far slower than `broad_candidates` as `batch_size` grows IS the win.
+#[derive(Serialize)]
+struct BroadSummary {
+    strategy: &'static str,
+    batch_size: usize,
+    broad_batches: u32,
+    broad_postings_scanned: u32,
+    broad_queries_evaluated: u32,
+    broad_candidates: u32,
+    total_matches: u32,
 }
 
 // -- GET /_stats
@@ -821,13 +952,13 @@ struct RootResponse {
 }
 
 // -- Structured API errors
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct ApiError {
     error: ApiErrorBody,
     status: u16,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct ApiErrorBody {
     #[serde(rename = "type")]
     error_type: String,
@@ -1356,6 +1487,229 @@ async fn search(
     Ok(Json(response))
 }
 
+/// POST /_mpercolate — batch percolation (ES `_msearch`-shaped).
+///
+/// Percolates a batch of documents in one request, evaluating the broad lane
+/// ONCE per title-batch (columnar; ADR-026) instead of once per document, so the
+/// broad-posting scan amortizes across the batch. Returns a `responses[]`
+/// envelope, one entry per input document in submission order. The broad lane is
+/// opt-in per request (`include_broad`, falling back to the server default).
+///
+/// This is the throughput path; `/_search` remains the rich path. Because the
+/// broad lane is amortized per batch, `/_mpercolate` does not produce per-document
+/// candidate/posting stats — only an optional top-level broad summary (`profile`).
+#[instrument(skip_all)]
+async fn mpercolate(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<MPercolateBody>,
+) -> Result<Json<MPercolateResponse>, (StatusCode, Json<ApiError>)> {
+    let start = Instant::now();
+
+    let Some(docs) = body.documents else {
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["mpercolate", "400"])
+            .inc();
+        return Err(ApiError::response(
+            StatusCode::BAD_REQUEST,
+            "validation_error",
+            "request must include 'documents' (an array of {\"title\": ...})",
+        ));
+    };
+
+    let include_broad = body.include_broad.unwrap_or(state.include_broad);
+    let include_source = body.include_source.unwrap_or(true);
+    let page_size = body.size.unwrap_or(1000);
+    let include_profile = body.profile.unwrap_or(false);
+    let timeout = tokio::time::Duration::from_millis(body.timeout_ms.unwrap_or(30_000));
+
+    // Empty batch: a valid no-op — return an empty responses[] without scheduling
+    // any work.
+    if docs.is_empty() {
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["mpercolate", "200"])
+            .inc();
+        return Ok(Json(MPercolateResponse {
+            took_ms: start.elapsed().as_secs_f64() * 1000.0,
+            responses: Vec::new(),
+            broad: None,
+        }));
+    }
+
+    let num_docs = docs.len();
+
+    // Read the live broad-lane config from the snapshot (ADR-026 dynamic knobs):
+    // batch size, columnar-vs-inline kill-switch, pure-anchor materialization, and
+    // the max batch size that bounds per-request work.
+    let snap = Arc::clone(&state.snapshot.load());
+    let cfg = snap.config();
+    if num_docs > cfg.max_percolate_batch {
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["mpercolate", "400"])
+            .inc();
+        return Err(ApiError::response(
+            StatusCode::BAD_REQUEST,
+            "validation_error",
+            format!(
+                "batch of {num_docs} documents exceeds max_percolate_batch ({})",
+                cfg.max_percolate_batch
+            ),
+        ));
+    }
+    let opts = BatchMatchOptions {
+        include_broad,
+        broad_batch_size: cfg.broad_batch_size,
+        broad_strategy: if cfg.broad_columnar {
+            BroadStrategy::Columnar
+        } else {
+            BroadStrategy::Inline
+        },
+        broad_materialize: cfg.broad_materialize,
+    };
+
+    let titles: Vec<String> = docs.into_iter().map(|d| d.title).collect();
+    let state_inner = Arc::clone(&state);
+    let search_fut = tokio::task::spawn_blocking(move || {
+        state_inner
+            .pool
+            .install(|| snap.match_titles_batch_with_stats(&titles, opts))
+    });
+
+    let (results, stats) = match tokio::time::timeout(timeout, search_fut).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            eprintln!("mpercolate task panicked: {e}");
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["mpercolate", "500"])
+                .inc();
+            return Err(ApiError::response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "search_error",
+                "internal percolate task failed",
+            ));
+        }
+        Err(_) => {
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["mpercolate", "408"])
+                .inc();
+            return Err(ApiError::response(
+                StatusCode::REQUEST_TIMEOUT,
+                "timeout",
+                format!("mpercolate timed out after {}ms", timeout.as_millis()),
+            ));
+        }
+    };
+
+    // Broad-lane meters (cumulative across requests).
+    state
+        .prom
+        .broad_batches_total
+        .inc_by(u64::from(stats.broad_batches));
+    state
+        .prom
+        .broad_postings_scanned_total
+        .inc_by(u64::from(stats.broad_postings_scanned));
+    state
+        .prom
+        .broad_queries_evaluated_total
+        .inc_by(u64::from(stats.broad_queries_evaluated));
+    state
+        .prom
+        .broad_candidates_total
+        .inc_by(u64::from(stats.broad_candidates));
+
+    // Reassemble per-document results in submission order (`results` is
+    // (global_index, ids) with index in 0..num_docs).
+    let mut per_doc: Vec<Vec<u64>> = vec![Vec::new(); num_docs];
+    for (idx, ids) in results {
+        if let Some(slot) = per_doc.get_mut(idx) {
+            *slot = ids;
+        }
+    }
+
+    let snap = state.snapshot.load();
+    let responses: Vec<PercolateItem> = per_doc
+        .into_iter()
+        .map(|ids| {
+            let total = ids.len();
+            let hits = ids
+                .into_iter()
+                .take(page_size)
+                .map(|id| {
+                    let source = if include_source {
+                        snap.get_query_source(id).map(|q| HitSource { query: q })
+                    } else {
+                        None
+                    };
+                    SearchHitItem {
+                        _id: id,
+                        _source: source,
+                        _explanation: None,
+                    }
+                })
+                .collect();
+            PercolateItem {
+                hits: SearchHits { total, hits },
+            }
+        })
+        .collect();
+
+    let took_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // Build the summary lazily (only when requested) — `then_some` would build it
+    // even when `profile` is false.
+    let broad = if include_profile {
+        Some(BroadSummary {
+            strategy: if matches!(opts.broad_strategy, BroadStrategy::Columnar) {
+                "columnar"
+            } else {
+                "inline"
+            },
+            batch_size: opts.broad_batch_size,
+            broad_batches: stats.broad_batches,
+            broad_postings_scanned: stats.broad_postings_scanned,
+            broad_queries_evaluated: stats.broad_queries_evaluated,
+            broad_candidates: stats.broad_candidates,
+            total_matches: stats.matches,
+        })
+    } else {
+        None
+    };
+
+    info!(
+        titles = num_docs,
+        matches = stats.matches,
+        include_broad,
+        took_ms = format!("{:.2}", took_ms),
+        "mpercolate complete"
+    );
+
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["mpercolate", "200"])
+        .inc();
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["mpercolate"])
+        .observe(start.elapsed().as_secs_f64());
+
+    Ok(Json(MPercolateResponse {
+        took_ms,
+        responses,
+        broad,
+    }))
+}
+
 /// POST /_bulk — NDJSON bulk ingest.
 ///
 /// Format (ES-compatible):
@@ -1730,6 +2084,18 @@ async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         total_mem,
         total_mem as f64 / 1_048_576.0
     ));
+    let cfg = snap.config();
+    out.push_str(&format!(
+        "broad lane       {} (batch_size {}, materialize {}, max_batch {})\n",
+        if cfg.broad_columnar {
+            "columnar"
+        } else {
+            "inline"
+        },
+        cfg.broad_batch_size,
+        cfg.broad_materialize,
+        cfg.max_percolate_batch,
+    ));
 
     if !m.segment_sizes.is_empty() {
         out.push_str("\nsegment  entries  holes\n");
@@ -2087,6 +2453,13 @@ fn apply_settings_patch(
             "auto_compact_on_ingest" => {
                 set_bool(&mut cfg.auto_compact_on_ingest, key, val, &mut errors);
             }
+            // ---- broad-lane batch knobs (ADR-026) ----
+            "broad_batch_size" => set_usize(&mut cfg.broad_batch_size, key, val, &mut errors),
+            "max_percolate_batch" => {
+                set_usize(&mut cfg.max_percolate_batch, key, val, &mut errors);
+            }
+            "broad_columnar" => set_bool(&mut cfg.broad_columnar, key, val, &mut errors),
+            "broad_materialize" => set_bool(&mut cfg.broad_materialize, key, val, &mut errors),
             // ---- static (bound at construction) ----
             "data_dir" | "wal_sync_on_write" | "retain_source" => errors.push(format!(
                 "setting [{key}] is not dynamically updateable; set it at startup"
@@ -2210,6 +2583,10 @@ async fn main() {
         max_anyof_group_size: cli.max_anyof_group_size,
         wal_sync_on_write: cli.wal_sync_on_write,
         retain_source: cli.retain_source,
+        broad_batch_size: cli.broad_batch_size,
+        broad_columnar: cli.broad_columnar,
+        broad_materialize: cli.broad_materialize,
+        max_percolate_batch: cli.max_percolate_batch,
         ..EngineConfig::default()
     };
     let problems = config.validate();
@@ -2427,6 +2804,7 @@ async fn main() {
         .route("/", get(api_root))
         .route("/_doc/{id}", get(get_doc).put(put_doc).delete(delete_doc))
         .route("/_search", post(search))
+        .route("/_mpercolate", post(mpercolate))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))
         .route("/_compact", post(compact))
@@ -2450,7 +2828,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn",
+        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn",
         "server listening"
     );
 
@@ -2545,6 +2923,35 @@ mod settings_tests {
         assert!((cfg.holes_ratio_threshold - 0.5).abs() < f64::EPSILON);
         // Untouched fields keep their defaults.
         assert_eq!(cfg.memtable_flush_threshold, 100_000);
+    }
+
+    #[test]
+    fn applies_broad_lane_settings() {
+        let cfg = apply_settings_patch(
+            EngineConfig::default(),
+            &patch(
+                r#"{"broad_batch_size": 512, "broad_columnar": false, "broad_materialize": false, "max_percolate_batch": 50000}"#,
+            ),
+        )
+        .expect("valid broad-lane patch");
+        assert_eq!(cfg.broad_batch_size, 512);
+        assert!(!cfg.broad_columnar);
+        assert!(!cfg.broad_materialize);
+        assert_eq!(cfg.max_percolate_batch, 50_000);
+    }
+
+    #[test]
+    fn rejects_zero_broad_batch_size() {
+        let err = apply_settings_patch(
+            EngineConfig::default(),
+            &patch(r#"{"broad_batch_size": 0}"#),
+        )
+        .expect_err("broad_batch_size 0 must be rejected by validate()");
+        assert!(
+            err.iter()
+                .any(|e| e.contains("broad_batch_size must be >= 1")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -2693,5 +3100,151 @@ mod cat_segments_tests {
         // Byte fields are raw integers in JSON (humanized only in the text table).
         assert_eq!(json["resident_bytes"], 145_000);
         assert_eq!(json["overhead_bytes"], 18_000);
+    }
+}
+
+#[cfg(test)]
+mod mpercolate_tests {
+    //! Handler-level tests for POST /_mpercolate: request validation, the empty
+    //! batch no-op, the responses[] envelope shape, and — the load-bearing one —
+    //! that each per-document response is identical to the per-title path
+    //! (`match_title`), so the batch endpoint can't silently diverge from
+    //! `/_search`. The library already proves batch == scalar (tests/broad_batch);
+    //! this proves the HTTP layer threads results through in order and unchanged.
+    use super::{mpercolate, AppState, DocBody, MPercolateBody, PrometheusMetrics, State};
+    use axum::Json;
+    use reverse_rusty::gen::{generate, GenConfig};
+    use reverse_rusty::segment::{Engine, MatchScratch};
+    use reverse_rusty::Normalizer;
+    use std::sync::Arc;
+
+    fn corpus() -> (Engine, Vec<String>) {
+        let data = generate(&GenConfig {
+            num_queries: 5_000,
+            num_titles: 300,
+            broad_query_frac: 0.1,
+            hot_skew: 2.0,
+            family_size: 8,
+            seed: 0x0BA7_C0DE,
+            num_players: 2_000,
+            num_sets: 1_000,
+        });
+        let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+        eng.build_from_queries(&data.queries);
+        (eng, data.titles)
+    }
+
+    fn state_with(eng: Engine, include_broad: bool) -> Arc<AppState> {
+        let snap = Arc::new(eng.snapshot());
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("pool");
+        Arc::new(AppState {
+            engine: parking_lot::Mutex::new(eng),
+            snapshot: arc_swap::ArcSwap::new(snap),
+            pool,
+            include_broad,
+            prom: PrometheusMetrics::new(),
+            slow_query_threshold_ms: 0,
+        })
+    }
+
+    fn body(docs: Option<Vec<&str>>, include_broad: Option<bool>, profile: bool) -> MPercolateBody {
+        MPercolateBody {
+            documents: docs.map(|v| {
+                v.into_iter()
+                    .map(|t| DocBody {
+                        title: t.to_string(),
+                    })
+                    .collect()
+            }),
+            include_broad,
+            include_source: Some(false),
+            // Large cap so no per-document truncation can mask a result mismatch.
+            size: Some(1_000_000),
+            timeout_ms: None,
+            profile: Some(profile),
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_documents_is_400() {
+        let (eng, _) = corpus();
+        let state = state_with(eng, false);
+        let err = mpercolate(State(state), Json(body(None, None, false)))
+            .await
+            .err()
+            .expect("missing documents must error");
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn empty_batch_is_noop() {
+        let (eng, _) = corpus();
+        let state = state_with(eng, true);
+        let resp = mpercolate(State(state), Json(body(Some(Vec::new()), None, true)))
+            .await
+            .expect("empty batch is a valid no-op")
+            .0;
+        assert!(resp.responses.is_empty());
+        assert!(resp.broad.is_none(), "no work => no broad summary");
+    }
+
+    // Reads the ES-convention `_id` field on hits (clippy::used_underscore_binding).
+    #[allow(clippy::used_underscore_binding)]
+    #[tokio::test]
+    async fn responses_are_byte_identical_to_per_title_search() {
+        let (eng, titles) = corpus();
+        // Capture a snapshot of the same state for the per-title baseline before
+        // the engine moves into the AppState.
+        let baseline = Arc::new(eng.snapshot());
+        let state = state_with(eng, true);
+
+        let batch: Vec<&str> = titles.iter().take(150).map(String::as_str).collect();
+        // include_broad=true exercises the columnar broad lane through the endpoint.
+        let resp = mpercolate(
+            State(Arc::clone(&state)),
+            Json(body(Some(batch.clone()), Some(true), true)),
+        )
+        .await
+        .expect("ok")
+        .0;
+
+        assert_eq!(
+            resp.responses.len(),
+            batch.len(),
+            "one response per document"
+        );
+
+        let mut scratch = MatchScratch::new();
+        let mut out = Vec::new();
+        let mut summed = 0u32;
+        for (i, title) in batch.iter().enumerate() {
+            out.clear();
+            baseline.match_title(title, &mut scratch, &mut out, true);
+            let mut expected = out.clone();
+            expected.sort_unstable();
+            expected.dedup();
+
+            let item = &resp.responses[i];
+            let mut got: Vec<u64> = item.hits.hits.iter().map(|h| h._id).collect();
+            got.sort_unstable();
+            assert_eq!(
+                got, expected,
+                "document {i} ({title}) diverged from per-title search"
+            );
+            assert_eq!(item.hits.total, expected.len(), "total mismatch at {i}");
+            summed += expected.len() as u32;
+        }
+
+        // Top-level broad summary present (profile=true) and internally consistent.
+        let broad = resp.broad.expect("profile=true => broad summary");
+        assert_eq!(broad.strategy, "columnar");
+        assert_eq!(broad.batch_size, 256);
+        assert_eq!(
+            broad.total_matches, summed,
+            "summary total must equal the per-document sum"
+        );
     }
 }

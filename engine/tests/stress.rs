@@ -20,7 +20,7 @@ use reverse_rusty::dict::Dict;
 use reverse_rusty::events::{EngineEvent, EngineMetrics};
 use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::normalize::Normalizer;
-use reverse_rusty::segment::{Engine, MatchScratch};
+use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy, Engine, MatchScratch};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -730,6 +730,105 @@ fn high_volume_parallel_read_after_mutations() {
     assert_eq!(
         total_par_matches, total_seq_matches,
         "parallel ({total_par_matches}) != sequential ({total_seq_matches}) match count"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// 4b. BROAD-LANE BATCH == PER-TITLE under churn (ADR-026)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The columnar broad-batch path (`match_titles_batch`) must return EXACTLY the
+/// per-title match set (`match_title`) after a realistic churn cycle (build + live
+/// insert + delete + flush + compact + a trailing unflushed memtable). Both broad
+/// strategies are checked, and tombstoned ids must not ghost — the batch twin of
+/// the par==seq guards above.
+#[test]
+fn broad_batch_equals_per_title_under_churn() {
+    eprintln!("\n=== BROAD BATCH == PER-TITLE UNDER CHURN ===");
+    let t0 = Instant::now();
+
+    let cfg = GenConfig {
+        num_queries: 40_000,
+        num_titles: 4_000,
+        broad_query_frac: 0.08,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0xBA7C_8027,
+        num_players: 4_000,
+        num_sets: 1_500,
+    };
+    let data = generate(&cfg);
+    let q = &data.queries;
+
+    let mut eng = Engine::with_config(
+        make_norm(),
+        EngineConfig {
+            memtable_flush_threshold: 8_000,
+            auto_compact_on_flush: true,
+            max_segments: 6,
+            ..EngineConfig::default()
+        },
+    );
+    eng.build_from_queries(&q[..q.len() / 2]);
+    for (logical, text) in &q[q.len() / 2..] {
+        eng.insert_live(text, *logical, 1);
+    }
+    // Delete every 10th query by id.
+    let delete_set: HashSet<u64> = q.iter().step_by(10).map(|(id, _)| *id).collect();
+    for id in &delete_set {
+        let _ = eng.delete_by_logical_id(*id);
+    }
+    eng.flush();
+    eng.compact_all();
+    // Trailing churn that lands in a fresh, unflushed memtable. Indices ≡3 (mod
+    // 10) are disjoint from the deleted set (≡0 mod 10), so nothing is revived.
+    for (logical, text) in q.iter().skip(3).step_by(500) {
+        eng.insert_live(text, *logical, 2);
+    }
+
+    // Per-title baseline (the contract the batch path must reproduce).
+    let snap = eng.snapshot();
+    let mut scratch = MatchScratch::new();
+    let mut out = Vec::new();
+    let mut seq: Vec<HashSet<u64>> = Vec::with_capacity(data.titles.len());
+    for title in &data.titles {
+        out.clear();
+        snap.match_title(title, &mut scratch, &mut out, true);
+        seq.push(out.iter().copied().collect());
+    }
+
+    for strat in [BroadStrategy::Columnar, BroadStrategy::Inline] {
+        let results = snap.match_titles_batch(
+            &data.titles,
+            BatchMatchOptions {
+                include_broad: true,
+                broad_batch_size: 256,
+                broad_strategy: strat,
+                broad_materialize: true,
+            },
+        );
+        let mut mismatches = 0usize;
+        let mut ghosts = 0usize;
+        for (idx, ids) in results {
+            let set: HashSet<u64> = ids.into_iter().collect();
+            for id in &set {
+                if delete_set.contains(id) {
+                    ghosts += 1;
+                }
+            }
+            if set != seq[idx] {
+                mismatches += 1;
+            }
+        }
+        assert_eq!(mismatches, 0, "batch ({strat:?}) != per-title under churn");
+        assert_eq!(
+            ghosts, 0,
+            "deleted ids ghosted in batch ({strat:?}) results"
+        );
+    }
+    eprintln!(
+        "  batch==per-title under churn OK, elapsed={:.1}s",
+        t0.elapsed().as_secs_f64()
     );
 }
 

@@ -105,21 +105,22 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/normalize.rs` | Shared query/title normalizer (daachorse automaton) + `NormalizerBuilder` | [normalization.md](docs/design/normalization.md) §2–4 |
 | `src/dict.rs` | Feature dictionary, frequency tracking, 64-bit common mask | [normalization.md](docs/design/normalization.md) §5 |
 | `src/compile.rs` | Signature-cover optimizer + cost classes A/B/C/D + read-only compile path for explain | [matching.md](docs/design/matching.md) §1 |
-| `src/config.rs` | `EngineConfig` — runtime-tunable knobs for compaction, flush, merge scoring (`Serialize`; dynamic subset updatable at runtime via `/_settings`) | ADR-022 |
+| `src/config.rs` | `EngineConfig` — runtime-tunable knobs for compaction, flush, merge scoring, and the broad-lane batch evaluator (`Serialize`; dynamic subset updatable at runtime via `/_settings`) | ADR-022, ADR-026 |
 | `src/filter.rs` | Per-segment anchor filter (cache-line blocked bloom, 512-bit blocks) | [ingestion-and-updates.md](docs/design/ingestion-and-updates.md) §6 |
 | `src/index.rs` | Candidate index: sig key → posting list (inline/Vec/Roaring) | [matching.md](docs/design/matching.md) §2 |
-| `src/exact.rs` | Integer-only SoA exact verification (common-mask gate) | [matching.md](docs/design/matching.md) §3 |
+| `src/exact.rs` | Integer-only SoA exact verification (common-mask gate) + columnar batch verification (`eval_batch`, the bitmap transpose of `verify`) + pure-anchor derivation | [matching.md](docs/design/matching.md) §3–4 |
 | `src/events.rs` | `EngineEvent` (incl. `DurabilityFailure`/`DurabilityOp`), `EngineMetrics`, `CompactionTrigger`, `SegmentInfo`/`SegmentKind` (per-segment introspection) — zero-dependency observability | ADR-021, ADR-023 |
 | `src/storage.rs` | Mmap'd segment file format: frozen hash tables, `MmapSegment`, `BaseSegment`, manifest, Dict serialization, query source persistence (`sources.dat`) | ADR-012, ADR-014 |
 | `src/wal.rs` | Write-ahead log: append-only CRC-framed entries, crash recovery replay | ADR-013 |
-| `src/segment.rs` + `src/segment/` | LSM engine (module). Root holds the shared type *defs* (`Engine`, `Segment`, `BaseSegment`, `EngineSnapshot`, report types); `impl` blocks split into submodules — `seg`/`base`/`snapshot` (the data/read types) and `lifecycle`/`ingest`/`compaction`/`matching`/`persistence`/`metrics` (the `Engine` controller). Same responsibilities: memtable + flush + bulk_ingest + tombstones + compaction + auto-trigger policy + persistence. Submodule-internal helpers are `pub(in crate::segment)`. | [ingestion-and-updates.md](docs/design/ingestion-and-updates.md) |
+| `src/segment.rs` + `src/segment/` | LSM engine (module). Root holds the shared type *defs* (`Engine`, `Segment`, `BaseSegment`, `EngineSnapshot`, `BatchMatchOptions`/`BroadStrategy`, report types); `impl` blocks split into submodules — `seg`/`base`/`snapshot` (the data/read types) and `lifecycle`/`ingest`/`compaction`/`matching`/`persistence`/`metrics` (the `Engine` controller), plus `broad_batch` (the columnar broad-lane batch evaluator behind `match_titles_batch`). Same responsibilities: memtable + flush + bulk_ingest + tombstones + compaction + auto-trigger policy + persistence. Submodule-internal helpers are `pub(in crate::segment)`. | [ingestion-and-updates.md](docs/design/ingestion-and-updates.md); broad lane → [matching.md](docs/design/matching.md) §4 |
 | `src/explain.rs` | Debug/explain tooling (first-class, not bolt-on) + structured `ExplainDetail` for API | [matching.md](docs/design/matching.md) §6 |
 | `src/gen.rs` | Synthetic data generator (deterministic, seeded) | — |
 | `src/vocab.rs` | Runtime vocabulary learning from query any-of groups, `Vocab` struct, JSON persistence | ADR-015 |
 | `src/error.rs` | Typed `ParseError` with `ParseErrorKind` enum | — |
 | `src/loader.rs` | Query file loader (CSV + JSONL auto-detection) | — |
 | `src/util.rs` | FNV-1a hash (stable across runs), FastMap alias | — |
-| `tests/oracle.rs` | Differential correctness oracle (brute force vs engine) | — |
+| `tests/oracle.rs` | Differential correctness oracle (brute force vs engine; per-title AND batch path) | — |
+| `tests/broad_batch.rs` | Broad-lane batch≡scalar equivalence matrix (the load-bearing batch correctness deliverable) | [matching.md](docs/design/matching.md) §4 |
 | `tests/error_paths.rs` | API error handling regression tests | — |
 | `tests/persistence.rs` | Persistence tests: segment round-trip, WAL recovery, mmap compaction | — |
 | `tests/hardening_fixes.rs` | Integration tests: vocab epoch, fallible deser, reverse-index delete | — |
@@ -131,7 +132,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/bin/norm.rs` | Title introspection tool | — |
 | `src/bin/segbench.rs` | Read-amplification vs segment count harness | — |
 | `src/bin/snapbench.rs` | Snapshot read/publish concurrency benchmark | ADR-016 |
-| `src/bin/server.rs` | HTTP server (axum) — ES-style REST API, snapshot-based concurrency, structured logging, Prometheus metrics, graceful shutdown. Endpoint reference: [`docs/reference/api.md`](docs/reference/api.md) | ADR-014, ADR-016, ADR-021, ADR-022, ADR-023 |
+| `src/bin/server.rs` | HTTP server (axum) — ES-style REST API (incl. batch `/_mpercolate`), snapshot-based concurrency, structured logging, Prometheus metrics, graceful shutdown. Endpoint reference: [`docs/reference/api.md`](docs/reference/api.md) | ADR-014, ADR-016, ADR-021, ADR-022, ADR-023, ADR-026 |
 
 *(All test files above are committed and run by `cargo test --release`. `tests/stress.rs`'s one 10M-query soak is `#[ignore]`d — run it explicitly or via the CI `run_soak` dispatch input. How-we-test guide: [`docs/testing.md`](docs/testing.md).)*
 

@@ -210,6 +210,71 @@ from the index, how many posting lists were scanned, how many bloom-filter probe
 how many candidates survived to become confirmed matches. The search body also accepts `explain` and
 `profile` options for per-query match tracing (see [`../design/matching.md`](../design/matching.md) §6).
 
+## `POST /_mpercolate` — Batch percolate (high throughput)
+
+The throughput counterpart to `/_search`. Percolates a **batch** of documents in one request and
+evaluates the broad lane **once per batch, columnar** (ADR-026) instead of once per document — so a
+hot broad anchor's huge posting is scanned once for the whole batch, not re-scanned per document.
+Returns an Elasticsearch `_msearch`-style `responses[]` envelope: one entry per input document, in
+submission order (`responses[i]` corresponds to `documents[i]`).
+
+```bash
+curl -X POST localhost:9200/_mpercolate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "documents": [
+      {"title": "Dell XPS 15 Laptop 16GB RAM 512GB SSD New"},
+      {"title": "Vintage Brown Leather Bomber Jacket Size L"},
+      {"title": "Generic unmatched listing"}
+    ],
+    "include_broad": true,
+    "profile": true
+  }'
+```
+
+```json
+{
+  "took_ms": 0.91,
+  "responses": [
+    {"hits": {"total": 1, "hits": [{"_id": 1, "_source": {"query": "dell laptop"}}]}},
+    {"hits": {"total": 1, "hits": [{"_id": 2, "_source": {"query": "leather jacket"}}]}},
+    {"hits": {"total": 0, "hits": []}}
+  ],
+  "broad": {
+    "strategy": "columnar",
+    "batch_size": 256,
+    "broad_batches": 1,
+    "broad_postings_scanned": 0,
+    "broad_queries_evaluated": 0,
+    "broad_candidates": 0,
+    "total_matches": 2
+  }
+}
+```
+
+Optional request fields:
+
+| Field | Default | Description |
+|---|---|---|
+| `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class-C (broad) queries for this batch |
+| `include_source` | true | Include original query text in each hit |
+| `size` | 1000 | Maximum hits per document |
+| `timeout_ms` | 30000 | Per-request timeout in milliseconds (returns 408 on expiry) |
+| `profile` | false | Include the top-level `broad` summary |
+
+Each per-document result is **byte-identical** to calling `/_search` with that single title — batching
+is a performance change only, never a semantic one (proven by `tests/broad_batch.rs`). The optional
+top-level `broad` summary surfaces the columnar evaluator's amortization: as the batch grows,
+`broad_postings_scanned` rises far slower than `broad_candidates` (each huge posting is consulted once
+per batch). An empty `documents` array is a valid no-op (`200` with `responses: []`); a missing
+`documents` field is a `400`.
+
+**When to use which.** Reach for `/_mpercolate` for high-throughput batch/streaming percolation,
+especially with broad queries enabled. Reach for `/_search` when you want the rich, per-document
+observability it alone provides — per-slot `stats`, `explain`, `profile`, and pagination (`from`).
+Because the broad lane is amortized per batch, `/_mpercolate` deliberately does not produce per-document
+candidate/posting stats — only the batch-level `broad` summary.
+
 ## `POST /_bulk` — Bulk ingest
 
 NDJSON format, compatible with Elasticsearch's `_bulk` API:
@@ -554,7 +619,8 @@ Attempting to set a static or unknown key returns `400`:
 | `/_doc/{id}` | GET | Retrieve a stored query |
 | `/_doc/{id}` | PUT | Register a single query |
 | `/_doc/{id}` | DELETE | Remove a stored query |
-| `/_search` | POST | Percolate one or more titles (supports `explain` / `profile`) |
+| `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
+| `/_mpercolate` | POST | Batch percolate (high throughput; columnar broad lane; `responses[]` envelope) |
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |
 | `/_flush` | POST | Flush memtable to immutable segment |
 | `/_compact` | POST | Force segment compaction |

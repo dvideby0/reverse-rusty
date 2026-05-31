@@ -142,6 +142,41 @@ pub struct EngineConfig {
     ///
     /// Default: `1000.0`
     pub compaction_fixed_cost: f64,
+
+    // ---- broad-lane batch evaluation (ADR-026) ----
+    // These govern the columnar broad lane used by `POST /_mpercolate`. They are
+    // performance/observability knobs only: none change the match result set (the
+    // batch path is byte-identical to the per-title path for every setting —
+    // tests/broad_batch.rs). All four are dynamic (`PUT /_settings`).
+    /// Title sub-batch / rayon chunk size for the columnar broad pass. Larger
+    /// amortizes each broad posting's scan over more titles (higher throughput,
+    /// higher per-request latency); smaller is the reverse. Never changes results.
+    ///
+    /// Default: `256`
+    pub broad_batch_size: usize,
+
+    /// Use the columnar broad evaluator (once per batch). When `false`, the
+    /// batch path falls back to the original inline per-title broad probe — the
+    /// provable kill-switch (byte-identical results, no amortization).
+    ///
+    /// Default: `true`
+    pub broad_columnar: bool,
+
+    /// Use the pure-anchor materialization fast path: broad queries whose entire
+    /// semantics is their hot anchor emit directly from the anchor's title bitmap
+    /// with no exact verification. When `false`, those queries go through full
+    /// bitmap verification instead (identical results, slower) — a kill-switch for
+    /// the optimization.
+    ///
+    /// Default: `true`
+    pub broad_materialize: bool,
+
+    /// Maximum number of documents accepted in a single `POST /_mpercolate` batch.
+    /// Requests above this are rejected with `400` before any work is scheduled,
+    /// bounding per-request memory and latency.
+    ///
+    /// Default: `10_000`
+    pub max_percolate_batch: usize,
 }
 
 impl Default for EngineConfig {
@@ -159,6 +194,10 @@ impl Default for EngineConfig {
             max_query_clauses: crate::dsl::MAX_CLAUSES,
             max_anyof_group_size: crate::dsl::MAX_ANY_OF_SIZE,
             compaction_fixed_cost: 1000.0,
+            broad_batch_size: 256,
+            broad_columnar: true,
+            broad_materialize: true,
+            max_percolate_batch: 10_000,
         }
     }
 }
@@ -205,6 +244,12 @@ impl EngineConfig {
         }
         if self.compaction_fixed_cost < 0.0 {
             problems.push("compaction_fixed_cost must be >= 0".into());
+        }
+        if self.broad_batch_size == 0 {
+            problems.push("broad_batch_size must be >= 1".into());
+        }
+        if self.max_percolate_batch == 0 {
+            problems.push("max_percolate_batch must be >= 1".into());
         }
         problems
     }

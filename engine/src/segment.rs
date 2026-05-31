@@ -45,6 +45,7 @@ use crate::storage::{MmapSegment, SourceStore};
 use crate::wal::Wal;
 
 mod base;
+mod broad_batch;
 mod compaction;
 mod ingest;
 mod lifecycle;
@@ -60,12 +61,61 @@ mod wal_failure_tests;
 #[derive(Default, Clone, Copy, Debug)]
 pub struct MatchStats {
     pub unique_candidates: u32, // distinct queries exact-checked
-    pub postings_scanned: u32,  // total posting entries unioned
+    pub postings_scanned: u32,  // total posting entries unioned (main + broad)
+    /// Broad-lane subset of `postings_scanned` — the quantity the columnar batch
+    /// path amortizes (each huge broad posting is scanned once per batch, not
+    /// once per title). Counted on BOTH paths, so `broad_postings_scanned`
+    /// columnar ÷ inline is the machine-independent amortization factor.
+    pub broad_postings_scanned: u32,
     pub main_candidates: u32,
     pub broad_candidates: u32,
     pub matches: u32,
     pub probes_attempted: u32, // total signature probes (before filter)
     pub probes_skipped: u32,   // probes skipped by anchor filter (definitely-not-present)
+    // ---- broad-lane batch/columnar accounting (0 on the per-title path) ----
+    pub broad_queries_evaluated: u32, // distinct broad queries exact-checked via bitmap eval
+    pub broad_anchors_scanned: u32,   // distinct broad anchors (postings) probed per batch
+    pub broad_batches: u32,           // broad sub-batches (chunks) processed
+}
+
+/// Which broad-lane strategy a batch match uses. `Columnar` is the new
+/// once-per-batch bitmap evaluator; `Inline` falls back to the original
+/// per-title broad probe (`Segment::match_into(include_broad=true)`) — the
+/// provable kill-switch that yields byte-identical results.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BroadStrategy {
+    Inline,
+    Columnar,
+}
+
+/// Options for batch matching. Replaces the bare `include_broad: bool` on the
+/// batch entry points without churning the per-title signatures.
+#[derive(Clone, Copy, Debug)]
+pub struct BatchMatchOptions {
+    /// Evaluate the broad lane at all (default false — broad is opt-in, as on
+    /// the per-title path).
+    pub include_broad: bool,
+    /// Title sub-batch / rayon chunk size for the columnar broad pass.
+    pub broad_batch_size: usize,
+    /// Columnar (new) vs Inline (original per-title broad) — the kill-switch.
+    pub broad_strategy: BroadStrategy,
+    /// Use the pure-anchor materialization fast path (emit pure-anchor broad
+    /// queries straight from the anchor's title bitmap, skipping verification).
+    /// When false, those queries go through full bitmap verification instead —
+    /// identical results, slower. A kill-switch for the optimization; only
+    /// consulted on the [`BroadStrategy::Columnar`] path.
+    pub broad_materialize: bool,
+}
+
+impl Default for BatchMatchOptions {
+    fn default() -> Self {
+        Self {
+            include_broad: false,
+            broad_batch_size: 256,
+            broad_strategy: BroadStrategy::Columnar,
+            broad_materialize: true,
+        }
+    }
 }
 
 /// One immutable (or, for the memtable, mutable) slice of the index. Owns the

@@ -201,6 +201,9 @@ impl Segment {
     ) {
         if let Some(posting) = index.get(key) {
             stats.postings_scanned += posting.len() as u32;
+            if is_broad {
+                stats.broad_postings_scanned += posting.len() as u32;
+            }
             posting.for_each(|local| {
                 // dedup across signatures with an epoch stamp (O(1), no alloc)
                 if seen[local as usize] == epoch {

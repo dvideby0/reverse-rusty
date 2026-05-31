@@ -9,7 +9,10 @@ classes, and explain tooling. Siblings:
 correctness contract this section must uphold.*
 
 > **Implementation status:** Signature optimizer, candidate index, exact matcher, broad-lane cost
-> classes (A/B/C/D), and explain tooling are fully implemented and tested. Near-duplicate queries are
+> classes (A/B/C/D), and explain tooling are fully implemented and tested. The broad lane's
+> **batch / columnar evaluation** (§4) is now implemented too — once-per-batch scans + bitmap-algebra
+> verification + a pure-anchor skip-verify fast path, exposed as `match_titles_batch` / `POST
+> /_mpercolate` (ADR-026). Near-duplicate queries are
 > clustered *implicitly* — they share signature anchors in the candidate index, so a single failed
 > anchor probe drops the whole cluster's candidates. An explicit query-family / shared-prefix-DAG
 > structure (subtree pruning) was evaluated and deliberately **not** pursued; see
@@ -143,19 +146,29 @@ Every compiled query is classified by the selectivity of its **best achievable s
 
 A class-C query's best signature is still too common (posting would be "huge"). Putting it in the main
 index would poison candidate selectivity for *every* title that has that feature. Instead the **broad
-lane**:
+lane** (implemented in `segment/broad_batch.rs`, ADR-026):
 
-- holds class-C queries indexed by their (few, coarse) features;
-- is evaluated with **batch / columnar** scans over a title batch, amortizing cost, rather than per
-  title in the hot path;
-- can maintain **precomputed subscriptions** (materialized result sets refreshed periodically) for the
-  very broadest;
-- is metered to a higher cost class (the spec's "higher price/cost class") and can return
-  **rewrite suggestions** ("add a year or set to make this realtime").
+- holds class-C queries indexed by their (few, coarse) features (the per-segment `broad` index);
+- is evaluated with **batch / columnar** scans over a title batch (`match_titles_batch`), amortizing
+  each huge posting's scan over the whole batch rather than re-scanning it per title in the hot path.
+  Mechanics: a per-batch feature→title-bitmap inverted index, one probe per distinct broad anchor per
+  batch, then per-query **bitmap-algebra verification** (`exact::eval_batch`, the bitwise transpose of
+  `verify`) — broad postings scanned amortize ~1/`broad_batch_size` (29× at 256), ~2.4× end-to-end
+  throughput over the inline path;
+- runs a **pure-anchor fast path** — broad queries whose entire semantics is their hot anchor emit
+  straight from the anchor's title bitmap with no verification (the streaming-safe analog of the
+  design's "materialized/precomputed subscriptions"; literal periodic-refresh materialization doesn't
+  map to streaming percolation, see ADR-026);
+- is metered through dedicated broad `MatchStats` counters (and Prometheus on `/_mpercolate`) — the
+  "higher cost class" intent. Class-C ingest rewrite suggestions ("add a year or set to make this
+  realtime") remain a separate, not-yet-built feature.
 
-This is the direct, structural fix for the percolator "unsupported query becomes an always-candidate"
-failure mode: we *detect* low selectivity at compile time and quarantine it, instead of paying for it
-silently on every title. (The class-B/C escalation could additionally use roaring-bitmap intersection.)
+The columnar path is **byte-identical** to the per-title broad path (`tests/broad_batch.rs` + the batch
+oracle); a `broad_columnar=false` setting reverts to the inline per-title probe (the kill-switch). This
+is the direct, structural fix for the percolator "unsupported query becomes an always-candidate"
+failure mode: we *detect* low selectivity at compile time, quarantine it, and then evaluate it cheaply
+in batch — instead of paying for it silently on every title. (Roaring-bitmap / SIMD posting
+intersection for the very broadest postings is a further micro-optimization, not yet done.)
 
 ---
 
