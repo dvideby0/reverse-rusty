@@ -39,10 +39,10 @@ use crate::config::EngineConfig;
 use crate::dict::{Dict, FeatureId};
 use crate::error::ParseError;
 use crate::normalize::Normalizer;
-use crate::segment::{MatchScratch, MatchStats};
+use crate::segment::MatchStats;
 
 use super::ring::{HashRing, DEFAULT_VNODES};
-use super::shard::Shard;
+use super::shard::{LocalShard, Shard};
 
 /// Configuration for a [`ClusterEngine`].
 #[derive(Clone, Debug)]
@@ -97,7 +97,7 @@ pub struct ClusterEngine {
     norm: Arc<Normalizer>,
     dict: Arc<Dict>,
     ring: HashRing,
-    shards: Vec<Shard>,
+    shards: Vec<Box<dyn Shard>>,
     include_broad: bool,
 }
 
@@ -129,23 +129,17 @@ impl ClusterEngine {
         let dict = Arc::new(dict);
 
         let ring = HashRing::new(config.num_shards, config.vnodes);
-        let shards: Vec<Shard> = (0..config.num_shards)
+        let shards: Vec<Box<dyn Shard>> = (0..config.num_shards)
             .map(|_| {
-                Shard::new(
+                Box::new(LocalShard::new(
                     Arc::clone(&norm),
                     Arc::clone(&dict),
                     config.per_shard.clone(),
-                )
+                )) as Box<dyn Shard>
             })
             .collect();
 
-        let cluster = ClusterEngine {
-            norm,
-            dict,
-            ring,
-            shards,
-            include_broad: config.include_broad,
-        };
+        let cluster = Self::from_parts(norm, dict, ring, shards, config.include_broad);
 
         // Pass B — bucket by placement, then ingest one base segment per shard.
         let mut buckets: Vec<Vec<(u64, Extracted, String, u32)>> =
@@ -167,6 +161,31 @@ impl ClusterEngine {
             }
         }
         cluster
+    }
+
+    /// Assemble a cluster from pre-built parts — the construction seam shared by
+    /// [`Self::build`] (which supplies `LocalShard`s) and the distributed builder /
+    /// gRPC integration test (which supply boxed `RemoteShard`s). `shards.len()` must
+    /// equal `ring.num_shards()`.
+    pub(crate) fn from_parts(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        ring: HashRing,
+        shards: Vec<Box<dyn Shard>>,
+        include_broad: bool,
+    ) -> Self {
+        assert_eq!(
+            shards.len(),
+            ring.num_shards(),
+            "shard count must match the ring's shard count"
+        );
+        ClusterEngine {
+            norm,
+            dict,
+            ring,
+            shards,
+            include_broad,
+        }
     }
 
     /// The placement decision for one compiled query — see the module-level table.
@@ -285,13 +304,13 @@ impl ClusterEngine {
         let parts: Vec<(Vec<u64>, MatchStats)> = if targets.len() <= 1 {
             targets
                 .iter()
-                .map(|&s| self.query_shard(s, title, include_broad && s == 0))
+                .map(|&s| self.shards[s].percolate(title, include_broad && s == 0))
                 .collect()
         } else {
             use rayon::prelude::*;
             targets
                 .par_iter()
-                .map(|&s| self.query_shard(s, title, include_broad && s == 0))
+                .map(|&s| self.shards[s].percolate(title, include_broad && s == 0))
                 .collect()
         };
 
@@ -304,22 +323,6 @@ impl ClusterEngine {
         out.sort_unstable();
         out.dedup();
         stats.matches = out.len() as u32;
-        (out, stats)
-    }
-
-    /// Probe one shard for a title via its lock-free snapshot.
-    fn query_shard(
-        &self,
-        shard: usize,
-        title: &str,
-        include_broad: bool,
-    ) -> (Vec<u64>, MatchStats) {
-        let mut scratch = MatchScratch::new();
-        let mut out = Vec::new();
-        let stats =
-            self.shards[shard]
-                .snapshot()
-                .match_title(title, &mut scratch, &mut out, include_broad);
         (out, stats)
     }
 
@@ -336,12 +339,12 @@ impl ClusterEngine {
     /// Total physical query count across shards (a replicated/any-of query is
     /// counted once per shard holding it — physical, not distinct-logical).
     pub fn num_queries(&self) -> usize {
-        self.shards.iter().map(Shard::num_queries).sum()
+        self.shards.iter().map(|s| s.num_queries()).sum()
     }
 
     /// Per-shard physical query counts (introspection / tests).
     pub fn shard_query_counts(&self) -> Vec<usize> {
-        self.shards.iter().map(Shard::num_queries).collect()
+        self.shards.iter().map(|s| s.num_queries()).collect()
     }
 
     /// Cluster-wide per-class entry tally `[A, B, C, D]`, summed across shards
