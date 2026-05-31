@@ -24,8 +24,9 @@ allow = [
     "BSL-1.0",
     "Unicode-3.0",
 ]
-# `reverse-rusty` is `publish = false` and intentionally unlicensed; skip the local
-# crate rather than forcing a license field on it.
+# `reverse-rusty` is `publish = false`; skip the workspace's own crate so this policy
+# governs third-party dependencies only. (It is MIT-licensed — allow-listed above —
+# so it would pass even if evaluated.)
 private = { ignore = true }
 confidence-threshold = 0.9
 

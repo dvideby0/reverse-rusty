@@ -203,5 +203,6 @@ pulled in by the server binary (today they are not yet feature-gated — see
 
 ## License
 
-This is an unpublished, single-node engine and is **intentionally unlicensed** — there is no
-distribution license at this time (see the note in [`engine/Cargo.toml`](engine/Cargo.toml)).
+Licensed under [the MIT License](LICENSE) — a permissive, widely-used license that allows reuse
+with attribution. It remains unpublished to crates.io (`publish = false`; see the note in
+[`engine/Cargo.toml`](engine/Cargo.toml)).
