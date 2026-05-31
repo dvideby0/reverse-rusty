@@ -19,6 +19,35 @@ pub const MAX_CLAUSES: usize = 256;
 /// Maximum number of members in an any-of group
 pub const MAX_ANY_OF_SIZE: usize = 64;
 
+/// Per-query complexity limits applied at parse time.
+///
+/// Defaults are the module constants ([`MAX_QUERY_LENGTH`], [`MAX_CLAUSES`],
+/// [`MAX_ANY_OF_SIZE`]), which also serve as the hard ceiling for callers that
+/// parse without an [`EngineConfig`] (the explain / read-only path, tests). The
+/// engine threads its configured limits in via
+/// [`EngineConfig::parse_limits`](crate::config::EngineConfig::parse_limits) so
+/// the runtime knobs — and `PUT /_settings` — actually govern every ingest path,
+/// not just the compiled-in defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseLimits {
+    /// Maximum query string length in bytes.
+    pub max_query_length: usize,
+    /// Maximum number of top-level clauses (terms + groups).
+    pub max_clauses: usize,
+    /// Maximum number of members in a single any-of group.
+    pub max_any_of_size: usize,
+}
+
+impl Default for ParseLimits {
+    fn default() -> Self {
+        ParseLimits {
+            max_query_length: MAX_QUERY_LENGTH,
+            max_clauses: MAX_CLAUSES,
+            max_any_of_size: MAX_ANY_OF_SIZE,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Atom {
     Term(String),
@@ -37,8 +66,18 @@ pub struct Ast {
     pub clauses: Vec<Clause>,
 }
 
+/// Parse a query DSL string using the default (compiled-in) [`ParseLimits`].
+///
+/// Equivalent to [`parse_with_limits`] with [`ParseLimits::default`]. Used by
+/// the explain / read-only path and by callers that have no [`EngineConfig`];
+/// the ingest paths call [`parse_with_limits`] so the configured limits govern.
 pub fn parse(input: &str) -> Result<Ast, ParseError> {
-    if input.len() > MAX_QUERY_LENGTH {
+    parse_with_limits(input, &ParseLimits::default())
+}
+
+/// Parse a query DSL string into an [`Ast`], enforcing `limits`.
+pub fn parse_with_limits(input: &str, limits: &ParseLimits) -> Result<Ast, ParseError> {
+    if input.len() > limits.max_query_length {
         return Err(ParseError::new(ParseErrorKind::QueryTooLong, 0));
     }
     let chars: Vec<char> = input.chars().collect();
@@ -92,7 +131,7 @@ pub fn parse(input: &str) -> Result<Ast, ParseError> {
                 if members.is_empty() {
                     return Err(ParseError::new(ParseErrorKind::EmptyAnyOfGroup, open));
                 }
-                if members.len() > MAX_ANY_OF_SIZE {
+                if members.len() > limits.max_any_of_size {
                     return Err(ParseError::new(ParseErrorKind::AnyOfGroupTooLarge, open));
                 }
                 clauses.push(Clause {
@@ -131,7 +170,7 @@ pub fn parse(input: &str) -> Result<Ast, ParseError> {
         }
     }
 
-    if clauses.len() > MAX_CLAUSES {
+    if clauses.len() > limits.max_clauses {
         return Err(ParseError::new(ParseErrorKind::TooManyClauses, 0));
     }
 
@@ -272,5 +311,46 @@ mod tests {
             Atom::AnyOf(m) => assert_eq!(m.len(), MAX_ANY_OF_SIZE),
             other => panic!("expected AnyOf, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_with_limits_enforces_custom_bounds() {
+        // A tighter-than-default limit rejects input the default would accept.
+        // The length budget is generous so the clause / any-of checks are
+        // isolated from the length check (which the parser tests first).
+        let tight = ParseLimits {
+            max_query_length: 64,
+            max_clauses: 2,
+            max_any_of_size: 2,
+        };
+        assert_eq!(
+            parse_with_limits(&"x".repeat(65), &tight).unwrap_err().kind,
+            ParseErrorKind::QueryTooLong
+        );
+        assert_eq!(
+            parse_with_limits("aa bb cc", &tight).unwrap_err().kind,
+            ParseErrorKind::TooManyClauses,
+            "8-byte input is within length but 3 clauses exceeds max_clauses=2"
+        );
+        assert_eq!(
+            parse_with_limits("(x,y,z)", &tight).unwrap_err().kind,
+            ParseErrorKind::AnyOfGroupTooLarge
+        );
+
+        // A looser-than-default limit accepts input the default would reject.
+        let loose = ParseLimits {
+            max_clauses: MAX_CLAUSES + 8,
+            ..ParseLimits::default()
+        };
+        let q: String = (0..=MAX_CLAUSES)
+            .map(|i| format!("t{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(parse(&q).is_err(), "default limit rejects MAX_CLAUSES + 1");
+        assert_eq!(
+            parse_with_limits(&q, &loose).unwrap().clauses.len(),
+            MAX_CLAUSES + 1,
+            "a raised max_clauses accepts the same query"
+        );
     }
 }

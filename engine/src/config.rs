@@ -108,21 +108,29 @@ pub struct EngineConfig {
     // ---- merge scoring ----
 
     // ---- query complexity limits ----
-    /// Maximum query string length in bytes. Queries exceeding this are
-    /// rejected at parse time with `ParseErrorKind::QueryTooLong`.
+    // These are enforced on every ingest path (live insert, bulk, initial build)
+    // via [`parse_limits`](Self::parse_limits), which the engine threads into the
+    // DSL parser. They are dynamic (`PUT /_settings`); a tightened limit takes
+    // effect on the next ingest. WAL replay deliberately ignores them and uses
+    // the compiled-in ceiling, so a tightened limit never drops an
+    // already-acknowledged write on recovery.
+    /// Maximum query string length in bytes. Queries exceeding this are rejected
+    /// at parse time with `ParseErrorKind::QueryTooLong`.
     ///
-    /// Default: `10_000`
+    /// Default: [`dsl::MAX_QUERY_LENGTH`](crate::dsl::MAX_QUERY_LENGTH).
     pub max_query_length: usize,
 
-    /// Maximum number of clauses (terms + groups) in a single query.
-    /// Each term and each any-of group counts as one clause.
+    /// Maximum number of clauses (terms + groups) in a single query. Each term
+    /// and each any-of group counts as one clause. Exceeding it is rejected with
+    /// `ParseErrorKind::TooManyClauses`.
     ///
-    /// Default: `256`
+    /// Default: [`dsl::MAX_CLAUSES`](crate::dsl::MAX_CLAUSES).
     pub max_query_clauses: usize,
 
     /// Maximum number of members in a single any-of group `(a,b,c,...)`.
+    /// Exceeding it is rejected with `ParseErrorKind::AnyOfGroupTooLarge`.
     ///
-    /// Default: `64`
+    /// Default: [`dsl::MAX_ANY_OF_SIZE`](crate::dsl::MAX_ANY_OF_SIZE).
     pub max_anyof_group_size: usize,
 
     // ---- merge scoring ----
@@ -147,9 +155,9 @@ impl Default for EngineConfig {
             data_dir: None,
             wal_sync_on_write: false,
             retain_source: true,
-            max_query_length: 10_000,
-            max_query_clauses: 256,
-            max_anyof_group_size: 64,
+            max_query_length: crate::dsl::MAX_QUERY_LENGTH,
+            max_query_clauses: crate::dsl::MAX_CLAUSES,
+            max_anyof_group_size: crate::dsl::MAX_ANY_OF_SIZE,
             compaction_fixed_cost: 1000.0,
         }
     }
@@ -160,6 +168,18 @@ impl EngineConfig {
     /// as a `const fn` for static initialization.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The query-complexity limits to apply at parse time, derived from this
+    /// config. The ingest paths pass this to
+    /// [`dsl::parse_with_limits`](crate::dsl::parse_with_limits) so the
+    /// configured (and runtime-tunable) limits actually govern parsing.
+    pub fn parse_limits(&self) -> crate::dsl::ParseLimits {
+        crate::dsl::ParseLimits {
+            max_query_length: self.max_query_length,
+            max_clauses: self.max_query_clauses,
+            max_any_of_size: self.max_anyof_group_size,
+        }
     }
 
     /// Validate configuration, returning a list of problems. Empty means valid.

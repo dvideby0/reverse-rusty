@@ -233,6 +233,14 @@ from the audit's former P3 list). Roughly grouped:
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
   runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving it from the corpus is the
   NPMI-wiring item in Tier 2.
+- **Validated on synthetic data only.** The differential oracle and the benchmarks run against the
+  seeded synthetic generator ([`gen.rs`](../engine/src/gen.rs)), which is deliberately adversarial
+  (ADR-008); one design-validation pass ran ~20 real eBay titles through the normalizer
+  ([`research/real-data-findings.md`](research/real-data-findings.md)). What has **not** been done is a
+  false-negative / false-positive audit (or throughput run) against a *real saved-search corpus* with
+  messy listing titles. Synthetic data cannot stand in for the long tail of real text, so this is the
+  highest-leverage step for external credibility — and a prerequisite before quoting the headline
+  numbers as production guarantees rather than design-target evidence.
 
 The former production-hardening audit's medium-priority items — metrics gaps (P2-2), response-envelope
 consistency (P2-8), and bulk-ingest lock scope (P2-14) — are now resolved (2026-05-29): P2-2 and P2-8

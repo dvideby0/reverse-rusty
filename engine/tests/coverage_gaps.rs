@@ -859,6 +859,53 @@ fn settings_snapshot_reflects_set_config_and_is_immutable() {
     );
 }
 
+/// The `EngineConfig` query-complexity limits must actually govern parsing on
+/// the ingest paths (not just sit in the struct), and must be dynamic: raising a
+/// limit at runtime makes a previously-rejected query acceptable. Regression
+/// test for the wiring gap where these knobs were never read by the parser.
+#[test]
+fn configured_query_limits_are_enforced_at_ingest_and_are_dynamic() {
+    use reverse_rusty::config::EngineConfig;
+    use reverse_rusty::error::{ParseErrorKind, WriteError};
+    use reverse_rusty::segment::InsertOutcome;
+
+    // A max_query_clauses far below the compiled-in default. The query stays well
+    // within the byte-length and any-of ceilings, so this isolates the clause
+    // limit specifically.
+    let mut eng = Engine::with_config(
+        Normalizer::default_vocab().unwrap(),
+        EngineConfig {
+            max_query_clauses: 3,
+            ..EngineConfig::default()
+        },
+    );
+
+    // 4 clauses > configured max of 3 → rejected at the live-insert front door.
+    let four = "alpha beta gamma delta";
+    match eng.try_insert_live(four, 1, 1) {
+        Err(WriteError::Parse(e)) => assert_eq!(e.kind, ParseErrorKind::TooManyClauses),
+        other => panic!("expected a TooManyClauses parse rejection, got {other:?}"),
+    }
+
+    // Same rejection on the bulk path (counted in the IngestReport).
+    let report = eng.bulk_ingest(&[(2, four.to_string())]);
+    assert_eq!(report.ingested, 0);
+    assert_eq!(report.rejected_parse, 1);
+
+    // Raising the limit at runtime (the PUT /_settings path uses set_config) makes
+    // the very same query acceptable — proving the knob governs parsing live.
+    let mut cfg = eng.config().clone();
+    cfg.max_query_clauses = 8;
+    eng.set_config(cfg);
+    assert!(
+        matches!(
+            eng.try_insert_live(four, 3, 1),
+            Ok(InsertOutcome::Inserted(_))
+        ),
+        "raising max_query_clauses must let the same query through"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Per-segment introspection (segment_infos — backs GET /_cat/segments)
 // ─────────────────────────────────────────────────────────────────────────────
