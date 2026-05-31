@@ -3,9 +3,12 @@ name = "reverse-rusty"
 version = "0.1.0"
 edition = "2021"
 description = "Domain-aware reverse product-query matcher. daachorse for multiword aliases, roaring for large postings, rayon for parallel matching."
-# Internal crate — not published to crates.io. This lets
-# `cargo deny` skip the (intentionally) unlicensed local crate via
-# `licenses.private.ignore`.
+# Licensed under the MIT License — a permissive, widely-recognized license
+# (reuse permitted with attribution) that is compatible with the all-permissive
+# (MIT / Apache-2.0 / BSD) dependency tree. Full text in ../LICENSE.
+license = "MIT"
+# Still not published to crates.io; `cargo deny`'s `licenses.private.ignore` skips
+# this local crate regardless, and "MIT" is allow-listed in deny.toml anyway.
 publish = false
 
 [dependencies]
