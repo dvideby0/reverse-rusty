@@ -82,6 +82,17 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   network — proven by `tests/cluster_grpc_oracle.rs` (gRPC cluster ≡ single-node ≡ brute, broad on/off).
   The remaining distributed layers stay design-only (see Tier 3).
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §3/§7/§10.)
+- **Durable cluster coordinator log (ADR-031)** — clustering build-path step 3a: the `ClusterEngine`
+  coordinator now has durability of its own. A `trait ClusterLog` (`cluster/clog.rs`) with a CRC-framed
+  `FileClusterLog` + in-memory `NullClusterLog`, a coordinator-level manifest + base snapshot (`storage.rs`),
+  and log-first/fail-closed `add_query`/`remove_query` make an in-process cluster built with a `data_dir`
+  rebuildable from disk alone: `ClusterEngine::open` re-derives byte-identical placement (zero false
+  negatives) from manifest + snapshot + replayed log, and `checkpoint()` compacts the log. Raw DSL is the
+  logged source of truth; one `apply` funnel serves both live writes and replay (the Raft state-machine
+  apply in disguise — the seam is shaped for a Raft-backed log later). Dependency-free (lean core); proven
+  by `tests/cluster_durability_oracle.rs` (rebuild ≡ pre-crash ≡ brute across K∈{1,3,8} × broad, +
+  checkpoint, torn-tail, fail-closed, two-backend differential, fsync parity). Still design-only: the
+  shared/Raft log + object-store segments (step 3b).
 
 ## Measured
 
@@ -141,12 +152,13 @@ the selective candidate count further.
 
 - **Feature-model versioning + blue/green re-materialize.** Frozen common-mask across minor versions;
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
-- **Clustering.** The 100M-query horizontal-scale story. **In-process core (build-path steps 1–2) plus
-  step 1's gRPC transport are built and oracle-proven** — consistent-hash entity-anchor sharding +
-  content routing + a designated broad-lane replicated shard over K shards in one process (ADR-027), and
-  a `distributed`-gated gRPC `ShardServer` + `RemoteShard` so a shard can be remote (ADR-029; see
-  Implemented above). **Still design-only:** the remaining distributed layers — a durable externalized
-  mutation log, Raft quorum cluster-manager, object-store segments, cross-node dict shipping, autoscaling,
+- **Clustering.** The 100M-query horizontal-scale story. **In-process core (build-path steps 1–2), step 1's
+  gRPC transport, and step 3a's durable coordinator log are built and oracle-proven** — consistent-hash
+  entity-anchor sharding + content routing + a designated broad-lane replicated shard over K shards in one
+  process (ADR-027), a `distributed`-gated gRPC `ShardServer` + `RemoteShard` so a shard can be remote
+  (ADR-029), and an externalized single-node coordinator mutation log with crash-rebuild (ADR-031; all in
+  Implemented above). **Still design-only:** the remaining distributed layers — the *shared/Raft* mutation
+  log + object-store segments (step 3b), Raft quorum cluster-manager, cross-node dict shipping, autoscaling,
   auto-split, replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
@@ -265,10 +277,12 @@ from the audit's former P3 list). Roughly grouped:
 
 ## Current limitations
 
-- **Single-node deployment.** The multi-shard core (ADR-027) and the gRPC `ShardServer`/`RemoteShard`
-  transport (ADR-029) are built — the `distributed` feature can already run a coordinator over remote
-  shards (on localhost today). A full multi-node deployment — a durable shared log, Raft cluster-manager,
-  object storage, cross-node dict shipping, and autoscaling — is designed but not built; see Tier 3.
+- **Single-node deployment.** The multi-shard core (ADR-027), the gRPC `ShardServer`/`RemoteShard`
+  transport (ADR-029), and a durable single-node coordinator log (ADR-031) are built — the `distributed`
+  feature can already run a coordinator over remote shards (on localhost today), and an in-process cluster
+  built with a `data_dir` now survives a crash (rebuild via `ClusterEngine::open`). A full multi-node
+  deployment — a shared/Raft log, Raft cluster-manager, object storage, cross-node dict shipping, and
+  autoscaling — is designed but not built; see Tier 3.
   **Correctness caveat (ADR-029/030):** cross-process dict divergence is now caught — a connect-time
   dict-fingerprint handshake (ADR-030) fails the connect with `ShardError::DictMismatch` if a server's
   frozen dict differs from the coordinator's, so a diverged dict can no longer drop matches *silently*.

@@ -52,6 +52,12 @@ pub enum ShardError {
     /// against that shard would *silently* drop results — fail loud instead. This is the
     /// one false-negative path the otherwise-fallible seam cannot catch (ADR-029).
     DictMismatch { expected: u64, actual: u64 },
+    /// A cluster mutation could not be durably logged (the coordinator's externalized
+    /// `ClusterLog`, ADR-031). The mutation is *rejected*, not applied — surfacing it
+    /// rather than acknowledging an unlogged write is load-bearing for the
+    /// rebuild-from-log contract (an un-logged add/remove would silently vanish on
+    /// reopen). Parallels the engine's WAL-first write path (ADR-013).
+    Log(String),
 }
 
 impl std::fmt::Display for ShardError {
@@ -64,6 +70,7 @@ impl std::fmt::Display for ShardError {
                 "dict fingerprint mismatch: coordinator {expected:#018x} != shard \
                  {actual:#018x} (every shard must share the coordinator's frozen dict)"
             ),
+            ShardError::Log(m) => write!(f, "cluster log durability error: {m}"),
         }
     }
 }

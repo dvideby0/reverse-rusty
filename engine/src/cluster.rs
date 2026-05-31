@@ -7,7 +7,10 @@
 //! `distributed` feature, the [`Shard`](shard::Shard) seam also has a gRPC
 //! implementation: [`ShardServer`] serves one shard, and a [`RemoteShard`] client lets
 //! the coordinator drive a shard across the network ([`ClusterEngine::connect_remote`]).
-//! A durable externalized log, Raft, object storage, autoscaling, and auto-split
+//! The coordinator's mutations are made durable by an externalized, ordered
+//! [`ClusterLog`](clog::ClusterLog) (build-path step 3a, ADR-031), so a cluster built
+//! with a `data_dir` is rebuildable from its log alone ([`ClusterEngine::open`]). Raft
+//! quorum replication of that log, object-storage segments, autoscaling, and auto-split
 //! remain later steps.
 //!
 //! Correctness rests on a single decision: the coordinator owns ONE authoritative
@@ -19,6 +22,7 @@
 //! lossless (zero false negatives). See [`coordinator`] for the placement/routing rules
 //! and the no-false-negative argument.
 
+mod clog;
 mod coordinator;
 mod ring;
 mod shard;

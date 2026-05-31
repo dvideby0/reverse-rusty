@@ -1558,6 +1558,232 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     })
 }
 
+// -- Cluster coordinator manifest + base snapshot (ADR-031) ------------------
+//
+// The coordinator's durable cluster-state document + base snapshot, the peers of the
+// engine `Manifest` + `sources.dat` one level up. The manifest is the atomic commit
+// point (tmp + CRC + rename); it pins the frozen dict (so reopen uses the SAME feature
+// space → byte-identical placement), the ring config, and the log replay cursor /
+// epoch. The base snapshot is the live query set `logical → (version, dsl)` — the
+// `sources.dat` v2 shape plus a version column.
+
+const CLUSTER_MANIFEST_MAGIC: [u8; 4] = *b"RCMN";
+const CLUSTER_MANIFEST_VERSION: u32 = 1;
+
+const CLUSTER_SNAP_MAGIC: [u8; 4] = *b"RCSN";
+const CLUSTER_SNAP_VERSION: u32 = 1;
+const CLUSTER_SNAP_HEADER: usize = 16; // magic(4) + version(4) + count(4) + reserved(4)
+const CLUSTER_SNAP_REC: usize = 24; // logical(8) + version(4) + blob_off(8) + dsl_len(4)
+
+/// The coordinator's cluster-state document (the analogue of what a Raft quorum will
+/// later hold). Written atomically alongside the base snapshot + mutation log.
+pub struct ClusterManifest {
+    /// The log epoch / checkpoint generation (bumped on `checkpoint`).
+    pub epoch: u64,
+    /// The log position the base snapshot captures through; replay starts after it.
+    pub snapshot_pos: u64,
+    /// `Dict::fingerprint()` of the frozen dict — verified on open (fail loud on drift).
+    pub dict_fingerprint: u64,
+    /// Ring config (re-derives a byte-identical `HashRing`).
+    pub num_shards: u32,
+    pub vnodes: u32,
+    /// Default broad-lane toggle.
+    pub include_broad: bool,
+    /// Relative filename of the base snapshot this manifest commits.
+    pub snapshot_file: String,
+    /// `serialize_dict(frozen dict)` — the authoritative feature space.
+    pub dict_data: Vec<u8>,
+}
+
+pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Result<()> {
+    let tmp = path.with_extension("cmanifest.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&CLUSTER_MANIFEST_MAGIC)?;
+    write_u32(&mut f, CLUSTER_MANIFEST_VERSION)?;
+    write_u64(&mut f, manifest.epoch)?;
+    write_u64(&mut f, manifest.snapshot_pos)?;
+    write_u64(&mut f, manifest.dict_fingerprint)?;
+    write_u32(&mut f, manifest.num_shards)?;
+    write_u32(&mut f, manifest.vnodes)?;
+    f.write_all(&[u8::from(manifest.include_broad)])?;
+    let snap_bytes = manifest.snapshot_file.as_bytes();
+    write_u32(&mut f, snap_bytes.len() as u32)?;
+    f.write_all(snap_bytes)?;
+    write_u32(&mut f, manifest.dict_data.len() as u32)?;
+    f.write_all(&manifest.dict_data)?;
+    f.sync_all()?;
+    drop(f);
+    // Read back for the trailing CRC (same simple approach as write_manifest).
+    let content = std::fs::read(&tmp)?;
+    let crc = crc32(&content);
+    let mut f = std::fs::OpenOptions::new().append(true).open(&tmp)?;
+    write_u32(&mut f, crc)?;
+    f.sync_all()?;
+    drop(f);
+    durable_rename(&tmp, path)?;
+    Ok(())
+}
+
+pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
+    let data = std::fs::read(path)?;
+    if data.len() < 12 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cluster manifest too small",
+        ));
+    }
+    let content = &data[..data.len() - 4];
+    let stored_crc = read_u32_at(&data, data.len() - 4)?;
+    if crc32(content) != stored_crc {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cluster manifest CRC mismatch",
+        ));
+    }
+    if data[0..4] != CLUSTER_MANIFEST_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "bad cluster manifest magic",
+        ));
+    }
+    let version = read_u32_at(&data, 4)?;
+    if version != CLUSTER_MANIFEST_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported cluster manifest version {version}"),
+        ));
+    }
+    let mut cursor = 8usize;
+    let epoch = read_u64_at(&data, cursor)?;
+    cursor += 8;
+    let snapshot_pos = read_u64_at(&data, cursor)?;
+    cursor += 8;
+    let dict_fingerprint = read_u64_at(&data, cursor)?;
+    cursor += 8;
+    let num_shards = read_u32_at(&data, cursor)?;
+    cursor += 4;
+    let vnodes = read_u32_at(&data, cursor)?;
+    cursor += 4;
+    let include_broad = *data
+        .get(cursor)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated cluster manifest"))?
+        != 0;
+    cursor += 1;
+    let snap_len = read_u32_at(&data, cursor)? as usize;
+    cursor += 4;
+    let snapshot_file =
+        std::str::from_utf8(data.get(cursor..cursor + snap_len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "truncated snapshot name")
+        })?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        .to_string();
+    cursor += snap_len;
+    let dict_len = read_u32_at(&data, cursor)? as usize;
+    cursor += 4;
+    let dict_data = data
+        .get(cursor..cursor + dict_len)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated dict blob"))?
+        .to_vec();
+
+    Ok(ClusterManifest {
+        epoch,
+        snapshot_pos,
+        dict_fingerprint,
+        num_shards,
+        vnodes,
+        include_broad,
+        snapshot_file,
+        dict_data,
+    })
+}
+
+/// Write the cluster base snapshot — a caller-sorted live set `(logical, version, dsl)`
+/// — as a sorted index + text blob + CRC trailer, written atomically. Mirrors
+/// `write_sources_v2` with an added per-record `version` column.
+pub fn write_cluster_snapshot(entries: &[(u64, u32, String)], path: &Path) -> io::Result<()> {
+    let mut buf: Vec<u8> =
+        Vec::with_capacity(CLUSTER_SNAP_HEADER + entries.len() * CLUSTER_SNAP_REC + 64);
+    buf.extend_from_slice(&CLUSTER_SNAP_MAGIC);
+    buf.extend_from_slice(&CLUSTER_SNAP_VERSION.to_le_bytes());
+    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
+    let mut blob: Vec<u8> = Vec::new();
+    let mut blob_off: u64 = 0;
+    let mut prev: Option<u64> = None;
+    for (logical, version, dsl) in entries {
+        debug_assert!(
+            prev.is_none_or(|p| p <= *logical),
+            "write_cluster_snapshot requires entries sorted by logical id"
+        );
+        prev = Some(*logical);
+        let bytes = dsl.as_bytes();
+        buf.extend_from_slice(&logical.to_le_bytes());
+        buf.extend_from_slice(&version.to_le_bytes());
+        buf.extend_from_slice(&blob_off.to_le_bytes());
+        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        blob.extend_from_slice(bytes);
+        blob_off += bytes.len() as u64;
+    }
+    buf.extend_from_slice(&blob);
+    let crc = crc32(&buf);
+    buf.extend_from_slice(&crc.to_le_bytes());
+
+    let tmp = path.with_extension("csnap.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&buf)?;
+    f.sync_all()?;
+    drop(f);
+    durable_rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Read a cluster base snapshot fully into `(logical, version, dsl)` records (the whole
+/// set is needed to rebuild every shard, so there is no mmap/lazy path).
+pub fn read_cluster_snapshot(path: &Path) -> io::Result<Vec<(u64, u32, String)>> {
+    let data = std::fs::read(path)?;
+    let bad = || io::Error::new(io::ErrorKind::InvalidData, "corrupt cluster snapshot");
+    if data.len() < CLUSTER_SNAP_HEADER + 4 || data[0..4] != CLUSTER_SNAP_MAGIC {
+        return Err(bad());
+    }
+    let version = read_u32_at(&data, 4)?;
+    if version != CLUSTER_SNAP_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("unsupported cluster snapshot version {version}"),
+        ));
+    }
+    let count = read_u32_at(&data, 8)? as usize;
+    let index_off = CLUSTER_SNAP_HEADER;
+    let blob_off = index_off
+        .checked_add(count.checked_mul(CLUSTER_SNAP_REC).ok_or_else(bad)?)
+        .ok_or_else(bad)?;
+    if blob_off + 4 > data.len() {
+        return Err(bad());
+    }
+    let want = read_u32_at(&data, data.len() - 4)?;
+    if crc32(&data[..data.len() - 4]) != want {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cluster snapshot CRC mismatch",
+        ));
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let rec = index_off + i * CLUSTER_SNAP_REC;
+        let logical = read_u64_at(&data, rec)?;
+        let version = read_u32_at(&data, rec + 8)?;
+        let boff = read_u64_at(&data, rec + 12)? as usize;
+        let len = read_u32_at(&data, rec + 20)? as usize;
+        let start = blob_off + boff;
+        let bytes = data.get(start..start + len).ok_or_else(bad)?;
+        let dsl = std::str::from_utf8(bytes)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            .to_string();
+        out.push((logical, version, dsl));
+    }
+    Ok(out)
+}
+
 // -- Query source store persistence ------------------------------------------
 
 const SOURCES_MAGIC: [u8; 4] = *b"SRCS";

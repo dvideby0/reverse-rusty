@@ -13,8 +13,10 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > oracle-proven** — `src/cluster/` (ADR-027): entity-anchor sharding, content routing, and a designated
 > broad-lane shard over K shards in **one process**, dependency-free. Step 1's **gRPC transport is also
 > built** — a `ShardServer` + `RemoteShard` behind the off-by-default `distributed` feature (ADR-029),
-> proven by `tests/cluster_grpc_oracle.rs`. Still design-only: the remaining multi-node layers — the
-> durable shared mutation log, the Raft quorum, object-store segments, cross-node dict shipping, and
+> proven by `tests/cluster_grpc_oracle.rs`. **Step 3a — a durable single-node coordinator mutation log**
+> (`trait ClusterLog` + crash-rebuild via `ClusterEngine::open`) — **is built** (ADR-031), proven by
+> `tests/cluster_durability_oracle.rs`. Still design-only: the remaining multi-node layers — the
+> *shared/Raft* mutation log, the Raft quorum, object-store segments, cross-node dict shipping, and
 > autoscaling/auto-split.
 
 **TL;DR (for agents)**
@@ -22,7 +24,7 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** OpenSearch cluster formation, Aurora log-is-the-database, consistent hashing
-- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027); multi-node layers design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport (ADR-029) and a durable single-node coordinator log (step 3a; ADR-031); the remaining multi-node layers are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary
 
 ---
@@ -250,13 +252,20 @@ without operator action. The defaults are the product.
    entity-anchor placement, a designated broad-lane shard (§7), cross-shard merge — validated by the
    multi-shard correctness oracle (`tests/cluster_oracle.rs`: cluster ≡ single-node ≡ brute, K∈{1,3,8,16}).
 3. **Externalize the mutation log** (start with a single-node WAL, then Raft) and make segments
-   loadable from a shared path (local dir → object store) — gets the Aurora storage shape. *(design-only)*
+   loadable from a shared path (local dir → object store) — gets the Aurora storage shape.
+   - 3a. **Single-node coordinator WAL.** ✅ **Done** (ADR-031): a durable, ordered `trait ClusterLog`
+     (`FileClusterLog`/`NullClusterLog`) plus a coordinator manifest + base snapshot; `ClusterEngine::{open,
+     checkpoint}` rebuild the whole cluster — byte-identical placement, zero false negatives — from the log
+     alone (proven by `tests/cluster_durability_oracle.rs`). Raw DSL is the logged source of truth; one
+     `apply` funnel serves both live writes and replay.
+   - 3b. **Shared-path / object-store segments** (a replica attaches-and-mmaps instead of re-ingesting) and a
+     **Raft-backed `ClusterLog`** behind the same seam — *(design-only; the seam + `apply` funnel + epoch were shaped for this swap)*.
 4. **Add the cluster-manager quorum** (Raft) holding ring + epoch; multi-process cluster. *(design-only)*
 5. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
 6. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
-(Steps 1–2 — the in-process core — and step 1's gRPC transport are built; ADR-027 + ADR-029. Steps 3–5 are design-only. See [`../STATUS.md`](../STATUS.md).)
+(Steps 1–2 — the in-process core — step 1's gRPC transport, and step 3a's single-node coordinator log are built; ADR-027 + ADR-029 + ADR-031. Steps 3b–5 are design-only. See [`../STATUS.md`](../STATUS.md).)
 
 ---
 
