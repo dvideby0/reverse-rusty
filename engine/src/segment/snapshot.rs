@@ -2,7 +2,7 @@
 //! lock-free read view and THE HOT PATH (`match_title` and the rayon-parallel
 //! batch matchers). Type definitions live in the `segment` module root.
 
-use super::{BaseSegment, EngineSnapshot, MatchScratch, MatchStats, Segment};
+use super::{BaseSegment, BatchMatchOptions, EngineSnapshot, MatchScratch, MatchStats, Segment};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
@@ -372,7 +372,48 @@ impl EngineSnapshot {
                 a.matches += b.matches;
                 a.probes_attempted += b.probes_attempted;
                 a.probes_skipped += b.probes_skipped;
+                a.broad_queries_evaluated += b.broad_queries_evaluated;
+                a.broad_anchors_scanned += b.broad_anchors_scanned;
+                a.broad_batches += b.broad_batches;
                 a
             })
+    }
+
+    /// Batch match on the snapshot: selective lane per title + broad lane once
+    /// per batch (columnar). Per-title `(index, matched_logical_ids)`, identical
+    /// to per-title [`EngineSnapshot::match_title`]. Lock-free read path.
+    pub fn match_titles_batch(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        opts: BatchMatchOptions,
+    ) -> Vec<(usize, Vec<u64>)> {
+        super::broad_batch::batch_results(
+            &MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+            },
+            titles,
+            opts,
+        )
+    }
+
+    /// Batch match returning only aggregate [`MatchStats`].
+    pub fn match_titles_batch_stats(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        opts: BatchMatchOptions,
+    ) -> MatchStats {
+        super::broad_batch::batch_stats(
+            &MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+            },
+            titles,
+            opts,
+        )
     }
 }

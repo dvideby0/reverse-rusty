@@ -1045,6 +1045,96 @@ impl MmapSegment {
         )
     }
 
+    // ---- broad-lane batch evaluation surface (mmap twin of the in-memory
+    // `Segment` accessors used by `segment::broad_batch`). Lets the columnar
+    // broad evaluator drive mmap and in-memory segments through one body. ----
+
+    /// Probe the broad frozen table for `key` (after the anchor-filter check),
+    /// appending reachable local IDs to `cands` (epoch-deduped via `seen`). The
+    /// reachability primitive for the batch broad lane — mirrors the broad block
+    /// of `match_into` (filter gate + probe) so the columnar path skips the same
+    /// probes the per-title path would.
+    #[inline]
+    pub(crate) fn broad_reach(
+        &self,
+        key: u64,
+        epoch: u32,
+        seen: &mut [u32],
+        cands: &mut Vec<u32>,
+        stats: &mut MatchStats,
+    ) {
+        stats.probes_attempted += 1;
+        if self.filter_num_blocks > 0 && !self.may_contain(key) {
+            stats.probes_skipped += 1;
+            return;
+        }
+        if let Some(posting) =
+            frozen_probe(key, self.broad_slots(), self.broad_blob(), self.broad_mask)
+        {
+            stats.postings_scanned += posting.len() as u32;
+            for &local in posting {
+                if seen[local as usize] != epoch {
+                    seen[local as usize] = epoch;
+                    cands.push(local);
+                }
+            }
+        }
+    }
+
+    /// Liveness for one local ID (mmap tombstone overlay).
+    #[inline]
+    pub(crate) fn is_alive_at(&self, local: u32) -> bool {
+        self.alive_overlay[local as usize]
+    }
+
+    /// Whether `local`'s entire semantics is its hot anchor — the pure-anchor
+    /// skip-verify fast path. Mmap twin of [`crate::exact::ExactStore::is_pure_anchor`].
+    #[inline]
+    pub(crate) fn is_pure_anchor(&self, local: u32) -> bool {
+        let i = local as usize;
+        self.req_len()[i] == 0
+            && self.forb_mask()[i] == 0
+            && self.forb_len()[i] == 0
+            && self.q_group_count()[i] == 0
+            && self.req_mask()[i].is_power_of_two()
+    }
+
+    /// Columnar batch verification for one query against a title batch, writing
+    /// the matching-title bitmap into `acc`. Mmap twin of
+    /// [`crate::exact::ExactStore::eval_batch`]; shares
+    /// [`crate::exact::eval_batch_slices`] so the in-memory and mmap broad-batch
+    /// paths cannot drift.
+    #[inline]
+    pub(crate) fn eval_batch<'a>(
+        &self,
+        local: u32,
+        tmask_batch: &[u64],
+        lookup: impl Fn(FeatureId) -> Option<&'a [u64]>,
+        acc: &mut [u64],
+        grp: &mut [u64],
+    ) {
+        crate::exact::eval_batch_slices(
+            local as usize,
+            tmask_batch,
+            lookup,
+            acc,
+            grp,
+            self.req_mask(),
+            self.forb_mask(),
+            self.req_off(),
+            self.req_len(),
+            self.req_blob(),
+            self.forb_off(),
+            self.forb_len(),
+            self.forb_blob(),
+            self.q_group_start(),
+            self.q_group_count(),
+            self.group_off(),
+            self.group_len(),
+            self.anyof_blob(),
+        );
+    }
+
     /// Filter check: is this signature key possibly in this segment?
     #[inline]
     fn may_contain(&self, key: u64) -> bool {

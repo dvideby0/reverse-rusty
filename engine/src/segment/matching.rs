@@ -6,7 +6,7 @@
 //! drift.
 
 use super::snapshot::MatchView;
-use super::{Engine, MatchScratch, MatchStats};
+use super::{BatchMatchOptions, Engine, MatchScratch, MatchStats};
 
 impl Engine {
     /// THE HOT PATH. Match one title, appending matched logical IDs to `out`.
@@ -77,7 +77,49 @@ impl Engine {
                 a.matches += b.matches;
                 a.probes_attempted += b.probes_attempted;
                 a.probes_skipped += b.probes_skipped;
+                a.broad_queries_evaluated += b.broad_queries_evaluated;
+                a.broad_anchors_scanned += b.broad_anchors_scanned;
+                a.broad_batches += b.broad_batches;
                 a
             })
+    }
+
+    /// Batch match: selective lane per title + broad lane once per batch
+    /// (columnar). Returns per-title `(index, matched_logical_ids)`, sorted +
+    /// deduped, byte-identical to per-title [`Engine::match_title`]. See
+    /// [`BatchMatchOptions`] and the `broad_batch` module.
+    pub fn match_titles_batch(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        opts: BatchMatchOptions,
+    ) -> Vec<(usize, Vec<u64>)> {
+        super::broad_batch::batch_results(
+            &MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+            },
+            titles,
+            opts,
+        )
+    }
+
+    /// Batch match returning only aggregate [`MatchStats`] (for benchmarks).
+    pub fn match_titles_batch_stats(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        opts: BatchMatchOptions,
+    ) -> MatchStats {
+        super::broad_batch::batch_stats(
+            &MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+            },
+            titles,
+            opts,
+        )
     }
 }

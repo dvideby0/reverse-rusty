@@ -86,6 +86,108 @@ pub fn verify_slices(
     true
 }
 
+/// Columnar batch verification — the bitmap transpose of [`verify_slices`].
+///
+/// Computes, for one stored query `i`, the set of titles in a batch that satisfy
+/// it, written as a bitmap into `acc` (one bit per batch-local title, `acc.len()`
+/// = `ceil(batch / 64)` words). `tmask_batch[t]` is title `t`'s common-mask word;
+/// `lookup(f)` returns the bitmap of titles containing feature `f` (or `None` if
+/// `f` is absent from the whole batch). `grp` is a reused scratch bitmap of the
+/// same width as `acc`.
+///
+/// This reproduces [`verify_slices`] clause-for-clause so the batch (broad-lane)
+/// path returns *exactly* the same matches as the scalar per-title path — the
+/// load-bearing correctness obligation (no false negatives, no false positives).
+/// Each scalar test becomes a bitwise transpose: the common-mask gate → a
+/// per-title gate bitmap; required-tail present → AND of the feature bitmaps;
+/// forbidden-tail absent → AND-NOT; any-of → AND of (OR over members). Forbidden
+/// features are consulted ONLY here in verification, never to retrieve/prune
+/// candidates — the "never gate on MUST_NOT" invariant, identical to the scalar
+/// path.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn eval_batch_slices<'a>(
+    i: usize,
+    tmask_batch: &[u64],
+    lookup: impl Fn(FeatureId) -> Option<&'a [u64]>,
+    acc: &mut [u64],
+    grp: &mut [u64],
+    req_mask: &[u64],
+    forb_mask: &[u64],
+    req_off: &[u32],
+    req_len: &[u16],
+    req_blob: &[u32],
+    forb_off: &[u32],
+    forb_len: &[u16],
+    forb_blob: &[u32],
+    q_group_start: &[u32],
+    q_group_count: &[u16],
+    group_off: &[u32],
+    group_len: &[u16],
+    anyof_blob: &[u32],
+) {
+    // 1) common-mask gate -> per-title gate bitmap (verify step 1, transposed)
+    let rm = req_mask[i];
+    let fm = forb_mask[i];
+    for a in acc.iter_mut() {
+        *a = 0;
+    }
+    for (t, &tm) in tmask_batch.iter().enumerate() {
+        if (rm & tm) == rm && (fm & tm) == 0 {
+            acc[t >> 6] |= 1u64 << (t & 63);
+        }
+    }
+
+    // 2) required tail: AND of each feature's title bitmap (verify step 2)
+    let ro = req_off[i] as usize;
+    let rl = req_len[i] as usize;
+    for &f in &req_blob[ro..ro + rl] {
+        if let Some(b) = lookup(f) {
+            for (a, x) in acc.iter_mut().zip(b) {
+                *a &= *x;
+            }
+        } else {
+            // feature absent from the whole batch -> no title can match
+            for a in acc.iter_mut() {
+                *a = 0;
+            }
+            return;
+        }
+    }
+
+    // 3) forbidden tail: AND-NOT each feature's title bitmap (verify step 3)
+    let fo = forb_off[i] as usize;
+    let fl = forb_len[i] as usize;
+    for &f in &forb_blob[fo..fo + fl] {
+        if let Some(b) = lookup(f) {
+            for (a, x) in acc.iter_mut().zip(b) {
+                *a &= !*x;
+            }
+        }
+    }
+
+    // 4) any-of groups: AND of (OR over members) (verify step 4)
+    let gs = q_group_start[i] as usize;
+    let gc = q_group_count[i] as usize;
+    for gi in gs..gs + gc {
+        let go = group_off[gi] as usize;
+        let gl = group_len[gi] as usize;
+        for g in grp.iter_mut() {
+            *g = 0;
+        }
+        for &m in &anyof_blob[go..go + gl] {
+            if let Some(b) = lookup(m) {
+                for (g, x) in grp.iter_mut().zip(b) {
+                    *g |= *x;
+                }
+            }
+        }
+        for (a, x) in acc.iter_mut().zip(grp.iter()) {
+            *a &= *x;
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct ExactStore {
     // common-mask words (the 64 hottest features)
@@ -248,6 +350,56 @@ impl ExactStore {
         }
 
         true
+    }
+
+    /// Columnar batch verification for one query against a title batch. Writes
+    /// the matching-title bitmap into `acc`. The bitmap transpose of [`verify`],
+    /// sharing [`eval_batch_slices`] with the mmap path so the two cannot drift.
+    #[inline]
+    pub fn eval_batch<'a>(
+        &self,
+        local: u32,
+        tmask_batch: &[u64],
+        lookup: impl Fn(FeatureId) -> Option<&'a [u64]>,
+        acc: &mut [u64],
+        grp: &mut [u64],
+    ) {
+        eval_batch_slices(
+            local as usize,
+            tmask_batch,
+            lookup,
+            acc,
+            grp,
+            &self.req_mask,
+            &self.forb_mask,
+            &self.req_off,
+            &self.req_len,
+            &self.req_blob,
+            &self.forb_off,
+            &self.forb_len,
+            &self.forb_blob,
+            &self.q_group_start,
+            &self.q_group_count,
+            &self.group_off,
+            &self.group_len,
+            &self.anyof_blob,
+        );
+    }
+
+    /// Whether query `local`'s ENTIRE semantics is its single hot anchor: one
+    /// masked required feature, no required tail, no forbidden, no any-of. Such a
+    /// query matches any title containing the anchor with NO exact verification —
+    /// the pure-anchor skip-verify fast path (the streaming-safe analog of the
+    /// design's "materialized subscriptions"). Derived purely from the SoA
+    /// columns, so it composes through compaction with no extra state.
+    #[inline]
+    pub fn is_pure_anchor(&self, local: u32) -> bool {
+        let i = local as usize;
+        self.req_len[i] == 0
+            && self.forb_mask[i] == 0
+            && self.forb_len[i] == 0
+            && self.q_group_count[i] == 0
+            && self.req_mask[i].is_power_of_two()
     }
 
     /// Copy entry `id` from `self` into `dest`, returning the new local id in
