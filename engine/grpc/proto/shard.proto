@@ -22,6 +22,10 @@ service ShardService {
   rpc InsertExtracted (InsertRequest) returns (InsertReply);
   rpc Delete          (DeleteRequest) returns (DeleteReply);
   rpc Flush           (FlushRequest)  returns (FlushReply);
+  // ---- handshake ----
+  // Connect-time dict-identity check: the coordinator compares the server's frozen-dict
+  // fingerprint to its own and refuses a mismatch (ADR-029).
+  rpc DictFingerprint (Empty) returns (DictFingerprintReply);
 }
 
 message Empty {}
@@ -84,3 +88,6 @@ message FlushReply   {}
 
 message CountReply       { uint64 count = 1; }            // usize num_queries
 message ClassCountsReply { repeated uint64 counts = 1; }  // exactly 4: [A, B, C, D]
+
+// 64-bit fingerprint of the server's frozen dict (engine `Dict::fingerprint`).
+message DictFingerprintReply { uint64 fingerprint = 1; }

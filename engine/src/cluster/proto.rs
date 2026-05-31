@@ -42,3 +42,80 @@ pub(crate) fn stats_from_engine(s: EngineStats) -> MatchStats {
         broad_batches: s.broad_batches,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{stats_from_engine, stats_to_engine, EngineStats, MatchStats};
+
+    // 11 DISTINCT values, so any field swap in either mapper changes the result — a pure
+    // round-trip alone would miss a *symmetric* transposition present in both directions,
+    // which the per-field, by-name assertions below catch.
+    const VALS: [u32; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+
+    fn engine_sample() -> EngineStats {
+        EngineStats {
+            unique_candidates: VALS[0],
+            postings_scanned: VALS[1],
+            broad_postings_scanned: VALS[2],
+            main_candidates: VALS[3],
+            broad_candidates: VALS[4],
+            matches: VALS[5],
+            probes_attempted: VALS[6],
+            probes_skipped: VALS[7],
+            broad_queries_evaluated: VALS[8],
+            broad_anchors_scanned: VALS[9],
+            broad_batches: VALS[10],
+        }
+    }
+
+    #[test]
+    fn engine_to_proto_maps_each_field_by_name() {
+        let p = stats_from_engine(engine_sample());
+        assert_eq!(p.unique_candidates, VALS[0]);
+        assert_eq!(p.postings_scanned, VALS[1]);
+        assert_eq!(p.broad_postings_scanned, VALS[2]);
+        assert_eq!(p.main_candidates, VALS[3]);
+        assert_eq!(p.broad_candidates, VALS[4]);
+        assert_eq!(p.matches, VALS[5]);
+        assert_eq!(p.probes_attempted, VALS[6]);
+        assert_eq!(p.probes_skipped, VALS[7]);
+        assert_eq!(p.broad_queries_evaluated, VALS[8]);
+        assert_eq!(p.broad_anchors_scanned, VALS[9]);
+        assert_eq!(p.broad_batches, VALS[10]);
+    }
+
+    #[test]
+    fn proto_to_engine_maps_each_field_by_name() {
+        let p = MatchStats {
+            unique_candidates: VALS[0],
+            postings_scanned: VALS[1],
+            broad_postings_scanned: VALS[2],
+            main_candidates: VALS[3],
+            broad_candidates: VALS[4],
+            matches: VALS[5],
+            probes_attempted: VALS[6],
+            probes_skipped: VALS[7],
+            broad_queries_evaluated: VALS[8],
+            broad_anchors_scanned: VALS[9],
+            broad_batches: VALS[10],
+        };
+        let e = stats_to_engine(p);
+        assert_eq!(e.unique_candidates, VALS[0]);
+        assert_eq!(e.postings_scanned, VALS[1]);
+        assert_eq!(e.broad_postings_scanned, VALS[2]);
+        assert_eq!(e.main_candidates, VALS[3]);
+        assert_eq!(e.broad_candidates, VALS[4]);
+        assert_eq!(e.matches, VALS[5]);
+        assert_eq!(e.probes_attempted, VALS[6]);
+        assert_eq!(e.probes_skipped, VALS[7]);
+        assert_eq!(e.broad_queries_evaluated, VALS[8]);
+        assert_eq!(e.broad_anchors_scanned, VALS[9]);
+        assert_eq!(e.broad_batches, VALS[10]);
+    }
+
+    #[test]
+    fn round_trip_is_identity() {
+        let e = engine_sample();
+        assert_eq!(stats_to_engine(stats_from_engine(e)), e);
+    }
+}

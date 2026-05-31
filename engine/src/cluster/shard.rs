@@ -30,21 +30,40 @@ use crate::dict::Dict;
 use crate::normalize::Normalizer;
 use crate::segment::{Engine, EngineSnapshot, IngestReport, MatchScratch, MatchStats};
 
-/// An error from a shard operation. In-process ([`LocalShard`]) operations are
-/// infallible and never produce this; a `RemoteShard` produces it on gRPC transport
-/// or status failure. Kept transport-agnostic (a `String` detail, not a
-/// `tonic::Status`) so it lives in the always-compiled core alongside the trait,
-/// rather than dragging the gated networking stack into the lean build.
+/// An error from cluster construction or a shard operation. In-process
+/// ([`LocalShard`]) *operations* are infallible and never produce this; a `RemoteShard`
+/// produces [`ShardError::Remote`] on gRPC transport or status failure, and
+/// [`ShardError::DictMismatch`] when a server's frozen dict diverges from the
+/// coordinator's (the connect-time fingerprint handshake). Cluster *construction* (the
+/// `ClusterEngine` builders and `HashRing::new`) produces [`ShardError::Config`] on an
+/// invalid configuration. Kept transport-agnostic (a `String` detail, not a
+/// `tonic::Status`) so it lives in the always-compiled core alongside the trait, rather
+/// than dragging the gated networking stack into the lean build.
 #[derive(Debug, Clone)]
 pub enum ShardError {
     /// A remote shard was unreachable or returned an error status (detail included).
     Remote(String),
+    /// Invalid cluster configuration / construction precondition — e.g. zero shards, or
+    /// a shard/endpoint count that disagrees with the ring. Replaces the old
+    /// construction-time `assert!`s so library code never panics on bad input.
+    Config(String),
+    /// A remote shard's frozen-dict fingerprint disagreed with the coordinator's at
+    /// connect time. The cross-process shared-dict invariant is broken, so matching
+    /// against that shard would *silently* drop results — fail loud instead. This is the
+    /// one false-negative path the otherwise-fallible seam cannot catch (ADR-029).
+    DictMismatch { expected: u64, actual: u64 },
 }
 
 impl std::fmt::Display for ShardError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ShardError::Remote(m) => write!(f, "remote shard error: {m}"),
+            ShardError::Config(m) => write!(f, "cluster config error: {m}"),
+            ShardError::DictMismatch { expected, actual } => write!(
+                f,
+                "dict fingerprint mismatch: coordinator {expected:#018x} != shard \
+                 {actual:#018x} (every shard must share the coordinator's frozen dict)"
+            ),
         }
     }
 }

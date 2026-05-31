@@ -31,11 +31,28 @@ pub struct RemoteShard {
 
 impl RemoteShard {
     /// Connect to a `ShardService` at `endpoint` (e.g. `"http://127.0.0.1:50051"`),
-    /// driving the async connect on `handle`.
-    pub fn connect(endpoint: String, handle: Handle) -> Result<Self, ShardError> {
+    /// driving the async connect on `handle`, then verify the server's frozen-dict
+    /// fingerprint equals `expected_fp` (the coordinator's
+    /// [`crate::dict::Dict::fingerprint`]). A mismatch returns [`ShardError::DictMismatch`]
+    /// — a divergent dict would otherwise drop matches silently across the wire (ADR-029).
+    pub fn connect(endpoint: String, handle: Handle, expected_fp: u64) -> Result<Self, ShardError> {
         let client = handle
             .block_on(ShardServiceClient::connect(endpoint))
             .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
+        // Handshake before trusting the shard: clone the client for the probe RPC (a cheap
+        // Channel bump, mirroring the per-call pattern below).
+        let mut probe = client.clone();
+        let actual_fp = handle
+            .block_on(async move { probe.dict_fingerprint(proto::Empty {}).await })
+            .map_err(rpc_err)?
+            .into_inner()
+            .fingerprint;
+        if actual_fp != expected_fp {
+            return Err(ShardError::DictMismatch {
+                expected: expected_fp,
+                actual: actual_fp,
+            });
+        }
         Ok(RemoteShard { client, handle })
     }
 }

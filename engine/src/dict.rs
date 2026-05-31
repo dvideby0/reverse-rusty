@@ -30,6 +30,23 @@ pub enum FeatureKind {
     Generic,
 }
 
+/// Stable byte tag for a [`FeatureKind`], used by [`Dict::fingerprint`]. Explicit (not
+/// `as u8`) so reordering the enum variants can't silently change a fingerprint — this
+/// mapping is part of the cross-process dict-identity contract.
+fn kind_tag(kind: FeatureKind) -> u8 {
+    match kind {
+        FeatureKind::Year => 0,
+        FeatureKind::Brand => 1,
+        FeatureKind::Player => 2,
+        FeatureKind::Category => 3,
+        FeatureKind::Grader => 4,
+        FeatureKind::Grade => 5,
+        FeatureKind::GraderGrade => 6,
+        FeatureKind::Flag => 7,
+        FeatureKind::Generic => 8,
+    }
+}
+
 #[derive(Clone)]
 pub struct Dict {
     map: FastMap<String, FeatureId>,
@@ -138,6 +155,40 @@ impl Dict {
     /// deserialization when the mask bits are already set from persisted data.
     pub fn mark_finalized(&mut self) {
         self.finalized = true;
+    }
+
+    /// A stable 64-bit fingerprint of the dict's *correctness-relevant* content: the
+    /// `name -> id` mapping (names in id order), each feature's `kind`, and its
+    /// common-mask bit, plus the `finalized` flag. Two dicts with equal fingerprints
+    /// produce identical matching for any title; a differing fingerprint means their ids
+    /// or masks disagree, so matching one side's queries against the other would drop
+    /// results.
+    ///
+    /// Used by the gRPC connect handshake to reject a coordinator/shard pair whose frozen
+    /// dicts diverged — the one cross-process false-negative path the fallible seam cannot
+    /// otherwise catch (ADR-029).
+    ///
+    /// Hashes with [`crate::util::fnv1a64`], stable across runs and processes (std hashers
+    /// are randomized and unusable for a cross-process identity check). `freq` is
+    /// deliberately EXCLUDED: it is build-time-only metadata whose sole match-relevant
+    /// effect (which features receive a mask bit) is already captured by `mask_bit`, so
+    /// including it would flag false mismatches between dicts that agree where it matters.
+    pub fn fingerprint(&self) -> u64 {
+        let mut buf: Vec<u8> = Vec::with_capacity(self.names.len() * 16 + 8);
+        buf.extend_from_slice(&(self.names.len() as u32).to_le_bytes());
+        for ((name, &kind), &mask) in self
+            .names
+            .iter()
+            .zip(self.kinds.iter())
+            .zip(self.mask_bit.iter())
+        {
+            buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name.as_bytes());
+            buf.push(kind_tag(kind));
+            buf.push(mask);
+        }
+        buf.push(u8::from(self.finalized));
+        crate::util::fnv1a64(&buf)
     }
 
     /// Resident heap bytes used by the dictionary. The existing per-segment

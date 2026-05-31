@@ -42,7 +42,7 @@ fn main() {
         num_shards: 4,
         ..ClusterConfig::default()
     };
-    let cluster = ClusterEngine::build(norm, &ccfg, &queries);
+    let cluster = ClusterEngine::build(norm, &ccfg, &queries).expect("build cluster");
 
     let cc = cluster.class_counts().expect("class_counts (in-process)");
     let total = cluster.num_queries().expect("num_queries (in-process)");

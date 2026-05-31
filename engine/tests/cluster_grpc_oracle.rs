@@ -18,13 +18,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, ShardServer};
+use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, ShardError, ShardServer};
 use reverse_rusty::compile::{extract, Extracted};
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::Dict;
 use reverse_rusty::gen::{generate, GenConfig, BRANDS};
 use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::{Engine, MatchScratch};
+use tonic::transport::server::TcpIncoming;
 
 fn vocab() -> Normalizer {
     Normalizer::default_vocab().expect("built-in vocab")
@@ -128,15 +129,6 @@ fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
     (queries, titles)
 }
 
-/// Bind an ephemeral localhost port and return its address. (Probe-then-serve: the
-/// brief window before the server re-binds is tolerated for a localhost test.)
-fn free_addr() -> SocketAddr {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind ephemeral port")
-        .local_addr()
-        .expect("local_addr")
-}
-
 /// Block until `addr` accepts TCP (the gRPC server is listening) or time out.
 fn wait_until_listening(addr: SocketAddr) {
     for _ in 0..300 {
@@ -199,18 +191,27 @@ fn grpc_cluster_matches_single_node_and_oracle() {
         ..ClusterConfig::default()
     };
 
-    // Stand up K real gRPC shard servers over the SHARED frozen dict/norm.
+    // Stand up K real gRPC shard servers over the SHARED frozen dict/norm. Each binds its
+    // ephemeral port ONCE (via `TcpIncoming`) and serves on that same socket — no
+    // bind→drop→rebind window for another process to steal the port (the old CI flake).
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let mut addrs: Vec<SocketAddr> = Vec::with_capacity(k);
-    for _ in 0..k {
-        let addr = free_addr();
-        let server = ShardServer::new(
-            Arc::clone(&norm),
-            Arc::clone(&dict),
-            EngineConfig::default(),
-        );
-        rt.spawn(server.serve(addr));
-        addrs.push(addr);
+    {
+        // `TcpIncoming::bind` -> `TcpListener::from_std` registers with the reactor, so it
+        // must run inside the runtime context; scope the guard so the later `connect_remote`
+        // (which `block_on`s) still runs OUTSIDE it, as before.
+        let _enter = rt.enter();
+        for _ in 0..k {
+            let incoming =
+                TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind ephemeral port");
+            addrs.push(incoming.local_addr().expect("local_addr"));
+            let server = ShardServer::new(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                EngineConfig::default(),
+            );
+            rt.spawn(server.serve_with_incoming(incoming));
+        }
     }
     for &addr in &addrs {
         wait_until_listening(addr);
@@ -234,16 +235,19 @@ fn grpc_cluster_matches_single_node_and_oracle() {
     assert!(cc[1] > 0, "no class-B queries: {cc:?}");
     assert!(cc[2] > 0, "no class-C (broad) queries: {cc:?}");
 
-    // The differential contract, over gRPC, for every title.
-    // TODO(ADR-029): this asserts matched-ID *sets* only — it does NOT verify the 11
-    // round-tripped `MatchStats` fields, so a transposition in `cluster/proto.rs`'s wire
-    // map would go undetected. Add a stats round-trip assertion (cheap, high-value).
+    // A local (in-process) cluster over the SAME corpus + config: identical placement and
+    // routing, so its merged `MatchStats` must equal the gRPC cluster's for every title. A
+    // transposition in `cluster/proto.rs`'s wire map shows up as a stats mismatch here (the
+    // proto.rs unit test catches it directly; this is the end-to-end backstop).
+    let local = ClusterEngine::build(vocab(), &cfg, &queries).expect("build local cluster");
+
+    // The differential contract, over gRPC, for every title — matched ids AND the
+    // round-tripped MatchStats.
     for (i, title) in titles.iter().enumerate() {
-        let got: HashSet<u64> = cluster
-            .percolate(title)
-            .expect("percolate over gRPC")
-            .into_iter()
-            .collect();
+        let (ids, grpc_stats) = cluster
+            .percolate_with_stats(title)
+            .expect("percolate over gRPC");
+        let got: HashSet<u64> = ids.into_iter().collect();
         assert_eq!(
             got, oracle[i],
             "gRPC cluster vs brute-force oracle on {title:?}"
@@ -251,6 +255,14 @@ fn grpc_cluster_matches_single_node_and_oracle() {
         assert_eq!(
             got, ref_broad[i],
             "gRPC cluster vs single-node on {title:?}"
+        );
+
+        let (_, local_stats) = local
+            .percolate_with_stats(title)
+            .expect("percolate local cluster");
+        assert_eq!(
+            grpc_stats, local_stats,
+            "gRPC vs local-cluster MatchStats (wire round-trip) on {title:?}"
         );
 
         let got_sel: HashSet<u64> = cluster
@@ -293,4 +305,71 @@ fn grpc_cluster_matches_single_node_and_oracle() {
             .contains(&qid),
         "a removed query must no longer match over gRPC"
     );
+}
+
+/// Build a small frozen dict from a fixed base plus `extra` DSL snippets (interned in
+/// order against `norm`). Two dicts built with different `extra` have different
+/// fingerprints — the divergence the handshake must catch.
+fn frozen_dict_with(extra: &[&str], norm: &Normalizer) -> Arc<Dict> {
+    let mut d = Dict::new();
+    let mut lc = String::new();
+    let base = ["1994 upper deck", "psa 10", "topps chrome"];
+    for q in base.iter().copied().chain(extra.iter().copied()) {
+        if let Ok(ast) = reverse_rusty::dsl::parse(q) {
+            let _ = extract(&ast, norm, &mut d, &mut lc);
+        }
+    }
+    d.finalize_mask();
+    Arc::new(d)
+}
+
+/// The dict-fingerprint handshake (ADR-029): a coordinator whose frozen dict diverges
+/// from a server's MUST fail the connect with `DictMismatch`, not silently drop matches.
+/// (The oracle above can't exercise this — it shares ONE `Arc<Dict>`, so the fingerprints
+/// always agree; here the two sides deliberately differ.)
+#[test]
+fn grpc_connect_rejects_divergent_dict() {
+    let norm = Arc::new(vocab());
+    let dict_server = frozen_dict_with(&[], &norm);
+    let dict_coord = frozen_dict_with(&["1995 fleer ultra"], &norm);
+    assert_ne!(
+        dict_server.fingerprint(),
+        dict_coord.fingerprint(),
+        "test setup: the two dicts must differ for the handshake to have anything to catch"
+    );
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let addr = {
+        // Bind in-context (see the main test), then drop the guard so `connect_remote`
+        // below `block_on`s outside the runtime context.
+        let _enter = rt.enter();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let addr = incoming.local_addr().expect("local_addr");
+        let server = ShardServer::new(
+            Arc::clone(&norm),
+            Arc::clone(&dict_server),
+            EngineConfig::default(),
+        );
+        rt.spawn(server.serve_with_incoming(incoming));
+        addr
+    };
+    wait_until_listening(addr);
+
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        ..ClusterConfig::default()
+    };
+    // `ClusterEngine` is not `Debug`, so match rather than `expect_err` (which would print
+    // the unexpected `Ok`).
+    match ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict_coord),
+        &cfg,
+        &[format!("http://{addr}")],
+        rt.handle(),
+    ) {
+        Err(ShardError::DictMismatch { .. }) => {} // the handshake fired — correct.
+        Err(other) => panic!("expected DictMismatch, got a different error: {other:?}"),
+        Ok(_) => panic!("connect SUCCEEDED against a divergent dict — the silent-FN guard failed"),
+    }
 }

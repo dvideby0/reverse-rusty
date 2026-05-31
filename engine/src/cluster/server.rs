@@ -73,6 +73,20 @@ impl ShardServer {
             .serve_with_shutdown(addr, signal)
             .await
     }
+
+    /// Serve `ShardService` on an already-bound `incoming` listener (no rebind). Lets a
+    /// caller bind the socket first and learn its port — an ephemeral `:0` for tests, or
+    /// socket activation in production — without the bind→drop→rebind gap that re-binding
+    /// by address would open.
+    pub async fn serve_with_incoming(
+        self,
+        incoming: tonic::transport::server::TcpIncoming,
+    ) -> Result<(), tonic::transport::Error> {
+        tonic::transport::Server::builder()
+            .add_service(ShardServiceServer::new(self))
+            .serve_with_incoming(incoming)
+            .await
+    }
 }
 
 /// Compile one raw query read-only against the shared frozen dict (parse failure →
@@ -120,6 +134,15 @@ impl ShardService for ShardServer {
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::ClassCountsReply {
             counts: counts.to_vec(),
+        }))
+    }
+
+    async fn dict_fingerprint(
+        &self,
+        _request: Request<proto::Empty>,
+    ) -> Result<Response<proto::DictFingerprintReply>, Status> {
+        Ok(Response::new(proto::DictFingerprintReply {
+            fingerprint: self.dict.fingerprint(),
         }))
     }
 

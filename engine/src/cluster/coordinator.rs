@@ -111,8 +111,16 @@ impl ClusterEngine {
     /// already present (it compiles read-only against the shared dict), which is
     /// the in-process limitation noted in the design (new-vocabulary adds need the
     /// deferred feature-model-epoch machinery).
-    pub fn build(norm: Normalizer, config: &ClusterConfig, queries: &[(u64, String)]) -> Self {
-        assert!(config.num_shards > 0, "cluster needs at least one shard");
+    pub fn build(
+        norm: Normalizer,
+        config: &ClusterConfig,
+        queries: &[(u64, String)],
+    ) -> Result<Self, ShardError> {
+        if config.num_shards == 0 {
+            return Err(ShardError::Config(
+                "cluster needs at least one shard".into(),
+            ));
+        }
         let norm = Arc::new(norm);
 
         // Pass A — build the authoritative dict over the WHOLE corpus, then freeze.
@@ -128,7 +136,7 @@ impl ClusterEngine {
         dict.finalize_mask();
         let dict = Arc::new(dict);
 
-        let ring = HashRing::new(config.num_shards, config.vnodes);
+        let ring = HashRing::new(config.num_shards, config.vnodes)?;
 
         // Construct concrete local shards so pass-B ingest can use the infallible
         // inherent path — `build` only ever makes `LocalShard`s (remote shards arrive
@@ -180,19 +188,21 @@ impl ClusterEngine {
         ring: HashRing,
         shards: Vec<Box<dyn Shard>>,
         include_broad: bool,
-    ) -> Self {
-        assert_eq!(
-            shards.len(),
-            ring.num_shards(),
-            "shard count must match the ring's shard count"
-        );
-        ClusterEngine {
+    ) -> Result<Self, ShardError> {
+        if shards.len() != ring.num_shards() {
+            return Err(ShardError::Config(format!(
+                "shard count {} must match the ring's shard count {}",
+                shards.len(),
+                ring.num_shards()
+            )));
+        }
+        Ok(ClusterEngine {
             norm,
             dict,
             ring,
             shards,
             include_broad,
-        }
+        })
     }
 
     /// Bulk-load queries into an already-built (frozen-dict) cluster — the load path
@@ -200,10 +210,20 @@ impl ClusterEngine {
     /// the distributed analog of `build`'s pass B. Buckets each query by placement
     /// (compiling read-only against the shared frozen dict) and ingests each bucket
     /// into its shard through the seam. Parse failures and class-D queries are skipped
-    /// (mirroring `build`); a shard write error propagates. Intended for a freshly
-    /// assembled (empty) cluster — calling it on an already-populated one re-indexes
-    /// those queries (duplicate entries).
+    /// (mirroring `build`); a shard write error propagates. Requires a freshly assembled
+    /// (empty) cluster: it errors with [`ShardError::Config`] if the cluster already holds
+    /// queries, rather than silently re-indexing them as duplicates (use
+    /// [`Self::add_query`] for incremental adds).
     pub fn ingest(&self, queries: &[(u64, String)]) -> Result<(), ShardError> {
+        // ingest re-indexes from scratch; on a populated cluster it would create duplicate
+        // entries. Refuse loudly instead (the doc contract: a freshly assembled cluster).
+        if self.num_queries()? > 0 {
+            return Err(ShardError::Config(
+                "ingest() requires an empty cluster; it re-indexes from scratch — use \
+                 add_query for incremental adds"
+                    .into(),
+            ));
+        }
         let mut buckets: Vec<Vec<(u64, Extracted, String, u32)>> =
             (0..self.ring.num_shards()).map(|_| Vec::new()).collect();
         let mut lc = String::new();
@@ -403,11 +423,11 @@ impl ClusterEngine {
     /// `config.num_shards`; endpoint `i` serves shard `i`. Load the corpus afterwards
     /// with [`Self::ingest`].
     ///
-    /// CAVEAT — TODO(ADR-029): the dict match is currently **unverified**. A coordinator
-    /// pointed at servers whose frozen dict diverged drops matches *silently* (the one
-    /// false-negative path the fallible seam cannot catch). Until a connect-time
-    /// dict-fingerprint handshake lands, only the shared-`Arc<Dict>` configuration
-    /// (in-process, or the localhost oracle) is guaranteed correct.
+    /// The shared-dict invariant is enforced across the wire by a connect-time
+    /// dict-fingerprint handshake (ADR-029): this returns [`ShardError::DictMismatch`] if
+    /// any server's frozen dict diverges from `dict`, so a divergent dict fails loud
+    /// instead of dropping matches silently. (The handshake guards correctness; it does
+    /// not *ship* the dict — servers must still be built over the same feature space.)
     pub fn connect_remote(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
@@ -415,24 +435,25 @@ impl ClusterEngine {
         endpoints: &[String],
         handle: &tokio::runtime::Handle,
     ) -> Result<Self, ShardError> {
-        assert_eq!(
-            endpoints.len(),
-            config.num_shards,
-            "connect_remote needs exactly one endpoint per shard"
-        );
-        let ring = HashRing::new(config.num_shards, config.vnodes);
+        if endpoints.len() != config.num_shards {
+            return Err(ShardError::Config(format!(
+                "connect_remote needs exactly one endpoint per shard: got {} endpoints \
+                 for {} shards",
+                endpoints.len(),
+                config.num_shards
+            )));
+        }
+        let ring = HashRing::new(config.num_shards, config.vnodes)?;
+        // Cross-process shared-dict invariant: every server MUST be frozen over the same
+        // dict as this coordinator, else placement/routing ids diverge and matches drop
+        // silently. Verify it loudly at connect via a fingerprint handshake (ADR-029).
+        let expected = dict.fingerprint();
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(endpoints.len());
         for ep in endpoints {
-            let remote = super::remote::RemoteShard::connect(ep.clone(), handle.clone())?;
+            let remote = super::remote::RemoteShard::connect(ep.clone(), handle.clone(), expected)?;
             shards.push(Box::new(remote) as Box<dyn Shard>);
         }
-        Ok(Self::from_parts(
-            norm,
-            dict,
-            ring,
-            shards,
-            config.include_broad,
-        ))
+        Self::from_parts(norm, dict, ring, shards, config.include_broad)
     }
 }
 

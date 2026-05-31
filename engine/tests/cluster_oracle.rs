@@ -172,7 +172,7 @@ fn cluster_matches_single_node_and_oracle() {
             include_broad: true,
             ..ClusterConfig::default()
         };
-        let cluster = ClusterEngine::build(vocab(), &cfg, &queries);
+        let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
         assert_eq!(cluster.num_shards(), k);
 
         // Every placement branch is exercised (A, B, C all present).
@@ -218,7 +218,7 @@ fn single_shard_cluster_equals_single_node_engine() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let cluster = ClusterEngine::build(vocab(), &cfg, &queries);
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
     let mut reference = Engine::new(vocab());
     reference.build_from_queries(&queries);
     let mut s = MatchScratch::new();
@@ -239,7 +239,7 @@ fn placement_by_cost_class() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let cluster = ClusterEngine::build(vocab(), &cfg, &queries);
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
     let mut id = 9_000_000u64;
     let mut next = || {
         id += 1;
@@ -304,7 +304,7 @@ fn anyof_query_can_place_on_multiple_shards() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let cluster = ClusterEngine::build(vocab(), &cfg, &queries);
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
     // Over many distinct rare-player pairs on a 16-shard ring, at least one
     // any-of query must straddle two shards — the multi-shard placement case.
     let mut id = 8_000_000u64;
@@ -336,7 +336,7 @@ fn fan_out_is_content_routed_not_scatter() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let cluster = ClusterEngine::build(vocab(), &cfg, &queries);
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
 
     let mut max_fanout = 0usize;
     let mut saw_multi = false;
@@ -367,7 +367,7 @@ fn add_then_percolate_then_remove_roundtrip() {
         include_broad: true,
         ..ClusterConfig::default()
     };
-    let cluster = ClusterEngine::build(vocab(), &cfg, &queries);
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
 
     let qid = 7_777_777u64;
     // class A: rare anchor (rareplayer0 is in the frozen dict via the any-of injection).
@@ -393,5 +393,40 @@ fn add_then_percolate_then_remove_roundtrip() {
     assert!(
         !cluster.percolate(title).unwrap().contains(&qid),
         "a removed query must no longer match"
+    );
+}
+
+/// `ingest()` must refuse a non-empty cluster: it re-indexes from scratch, so calling it
+/// on an already-populated cluster would silently duplicate entries (the ADR-029 footgun).
+/// It returns `ShardError::Config` instead. (The happy path — ingest into a freshly
+/// connected empty cluster — is covered by `cluster_grpc_oracle.rs`.)
+#[test]
+fn ingest_on_a_populated_cluster_is_rejected() {
+    let data = generate(&GenConfig {
+        num_queries: 500,
+        num_titles: 1,
+        broad_query_frac: 0.05,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0x1234_5678,
+        num_players: 200,
+        num_sets: 100,
+    });
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..ClusterConfig::default()
+    };
+    // build() loads the corpus, so the cluster is already populated.
+    let cluster = ClusterEngine::build(vocab(), &cfg, &data.queries).expect("build cluster");
+    assert!(
+        cluster.num_queries().unwrap() > 0,
+        "corpus should populate the cluster"
+    );
+    assert!(
+        matches!(
+            cluster.ingest(&data.queries),
+            Err(reverse_rusty::cluster::ShardError::Config(_))
+        ),
+        "ingest() on a populated cluster must error, not silently duplicate"
     );
 }

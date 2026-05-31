@@ -18,6 +18,8 @@ use crate::dict::FeatureId;
 use crate::util::fnv1a64;
 use std::collections::BTreeMap;
 
+use super::shard::ShardError;
+
 /// Default virtual nodes per shard. 128 keeps per-shard load within a few percent
 /// of even for the shard counts we target (a handful to low hundreds).
 pub const DEFAULT_VNODES: u32 = 128;
@@ -33,9 +35,14 @@ pub struct HashRing {
 impl HashRing {
     /// Build a ring over `num_shards` shards with `vnodes` virtual nodes each.
     /// Deterministic: positions are `fnv1a64` over (shard, vnode), so two rings
-    /// with the same parameters are byte-identical.
-    pub fn new(num_shards: usize, vnodes: u32) -> Self {
-        assert!(num_shards > 0, "HashRing needs at least one shard");
+    /// with the same parameters are byte-identical. Errors with [`ShardError::Config`]
+    /// if `num_shards` is zero.
+    pub fn new(num_shards: usize, vnodes: u32) -> Result<Self, ShardError> {
+        if num_shards == 0 {
+            return Err(ShardError::Config(
+                "HashRing needs at least one shard".into(),
+            ));
+        }
         let vnodes = vnodes.max(1);
         let mut ring = BTreeMap::new();
         for shard in 0..num_shards {
@@ -46,7 +53,7 @@ impl HashRing {
                 ring.insert(vnode_pos(shard, v), shard);
             }
         }
-        HashRing { ring, num_shards }
+        Ok(HashRing { ring, num_shards })
     }
 
     /// Number of shards this ring distributes over.
@@ -98,7 +105,7 @@ mod tests {
 
     #[test]
     fn lookup_is_deterministic_and_in_range() {
-        let ring = HashRing::new(8, DEFAULT_VNODES);
+        let ring = HashRing::new(8, DEFAULT_VNODES).unwrap();
         for f in 0u32..5_000 {
             let s = ring.lookup(f);
             assert!(s < 8, "shard {s} out of range for 8 shards");
@@ -108,16 +115,24 @@ mod tests {
 
     #[test]
     fn single_shard_ring_routes_everything_to_zero() {
-        let ring = HashRing::new(1, DEFAULT_VNODES);
+        let ring = HashRing::new(1, DEFAULT_VNODES).unwrap();
         for f in 0u32..1_000 {
             assert_eq!(ring.lookup(f), 0);
         }
     }
 
     #[test]
+    fn zero_shards_is_an_error() {
+        assert!(matches!(
+            HashRing::new(0, DEFAULT_VNODES),
+            Err(ShardError::Config(_))
+        ));
+    }
+
+    #[test]
     fn distribution_is_roughly_balanced() {
         let k = 8usize;
-        let ring = HashRing::new(k, DEFAULT_VNODES);
+        let ring = HashRing::new(k, DEFAULT_VNODES).unwrap();
         let n = 80_000u32;
         let mut counts = vec![0usize; k];
         for f in 0..n {
@@ -137,8 +152,8 @@ mod tests {
     fn adding_a_shard_moves_about_one_over_n_of_keys() {
         let k = 8usize;
         let n = 80_000u32;
-        let before = HashRing::new(k, DEFAULT_VNODES);
-        let after = HashRing::new(k + 1, DEFAULT_VNODES);
+        let before = HashRing::new(k, DEFAULT_VNODES).unwrap();
+        let after = HashRing::new(k + 1, DEFAULT_VNODES).unwrap();
         let moved = (0..n)
             .filter(|&f| before.lookup(f) != after.lookup(f))
             .count();

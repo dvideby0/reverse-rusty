@@ -58,7 +58,7 @@ mod snapshot;
 #[cfg(test)]
 mod wal_failure_tests;
 
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MatchStats {
     pub unique_candidates: u32, // distinct queries exact-checked
     pub postings_scanned: u32,  // total posting entries unioned (main + broad)
