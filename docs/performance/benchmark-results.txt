@@ -34,7 +34,8 @@ HOW TO RUN
 
   # ---- throughput / structure ----
   cargo run --release --bin bench -- 1000000 20000 0.0      # PURE SELECTIVE (clean cand count)
-  cargo run --release --bin bench -- 1000000 20000 0.05     # +broad lane (shows its ~5-9x cost)
+  cargo run --release --bin bench -- 1000000 20000 0.05     # +broad lane: inline cost AND the
+                                                            #   columnar batch win + amortization sweep
   cargo run --release --bin segbench -- 300000 3000 0.0     # read-amp vs 1/2/4/8 segments
   cargo run --release --bin snapbench -- 1000000 200        # snapshot-publish cost (ADR-016)
   cargo run --release --bin learn -- 500000 50 0.30         # NPMI corpus learner (see appendix)
@@ -61,6 +62,21 @@ INVARIANTS — the regression gate (machine-INDEPENDENT; must reproduce)
 
   COST-CLASS SPLIT  (bench 1000000 20000 0.05):   ~99.5% A | ~0.2% B | ~0.2% C | 0 D
     (broad_frac=0.0 -> 100% A.  class D must always be 0 for generated data.)
+
+  BROAD-LANE AMORTIZATION  (the columnar batch evaluator; ADR-026) — bench 1000000 20000 0.05:
+    The broad lane is evaluated once per title-batch instead of once per title. broad_postings_scanned
+    per pass (the broad subset of postings; the selective lane is batch-size-INVARIANT) falls ~1/bs as
+    the batch grows — each hot broad posting is scanned once per batch, not once per title. The ratio
+    broad_post(bs=1) / broad_post(bs=N) is the amortization factor; it reproduces on any box.
+      bs                  1         8        64       256      1024
+      broad_post/pass  5124096  3453872   696112   175696    44480
+      amortization x      1x      1.5x       7x       29x      115x     (= broad_post(bs=1)/broad_post(bs))
+      broad_batches    20000     2500       313       79        20      (== ceil(num_titles / bs))
+    All generated broad queries are pure-anchor, so broad_qs_eval == 0 (100% take the skip-verify fast
+    path; the bitmap-verify path is exercised by tests/broad_batch.rs, not this corpus). These numbers
+    are fixed by the data + algorithm (seed 0x00C0FFEE), NOT the CPU — they must reproduce.
+    CORRECTNESS: match_titles_batch[t] is byte-identical to per-title match_title(t, broad=true) for
+    ALL t and ALL bs (tests/broad_batch.rs, 7/7) — batch size is a perf knob, never a semantic one.
 
   CORRECTNESS  (must be exactly these — this is the contract):
     oracle:   false_neg = 0,  false_pos = 0      (~109k matches over 40k queries x 4k titles)
@@ -89,6 +105,19 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-05-30b] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  Broad-lane columnar batch
+              evaluation (ADR-026, Stage 2).  Loaded interactive box — throughput is indicative;
+              the broad-amortization structural numbers are NOT (they reproduced bit-for-bit).
+  INVARIANTS — broad amortization reproduced, bench 1M 20k 0.05 (see INVARIANTS block above):
+    broad_post/pass  5124096 / 3453872 / 696112 / 175696 / 44480   for bs 1 / 8 / 64 / 256 / 1024
+    amortization     1 / 1.5 / 7 / 29 / 115x;   broad_batches 20000/2500/313/79/20;  broad_qs_eval 0
+    broad_batch tests 7/7 pass;  batch == scalar per-title for all bs;  Inline == Columnar (kill-switch)
+  THROUGHPUT — indicative, 16 threads, bench 1M 20k 0.05:
+    inline broad (per-title)     ~760k titles/s    (the naive status quo — broad re-scanned per title)
+    selective via batch path     ~2.5M titles/s    (broad OFF; coarse par_chunks granularity alone helps)
+    columnar batch broad bs=256  ~1.8M titles/s    (2.4x over inline broad;  broad lane +37% over selective)
+    sweep throughput peaks near bs=256 (419k bs=1 -> 1.8M bs=256 -> 1.7M bs=1024)
+
 [2026-05-30]  Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  Verification pass after the
               /_cat/segments work (ADR-023).  Loaded interactive box — throughput is indicative.
   INVARIANTS — all reproduced:

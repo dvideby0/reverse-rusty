@@ -72,6 +72,7 @@ impl Engine {
             .reduce(MatchStats::default, |mut a, b| {
                 a.unique_candidates += b.unique_candidates;
                 a.postings_scanned += b.postings_scanned;
+                a.broad_postings_scanned += b.broad_postings_scanned;
                 a.main_candidates += b.main_candidates;
                 a.broad_candidates += b.broad_candidates;
                 a.matches += b.matches;

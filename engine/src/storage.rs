@@ -1072,6 +1072,7 @@ impl MmapSegment {
             frozen_probe(key, self.broad_slots(), self.broad_blob(), self.broad_mask)
         {
             stats.postings_scanned += posting.len() as u32;
+            stats.broad_postings_scanned += posting.len() as u32;
             for &local in posting {
                 if seen[local as usize] != epoch {
                     seen[local as usize] = epoch;

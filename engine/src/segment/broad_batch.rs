@@ -184,6 +184,7 @@ impl BroadBackend for &Segment {
         }
         if let Some(posting) = self.broad.get(key) {
             stats.postings_scanned += posting.len() as u32;
+            stats.broad_postings_scanned += posting.len() as u32;
             posting.for_each(|local| {
                 if seen[local as usize] != epoch {
                     seen[local as usize] = epoch;
@@ -551,6 +552,7 @@ fn match_batch_chunk(
 fn add_stats(mut a: MatchStats, b: MatchStats) -> MatchStats {
     a.unique_candidates += b.unique_candidates;
     a.postings_scanned += b.postings_scanned;
+    a.broad_postings_scanned += b.broad_postings_scanned;
     a.main_candidates += b.main_candidates;
     a.broad_candidates += b.broad_candidates;
     a.matches += b.matches;

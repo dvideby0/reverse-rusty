@@ -35,12 +35,19 @@ frequent updates, zero false negatives.**
    *entity space density*, not the *total number of queries* — which is the whole point. Even on
    one core, the selective path runs at **158–255× the 2,778 titles/sec target**.
 
-2. **Broad queries are the entire risk, and the design's instinct to quarantine them is correct.**
-   Folding broad queries (5% of the population, concentrated on hot entities) into the realtime path
-   inline collapses throughput by **~9×** (710k → 78k) and inflates p99 latency by **~28×**. This is
-   the percolator "unsupported/un-gateable query becomes an always-candidate" failure mode,
-   reproduced and measured. The design routes these to a batched broad lane instead of the realtime
-   path (see [`../design/matching.md`](../design/matching.md) §4).
+2. **Broad queries were the entire risk — and are now batched.** Folding broad queries (5% of the
+   population, concentrated on hot entities) into the realtime path *inline* collapses throughput by
+   **~9×** (710k → 78k) and inflates p99 latency by **~28×** — the percolator "unsupported/un-gateable
+   query becomes an always-candidate" failure mode, reproduced and measured (the "naive" row above).
+   Reverse Rusty now evaluates the broad lane **once per title-batch, columnar** (ADR-026): each hot
+   broad posting is scanned once per batch instead of once per title, and per-query verification is
+   bitmap algebra. The broad work amortizes ~1/batch_size — broad postings scanned drop **29× at batch
+   256, 115× at batch 1024** (machine-independent; the regression gate in
+   [`benchmark-results.txt`](benchmark-results.txt)). On the dev box (M4 Max, 16-thread) the batched
+   broad lane runs **~2.4× faster than the inline path** and adds only ~37% over the selective ceiling,
+   while staying byte-identical to the per-title result (`tests/broad_batch.rs`). Pure-anchor broad
+   queries (whole semantics == one hot term) skip verification entirely. See
+   [`../design/matching.md`](../design/matching.md) §4.
 
 ---
 
@@ -187,9 +194,11 @@ added cost is the probe (hash-lookup) *count*, not extra exact-verified candidat
 - **Hot-entity skew (zipf, skew=3.5):** the selective path holds at **288k titles/sec/core** with
   flat candidate counts — popular players don't poison the selective lane because class-A queries
   anchor on the *rarer* required feature (the set), not the hot player.
-- **Broad queries:** isolated by classification. Inline they cost ~9× throughput; the design batches
-  them. The engine measures and reports the broad contribution separately every run (`of which broad
-  lane`), so the cost is always visible.
+- **Broad queries:** isolated by classification. Inline they cost ~9× throughput; the engine now
+  batches them columnar (once per title-batch, ADR-026) so the broad work amortizes ~1/batch_size.
+  The engine measures and reports the broad contribution separately every run (`of which broad lane`,
+  plus the `BROAD LANE` section's inline-vs-columnar comparison and amortization sweep), so the cost
+  — and the win — is always visible.
 - **Near-duplicate query clusters:** generated at `family_size=8`; the signature index naturally
   shares anchors across a cluster, so a single failed anchor probe eliminates the whole cluster's
   candidates at once — realized *implicitly* at anchor granularity, with no explicit family structure
@@ -199,8 +208,10 @@ added cost is the probe (hash-lookup) *count*, not extra exact-verified candidat
 
 ## 9. Bottleneck analysis & where Reverse Rusty is honest about its limits
 
-- **#1 bottleneck: the broad lane.** Confirmed, quantified, and architecturally addressed
-  (quarantine + batch). This is the single most important operational lever.
+- **#1 bottleneck: the broad lane.** Confirmed, quantified, and now *resolved* — quarantine +
+  columnar batch evaluation (ADR-026): the broad lane runs once per title-batch (postings scanned
+  amortize ~1/batch_size; ~2.4× over the inline path on the dev box), byte-identical to the per-title
+  result. This was the single most important operational lever.
 - **#2: memory bandwidth at scale.** Candidate counts are flat but absolute throughput drops as the
   index leaves cache. Mitigation: sharding for cache residency, tighter SoA packing, mmap segments.
 - **Simplifications at the time of this capture (status updated inline):**

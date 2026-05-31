@@ -61,7 +61,12 @@ mod wal_failure_tests;
 #[derive(Default, Clone, Copy, Debug)]
 pub struct MatchStats {
     pub unique_candidates: u32, // distinct queries exact-checked
-    pub postings_scanned: u32,  // total posting entries unioned
+    pub postings_scanned: u32,  // total posting entries unioned (main + broad)
+    /// Broad-lane subset of `postings_scanned` — the quantity the columnar batch
+    /// path amortizes (each huge broad posting is scanned once per batch, not
+    /// once per title). Counted on BOTH paths, so `broad_postings_scanned`
+    /// columnar ÷ inline is the machine-independent amortization factor.
+    pub broad_postings_scanned: u32,
     pub main_candidates: u32,
     pub broad_candidates: u32,
     pub matches: u32,

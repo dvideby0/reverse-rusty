@@ -9,7 +9,7 @@
 
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::gen::{generate, GenConfig};
-use reverse_rusty::segment::{Engine, MatchScratch};
+use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy, Engine, MatchScratch};
 use reverse_rusty::Normalizer;
 use std::time::Instant;
 
@@ -230,6 +230,96 @@ fn main() {
         par_broad,
         par_broad / per_core_broad
     );
+
+    // ---- broad lane: inline (per-title) vs columnar batch ----
+    // The broad lane is the single biggest matching-performance lever: evaluated
+    // inline it re-scans a hot anchor's huge posting once PER TITLE; columnar it
+    // scans that posting once PER BATCH and verifies with bitmap algebra. This
+    // section quantifies the win against the inline-broad parallel pass above
+    // (the ~9x-slower naive path) and shows the amortization is real and
+    // machine-independent: postings_scanned per pass falls ~linearly as
+    // broad_batch_size grows. (ADR-026 / docs/design/matching.md §4.)
+    let columnar = |bs: usize| BatchMatchOptions {
+        include_broad: true,
+        broad_batch_size: bs,
+        broad_strategy: BroadStrategy::Columnar,
+    };
+    // Selective-only through the SAME batch path (broad off, same par_chunks
+    // granularity) — the fair baseline for the broad lane's marginal cost (the
+    // per-title parallel pass above uses finer granularity, so comparing the
+    // columnar batch to *it* would conflate chunking with the lane change).
+    let selective_batch = BatchMatchOptions {
+        include_broad: false,
+        broad_batch_size: 256,
+        broad_strategy: BroadStrategy::Columnar,
+    };
+    let _ = eng.match_titles_batch_stats(&data.titles, selective_batch); // warmup
+    let tselb = Instant::now();
+    for _ in 0..reps {
+        let _ = eng.match_titles_batch_stats(&data.titles, selective_batch);
+    }
+    let sel_batch = total_titles as f64 / tselb.elapsed().as_secs_f64();
+
+    let _ = eng.match_titles_batch_stats(&data.titles, columnar(256)); // warmup
+    let tbatch = Instant::now();
+    for _ in 0..reps {
+        let _ = eng.match_titles_batch_stats(&data.titles, columnar(256));
+    }
+    let batch_s = tbatch.elapsed().as_secs_f64();
+    let par_batch = total_titles as f64 / batch_s;
+
+    println!("======== BROAD LANE: inline vs columnar batch ({ncpu} threads) ====");
+    println!("inline broad (per-title): {par_broad:.0} titles/sec   (the naive status quo)");
+    println!("selective (batch path)  : {sel_batch:.0} titles/sec   (broad OFF; same chunking)");
+    println!(
+        "columnar batch (bs=256) : {:.0} titles/sec   ({:.1}x over inline broad; broad lane costs {:.0}% over selective)",
+        par_batch,
+        par_batch / par_broad,
+        (sel_batch / par_batch - 1.0) * 100.0
+    );
+
+    // Amortization sweep — the machine-independent invariant. `broad_post/pass`
+    // (broad posting entries scanned across one pass over all titles — the
+    // subset of postings the broad lane owns; the main lane is unaffected by
+    // batch size) falls ~linearly as the batch grows, because each huge broad
+    // posting is consulted once per batch instead of once per title. `bs=1` is
+    // the un-amortized baseline (≈ the inline broad lane); the ratio
+    // `broad_post(bs=1) / broad_post(bs=N)` is the amortization factor, which
+    // reproduces on any box.
+    println!(
+        "broad_batch_size sweep (one pass over {} titles; broad_post/pass falls ~1/bs):",
+        data.titles.len()
+    );
+    println!(
+        "   {:>6}  {:>13}  {:>15}  {:>13}  {:>8}",
+        "bs", "titles/sec", "broad_post/pass", "broad_qs_eval", "batches"
+    );
+    let mut broad_post_bs1 = 0u64;
+    for &bs in &[1usize, 8, 64, 256, 1024] {
+        let opts = columnar(bs);
+        let st = eng.match_titles_batch_stats(&data.titles, opts); // stats from 1 pass
+        if bs == 1 {
+            broad_post_bs1 = u64::from(st.broad_postings_scanned);
+        }
+        let tsw = Instant::now();
+        for _ in 0..reps {
+            let _ = eng.match_titles_batch_stats(&data.titles, opts);
+        }
+        let sw_s = tsw.elapsed().as_secs_f64();
+        let amort = if st.broad_postings_scanned > 0 {
+            broad_post_bs1 as f64 / f64::from(st.broad_postings_scanned)
+        } else {
+            0.0
+        };
+        println!(
+            "   {:>6}  {:>13.0}  {:>15}  {:>13}  {:>8}   ({amort:.0}x amortized)",
+            bs,
+            total_titles as f64 / sw_s,
+            st.broad_postings_scanned,
+            st.broad_queries_evaluated,
+            st.broad_batches
+        );
+    }
 
     // ---- live update micro-bench ----
     println!("================ UPDATES ==============");
