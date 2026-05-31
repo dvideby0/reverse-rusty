@@ -39,6 +39,7 @@ Find an ADR by its number in the records below. (Implementation status of each d
 | 024 | CI via GitHub Actions mirroring `check.sh`; commit pressure tests + benchmark baseline | Accepted |
 | 025 | Wire query-complexity limits into the parser (the config knobs were cosmetic) | Accepted |
 | 026 | Broad-lane batch / columnar evaluation (`match_titles_batch`, `POST /_mpercolate`) | Accepted |
+| 027 | Clustering — ring+vnodes hashing & content-routed percolation (in-process first) | Accepted |
 
 ---
 
@@ -864,3 +865,82 @@ Find an ADR by its number in the records below. (Implementation status of each d
   ADR-020 (the resident-memory prerequisite), [matching.md](design/matching.md) §4,
   [api.md](reference/api.md) (`/_mpercolate`), `segment/broad_batch.rs`, `exact.rs`
   (`eval_batch_slices` / `is_pure_anchor`).
+
+### ADR-027: Clustering — ring+vnodes consistent hashing & content-routed percolation (in-process first)
+
+- **Context:** Horizontal scaling to 100M+ stored queries is roadmap Tier 3 ([STATUS](STATUS.md)); the
+  design ([clustering-and-scaling.md](design/clustering-and-scaling.md)) shards the query corpus by
+  entity anchor and **content-routes** each title to the ~2–5 shards that could match it, instead of
+  scatter-gathering across all N. But the design was only *pattern*-grounded — it names
+  OpenSearch/Aurora/"consistent hashing" yet never picked a hashing variant, cited the routing
+  literature, or wrote down the cross-shard correctness argument. Per the project's research-first rule
+  (the same discipline as ADR-011), those decisions are locked here *before* any ring code, off the back
+  of a prior-art survey ([research/clustering-prior-art.md](research/clustering-prior-art.md)). **No
+  implementation ships with this ADR** — it records the decisions the implementation will follow.
+- **Decision 1 — hashing variant: consistent-hash ring + virtual nodes**, keyed by the stable feature
+  *token* `fnv1a64(canonical_feature_name)` — *not* the per-shard integer `FeatureId`, which is unstable
+  across shards. `fnv1a64` (`util.rs`) is deterministic across runs, so the ring — and therefore the
+  oracle and benchmarks — reproduce. Virtual nodes (≈128/shard) give balance at small K; lookup is a
+  binary search over the sorted vnode array, comfortably off the hot path (routing is once per title,
+  fan-out ~2–5).
+- **Decision 2 — build order: in-process content-routing first** (design §10 steps 1–2). A library-level
+  coordinator owns K reused `Engine` instances + the ring and implements anchor placement + content-routed
+  matching; correctness is proven by a multi-shard differential oracle (cluster ≡ single-node). This
+  delivers the novel, load-bearing piece — content-routed percolation with a no-false-negative proof —
+  with **no new dependencies**, honoring the std-only-core philosophy (ADR-007). Networking, a control
+  plane, and shared storage are deliberately *not* in the first slice (see Deferred).
+- **Why correct (the cross-shard no-false-negative argument):**
+  - *Placement.* A query is stored on `ring.lookup(token(a))`, where `a` is its **rarest anchor-eligible
+    (non-hot) required feature**. "Hot" follows `is_hot` (`compile.rs` — a feature with a common-mask
+    bit); anchor selection mirrors `build_signatures`.
+  - *Routing.* A title is sent to `{ ring.lookup(token(f)) : f ∈ title features, f anchor-eligible }`.
+  - *Reduction.* The per-shard matcher **over-probes**: `Segment::match_into` probes `sig_key([f])` for
+    *every* title feature, plus hot×other pairs (`segment/seg.rs`). So within a shard the existing
+    single-node lossless cover (overview §2) already finds any match — routing is purely a
+    coordinator-level *pruning* optimization. Cross-shard correctness therefore reduces to one
+    containment lemma: **for every query Q and every title T that can match it, Q's placement shard ∈ T's
+    routing set.** It holds because Q's anchor `a` is a *required* feature of Q (present in every matching
+    T) and is anchor-eligible by construction, so `ring.lookup(token(a))` — where Q lives — is in T's
+    routing set. ∎
+  - *Global-vs-local hotness.* Each shard builds its own `Dict`, so a feature's hotness can differ
+    between the coordinator's global view and a shard's local view, which could file a query under a
+    shard's *broad* index. Closed by matching **every shard (and the broad lane) with
+    `include_broad=true`** and `sort`+`dedup`-ing the union (mirroring the engine's own cross-segment
+    dedup) — within-shard finding is then maximally permissive, so only routing-reach must be argued.
+  - *Any-of-only queries* (e.g. `(A OR B)` with no plain required feature): **set-placement** — store the
+    query on `ring.lookup(token(g))` for each member `g` of the cheapest all-eligible any-of group (a
+    matching title contains ≥1 member, which routes there); if that group is not all-eligible, **demote
+    to the broad lane**. Both branches are lossless (demote-only).
+  - *Broad lane (class C).* Queries with no anchor-eligible required feature go to one **replicated**
+    broad-lane engine evaluated for every title (design §7) — the cluster analogue of the single-node
+    broad-query quarantine (ADR-003).
+- **Alternatives considered:**
+  - *Jump consistent hash* (best balance, O(1) memory) — rejected: sequential-integer buckets mean **no
+    arbitrary-node removal**, which conflicts with failover/rebalance (design §9).
+  - *Rendezvous / HRW* — strong runner-up (arbitrary removal, optimal rebalance, no vnode tuning) but has
+    no explicit contiguous range for the design's range-split auto-split (§8.3); revisit if vnode balance
+    proves fiddly.
+  - *Maglev / multi-probe* — rejected: tuned for 100s–1000s of backends at packet rate; overkill for a
+    once-per-title decision over a handful of shards.
+  - *Key the ring on integer `FeatureId`* — rejected: per-shard dicts make those IDs unstable; the ring
+    must key on the stable feature *token*.
+  - *gRPC shard server / Raft control plane first* — rejected for the first slice: it would pull in
+    networking/consensus crates (against ADR-007) before the novel routing + correctness core is even
+    validated; the design's own build path (§10) puts in-process K-shard validation first.
+- **Deferred (explicitly not decided or built here):** gRPC `ShardServer`; Raft cluster-manager + quorum
+  state (ring / epoch / feature-model version); externalized & shared mutation log + object-store
+  segments; autoscale / scale-to-zero; auto-split / auto-merge / `recommended_shard_count` / online
+  rebalance; cross-cluster feature-model hot-swap; failover + epoch fencing; and **HTTP-server wiring** of
+  the coordinator. Each is its own later slice.
+- **Consequence:** The clustering design is now research-grounded and its key knobs are locked — a
+  ring+vnodes ring over stable feature tokens, an in-process-first build path, and a written cross-shard
+  correctness argument ready to be encoded as a multi-shard oracle. Implementation remains pending
+  (tracked in [STATUS](STATUS.md) Tier 3) and begins only after this ADR + the prior-art write-up are
+  reviewed. No code, dependencies, or APIs change with this ADR.
+- **See also:** ADR-003 (broad-query quarantine — the lane the cluster replicates), ADR-006 (forbidden
+  never gates — preserved; placement/routing key on required features only, never forbidden), ADR-007
+  (the dependency philosophy this slice honors), ADR-011 (the research-first precedent), ADR-019
+  (query-family factoring *declined* — content-routed sharding is the sanctioned scale path instead),
+  [design/clustering-and-scaling.md](design/clustering-and-scaling.md),
+  [research/clustering-prior-art.md](research/clustering-prior-art.md), `compile.rs` (`is_hot` /
+  `build_signatures`), `segment/seg.rs` (`match_into` — the over-probe that makes routing pruning-only).

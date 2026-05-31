@@ -127,7 +127,10 @@ the selective candidate count further.
 - **Feature-model versioning + blue/green re-materialize.** Frozen common-mask across minor versions;
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
 - **Clustering.** Consistent-hash entity-anchor sharding, content routing, quorum cluster-manager,
-  autoscaling, broad-lane replication — the 100M-query horizontal-scale story.
+  autoscaling, broad-lane replication — the 100M-query horizontal-scale story. *Prior art + the hashing
+  variant (ring + virtual nodes) and the cross-shard correctness argument are now locked
+  ([`DECISIONS.md`](DECISIONS.md) ADR-027, [`research/clustering-prior-art.md`](research/clustering-prior-art.md));
+  implementation pending.*
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
