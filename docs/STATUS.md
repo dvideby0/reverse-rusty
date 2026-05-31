@@ -67,6 +67,18 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   path (`tests/broad_batch.rs` + batch oracle); broad postings scanned amortize ~1/batch_size (29× at
   256). Four dynamic knobs (`broad_batch_size`/`broad_columnar`/`broad_materialize`/`max_percolate_batch`)
   + broad Prometheus counters; `broad_columnar=false` is the inline kill-switch.
+- **In-process multi-shard core (ADR-027)** — the first, dependency-free step of clustering
+  (`src/cluster/`): a `ClusterEngine` coordinator over K `Shard`s (each a `Shard`-wrapped `Engine` +
+  `ArcSwap` snapshot), a consistent-hash `HashRing` over the query's **anchor `FeatureId`**, and content
+  routing that sends a title only to its ~2–5 anchor shards (not all N) plus a designated replicated lane
+  (shard 0) for class-C / class-B-arity-2 queries that have no rare anchor. One authoritative `Dict` is
+  built over the whole corpus, frozen, and shared read-only into every shard, so `sig_key`s and hotness
+  are globally consistent — a shard's indexing matches the coordinator's placement by construction.
+  `compile::anchor_plan` (refactored out of `build_signatures`, byte-identical) is the placement SSOT.
+  Proven by `tests/cluster_oracle.rs`: cluster ≡ single-node ≡ independent brute-force oracle across
+  K∈{1,3,8,16} × broad on/off, zero false negatives / false positives, every placement class + small
+  fan-out asserted. This is build-path steps 1–2; the distributed layers remain design-only (see Tier 3).
+  ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §3/§7/§10.)
 
 ## Measured
 
@@ -126,8 +138,11 @@ the selective candidate count further.
 
 - **Feature-model versioning + blue/green re-materialize.** Frozen common-mask across minor versions;
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
-- **Clustering.** Consistent-hash entity-anchor sharding, content routing, quorum cluster-manager,
-  autoscaling, broad-lane replication — the 100M-query horizontal-scale story.
+- **Clustering.** The 100M-query horizontal-scale story. **In-process core (build-path steps 1–2) is
+  built and oracle-proven** — consistent-hash entity-anchor sharding + content routing + a designated
+  broad-lane replicated shard, over K shards in one process (ADR-027; see Implemented above). **Still
+  design-only:** the distributed layers — gRPC `ShardServer`, durable externalized mutation log,
+  Raft quorum cluster-manager, object-store segments, autoscaling, auto-split, and replicate-broad-to-all.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
@@ -241,8 +256,9 @@ from the audit's former P3 list). Roughly grouped:
 
 ## Current limitations
 
-- **Single-node.** Horizontal scale (sharding / routing / autoscaling) is designed but not built — see
-  Tier 3 above.
+- **Single-node deployment.** The in-process multi-shard core is built (ADR-027), but it runs K shards
+  in *one* process. Multi-node deployment (gRPC, durable shared log, Raft, object storage, autoscaling)
+  is designed but not built — see Tier 3 above.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
   runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving it from the corpus is the
   NPMI-wiring item in Tier 2.

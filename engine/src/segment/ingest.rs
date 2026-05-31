@@ -361,6 +361,61 @@ impl Engine {
         Ok((report, item_status))
     }
 
+    /// Build a fresh immutable base segment from PRE-EXTRACTED queries, indexing
+    /// against the engine's shared dict WITHOUT mutating it (no interning, no
+    /// frequency bump, no mask re-finalize — `Segment::add_compiled` only *reads*
+    /// the dict). This is the cluster shard's bulk path: every shard shares the
+    /// coordinator's one frozen dict, so each query is indexed under exactly the
+    /// `sig_key` the coordinator placed it on. `items` is
+    /// `(logical_id, extracted, source_text, version)`; class-D queries are
+    /// skipped, as on every other ingest path. In-memory only (the cluster step
+    /// keeps shards non-durable); no WAL/manifest involvement.
+    pub fn ingest_extracted(&mut self, items: &[(u64, Extracted, String, u32)]) -> IngestReport {
+        let mut report = IngestReport::default();
+        let mut seg = Segment::new();
+        seg.vocab_epoch = self.vocab_epoch;
+        let mut accepted: Vec<(u64, String)> = Vec::new();
+        for (logical, ex, text, version) in items {
+            if seg
+                .add_compiled(ex, &self.dict, *logical, *version)
+                .is_some()
+            {
+                accepted.push((*logical, text.clone()));
+                report.ingested += 1;
+            } else {
+                self.rejected_class_d += 1;
+                report.rejected_class_d += 1;
+            }
+        }
+        seg.build_filter();
+        self.seal_and_push(seg);
+        for (logical, text) in accepted {
+            self.query_store.insert(logical, text);
+        }
+        report
+    }
+
+    /// Insert ONE pre-extracted query into the memtable without mutating the
+    /// shared dict — the live-update analog of [`ingest_extracted`](Self::ingest_extracted),
+    /// used by the cluster's incremental `add_query`. Returns the new
+    /// memtable-local id, or `None` for a class-D rejection.
+    pub fn insert_extracted(
+        &mut self,
+        ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+    ) -> Option<u32> {
+        let outcome =
+            Arc::make_mut(&mut self.memtable).add_compiled(ex, &self.dict, logical, version);
+        if outcome.is_some() {
+            self.query_store.insert(logical, text.to_string());
+        } else {
+            self.rejected_class_d += 1;
+        }
+        outcome
+    }
+
     /// Replay an insert from WAL recovery (does NOT write back to WAL).
     ///
     /// Replay uses the default (compiled-in) parse ceiling, NOT the configured

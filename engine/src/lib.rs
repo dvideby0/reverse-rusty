@@ -32,6 +32,7 @@
     )
 )]
 
+pub mod cluster;
 pub mod compile;
 pub mod config;
 pub mod dict;
@@ -81,6 +82,9 @@ const _: () = {
     #[allow(dead_code)]
     fn assertions() {
         assert_send::<Engine>();
+        // The cluster coordinator is shared read+write behind `Arc` (interior
+        // mutability via per-shard mutexes + ArcSwap), so it must be Send + Sync.
+        assert_send_sync::<cluster::ClusterEngine>();
         assert_send_sync::<EngineSnapshot>();
         assert_send::<segment::MatchScratch>();
         assert_send_sync::<Normalizer>();

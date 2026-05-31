@@ -41,7 +41,8 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) — LSM write path, segments,
   tombstones, compaction, feature-model versioning.
 - [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) — sharding and horizontal
-  scale (entirely design-only).
+  scale (the in-process multi-shard core is built — ADR-027, `src/cluster/`; the multi-node layers
+  are design-only).
 
 ### Reference — how to use it
 - [`reference/api.md`](reference/api.md) — the complete REST API (every endpoint + server flags).

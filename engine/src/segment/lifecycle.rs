@@ -20,6 +20,17 @@ impl Engine {
     /// Create an engine with explicit configuration. If `config.data_dir` is set,
     /// initializes the data directory and WAL.
     pub fn with_config(norm: Normalizer, config: EngineConfig) -> Self {
+        Self::with_shared(Arc::new(norm), Arc::new(Dict::new()), config)
+    }
+
+    /// Create an engine that SHARES a pre-built normalizer and dictionary (by
+    /// `Arc`) instead of owning fresh ones. This is how a cluster shard is built:
+    /// every shard shares the coordinator's one authoritative, already-finalized
+    /// `Dict` so `FeatureId`s / `sig_key`s / hotness are globally consistent (see
+    /// [`crate::cluster`]). The dict must be treated as frozen — shard ingest uses
+    /// the read-only `*_extracted` paths so it is never `Arc::make_mut`'d (which
+    /// would fork it and break cross-shard agreement).
+    pub fn with_shared(norm: Arc<Normalizer>, dict: Arc<Dict>, config: EngineConfig) -> Self {
         let mut wal_healthy = true;
         // Diagnostics raised here predate any observer (it is attached after
         // construction via `set_observer`), so they are buffered and replayed on
@@ -52,9 +63,9 @@ impl Engine {
         let query_store = Arc::new(SourceStore::empty(config.retain_source));
         Engine {
             config: Arc::new(config),
-            norm: Arc::new(norm),
+            norm,
             vocab: None,
-            dict: Arc::new(Dict::new()),
+            dict,
             segments: Vec::new(),
             memtable: Arc::new(Segment::new()),
             rejected_parse: 0,

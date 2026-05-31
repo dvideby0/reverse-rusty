@@ -47,6 +47,10 @@ name = "demo"
 path = "src/bin/demo.rs"
 
 [[bin]]
+name = "clusterdemo"
+path = "src/bin/clusterdemo.rs"
+
+[[bin]]
 name = "learn"
 path = "src/bin/learn.rs"
 

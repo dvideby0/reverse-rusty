@@ -9,14 +9,18 @@ shares), [`matching.md`](matching.md) (the per-shard hot path), [`normalization.
 Read the [overview](README.md) for the correctness contract; the self-tuning draws on the feature model
 in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learning.md).*
 
-> **Implementation status:** Design-only — not yet coded. Reverse Rusty is single-node today.
+> **Implementation status:** The in-process multi-shard core (build-path §10 steps 1–2) is **built and
+> oracle-proven** — `src/cluster/` (ADR-027): entity-anchor sharding, content routing, and a designated
+> broad-lane shard over K shards in **one process**, dependency-free. Still design-only: the multi-node
+> layers — gRPC `ShardServer`, the durable shared mutation log, the Raft quorum, object-store segments,
+> and autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** OpenSearch cluster formation, Aurora log-is-the-database, consistent hashing
-- **Status:** Entirely design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027); multi-node layers design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary
 
 ---
@@ -235,17 +239,21 @@ without operator action. The defaults are the product.
 ---
 
 ## 10. Incremental build path from today's single-node engine
-1. **Wrap the current engine as a single shard** behind a `ShardServer` (gRPC): `add/remove/percolate`.
+1. **Wrap the current engine as a shard.** ✅ **Done in-process** (ADR-027): the `Shard` wrapper owns an
+   `Engine` + `ArcSwap<EngineSnapshot>` and exposes add/remove/percolate. *Remaining:* lift it behind a
+   `ShardServer` (gRPC) so a shard can be remote (the local↔remote `trait Shard` seam).
 2. **Add a coordinator** with the consistent-hash ring + content routing (§3) over K local shards in
-   one process — validates routing/fan-out and the cross-shard correctness oracle.
+   one process. ✅ **Done** (ADR-027): `cluster::ClusterEngine` + `HashRing` over anchor `FeatureId`,
+   entity-anchor placement, a designated broad-lane shard (§7), cross-shard merge — validated by the
+   multi-shard correctness oracle (`tests/cluster_oracle.rs`: cluster ≡ single-node ≡ brute, K∈{1,3,8,16}).
 3. **Externalize the mutation log** (start with a single-node WAL, then Raft) and make segments
-   loadable from a shared path (local dir → object store) — gets the Aurora storage shape.
-4. **Add the cluster-manager quorum** (Raft) holding ring + epoch; multi-process cluster.
-5. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas.
-6. Each step is independently testable; the differential oracle (`tests/oracle.rs`) extends naturally
-   to a multi-shard harness asserting the cluster returns exactly the single-node result set.
+   loadable from a shared path (local dir → object store) — gets the Aurora storage shape. *(design-only)*
+4. **Add the cluster-manager quorum** (Raft) holding ring + epoch; multi-process cluster. *(design-only)*
+5. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
+6. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
+   a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
-(All of this is design-only — Reverse Rusty is single-node today; see [`../STATUS.md`](../STATUS.md).)
+(Steps 1–2 — the in-process core — are built; ADR-027. The rest is design-only. See [`../STATUS.md`](../STATUS.md).)
 
 ---
 

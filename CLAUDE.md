@@ -12,8 +12,10 @@ canonical docs, linked from the router below.
 
 Reverse Rusty is a high-performance **reverse product-query matcher** for eBay-style listings.
 Given millions of stored product-intent queries and an incoming listing title, it finds which
-queries match ("percolation"). Written in Rust; a single-node engine with a design-complete
-clustering story. It gates candidates on **semantic signatures** (not raw terms), verifies
+queries match ("percolation"). Written in Rust; a single-node engine whose **in-process
+multi-shard core** (entity-anchor sharding + content routing) is built and oracle-proven
+([ADR-027](docs/DECISIONS.md)), with the distributed layers (gRPC/Raft/object-store) still
+design-only. It gates candidates on **semantic signatures** (not raw terms), verifies
 with **integer-only match plans**, quarantines broad queries, and supports frequent updates —
 with a hard guarantee of **zero false negatives**. (Selective path ≈250× the spec target, a flat
 ~54 candidates/title, zero false negatives — see [`docs/performance/`](docs/performance/README.md).)
@@ -104,7 +106,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/dsl.rs` | Query DSL parser → AST (compile-time only) | [normalization.md](docs/design/normalization.md) §1 |
 | `src/normalize.rs` | Shared query/title normalizer (daachorse automaton) + `NormalizerBuilder` | [normalization.md](docs/design/normalization.md) §2–4 |
 | `src/dict.rs` | Feature dictionary, frequency tracking, 64-bit common mask | [normalization.md](docs/design/normalization.md) §5 |
-| `src/compile.rs` | Signature-cover optimizer + cost classes A/B/C/D + read-only compile path for explain | [matching.md](docs/design/matching.md) §1 |
+| `src/compile.rs` | Signature-cover optimizer + cost classes A/B/C/D + read-only compile path for explain + `anchor_plan` (pre-hash anchor groups — the placement SSOT for clustering) | [matching.md](docs/design/matching.md) §1; ADR-027 |
 | `src/config.rs` | `EngineConfig` — runtime-tunable knobs for compaction, flush, merge scoring, and the broad-lane batch evaluator (`Serialize`; dynamic subset updatable at runtime via `/_settings`) | ADR-022, ADR-026 |
 | `src/filter.rs` | Per-segment anchor filter (cache-line blocked bloom, 512-bit blocks) | [ingestion-and-updates.md](docs/design/ingestion-and-updates.md) §6 |
 | `src/index.rs` | Candidate index: sig key → posting list (inline/Vec/Roaring) | [matching.md](docs/design/matching.md) §2 |
@@ -113,6 +115,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/storage.rs` | Mmap'd segment file format: frozen hash tables, `MmapSegment`, `BaseSegment`, manifest, Dict serialization, query source persistence (`sources.dat`) | ADR-012, ADR-014 |
 | `src/wal.rs` | Write-ahead log: append-only CRC-framed entries, crash recovery replay | ADR-013 |
 | `src/segment.rs` + `src/segment/` | LSM engine (module). Root holds the shared type *defs* (`Engine`, `Segment`, `BaseSegment`, `EngineSnapshot`, `BatchMatchOptions`/`BroadStrategy`, report types); `impl` blocks split into submodules — `seg`/`base`/`snapshot` (the data/read types) and `lifecycle`/`ingest`/`compaction`/`matching`/`persistence`/`metrics` (the `Engine` controller), plus `broad_batch` (the columnar broad-lane batch evaluator behind `match_titles_batch`). Same responsibilities: memtable + flush + bulk_ingest + tombstones + compaction + auto-trigger policy + persistence. Submodule-internal helpers are `pub(in crate::segment)`. A `#[cfg(test)]` `wal_failure_tests` submodule holds WAL-failure integration tests for the write path. | [ingestion-and-updates.md](docs/design/ingestion-and-updates.md); broad lane → [matching.md](docs/design/matching.md) §4 |
+| `src/cluster.rs` + `src/cluster/` | In-process multi-shard core (module): `ClusterEngine` coordinator (placement + content routing + cross-shard merge), `HashRing` (consistent hash over anchor `FeatureId`), `Shard` (wraps an `Engine` + `ArcSwap<EngineSnapshot>`). One shared frozen dict across shards; class C / B-arity-2 → designated replicated lane (shard 0). Build path steps 1–2; dependency-free. | [clustering-and-scaling.md](docs/design/clustering-and-scaling.md) §3/§7/§10; ADR-027 |
 | `src/explain.rs` | Debug/explain tooling (first-class, not bolt-on) + structured `ExplainDetail` for API | [matching.md](docs/design/matching.md) §6 |
 | `src/gen.rs` | Synthetic data generator (deterministic, seeded) | — |
 | `src/vocab.rs` | Runtime vocabulary learning from query any-of groups, `Vocab` struct, JSON persistence | ADR-015 |
@@ -121,12 +124,14 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/util.rs` | FNV-1a hash (stable across runs), FastMap alias | — |
 | `tests/oracle.rs` | Differential correctness oracle (brute force vs engine; per-title AND batch path) | — |
 | `tests/broad_batch.rs` | Broad-lane batch≡scalar equivalence matrix (the load-bearing batch correctness deliverable) | [matching.md](docs/design/matching.md) §4 |
+| `tests/cluster_oracle.rs` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad on/off, all placement classes + fan-out asserted | ADR-027 |
 | `tests/error_paths.rs` | API error handling regression tests | — |
 | `tests/persistence.rs` | Persistence tests: segment round-trip, WAL recovery, mmap compaction | — |
 | `tests/hardening_fixes.rs` | Integration tests: vocab epoch, fallible deser, reverse-index delete | — |
 | `tests/coverage_gaps.rs` | Regression tests closing specific coverage gaps | — |
 | `tests/stress.rs` | Pressure/soak suite: mixed read/write/delete churn, par==seq under mutation; one `#[ignore]`d 10M-query soak | [testing.md](docs/testing.md) |
 | `src/bin/demo.rs` | Worked example end-to-end | — |
+| `src/bin/clusterdemo.rs` | Cluster worked example: per-class placement + content-routed fan-out | ADR-027 |
 | `src/bin/bench.rs` | Benchmark harness | — |
 | `src/bin/learn.rs` | Corpus feature learner (NPMI) | [corpus-feature-learning.md](docs/research/corpus-feature-learning.md) |
 | `src/bin/norm.rs` | Title introspection tool | — |
@@ -153,7 +158,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | "Why was it done this way?" / "why was X NOT built?" | [`docs/DECISIONS.md`](docs/DECISIONS.md) (ADR index; declined → ADR-019) |
 | Performance numbers / 100M extrapolation | [`docs/performance/results.md`](docs/performance/results.md); regression gate: `benchmark-results.txt` INVARIANTS |
 | Run/change tests, benchmarks, pressure tests, hooks, or CI | [`docs/testing.md`](docs/testing.md) (gate: `engine/check.sh`; CI: `.github/workflows/ci.yml`) |
-| Clustering / sharding / scale-out | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md) (design-only) |
+| Clustering / sharding / scale-out | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md); in-process core (steps 1–2) built → `src/cluster/`, [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-027 |
 | Prior art (Lucene / ES / Tantivy) | [`docs/research/prior-art.md`](docs/research/prior-art.md) |
 | Dependency versions / why a crate | [`engine/Cargo.toml`](engine/Cargo.toml) |
 | Full docs index + where-new-info-goes rules | [`docs/README.md`](docs/README.md) |

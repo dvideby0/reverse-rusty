@@ -78,6 +78,26 @@ pub struct MatchStats {
     pub broad_batches: u32,           // broad sub-batches (chunks) processed
 }
 
+impl MatchStats {
+    /// Field-wise accumulate `other` into `self`. The single shared body for
+    /// merging per-title stats in the parallel matchers and per-shard stats in
+    /// the cluster coordinator. `matches` is summed like the rest; callers that
+    /// dedup across sources (e.g. the cluster union) overwrite it afterward.
+    pub fn merge(&mut self, other: MatchStats) {
+        self.unique_candidates += other.unique_candidates;
+        self.postings_scanned += other.postings_scanned;
+        self.broad_postings_scanned += other.broad_postings_scanned;
+        self.main_candidates += other.main_candidates;
+        self.broad_candidates += other.broad_candidates;
+        self.matches += other.matches;
+        self.probes_attempted += other.probes_attempted;
+        self.probes_skipped += other.probes_skipped;
+        self.broad_queries_evaluated += other.broad_queries_evaluated;
+        self.broad_anchors_scanned += other.broad_anchors_scanned;
+        self.broad_batches += other.broad_batches;
+    }
+}
+
 /// Which broad-lane strategy a batch match uses. `Columnar` is the new
 /// once-per-batch bitmap evaluator; `Inline` falls back to the original
 /// per-title broad probe (`Segment::match_into(include_broad=true)`) — the
