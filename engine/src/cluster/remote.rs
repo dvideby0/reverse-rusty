@@ -106,6 +106,29 @@ impl RemoteShard {
         }
         Ok(RemoteShard { client, handle })
     }
+
+    /// Drive this remote node's `RecoverFrom` RPC (ADR-036): it pulls `source_endpoint`'s sealed
+    /// segments (via that peer's `FetchSegments`), writes them under its own data_dir, attaches
+    /// them, and starts serving — the cross-node peer-recovery primitive. `dict_fp` must equal
+    /// the coordinator's frozen-dict fingerprint (the server re-checks it). Returns
+    /// `(segments_attached, num_queries)`. The node must be durable + have adopted the dict.
+    pub fn recover_from(
+        &self,
+        source_endpoint: &str,
+        dict_fp: u64,
+    ) -> Result<(u64, u64), ShardError> {
+        let mut client = self.client.clone();
+        let req = proto::RecoverFromRequest {
+            source_endpoint: source_endpoint.to_string(),
+            dict_fingerprint: dict_fp,
+        };
+        let reply = self
+            .handle
+            .block_on(async move { client.recover_from(req).await })
+            .map_err(rpc_err)?
+            .into_inner();
+        Ok((reply.segments_attached, reply.num_queries))
+    }
 }
 
 fn rpc_err<E: std::fmt::Display>(e: E) -> ShardError {

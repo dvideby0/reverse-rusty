@@ -29,17 +29,18 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > and no cloud dependency** in the serving path; object storage, if ever added, is only an optional
 > pluggable backup target (local-fs default). The prior-art survey + the hashing-variant/correctness
 > rationale behind ADR-027 are in [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md).
-> Per-shard **replication + peer recovery** is built **in-process** (ADR-035; the `ReplicatedShard`
-> composite — primary + N replicas, read failover, `peer_recover`). Still design-only: the **gRPC
-> multi-node lift** of replication (ADR-036), the **Raft/quorum control plane**, normalizer/vocab shipping,
-> TLS/auth, and autoscaling/auto-split.
+> Per-shard **replication + peer recovery** is built — **in-process** (ADR-035; the `ReplicatedShard`
+> composite — primary + N replicas, read failover, `peer_recover`) and over **gRPC** (ADR-036; remote
+> replicas via `connect_replicated` + a streaming `FetchSegments`/`RecoverFrom` peer-recovery path). Still
+> design-only: the **Raft/quorum control plane** (placement + membership), a durable/replicated coordinator
+> log (so recovery need not quiesce writes), normalizer/vocab shipping, TLS/auth, and autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** Elasticsearch/Cassandra **shared-nothing** (local segments + WAL + peer recovery + quorum control plane) and consistent hashing — **not** Aurora's shared object storage (ADR-033)
-- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **in-process per-shard replication + peer recovery** (step 4; ADR-035 — the `ReplicatedShard` composite); the remaining multi-node layers (the gRPC lift of replication, a Raft control plane, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`); the remaining multi-node layers (a Raft control plane, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary; **no object store / cloud dependency** — durability is a local WAL + replicas (ADR-033)
 
 ---
@@ -318,10 +319,15 @@ without operator action. The defaults are the product.
      present the primary's view, and `peer_recover` (seal → copy `.seg` → attach-and-mmap) rebuilds a replica
      from a peer. `ClusterConfig::replication_factor` (default 1) drives it; validated by the multi-shard +
      durability oracles at RF > 1 (`tests/cluster_oracle.rs`, `tests/cluster_durability_oracle.rs`).
-   - 4b. **gRPC multi-node.** *(design-only — ADR-036)*: replicas as `RemoteShard`s, a streaming
-     `FetchSegments` RPC for cross-node peer recovery, durable server shards. Concurrent-write tail replay
-     during recovery needs a durable/replicated coordinator log and couples to step 5; this increment
-     quiesces writes for the copy window.
+   - 4b. **gRPC multi-node.** ✅ **Done** (ADR-036): `ClusterEngine::connect_replicated(groups)` wraps each
+     position's primary + replica `RemoteShard`s in a `ReplicatedShard` (coordinator unchanged), durable
+     server shards (`pending_durable`/`new_durable`; `AdoptDict` builds a durable shard when a `data_dir` is
+     set), and two RPCs — server-streaming `FetchSegments` (manifest-first, chunked; the receiver rejects a
+     truncated stream rather than attaching a subset) + target-driven `RecoverFrom` (the recovering node
+     pulls a peer's segments), orchestrated by `peer_recover_replica`. Validated by
+     `tests/cluster_grpc_oracle.rs` (`grpc_replicated_failover_and_peer_recovery`). **Honest scope:** recovery
+     **quiesces writes** for the copy window — concurrent-write "stream + replay the tail" needs a
+     durable/replicated coordinator log (a remote cluster uses `NullClusterLog`), which couples to step 5.
 5. **Add the cluster-manager quorum** (Raft) holding ring + shard→node map + feature-model version +
    epoch; multi-process cluster. *(design-only)*
 6. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
@@ -329,9 +335,9 @@ without operator action. The defaults are the product.
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
 (Steps 1–2 — the in-process core — step 1's gRPC transport + dict shipping, step 3a's coordinator log,
-step 3b's per-shard local durable segments, and step 4a's in-process per-shard replication + peer recovery
-are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032 + ADR-035. The remaining shared-nothing multi-node
-work — step 4b (the gRPC lift of replication, ADR-036), the Raft control plane, autoscale — is design-only
+step 3b's per-shard local durable segments, and step 4's per-shard replication + peer recovery (4a in-process,
+4b over gRPC) are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036. The remaining
+shared-nothing multi-node work — steps 5–6 (the Raft control plane, autoscale + auto-split) — is design-only
 (ADR-033). See [`../STATUS.md`](../STATUS.md).)
 
 ---

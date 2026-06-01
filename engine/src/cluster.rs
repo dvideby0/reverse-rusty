@@ -40,6 +40,8 @@ pub use ring::{HashRing, DEFAULT_VNODES};
 pub use shard::ShardError;
 
 #[cfg(feature = "distributed")]
+pub use coordinator::ShardGroup;
+#[cfg(feature = "distributed")]
 pub use remote::RemoteShard;
 #[cfg(feature = "distributed")]
 pub use server::ShardServer;

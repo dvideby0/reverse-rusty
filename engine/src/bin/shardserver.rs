@@ -13,6 +13,7 @@
 //! ships the dict) and percolate.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use reverse_rusty::cluster::ShardServer;
@@ -25,20 +26,43 @@ use reverse_rusty::normalize::Normalizer;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let pending = args.iter().any(|a| a == "--pending");
-    let addr: SocketAddr = args
-        .iter()
-        .find(|a| !a.starts_with("--"))
-        .map_or("127.0.0.1:50051", String::as_str)
-        .parse()?;
+    // `--data-dir <path>` makes the node DURABLE: its shard persists segments there, so it can
+    // serve `FetchSegments` and be a recovering replica (ADR-035/036). Parse it explicitly so its
+    // value is not mistaken for the positional ADDR.
+    let mut data_dir: Option<PathBuf> = None;
+    let mut addr_arg: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--data-dir" => {
+                data_dir = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            // First positional arg = ADDR; later positionals are ignored.
+            a if !a.starts_with("--") && addr_arg.is_none() => {
+                addr_arg = Some(a.to_string());
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let addr: SocketAddr = addr_arg.as_deref().unwrap_or("127.0.0.1:50051").parse()?;
 
     let norm = Arc::new(Normalizer::default_vocab()?);
     let rt = tokio::runtime::Runtime::new()?;
 
     if pending {
-        // Dict-less: serve nothing until a coordinator ships its frozen dict (AdoptDict) and
-        // then places queries — the real multi-node flow, no out-of-band dict (ADR-034).
-        let server = ShardServer::pending(norm, EngineConfig::default());
-        println!("shardserver: serving ShardService on {addr} (PENDING — awaiting AdoptDict)");
+        // Dict-less: serve nothing until a coordinator ships its frozen dict (AdoptDict) and then
+        // places queries — the real multi-node flow, no out-of-band dict (ADR-034). With
+        // `--data-dir` it is also durable: a recovering/replica node (ADR-035/036).
+        let server = match &data_dir {
+            Some(dir) => ShardServer::pending_durable(norm, EngineConfig::default(), dir.clone()),
+            None => ShardServer::pending(norm, EngineConfig::default()),
+        };
+        let durable = if data_dir.is_some() { ", DURABLE" } else { "" };
+        println!(
+            "shardserver: serving ShardService on {addr} (PENDING{durable} — awaiting AdoptDict)"
+        );
         rt.block_on(server.serve(addr))?;
         return Ok(());
     }
@@ -67,7 +91,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     dict.finalize_mask();
 
-    let server = ShardServer::new(Arc::clone(&norm), Arc::new(dict), EngineConfig::default());
+    let server = match &data_dir {
+        Some(dir) => ShardServer::new_durable(
+            Arc::clone(&norm),
+            Arc::new(dict),
+            EngineConfig::default(),
+            dir.clone(),
+        )?,
+        None => ShardServer::new(Arc::clone(&norm), Arc::new(dict), EngineConfig::default()),
+    };
     server.ingest_dsl(&queries);
     println!(
         "shardserver: serving ShardService on {addr} ({} queries loaded)",

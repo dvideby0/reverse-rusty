@@ -980,6 +980,18 @@ impl ClusterEngine {
     }
 }
 
+/// One shard position's placement across nodes for [`ClusterEngine::connect_replicated`]: a
+/// primary endpoint + N replica endpoints (RF = 1 + `replicas.len()`). Supplied by the caller
+/// in this increment — there is no allocator / control plane yet (that is the Raft step; ADR-036).
+#[cfg(feature = "distributed")]
+#[derive(Clone, Debug)]
+pub struct ShardGroup {
+    /// The primary node's endpoint (e.g. `"http://127.0.0.1:50051"`).
+    pub primary: String,
+    /// Replica node endpoints — on different nodes than the primary.
+    pub replicas: Vec<String>,
+}
+
 /// gRPC remote-cluster construction (behind the `distributed` feature).
 #[cfg(feature = "distributed")]
 impl ClusterEngine {
@@ -1047,6 +1059,95 @@ impl ClusterEngine {
             config.include_broad,
             ClusterDurable::in_memory(config.vnodes),
         )
+    }
+
+    /// Assemble a cluster whose K shard POSITIONS are each a [`ReplicatedShard`](super::replica::ReplicatedShard)
+    /// over RF gRPC [`RemoteShard`]s (a primary + replicas), one [`ShardGroup`] per position. Ships +
+    /// adopts the frozen dict on EVERY endpoint (ADR-034), then wraps position `i`'s RemoteShards
+    /// into one composite boxed as the `i`-th shard — so the coordinator's placement / routing /
+    /// merge is identical to a non-replicated remote cluster, while reads fail over to a replica and
+    /// writes fan out (ADR-035). `groups.len()` must equal `config.num_shards`; a group with no
+    /// replicas degenerates to a bare `RemoteShard` (identical to [`Self::connect_remote`]). Load the
+    /// corpus afterwards with [`Self::ingest`].
+    pub fn connect_replicated(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        config: &ClusterConfig,
+        groups: &[ShardGroup],
+        handle: &tokio::runtime::Handle,
+    ) -> Result<Self, ShardError> {
+        if groups.len() != config.num_shards {
+            return Err(ShardError::Config(format!(
+                "connect_replicated needs one ShardGroup per shard: got {} for {} shards",
+                groups.len(),
+                config.num_shards
+            )));
+        }
+        let ring = HashRing::new(config.num_shards, config.vnodes)?;
+        let expected = dict.fingerprint();
+        let dict_bytes = crate::storage::serialize_dict(&dict);
+        let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(groups.len());
+        for g in groups {
+            let primary = super::remote::RemoteShard::connect_and_adopt(
+                g.primary.clone(),
+                handle.clone(),
+                dict_bytes.clone(),
+                expected,
+            )?;
+            let mut replicas: Vec<Box<dyn Shard>> = Vec::with_capacity(g.replicas.len());
+            for ep in &g.replicas {
+                let r = super::remote::RemoteShard::connect_and_adopt(
+                    ep.clone(),
+                    handle.clone(),
+                    dict_bytes.clone(),
+                    expected,
+                )?;
+                replicas.push(Box::new(r) as Box<dyn Shard>);
+            }
+            let shard: Box<dyn Shard> = if replicas.is_empty() {
+                Box::new(primary)
+            } else {
+                Box::new(super::replica::ReplicatedShard::new(
+                    Box::new(primary) as Box<dyn Shard>,
+                    replicas,
+                ))
+            };
+            shards.push(shard);
+        }
+        Self::from_parts(
+            norm,
+            dict,
+            ring,
+            shards,
+            config.include_broad,
+            ClusterDurable::in_memory(config.vnodes),
+        )
+    }
+
+    /// Cross-node peer recovery (ADR-036): bring a fresh, durable, **pending** node up as a copy of
+    /// a shard by streaming a peer's segments. Ships the frozen dict to `target_endpoint` (adopt),
+    /// then drives its `RecoverFrom`, which pulls `source_endpoint`'s sealed segments, attaches them,
+    /// and starts serving. Returns the recovered node's post-attach query count (so the caller can
+    /// verify parity or fold it into a group). Writes to the position MUST be quiesced for the
+    /// window — there is no durable remote coordinator log to replay a concurrent tail from in this
+    /// increment (that couples to the Raft control plane, step 5).
+    pub fn peer_recover_replica(
+        &self,
+        source_endpoint: &str,
+        target_endpoint: &str,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<u64, ShardError> {
+        let expected = self.dict.fingerprint();
+        let dict_bytes = crate::storage::serialize_dict(&self.dict);
+        // Ship the dict so the fresh node attaches segments against the right feature space.
+        let target = super::remote::RemoteShard::connect_and_adopt(
+            target_endpoint.to_string(),
+            handle.clone(),
+            dict_bytes,
+            expected,
+        )?;
+        let (_segments, num_queries) = target.recover_from(source_endpoint, expected)?;
+        Ok(num_queries)
     }
 }
 

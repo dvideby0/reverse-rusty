@@ -8,9 +8,13 @@
 //! `percolate` / `ingest` / `insert` / `delete` / `flush`.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
 use crate::compile::{extract_readonly, Extracted};
@@ -20,7 +24,7 @@ use crate::normalize::Normalizer;
 
 use super::proto;
 use super::proto::shard_service_server::{ShardService, ShardServiceServer};
-use super::shard::{LocalShard, Shard};
+use super::shard::{LocalShard, Shard, ShardError};
 
 /// The adopted feature space + the shard compiled over it. Held behind an
 /// [`ArcSwapOption`] in [`ShardServer`] so a server can start *pending* (no dict) and
@@ -40,6 +44,11 @@ struct ServerState {
 pub struct ShardServer {
     norm: Arc<Normalizer>,
     config: EngineConfig,
+    /// `Some` ⇒ a **durable** node: its shard persists segments under this dir (ADR-035), so
+    /// the node can serve `FetchSegments` (stream its segments to a recovering peer) and accept
+    /// `RecoverFrom` (pull a peer's segments + attach). `None` ⇒ in-memory (today's default).
+    /// When set, `AdoptDict` builds a durable (segments-only) shard rather than an in-memory one.
+    data_dir: Option<PathBuf>,
     /// `None` until a dict is adopted; reads against a pending server return
     /// `failed_precondition`.
     state: ArcSwapOption<ServerState>,
@@ -54,6 +63,7 @@ impl ShardServer {
         ShardServer {
             norm,
             config,
+            data_dir: None,
             state,
         }
     }
@@ -66,8 +76,43 @@ impl ShardServer {
         ShardServer {
             norm,
             config,
+            data_dir: None,
             state: ArcSwapOption::from(None),
         }
+    }
+
+    /// A **durable, pending** server (ADR-035/036): empty (awaiting `AdoptDict`) but rooted at
+    /// `data_dir`, so once it adopts a dict its shard persists segments there. This is the real
+    /// recovering/replica node — after adoption it can serve `FetchSegments` and accept
+    /// `RecoverFrom`. The durable analogue of [`Self::pending`].
+    pub fn pending_durable(norm: Arc<Normalizer>, config: EngineConfig, data_dir: PathBuf) -> Self {
+        ShardServer {
+            norm,
+            config,
+            data_dir: Some(data_dir),
+            state: ArcSwapOption::from(None),
+        }
+    }
+
+    /// A **durable, pre-built** server: build a segments-only durable shard over `dict` rooted
+    /// at `data_dir`. The durable analogue of [`Self::new`]. Errors if the durable engine cannot
+    /// be created (e.g. the dir is unwritable).
+    pub fn new_durable(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        config: EngineConfig,
+        data_dir: PathBuf,
+    ) -> Result<Self, ShardError> {
+        let mut sc = config.clone();
+        sc.data_dir = Some(data_dir.clone());
+        let shard = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), sc)?;
+        let state = ArcSwapOption::from(Some(Arc::new(ServerState { dict, shard })));
+        Ok(ShardServer {
+            norm,
+            config,
+            data_dir: Some(data_dir),
+            state,
+        })
     }
 
     /// The adopted state, or `failed_precondition` if the server is still pending.
@@ -250,11 +295,22 @@ impl ShardService for ShardServer {
 
         if adopt {
             let dict = Arc::new(dict);
-            let shard = LocalShard::new(
-                Arc::clone(&self.norm),
-                Arc::clone(&dict),
-                self.config.clone(),
-            );
+            // A durable node (data_dir set) builds a segments-only durable shard so its writes
+            // persist `.seg` files — required to later serve `FetchSegments` or be a recovering
+            // replica (ADR-035/036). An in-memory node keeps today's behavior.
+            let shard = match &self.data_dir {
+                Some(dir) => {
+                    let mut sc = self.config.clone();
+                    sc.data_dir = Some(dir.clone());
+                    LocalShard::new_durable(Arc::clone(&self.norm), Arc::clone(&dict), sc)
+                        .map_err(|e| Status::internal(format!("durable adopt: {e}")))?
+                }
+                None => LocalShard::new(
+                    Arc::clone(&self.norm),
+                    Arc::clone(&dict),
+                    self.config.clone(),
+                ),
+            };
             self.state
                 .store(Some(Arc::new(ServerState { dict, shard })));
         }
@@ -335,6 +391,249 @@ impl ShardService for ShardServer {
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::FlushReply {}))
     }
+
+    // ---- peer recovery (ADR-035/036, clustering build-path step 4b) ----
+    type FetchSegmentsStream =
+        Pin<Box<dyn Stream<Item = Result<proto::FetchSegmentsChunk, Status>> + Send>>;
+
+    /// Stream this (durable) shard's sealed segments to a recovering peer: seal a consistent
+    /// snapshot, send the manifest frame (the complete file set + seg-id cursor), then a chunked
+    /// run per `.seg` (and `sources.dat` if present). Refuses if the server is not durable or
+    /// the requester's dict fingerprint diverges (never ships segments compiled against a
+    /// different feature space).
+    async fn fetch_segments(
+        &self,
+        request: Request<proto::FetchSegmentsRequest>,
+    ) -> Result<Response<Self::FetchSegmentsStream>, Status> {
+        let st = self.loaded()?;
+        let Some(dir) = self.data_dir.clone() else {
+            return Err(Status::failed_precondition(
+                "shard is not durable; cannot stream segments for peer recovery",
+            ));
+        };
+        let fp = st.dict.fingerprint();
+        if request.into_inner().dict_fingerprint != fp {
+            return Err(Status::failed_precondition(
+                "FetchSegments dict-fingerprint mismatch (divergent feature space)",
+            ));
+        }
+        // Seal so the on-disk `.seg` set reflects live state (memtable flushed, base tombstones
+        // baked) — else a deleted query could resurrect on the recovered replica.
+        st.shard
+            .seal_for_checkpoint()
+            .map_err(|e| Status::internal(format!("seal before FetchSegments: {e}")))?;
+        let files = st
+            .shard
+            .segment_filenames()
+            .map_err(|e| Status::internal(format!("collecting segment filenames: {e}")))?;
+        let next_seg_id = st
+            .shard
+            .next_seg_id()
+            .map_err(|e| Status::internal(format!("next_seg_id: {e}")))?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move {
+            let seg_dir = dir.join("segments");
+            let sources = dir.join("sources.dat");
+            let has_sources = sources.exists();
+            let manifest = proto::FetchSegmentsChunk {
+                frame: Some(proto::fetch_segments_chunk::Frame::Manifest(
+                    proto::FetchManifest {
+                        segment_files: files.clone(),
+                        next_seg_id,
+                        dict_fingerprint: fp,
+                        has_sources,
+                    },
+                )),
+            };
+            if tx.send(Ok(manifest)).await.is_err() {
+                return;
+            }
+            for name in &files {
+                if !stream_file(&tx, name, &seg_dir.join(name)).await {
+                    return;
+                }
+            }
+            if has_sources {
+                stream_file(&tx, "sources.dat", &sources).await;
+            }
+        });
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+
+    /// Accept peer recovery — the recovering node pulls from a peer (the Elasticsearch model):
+    /// connect to `source_endpoint`, drain its `FetchSegments`, write the files under our own
+    /// data_dir (tmp+rename), attach them, and swap in the recovered shard. Refuses if not
+    /// durable or the dict fingerprint diverges. The caller keeps writes to this position
+    /// quiesced for the window (this increment has no durable remote log to replay a tail from).
+    async fn recover_from(
+        &self,
+        request: Request<proto::RecoverFromRequest>,
+    ) -> Result<Response<proto::RecoverFromReply>, Status> {
+        let st = self.loaded()?;
+        let Some(dir) = self.data_dir.clone() else {
+            return Err(Status::failed_precondition(
+                "shard is not durable; cannot accept peer recovery",
+            ));
+        };
+        let req = request.into_inner();
+        let dict_fp = st.dict.fingerprint();
+        if req.dict_fingerprint != dict_fp {
+            return Err(Status::failed_precondition(
+                "RecoverFrom dict-fingerprint mismatch (divergent feature space)",
+            ));
+        }
+        let mut client =
+            proto::shard_service_client::ShardServiceClient::connect(req.source_endpoint.clone())
+                .await
+                .map_err(|e| {
+                    Status::unavailable(format!(
+                        "connecting to recovery source {}: {e}",
+                        req.source_endpoint
+                    ))
+                })?;
+        let mut stream = client
+            .fetch_segments(proto::FetchSegmentsRequest {
+                dict_fingerprint: dict_fp,
+            })
+            .await?
+            .into_inner();
+
+        let seg_dir = dir.join("segments");
+        std::fs::create_dir_all(&seg_dir)
+            .map_err(|e| Status::internal(format!("creating {}: {e}", seg_dir.display())))?;
+        let (files, next_seg_id) = drain_recovery_stream(&mut stream, &dir, &seg_dir).await?;
+
+        // Attach the received segments against our adopted dict (fail-loud on missing/corrupt).
+        let mut sc = self.config.clone();
+        sc.data_dir = Some(dir.clone());
+        let shard = LocalShard::open_segments(
+            Arc::clone(&self.norm),
+            Arc::clone(&st.dict),
+            sc,
+            &files,
+            next_seg_id,
+        )
+        .map_err(|e| Status::internal(format!("attaching recovered segments: {e}")))?;
+        let num_queries = shard
+            .num_queries()
+            .map_err(|e| Status::internal(e.to_string()))? as u64;
+        let segments_attached = files.len() as u64;
+        self.state.store(Some(Arc::new(ServerState {
+            dict: Arc::clone(&st.dict),
+            shard,
+        })));
+        Ok(Response::new(proto::RecoverFromReply {
+            segments_attached,
+            num_queries,
+        }))
+    }
+}
+
+/// Stream one file as a contiguous run of ≤256 KiB `FileChunk`s ending with `last = true`.
+/// Reads the file into memory once (bounded per-file — fine for a recovery path; a chunked
+/// file read is a future refinement). Returns `false` to abort the stream (read error — the
+/// error is forwarded to the receiver first — or the receiver hung up).
+async fn stream_file(
+    tx: &tokio::sync::mpsc::Sender<Result<proto::FetchSegmentsChunk, Status>>,
+    name: &str,
+    path: &std::path::Path,
+) -> bool {
+    const CHUNK: usize = 256 * 1024;
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            tx.send(Err(Status::internal(format!(
+                "reading {name} for FetchSegments: {e}"
+            ))))
+            .await
+            .ok();
+            return false;
+        }
+    };
+    let mut off = 0usize;
+    loop {
+        let end = (off + CHUNK).min(bytes.len());
+        let last = end == bytes.len();
+        let chunk = proto::FetchSegmentsChunk {
+            frame: Some(proto::fetch_segments_chunk::Frame::File(proto::FileChunk {
+                name: name.to_string(),
+                data: bytes[off..end].to_vec(),
+                last,
+            })),
+        };
+        if tx.send(Ok(chunk)).await.is_err() {
+            return false;
+        }
+        if last {
+            return true;
+        }
+        off = end;
+    }
+}
+
+/// Drain a `FetchSegments` stream into `dir`: the manifest frame first, then per-file runs
+/// written via tmp+rename (so a crash mid-recovery never leaves a half-written `.seg` that a
+/// later attach would CRC-reject). Validates that every manifested segment fully arrived — a
+/// truncated stream errors rather than attaching a subset (a silent shard-sized false
+/// negative). Returns the attach file list + seg-id cursor from the manifest.
+async fn drain_recovery_stream(
+    stream: &mut tonic::Streaming<proto::FetchSegmentsChunk>,
+    dir: &std::path::Path,
+    seg_dir: &std::path::Path,
+) -> Result<(Vec<String>, u64), Status> {
+    use std::io::Write as _;
+    let final_path = |name: &str| -> PathBuf {
+        if name == "sources.dat" {
+            dir.join("sources.dat")
+        } else {
+            seg_dir.join(name)
+        }
+    };
+    let mut manifest: Option<proto::FetchManifest> = None;
+    let mut received: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // The currently-open tmp file: (name, handle, tmp path). Files arrive as contiguous runs.
+    let mut cur: Option<(String, std::fs::File, PathBuf)> = None;
+
+    while let Some(chunk) = stream.message().await? {
+        match chunk.frame {
+            Some(proto::fetch_segments_chunk::Frame::Manifest(m)) => manifest = Some(m),
+            Some(proto::fetch_segments_chunk::Frame::File(fc)) => {
+                if cur.as_ref().is_none_or(|(n, _, _)| *n != fc.name) {
+                    let fin = final_path(&fc.name);
+                    let tmp = PathBuf::from(format!("{}.tmp", fin.display()));
+                    let f = std::fs::File::create(&tmp)
+                        .map_err(|e| Status::internal(format!("create {}: {e}", tmp.display())))?;
+                    cur = Some((fc.name.clone(), f, tmp));
+                }
+                if let Some((_, f, _)) = cur.as_mut() {
+                    f.write_all(&fc.data)
+                        .map_err(|e| Status::internal(format!("writing {}: {e}", fc.name)))?;
+                }
+                if fc.last {
+                    if let Some((name, f, tmp)) = cur.take() {
+                        f.sync_all()
+                            .map_err(|e| Status::internal(format!("sync {name}: {e}")))?;
+                        drop(f);
+                        std::fs::rename(&tmp, final_path(&name))
+                            .map_err(|e| Status::internal(format!("rename {name}: {e}")))?;
+                        received.insert(name);
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+    let manifest =
+        manifest.ok_or_else(|| Status::internal("recovery stream had no manifest frame"))?;
+    for name in &manifest.segment_files {
+        if !received.contains(name) {
+            return Err(Status::internal(format!(
+                "recovery stream truncated: segment {name} did not fully arrive"
+            )));
+        }
+    }
+    Ok((manifest.segment_files, manifest.next_seg_id))
 }
 
 #[cfg(test)]

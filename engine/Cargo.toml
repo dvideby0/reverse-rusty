@@ -58,6 +58,9 @@ prometheus = { version = "0.14", default-features = false, optional = true }
 # lean core and the standard server build never compile it.
 reverse-rusty-shard-proto = { path = "grpc", optional = true }
 tonic = { version = "0.14", optional = true }
+# Server-streaming peer recovery (ADR-036) wraps an mpsc receiver as a `Stream`
+# (`ReceiverStream`); `sync` is the feature that gates that wrapper. Distributed-only.
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
 
 [features]
 # Default-on so every documented command (`cargo build --release`,
@@ -80,7 +83,7 @@ server = [
 # stack. Off by default, so neither the lean core nor the standard server build sees
 # it. `dep:tokio` re-enables tokio (optional since the lean split) with its declared
 # features; `tokio/net` adds the socket support tonic's transport needs.
-distributed = ["dep:reverse-rusty-shard-proto", "dep:tonic", "dep:tokio", "tokio/net"]
+distributed = ["dep:reverse-rusty-shard-proto", "dep:tonic", "dep:tokio", "tokio/net", "dep:tokio-stream"]
 
 [[bin]]
 name = "bench"

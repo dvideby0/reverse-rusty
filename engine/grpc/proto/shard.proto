@@ -32,6 +32,18 @@ service ShardService {
   // Empty shard => adopt; same fingerprint => idempotent no-op; non-empty shard whose
   // fingerprint differs => the server refuses (re-basing loaded data is unsafe).
   rpc AdoptDict (AdoptDictRequest) returns (AdoptDictReply);
+  // ---- peer recovery (ADR-035/036, clustering build-path step 4b) ----
+  // Server-streams this shard's sealed durable state (committed .seg files + the sources.dat
+  // blob) so a fresh replica can materialize a byte-identical base. The source seals a
+  // consistent snapshot (flush + reseal tombstones) before streaming, carries the
+  // coordinator's dict fingerprint, and refuses a mismatch. Requires a DURABLE server (a
+  // data_dir); a non-durable/pending server returns FailedPrecondition.
+  rpc FetchSegments (FetchSegmentsRequest) returns (stream FetchSegmentsChunk);
+  // Target-driven peer recovery (the Elasticsearch model: the recovering node pulls from a
+  // peer): this (durable, dict-adopted) node drains `source_endpoint`'s FetchSegments stream,
+  // writes the files under its own data_dir, attaches them (open_segments), and swaps in the
+  // recovered shard. Returns the attached segment count + post-attach query count.
+  rpc RecoverFrom (RecoverFromRequest) returns (RecoverFromReply);
 }
 
 message Empty {}
@@ -107,3 +119,43 @@ message AdoptDictRequest {
 }
 // The server's frozen-dict fingerprint AFTER adoption (equals the request's on success).
 message AdoptDictReply { uint64 fingerprint = 1; }
+
+// ---- peer recovery (ADR-035/036) ----
+message FetchSegmentsRequest {
+  // The coordinator's frozen-dict fingerprint; the source refuses a mismatch (never ships
+  // segments compiled against a divergent feature space).
+  uint64 dict_fingerprint = 1;
+}
+// First stream frame: the snapshot manifest — the COMPLETE file set + the seg-id cursor — so
+// the receiver can pre-validate completeness and reject a truncated stream (never attach a
+// subset, which would be a silent shard-sized false negative).
+message FetchManifest {
+  repeated string segment_files = 1; // .seg base names, in attach order (segment_filenames())
+  uint64 next_seg_id = 2;
+  uint64 dict_fingerprint = 3;       // echoed; the receiver re-checks it == its adopted dict
+  bool has_sources = 4;              // whether a "sources.dat" file run follows the segments
+}
+// One run of bytes for a single file: contiguous chunks sharing `name`, terminated by `last`.
+// The sentinel name "sources.dat" carries the optional (display-only) source blob; every
+// other name is a .seg file. `data` is <= 256 KiB so each message stays well under gRPC's
+// 4 MiB default decode cap.
+message FileChunk {
+  string name = 1;
+  bytes data = 2;
+  bool last = 3;
+}
+message FetchSegmentsChunk {
+  oneof frame {
+    FetchManifest manifest = 1; // exactly once, first
+    FileChunk file = 2;         // zero+ runs, in manifest order
+  }
+}
+
+message RecoverFromRequest {
+  string source_endpoint = 1;  // the peer to pull from (e.g. "http://127.0.0.1:50051")
+  uint64 dict_fingerprint = 2; // must match this node's adopted dict
+}
+message RecoverFromReply {
+  uint64 segments_attached = 1;
+  uint64 num_queries = 2;      // post-attach count, for the orchestrator to sanity-check
+}

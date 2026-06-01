@@ -131,7 +131,18 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   `tests/cluster_oracle.rs` (RF∈{2,3}×K ≡ single-node ≡ brute, counts not inflated, live add/remove) and
   `tests/cluster_durability_oracle.rs` (durable RF=2 reopen ≡ pre-crash ≡ brute; checkpoint seals primaries
   only) + `replica.rs` unit tests. The **gRPC multi-node lift** (replicas as remote shards + a streaming
-  segment-fetch RPC) is the next step (ADR-036).
+  segment-fetch RPC) is built in ADR-036.
+- **gRPC multi-node replication + peer recovery (ADR-036)** — lifts ADR-035 onto the gRPC transport.
+  `ClusterEngine::connect_replicated(groups)` wraps each position's primary + replica `RemoteShard`s in a
+  `ReplicatedShard` (coordinator unchanged; reads fail over, writes fan out); `ShardServer` gains durable
+  ctors (`pending_durable`/`new_durable`) and `AdoptDict` builds a durable shard when a `data_dir` is set.
+  Two new RPCs — server-streaming `FetchSegments` (seal → manifest frame → chunked `.seg` runs; the receiver
+  rejects a truncated stream rather than attaching a subset) and target-driven `RecoverFrom` (the recovering
+  node pulls a peer's segments + attaches — the Elasticsearch model), orchestrated by `peer_recover_replica`.
+  One new distributed-only dep (`tokio-stream`). Proven by `cluster_grpc_oracle.rs`'s
+  `grpc_replicated_failover_and_peer_recovery` (K×RF servers ≡ brute; primary-stop failover; fresh-node peer
+  recovery). **Honest scope:** recovery quiesces writes (there is no durable remote coordinator log to replay
+  a tail from — that couples to the Raft step); shard→node placement / membership and TLS/auth stay design-only.
 
 ## Measured
 
@@ -200,14 +211,15 @@ the selective candidate count further.
   `ShardServer` + `RemoteShard` so a shard can be remote (ADR-029) with the coordinator **shipping its frozen
   dict** at connect so a data node starts empty (ADR-034), an externalized coordinator mutation log with
   crash-rebuild (ADR-031), per-shard compiled segments that reopen by attach-and-mmap instead of
-  re-ingesting (ADR-032), and an **in-process per-shard primary+replica layer with read failover and peer
-  recovery** (ADR-035; the `ReplicatedShard` composite) — all in Implemented above. The hashing-variant
+  re-ingesting (ADR-032), and a **per-shard primary+replica layer with read failover + peer recovery** —
+  in-process (ADR-035; the `ReplicatedShard` composite) and over **gRPC** (ADR-036; remote replicas + a
+  streaming segment-fetch RPC for cross-node peer recovery) — all in Implemented above. The hashing-variant
   survey + the cross-shard correctness argument behind ADR-027 are written up in
   [`research/clustering-prior-art.md`](research/clustering-prior-art.md). **Still design-only** (the
-  shared-nothing multi-node roadmap): the **gRPC multi-node lift** of replication (remote replicas + a
-  streaming segment-fetch RPC for cross-node peer recovery — ADR-036), a **Raft/quorum control plane** (ring +
-  shard→node map + epoch), normalizer/vocab shipping, cross-process/remote coordinator durability, autoscaling,
-  auto-split, replicate-broad-to-all, and TLS/auth.
+  shared-nothing multi-node roadmap): a **Raft/quorum control plane** (ring + shard→node map + epoch) with
+  shard→node placement + membership/failure-detection, a **durable/replicated coordinator log** for a remote
+  cluster (so peer recovery can replay a concurrent tail instead of quiescing writes), normalizer/vocab
+  shipping, autoscaling, auto-split, replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
@@ -327,15 +339,16 @@ from the audit's former P3 list). Roughly grouped:
 
 - **Single-node deployment.** The multi-shard core (ADR-027), the gRPC `ShardServer`/`RemoteShard`
   transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (ADR-031),
-  per-shard local durable segments with attach-and-mmap reopen (ADR-032), and an **in-process per-shard
-  primary+replica layer with read failover + peer recovery** (ADR-035) are built — the `distributed`
+  per-shard local durable segments with attach-and-mmap reopen (ADR-032), and **per-shard replication +
+  peer recovery** both in-process (ADR-035) and over **gRPC** (ADR-036) are built — the `distributed`
   feature can already run a coordinator over remote shards (on localhost today) that start **empty** and
-  receive the frozen dict at connect; an in-process cluster built with a `data_dir` survives a crash and
-  reopens by mmap'ing its compiled segments (no corpus recompile) via `ClusterEngine::open`; and an
-  in-process cluster can run `replication_factor > 1` (replicas serve reads on primary failover). A full
-  multi-node deployment — the remaining **shared-nothing** layers (the gRPC lift of replication, a Raft/quorum
-  control plane), plus autoscaling — is designed but not built (no object store / cloud dependency anywhere;
-  ADR-033); see Tier 3.
+  receive the frozen dict at connect, run `replication_factor > 1` with reads **failing over** to a replica
+  when a primary dies, and bring a fresh node up by **streaming a peer's segments** (`FetchSegments` /
+  `RecoverFrom`); an in-process cluster built with a `data_dir` survives a crash and reopens by mmap'ing its
+  compiled segments (no corpus recompile) via `ClusterEngine::open`. A full multi-node deployment — the
+  remaining **shared-nothing** layers (a Raft/quorum control plane for shard→node placement + membership, a
+  durable/replicated coordinator log so recovery need not quiesce writes), plus autoscaling — is designed but
+  not built (no object store / cloud dependency anywhere; ADR-033); see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator
   **ships** its frozen dict to each server at connect (ADR-034), and the ADR-030 fingerprint handshake fails
   loud (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can
