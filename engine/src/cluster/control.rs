@@ -244,7 +244,11 @@ pub trait ControlPlane: Send + Sync {
 /// Canonicalizing (sorted `nodes`/`assignments`) so the committed document is order-
 /// independent: replaying the same change set in log order yields a byte-identical
 /// `ClusterState`, which is what makes the two-backend differential meaningful.
-fn apply(state: &mut ClusterState, change: ClusterStateChange) {
+///
+/// `pub(super)` so the openraft state machine (`control_raft.rs`, ADR-038) applies a
+/// committed `Normal` log entry through the SAME funnel as [`InMemoryControlPlane`] — live
+/// ≡ replay across both backends, the property the differential oracle relies on.
+pub(super) fn apply(state: &mut ClusterState, change: ClusterStateChange) {
     match change {
         ClusterStateChange::AddNode(node) => {
             state.nodes.retain(|n| n.id != node.id);
@@ -261,6 +265,39 @@ fn apply(state: &mut ClusterState, change: ClusterStateChange) {
             state.dict_fingerprint = dict_fingerprint;
             state.model_version += 1;
         }
+    }
+}
+
+/// The canonical single-logical-node cluster-state document: one `NodeId(0)`
+/// (`Manager`-eligible, the sole voter, no socket), identity assignments
+/// (`position i → primary NodeId(0)`, no replicas), and the build's ring params + dict
+/// fingerprint. Shared by [`InMemoryControlPlane::single_node`] AND the openraft state
+/// machine's genesis seed (`control_raft.rs`, ADR-038), so the two backends start from a
+/// byte-identical document — the precondition that makes their differential meaningful.
+pub(super) fn single_node_state(
+    num_shards: u32,
+    vnodes: u32,
+    dict_fingerprint: u64,
+) -> ClusterState {
+    ClusterState {
+        epoch: 0,
+        nodes: vec![NodeDescriptor {
+            id: NodeId(0),
+            addr: None,
+            role: NodeRole::Manager,
+        }],
+        voters: vec![NodeId(0)],
+        assignments: (0..num_shards)
+            .map(|position| ShardAssignment {
+                position,
+                primary: NodeId(0),
+                replicas: Vec::new(),
+            })
+            .collect(),
+        num_shards,
+        vnodes,
+        dict_fingerprint,
+        model_version: 0,
     }
 }
 
@@ -290,34 +327,12 @@ impl InMemoryControlPlane {
         }
     }
 
-    /// The DEFAULT single-logical-node document the coordinator uses when no control plane is
-    /// supplied: one `NodeId(0)` (`Manager`-eligible, the sole voter, no socket), identity
-    /// assignments (`position i → primary NodeId(0)`, no replicas), and the build's ring
-    /// params + dict fingerprint. Every shard is "assigned" to the one node, so the RF=1
-    /// in-process path is byte-identical to before ADR-037.
+    /// The DEFAULT single-logical-node control plane the coordinator uses when none is
+    /// supplied: the [`single_node_state`] document wrapped in an in-memory backend. Every
+    /// shard is "assigned" to the one node, so the RF=1 in-process path is byte-identical to
+    /// before ADR-037.
     pub fn single_node(num_shards: u32, vnodes: u32, dict_fingerprint: u64) -> Self {
-        let node = NodeDescriptor {
-            id: NodeId(0),
-            addr: None,
-            role: NodeRole::Manager,
-        };
-        let assignments = (0..num_shards)
-            .map(|position| ShardAssignment {
-                position,
-                primary: NodeId(0),
-                replicas: Vec::new(),
-            })
-            .collect();
-        InMemoryControlPlane::new(ClusterState {
-            epoch: 0,
-            nodes: vec![node],
-            voters: vec![NodeId(0)],
-            assignments,
-            num_shards,
-            vnodes,
-            dict_fingerprint,
-            model_version: 0,
-        })
+        InMemoryControlPlane::new(single_node_state(num_shards, vnodes, dict_fingerprint))
     }
 
     /// Lock the document, recovering a poisoned guard rather than panicking (a prior writer

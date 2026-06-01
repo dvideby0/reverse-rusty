@@ -159,3 +159,24 @@ message RecoverFromReply {
   uint64 segments_attached = 1;
   uint64 num_queries = 2;      // post-attach count, for the orchestrator to sanity-check
 }
+
+// ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----
+// The three Raft RPCs between cluster-manager nodes, carried as an OPAQUE serialized envelope:
+// `data` is the serde-encoded openraft request/response (AppendEntries / Vote / full Snapshot).
+// Keeping the wire opaque means shard.proto need not mirror openraft's intricate, version-coupled
+// message types in protobuf — the consensus engine owns its own schema, and the gRPC layer is a
+// dumb byte pipe. The handler's `Result<Resp, RaftError>` is encoded INSIDE the reply envelope;
+// only transport failures surface as a gRPC status. This service is distinct from ShardService:
+// a manager node serves it (the data path stays on ShardService). See engine ADR-038.
+service ControlService {
+  rpc AppendEntries (RaftEnvelope) returns (RaftEnvelope);
+  rpc Vote          (RaftEnvelope) returns (RaftEnvelope);
+  rpc Snapshot      (RaftEnvelope) returns (RaftEnvelope);
+}
+
+// One serialized openraft message (request on the way in, response on the way out). The encoding
+// is the engine's choice (serde_json today); both ends are the same binary, so it never crosses a
+// version boundary mid-flight.
+message RaftEnvelope {
+  bytes data = 1;
+}

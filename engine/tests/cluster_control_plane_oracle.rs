@@ -248,19 +248,18 @@ fn shard_reassignment_preserves_correctness() {
 
 /// Every `ControlPlane` backend, driven by the same script, converges to the identical
 /// committed document — the `NullClusterLog ≡ FileClusterLog` two-backend differential.
-/// Only the in-memory backend exists in step 5a; the openraft single-node backend slots in
-/// as a second entry in step 5b with no change to this test. The per-backend field
-/// assertions keep the proof meaningful while there is one backend.
+///
+/// The openraft backend (ADR-038, step 5b) is NOT a second entry here: a faithful Raft proof
+/// is inherently MULTI-node (a lone node cannot satisfy a voter-set change, and openraft commits
+/// its own Blank/Membership entries, so `epoch` is not byte-comparable). Its differential lives
+/// in `cluster_control_raft_oracle.rs` (`--features distributed`), where 3 real nodes converge to
+/// the same voters/nodes/assignments/model this in-memory backend reaches.
 #[test]
 fn control_plane_backends_agree() {
-    let backends: Vec<(&str, Box<dyn ControlPlane>)> = vec![
-        (
-            "in-memory",
-            Box::new(InMemoryControlPlane::single_node(4, 128, 0xFEED)),
-        ),
-        // TODO(ADR-038 / step 5b): push the openraft single-node backend here:
-        // ("openraft-1", Box::new(RaftControlPlane::single_node(...))),
-    ];
+    let backends: Vec<(&str, Box<dyn ControlPlane>)> = vec![(
+        "in-memory",
+        Box::new(InMemoryControlPlane::single_node(4, 128, 0xFEED)),
+    )];
 
     let node = |id: u64, role: NodeRole| NodeDescriptor {
         id: NodeId(id),

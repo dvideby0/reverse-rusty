@@ -32,9 +32,10 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > Per-shard **replication + peer recovery** is built — **in-process** (ADR-035; the `ReplicatedShard`
 > composite — primary + N replicas, read failover, `peer_recover`) and over **gRPC** (ADR-036; remote
 > replicas via `connect_replicated` + a streaming `FetchSegments`/`RecoverFrom` peer-recovery path). The
-> **quorum/Raft control plane's dependency-free seam is built** too — a `trait ControlPlane` + an in-memory
-> backend holding the cluster-state document (step 5a; ADR-037). Still design-only: the **openraft backend**
-> behind that seam (step 5b — multi-process elections), a durable/replicated **per-shard query log** so
+> **quorum/Raft control plane is built** too — its seam (a `trait ControlPlane` + in-memory backend holding
+> the cluster-state document, step 5a; ADR-037) AND the **openraft backend** behind it (step 5b; ADR-038 — a
+> `RaftControlPlane` over `Raft<C>` + a gRPC `ControlService` + a `controlserver` bin, multi-process elections
+> + leader failover, `distributed`-gated). Still design-only: a durable/replicated **per-shard query log** so
 > recovery need not quiesce writes (step 5c — distinct from the control-plane doc), normalizer/vocab shipping,
 > TLS/auth, and autoscaling/auto-split.
 
@@ -43,7 +44,7 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** Elasticsearch/Cassandra **shared-nothing** (local segments + WAL + peer recovery + quorum control plane) and consistent hashing — **not** Aurora's shared object storage (ADR-033)
-- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`), and the **control-plane seam** (step 5a; ADR-037 — a `trait ControlPlane` + in-memory backend holding the shard→node map); the remaining multi-node layers (the openraft backend behind that seam, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`), and the **quorum/Raft control plane** — its seam (step 5a; ADR-037 — a `trait ControlPlane` + in-memory backend holding the shard→node map) and the **openraft backend** behind it (step 5b; ADR-038 — a `RaftControlPlane` + gRPC `ControlService`, multi-process elections + leader failover); the remaining multi-node layers (a durable per-shard query log / step 5c, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary; **no object store / cloud dependency** — durability is a local WAL + replicas (ADR-033)
 
 ---
@@ -186,6 +187,15 @@ Elasticsearch's per-shard **translog** / Cassandra's commitlog.
 - The cluster-manager does only coordination — membership, **shard allocation**, and **rebalancing**
   — and never sits in the title hot path. (The same separation Elasticsearch enforces with dedicated
   master-eligible nodes.)
+- **Built (ADR-037 + ADR-038):** the control plane is a `trait ControlPlane` seam (document-mutation +
+  linearizable-read — the `ClusterLog` sibling) with two backends — an in-memory one (the default; the
+  coordinator stays byte-identical) and an **openraft** one (`RaftControlPlane` over `Raft<C>` + a gRPC
+  `ControlService` carrying an opaque-bytes envelope + a `controlserver` manager bin). The state machine
+  reuses the single `control::apply` funnel, so the two backends are live ≡ replay. Consensus holds **only**
+  the cluster-state document — never the ~750k/sec query mutations (those stay on the `ClusterLog` + the
+  per-shard primary→replica path) nor the per-shard segment registry (the local manifest). openraft is
+  `distributed`-gated, so the lean core never compiles a consensus engine. The allocator that *acts* on the
+  shard→node map (physically moving shards on a reassignment) is the next increment.
 
 ---
 
@@ -340,9 +350,15 @@ without operator action. The defaults are the product.
      (membership distinct from `propose`, a `ForwardToLeader` error, snapshot-read, an app epoch distinct from
      the Raft term). Proven by `tests/cluster_control_plane_oracle.rs`. *(Consensus holds the cluster-state doc
      ONLY — not the query mutations, which stay on the per-shard path.)*
-   - 5b. **The openraft backend.** *(design-only)* A `RaftControlPlane` over `Raft<C>` behind the seam, a new
-     gRPC `ControlService` (opaque-bytes envelope), manager role/bin, multi-process elections —
-     `distributed`-gated so the lean core never sees openraft.
+   - 5b. **The openraft backend.** ✅ **Done** (ADR-038): a `RaftControlPlane` over `Raft<C>` behind the
+     *unchanged* seam (the default backend stays in-memory, so the coordinator is byte-identical), a new gRPC
+     `ControlService` (opaque-bytes envelope) added to the existing `shard.proto`, a tonic `RaftNetwork` +
+     `ControlServer`, and a `controlserver` manager bin — multi-process elections + leader failover, all
+     `distributed`-gated so the lean core never compiles openraft. The state machine reuses the ONE
+     `control::apply` funnel (live ≡ replay with the in-memory backend). Proven by
+     `tests/cluster_control_raft_oracle.rs` (3-node in-process convergence + `ForwardToLeader` +
+     `change_membership` routing; and over real gRPC servers, survive-the-leader-being-killed). *(Consensus
+     holds the cluster-state doc ONLY — never query mutations.)*
    - 5c. **Close the quiesce gap.** *(design-only)* Make the per-shard *query* log durable + replicated (the
      ES translog) so a recovering replica replays the tail after the segment copy instead of quiescing writes
      (ADR-036's honest-scope window). **Distinct from the control-plane doc** — the control plane alone does
@@ -353,10 +369,11 @@ without operator action. The defaults are the product.
 
 (Steps 1–2 — the in-process core — step 1's gRPC transport + dict shipping, step 3a's coordinator log,
 step 3b's per-shard local durable segments, step 4's per-shard replication + peer recovery (4a in-process,
-4b over gRPC), and step 5a's control-plane seam are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032 +
-ADR-035 + ADR-036 + ADR-037. The remaining shared-nothing multi-node work — the openraft backend behind the
-control-plane seam (5b), the per-shard durable query log that closes the recovery-quiesce gap (5c), and
-autoscale + auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
+4b over gRPC), and the **quorum/Raft control plane** — step 5a's seam AND step 5b's openraft backend + gRPC
+`ControlService` — are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 +
+ADR-038. The remaining shared-nothing multi-node work — the per-shard durable query log that closes the
+recovery-quiesce gap (5c), and autoscale + auto-split (step 6) — is design-only (ADR-033). See
+[`../STATUS.md`](../STATUS.md).)
 
 ---
 

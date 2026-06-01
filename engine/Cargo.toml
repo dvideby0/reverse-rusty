@@ -61,6 +61,19 @@ tonic = { version = "0.14", optional = true }
 # Server-streaming peer recovery (ADR-036) wraps an mpsc receiver as a `Stream`
 # (`ReceiverStream`); `sync` is the feature that gates that wrapper. Distributed-only.
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+# Cluster-manager consensus (the openraft control-plane backend; ADR-038, clustering
+# step 5b). Pinned EXACT (`=`) like the rest of the distributed stack — 0.9.24 is the
+# latest STABLE line (0.10 is alpha; a zero-false-negatives project pins stable). Off
+# by default and distributed-gated, so neither the lean core nor the standard server
+# build ever compiles a consensus engine. Owns the dangerous parts (joint-consensus
+# membership + snapshots) behind the stable `trait ControlPlane` seam. Features:
+#  - `serde`: makes the Raft RPC/state types serializable for the opaque-bytes gRPC envelope.
+#  - `storage-v2`: unseals the split `RaftLogStorage` + `RaftStateMachine` traits (the
+#    non-deprecated path; the legacy combined `RaftStorage` + `Adaptor` would trip our
+#    `-D warnings` clippy lane on deprecation).
+#  - `generic-snapshot-data`: ships the (tiny) cluster-state snapshot whole via
+#    `full_snapshot` instead of chunked `install_snapshot` — one Snapshot RPC, no streaming.
+openraft = { version = "=0.9.24", features = ["serde", "storage-v2", "generic-snapshot-data"], optional = true }
 
 [features]
 # Default-on so every documented command (`cargo build --release`,
@@ -83,7 +96,7 @@ server = [
 # stack. Off by default, so neither the lean core nor the standard server build sees
 # it. `dep:tokio` re-enables tokio (optional since the lean split) with its declared
 # features; `tokio/net` adds the socket support tonic's transport needs.
-distributed = ["dep:reverse-rusty-shard-proto", "dep:tonic", "dep:tokio", "tokio/net", "dep:tokio-stream"]
+distributed = ["dep:reverse-rusty-shard-proto", "dep:tonic", "dep:tokio", "tokio/net", "dep:tokio-stream", "dep:openraft"]
 
 [[bin]]
 name = "bench"
@@ -122,6 +135,13 @@ name = "shardserver"
 path = "src/bin/shardserver.rs"
 # A deployable shard node: serves ShardService over gRPC. Builds only with the
 # `distributed` feature (and its tonic/proto deps).
+required-features = ["distributed"]
+
+[[bin]]
+name = "controlserver"
+path = "src/bin/controlserver.rs"
+# A deployable cluster-manager node: serves the openraft ControlService over gRPC
+# (ADR-038). Builds only with the `distributed` feature (tonic/proto + openraft).
 required-features = ["distributed"]
 
 [profile.release]

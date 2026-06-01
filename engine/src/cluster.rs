@@ -30,6 +30,10 @@ mod ring;
 mod shard;
 
 #[cfg(feature = "distributed")]
+mod control_raft;
+#[cfg(feature = "distributed")]
+mod control_server;
+#[cfg(feature = "distributed")]
 mod proto;
 #[cfg(feature = "distributed")]
 mod remote;
@@ -44,6 +48,10 @@ pub use coordinator::{AddOutcome, ClusterConfig, ClusterEngine};
 pub use ring::{HashRing, DEFAULT_VNODES};
 pub use shard::ShardError;
 
+#[cfg(feature = "distributed")]
+pub use control_raft::{in_process_cluster, start_grpc_node, RaftControlPlane, TypeConfig};
+#[cfg(feature = "distributed")]
+pub use control_server::ControlServer;
 #[cfg(feature = "distributed")]
 pub use coordinator::ShardGroup;
 #[cfg(feature = "distributed")]
