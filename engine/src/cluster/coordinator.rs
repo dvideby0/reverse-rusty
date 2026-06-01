@@ -61,6 +61,14 @@ fn shard_dir(base: &Path, shard: usize) -> PathBuf {
     base.join(format!("shard_{shard:03}"))
 }
 
+/// Directory holding shard `shard`'s replica `r` (r ≥ 1; the primary lives at [`shard_dir`]).
+/// A throwaway durable copy rebuilt from the primary via peer recovery on every `open`, so it
+/// is NOT recorded in the coordinator manifest (replicas are allocated, not catalogued —
+/// ADR-035/033, the Elasticsearch model).
+fn replica_dir(base: &Path, shard: usize, r: usize) -> PathBuf {
+    shard_dir(base, shard).join(format!("replica_{r:03}"))
+}
+
 /// Configuration for a [`ClusterEngine`].
 #[derive(Clone, Debug)]
 pub struct ClusterConfig {
@@ -68,6 +76,14 @@ pub struct ClusterConfig {
     pub num_shards: usize,
     /// Virtual nodes per shard on the consistent-hash ring.
     pub vnodes: u32,
+    /// Replication factor: copies per shard POSITION (1 = primary only — the default, and
+    /// byte-identical to pre-ADR-035 behavior; N = primary + N-1 replicas). Replicas are
+    /// extra copies kept set-equal by write fan-out that serve reads on primary failover
+    /// (clustering build-path step 4). A durable cluster roots the primary at `shard_<i>/`
+    /// (the manifest-recorded copy) and each replica at `shard_<i>/replica_<r>/` (rebuilt
+    /// from the primary via peer recovery on `open`; not catalogued in the manifest). Must
+    /// be ≥ 1.
+    pub replication_factor: usize,
     /// Per-shard engine configuration (forwarded to each shard's `Engine`). Leave
     /// `per_shard.data_dir` unset: the coordinator derives each shard's directory
     /// (`shard_<i>/`) from the cluster `data_dir` below and overrides this field per
@@ -93,6 +109,7 @@ impl Default for ClusterConfig {
         ClusterConfig {
             num_shards: 8,
             vnodes: DEFAULT_VNODES,
+            replication_factor: 1,
             per_shard: EngineConfig::default(),
             include_broad: true,
             data_dir: None,
@@ -200,6 +217,11 @@ impl ClusterEngine {
                 "cluster needs at least one shard".into(),
             ));
         }
+        if config.replication_factor == 0 {
+            return Err(ShardError::Config(
+                "replication_factor must be ≥ 1 (1 = primary only)".into(),
+            ));
+        }
         let norm = Arc::new(norm);
 
         // Pass A — build the authoritative dict over the WHOLE corpus, then freeze.
@@ -217,28 +239,35 @@ impl ClusterEngine {
 
         let ring = HashRing::new(config.num_shards, config.vnodes)?;
 
-        // Construct concrete local shards. A durable cluster gives each shard its own
-        // segments-only engine dir (`shard_<i>/`) so pass-B ingest persists compiled
-        // `.seg` files; an in-memory cluster uses plain in-memory shards. `build` only
-        // makes `LocalShard`s (remote shards arrive via `from_parts`), so pass-B ingest
-        // can use the infallible inherent `ingest_local` path.
-        let mut locals: Vec<LocalShard> = Vec::with_capacity(config.num_shards);
+        // Construct concrete local shards: `replication_factor` copies per position (copy 0 =
+        // primary, copies 1.. = replicas). A durable cluster roots the primary at `shard_<i>/`
+        // (the manifest-recorded copy) and each replica at `shard_<i>/replica_<r>/` (rebuilt
+        // from the primary on `open`); an in-memory cluster uses plain in-RAM copies. `build`
+        // only makes `LocalShard`s (remote shards arrive via `from_parts`), so pass-B ingest can
+        // use the infallible inherent `ingest_local` path on every copy.
+        let rf = config.replication_factor;
+        let mut groups: Vec<Vec<LocalShard>> = Vec::with_capacity(config.num_shards);
         for s in 0..config.num_shards {
-            if let Some(dir) = &config.data_dir {
-                let mut sc = config.per_shard.clone();
-                sc.data_dir = Some(shard_dir(dir, s));
-                locals.push(LocalShard::new_durable(
-                    Arc::clone(&norm),
-                    Arc::clone(&dict),
-                    sc,
-                )?);
-            } else {
-                locals.push(LocalShard::new(
-                    Arc::clone(&norm),
-                    Arc::clone(&dict),
-                    config.per_shard.clone(),
-                ));
+            let mut copies = Vec::with_capacity(rf);
+            for r in 0..rf {
+                let shard = if let Some(dir) = &config.data_dir {
+                    let mut sc = config.per_shard.clone();
+                    sc.data_dir = Some(if r == 0 {
+                        shard_dir(dir, s)
+                    } else {
+                        replica_dir(dir, s, r)
+                    });
+                    LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), sc)?
+                } else {
+                    LocalShard::new(
+                        Arc::clone(&norm),
+                        Arc::clone(&dict),
+                        config.per_shard.clone(),
+                    )
+                };
+                copies.push(shard);
             }
+            groups.push(copies);
         }
 
         // Pass B — bucket by placement, then ingest one base segment per shard. For a
@@ -259,9 +288,13 @@ impl ClusterEngine {
                 }
             }
         }
+        // Ingest the same bucket into EVERY copy of the owning position (identical op stream
+        // ⇒ all copies set-equal by construction).
         for (s, bucket) in buckets.into_iter().enumerate() {
             if !bucket.is_empty() {
-                locals[s].ingest_local(&bucket);
+                for copy in &groups[s] {
+                    copy.ingest_local(&bucket);
+                }
             }
         }
 
@@ -271,15 +304,22 @@ impl ClusterEngine {
         // construction — nothing to lose yet); a shard whose segment write fell back to
         // in-memory makes `segment_filenames` error, aborting the build rather than
         // committing a registry that would lose it.
+        // Durability: commit the manifest from the PRIMARIES (copy 0 of each position); this
+        // borrow of `groups` ends before the positions are consumed into shards below.
         let durable = match &config.data_dir {
-            Some(dir) => Self::commit_durable_base(dir, &dict, &ring, config, &locals)?,
+            Some(dir) => {
+                let primaries: Vec<&LocalShard> = groups.iter().map(|g| &g[0]).collect();
+                Self::commit_durable_base(dir, &dict, &ring, config, &primaries)?
+            }
             None => ClusterDurable::in_memory(config.vnodes),
         };
 
-        let shards: Vec<Box<dyn Shard>> = locals
-            .into_iter()
-            .map(|s| Box::new(s) as Box<dyn Shard>)
-            .collect();
+        // Assemble each position into a shard: a bare `LocalShard` at RF=1, else a
+        // `ReplicatedShard` composite over the primary + replicas.
+        let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(config.num_shards);
+        for copies in groups {
+            shards.push(into_shard(copies)?);
+        }
         Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)
     }
 
@@ -293,15 +333,17 @@ impl ClusterEngine {
         dict: &Dict,
         ring: &HashRing,
         config: &ClusterConfig,
-        locals: &[LocalShard],
+        primaries: &[&LocalShard],
     ) -> Result<ClusterDurable, ShardError> {
         std::fs::create_dir_all(dir)
             .map_err(|e| ShardError::Log(format!("creating cluster data dir: {e}")))?;
-        let mut segment_registry = Vec::with_capacity(locals.len());
-        let mut next_seg_ids = Vec::with_capacity(locals.len());
-        for s in locals {
-            segment_registry.push(s.segment_filenames()?);
-            next_seg_ids.push(s.next_seg_id()?);
+        // Only the PRIMARY of each position is committed to the manifest; replicas are not
+        // catalogued (rebuilt from the primary via peer recovery on reopen — ADR-035).
+        let mut segment_registry = Vec::with_capacity(primaries.len());
+        let mut next_seg_ids = Vec::with_capacity(primaries.len());
+        for p in primaries {
+            segment_registry.push(p.segment_filenames()?);
+            next_seg_ids.push(p.next_seg_id()?);
         }
         let manifest = crate::storage::ClusterManifest {
             epoch: 0,
@@ -717,18 +759,37 @@ impl ClusterEngine {
         // Attach each shard's committed compiled segments (mmap) against the shared dict —
         // NOT re-ingest. Fails loud on a missing / CRC-corrupt segment (a skipped segment
         // is a silent shard-sized false negative).
+        let rf = config.map_or(1, |c| c.replication_factor.max(1));
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
         for s in 0..num_shards {
+            let primary_dir = shard_dir(&data_dir, s);
             let mut sc = per_shard.clone();
-            sc.data_dir = Some(shard_dir(&data_dir, s));
-            let shard = LocalShard::open_segments(
+            sc.data_dir = Some(primary_dir.clone());
+            let primary = LocalShard::open_segments(
                 Arc::clone(&norm),
                 Arc::clone(&dict),
                 sc,
                 &manifest.segment_registry[s],
                 manifest.next_seg_ids[s],
             )?;
-            shards.push(Box::new(shard) as Box<dyn Shard>);
+            // Re-seed replicas (rf-1) by peer recovery from the just-attached primary — replicas
+            // are not in the manifest, so they are rebuilt from the durable primary on every open.
+            // The log-tail replay below then feeds primary AND replicas through the composite.
+            let mut copies: Vec<LocalShard> = Vec::with_capacity(rf);
+            let mut recovered: Vec<LocalShard> = Vec::with_capacity(rf.saturating_sub(1));
+            for r in 1..rf {
+                recovered.push(super::replica::peer_recover(
+                    Arc::clone(&norm),
+                    Arc::clone(&dict),
+                    per_shard.clone(),
+                    &primary,
+                    &primary_dir,
+                    &replica_dir(&data_dir, s, r),
+                )?);
+            }
+            copies.push(primary);
+            copies.extend(recovered);
+            shards.push(into_shard(copies)?);
         }
 
         let log = FileClusterLog::open(
@@ -888,6 +949,12 @@ impl ClusterEngine {
         for ev in &pending {
             observer(ev);
         }
+        // Fan the observer into each shard as an event sink, so a `ReplicatedShard` surfaces its
+        // degraded-redundancy (`ReplicaDesync`) events through the same observer (ADR-035). A
+        // plain shard's default `set_event_sink` is a no-op.
+        for shard in &self.shards {
+            shard.set_event_sink(Arc::clone(&observer));
+        }
         *self
             .observer
             .lock()
@@ -944,6 +1011,13 @@ impl ClusterEngine {
                 config.num_shards
             )));
         }
+        if config.replication_factor > 1 {
+            return Err(ShardError::Config(
+                "connect_remote does not support replication_factor > 1; remote per-shard \
+                 replication is clustering step 4b (ADR-036)"
+                    .into(),
+            ));
+        }
         let ring = HashRing::new(config.num_shards, config.vnodes)?;
         // Cross-process shared-dict invariant: placement/routing ids line up only when every
         // server's frozen dict equals this coordinator's. SHIP it (ADR-034): serialize once,
@@ -974,6 +1048,27 @@ impl ClusterEngine {
             ClusterDurable::in_memory(config.vnodes),
         )
     }
+}
+
+/// Wrap one shard position's copies into a `Box<dyn Shard>`: a bare [`LocalShard`] at RF=1
+/// (byte-identical to pre-ADR-035 — no composite overhead at the default), else a
+/// [`ReplicatedShard`](super::replica::ReplicatedShard) over the primary (copy 0) + replicas.
+fn into_shard(copies: Vec<LocalShard>) -> Result<Box<dyn Shard>, ShardError> {
+    let mut it = copies.into_iter();
+    let Some(primary) = it.next() else {
+        return Err(ShardError::Config(
+            "internal: a shard position has no copies (replication_factor must be ≥ 1)".into(),
+        ));
+    };
+    let replicas: Vec<Box<dyn Shard>> = it.map(|c| Box::new(c) as Box<dyn Shard>).collect();
+    Ok(if replicas.is_empty() {
+        Box::new(primary) as Box<dyn Shard>
+    } else {
+        Box::new(super::replica::ReplicatedShard::new(
+            Box::new(primary) as Box<dyn Shard>,
+            replicas,
+        )) as Box<dyn Shard>
+    })
 }
 
 /// The placement decision for one compiled query — see the module-level table. A free

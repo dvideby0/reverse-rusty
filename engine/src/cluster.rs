@@ -24,6 +24,7 @@
 
 mod clog;
 mod coordinator;
+mod replica;
 mod ring;
 mod shard;
 

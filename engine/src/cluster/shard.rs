@@ -77,6 +77,13 @@ impl std::fmt::Display for ShardError {
 
 impl std::error::Error for ShardError {}
 
+/// Sink for shard-level observability events (e.g. a [`ReplicatedShard`] replica
+/// dropping out of its in-sync set). The `Arc` analogue of the engine's event
+/// observer; the coordinator fans its observer in via `ClusterEngine::set_observer`.
+///
+/// [`ReplicatedShard`]: super::replica::ReplicatedShard
+pub(crate) type EventSink = Arc<dyn Fn(&crate::events::EngineEvent) + Send + Sync>;
+
 /// One shard, local or remote — the seam that lets a coordinator hold a mix of
 /// in-process and (eventually) networked shards behind one type.
 ///
@@ -141,6 +148,13 @@ pub(crate) trait Shard: Send + Sync {
     /// This shard's next segment-id counter — committed per shard so a flush after reopen
     /// never reuses a committed segment filename.
     fn next_seg_id(&self) -> Result<u64, ShardError>;
+
+    // ---- observability (ADR-035) ----
+    /// Install an event sink so this shard can surface degraded-redundancy events — e.g. a
+    /// [`ReplicatedShard`](super::replica::ReplicatedShard) replica falling out of its
+    /// in-sync set. Default: a no-op (a plain [`LocalShard`]/`RemoteShard` emits nothing
+    /// here). The coordinator fans its observer in via `ClusterEngine::set_observer`.
+    fn set_event_sink(&self, _sink: EventSink) {}
 }
 
 /// One in-process shard: owned engine for writes + lock-free snapshot for reads.

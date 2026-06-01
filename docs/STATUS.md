@@ -118,6 +118,20 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   single-node ≡ brute, plus the updated divergence test) + a `server.rs` adoption-contract unit test. Scope:
   ships the **dict**; the normalizer is still a shared-vocab assumption (`default_vocab()` today) — vocab
   shipping is the next hardening. This is the first shared-nothing multi-node step (ADR-033 roadmap).
+- **Per-shard replication + peer recovery — in-process (ADR-035)** — clustering build-path step 4, the
+  Elasticsearch/Cassandra HA primitive. A `ReplicatedShard` composite (`src/cluster/replica.rs`) wraps one
+  shard position's **primary + N replicas** behind the existing `trait Shard`, so the coordinator is
+  unchanged (RF copies live inside one `Box<dyn Shard>`): writes fan out to the in-sync replicas, reads
+  **fail over** to an in-sync replica on a transport error (never a stale one → no false negative), and
+  aggregation + durability present the **primary's** view (so `num_queries`/`class_counts`/remove counts are
+  rf-independent). A fresh replica is brought up by **peer recovery** — seal the primary, copy its `.seg`,
+  attach-and-mmap (the in-process analogue of "stream segments from a peer"). `ClusterConfig::replication_factor`
+  (default 1 = byte-identical to before) drives it; replicas are HA copies rebuilt from the primary on `open`,
+  so the durable manifest is unchanged (primary + log remain the durable truth). Dependency-free; proven by
+  `tests/cluster_oracle.rs` (RF∈{2,3}×K ≡ single-node ≡ brute, counts not inflated, live add/remove) and
+  `tests/cluster_durability_oracle.rs` (durable RF=2 reopen ≡ pre-crash ≡ brute; checkpoint seals primaries
+  only) + `replica.rs` unit tests. The **gRPC multi-node lift** (replicas as remote shards + a streaming
+  segment-fetch RPC) is the next step (ADR-036).
 
 ## Measured
 
@@ -185,13 +199,15 @@ the selective candidate count further.
   designated broad-lane replicated shard over K shards in one process (ADR-027), a `distributed`-gated gRPC
   `ShardServer` + `RemoteShard` so a shard can be remote (ADR-029) with the coordinator **shipping its frozen
   dict** at connect so a data node starts empty (ADR-034), an externalized coordinator mutation log with
-  crash-rebuild (ADR-031), and per-shard compiled segments that reopen by attach-and-mmap instead of
-  re-ingesting (ADR-032; all in Implemented above). The hashing-variant survey + the cross-shard correctness
-  argument behind ADR-027 are written up in
+  crash-rebuild (ADR-031), per-shard compiled segments that reopen by attach-and-mmap instead of
+  re-ingesting (ADR-032), and an **in-process per-shard primary+replica layer with read failover and peer
+  recovery** (ADR-035; the `ReplicatedShard` composite) — all in Implemented above. The hashing-variant
+  survey + the cross-shard correctness argument behind ADR-027 are written up in
   [`research/clustering-prior-art.md`](research/clustering-prior-art.md). **Still design-only** (the
-  shared-nothing multi-node roadmap): per-shard **replication + peer recovery**, a **Raft/quorum control
-  plane** (ring + shard→node map + epoch), normalizer/vocab shipping, cross-process/remote coordinator
-  durability, autoscaling, auto-split, replicate-broad-to-all, and TLS/auth.
+  shared-nothing multi-node roadmap): the **gRPC multi-node lift** of replication (remote replicas + a
+  streaming segment-fetch RPC for cross-node peer recovery — ADR-036), a **Raft/quorum control plane** (ring +
+  shard→node map + epoch), normalizer/vocab shipping, cross-process/remote coordinator durability, autoscaling,
+  auto-split, replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
@@ -310,12 +326,14 @@ from the audit's former P3 list). Roughly grouped:
 ## Current limitations
 
 - **Single-node deployment.** The multi-shard core (ADR-027), the gRPC `ShardServer`/`RemoteShard`
-  transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (ADR-031), and
-  per-shard local durable segments with attach-and-mmap reopen (ADR-032) are built — the `distributed`
+  transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (ADR-031),
+  per-shard local durable segments with attach-and-mmap reopen (ADR-032), and an **in-process per-shard
+  primary+replica layer with read failover + peer recovery** (ADR-035) are built — the `distributed`
   feature can already run a coordinator over remote shards (on localhost today) that start **empty** and
-  receive the frozen dict at connect, and an in-process cluster built with a `data_dir` survives a crash and
-  reopens by mmap'ing its compiled segments (no corpus recompile) via `ClusterEngine::open`. A full
-  multi-node deployment — the **shared-nothing** layers (per-shard replication + peer recovery, a Raft/quorum
+  receive the frozen dict at connect; an in-process cluster built with a `data_dir` survives a crash and
+  reopens by mmap'ing its compiled segments (no corpus recompile) via `ClusterEngine::open`; and an
+  in-process cluster can run `replication_factor > 1` (replicas serve reads on primary failover). A full
+  multi-node deployment — the remaining **shared-nothing** layers (the gRPC lift of replication, a Raft/quorum
   control plane), plus autoscaling — is designed but not built (no object store / cloud dependency anywhere;
   ADR-033); see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator
