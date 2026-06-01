@@ -58,6 +58,14 @@ pub enum ShardError {
     /// rebuild-from-log contract (an un-logged add/remove would silently vanish on
     /// reopen). Parallels the engine's WAL-first write path (ADR-013).
     Log(String),
+    /// A cluster-state transition could not be committed by the control plane (no quorum,
+    /// not the leader, or a backend error — ADR-037). The transition is *rejected*, not
+    /// applied; surfacing it rather than serving a stale/blind shard→node map is
+    /// load-bearing (a silently-wrong assignment routes a title to the wrong node — a
+    /// shard-sized false negative). The structured cause is in
+    /// [`ControlError`](super::control::ControlError); this is the folded form crossing the
+    /// coordinator boundary. The in-memory single-node control plane never produces it.
+    ControlPlane(String),
 }
 
 impl std::fmt::Display for ShardError {
@@ -71,6 +79,7 @@ impl std::fmt::Display for ShardError {
                  {actual:#018x} (every shard must share the coordinator's frozen dict)"
             ),
             ShardError::Log(m) => write!(f, "cluster log durability error: {m}"),
+            ShardError::ControlPlane(m) => write!(f, "cluster control-plane error: {m}"),
         }
     }
 }

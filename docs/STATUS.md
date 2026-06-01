@@ -143,6 +143,23 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   `grpc_replicated_failover_and_peer_recovery` (K×RF servers ≡ brute; primary-stop failover; fresh-node peer
   recovery). **Honest scope:** recovery quiesces writes (there is no durable remote coordinator log to replay
   a tail from — that couples to the Raft step); shard→node placement / membership and TLS/auth stay design-only.
+- **Cluster-state control-plane seam (ADR-037)** — clustering build-path step 5a, the dependency-free first
+  increment of the quorum/Raft control plane. A `trait ControlPlane` (`src/cluster/control.rs`) — the
+  document-mutation + linearizable-read sibling of `ClusterLog` — holds the small, low-rate cluster-state
+  document (`ClusterState`: ring params + the **shard→node map** + membership + feature-model version +
+  epoch), with an in-memory `InMemoryControlPlane` backend (the `NullClusterLog` analogue + fast differential
+  backend). `ClusterEngine` carries it as a `Box<dyn ControlPlane>` defaulted to one logical node owning every
+  shard, so the RF=1 / in-process path is **byte-identical**; new introspection `control_state()` /
+  `assignment_for()` / `reassign_shard()`. The seam's shape (membership distinct from `propose`, a
+  `ForwardToLeader` error, snapshot-read not watch, an app epoch distinct from the Raft term) is fixed so the
+  **openraft** backend drops in behind it (step 5b) without touching the coordinator — and openraft is
+  `distributed`-gated, so the lean core never sees it. Consensus holds the cluster-state doc **only**: query
+  mutations stay on `ClusterLog` + the per-shard primary→replica path, the segment registry stays in the local
+  manifest. Dependency-free; proven by `tests/cluster_control_plane_oracle.rs` (default ≡ brute across K×RF;
+  document well-formed; reassignment preserves correctness; two-backend differential) + `control.rs` unit
+  tests. **Honest scope:** the control plane alone does **not** lift the ADR-036 recovery-quiesce window — that
+  needs a durable/replicated *per-shard query log* (step 5c, distinct from the control-plane doc); the openraft
+  backend (5b), multi-process elections, and an allocator acting on the map are design-only.
 
 ## Measured
 
@@ -215,11 +232,14 @@ the selective candidate count further.
   in-process (ADR-035; the `ReplicatedShard` composite) and over **gRPC** (ADR-036; remote replicas + a
   streaming segment-fetch RPC for cross-node peer recovery) — all in Implemented above. The hashing-variant
   survey + the cross-shard correctness argument behind ADR-027 are written up in
-  [`research/clustering-prior-art.md`](research/clustering-prior-art.md). **Still design-only** (the
-  shared-nothing multi-node roadmap): a **Raft/quorum control plane** (ring + shard→node map + epoch) with
-  shard→node placement + membership/failure-detection, a **durable/replicated coordinator log** for a remote
-  cluster (so peer recovery can replay a concurrent tail instead of quiescing writes), normalizer/vocab
-  shipping, autoscaling, auto-split, replicate-broad-to-all, and TLS/auth.
+  [`research/clustering-prior-art.md`](research/clustering-prior-art.md). The quorum/Raft control plane is now
+  under way: its **dependency-free seam is built** — a `trait ControlPlane` + an in-memory backend holding the
+  cluster-state document (ring + the **shard→node map** + membership + feature-model version + epoch), step 5a
+  / ADR-037. **Still design-only** (the shared-nothing multi-node roadmap): the **openraft backend** behind that
+  seam (step 5b — multi-process elections + a gRPC control service), a **durable/replicated per-shard query
+  log** so peer recovery can replay a concurrent tail instead of quiescing writes (step 5c — distinct from the
+  control-plane doc; the control plane alone does not lift the quiesce window), normalizer/vocab shipping,
+  autoscaling, auto-split, replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
@@ -346,9 +366,11 @@ from the audit's former P3 list). Roughly grouped:
   when a primary dies, and bring a fresh node up by **streaming a peer's segments** (`FetchSegments` /
   `RecoverFrom`); an in-process cluster built with a `data_dir` survives a crash and reopens by mmap'ing its
   compiled segments (no corpus recompile) via `ClusterEngine::open`. A full multi-node deployment — the
-  remaining **shared-nothing** layers (a Raft/quorum control plane for shard→node placement + membership, a
-  durable/replicated coordinator log so recovery need not quiesce writes), plus autoscaling — is designed but
-  not built (no object store / cloud dependency anywhere; ADR-033); see Tier 3.
+  remaining **shared-nothing** layers (the quorum/Raft control plane — its dependency-free **seam is built**
+  (ADR-037: a `trait ControlPlane` + in-memory backend holding the cluster-state document), while the openraft
+  backend + multi-process elections, and a durable/replicated per-shard query log so recovery need not quiesce
+  writes, are not), plus autoscaling — is designed but not built (no object store / cloud dependency anywhere;
+  ADR-033); see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator
   **ships** its frozen dict to each server at connect (ADR-034), and the ADR-030 fingerprint handshake fails
   loud (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can

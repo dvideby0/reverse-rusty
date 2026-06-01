@@ -46,6 +46,9 @@ use crate::normalize::Normalizer;
 use crate::segment::MatchStats;
 
 use super::clog::{ClusterLog, ClusterMutation, FileClusterLog, LogPos, NullClusterLog};
+use super::control::{
+    ClusterState, ClusterStateChange, ControlPlane, InMemoryControlPlane, ShardAssignment,
+};
 use super::ring::{HashRing, DEFAULT_VNODES};
 use super::shard::{LocalShard, Shard, ShardError};
 
@@ -156,16 +159,27 @@ pub(crate) struct ClusterDurable {
     pub epoch: u64,
     /// Ring vnode count, captured so the manifest can re-derive a byte-identical ring.
     pub vnodes: u32,
+    /// The cluster-state control plane (membership + shard→node map + ring params + model
+    /// version + epoch — ADR-037). A single-node [`InMemoryControlPlane`] today (one logical
+    /// node owns every shard ⇒ the default path is byte-identical to before ADR-037); an
+    /// openraft-backed backend drops in here in step 5b.
+    pub control: Box<dyn ControlPlane>,
 }
 
 impl ClusterDurable {
-    /// The non-durable bundle: a `NullClusterLog`, no `data_dir`.
-    fn in_memory(vnodes: u32) -> Self {
+    /// The non-durable bundle: a `NullClusterLog`, no `data_dir`, and a single-node
+    /// [`InMemoryControlPlane`] over the build's ring params + dict fingerprint.
+    fn in_memory(num_shards: u32, vnodes: u32, dict_fingerprint: u64) -> Self {
         ClusterDurable {
             log: Box::new(NullClusterLog::new()),
             data_dir: None,
             epoch: 0,
             vnodes,
+            control: Box::new(InMemoryControlPlane::single_node(
+                num_shards,
+                vnodes,
+                dict_fingerprint,
+            )),
         }
     }
 }
@@ -190,6 +204,10 @@ pub struct ClusterEngine {
     /// Buffered until set, mirroring the engine's `set_observer` pattern.
     observer: Mutex<Option<ClusterObserver>>,
     pending_events: Mutex<Vec<EngineEvent>>,
+    /// The cluster-state control plane: membership + the shard→node map + ring params +
+    /// feature-model version + epoch (ADR-037). Read at assembly / introspection time only,
+    /// never on the per-title hot path. [`InMemoryControlPlane`] today; openraft-backed later.
+    control: Box<dyn ControlPlane>,
 }
 
 /// Observer callback for cluster durability events — the `Arc` analogue of the
@@ -311,7 +329,11 @@ impl ClusterEngine {
                 let primaries: Vec<&LocalShard> = groups.iter().map(|g| &g[0]).collect();
                 Self::commit_durable_base(dir, &dict, &ring, config, &primaries)?
             }
-            None => ClusterDurable::in_memory(config.vnodes),
+            None => ClusterDurable::in_memory(
+                config.num_shards as u32,
+                config.vnodes,
+                dict.fingerprint(),
+            ),
         };
 
         // Assemble each position into a shard: a bare `LocalShard` at RF=1, else a
@@ -369,6 +391,11 @@ impl ClusterEngine {
             data_dir: Some(dir.to_path_buf()),
             epoch: 0,
             vnodes: config.vnodes,
+            control: Box::new(InMemoryControlPlane::single_node(
+                ring.num_shards() as u32,
+                config.vnodes,
+                dict.fingerprint(),
+            )),
         })
     }
 
@@ -401,6 +428,7 @@ impl ClusterEngine {
             epoch: AtomicU64::new(durable.epoch),
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
+            control: durable.control,
             observer: Mutex::new(None),
             pending_events: Mutex::new(Vec::new()),
         })
@@ -804,6 +832,11 @@ impl ClusterEngine {
             data_dir: Some(data_dir.clone()),
             epoch: manifest.epoch,
             vnodes: manifest.vnodes,
+            control: Box::new(InMemoryControlPlane::single_node(
+                manifest.num_shards,
+                manifest.vnodes,
+                manifest.dict_fingerprint,
+            )),
         };
         let engine = Self::from_parts(norm, dict, ring, shards, manifest.include_broad, durable)?;
 
@@ -935,6 +968,40 @@ impl ClusterEngine {
         self.epoch.load(Ordering::Relaxed)
     }
 
+    /// A snapshot of the committed cluster-state document (membership + shard→node map +
+    /// ring params + feature-model version + epoch — ADR-037), read from the control plane.
+    /// An owned clone, so the caller holds a stable view. Distinct from [`Self::epoch`]
+    /// (the local checkpoint generation): [`ClusterState::epoch`] is the control-plane term.
+    pub fn control_state(&self) -> Result<ClusterState, ShardError> {
+        Ok((*self.control.cluster_state()?).clone())
+    }
+
+    /// The node assignment for one shard POSITION (the ring's output index). Errors loudly
+    /// if a live position is unassigned — a silently-unrouted shard would be a shard-sized
+    /// false negative (the same fail-closed stance as a propagating shard probe). In-process
+    /// every position is assigned to the one logical node.
+    pub fn assignment_for(&self, position: usize) -> Result<ShardAssignment, ShardError> {
+        let state = self.control.cluster_state()?;
+        state
+            .assignments
+            .iter()
+            .find(|a| a.position as usize == position)
+            .cloned()
+            .ok_or_else(|| {
+                ShardError::ControlPlane(format!("no assignment for shard position {position}"))
+            })
+    }
+
+    /// Commit a shard→node (re)assignment through the control plane — the rebalance /
+    /// failover primitive. In-process this updates the committed map and bumps the
+    /// control-plane epoch *without moving data* (physical movement on an assignment change
+    /// — peer recovery — is a later increment). Errors propagate (fail-closed).
+    pub fn reassign_shard(&self, assignment: ShardAssignment) -> Result<(), ShardError> {
+        self.control
+            .propose(ClusterStateChange::AssignShard(assignment))?;
+        Ok(())
+    }
+
     /// Register an observer for durability events (recovery torn-tail, append failures).
     /// Any events buffered before this call are delivered immediately, mirroring the
     /// engine's `set_observer`.
@@ -1051,14 +1118,9 @@ impl ClusterEngine {
         // A remote cluster is non-durable at the coordinator in this increment (the
         // coordinator-level durable log is the in-process story; cross-node durability
         // is a later step). Use the in-memory log so behavior is unchanged.
-        Self::from_parts(
-            norm,
-            dict,
-            ring,
-            shards,
-            config.include_broad,
-            ClusterDurable::in_memory(config.vnodes),
-        )
+        let durable =
+            ClusterDurable::in_memory(config.num_shards as u32, config.vnodes, dict.fingerprint());
+        Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)
     }
 
     /// Assemble a cluster whose K shard POSITIONS are each a [`ReplicatedShard`](super::replica::ReplicatedShard)
@@ -1114,14 +1176,9 @@ impl ClusterEngine {
             };
             shards.push(shard);
         }
-        Self::from_parts(
-            norm,
-            dict,
-            ring,
-            shards,
-            config.include_broad,
-            ClusterDurable::in_memory(config.vnodes),
-        )
+        let durable =
+            ClusterDurable::in_memory(config.num_shards as u32, config.vnodes, dict.fingerprint());
+        Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)
     }
 
     /// Cross-node peer recovery (ADR-036): bring a fresh, durable, **pending** node up as a copy of

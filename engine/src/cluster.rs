@@ -23,6 +23,7 @@
 //! and the no-false-negative argument.
 
 mod clog;
+mod control;
 mod coordinator;
 mod replica;
 mod ring;
@@ -35,6 +36,10 @@ mod remote;
 #[cfg(feature = "distributed")]
 mod server;
 
+pub use control::{
+    ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane,
+    NodeDescriptor, NodeId, NodeRole, ShardAssignment, StateVersion,
+};
 pub use coordinator::{AddOutcome, ClusterConfig, ClusterEngine};
 pub use ring::{HashRing, DEFAULT_VNODES};
 pub use shard::ShardError;

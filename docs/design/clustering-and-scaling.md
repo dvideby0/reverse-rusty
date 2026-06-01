@@ -31,16 +31,19 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > rationale behind ADR-027 are in [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md).
 > Per-shard **replication + peer recovery** is built — **in-process** (ADR-035; the `ReplicatedShard`
 > composite — primary + N replicas, read failover, `peer_recover`) and over **gRPC** (ADR-036; remote
-> replicas via `connect_replicated` + a streaming `FetchSegments`/`RecoverFrom` peer-recovery path). Still
-> design-only: the **Raft/quorum control plane** (placement + membership), a durable/replicated coordinator
-> log (so recovery need not quiesce writes), normalizer/vocab shipping, TLS/auth, and autoscaling/auto-split.
+> replicas via `connect_replicated` + a streaming `FetchSegments`/`RecoverFrom` peer-recovery path). The
+> **quorum/Raft control plane's dependency-free seam is built** too — a `trait ControlPlane` + an in-memory
+> backend holding the cluster-state document (step 5a; ADR-037). Still design-only: the **openraft backend**
+> behind that seam (step 5b — multi-process elections), a durable/replicated **per-shard query log** so
+> recovery need not quiesce writes (step 5c — distinct from the control-plane doc), normalizer/vocab shipping,
+> TLS/auth, and autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** Elasticsearch/Cassandra **shared-nothing** (local segments + WAL + peer recovery + quorum control plane) and consistent hashing — **not** Aurora's shared object storage (ADR-033)
-- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`); the remaining multi-node layers (a Raft control plane, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`), and the **control-plane seam** (step 5a; ADR-037 — a `trait ControlPlane` + in-memory backend holding the shard→node map); the remaining multi-node layers (the openraft backend behind that seam, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary; **no object store / cloud dependency** — durability is a local WAL + replicas (ADR-033)
 
 ---
@@ -329,16 +332,31 @@ without operator action. The defaults are the product.
      **quiesces writes** for the copy window — concurrent-write "stream + replay the tail" needs a
      durable/replicated coordinator log (a remote cluster uses `NullClusterLog`), which couples to step 5.
 5. **Add the cluster-manager quorum** (Raft) holding ring + shard→node map + feature-model version +
-   epoch; multi-process cluster. *(design-only)*
+   epoch; multi-process cluster.
+   - 5a. **The control-plane seam.** ✅ **Done** (ADR-037): a dependency-free `trait ControlPlane`
+     (document-mutation + linearizable-read — the `ClusterLog` sibling) + a `ClusterState` document
+     (ring + the shard→node map + membership + feature-model version + epoch) + an in-memory backend, wired
+     into the coordinator (default = one logical node ⇒ byte-identical). Its shape is fixed for openraft
+     (membership distinct from `propose`, a `ForwardToLeader` error, snapshot-read, an app epoch distinct from
+     the Raft term). Proven by `tests/cluster_control_plane_oracle.rs`. *(Consensus holds the cluster-state doc
+     ONLY — not the query mutations, which stay on the per-shard path.)*
+   - 5b. **The openraft backend.** *(design-only)* A `RaftControlPlane` over `Raft<C>` behind the seam, a new
+     gRPC `ControlService` (opaque-bytes envelope), manager role/bin, multi-process elections —
+     `distributed`-gated so the lean core never sees openraft.
+   - 5c. **Close the quiesce gap.** *(design-only)* Make the per-shard *query* log durable + replicated (the
+     ES translog) so a recovering replica replays the tail after the segment copy instead of quiescing writes
+     (ADR-036's honest-scope window). **Distinct from the control-plane doc** — the control plane alone does
+     not lift it.
 6. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
 7. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
 (Steps 1–2 — the in-process core — step 1's gRPC transport + dict shipping, step 3a's coordinator log,
-step 3b's per-shard local durable segments, and step 4's per-shard replication + peer recovery (4a in-process,
-4b over gRPC) are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036. The remaining
-shared-nothing multi-node work — steps 5–6 (the Raft control plane, autoscale + auto-split) — is design-only
-(ADR-033). See [`../STATUS.md`](../STATUS.md).)
+step 3b's per-shard local durable segments, step 4's per-shard replication + peer recovery (4a in-process,
+4b over gRPC), and step 5a's control-plane seam are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032 +
+ADR-035 + ADR-036 + ADR-037. The remaining shared-nothing multi-node work — the openraft backend behind the
+control-plane seam (5b), the per-shard durable query log that closes the recovery-quiesce gap (5c), and
+autoscale + auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
 
 ---
 
