@@ -35,9 +35,11 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > **quorum/Raft control plane is built** too — its seam (a `trait ControlPlane` + in-memory backend holding
 > the cluster-state document, step 5a; ADR-037) AND the **openraft backend** behind it (step 5b; ADR-038 — a
 > `RaftControlPlane` over `Raft<C>` + a gRPC `ControlService` + a `controlserver` bin, multi-process elections
-> + leader failover, `distributed`-gated). Still design-only: a durable/replicated **per-shard query log** so
-> recovery need not quiesce writes (step 5c — distinct from the control-plane doc), normalizer/vocab shipping,
-> TLS/auth, and autoscaling/auto-split.
+> + leader failover, `distributed`-gated). The durable/replicated **per-shard query log (translog)** is built
+> too (step 5c; ADR-039) — peer recovery streams a peer's segments then replays the translog tail, so it need
+> **not quiesce** writes for the copy window (in-process + over gRPC via `FetchTranslog`), and a durable data
+> node self-restarts from its own checkpoint sidecar. Still design-only: translog retention/GC + a brief
+> finalize under sustained writes, normalizer/vocab shipping, TLS/auth, and autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
@@ -338,9 +340,9 @@ without operator action. The defaults are the product.
      set), and two RPCs — server-streaming `FetchSegments` (manifest-first, chunked; the receiver rejects a
      truncated stream rather than attaching a subset) + target-driven `RecoverFrom` (the recovering node
      pulls a peer's segments), orchestrated by `peer_recover_replica`. Validated by
-     `tests/cluster_grpc_oracle.rs` (`grpc_replicated_failover_and_peer_recovery`). **Honest scope:** recovery
-     **quiesces writes** for the copy window — concurrent-write "stream + replay the tail" needs a
-     durable/replicated coordinator log (a remote cluster uses `NullClusterLog`), which couples to step 5.
+     `tests/cluster_grpc_oracle.rs` (`grpc_replicated_failover_and_peer_recovery`). **Honest scope (lifted by
+     5c):** as shipped here recovery **quiesced writes** for the copy window — concurrent-write "stream + replay
+     the tail" needed a durable per-shard log; **step 5c (ADR-039) adds that translog and closes the gap.**
 5. **Add the cluster-manager quorum** (Raft) holding ring + shard→node map + feature-model version +
    epoch; multi-process cluster.
    - 5a. **The control-plane seam.** ✅ **Done** (ADR-037): a dependency-free `trait ControlPlane`
@@ -359,21 +361,28 @@ without operator action. The defaults are the product.
      `tests/cluster_control_raft_oracle.rs` (3-node in-process convergence + `ForwardToLeader` +
      `change_membership` routing; and over real gRPC servers, survive-the-leader-being-killed). *(Consensus
      holds the cluster-state doc ONLY — never query mutations.)*
-   - 5c. **Close the quiesce gap.** *(design-only)* Make the per-shard *query* log durable + replicated (the
-     ES translog) so a recovering replica replays the tail after the segment copy instead of quiescing writes
-     (ADR-036's honest-scope window). **Distinct from the control-plane doc** — the control plane alone does
-     not lift it.
+   - 5c. **Close the quiesce gap.** ✅ **Done** (ADR-039): each durable shard owns a per-shard **translog** (the
+     ES translog — ADR-031's CRC-framed `FileClusterLog` + the logical-id-and-DSL `ClusterMutation`, re-homed per
+     shard), appended log-first on every write and trimmed at `seal_for_checkpoint` to a position `P` (segments
+     hold ops ≤ `P`, the translog the un-sealed ops > `P`). Peer recovery streams a peer's segments at `P` **then
+     replays the translog tail (> `P`)** — the writes that land during the copy, recovered rather than lost — so
+     it need **not quiesce**, both in-process (`peer_recover` + `catch_up_replica`) and over gRPC (a server-
+     streaming `FetchTranslog(after_seqno)` RPC + `FetchManifest.up_to_seqno`). A durable data node also
+     self-restarts from a per-shard checkpoint sidecar (`shard.ckpt`). Proven by
+     `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_without_quiescing` + `replica.rs` in-process tests.
+     **Distinct from the control-plane doc** — the control plane (5a/5b) holds cluster *state*, never the query
+     mutations this log carries.
 6. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
 7. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
 (Steps 1–2 — the in-process core — step 1's gRPC transport + dict shipping, step 3a's coordinator log,
 step 3b's per-shard local durable segments, step 4's per-shard replication + peer recovery (4a in-process,
-4b over gRPC), and the **quorum/Raft control plane** — step 5a's seam AND step 5b's openraft backend + gRPC
-`ControlService` — are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 +
-ADR-038. The remaining shared-nothing multi-node work — the per-shard durable query log that closes the
-recovery-quiesce gap (5c), and autoscale + auto-split (step 6) — is design-only (ADR-033). See
-[`../STATUS.md`](../STATUS.md).)
+4b over gRPC), the **quorum/Raft control plane** — step 5a's seam AND step 5b's openraft backend + gRPC
+`ControlService` — AND step 5c's **per-shard translog + no-quiesce peer recovery** are built; ADR-027 + ADR-029
++ ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039. The remaining shared-nothing
+multi-node work — translog retention/GC + a brief finalize under sustained writes, a durable Raft log, and
+autoscale + auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
 
 ---
 

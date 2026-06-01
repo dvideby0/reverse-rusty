@@ -51,7 +51,8 @@ use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
 use crate::segment::{IngestReport, MatchStats};
 
-use super::shard::{EventSink, LocalShard, Shard, ShardError};
+use super::clog::{ClusterMutation, LogPos};
+use super::shard::{apply_mutation, EventSink, LocalShard, Shard, ShardError};
 
 /// One replica copy plus its in-sync flag.
 struct ReplicaSlot {
@@ -221,7 +222,7 @@ impl Shard for ReplicatedShard {
     }
 
     // ---- durable checkpoint: PRIMARY ONLY (replicas are not in the manifest) ----
-    fn seal_for_checkpoint(&self) -> Result<(), ShardError> {
+    fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
         let _g = self.lock();
         self.primary.seal_for_checkpoint()
     }
@@ -232,6 +233,12 @@ impl Shard for ReplicatedShard {
 
     fn next_seg_id(&self) -> Result<u64, ShardError> {
         self.primary.next_seg_id()
+    }
+
+    // The position-bearing tail is the PRIMARY's (the authoritative copy + the recovery
+    // source); a recovering replica is brought up from the primary's segments + this tail.
+    fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
+        self.primary.translog_tail(from)
     }
 
     // ---- observability ----
@@ -253,24 +260,31 @@ impl Shard for ReplicatedShard {
     }
 }
 
-/// Bring a fresh replica up to a DURABLE primary's state by copying its sealed segments —
-/// the in-process analogue of Elasticsearch peer recovery ("stream segments from a peer").
+/// Bring a fresh replica up to a DURABLE primary's state — the in-process analogue of
+/// Elasticsearch peer recovery ("stream segments from a peer, then replay the translog tail").
 /// Seals the primary (flush memtable + reseal base-segment tombstones) so its on-disk `.seg`
-/// set reflects every applied delete, copies those files (and `sources.dat` if present —
-/// display-only, tolerated absent) into a clean `replica_dir`, then attaches them via
-/// [`LocalShard::open_segments`] (fail-loud on a missing/corrupt segment). The caller keeps
-/// the position quiesced for this window (no concurrent writes). DURABLE-primary only: an
-/// in-memory primary has no files to copy (its `segment_filenames` errors).
+/// set is a consistent snapshot at position `P`, copies those files (and `sources.dat` if
+/// present — display-only, tolerated absent) into a clean `replica_dir`, attaches them via
+/// [`LocalShard::open_segments`] (fail-loud on a missing/corrupt segment), and **replays the
+/// primary's translog tail (ops > P)** into the new replica.
+///
+/// Because the tail captures the writes that landed *during* the copy, the position need
+/// **not** be quiesced for the copy window (ADR-039 — closing ADR-036's gap): segments hold
+/// exactly ops ≤ P and the tail exactly ops > P, so there is no overlap and no double-apply.
+/// Returns the new replica plus the high-water position it caught up to; a later
+/// [`catch_up_replica`] from that cursor drains any further tail (the brief finalize under
+/// sustained writes). DURABLE-primary only: an in-memory primary has no files to copy.
 pub(crate) fn peer_recover(
-    norm: Arc<Normalizer>,
-    dict: Arc<Dict>,
+    norm: &Arc<Normalizer>,
+    dict: &Arc<Dict>,
     mut config: EngineConfig,
     primary: &dyn Shard,
     primary_dir: &Path,
     replica_dir: &Path,
-) -> Result<LocalShard, ShardError> {
-    // 1. Seal so the primary's on-disk segments are a consistent, tombstone-baked snapshot.
-    primary.seal_for_checkpoint()?;
+) -> Result<(LocalShard, LogPos), ShardError> {
+    // 1. Seal so the primary's on-disk segments are a consistent, tombstone-baked snapshot at
+    //    position `P`; the translog's remaining tail is exactly the un-sealed ops > P.
+    let snapshot_pos = primary.seal_for_checkpoint()?;
     let files = primary.segment_filenames()?;
     let next_seg_id = primary.next_seg_id()?;
 
@@ -313,7 +327,41 @@ pub(crate) fn peer_recover(
 
     // 4. Attach the copied segments against the shared dict (fail-loud on any missing/corrupt).
     config.data_dir = Some(replica_dir.to_path_buf());
-    LocalShard::open_segments(norm, dict, config, &files, next_seg_id)
+    let replica = LocalShard::open_segments(
+        Arc::clone(norm),
+        Arc::clone(dict),
+        config,
+        &files,
+        next_seg_id,
+    )?;
+
+    // 5. Replay the primary's translog tail (ops > P) — the writes that landed during the
+    //    copy. This is what lifts the quiesce: the segment copy ran concurrently with writes,
+    //    and those writes are recovered here rather than lost.
+    let hwm = catch_up_replica(&replica, primary, norm, dict, snapshot_pos)?;
+    Ok((replica, hwm))
+}
+
+/// Replay `source`'s un-sealed translog tail (ops strictly after `from`) into `target` through
+/// the normal write path — so each op is re-derived from its raw DSL against the frozen dict
+/// (byte-identical to the original write) and re-logged into `target`'s own translog. Returns
+/// the highest position applied (`from` if the tail was empty). The catch-up half of no-quiesce
+/// recovery (ADR-039): re-runnable, so calling it again with the returned cursor drains any
+/// further tail — the basis for a brief finalize catch-up after the bulk copy.
+pub(crate) fn catch_up_replica(
+    target: &dyn Shard,
+    source: &dyn Shard,
+    norm: &Normalizer,
+    dict: &Dict,
+    from: LogPos,
+) -> Result<LogPos, ShardError> {
+    let tail = source.translog_tail(from)?;
+    let mut hwm = from;
+    for (pos, m) in &tail {
+        apply_mutation(target, norm, dict, m)?;
+        hwm = (*pos).max(hwm);
+    }
+    Ok(hwm)
 }
 
 #[cfg(test)]
@@ -434,14 +482,20 @@ mod tests {
         fn flush(&self) -> Result<(), ShardError> {
             self.write_err()
         }
-        fn seal_for_checkpoint(&self) -> Result<(), ShardError> {
-            Ok(())
+        fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
+            Ok(LogPos(0))
         }
         fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
             Ok(Vec::new())
         }
         fn next_seg_id(&self) -> Result<u64, ShardError> {
             Ok(0)
+        }
+        fn translog_tail(
+            &self,
+            _from: LogPos,
+        ) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
+            Ok(Vec::new())
         }
     }
 
@@ -693,9 +747,9 @@ mod tests {
         primary.flush().expect("flush to base");
         primary.delete_by_logical_id(2).expect("delete id 2");
 
-        let replica = peer_recover(
-            Arc::clone(&norm),
-            Arc::clone(&dict),
+        let (replica, _hwm) = peer_recover(
+            &norm,
+            &dict,
             EngineConfig::default(),
             &primary,
             &primary_dir,
@@ -720,6 +774,163 @@ mod tests {
             "the baked tombstone must not resurrect on the recovered replica"
         );
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn peer_recover_replays_tail_without_quiescing() {
+        // The headline in-process property (ADR-039): a segment snapshot is taken at position
+        // `P`, writes land AFTER it (id 10 added, id 1 removed — in the primary's translog,
+        // > P), and the recovering replica catches them up via the TRANSLOG TAIL — no segment
+        // re-copy, no quiesce. Ordered (snapshot → write → catch-up) for determinism; it
+        // exercises the exact path a concurrent recovery uses for writes that arrive during the
+        // copy window. The pre-catch-up staleness assertion proves the writes truly post-date
+        // the snapshot (else the test would pass trivially).
+        let (norm, dict, corpus) = compile_corpus(&[
+            (1, "alpha bravo"),
+            (2, "charlie delta"),
+            (3, "echo foxtrot"),
+            (10, "alpha bravo"),
+        ]);
+        let tmp = scratch_dir("tail");
+        let primary_dir = tmp.join("primary");
+        let replica_dir = tmp.join("replica");
+
+        let pc = EngineConfig {
+            data_dir: Some(primary_dir.clone()),
+            ..EngineConfig::default()
+        };
+        let primary = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), pc)
+            .expect("durable primary");
+        // The snapshot corpus = ids 1..3 (id 10 is held back for a post-snapshot add).
+        for (id, ex, dsl) in corpus.iter().take(3) {
+            primary.insert_extracted(ex, *id, 1, dsl).expect("seed");
+        }
+
+        // Snapshot: peer_recover seals the primary at P, copies segments, replays the (empty)
+        // tail; `hwm` is the position the replica is caught up to in the primary's log space.
+        let (replica, hwm) = peer_recover(
+            &norm,
+            &dict,
+            EngineConfig::default(),
+            &primary,
+            &primary_dir,
+            &replica_dir,
+        )
+        .expect("peer recovery");
+
+        // Writes that land AFTER the snapshot (into the primary's translog, > hwm).
+        let (_, ex10, dsl10) = &corpus[3]; // id 10, "alpha bravo"
+        primary
+            .insert_extracted(ex10, 10, 1, dsl10)
+            .expect("post-snapshot add");
+        primary
+            .delete_by_logical_id(1)
+            .expect("post-snapshot delete");
+
+        // Pre-catch-up the replica is STALE (still has id 1, lacks id 10): the writes truly
+        // post-date the copied snapshot.
+        let (pre, _) = replica.percolate("alpha bravo zulu", true).expect("read");
+        assert!(
+            pre.contains(&1) && !pre.contains(&10),
+            "replica must be stale before catch-up (proving writes post-date the snapshot): {pre:?}"
+        );
+
+        // Replay the tail (ops > hwm) — the no-quiesce recovery delta.
+        catch_up_replica(&replica, &primary, &norm, &dict, hwm).expect("catch up");
+
+        // The replica now equals the primary on every probe: id 10 present, id 1 gone.
+        for title in [
+            "alpha bravo zulu",
+            "charlie delta zulu",
+            "echo foxtrot zulu",
+        ] {
+            let (mut p, _) = primary.percolate(title, true).expect("primary");
+            let (mut r, _) = replica.percolate(title, true).expect("replica");
+            p.sort_unstable();
+            r.sort_unstable();
+            assert_eq!(
+                p, r,
+                "replica diverged from primary on {title:?} after catch-up"
+            );
+        }
+        let (after, _) = replica.percolate("alpha bravo zulu", true).expect("read");
+        assert!(
+            after.contains(&10) && !after.contains(&1),
+            "the translog tail was not applied on catch-up: {after:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn durable_shard_self_restarts_from_translog() {
+        // ADR-039 §6: a durable data node crashes with un-sealed writes in its translog and
+        // restarts from disk — `new_durable` finds the checkpoint sidecar, attaches the committed
+        // segments AND replays the translog tail (the ops the last seal had not yet baked). The
+        // reopened shard equals the pre-crash live set, with a removed id NOT resurrecting.
+        let (norm, dict, corpus) = compile_corpus(&[
+            (1, "alpha bravo"),
+            (2, "charlie delta"),
+            (3, "echo foxtrot"),
+            (4, "golf hotel"),
+        ]);
+        let tmp = scratch_dir("selfrestart");
+        let cfg = EngineConfig {
+            data_dir: Some(tmp.clone()),
+            ..EngineConfig::default()
+        };
+
+        {
+            let shard = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), cfg.clone())
+                .expect("durable shard");
+            // Sealed base: ids 1, 2 (flushed into a segment; the sidecar commits at position P).
+            shard
+                .insert_extracted(&corpus[0].1, 1, 1, &corpus[0].2)
+                .expect("ins 1");
+            shard
+                .insert_extracted(&corpus[1].1, 2, 1, &corpus[1].2)
+                .expect("ins 2");
+            shard.seal_for_checkpoint().expect("seal");
+            // Un-sealed translog tail (> P): add 3, add 4, remove 1 — only in the translog.
+            shard
+                .insert_extracted(&corpus[2].1, 3, 1, &corpus[2].2)
+                .expect("ins 3");
+            shard
+                .insert_extracted(&corpus[3].1, 4, 1, &corpus[3].2)
+                .expect("ins 4");
+            shard.delete_by_logical_id(1).expect("del 1");
+            // "Crash": drop without another seal — the tail lives only in the translog.
+        }
+
+        // Restart from the sidecar: attach segments (1, 2) + replay the tail (add 3, add 4,
+        // remove 1) → live set {2, 3, 4}.
+        let reopened = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), cfg)
+            .expect("self-restart");
+        let probe = |title: &str| -> Vec<u64> {
+            let (mut ids, _) = reopened.percolate(title, true).expect("read");
+            ids.sort_unstable();
+            ids
+        };
+        assert_eq!(
+            probe("alpha bravo zulu"),
+            Vec::<u64>::new(),
+            "id 1 was removed in the tail; it must not resurrect on self-restart"
+        );
+        assert_eq!(probe("charlie delta zulu"), vec![2], "sealed id 2 survives");
+        assert_eq!(
+            probe("echo foxtrot zulu"),
+            vec![3],
+            "tail add id 3 recovered"
+        );
+        assert_eq!(probe("golf hotel zulu"), vec![4], "tail add id 4 recovered");
+        // Physical entry count: 2 sealed (ids 1, 2) + 2 tail adds (ids 3, 4). id 1's sealed entry
+        // is tombstoned (the matching probes above prove it is excluded), not yet compacted away —
+        // exactly what a non-restarted shard applying the same ops reports.
+        assert_eq!(
+            reopened.num_queries().expect("count"),
+            4,
+            "physical count = 2 sealed + 2 tail (id 1 tombstoned, awaiting compaction)"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

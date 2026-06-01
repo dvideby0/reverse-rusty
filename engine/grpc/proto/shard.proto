@@ -44,6 +44,14 @@ service ShardService {
   // writes the files under its own data_dir, attaches them (open_segments), and swaps in the
   // recovered shard. Returns the attached segment count + post-attach query count.
   rpc RecoverFrom (RecoverFromRequest) returns (RecoverFromReply);
+  // ---- per-shard query log / translog (ADR-039, clustering step 5c) ----
+  // Server-streams this shard's UN-SEALED translog tail — every logged mutation with position
+  // strictly after `after_seqno`, oldest-first. The recovering node drains FetchSegments at
+  // position P (FetchManifest.up_to_seqno) then FetchTranslog(after = P) here to replay the
+  // writes that landed during the copy window — so peer recovery need NOT quiesce writes
+  // (closing ADR-036's gap). Read-only: it does NOT seal (unlike FetchSegments), so the source
+  // keeps serving + accepting writes. Refuses a dict-fingerprint mismatch.
+  rpc FetchTranslog (FetchTranslogRequest) returns (stream TranslogEntry);
 }
 
 message Empty {}
@@ -134,6 +142,10 @@ message FetchManifest {
   uint64 next_seg_id = 2;
   uint64 dict_fingerprint = 3;       // echoed; the receiver re-checks it == its adopted dict
   bool has_sources = 4;              // whether a "sources.dat" file run follows the segments
+  // The per-shard translog position the sealed segments capture through (ADR-039): every op
+  // <= up_to_seqno is in these segments; the recovering node then replays the tail (> this) via
+  // FetchTranslog. proto3 default 0 is back-compatible (a pre-5c sender = "replay from the start").
+  uint64 up_to_seqno = 5;
 }
 // One run of bytes for a single file: contiguous chunks sharing `name`, terminated by `last`.
 // The sentinel name "sources.dat" carries the optional (display-only) source blob; every
@@ -158,6 +170,24 @@ message RecoverFromRequest {
 message RecoverFromReply {
   uint64 segments_attached = 1;
   uint64 num_queries = 2;      // post-attach count, for the orchestrator to sanity-check
+  uint64 up_to_seqno = 3;      // the snapshot's translog position P (ADR-039); the orchestrator
+                               // replays the source tail > P to finish a no-quiesce recovery
+}
+
+// ---- per-shard query log / translog (ADR-039, clustering step 5c) ----
+message FetchTranslogRequest {
+  uint64 after_seqno = 1;      // stream only ops with position strictly after this (the snapshot P)
+  uint64 dict_fingerprint = 2; // the source refuses a mismatch (never ships ops for a divergent space)
+}
+// One un-sealed translog entry: its position + the logical mutation. Mirrors engine
+// `clog::ClusterMutation` 1:1 — the Add arm REUSES `AddItem {logical_id, dsl, version}` (the
+// DSL-on-wire form the data node re-compiles read-only), and Remove carries just the logical id.
+message TranslogEntry {
+  uint64 seqno = 1;
+  oneof op {
+    AddItem add = 2;
+    uint64 remove_logical = 3;
+  }
 }
 
 // ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----

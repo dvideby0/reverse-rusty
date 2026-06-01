@@ -28,6 +28,7 @@ mod coordinator;
 mod replica;
 mod ring;
 mod shard;
+mod translog;
 
 #[cfg(feature = "distributed")]
 mod control_raft;

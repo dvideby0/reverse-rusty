@@ -20,15 +20,19 @@
 //! the `distributed` feature) lives in `super::remote` and satisfies the same trait
 //! by issuing gRPC calls.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
 
-use crate::compile::Extracted;
+use crate::compile::{extract_readonly, Extracted};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
 use crate::segment::{Engine, EngineSnapshot, IngestReport, MatchScratch, MatchStats};
+
+use super::clog::{ClusterMutation, LogPos};
+use super::translog;
 
 /// An error from cluster construction or a shard operation. In-process
 /// ([`LocalShard`]) *operations* are infallible and never produce this; a `RemoteShard`
@@ -149,7 +153,13 @@ pub(crate) trait Shard: Send + Sync {
     /// segment, so the ON-DISK segment set reflects every applied delete. Without the
     /// re-seal a `Remove` against a base segment lives only in the in-RAM alive overlay
     /// and would resurrect the query on reopen once its log entry is truncated.
-    fn seal_for_checkpoint(&self) -> Result<(), ShardError>;
+    ///
+    /// Returns the per-shard translog position `P` the sealed segments now capture through
+    /// (ADR-039): every op `≤ P` is durably in the segments, and the translog is trimmed to
+    /// `P` so its remaining tail is exactly the un-sealed ops `> P`. A recovering replica
+    /// streams the segments (`≤ P`) then replays the tail (`> P`) — no overlap, no
+    /// double-apply (the zero-false-negative boundary). In-memory shards return `LogPos(0)`.
+    fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError>;
     /// This shard's live (mmap'd) base-segment filenames — the registry the coordinator
     /// commits into `cluster_manifest.bin`. `Err` (never a silent empty list) if any
     /// segment is in-memory (a write fell back), which would otherwise lose data on reopen.
@@ -157,6 +167,15 @@ pub(crate) trait Shard: Send + Sync {
     /// This shard's next segment-id counter — committed per shard so a flush after reopen
     /// never reuses a committed segment filename.
     fn next_seg_id(&self) -> Result<u64, ShardError>;
+
+    // ---- per-shard query log / translog (ADR-039; clustering step 5c) ----
+    /// The un-sealed tail of this shard's durable query log: every logged mutation with
+    /// position strictly after `from`, oldest-first (the ops NOT yet baked into a sealed
+    /// segment). A recovering replica calls this after attaching the source's segments at
+    /// `P = seal_for_checkpoint()` to replay the writes that landed during the copy window —
+    /// the durable+replicated tail that lets recovery proceed WITHOUT quiescing writes
+    /// (closing ADR-036's gap). A non-durable (in-memory) shard returns an empty tail.
+    fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError>;
 
     // ---- observability (ADR-035) ----
     /// Install an event sink so this shard can surface degraded-redundancy events — e.g. a
@@ -166,44 +185,79 @@ pub(crate) trait Shard: Send + Sync {
     fn set_event_sink(&self, _sink: EventSink) {}
 }
 
-/// One in-process shard: owned engine for writes + lock-free snapshot for reads.
+/// One in-process shard: owned engine for writes + lock-free snapshot for reads, plus a
+/// per-shard durable query log (the translog, ADR-039). The translog is a no-op
+/// [`NullClusterLog`](super::clog::NullClusterLog) for an in-memory shard (byte-identical to
+/// pre-ADR-039) and a CRC-framed [`FileClusterLog`](super::clog::FileClusterLog) for a durable
+/// shard (the un-sealed-write tail a recovering replica replays). Replay re-derives features
+/// from the raw DSL against the frozen dict, so the caller (which always holds the shared
+/// `norm`/`dict`) supplies them to [`apply_mutation`] — the shard need not retain them.
 pub(crate) struct LocalShard {
     engine: Mutex<Engine>,
     snapshot: ArcSwap<EngineSnapshot>,
+    translog: Box<translog::ShardLog>,
+    /// Retained for translog replay (re-derive features from raw DSL) on self-restart, and to
+    /// stamp the per-shard checkpoint sidecar's dict fingerprint.
+    norm: Arc<Normalizer>,
+    dict: Arc<Dict>,
+    /// `Some` ⇒ durable (segments + translog + checkpoint sidecar live here); `None` ⇒ in-memory.
+    data_dir: Option<PathBuf>,
 }
 
 impl LocalShard {
-    /// Build a shard sharing the coordinator's frozen normalizer + dict.
+    /// Build a shard sharing the coordinator's frozen normalizer + dict. In-memory ⇒ a
+    /// no-op [`NullClusterLog`](super::clog::NullClusterLog) translog (byte-identical to
+    /// pre-ADR-039) and no checkpoint sidecar.
     pub(crate) fn new(norm: Arc<Normalizer>, dict: Arc<Dict>, config: EngineConfig) -> Self {
-        let engine = Engine::with_shared(norm, dict, config);
+        let engine = Engine::with_shared(Arc::clone(&norm), Arc::clone(&dict), config);
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         LocalShard {
             engine: Mutex::new(engine),
             snapshot,
+            translog: translog::null(),
+            norm,
+            dict,
+            data_dir: None,
         }
     }
 
     /// Build a DURABLE shard (ADR-032): an engine that persists compiled segments under
-    /// `config.data_dir` (the shard's directory) with no WAL and no own manifest — the
-    /// coordinator's `ClusterLog` is the tail and its `cluster_manifest.bin` is the
-    /// registry. Shares the coordinator's frozen normalizer + dict.
+    /// `config.data_dir` with no WAL and no own manifest, plus a durable translog (ADR-039).
+    /// **Self-restart (ADR-039 §6):** if a checkpoint sidecar is already present in the dir, this
+    /// is a node restarting over its own prior data — attach its committed segments and replay the
+    /// translog tail instead of starting fresh. Otherwise a fresh empty durable shard.
     pub(crate) fn new_durable(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
         config: EngineConfig,
     ) -> Result<Self, ShardError> {
-        let engine = Engine::with_shared_segments_only(norm, dict, config)
-            .map_err(|e| ShardError::Log(format!("creating durable shard: {e}")))?;
+        let dir = config.data_dir.clone().ok_or_else(|| {
+            ShardError::Log("durable shard requires a data_dir for its translog".into())
+        })?;
+        if let Some(ckpt) = translog::read_sidecar(&dir)? {
+            return Self::open_durable_self(norm, dict, config, &ckpt);
+        }
+        let translog = translog::open_fresh(&dir, config.wal_sync_on_write)?;
+        let engine =
+            Engine::with_shared_segments_only(Arc::clone(&norm), Arc::clone(&dict), config)
+                .map_err(|e| ShardError::Log(format!("creating durable shard: {e}")))?;
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         Ok(LocalShard {
             engine: Mutex::new(engine),
             snapshot,
+            translog,
+            norm,
+            dict,
+            data_dir: Some(dir),
         })
     }
 
-    /// Reopen a durable shard by attaching its committed segment files (ADR-032) against
-    /// the shared dict — attach-and-mmap, not re-ingest. `files`/`next_seg_id` come from
-    /// the coordinator's `cluster_manifest.bin`; `config.data_dir` is the shard's dir.
+    /// Reopen a durable shard by attaching an EXPLICIT committed segment list (ADR-032) against
+    /// the shared dict — attach-and-mmap, not re-ingest. `files`/`next_seg_id` come from the
+    /// coordinator's `cluster_manifest.bin`; the attached segments are the durable base, and the
+    /// translog starts FRESH (ADR-039) — the coordinator `ClusterLog` (in-process) or the
+    /// peer-recovery tail repopulates it. (Distinct from `new_durable`'s sidecar-driven
+    /// self-restart: this is the coordinator-managed attach.)
     pub(crate) fn open_segments(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
@@ -211,13 +265,103 @@ impl LocalShard {
         files: &[String],
         next_seg_id: u64,
     ) -> Result<Self, ShardError> {
-        let engine = Engine::open_shared_segments(norm, dict, config, files, next_seg_id)
-            .map_err(|e| ShardError::Log(format!("attaching shard segments: {e}")))?;
+        let dir = config.data_dir.clone();
+        let translog = match &dir {
+            Some(d) => translog::open_fresh(d, config.wal_sync_on_write)?,
+            None => translog::null(),
+        };
+        let engine = Engine::open_shared_segments(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            config,
+            files,
+            next_seg_id,
+        )
+        .map_err(|e| ShardError::Log(format!("attaching shard segments: {e}")))?;
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         Ok(LocalShard {
             engine: Mutex::new(engine),
             snapshot,
+            translog,
+            norm,
+            dict,
+            data_dir: dir,
         })
+    }
+
+    /// Self-restart a durable shard from its checkpoint sidecar (ADR-039 §6): attach the committed
+    /// segments (ops ≤ `local_checkpoint`), open the EXISTING translog (the on-disk tail is the
+    /// authority — not reset), and replay the un-sealed tail (ops > `local_checkpoint`) into the
+    /// engine. Fail-loud if the sidecar's dict fingerprint diverges (never attach segments built
+    /// for a different feature space). Replay is engine-only (the ops are already in the translog).
+    fn open_durable_self(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        config: EngineConfig,
+        ckpt: &translog::ShardCheckpoint,
+    ) -> Result<Self, ShardError> {
+        let dir = config
+            .data_dir
+            .clone()
+            .ok_or_else(|| ShardError::Log("durable self-restart requires a data_dir".into()))?;
+        if ckpt.dict_fingerprint != dict.fingerprint() {
+            return Err(ShardError::DictMismatch {
+                expected: dict.fingerprint(),
+                actual: ckpt.dict_fingerprint,
+            });
+        }
+        let floor = LogPos(ckpt.local_checkpoint);
+        let translog = translog::open_existing(&dir, config.wal_sync_on_write, floor)?;
+        let engine = Engine::open_shared_segments(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            config,
+            &ckpt.segment_files,
+            ckpt.next_seg_id,
+        )
+        .map_err(|e| ShardError::Log(format!("attaching shard segments on self-restart: {e}")))?;
+        let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
+        let shard = LocalShard {
+            engine: Mutex::new(engine),
+            snapshot,
+            translog,
+            norm,
+            dict,
+            data_dir: Some(dir),
+        };
+        // Replay the un-sealed tail (ops > P) into the engine ONLY — the ops are already on disk
+        // in the translog, so re-appending would duplicate them. Position-filtered, so it never
+        // double-applies an op already baked into the attached segments.
+        let tail = shard.translog.replay(floor)?.entries;
+        for (_pos, m) in &tail {
+            shard.apply_to_engine(m);
+        }
+        Ok(shard)
+    }
+
+    /// Apply one logged mutation to the engine WITHOUT re-appending it to the translog — used by
+    /// self-restart replay (ADR-039 §6), where the op is already durable in the translog. The
+    /// translog-appending counterpart is the seam's `insert_extracted`/`delete_by_logical_id`.
+    /// Infallible: a segments-only engine has no WAL, so neither apply can error.
+    fn apply_to_engine(&self, m: &ClusterMutation) {
+        let mut eng = self.lock();
+        match m {
+            ClusterMutation::Add {
+                logical,
+                version,
+                dsl,
+            } => {
+                if let Ok(ast) = crate::dsl::parse(dsl) {
+                    let mut lc = String::new();
+                    let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+                    eng.insert_extracted(&ex, *logical, *version, dsl);
+                }
+            }
+            ClusterMutation::Remove { logical } => {
+                eng.delete_by_logical_id(*logical).unwrap_or(0);
+            }
+        }
+        Self::publish(&eng, &self.snapshot);
     }
 
     /// Bulk-ingest, infallibly — the build path uses this directly on a concrete
@@ -290,6 +434,17 @@ impl Shard for LocalShard {
         text: &str,
     ) -> Result<Option<u32>, ShardError> {
         let mut eng = self.lock();
+        // Log-first / fail-closed (ADR-039): durably record the mutation in this shard's
+        // translog BEFORE applying it, under the engine lock so the log order equals the
+        // apply order (a re-add then re-remove of one id must replay in the same order it
+        // applied). A durable translog is the un-sealed tail a recovering peer replays; the
+        // in-memory translog is a no-op. An append failure rejects the write (engine
+        // untouched), mirroring the coordinator's WAL-first add_query.
+        self.translog.append(&ClusterMutation::Add {
+            logical,
+            version,
+            dsl: text.to_string(),
+        })?;
         let out = eng.insert_extracted(ex, logical, version, text);
         Self::publish(&eng, &self.snapshot);
         Ok(out)
@@ -297,8 +452,9 @@ impl Shard for LocalShard {
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
         let mut eng = self.lock();
-        // In-memory shards have no WAL, so the delete never errors; `0` on the
-        // impossible error rather than panicking.
+        // Log-first (ADR-039): see `insert_extracted`. Idempotent on replay.
+        self.translog.append(&ClusterMutation::Remove { logical })?;
+        // The engine delete itself never errors for a cluster shard (segments-only, no WAL).
         let n = eng.delete_by_logical_id(logical).unwrap_or(0);
         Self::publish(&eng, &self.snapshot);
         Ok(n)
@@ -308,15 +464,41 @@ impl Shard for LocalShard {
         let mut eng = self.lock();
         eng.flush();
         Self::publish(&eng, &self.snapshot);
+        // NOTE: a bare flush seals the memtable into a segment but does NOT trim the translog
+        // — a `Remove` against a base segment is only baked by `reseal_tombstoned_segments`,
+        // so only `seal_for_checkpoint` (flush + reseal) may advance the checkpoint and trim.
         Ok(())
     }
 
-    fn seal_for_checkpoint(&self) -> Result<(), ShardError> {
+    fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
         let mut eng = self.lock();
         eng.flush(); // seal the memtable into a base segment
         eng.reseal_tombstoned_segments(); // bake base-segment tombstones onto disk
         Self::publish(&eng, &self.snapshot);
-        Ok(())
+        // Everything ≤ `p` is now durably in the sealed/resealed segments; trim the translog
+        // to it so its remaining tail is exactly the un-sealed ops > `p` (ADR-039). Held under
+        // the engine lock, so no concurrent write advances `last_pos` between flush and read.
+        let p = self.translog.last_pos()?;
+        // A durable shard records a checkpoint sidecar so the data node can self-recover after a
+        // crash (ADR-039 §6): write it AFTER the segments are durable and BEFORE trimming the
+        // translog, so a crash in between just replays an already-captured (position-filtered)
+        // prefix — never a loss, never a double-apply.
+        if let Some(dir) = &self.data_dir {
+            let segment_files = eng.segment_filenames().map_err(|e| {
+                ShardError::Log(format!("collecting segment filenames for checkpoint: {e}"))
+            })?;
+            translog::write_sidecar(
+                dir,
+                &translog::ShardCheckpoint {
+                    next_seg_id: eng.next_seg_id(),
+                    local_checkpoint: p.0,
+                    dict_fingerprint: self.dict.fingerprint(),
+                    segment_files,
+                },
+            )?;
+        }
+        self.translog.checkpoint(p)?;
+        Ok(p)
     }
 
     fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
@@ -328,4 +510,42 @@ impl Shard for LocalShard {
     fn next_seg_id(&self) -> Result<u64, ShardError> {
         Ok(self.lock().next_seg_id())
     }
+
+    fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
+        Ok(self.translog.replay(from)?.entries)
+    }
+}
+
+/// Apply one logged mutation to a shard through its normal write path — so the op is itself
+/// re-logged into that shard's translog (a recovered replica's tail stays consistent) and
+/// applied to its engine. Re-derives features from the raw DSL against the frozen `dict`
+/// (the ADR-029 DSL-on-wire invariant), so a replayed op is byte-identical to the original
+/// live write → the recovered shard converges to the same logical set (zero false negatives).
+/// Used by both in-process peer recovery ([`super::replica::peer_recover`]) and the
+/// coordinator's gRPC tail-replay.
+pub(crate) fn apply_mutation(
+    shard: &dyn Shard,
+    norm: &Normalizer,
+    dict: &Dict,
+    m: &ClusterMutation,
+) -> Result<(), ShardError> {
+    match m {
+        ClusterMutation::Add {
+            logical,
+            version,
+            dsl,
+        } => {
+            // Only parseable DSL is ever logged, but stay defensive: an unparseable record
+            // carries no applicable mutation, so skip it rather than fail the whole replay.
+            if let Ok(ast) = crate::dsl::parse(dsl) {
+                let mut lc = String::new();
+                let ex = extract_readonly(&ast, norm, dict, &mut lc);
+                shard.insert_extracted(&ex, *logical, *version, dsl)?;
+            }
+        }
+        ClusterMutation::Remove { logical } => {
+            shard.delete_by_logical_id(*logical)?;
+        }
+    }
+    Ok(())
 }

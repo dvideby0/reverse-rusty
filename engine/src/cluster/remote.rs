@@ -19,6 +19,7 @@ use tonic::transport::Channel;
 use crate::compile::Extracted;
 use crate::segment::{IngestReport, MatchStats};
 
+use super::clog::{ClusterMutation, LogPos};
 use super::proto;
 use super::proto::shard_service_client::ShardServiceClient;
 use super::shard::{Shard, ShardError};
@@ -27,6 +28,9 @@ use super::shard::{Shard, ShardError};
 pub struct RemoteShard {
     client: ShardServiceClient<Channel>,
     handle: Handle,
+    /// The coordinator's frozen-dict fingerprint (verified equal to the server's at connect).
+    /// Carried so dict-guarded RPCs (e.g. `FetchTranslog`) can present it.
+    dict_fp: u64,
 }
 
 impl RemoteShard {
@@ -53,7 +57,11 @@ impl RemoteShard {
                 actual: actual_fp,
             });
         }
-        Ok(RemoteShard { client, handle })
+        Ok(RemoteShard {
+            client,
+            handle,
+            dict_fp: expected_fp,
+        })
     }
 
     /// Connect, then **ship** the coordinator's frozen dict to the server (`AdoptDict`,
@@ -104,19 +112,25 @@ impl RemoteShard {
                 actual: adopted,
             });
         }
-        Ok(RemoteShard { client, handle })
+        Ok(RemoteShard {
+            client,
+            handle,
+            dict_fp: expected_fp,
+        })
     }
 
     /// Drive this remote node's `RecoverFrom` RPC (ADR-036): it pulls `source_endpoint`'s sealed
     /// segments (via that peer's `FetchSegments`), writes them under its own data_dir, attaches
     /// them, and starts serving — the cross-node peer-recovery primitive. `dict_fp` must equal
     /// the coordinator's frozen-dict fingerprint (the server re-checks it). Returns
-    /// `(segments_attached, num_queries)`. The node must be durable + have adopted the dict.
+    /// `(segments_attached, num_queries, up_to_seqno)` — the last being the snapshot's translog
+    /// position `P` (ADR-039), from which the coordinator replays the source's tail (> P) to
+    /// finish a no-quiesce recovery. The node must be durable + have adopted the dict.
     pub fn recover_from(
         &self,
         source_endpoint: &str,
         dict_fp: u64,
-    ) -> Result<(u64, u64), ShardError> {
+    ) -> Result<(u64, u64, u64), ShardError> {
         let mut client = self.client.clone();
         let req = proto::RecoverFromRequest {
             source_endpoint: source_endpoint.to_string(),
@@ -127,7 +141,11 @@ impl RemoteShard {
             .block_on(async move { client.recover_from(req).await })
             .map_err(rpc_err)?
             .into_inner();
-        Ok((reply.segments_attached, reply.num_queries))
+        Ok((
+            reply.segments_attached,
+            reply.num_queries,
+            reply.up_to_seqno,
+        ))
     }
 }
 
@@ -256,11 +274,13 @@ impl Shard for RemoteShard {
         Ok(())
     }
 
-    fn seal_for_checkpoint(&self) -> Result<(), ShardError> {
-        // Coordinator-driven durable checkpoint is local-only this increment (a remote
-        // cluster uses an in-memory log; ADR-031/032). Flush so the remote memtable
-        // seals; the remote node owns its own segment durability.
-        self.flush()
+    fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
+        // The remote node owns its own segment durability + translog position (server-side); a
+        // recovering peer learns the snapshot's position from `FetchManifest.up_to_seqno`, not
+        // from this client-side call. Flush so the remote memtable seals; report `LogPos(0)` as
+        // a benign sentinel (the coordinator's gRPC recovery uses the server-reported position).
+        self.flush()?;
+        Ok(LogPos(0))
     }
 
     fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
@@ -277,5 +297,30 @@ impl Shard for RemoteShard {
         Err(ShardError::Remote(
             "next_seg_id is unavailable for a remote shard".into(),
         ))
+    }
+
+    fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
+        // Drain the source's `FetchTranslog` stream (ops > `from`) and decode each entry back
+        // into a logical mutation. The coordinator replays these into the recovering target —
+        // the no-quiesce catch-up (ADR-039). The tail is the small un-sealed delta.
+        let mut client = self.client.clone();
+        let req = proto::FetchTranslogRequest {
+            after_seqno: from.0,
+            dict_fingerprint: self.dict_fp,
+        };
+        self.handle.block_on(async move {
+            let mut stream = client
+                .fetch_translog(req)
+                .await
+                .map_err(rpc_err)?
+                .into_inner();
+            let mut out = Vec::new();
+            while let Some(entry) = stream.message().await.map_err(rpc_err)? {
+                if let Some(pm) = proto::translog_entry_to_mutation(entry) {
+                    out.push(pm);
+                }
+            }
+            Ok(out)
+        })
     }
 }

@@ -7,6 +7,7 @@
 
 pub(crate) use reverse_rusty_shard_proto::*;
 
+use super::clog::{ClusterMutation, LogPos};
 use crate::segment::MatchStats as EngineStats;
 
 /// Proto wire `MatchStats` → engine [`MatchStats`]. Field order pinned to `segment.rs`.
@@ -40,6 +41,42 @@ pub(crate) fn stats_from_engine(s: EngineStats) -> MatchStats {
         broad_queries_evaluated: s.broad_queries_evaluated,
         broad_anchors_scanned: s.broad_anchors_scanned,
         broad_batches: s.broad_batches,
+    }
+}
+
+/// Proto `TranslogEntry` → engine `(LogPos, ClusterMutation)` (ADR-039). `None` if the oneof
+/// is unset (a malformed frame). The Add arm reuses `AddItem {logical_id, dsl, version}`, so
+/// the wire stays DSL-bearing/dict-agnostic — the receiver re-compiles read-only on replay.
+pub(crate) fn translog_entry_to_mutation(e: TranslogEntry) -> Option<(LogPos, ClusterMutation)> {
+    let m = match e.op? {
+        translog_entry::Op::Add(item) => ClusterMutation::Add {
+            logical: item.logical_id,
+            version: item.version.max(1),
+            dsl: item.dsl,
+        },
+        translog_entry::Op::RemoveLogical(logical) => ClusterMutation::Remove { logical },
+    };
+    Some((LogPos(e.seqno), m))
+}
+
+/// Engine `(LogPos, &ClusterMutation)` → proto `TranslogEntry` — the source side of
+/// `FetchTranslog` (ADR-039).
+pub(crate) fn translog_entry_from_mutation(pos: LogPos, m: &ClusterMutation) -> TranslogEntry {
+    let op = match m {
+        ClusterMutation::Add {
+            logical,
+            version,
+            dsl,
+        } => translog_entry::Op::Add(AddItem {
+            logical_id: *logical,
+            dsl: dsl.clone(),
+            version: *version,
+        }),
+        ClusterMutation::Remove { logical } => translog_entry::Op::RemoveLogical(*logical),
+    };
+    TranslogEntry {
+        seqno: pos.0,
+        op: Some(op),
     }
 }
 

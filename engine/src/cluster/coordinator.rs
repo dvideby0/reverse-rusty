@@ -806,14 +806,18 @@ impl ClusterEngine {
             let mut copies: Vec<LocalShard> = Vec::with_capacity(rf);
             let mut recovered: Vec<LocalShard> = Vec::with_capacity(rf.saturating_sub(1));
             for r in 1..rf {
-                recovered.push(super::replica::peer_recover(
-                    Arc::clone(&norm),
-                    Arc::clone(&dict),
+                // The high-water is irrelevant here: at open there are no concurrent writes,
+                // so the primary's translog tail is empty and this peer_recover is a pure
+                // segment copy; the coordinator-log replay below repopulates all copies.
+                let (replica, _hwm) = super::replica::peer_recover(
+                    &norm,
+                    &dict,
                     per_shard.clone(),
                     &primary,
                     &primary_dir,
                     &replica_dir(&data_dir, s, r),
-                )?);
+                )?;
+                recovered.push(replica);
             }
             copies.push(primary);
             copies.extend(recovered);
@@ -1181,19 +1185,22 @@ impl ClusterEngine {
         Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)
     }
 
-    /// Cross-node peer recovery (ADR-036): bring a fresh, durable, **pending** node up as a copy of
-    /// a shard by streaming a peer's segments. Ships the frozen dict to `target_endpoint` (adopt),
-    /// then drives its `RecoverFrom`, which pulls `source_endpoint`'s sealed segments, attaches them,
-    /// and starts serving. Returns the recovered node's post-attach query count (so the caller can
-    /// verify parity or fold it into a group). Writes to the position MUST be quiesced for the
-    /// window — there is no durable remote coordinator log to replay a concurrent tail from in this
-    /// increment (that couples to the Raft control plane, step 5).
+    /// Cross-node peer recovery (ADR-036 + ADR-039): bring a fresh, durable, **pending** node up
+    /// as a copy of a shard by streaming a peer's segments AND replaying its translog tail — so
+    /// writes to the source need **not** be quiesced for the copy window (ADR-036's gap, closed by
+    /// the per-shard translog). Ships the frozen dict to `target_endpoint` (adopt); drives its
+    /// `RecoverFrom`, which pulls `source_endpoint`'s sealed segments at position `P`, attaches
+    /// them, and reports `P`; then replays the source's translog tail (ops > `P` — the writes that
+    /// landed during the copy) into the target via the shared apply funnel. Returns
+    /// `(num_queries, high_water)` — the post-recovery count and the source position the target is
+    /// caught up to. Under sustained writes a brief finalize via [`Self::catch_up_recovered_replica`]
+    /// drains any residual that arrived during the tail replay.
     pub fn peer_recover_replica(
         &self,
         source_endpoint: &str,
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
-    ) -> Result<u64, ShardError> {
+    ) -> Result<(u64, u64), ShardError> {
         let expected = self.dict.fingerprint();
         let dict_bytes = crate::storage::serialize_dict(&self.dict);
         // Ship the dict so the fresh node attaches segments against the right feature space.
@@ -1203,8 +1210,53 @@ impl ClusterEngine {
             dict_bytes,
             expected,
         )?;
-        let (_segments, num_queries) = target.recover_from(source_endpoint, expected)?;
-        Ok(num_queries)
+        // Bulk copy: segments at snapshot position P (the source keeps serving + accepting writes).
+        let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
+        // Tail replay: drain the source's translog (ops > P) and apply to the target through the
+        // SAME apply funnel as a live write (re-derived from DSL against the frozen dict), so the
+        // recovered copy converges to the same logical set — the no-quiesce delta (ADR-039).
+        let source = super::remote::RemoteShard::connect(
+            source_endpoint.to_string(),
+            handle.clone(),
+            expected,
+        )?;
+        let hwm =
+            super::replica::catch_up_replica(&target, &source, &self.norm, &self.dict, LogPos(p))?;
+        let num_queries = target.num_queries()? as u64;
+        Ok((num_queries, hwm.0))
+    }
+
+    /// Re-run the translog catch-up (ADR-039): replay `source`'s tail (ops strictly after
+    /// `after`) into the already-recovered `target`, returning the new high-water source position.
+    /// The brief finalize after [`Self::peer_recover_replica`]'s bulk copy — under sustained
+    /// writes, recovery converges by repeating this until the high-water stops advancing (the
+    /// window where a final quiesce would shrink to the residual delta).
+    pub fn catch_up_recovered_replica(
+        &self,
+        source_endpoint: &str,
+        target_endpoint: &str,
+        after: u64,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<u64, ShardError> {
+        let expected = self.dict.fingerprint();
+        let source = super::remote::RemoteShard::connect(
+            source_endpoint.to_string(),
+            handle.clone(),
+            expected,
+        )?;
+        let target = super::remote::RemoteShard::connect(
+            target_endpoint.to_string(),
+            handle.clone(),
+            expected,
+        )?;
+        let hwm = super::replica::catch_up_replica(
+            &target,
+            &source,
+            &self.norm,
+            &self.dict,
+            LogPos(after),
+        )?;
+        Ok(hwm.0)
     }
 }
 

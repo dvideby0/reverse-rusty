@@ -179,6 +179,25 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   recovery-quiesce window (that is step 5c — a durable/replicated per-shard *query* log); a durable Raft log
   (CRC-framed, reusing `storage::crc32`), TLS/auth, and an allocator acting on the shard→node map remain
   design-only.
+- **Durable + replicated per-shard query log (translog) + no-quiesce peer recovery (ADR-039)** — clustering
+  build-path step 5c, closing the ADR-036 recovery-quiesce gap. Each durable shard owns a per-shard **translog**
+  (`src/cluster/translog.rs`) — the Elasticsearch translog, reusing ADR-031's CRC-framed `FileClusterLog` /
+  `NullClusterLog` + the logical-id-and-DSL `ClusterMutation` + `LogPos` verbatim, re-homed per shard. Writes are
+  log-first/fail-closed; `seal_for_checkpoint` captures the snapshot position `P` and trims the tail (segments
+  hold ops ≤ `P`, the translog holds exactly the un-sealed ops > `P` — the no-double-apply boundary). Peer
+  recovery now streams a peer's segments at `P` **then replays the translog tail (> `P`)** — the writes that land
+  during the copy window are recovered rather than lost, so recovery need **not quiesce** writes, both in-process
+  (`peer_recover` + `catch_up_replica`) and over gRPC (a new server-streaming `FetchTranslog(after_seqno)` RPC +
+  `FetchManifest.up_to_seqno` + the coordinator's `peer_recover_replica`). A durable data node also **self-restarts**
+  from a per-shard checkpoint sidecar (`shard.ckpt`: committed segments + `P` + dict fingerprint), attaching its
+  segments + replaying its translog tail after its own crash (no coordinator manifest on the remote path). The
+  default in-memory / RF=1 / in-process paths are byte-identical (a `NullClusterLog` translog), so every prior
+  oracle is unchanged. Proven by `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_without_quiescing` (recovered
+  ≡ live source ≡ brute over the final live set across the wire), `replica.rs::peer_recover_replays_tail_without_quiescing`
+  + `::durable_shard_self_restarts_from_translog`, and `translog.rs` unit tests. `translog.rs` is std-only (lean
+  core); the gRPC pieces are `distributed`-gated. **Honest scope:** under sustained writes full convergence still
+  needs a brief finalize (the quiesce window shrinks to the residual delta, not the whole copy); translog
+  retention/GC for a slow follower, TLS/auth, and an allocator acting on the shard→node map remain design-only.
 
 ## Measured
 
@@ -256,12 +275,14 @@ the selective candidate count further.
   document (ring + the **shard→node map** + membership + feature-model version + epoch), step 5a / ADR-037 —
   plus the **openraft backend** behind it (step 5b / ADR-038): a `RaftControlPlane` over `Raft<C>` + a gRPC
   `ControlService` (opaque-bytes envelope) + a `controlserver` manager bin, giving multi-process elections and
-  leader failover, `distributed`-gated so the lean core never sees openraft. **Still design-only** (the
-  shared-nothing multi-node roadmap): a **durable/replicated per-shard query log** so peer recovery can replay a
-  concurrent tail instead of quiescing writes (step 5c — distinct from the control-plane doc; the control plane
-  alone does not lift the quiesce window), a durable Raft log (CRC-framed) + restart recovery, an allocator that
-  acts on the shard→node map, normalizer/vocab shipping, autoscaling, auto-split, replicate-broad-to-all, and
-  TLS/auth.
+  leader failover, `distributed`-gated so the lean core never sees openraft. The **durable + replicated
+  per-shard query log (translog)** is **built** too (step 5c / ADR-039): peer recovery now streams a peer's
+  segments at position `P` then replays the per-shard translog tail (> `P`), so it need **not quiesce** writes
+  for the copy window (the ADR-036 gap closed, both in-process and over gRPC via `FetchTranslog`), and a durable
+  data node self-restarts from its own checkpoint sidecar. **Still design-only** (the shared-nothing multi-node
+  roadmap): translog retention/GC for a slow follower + a brief finalize under sustained writes, a durable Raft
+  log (CRC-framed) + restart recovery, an allocator that acts on the shard→node map, normalizer/vocab shipping,
+  autoscaling, auto-split, replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
@@ -391,10 +412,13 @@ from the audit's former P3 list). Roughly grouped:
   too: its seam (ADR-037: a `trait ControlPlane` + in-memory backend holding the cluster-state document) AND the
   **openraft backend** behind it (ADR-038: a `RaftControlPlane` over `Raft<C>` + a gRPC `ControlService` + a
   `controlserver` manager bin), giving multi-process elections and leader failover (`distributed`-gated — the
-  lean core never compiles openraft). A full multi-node deployment still needs the remaining **shared-nothing**
-  layers — a **durable/replicated per-shard query log** so recovery need not quiesce writes (step 5c), a durable
-  Raft log + restart recovery, an allocator that acts on the shard→node map, plus autoscaling — designed but not
-  built (no object store / cloud dependency anywhere; ADR-033); see Tier 3.
+  lean core never compiles openraft). The **durable + replicated per-shard query log (translog) is built** too
+  (ADR-039): peer recovery streams a peer's segments then replays the per-shard translog tail, so it need **not
+  quiesce** writes for the copy window (in-process + over gRPC via `FetchTranslog`), and a durable data node
+  self-restarts from its own checkpoint sidecar. A full multi-node deployment still needs the remaining
+  **shared-nothing** layers — translog retention/GC for a slow follower (+ a brief finalize under sustained
+  writes), a durable Raft log + restart recovery, an allocator that acts on the shard→node map, plus
+  autoscaling — designed but not built (no object store / cloud dependency anywhere; ADR-033); see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator
   **ships** its frozen dict to each server at connect (ADR-034), and the ADR-030 fingerprint handshake fails
   loud (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can

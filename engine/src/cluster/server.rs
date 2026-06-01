@@ -22,6 +22,7 @@ use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
 
+use super::clog::LogPos;
 use super::proto;
 use super::proto::shard_service_server::{ShardService, ShardServiceServer};
 use super::shard::{LocalShard, Shard, ShardError};
@@ -418,10 +419,15 @@ impl ShardService for ShardServer {
             ));
         }
         // Seal so the on-disk `.seg` set reflects live state (memtable flushed, base tombstones
-        // baked) — else a deleted query could resurrect on the recovered replica.
-        st.shard
+        // baked) — else a deleted query could resurrect on the recovered replica. The returned
+        // position `P` is what the sealed segments capture through; the recovering node replays
+        // the translog tail (> P) via FetchTranslog to catch writes that land during the copy
+        // (ADR-039), so the source need NOT quiesce.
+        let up_to_seqno = st
+            .shard
             .seal_for_checkpoint()
-            .map_err(|e| Status::internal(format!("seal before FetchSegments: {e}")))?;
+            .map_err(|e| Status::internal(format!("seal before FetchSegments: {e}")))?
+            .0;
         let files = st
             .shard
             .segment_filenames()
@@ -443,6 +449,7 @@ impl ShardService for ShardServer {
                         next_seg_id,
                         dict_fingerprint: fp,
                         has_sources,
+                        up_to_seqno,
                     },
                 )),
             };
@@ -464,8 +471,11 @@ impl ShardService for ShardServer {
     /// Accept peer recovery — the recovering node pulls from a peer (the Elasticsearch model):
     /// connect to `source_endpoint`, drain its `FetchSegments`, write the files under our own
     /// data_dir (tmp+rename), attach them, and swap in the recovered shard. Refuses if not
-    /// durable or the dict fingerprint diverges. The caller keeps writes to this position
-    /// quiesced for the window (this increment has no durable remote log to replay a tail from).
+    /// durable or the dict fingerprint diverges. Returns the snapshot's translog position `P`
+    /// (ADR-039): the orchestrator then replays the source's translog tail (> P) into this node
+    /// via `FetchTranslog`, so the source need NOT quiesce writes during the segment copy
+    /// (closing ADR-036's gap). Segment attach here is at the snapshot only; the tail catch-up
+    /// is the coordinator's `peer_recover_replica`.
     async fn recover_from(
         &self,
         request: Request<proto::RecoverFromRequest>,
@@ -502,7 +512,8 @@ impl ShardService for ShardServer {
         let seg_dir = dir.join("segments");
         std::fs::create_dir_all(&seg_dir)
             .map_err(|e| Status::internal(format!("creating {}: {e}", seg_dir.display())))?;
-        let (files, next_seg_id) = drain_recovery_stream(&mut stream, &dir, &seg_dir).await?;
+        let (files, next_seg_id, up_to_seqno) =
+            drain_recovery_stream(&mut stream, &dir, &seg_dir).await?;
 
         // Attach the received segments against our adopted dict (fail-loud on missing/corrupt).
         let mut sc = self.config.clone();
@@ -526,7 +537,40 @@ impl ShardService for ShardServer {
         Ok(Response::new(proto::RecoverFromReply {
             segments_attached,
             num_queries,
+            up_to_seqno,
         }))
+    }
+
+    // ---- per-shard translog tail (ADR-039) ----
+    type FetchTranslogStream =
+        Pin<Box<dyn Stream<Item = Result<proto::TranslogEntry, Status>> + Send>>;
+
+    /// Stream this shard's un-sealed translog tail — every logged mutation with position
+    /// strictly after `after_seqno`, oldest-first. Read-only: it does NOT seal (unlike
+    /// `FetchSegments`), so the source keeps serving + accepting writes while a recovering peer
+    /// catches up (ADR-039 — the no-quiesce property). The tail is the small un-sealed delta, so
+    /// it is read once and streamed from memory. Refuses a dict-fingerprint mismatch.
+    async fn fetch_translog(
+        &self,
+        request: Request<proto::FetchTranslogRequest>,
+    ) -> Result<Response<Self::FetchTranslogStream>, Status> {
+        let st = self.loaded()?;
+        let req = request.into_inner();
+        let fp = st.dict.fingerprint();
+        if req.dict_fingerprint != fp {
+            return Err(Status::failed_precondition(
+                "FetchTranslog dict-fingerprint mismatch (divergent feature space)",
+            ));
+        }
+        let tail = st
+            .shard
+            .translog_tail(LogPos(req.after_seqno))
+            .map_err(|e| Status::internal(format!("reading translog tail: {e}")))?;
+        let entries: Vec<Result<proto::TranslogEntry, Status>> = tail
+            .into_iter()
+            .map(|(pos, m)| Ok(proto::translog_entry_from_mutation(pos, &m)))
+            .collect();
+        Ok(Response::new(Box::pin(tokio_stream::iter(entries))))
     }
 }
 
@@ -581,7 +625,7 @@ async fn drain_recovery_stream(
     stream: &mut tonic::Streaming<proto::FetchSegmentsChunk>,
     dir: &std::path::Path,
     seg_dir: &std::path::Path,
-) -> Result<(Vec<String>, u64), Status> {
+) -> Result<(Vec<String>, u64, u64), Status> {
     use std::io::Write as _;
     let final_path = |name: &str| -> PathBuf {
         if name == "sources.dat" {
@@ -633,7 +677,11 @@ async fn drain_recovery_stream(
             )));
         }
     }
-    Ok((manifest.segment_files, manifest.next_seg_id))
+    Ok((
+        manifest.segment_files,
+        manifest.next_seg_id,
+        manifest.up_to_seqno,
+    ))
 }
 
 #[cfg(test)]
