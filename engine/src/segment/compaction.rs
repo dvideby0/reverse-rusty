@@ -144,6 +144,44 @@ impl Engine {
         Some(report)
     }
 
+    /// Re-seal every base segment that carries tombstones, dropping the dead entries so
+    /// the ON-DISK `.seg` reflects all applied deletes. The cluster checkpoint calls this
+    /// (ADR-032): a [`MmapSegment::tombstone`](crate::storage::MmapSegment::tombstone)
+    /// mutates only the in-RAM alive overlay, so without re-sealing, a `Remove` against a
+    /// base segment would be lost once the log tail carrying it is truncated — the deleted
+    /// query would resurrect on reopen (a false positive). No-op when every segment is
+    /// already clean. Unlike [`compact_all`](Self::compact_all) it re-seals a lone dirty
+    /// segment too (it does not require ≥2 segments) and re-seals each dirty segment in
+    /// place (it does not merge clean ones), so it stays O(tombstoned data), not O(corpus).
+    pub fn reseal_tombstoned_segments(&mut self) {
+        if self.segments.iter().all(|s| s.alive_count() == s.len()) {
+            return; // nothing tombstoned — fast common case
+        }
+        let mut new_segments = Vec::with_capacity(self.segments.len());
+        let mut old_files = Vec::new();
+        for arc in std::mem::take(&mut self.segments) {
+            if arc.alive_count() == arc.len() {
+                new_segments.push(arc); // already clean — keep as-is (no rewrite)
+                continue;
+            }
+            if let BaseSegment::Mmap(m) = arc.as_ref() {
+                old_files.push(m.path().to_path_buf());
+            }
+            let seg = arc_into_memory(arc);
+            let clean = Segment::compact_from(&[&seg]); // copies only alive entries
+                                                        // An all-tombstoned segment compacts to empty — drop it rather than writing
+                                                        // an empty `.seg` (and let its old file be cleaned up below).
+            if clean.is_empty() {
+                continue;
+            }
+            let base = self.make_base_segment(clean); // writes a fresh `.seg`
+            new_segments.push(Arc::new(base));
+        }
+        self.segments = new_segments;
+        self.cleanup_segment_files(&old_files);
+        self.save_manifest_if_persistent();
+    }
+
     /// Merge a specific range of base segments `[lo..hi)` into one, replacing
     /// them in the segments vec. Useful for leveled/tiered policies that pick
     /// adjacent pairs. Returns a report if the merge happened.

@@ -981,6 +981,21 @@ impl MmapSegment {
         self.alive_counter
     }
 
+    /// Tally entries by cost class into `c` (`[A, B, C, D]`), reading the persisted
+    /// per-entry class bytes. Counts ALL entries (including tombstoned), matching
+    /// [`Segment::class_counts`](crate::segment::Segment::class_counts) so introspection
+    /// is identical whether a segment is in-memory or mmap'd (the latter is what a
+    /// reopened durable cluster attaches — ADR-032).
+    pub fn class_counts(&self, c: &mut [u64; 4]) {
+        let n = self.len();
+        for i in 0..n {
+            // SAFETY: `i < n == num_queries`, the length of the `class_arr` byte array
+            // parsed from the mmap (same bound `to_memory_segment` uses).
+            let class_byte = unsafe { *self.class_arr.add(i) };
+            c[(class_byte as usize).min(3)] += 1;
+        }
+    }
+
     pub fn holes_ratio(&self) -> f64 {
         let total = self.len();
         if total == 0 {
@@ -1568,19 +1583,19 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
 // `sources.dat` v2 shape plus a version column.
 
 const CLUSTER_MANIFEST_MAGIC: [u8; 4] = *b"RCMN";
-const CLUSTER_MANIFEST_VERSION: u32 = 1;
-
-const CLUSTER_SNAP_MAGIC: [u8; 4] = *b"RCSN";
-const CLUSTER_SNAP_VERSION: u32 = 1;
-const CLUSTER_SNAP_HEADER: usize = 16; // magic(4) + version(4) + count(4) + reserved(4)
-const CLUSTER_SNAP_REC: usize = 24; // logical(8) + version(4) + blob_off(8) + dsl_len(4)
+// v2 (ADR-032): the base is per-shard COMPILED segments (the `segment_registry`),
+// not a raw-DSL snapshot file. v1 had a `snapshot_file: String`; the reader rejects
+// it (pre-release branch — no on-disk v1 to migrate).
+const CLUSTER_MANIFEST_VERSION: u32 = 2;
 
 /// The coordinator's cluster-state document (the analogue of what a Raft quorum will
-/// later hold). Written atomically alongside the base snapshot + mutation log.
+/// later hold). Written atomically (tmp + CRC + rename) — the SINGLE commit point that
+/// makes a checkpoint all-or-nothing: it pins the frozen dict + ring + log cursor AND
+/// the per-shard segment registry that constitutes the committed base (ADR-032).
 pub struct ClusterManifest {
     /// The log epoch / checkpoint generation (bumped on `checkpoint`).
     pub epoch: u64,
-    /// The log position the base snapshot captures through; replay starts after it.
+    /// The log position the committed segment base captures through; replay starts after it.
     pub snapshot_pos: u64,
     /// `Dict::fingerprint()` of the frozen dict — verified on open (fail loud on drift).
     pub dict_fingerprint: u64,
@@ -1589,9 +1604,16 @@ pub struct ClusterManifest {
     pub vnodes: u32,
     /// Default broad-lane toggle.
     pub include_broad: bool,
-    /// Relative filename of the base snapshot this manifest commits.
-    pub snapshot_file: String,
-    /// `serialize_dict(frozen dict)` — the authoritative feature space.
+    /// Per-shard committed base: `segment_registry[i]` is the list of `.seg` filenames
+    /// (relative to `shard_<i>/segments/`) that constitute shard `i`'s base. This is the
+    /// atomic-commit replacement for the v1 raw-DSL snapshot — on open a shard
+    /// attaches-and-mmaps exactly these instead of re-ingesting (ADR-032).
+    pub segment_registry: Vec<Vec<String>>,
+    /// Per-shard next segment-id counter (parallel to `segment_registry`), so a flush
+    /// after reopen never reuses/clobbers a committed segment filename.
+    pub next_seg_ids: Vec<u64>,
+    /// `serialize_dict(frozen dict)` — the authoritative feature space, stored ONCE here
+    /// (shards do not embed their own dict copy).
     pub dict_data: Vec<u8>,
 }
 
@@ -1606,9 +1628,21 @@ pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Re
     write_u32(&mut f, manifest.num_shards)?;
     write_u32(&mut f, manifest.vnodes)?;
     f.write_all(&[u8::from(manifest.include_broad)])?;
-    let snap_bytes = manifest.snapshot_file.as_bytes();
-    write_u32(&mut f, snap_bytes.len() as u32)?;
-    f.write_all(snap_bytes)?;
+    // Per-shard segment registry: outer count, then each shard's filename list.
+    write_u32(&mut f, manifest.segment_registry.len() as u32)?;
+    for files in &manifest.segment_registry {
+        write_u32(&mut f, files.len() as u32)?;
+        for name in files {
+            let b = name.as_bytes();
+            write_u32(&mut f, b.len() as u32)?;
+            f.write_all(b)?;
+        }
+    }
+    // Per-shard next-seg-id counters (parallel to the registry).
+    write_u32(&mut f, manifest.next_seg_ids.len() as u32)?;
+    for &id in &manifest.next_seg_ids {
+        write_u64(&mut f, id)?;
+    }
     write_u32(&mut f, manifest.dict_data.len() as u32)?;
     f.write_all(&manifest.dict_data)?;
     f.sync_all()?;
@@ -1669,15 +1703,35 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated cluster manifest"))?
         != 0;
     cursor += 1;
-    let snap_len = read_u32_at(&data, cursor)? as usize;
+    // Per-shard segment registry (outer count, then each shard's filename list).
+    let shard_count = read_u32_at(&data, cursor)? as usize;
     cursor += 4;
-    let snapshot_file =
-        std::str::from_utf8(data.get(cursor..cursor + snap_len).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "truncated snapshot name")
-        })?)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-        .to_string();
-    cursor += snap_len;
+    let mut segment_registry: Vec<Vec<String>> = Vec::with_capacity(shard_count);
+    for _ in 0..shard_count {
+        let nfiles = read_u32_at(&data, cursor)? as usize;
+        cursor += 4;
+        let mut files = Vec::with_capacity(nfiles);
+        for _ in 0..nfiles {
+            let len = read_u32_at(&data, cursor)? as usize;
+            cursor += 4;
+            let name = std::str::from_utf8(data.get(cursor..cursor + len).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "truncated registry filename")
+            })?)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            .to_string();
+            cursor += len;
+            files.push(name);
+        }
+        segment_registry.push(files);
+    }
+    // Per-shard next-seg-id counters (parallel to the registry).
+    let nids = read_u32_at(&data, cursor)? as usize;
+    cursor += 4;
+    let mut next_seg_ids = Vec::with_capacity(nids);
+    for _ in 0..nids {
+        next_seg_ids.push(read_u64_at(&data, cursor)?);
+        cursor += 8;
+    }
     let dict_len = read_u32_at(&data, cursor)? as usize;
     cursor += 4;
     let dict_data = data
@@ -1692,96 +1746,10 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         num_shards,
         vnodes,
         include_broad,
-        snapshot_file,
+        segment_registry,
+        next_seg_ids,
         dict_data,
     })
-}
-
-/// Write the cluster base snapshot — a caller-sorted live set `(logical, version, dsl)`
-/// — as a sorted index + text blob + CRC trailer, written atomically. Mirrors
-/// `write_sources_v2` with an added per-record `version` column.
-pub fn write_cluster_snapshot(entries: &[(u64, u32, String)], path: &Path) -> io::Result<()> {
-    let mut buf: Vec<u8> =
-        Vec::with_capacity(CLUSTER_SNAP_HEADER + entries.len() * CLUSTER_SNAP_REC + 64);
-    buf.extend_from_slice(&CLUSTER_SNAP_MAGIC);
-    buf.extend_from_slice(&CLUSTER_SNAP_VERSION.to_le_bytes());
-    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes()); // reserved
-    let mut blob: Vec<u8> = Vec::new();
-    let mut blob_off: u64 = 0;
-    let mut prev: Option<u64> = None;
-    for (logical, version, dsl) in entries {
-        debug_assert!(
-            prev.is_none_or(|p| p <= *logical),
-            "write_cluster_snapshot requires entries sorted by logical id"
-        );
-        prev = Some(*logical);
-        let bytes = dsl.as_bytes();
-        buf.extend_from_slice(&logical.to_le_bytes());
-        buf.extend_from_slice(&version.to_le_bytes());
-        buf.extend_from_slice(&blob_off.to_le_bytes());
-        buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-        blob.extend_from_slice(bytes);
-        blob_off += bytes.len() as u64;
-    }
-    buf.extend_from_slice(&blob);
-    let crc = crc32(&buf);
-    buf.extend_from_slice(&crc.to_le_bytes());
-
-    let tmp = path.with_extension("csnap.tmp");
-    let mut f = std::fs::File::create(&tmp)?;
-    f.write_all(&buf)?;
-    f.sync_all()?;
-    drop(f);
-    durable_rename(&tmp, path)?;
-    Ok(())
-}
-
-/// Read a cluster base snapshot fully into `(logical, version, dsl)` records (the whole
-/// set is needed to rebuild every shard, so there is no mmap/lazy path).
-pub fn read_cluster_snapshot(path: &Path) -> io::Result<Vec<(u64, u32, String)>> {
-    let data = std::fs::read(path)?;
-    let bad = || io::Error::new(io::ErrorKind::InvalidData, "corrupt cluster snapshot");
-    if data.len() < CLUSTER_SNAP_HEADER + 4 || data[0..4] != CLUSTER_SNAP_MAGIC {
-        return Err(bad());
-    }
-    let version = read_u32_at(&data, 4)?;
-    if version != CLUSTER_SNAP_VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unsupported cluster snapshot version {version}"),
-        ));
-    }
-    let count = read_u32_at(&data, 8)? as usize;
-    let index_off = CLUSTER_SNAP_HEADER;
-    let blob_off = index_off
-        .checked_add(count.checked_mul(CLUSTER_SNAP_REC).ok_or_else(bad)?)
-        .ok_or_else(bad)?;
-    if blob_off + 4 > data.len() {
-        return Err(bad());
-    }
-    let want = read_u32_at(&data, data.len() - 4)?;
-    if crc32(&data[..data.len() - 4]) != want {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "cluster snapshot CRC mismatch",
-        ));
-    }
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let rec = index_off + i * CLUSTER_SNAP_REC;
-        let logical = read_u64_at(&data, rec)?;
-        let version = read_u32_at(&data, rec + 8)?;
-        let boff = read_u64_at(&data, rec + 12)? as usize;
-        let len = read_u32_at(&data, rec + 20)? as usize;
-        let start = blob_off + boff;
-        let bytes = data.get(start..start + len).ok_or_else(bad)?;
-        let dsl = std::str::from_utf8(bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-            .to_string();
-        out.push((logical, version, dsl));
-    }
-    Ok(out)
 }
 
 // -- Query source store persistence ------------------------------------------
@@ -2206,4 +2174,59 @@ pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, S
         }
     }
     Ok(store)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The v2 cluster manifest's nested per-shard registry + next-seg-id columns must
+    /// round-trip byte-exactly (varied per-shard file counts, including an empty shard).
+    /// The hand-rolled length-prefixed encoding is easy to get cursor-wrong, so pin it.
+    #[test]
+    fn cluster_manifest_v2_round_trips_registry() {
+        let dir = std::env::temp_dir().join(format!("rr_cmanifest_rt_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cluster_manifest.bin");
+
+        let manifest = ClusterManifest {
+            epoch: 7,
+            snapshot_pos: 42,
+            dict_fingerprint: 0xDEAD_BEEF_1234_5678,
+            num_shards: 3,
+            vnodes: 64,
+            include_broad: true,
+            segment_registry: vec![
+                vec!["seg_000001.seg".to_string(), "seg_000004.seg".to_string()],
+                vec![], // an empty shard (no committed segments)
+                vec!["seg_000002.seg".to_string()],
+            ],
+            next_seg_ids: vec![5, 1, 3],
+            dict_data: vec![1, 2, 3, 4, 5],
+        };
+        write_cluster_manifest(&manifest, &path).expect("write");
+        let got = read_cluster_manifest(&path).expect("read");
+
+        assert_eq!(got.epoch, manifest.epoch);
+        assert_eq!(got.snapshot_pos, manifest.snapshot_pos);
+        assert_eq!(got.dict_fingerprint, manifest.dict_fingerprint);
+        assert_eq!(got.num_shards, manifest.num_shards);
+        assert_eq!(got.vnodes, manifest.vnodes);
+        assert_eq!(got.include_broad, manifest.include_broad);
+        assert_eq!(got.segment_registry, manifest.segment_registry);
+        assert_eq!(got.next_seg_ids, manifest.next_seg_ids);
+        assert_eq!(got.dict_data, manifest.dict_data);
+
+        // A flipped byte in the body must fail the trailing-CRC check (fail loud).
+        let mut bytes = std::fs::read(&path).expect("read raw");
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&path, &bytes).expect("corrupt");
+        assert!(
+            read_cluster_manifest(&path).is_err(),
+            "corrupt manifest must error"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

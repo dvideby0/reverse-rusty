@@ -329,6 +329,14 @@ pub struct Engine {
     /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,
+    /// Whether this engine writes its own `manifest.bin`. True for a standalone
+    /// engine. False for a **cluster shard** (ADR-032): the coordinator's
+    /// `cluster_manifest.bin` is the sole metadata authority (it records the
+    /// per-shard segment registry + the one shared dict), so a shard suppresses its
+    /// own manifest — segment `.seg` files are still written, but no per-shard dict
+    /// copy. Such an engine is opened via [`Engine::open_shared_segments`], not
+    /// [`Engine::open`].
+    owns_manifest: bool,
 }
 
 impl std::fmt::Debug for Engine {
@@ -350,6 +358,7 @@ impl std::fmt::Debug for Engine {
             .field("skipped_segments", &self.skipped_segments)
             .field("query_store_entries", &self.query_store.len())
             .field("vocab_epoch", &self.vocab_epoch)
+            .field("owns_manifest", &self.owns_manifest)
             .finish()
     }
 }

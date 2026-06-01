@@ -14,18 +14,20 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > broad-lane shard over K shards in **one process**, dependency-free. Step 1's **gRPC transport is also
 > built** — a `ShardServer` + `RemoteShard` behind the off-by-default `distributed` feature (ADR-029),
 > proven by `tests/cluster_grpc_oracle.rs`. **Step 3a — a durable single-node coordinator mutation log**
-> (`trait ClusterLog` + crash-rebuild via `ClusterEngine::open`) — **is built** (ADR-031), proven by
-> `tests/cluster_durability_oracle.rs`. The prior-art survey + the locked hashing-variant/correctness
-> rationale behind ADR-027 are in [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md).
-> Still design-only: the remaining multi-node layers — the *shared/Raft* mutation log, the Raft quorum,
-> object-store segments, cross-node dict shipping, and autoscaling/auto-split.
+> (`trait ClusterLog` + crash-rebuild via `ClusterEngine::open`) — **is built** (ADR-031), and **step 3b —
+> per-shard durable compiled segments (local dir)** so reopen **attaches-and-mmaps** instead of re-ingesting
+> — **is built** (ADR-032); both proven by `tests/cluster_durability_oracle.rs`. The prior-art survey + the
+> locked hashing-variant/correctness rationale behind ADR-027 are in
+> [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md). Still design-only: the
+> remaining multi-node layers — the *object-store* segment store and *Raft-backed* mutation log, the Raft
+> quorum, cross-node dict shipping, and autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** OpenSearch cluster formation, Aurora log-is-the-database, consistent hashing
-- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport (ADR-029) and a durable single-node coordinator log (step 3a; ADR-031); the remaining multi-node layers are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport (ADR-029), a durable single-node coordinator log (step 3a; ADR-031), and per-shard durable segments with attach-and-mmap reopen (step 3b, local dir; ADR-032); the remaining multi-node layers (object store, Raft, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary
 
 ---
@@ -265,14 +267,20 @@ without operator action. The defaults are the product.
      checkpoint}` rebuild the whole cluster — byte-identical placement, zero false negatives — from the log
      alone (proven by `tests/cluster_durability_oracle.rs`). Raw DSL is the logged source of truth; one
      `apply` funnel serves both live writes and replay.
-   - 3b. **Shared-path / object-store segments** (a replica attaches-and-mmaps instead of re-ingesting) and a
-     **Raft-backed `ClusterLog`** behind the same seam — *(design-only; the seam + `apply` funnel + epoch were shaped for this swap)*.
+   - 3b. **Shared-path per-shard segments.** ✅ **Done (local dir)** (ADR-032): each shard is a segments-only
+     durable engine (`shard_<i>/segments/*.seg`, no per-shard WAL/manifest); `ClusterEngine::open`
+     **attaches-and-mmaps** each shard's committed compiled segments and replays only the log tail — no
+     re-ingest/recompile. The coordinator manifest (v2) is the single atomic commit point recording the
+     per-shard segment registry + cursor; `checkpoint` re-seals tombstoned base segments so a truncated
+     `Remove` can't resurrect a query. Proven by `tests/cluster_durability_oracle.rs`. *Still design-only:*
+     **object-store** segments (S3 behind a path abstraction) and a **Raft-backed `ClusterLog`** behind the
+     same seam (the seam + `apply` funnel + epoch were shaped for this swap).
 4. **Add the cluster-manager quorum** (Raft) holding ring + epoch; multi-process cluster. *(design-only)*
 5. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
 6. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
-(Steps 1–2 — the in-process core — step 1's gRPC transport, and step 3a's single-node coordinator log are built; ADR-027 + ADR-029 + ADR-031. Steps 3b–5 are design-only. See [`../STATUS.md`](../STATUS.md).)
+(Steps 1–2 — the in-process core — step 1's gRPC transport, step 3a's single-node coordinator log, and step 3b's per-shard durable segments (local dir) are built; ADR-027 + ADR-029 + ADR-031 + ADR-032. Step 3b's object-store/Raft half and steps 4–5 are design-only. See [`../STATUS.md`](../STATUS.md).)
 
 ---
 

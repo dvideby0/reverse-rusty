@@ -252,7 +252,7 @@ impl EngineSnapshot {
         for seg in &self.segments {
             match seg.as_ref() {
                 BaseSegment::Memory(s) => s.class_counts(&mut c),
-                BaseSegment::Mmap(_) => {}
+                BaseSegment::Mmap(s) => s.class_counts(&mut c),
             }
         }
         self.memtable.class_counts(&mut c);

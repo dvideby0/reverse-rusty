@@ -79,6 +79,7 @@ impl Engine {
             skipped_segments: 0,
             query_store,
             vocab_epoch: 0,
+            owns_manifest: true,
         }
     }
 
@@ -89,6 +90,55 @@ impl Engine {
         std::fs::create_dir_all(dir)?;
         std::fs::create_dir_all(dir.join("segments"))?;
         Wal::open(&dir.join("wal.log"), wal_sync_on_write)
+    }
+
+    /// Create the data directory and its `segments` subdirectory WITHOUT opening a WAL —
+    /// the segments-only-durable path ([`with_shared_segments_only`](Self::with_shared_segments_only)).
+    fn init_segments_dir(dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir.join("segments"))
+    }
+
+    /// Create a **cluster-shard** engine (ADR-032): shares the coordinator's frozen
+    /// normalizer + dict (like [`with_shared`](Self::with_shared)) and persists sealed
+    /// segments under `config.data_dir`, but runs WITHOUT a WAL and WITHOUT writing its
+    /// own `manifest.bin`. The coordinator's `ClusterLog` is the durable tail and its
+    /// `cluster_manifest.bin` is the sole segment registry + dict store, so a per-shard
+    /// WAL would double-log the tail and a per-shard manifest would duplicate the shared
+    /// dict. `config.data_dir` MUST be set; reopen via
+    /// [`open_shared_segments`](Self::open_shared_segments).
+    pub fn with_shared_segments_only(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        config: EngineConfig,
+    ) -> std::io::Result<Self> {
+        let dir = config.data_dir.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "with_shared_segments_only requires config.data_dir",
+            )
+        })?;
+        Self::init_segments_dir(dir)?;
+        let query_store = Arc::new(SourceStore::empty(config.retain_source));
+        Ok(Engine {
+            config: Arc::new(config),
+            norm,
+            vocab: None,
+            dict,
+            segments: Vec::new(),
+            memtable: Arc::new(Segment::new()),
+            rejected_parse: 0,
+            rejected_class_d: 0,
+            observer: None,
+            pending_events: Vec::new(),
+            wal: None,
+            next_seg_id: 1,
+            wal_healthy: true,
+            persistence_healthy: true,
+            skipped_segments: 0,
+            query_store,
+            vocab_epoch: 0,
+            owns_manifest: false,
+        })
     }
 
     /// Create an engine from a [`Vocab`](crate::vocab::Vocab), which is
@@ -234,6 +284,7 @@ impl Engine {
             skipped_segments,
             query_store,
             vocab_epoch: 0,
+            owns_manifest: true,
         };
 
         // Replay WAL entries after last checkpoint
@@ -270,6 +321,64 @@ impl Engine {
         }
 
         Ok(engine)
+    }
+
+    /// Reopen a **cluster-shard** engine (ADR-032) by attaching an EXPLICIT list of
+    /// committed segment files against the SUPPLIED shared dict — no per-shard manifest,
+    /// no dict deserialize, no WAL. The coordinator supplies `files` (relative `.seg`
+    /// names under `config.data_dir/segments/`) and `next_seg_id` from its
+    /// `cluster_manifest.bin`, having already fingerprint-checked the dict. This is
+    /// attach-and-mmap, NOT re-ingest: the compiled segments ARE the materialized base.
+    ///
+    /// Fails LOUD (returns `Err`) on any missing or CRC-corrupt segment — deliberately
+    /// unlike [`open`](Self::open), which skips corrupt segments and degrades. A skipped
+    /// shard segment is a silent, shard-sized false negative, which the cluster's
+    /// zero-false-negative contract forbids; the caller surfaces the error instead.
+    pub fn open_shared_segments(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+    ) -> std::io::Result<Self> {
+        let dir = config.data_dir.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "open_shared_segments requires config.data_dir",
+            )
+        })?;
+        Self::init_segments_dir(dir)?;
+        let seg_dir = dir.join("segments");
+        let mut segments = Vec::with_capacity(files.len());
+        for name in files {
+            // Fail loud: a missing / CRC-corrupt committed segment is a false-negative risk.
+            let mmap_seg = MmapSegment::open(&seg_dir.join(name))?;
+            segments.push(Arc::new(BaseSegment::Mmap(mmap_seg)));
+        }
+        let query_store = Arc::new(SourceStore::open(
+            &dir.join("sources.dat"),
+            config.retain_source,
+        )?);
+        Ok(Engine {
+            config: Arc::new(config),
+            norm,
+            vocab: None,
+            dict,
+            segments,
+            memtable: Arc::new(Segment::new()),
+            rejected_parse: 0,
+            rejected_class_d: 0,
+            observer: None,
+            pending_events: Vec::new(),
+            wal: None,
+            next_seg_id,
+            wal_healthy: true,
+            persistence_healthy: true,
+            skipped_segments: 0,
+            query_store,
+            vocab_epoch: 0,
+            owns_manifest: false,
+        })
     }
 
     /// Set an observer callback that receives [`EngineEvent`](crate::events::EngineEvent)s
@@ -370,6 +479,46 @@ impl Engine {
     /// Read-only access to the normalizer.
     pub fn normalizer(&self) -> &Normalizer {
         &self.norm
+    }
+
+    /// The current next segment-id counter — recorded per shard in the cluster manifest
+    /// so a flush after reopen never reuses a committed segment filename (ADR-032).
+    pub fn next_seg_id(&self) -> u64 {
+        self.next_seg_id
+    }
+
+    /// The filenames of this engine's live (mmap'd) base segments, in order — the
+    /// per-shard registry the cluster coordinator commits (ADR-032). Returns `Err` if
+    /// ANY base segment is in-memory: that means a segment write fell back to `Memory`
+    /// (e.g. a disk error, `persistence.rs`), and committing a registry that omits it
+    /// would silently lose that segment's data on reopen, so the caller must refuse to
+    /// commit and surface the failure instead.
+    pub fn segment_filenames(&self) -> std::io::Result<Vec<String>> {
+        let mut names = Vec::with_capacity(self.segments.len());
+        for seg in &self.segments {
+            match seg.as_ref() {
+                BaseSegment::Mmap(m) => {
+                    let name = m
+                        .path()
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "segment path has no filename",
+                            )
+                        })?;
+                    names.push(name.to_string());
+                }
+                BaseSegment::Memory(_) => {
+                    return Err(std::io::Error::other(
+                        "a base segment is in-memory (segment write fell back); refusing \
+                         to commit a cluster segment registry that would lose it on reopen",
+                    ));
+                }
+            }
+        }
+        Ok(names)
     }
 
     /// Look up the original query text for a logical ID. Returns `None` if

@@ -91,8 +91,21 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   logged source of truth; one `apply` funnel serves both live writes and replay (the Raft state-machine
   apply in disguise — the seam is shaped for a Raft-backed log later). Dependency-free (lean core); proven
   by `tests/cluster_durability_oracle.rs` (rebuild ≡ pre-crash ≡ brute across K∈{1,3,8} × broad, +
-  checkpoint, torn-tail, fail-closed, two-backend differential, fsync parity). Still design-only: the
-  shared/Raft log + object-store segments (step 3b).
+  checkpoint, torn-tail, fail-closed, two-backend differential, fsync parity).
+- **Per-shard durable segments — attach-and-mmap reopen (ADR-032)** — clustering build-path step 3b
+  (local dir). Each shard is now a segments-only durable engine (`shard_<i>/segments/*.seg`, no per-shard
+  WAL or manifest, built over the one shared frozen dict). `ClusterEngine::open` **attaches-and-mmaps** each
+  shard's committed compiled segments and replays only the log tail — **no re-ingest/recompile of the
+  corpus** (the cost that re-ingest paid at 100M). The coordinator manifest (v2) is the single atomic
+  commit point recording the per-shard segment registry + per-shard `next_seg_id` + log cursor (the raw-DSL
+  base snapshot + coordinator `live` set are gone). `checkpoint()` re-seals tombstoned base segments so a
+  truncated `Remove` can't resurrect a query, and a missing/corrupt committed segment fails `open` loud
+  (no silent shard-sized false negative). Crash-safety mirrors 3a (manifest = sole commit point; pre-commit
+  crash ⇒ old registry authoritative + orphan segments recovered via log replay). Dependency-free; proven by
+  the extended `tests/cluster_durability_oracle.rs` (the existing rebuild ≡ pre-crash ≡ brute, plus
+  attach-with-no-log, the checkpoint-after-removing-a-build-time-query bug-catcher, orphan-ignored, and
+  corrupt-segment-fails-loud). Still design-only: **object-store** segments + a **Raft-backed** log behind
+  the same seam (step 3b's multi-node half) + cross-process/remote durability.
 
 ## Measured
 
@@ -153,15 +166,17 @@ the selective candidate count further.
 - **Feature-model versioning + blue/green re-materialize.** Frozen common-mask across minor versions;
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
 - **Clustering.** The 100M-query horizontal-scale story. **In-process core (build-path steps 1–2), step 1's
-  gRPC transport, and step 3a's durable coordinator log are built and oracle-proven** — consistent-hash
-  entity-anchor sharding + content routing + a designated broad-lane replicated shard over K shards in one
-  process (ADR-027), a `distributed`-gated gRPC `ShardServer` + `RemoteShard` so a shard can be remote
-  (ADR-029), and an externalized single-node coordinator mutation log with crash-rebuild (ADR-031; all in
-  Implemented above). The hashing-variant survey + the cross-shard correctness argument behind ADR-027 are
-  written up in [`research/clustering-prior-art.md`](research/clustering-prior-art.md). **Still design-only:**
-  the remaining distributed layers — the *shared/Raft* mutation log + object-store segments (step 3b), Raft
-  quorum cluster-manager, cross-node dict shipping, autoscaling, auto-split, replicate-broad-to-all, and
-  TLS/auth.
+  gRPC transport, step 3a's durable coordinator log, and step 3b's per-shard durable segments (local dir)
+  are built and oracle-proven** — consistent-hash entity-anchor sharding + content routing + a designated
+  broad-lane replicated shard over K shards in one process (ADR-027), a `distributed`-gated gRPC
+  `ShardServer` + `RemoteShard` so a shard can be remote (ADR-029), an externalized single-node coordinator
+  mutation log with crash-rebuild (ADR-031), and per-shard compiled segments that reopen by
+  attach-and-mmap instead of re-ingesting (ADR-032; all in Implemented above). The hashing-variant survey +
+  the cross-shard correctness argument behind ADR-027 are written up in
+  [`research/clustering-prior-art.md`](research/clustering-prior-art.md). **Still design-only:** the
+  remaining distributed layers — **object-store** segments + a **Raft-backed** mutation log behind the same
+  seams (step 3b's multi-node half + step 4), Raft quorum cluster-manager, cross-node dict shipping,
+  cross-process/remote durability, autoscaling, auto-split, replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
@@ -280,11 +295,12 @@ from the audit's former P3 list). Roughly grouped:
 ## Current limitations
 
 - **Single-node deployment.** The multi-shard core (ADR-027), the gRPC `ShardServer`/`RemoteShard`
-  transport (ADR-029), and a durable single-node coordinator log (ADR-031) are built — the `distributed`
-  feature can already run a coordinator over remote shards (on localhost today), and an in-process cluster
-  built with a `data_dir` now survives a crash (rebuild via `ClusterEngine::open`). A full multi-node
-  deployment — a shared/Raft log, Raft cluster-manager, object storage, cross-node dict shipping, and
-  autoscaling — is designed but not built; see Tier 3.
+  transport (ADR-029), a durable single-node coordinator log (ADR-031), and per-shard durable segments with
+  attach-and-mmap reopen (ADR-032) are built — the `distributed` feature can already run a coordinator over
+  remote shards (on localhost today), and an in-process cluster built with a `data_dir` now survives a crash
+  and reopens by mmap'ing its compiled segments (no corpus recompile) via `ClusterEngine::open`. A full
+  multi-node deployment — an object-store/Raft log + segment store, a Raft cluster-manager, cross-node dict
+  shipping, and autoscaling — is designed but not built; see Tier 3.
   **Correctness caveat (ADR-029/030):** cross-process dict divergence is now caught — a connect-time
   dict-fingerprint handshake (ADR-030) fails the connect with `ShardError::DictMismatch` if a server's
   frozen dict differs from the coordinator's, so a diverged dict can no longer drop matches *silently*.

@@ -32,7 +32,8 @@
 //! is a verbatim single-node engine, so its lossless cover + exact verify finish
 //! the job. No shard boundary can drop a match.
 
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -43,7 +44,6 @@ use crate::error::ParseError;
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
 use crate::segment::MatchStats;
-use crate::util::{fast_map, FastMap};
 
 use super::clog::{ClusterLog, ClusterMutation, FileClusterLog, LogPos, NullClusterLog};
 use super::ring::{HashRing, DEFAULT_VNODES};
@@ -53,10 +53,12 @@ use super::shard::{LocalShard, Shard, ShardError};
 const CLUSTER_MANIFEST_FILE: &str = "cluster_manifest.bin";
 /// Filename of the incremental mutation log within `data_dir`.
 const CLUSTER_LOG_FILE: &str = "cluster.log";
-/// Base-snapshot filename for a given epoch (versioned so a checkpoint commits a fresh
-/// snapshot atomically before the old one is dropped — no double-apply on crash).
-fn snapshot_file_for(epoch: u64) -> String {
-    format!("cluster_snapshot_{epoch}.dat")
+
+/// Directory holding shard `i`'s durable compiled segments (under the cluster `data_dir`).
+/// Zero-padded so the dirs sort in shard order. Each is a segments-only engine `data_dir`
+/// (`shard_<i>/segments/seg_*.seg` + `shard_<i>/sources.dat`), no per-shard WAL/manifest.
+fn shard_dir(base: &Path, shard: usize) -> PathBuf {
+    base.join(format!("shard_{shard:03}"))
 }
 
 /// Configuration for a [`ClusterEngine`].
@@ -66,9 +68,11 @@ pub struct ClusterConfig {
     pub num_shards: usize,
     /// Virtual nodes per shard on the consistent-hash ring.
     pub vnodes: u32,
-    /// Per-shard engine configuration (forwarded to each shard's `Engine`).
-    /// In-process shards are non-durable; leave their `data_dir` unset — the
-    /// coordinator's externalized [`ClusterLog`] (below) is the single source of truth.
+    /// Per-shard engine configuration (forwarded to each shard's `Engine`). Leave
+    /// `per_shard.data_dir` unset: the coordinator derives each shard's directory
+    /// (`shard_<i>/`) from the cluster `data_dir` below and overrides this field per
+    /// shard, so segments persist there (ADR-032) with no per-shard WAL/manifest. For an
+    /// in-memory cluster (`data_dir = None`) the shards are non-durable.
     pub per_shard: EngineConfig,
     /// Default broad-lane toggle for [`ClusterEngine::percolate`].
     pub include_broad: bool,
@@ -124,13 +128,10 @@ enum Target {
 ///
 /// [`from_parts`]: ClusterEngine::from_parts
 pub(crate) struct ClusterDurable {
-    /// The ordered mutation log (the source of truth). `NullClusterLog` for an
-    /// in-memory cluster; `FileClusterLog` for a durable one.
+    /// The ordered mutation log (the durable tail / source of truth for everything since
+    /// the last checkpoint). `NullClusterLog` for an in-memory cluster; `FileClusterLog`
+    /// for a durable one.
     pub log: Box<dyn ClusterLog>,
-    /// The authoritative live query set `logical → (version, dsl)` — the base-snapshot
-    /// source. Populated only for durable clusters (an in-memory cluster never
-    /// snapshots, so it leaves this empty and pays no per-write cost).
-    pub live: FastMap<u64, (u32, String)>,
     /// The durable-artifact directory (`Some` ⇔ durable).
     pub data_dir: Option<PathBuf>,
     /// The current checkpoint generation / log epoch (the future Raft term; lives in the
@@ -141,11 +142,10 @@ pub(crate) struct ClusterDurable {
 }
 
 impl ClusterDurable {
-    /// The non-durable bundle: a `NullClusterLog`, no `data_dir`, empty live set.
+    /// The non-durable bundle: a `NullClusterLog`, no `data_dir`.
     fn in_memory(vnodes: u32) -> Self {
         ClusterDurable {
             log: Box::new(NullClusterLog::new()),
-            live: fast_map(),
             data_dir: None,
             epoch: 0,
             vnodes,
@@ -161,11 +161,8 @@ pub struct ClusterEngine {
     ring: HashRing,
     shards: Vec<Box<dyn Shard>>,
     include_broad: bool,
-    /// The durable mutation log (the source of truth); a `NullClusterLog` when in-memory.
+    /// The durable mutation log (the tail); a `NullClusterLog` when in-memory.
     log: Box<dyn ClusterLog>,
-    /// Authoritative live query set `logical → (version, dsl)`, the base-snapshot source.
-    /// Maintained only for durable clusters (`data_dir.is_some()`).
-    live: Mutex<FastMap<u64, (u32, String)>>,
     /// Checkpoint generation / log epoch (manifest-resident; bumped on `checkpoint`).
     epoch: AtomicU64,
     /// Ring vnode count (for re-deriving the ring in the manifest on checkpoint).
@@ -220,40 +217,42 @@ impl ClusterEngine {
 
         let ring = HashRing::new(config.num_shards, config.vnodes)?;
 
-        // Construct concrete local shards so pass-B ingest can use the infallible
-        // inherent path — `build` only ever makes `LocalShard`s (remote shards arrive
-        // via `from_parts`), so it stays infallible while the trait is Result-typed.
-        let locals: Vec<LocalShard> = (0..config.num_shards)
-            .map(|_| {
-                LocalShard::new(
+        // Construct concrete local shards. A durable cluster gives each shard its own
+        // segments-only engine dir (`shard_<i>/`) so pass-B ingest persists compiled
+        // `.seg` files; an in-memory cluster uses plain in-memory shards. `build` only
+        // makes `LocalShard`s (remote shards arrive via `from_parts`), so pass-B ingest
+        // can use the infallible inherent `ingest_local` path.
+        let mut locals: Vec<LocalShard> = Vec::with_capacity(config.num_shards);
+        for s in 0..config.num_shards {
+            if let Some(dir) = &config.data_dir {
+                let mut sc = config.per_shard.clone();
+                sc.data_dir = Some(shard_dir(dir, s));
+                locals.push(LocalShard::new_durable(
+                    Arc::clone(&norm),
+                    Arc::clone(&dict),
+                    sc,
+                )?);
+            } else {
+                locals.push(LocalShard::new(
                     Arc::clone(&norm),
                     Arc::clone(&dict),
                     config.per_shard.clone(),
-                )
-            })
-            .collect();
+                ));
+            }
+        }
 
         // Pass B — bucket by placement, then ingest one base segment per shard. For a
-        // durable cluster, also collect the accepted (placed) queries into the live set
-        // — the initial corpus becomes ONE base snapshot artifact, not N log entries
-        // (the Aurora base+delta shape). An in-memory cluster skips this (no snapshot).
-        let durable = config.data_dir.is_some();
-        let mut live: FastMap<u64, (u32, String)> = fast_map();
+        // durable cluster each shard's `ingest_local` persists a compiled `.seg`; the
+        // initial corpus becomes the committed base (the Aurora "segments are the
+        // materialized view" base), recorded in the coordinator manifest below rather
+        // than as a raw-DSL snapshot.
         let mut buckets: Vec<Vec<(u64, Extracted, String, u32)>> =
             (0..config.num_shards).map(|_| Vec::new()).collect();
         for (logical, ex, text) in extracted {
             match placement_of(&dict, &ring, &ex) {
                 Target::Reject => {}
-                Target::Replicated => {
-                    if durable {
-                        live.insert(logical, (1, text.clone()));
-                    }
-                    buckets[0].push((logical, ex, text, 1));
-                }
+                Target::Replicated => buckets[0].push((logical, ex, text, 1)),
                 Target::Selective(shs) => {
-                    if durable {
-                        live.insert(logical, (1, text.clone()));
-                    }
                     for &s in &shs {
                         buckets[s].push((logical, ex.clone(), text.clone(), 1));
                     }
@@ -266,56 +265,44 @@ impl ClusterEngine {
             }
         }
 
+        // Durability: commit the coordinator manifest (the atomic base = per-shard
+        // segment registry + dict + ring + epoch 0) and open an empty log, or fall back
+        // to an in-memory log. Construction fails loud on a durable-setup error (fresh
+        // construction — nothing to lose yet); a shard whose segment write fell back to
+        // in-memory makes `segment_filenames` error, aborting the build rather than
+        // committing a registry that would lose it.
+        let durable = match &config.data_dir {
+            Some(dir) => Self::commit_durable_base(dir, &dict, &ring, config, &locals)?,
+            None => ClusterDurable::in_memory(config.vnodes),
+        };
+
         let shards: Vec<Box<dyn Shard>> = locals
             .into_iter()
             .map(|s| Box::new(s) as Box<dyn Shard>)
             .collect();
-
-        // Set up durability: write the base snapshot + manifest (epoch 0) and open an
-        // empty log, or fall back to an in-memory log. Construction fails loud on a
-        // durable-setup I/O error (this is fresh construction — nothing to lose yet).
-        let durable = match &config.data_dir {
-            Some(dir) => {
-                Self::write_durable_base(dir, &dict, &ring, config, &live)?;
-                let log = FileClusterLog::open(
-                    &dir.join(CLUSTER_LOG_FILE),
-                    config.wal_sync_on_write,
-                    LogPos(0),
-                )
-                .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
-                ClusterDurable {
-                    log: Box::new(log),
-                    live,
-                    data_dir: Some(dir.clone()),
-                    epoch: 0,
-                    vnodes: config.vnodes,
-                }
-            }
-            None => ClusterDurable::in_memory(config.vnodes),
-        };
         Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)
     }
 
-    /// Write the base snapshot + coordinator manifest for a durable cluster at `dir`
-    /// (the atomic commit point is the manifest write). Shared by `build` and the
-    /// checkpoint path's initial layout.
-    fn write_durable_base(
-        dir: &std::path::Path,
+    /// Commit the initial durable base for a freshly built cluster: collect each shard's
+    /// segment registry + next-seg-id, write the coordinator manifest (epoch 0,
+    /// snapshot_pos 0 — the atomic commit point), and open an empty log. The per-shard
+    /// `.seg` files were already written by pass-B ingest; this records which ones are
+    /// committed. Returns the durability bundle for [`from_parts`].
+    fn commit_durable_base(
+        dir: &Path,
         dict: &Dict,
         ring: &HashRing,
         config: &ClusterConfig,
-        live: &FastMap<u64, (u32, String)>,
-    ) -> Result<(), ShardError> {
+        locals: &[LocalShard],
+    ) -> Result<ClusterDurable, ShardError> {
         std::fs::create_dir_all(dir)
             .map_err(|e| ShardError::Log(format!("creating cluster data dir: {e}")))?;
-        let snapshot_file = snapshot_file_for(0);
-        let mut entries: Vec<(u64, u32, String)> = live
-            .iter()
-            .map(|(k, (v, dsl))| (*k, *v, dsl.clone()))
-            .collect();
-        entries.sort_unstable_by_key(|&(k, _, _)| k);
-        crate::storage::write_cluster_snapshot(&entries, &dir.join(&snapshot_file))
-            .map_err(|e| ShardError::Log(format!("writing cluster snapshot: {e}")))?;
+        let mut segment_registry = Vec::with_capacity(locals.len());
+        let mut next_seg_ids = Vec::with_capacity(locals.len());
+        for s in locals {
+            segment_registry.push(s.segment_filenames()?);
+            next_seg_ids.push(s.next_seg_id()?);
+        }
         let manifest = crate::storage::ClusterManifest {
             epoch: 0,
             snapshot_pos: 0,
@@ -323,12 +310,24 @@ impl ClusterEngine {
             num_shards: ring.num_shards() as u32,
             vnodes: config.vnodes,
             include_broad: config.include_broad,
-            snapshot_file,
+            segment_registry,
+            next_seg_ids,
             dict_data: crate::storage::serialize_dict(dict),
         };
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
-        Ok(())
+        let log = FileClusterLog::open(
+            &dir.join(CLUSTER_LOG_FILE),
+            config.wal_sync_on_write,
+            LogPos(0),
+        )
+        .map_err(|e| ShardError::Log(format!("opening cluster log: {e}")))?;
+        Ok(ClusterDurable {
+            log: Box::new(log),
+            data_dir: Some(dir.to_path_buf()),
+            epoch: 0,
+            vnodes: config.vnodes,
+        })
     }
 
     /// Assemble a cluster from pre-built parts — the construction seam shared by
@@ -357,7 +356,6 @@ impl ClusterEngine {
             shards,
             include_broad,
             log: durable.log,
-            live: Mutex::new(durable.live),
             epoch: AtomicU64::new(durable.epoch),
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
@@ -387,9 +385,10 @@ impl ClusterEngine {
         }
         let entries: Vec<(u64, u32, String)> =
             queries.iter().map(|(l, t)| (*l, 1, t.clone())).collect();
-        self.load_live_set(&entries)?;
+        self.bucket_and_ingest(&entries)?;
         // These bulk adds bypassed the log (they go straight to base segments), so on a
-        // durable cluster they must be captured by a base snapshot to survive reopen.
+        // durable cluster a checkpoint commits them into the coordinator manifest's
+        // per-shard segment registry to survive reopen.
         if self.data_dir.is_some() {
             self.checkpoint()?;
         }
@@ -397,36 +396,25 @@ impl ClusterEngine {
     }
 
     /// Bucket a set of `(logical, version, dsl)` queries by placement and bulk-ingest one
-    /// base segment per shard — the shared loader for [`Self::ingest`] and recovery
-    /// ([`Self::open`]). Compiles read-only against the frozen dict, so placement is
-    /// byte-identical to the original build. Populates the live set on durable clusters.
-    fn load_live_set(&self, entries: &[(u64, u32, String)]) -> Result<(), ShardError> {
-        let durable = self.data_dir.is_some();
+    /// base segment per shard — the load path for [`Self::ingest`] (a freshly assembled,
+    /// e.g. remote, cluster). Compiles read-only against the frozen dict, so placement is
+    /// byte-identical to the original build. (Recovery no longer re-ingests; [`Self::open`]
+    /// attaches each shard's committed segments instead — ADR-032.)
+    fn bucket_and_ingest(&self, entries: &[(u64, u32, String)]) -> Result<(), ShardError> {
         let mut buckets: Vec<Vec<(u64, Extracted, String, u32)>> =
             (0..self.ring.num_shards()).map(|_| Vec::new()).collect();
         let mut lc = String::new();
-        {
-            let mut live = self.live();
-            for (logical, version, text) in entries {
-                let Ok(ast) = crate::dsl::parse(text) else {
-                    continue;
-                };
-                let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                match self.placement(&ex) {
-                    Target::Reject => {}
-                    Target::Replicated => {
-                        if durable {
-                            live.insert(*logical, (*version, text.clone()));
-                        }
-                        buckets[0].push((*logical, ex, text.clone(), *version));
-                    }
-                    Target::Selective(shs) => {
-                        if durable {
-                            live.insert(*logical, (*version, text.clone()));
-                        }
-                        for &s in &shs {
-                            buckets[s].push((*logical, ex.clone(), text.clone(), *version));
-                        }
+        for (logical, version, text) in entries {
+            let Ok(ast) = crate::dsl::parse(text) else {
+                continue;
+            };
+            let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+            match self.placement(&ex) {
+                Target::Reject => {}
+                Target::Replicated => buckets[0].push((*logical, ex, text.clone(), *version)),
+                Target::Selective(shs) => {
+                    for &s in &shs {
+                        buckets[s].push((*logical, ex.clone(), text.clone(), *version));
                     }
                 }
             }
@@ -494,10 +482,10 @@ impl ClusterEngine {
         self.apply_remove(id)
     }
 
-    /// Apply an ADD to the shards + live set — the state-machine `apply` for adds, shared
-    /// by the live write path ([`Self::add_query`], after logging) and replay
-    /// ([`Self::open`]). Re-deriving placement here from the frozen dict makes live and
-    /// replayed application byte-identical.
+    /// Apply an ADD to the shards — the state-machine `apply` for adds, shared by the live
+    /// write path ([`Self::add_query`], after logging) and log replay ([`Self::open`]).
+    /// Re-deriving placement here from the frozen dict makes live and replayed application
+    /// byte-identical.
     fn apply_add(&self, id: u64, version: u32, dsl: &str) -> Result<AddOutcome, ShardError> {
         let ast = match crate::dsl::parse(dsl) {
             Ok(a) => a,
@@ -506,8 +494,8 @@ impl ClusterEngine {
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
         let outcome = match self.placement(&ex) {
-            // Class D is logged-but-unplaceable: a harmless no-op on replay (not stored,
-            // not in the live set), matching the caller-visible "rejected, stored nowhere".
+            // Class D is logged-but-unplaceable: a harmless no-op on replay (stored
+            // nowhere), matching the caller-visible "rejected, stored nowhere".
             Target::Reject => return Ok(AddOutcome::RejectedClassD),
             Target::Replicated => {
                 self.shards[0].insert_extracted(&ex, id, version, dsl)?;
@@ -520,23 +508,17 @@ impl ClusterEngine {
                 AddOutcome::Placed { shards }
             }
         };
-        if self.data_dir.is_some() {
-            self.live().insert(id, (version, dsl.to_string()));
-        }
         Ok(outcome)
     }
 
-    /// Apply a REMOVE to the shards + live set — the state-machine `apply` for removes.
+    /// Apply a REMOVE to the shards — the state-machine `apply` for removes. The shard
+    /// memtable/segment liveness is the authority; there is no separate coordinator live
+    /// set to keep in sync (the durable base is the per-shard segments — ADR-032).
     fn apply_remove(&self, id: u64) -> Result<usize, ShardError> {
-        let n = self
-            .shards
+        self.shards
             .iter()
             .map(|s| s.delete_by_logical_id(id))
-            .sum::<Result<usize, _>>()?;
-        if self.data_dir.is_some() {
-            self.live().remove(&id);
-        }
-        Ok(n)
+            .sum::<Result<usize, _>>()
     }
 
     /// Replay one recovered mutation through the same `apply` funnel as live writes.
@@ -554,13 +536,6 @@ impl ClusterEngine {
             }
         }
         Ok(())
-    }
-
-    /// Lock the live set, recovering a poisoned guard rather than panicking.
-    fn live(&self) -> std::sync::MutexGuard<'_, FastMap<u64, (u32, String)>> {
-        self.live
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Seal every shard's memtable into an immutable base segment.
@@ -685,12 +660,14 @@ impl ClusterEngine {
     }
 
     /// Reopen a durable cluster from `data_dir` (built earlier with a `data_dir` set).
-    /// Rebuilds the whole cluster from the manifest + base snapshot + replayed log:
-    /// the frozen dict is restored from the manifest (fingerprint-checked — a mismatch
-    /// is a loud [`ShardError::DictMismatch`], ADR-030 parity) and the ring is
-    /// re-derived deterministically, so placement is byte-identical to the original →
-    /// zero false negatives across the restart. `config` supplies the per-shard engine
-    /// config + fsync policy (defaults if `None`).
+    /// Each shard **attaches-and-mmaps** its committed compiled segments (the
+    /// `cluster_manifest.bin` registry) — NOT re-ingest — then the log tail strictly
+    /// after the manifest's `snapshot_pos` is replayed through the same apply funnel as
+    /// live writes (ADR-032). The frozen dict is restored from the manifest
+    /// (fingerprint-checked — a mismatch is a loud [`ShardError::DictMismatch`], ADR-030
+    /// parity) and the ring re-derived deterministically, so placement is byte-identical
+    /// to the original → zero false negatives across the restart. `config` supplies the
+    /// per-shard engine config + fsync policy (defaults if `None`).
     pub fn open(
         data_dir: impl Into<PathBuf>,
         norm: Normalizer,
@@ -718,21 +695,41 @@ impl ClusterEngine {
                 actual: actual_fp,
             });
         }
+        let num_shards = manifest.num_shards as usize;
+        // Defensive: the registry + next-seg-id columns must agree with num_shards. A
+        // malformed manifest must fail loud, never silently attach the wrong segments.
+        if manifest.segment_registry.len() != num_shards
+            || manifest.next_seg_ids.len() != num_shards
+        {
+            return Err(ShardError::Config(format!(
+                "cluster manifest is inconsistent: num_shards={num_shards} but registry has \
+                 {} shard list(s) and {} next-seg-id(s)",
+                manifest.segment_registry.len(),
+                manifest.next_seg_ids.len()
+            )));
+        }
         let norm = Arc::new(norm);
-        let ring = HashRing::new(manifest.num_shards as usize, manifest.vnodes)?;
+        let ring = HashRing::new(num_shards, manifest.vnodes)?;
 
         let per_shard = config.map(|c| c.per_shard.clone()).unwrap_or_default();
         let fsync = config.is_some_and(|c| c.wal_sync_on_write);
 
-        let shards: Vec<Box<dyn Shard>> = (0..manifest.num_shards as usize)
-            .map(|_| {
-                Box::new(LocalShard::new(
-                    Arc::clone(&norm),
-                    Arc::clone(&dict),
-                    per_shard.clone(),
-                )) as Box<dyn Shard>
-            })
-            .collect();
+        // Attach each shard's committed compiled segments (mmap) against the shared dict —
+        // NOT re-ingest. Fails loud on a missing / CRC-corrupt segment (a skipped segment
+        // is a silent shard-sized false negative).
+        let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
+        for s in 0..num_shards {
+            let mut sc = per_shard.clone();
+            sc.data_dir = Some(shard_dir(&data_dir, s));
+            let shard = LocalShard::open_segments(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                sc,
+                &manifest.segment_registry[s],
+                manifest.next_seg_ids[s],
+            )?;
+            shards.push(Box::new(shard) as Box<dyn Shard>);
+        }
 
         let log = FileClusterLog::open(
             &data_dir.join(CLUSTER_LOG_FILE),
@@ -743,19 +740,15 @@ impl ClusterEngine {
 
         let durable = ClusterDurable {
             log: Box::new(log),
-            live: fast_map(),
             data_dir: Some(data_dir.clone()),
             epoch: manifest.epoch,
             vnodes: manifest.vnodes,
         };
         let engine = Self::from_parts(norm, dict, ring, shards, manifest.include_broad, durable)?;
 
-        // Reconstruct: base snapshot (bulk, one segment per shard) then replay the log
-        // tail through the SAME apply funnel as live writes.
-        let snap = crate::storage::read_cluster_snapshot(&data_dir.join(&manifest.snapshot_file))
-            .map_err(|e| ShardError::Config(format!("reading cluster snapshot: {e}")))?;
-        engine.load_live_set(&snap)?;
-
+        // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the
+        // log tail strictly after snapshot_pos, through the SAME apply funnel as live
+        // writes — those entries are not in the attached segments, so no double-apply.
         let replay = engine.log.replay(LogPos(manifest.snapshot_pos))?;
         if replay.skipped_bytes > 0 {
             engine.emit(EngineEvent::DurabilityFailure {
@@ -773,26 +766,41 @@ impl ClusterEngine {
         Ok(engine)
     }
 
-    /// Compact the durable state: write a fresh base snapshot of the live set, commit it
-    /// via the manifest (the atomic commit point), then truncate the now-captured log
-    /// prefix. A no-op on an in-memory cluster. Mirrors the engine's
-    /// flush→checkpoint→reset ordering, so a crash at any point leaves a consistent
-    /// (snapshot, log) pair.
+    /// Checkpoint the durable state: seal each shard (flush memtable + re-seal tombstoned
+    /// base segments so the on-disk set is a clean materialization of the live state ≤
+    /// `up_to`), then commit the coordinator manifest (the atomic commit point: new
+    /// per-shard segment registry + log cursor + bumped epoch), then truncate the captured
+    /// log prefix and GC orphaned segment files. A no-op on an in-memory cluster.
+    ///
+    /// Crash-safety: the manifest write is the single commit point (tmp + CRC + rename).
+    /// A crash BEFORE it leaves the old (registry, cursor) authoritative — the freshly
+    /// written `.seg` are orphans (not in the old registry) recovered via log replay, so
+    /// no double-apply and no loss. A crash AFTER it (before truncation) loads the new
+    /// segments and replays only the (now shorter) tail — also correct.
     pub fn checkpoint(&self) -> Result<(), ShardError> {
         let Some(dir) = self.data_dir.clone() else {
             return Ok(());
         };
         let up_to = self.log.last_pos()?;
         let new_epoch = self.epoch.load(Ordering::Relaxed) + 1;
-        let snapshot_file = snapshot_file_for(new_epoch);
 
-        // 1. Fresh base snapshot under a NEW name — a crash before the manifest update
-        //    leaves the old (snapshot, log) pair authoritative (no double-apply).
-        let entries = self.live_sorted();
-        crate::storage::write_cluster_snapshot(&entries, &dir.join(&snapshot_file))
-            .map_err(|e| ShardError::Log(format!("writing cluster snapshot: {e}")))?;
+        // 1. Seal each shard: memtable → base segment, then bake base-segment tombstones
+        //    onto disk. After this every shard's on-disk segments reflect live state ≤ up_to.
+        for s in &self.shards {
+            s.seal_for_checkpoint()?;
+        }
 
-        // 2. Manifest = the atomic commit point.
+        // 2. Collect the per-shard segment registry + next-seg-ids. An error here (e.g. a
+        //    segment write fell back to in-memory) aborts BEFORE the commit, leaving the
+        //    old manifest authoritative — nothing is lost.
+        let mut segment_registry = Vec::with_capacity(self.shards.len());
+        let mut next_seg_ids = Vec::with_capacity(self.shards.len());
+        for s in &self.shards {
+            segment_registry.push(s.segment_filenames()?);
+            next_seg_ids.push(s.next_seg_id()?);
+        }
+
+        // 3. Coordinator manifest = the atomic commit point (new base + new cursor).
         let manifest = crate::storage::ClusterManifest {
             epoch: new_epoch,
             snapshot_pos: up_to.0,
@@ -800,15 +808,17 @@ impl ClusterEngine {
             num_shards: self.ring.num_shards() as u32,
             vnodes: self.vnodes,
             include_broad: self.include_broad,
-            snapshot_file,
+            segment_registry: segment_registry.clone(),
+            next_seg_ids,
             dict_data: crate::storage::serialize_dict(&self.dict),
         };
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
 
-        // 3. Committed. Truncate the captured prefix + drop the old snapshot (both
-        //    best-effort: a crash here just replays an already-captured idempotent tail).
-        let old_epoch = self.epoch.swap(new_epoch, Ordering::Relaxed);
+        // 4. Committed. Truncate the captured log prefix + GC orphaned segment files (both
+        //    best-effort: a crash here just replays an already-captured tail / leaves
+        //    orphan files that are ignored on open).
+        self.epoch.store(new_epoch, Ordering::Relaxed);
         if let Err(e) = self.log.checkpoint(up_to) {
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::WalReset,
@@ -818,18 +828,45 @@ impl ClusterEngine {
                 error: e.to_string(),
             });
         }
-        match std::fs::remove_file(dir.join(snapshot_file_for(old_epoch))) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => self.emit(EngineEvent::DurabilityFailure {
-                op: DurabilityOp::WalReset,
-                detail: "removing the superseded cluster snapshot after checkpoint \
-                         failed (orphaned file, ignored on open)"
-                    .into(),
-                error: e.to_string(),
-            }),
-        }
+        self.gc_orphan_segments(&dir, &segment_registry);
         Ok(())
+    }
+
+    /// Best-effort GC of segment files no longer in the committed registry (superseded by
+    /// a re-seal/compaction during the just-committed checkpoint, or left by an earlier
+    /// crashed checkpoint). An orphan left behind is benign — it is not in the manifest,
+    /// so `open` never attaches it.
+    fn gc_orphan_segments(&self, dir: &Path, registry: &[Vec<String>]) {
+        for (s, files) in registry.iter().enumerate() {
+            let keep: HashSet<&str> = files.iter().map(String::as_str).collect();
+            let seg_dir = shard_dir(dir, s).join("segments");
+            let Ok(rd) = std::fs::read_dir(&seg_dir) else {
+                continue;
+            };
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let is_seg = path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("seg"));
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if !is_seg || keep.contains(name) {
+                    continue;
+                }
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => self.emit(EngineEvent::DurabilityFailure {
+                        op: DurabilityOp::WalReset,
+                        detail: format!(
+                            "removing orphaned segment {name} after checkpoint failed \
+                             (ignored on open)"
+                        ),
+                        error: e.to_string(),
+                    }),
+                }
+            }
+        }
     }
 
     /// The current checkpoint generation / log epoch (0 for an in-memory cluster).
@@ -873,18 +910,6 @@ impl ClusterEngine {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(ev);
         }
-    }
-
-    /// The live query set as a logical-id-sorted `(logical, version, dsl)` vector — the
-    /// base-snapshot source for [`Self::checkpoint`].
-    fn live_sorted(&self) -> Vec<(u64, u32, String)> {
-        let live = self.live();
-        let mut entries: Vec<(u64, u32, String)> = live
-            .iter()
-            .map(|(k, (v, dsl))| (*k, *v, dsl.clone()))
-            .collect();
-        entries.sort_unstable_by_key(|&(k, _, _)| k);
-        entries
     }
 }
 

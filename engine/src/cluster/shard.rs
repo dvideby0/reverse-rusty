@@ -127,6 +127,20 @@ pub(crate) trait Shard: Send + Sync {
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError>;
     /// Seal the memtable into an immutable base segment.
     fn flush(&self) -> Result<(), ShardError>;
+
+    // ---- durable checkpoint (ADR-032; local shards only) ----
+    /// Seal for a cluster checkpoint: flush the memtable AND re-seal any tombstoned base
+    /// segment, so the ON-DISK segment set reflects every applied delete. Without the
+    /// re-seal a `Remove` against a base segment lives only in the in-RAM alive overlay
+    /// and would resurrect the query on reopen once its log entry is truncated.
+    fn seal_for_checkpoint(&self) -> Result<(), ShardError>;
+    /// This shard's live (mmap'd) base-segment filenames — the registry the coordinator
+    /// commits into `cluster_manifest.bin`. `Err` (never a silent empty list) if any
+    /// segment is in-memory (a write fell back), which would otherwise lose data on reopen.
+    fn segment_filenames(&self) -> Result<Vec<String>, ShardError>;
+    /// This shard's next segment-id counter — committed per shard so a flush after reopen
+    /// never reuses a committed segment filename.
+    fn next_seg_id(&self) -> Result<u64, ShardError>;
 }
 
 /// One in-process shard: owned engine for writes + lock-free snapshot for reads.
@@ -144,6 +158,43 @@ impl LocalShard {
             engine: Mutex::new(engine),
             snapshot,
         }
+    }
+
+    /// Build a DURABLE shard (ADR-032): an engine that persists compiled segments under
+    /// `config.data_dir` (the shard's directory) with no WAL and no own manifest — the
+    /// coordinator's `ClusterLog` is the tail and its `cluster_manifest.bin` is the
+    /// registry. Shares the coordinator's frozen normalizer + dict.
+    pub(crate) fn new_durable(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        config: EngineConfig,
+    ) -> Result<Self, ShardError> {
+        let engine = Engine::with_shared_segments_only(norm, dict, config)
+            .map_err(|e| ShardError::Log(format!("creating durable shard: {e}")))?;
+        let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
+        Ok(LocalShard {
+            engine: Mutex::new(engine),
+            snapshot,
+        })
+    }
+
+    /// Reopen a durable shard by attaching its committed segment files (ADR-032) against
+    /// the shared dict — attach-and-mmap, not re-ingest. `files`/`next_seg_id` come from
+    /// the coordinator's `cluster_manifest.bin`; `config.data_dir` is the shard's dir.
+    pub(crate) fn open_segments(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+    ) -> Result<Self, ShardError> {
+        let engine = Engine::open_shared_segments(norm, dict, config, files, next_seg_id)
+            .map_err(|e| ShardError::Log(format!("attaching shard segments: {e}")))?;
+        let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
+        Ok(LocalShard {
+            engine: Mutex::new(engine),
+            snapshot,
+        })
     }
 
     /// Bulk-ingest, infallibly — the build path uses this directly on a concrete
@@ -235,5 +286,23 @@ impl Shard for LocalShard {
         eng.flush();
         Self::publish(&eng, &self.snapshot);
         Ok(())
+    }
+
+    fn seal_for_checkpoint(&self) -> Result<(), ShardError> {
+        let mut eng = self.lock();
+        eng.flush(); // seal the memtable into a base segment
+        eng.reseal_tombstoned_segments(); // bake base-segment tombstones onto disk
+        Self::publish(&eng, &self.snapshot);
+        Ok(())
+    }
+
+    fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
+        self.lock()
+            .segment_filenames()
+            .map_err(|e| ShardError::Log(format!("collecting shard segment filenames: {e}")))
+    }
+
+    fn next_seg_id(&self) -> Result<u64, ShardError> {
+        Ok(self.lock().next_seg_id())
     }
 }

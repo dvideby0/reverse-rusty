@@ -181,4 +181,27 @@ impl Shard for RemoteShard {
             .map_err(rpc_err)?;
         Ok(())
     }
+
+    fn seal_for_checkpoint(&self) -> Result<(), ShardError> {
+        // Coordinator-driven durable checkpoint is local-only this increment (a remote
+        // cluster uses an in-memory log; ADR-031/032). Flush so the remote memtable
+        // seals; the remote node owns its own segment durability.
+        self.flush()
+    }
+
+    fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
+        // Never `Ok(vec![])`: a silent empty registry would drop this shard's data on a
+        // future durable-remote reopen. Surface that durability is remote-side here.
+        Err(ShardError::Remote(
+            "segment registry is unavailable for a remote shard (durable checkpoint is \
+             local-only in this increment)"
+                .into(),
+        ))
+    }
+
+    fn next_seg_id(&self) -> Result<u64, ShardError> {
+        Err(ShardError::Remote(
+            "next_seg_id is unavailable for a remote shard".into(),
+        ))
+    }
 }
