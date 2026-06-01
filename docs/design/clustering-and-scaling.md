@@ -1,8 +1,10 @@
-# Clustering, Sharding & Auto-Scaling — dead-simple, self-tuning, OS/Aurora-patterned
+# Clustering, Sharding & Auto-Scaling — dead-simple, self-tuning, shared-nothing
 
 *Scope: take the single-node engine and make it scale horizontally to 100M+ stored queries and
 arbitrary title throughput, **automatically and with near-zero configuration**, reusing the
-cluster-formation and storage patterns OpenSearch and Aurora proved in production — while exploiting
+**shared-nothing** cluster-formation and storage patterns Elasticsearch and Cassandra proved in
+production (local storage + per-node WAL + replication + quorum control plane — no shared object
+store; ADR-033) — while exploiting
 the one structural advantage our workload has over a generic search engine. Siblings:
 [`ingestion-and-updates.md`](ingestion-and-updates.md) (the durable mutation log / write path this
 shares), [`matching.md`](matching.md) (the per-shard hot path), [`normalization.md`](normalization.md).
@@ -12,23 +14,31 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > **Implementation status:** The in-process multi-shard core (build-path §10 steps 1–2) is **built and
 > oracle-proven** — `src/cluster/` (ADR-027): entity-anchor sharding, content routing, and a designated
 > broad-lane shard over K shards in **one process**, dependency-free. Step 1's **gRPC transport is also
-> built** — a `ShardServer` + `RemoteShard` behind the off-by-default `distributed` feature (ADR-029),
-> proven by `tests/cluster_grpc_oracle.rs`. **Step 3a — a durable single-node coordinator mutation log**
-> (`trait ClusterLog` + crash-rebuild via `ClusterEngine::open`) — **is built** (ADR-031), and **step 3b —
-> per-shard durable compiled segments (local dir)** so reopen **attaches-and-mmaps** instead of re-ingesting
-> — **is built** (ADR-032); both proven by `tests/cluster_durability_oracle.rs`. The prior-art survey + the
-> locked hashing-variant/correctness rationale behind ADR-027 are in
-> [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md). Still design-only: the
-> remaining multi-node layers — the *object-store* segment store and *Raft-backed* mutation log, the Raft
-> quorum, cross-node dict shipping, and autoscaling/auto-split.
+> built** — a `ShardServer` + `RemoteShard` behind the off-by-default `distributed` feature (ADR-029), with
+> the coordinator **shipping its frozen dict** to each server at connect (ADR-034), so a data node starts
+> empty rather than rebuilding a byte-identical dict from the corpus; proven by `tests/cluster_grpc_oracle.rs`.
+> **Step 3a — a durable coordinator mutation log** (`trait ClusterLog` + crash-rebuild via
+> `ClusterEngine::open`) — **is built** (ADR-031), and **per-shard durable compiled segments** so reopen
+> **attaches-and-mmaps** instead of re-ingesting — **is built** (ADR-032); both proven by
+> `tests/cluster_durability_oracle.rs`.
+>
+> **Architecture note (ADR-033):** this design follows the **shared-nothing** model of
+> Elasticsearch/Cassandra/Kafka — **local** per-shard segments + a **per-node/coordinator WAL** for
+> durability + **peer recovery** for HA + a **quorum/Raft control plane** for membership — **not** the
+> Aurora "disaggregated shared object-storage" model an earlier draft borrowed. There is **no object store
+> and no cloud dependency** in the serving path; object storage, if ever added, is only an optional
+> pluggable backup target (local-fs default). The prior-art survey + the hashing-variant/correctness
+> rationale behind ADR-027 are in [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md).
+> Still design-only: per-shard **replication + peer recovery**, the **Raft/quorum control plane**,
+> normalizer/vocab shipping, TLS/auth, and autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
-- **Patterns borrowed:** OpenSearch cluster formation, Aurora log-is-the-database, consistent hashing
-- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport (ADR-029), a durable single-node coordinator log (step 3a; ADR-031), and per-shard durable segments with attach-and-mmap reopen (step 3b, local dir; ADR-032); the remaining multi-node layers (object store, Raft, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
-- **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary
+- **Patterns borrowed:** Elasticsearch/Cassandra **shared-nothing** (local segments + WAL + peer recovery + quorum control plane) and consistent hashing — **not** Aurora's shared object storage (ADR-033)
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), and per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032); the remaining multi-node layers (peer replication, Raft control plane, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary; **no object store / cloud dependency** — durability is a local WAL + replicas (ADR-033)
 
 ---
 
@@ -107,72 +117,88 @@ must be re-materialized when the cluster grows.
 
 ---
 
-## 4. Cluster architecture — three layers, each borrowed from a proven system
+## 4. Cluster architecture — three layers, shared-nothing (Elasticsearch/Cassandra-patterned)
+
+> **ADR-033:** an earlier draft modeled the durable layer on **Aurora's disaggregated shared object
+> storage**. We don't. The cluster is **shared-nothing** — each node owns its shards on **local disk**,
+> durability is a **per-node/coordinator WAL**, and HA comes from **replicas + peer recovery** — exactly
+> like Elasticsearch and Cassandra. There is **no object store and no cloud dependency** in the serving
+> path.
 
 ```
-        ┌──────────────────────── control plane (OpenSearch-style) ───────────────────────┐
+        ┌──────────────────────── control plane (Elasticsearch-style) ─────────────────────┐
         │  cluster-manager quorum (Raft): cluster state = ring + shard→node map +          │
         │  feature-model version + log epoch. Election, membership, allocation, rebalance. │
         └──────────────────────────────────────────────────────────────────────────────────┘
                  ▲ gossip/join                         ▲ assigns shards
         ┌────────┴───────────┐               ┌─────────┴─────────────────────────────────────┐
-        │ coordinator nodes  │  route title  │ data/matcher nodes (stateless-ish compute)    │
-        │ (content routing,  │ ───────────►  │  own shards by MMAP'ing immutable segments    │
-        │  scatter to ~2-5   │ ◄───────────  │  from shared storage + replay hot log tail    │
+        │ coordinator nodes  │  route title  │ data/matcher nodes                            │
+        │ (content routing,  │ ───────────►  │  own shards as LOCAL mmap'd segments +        │
+        │  scatter to ~2-5   │ ◄───────────  │  the hot delta from their own WAL tail        │
         │  shards, merge)    │  matched qids │  → run the matching hot path locally          │
         └────────────────────┘               └───────────────────────────────────────────────┘
-                                                         ▲ load segments        ▲ append mutations
-        ┌────────────────────────────── durable layer (Aurora-style) ───────────────────────────┐
-        │  (a) replicated, ordered MUTATION LOG of add/update/tombstone (the source of truth)     │
-        │  (b) immutable compiled SEGMENTS in shared object storage (candidate index + exact SoA) │
-        │  quorum-durable; "the log is the database", segments are materialized views of it.      │
+                                              ▲ replicate (primary→replica)   ▲ append mutations
+        ┌──────────────── durable layer — shared-NOTHING (Elasticsearch / Cassandra) ─────────────┐
+        │  Per shard: a PRIMARY + N REPLICAS on DIFFERENT nodes, each on LOCAL disk.               │
+        │  (a) an ordered MUTATION LOG (WAL) of add/update/tombstone — the source of truth —       │
+        │      replicated primary→replica before ack (≈ the ES translog / Cassandra commitlog).    │
+        │  (b) immutable compiled SEGMENTS on LOCAL disk (candidate index + exact SoA),            │
+        │      materialized views of the log. A new/recovering replica streams them FROM A PEER    │
+        │      (peer recovery) + replays the log tail — no shared storage anywhere.                │
         └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 4.1 Durable layer — Aurora's "log is the database"
-Aurora's key move is to **ship the redo log to a shared, distributed, log-structured storage** that
-replicates 6 ways across 3 AZs and self-heals, instead of shipping data pages. We adopt the same
-shape:
+### 4.1 Durable layer — local WAL + replication (the Elasticsearch/Cassandra shape)
+The source of truth is an **ordered log of query mutations** (`add(qid, dsl)`, `update`, `tombstone`) —
+our hot delta from [`ingestion-and-updates.md`](ingestion-and-updates.md), made durable per node and
+replicated. This is **built today** as the coordinator's `ClusterLog` (ADR-031), the analogue of
+Elasticsearch's per-shard **translog** / Cassandra's commitlog.
 
-- The **source of truth is an ordered, quorum-replicated log of query mutations** (`add(qid, dsl)`,
-  `update`, `tombstone`). This *is* our hot delta from [`ingestion-and-updates.md`](ingestion-and-updates.md),
-  now made durable and shared.
-- **Immutable segments** (the compiled candidate index + exact SoA for a shard's feature range) live
-  in **shared object storage** and are **materialized views of the log**, produced by the
-  "improving compaction" job (see [`ingestion-and-updates.md`](ingestion-and-updates.md) §7).
-- Durability is **quorum** over the log, exactly like Aurora's 4/6 write quorum — no node-local disk
-  is authoritative.
+- **Immutable segments** (the compiled candidate index + exact SoA for a shard's feature range) live on
+  the owning node's **local disk** and are **materialized views of the log**, produced by the "improving
+  compaction" job (see [`ingestion-and-updates.md`](ingestion-and-updates.md) §7). Built today as the
+  per-shard segments-only durable engine (ADR-032).
+- **Durability = a per-node WAL + replication factor N** (write the primary, replicate to in-sync
+  replicas before ack). No external storage service is authoritative — the cluster is self-contained.
+  *(This is deliberately **not** Aurora's quorum-over-shared-storage; ADR-033.)*
 
-### 4.2 Compute layer — Aurora replicas + OpenSearch data nodes
-- A matcher node "owns" a shard by **`mmap`-ing that shard's immutable segments from shared storage**
-  and replaying the **tail of the mutation log** into an in-memory hot delta. Because segments are
-  shared and immutable, **spinning up a new replica is attach-and-mmap, not a data copy** — Aurora's
-  trick that makes replicas and failover fast (Aurora restores service in <60s, often <30s).
-- Multiple replicas per shard give HA + read (title) scaling; a title probe can hit any replica.
+### 4.2 Compute layer — data nodes own local shards; replicas via peer recovery
+- A data/matcher node "owns" a shard by holding **that shard's segments on its own local disk** plus the
+  hot delta replayed from its WAL tail, and runs the matching hot path locally.
+- HA + read (title) scaling come from **multiple replicas per shard on different nodes**; a title probe
+  can hit any replica. A write goes to the primary and replicates to the replicas before acking (§6).
+- **Spinning up / recovering a replica is peer recovery**: the new owner **streams the shard's segments
+  from a peer** that already holds them, then replays the log tail — the Elasticsearch/Cassandra model.
+  (No attach-from-shared-storage, because there is no shared storage; the cost is one peer-to-peer segment
+  copy at recovery, which a warm standby replica avoids — failover is then just promotion.)
 
-### 4.3 Control plane — OpenSearch cluster-manager quorum
+### 4.3 Control plane — quorum cluster-manager (Elasticsearch-style)
 - A small set of **cluster-manager-eligible nodes** hold the **cluster state**: the consistent-hash
   ring, shard→node assignments, the feature-model version, and the log epoch. They elect a leader by
-  **quorum/majority vote** (the OpenSearch model: any eligible node can call an election, majority
+  **quorum/majority vote** (Elasticsearch's model: any eligible node can call an election, majority
   wins, which prevents split-brain). Use **3 or 5 managers** to tolerate 1 or 2 failures.
 - The cluster-manager does only coordination — membership, **shard allocation**, and **rebalancing**
-  — never sits in the title hot path. (Same separation OpenSearch enforces with dedicated manager
-  nodes.)
+  — and never sits in the title hot path. (The same separation Elasticsearch enforces with dedicated
+  master-eligible nodes.)
 
 ---
 
 ## 5. Pattern-borrowing scorecard
 
-| Concern | OpenSearch | Aurora | What Reverse Rusty does |
+We follow the **shared-nothing** column (Elasticsearch / Cassandra). The Aurora column is kept as the
+*rejected* alternative (ADR-033) — it shows why a shared-storage design is tempting and what we give up
+(and gain) by not taking it.
+
+| Concern | Elasticsearch / Cassandra (**adopted**) | Aurora (**rejected**, ADR-033) | What Reverse Rusty does |
 |---|---|---|---|
 | Cluster formation | seed hosts, gossip, **quorum manager election** | — | same: quorum-elected cluster-manager holds the ring + epoch |
-| Source of truth | replicated cluster state | **redo log → shared storage** | **mutation log** (quorum), segments are materialized views |
-| Data placement | `hash(routing) % primaries` | shared volume (no sharding) | **consistent hash over anchor feature** (entity affinity) |
+| Source of truth | per-node **WAL** (translog/commitlog), replicated | redo log → shared storage | **mutation log** (WAL, replicated), local segments are materialized views |
+| Data placement | `hash(routing) % primaries` / consistent hash | shared volume (no sharding) | **consistent hash over anchor feature** (entity affinity) |
 | Read/match path | **scatter-gather all shards** | replicas read shared storage | **content route to ~2–5 anchor shards** (our win) |
-| Replicas / HA | primary + replica shards | up to 15 readers on shared storage | replicas **mmap shared segments**, replay log tail |
-| Failover | promote replica shard | **promote reader, <60s** | promote replica (already has segments mmap'd) + replay tail |
-| Grow capacity | add node → **rebalance**, `_split` | storage auto-grows in 10GB chunks | add node → consistent-hash moves ~1/N; **auto-split hot shards** |
-| Elastic compute | — | **Serverless: autoscale ACUs, scale-to-zero** | autoscale matcher/coordinator on title QPS; scale-to-zero idle |
+| Replicas / HA | primary + replica shards on **local disk** | up to 15 readers on shared storage | replicas hold **local segments** (peer recovery), replay log tail |
+| Failover | **promote a replica** | promote reader, <60s | promote a warm replica (already holds local segments) + replay tail |
+| Grow capacity | add node → **rebalance** (peer recovery), `_split` | storage auto-grows in 10GB chunks | add node → consistent-hash moves ~1/N (streamed from a peer); **auto-split hot shards** |
+| Elastic compute | scale data/replica nodes | Serverless: autoscale ACUs, scale-to-zero | autoscale matcher/coordinator on title QPS; scale-to-zero idle compute |
 
 ---
 
@@ -181,7 +207,8 @@ shape:
   **near-real-time**: visible on a shard once its replicas apply that log entry (≈ log-replication
   latency). This matches the measured ~750k updates/sec/core local path, now durable.
 - Optional **read-your-writes / synchronous** mode: `add_query` returns after a quorum of the owning
-  shard's replicas have applied the entry (Aurora-style quorum commit). A knob, off by default.
+  shard's replicas have applied the entry (the Elasticsearch in-sync-replica ack model). A knob, off by
+  default.
 - No index-wide refresh, no segment rebuild on the write path — the cost we deliberately avoided vs
   the Lucene/percolator refresh model.
 
@@ -207,18 +234,20 @@ The operator experience should be: **one binary, one join command, everything el
    ~256 B/query (→ a target like ~5–10M queries/shard within a node's RAM budget) and the live corpus
    size. Operators never pick a shard count.
 3. **Auto-split / auto-merge.** Because segments are immutable and the log is the source of truth,
-   splitting a shard = split its hash range and re-materialize the two halves from shared storage
-   **online** (no downtime, no reindex). The compaction job emits a **`recommended_shard_count`** from
-   telemetry — driven by our "compaction that improves" loop. The
-   cluster reshards itself when a shard exceeds size/latency thresholds.
-4. **Auto-rebalance with no peer copy.** Adding/removing a node changes the ring; new owners
-   **fetch segments from shared storage** rather than streaming from a peer (Aurora-style), so
-   rebalance is bandwidth-cheap and fast.
-5. **Auto-scale compute (serverless).** Matcher/coordinator replicas scale on title QPS / candidate
-   load (HPA-style), independent of storage; **scale-to-zero** when idle, like Aurora Serverless. Shard
+   splitting a shard = split its hash range and **re-materialize the two halves from the local segments +
+   log tail online** (no downtime, no reindex) — like an Elasticsearch shard `_split`. The compaction job
+   emits a **`recommended_shard_count`** from telemetry — driven by our "compaction that improves" loop.
+   The cluster reshards itself when a shard exceeds size/latency thresholds.
+4. **Auto-rebalance via peer recovery.** Adding/removing a node changes the ring; new owners **stream the
+   moved shard's segments from a current owner (peer recovery)** and replay the log tail. Consistent
+   hashing moves only ~1/N of the ranges, so the copy is bounded — the Elasticsearch/Cassandra rebalance
+   model (there is no shared storage to "fetch" from; ADR-033).
+5. **Auto-scale compute.** Matcher/coordinator replicas scale on title QPS / candidate load (HPA-style),
+   decoupled from storage; **scale-to-zero** idle compute (the serverless-autoscaler pattern). Shard
    *ownership* scales with corpus size; *throughput* scales with replica count — decoupled.
-6. **Self-heal.** A dead node's shards are promoted on replicas that already mmap the same shared
-   segments; they just replay the log tail — fast failover with no data movement.
+6. **Self-heal.** A dead node's shards are promoted on replicas that already hold **their own local copy**
+   of those segments; they just replay the log tail — fast failover with no data movement (warm replicas
+   make failover a promotion, not a copy).
 7. **Self-tune the feature model too.** The same compaction pass re-runs the corpus learner
    ([`../research/corpus-feature-learning.md`](../research/corpus-feature-learning.md)), republishes the
    feature-model version in cluster state, and nodes hot-swap to it at an epoch boundary. Sharding,
@@ -252,44 +281,54 @@ without operator action. The defaults are the product.
 ---
 
 ## 10. Incremental build path from today's single-node engine
-1. **Wrap the current engine as a shard.** ✅ **Done** (ADR-027, ADR-029): the in-process `LocalShard`
-   owns an `Engine` + `ArcSwap<EngineSnapshot>`; the local↔remote `trait Shard` seam abstracts the
-   per-shard operation, and behind the `distributed` feature a gRPC `ShardServer` + `RemoteShard` lift it
-   onto the network (`ClusterEngine::connect_remote`), proven by `tests/cluster_grpc_oracle.rs`.
+1. **Wrap the current engine as a shard.** ✅ **Done** (ADR-027, ADR-029, ADR-034): the in-process
+   `LocalShard` owns an `Engine` + `ArcSwap<EngineSnapshot>`; the local↔remote `trait Shard` seam abstracts
+   the per-shard operation, and behind the `distributed` feature a gRPC `ShardServer` + `RemoteShard` lift it
+   onto the network (`ClusterEngine::connect_remote`). The coordinator **ships its frozen dict** to each
+   server at connect (ADR-034), so a data node starts **empty** instead of rebuilding a byte-identical dict
+   from the corpus out-of-band. Proven by `tests/cluster_grpc_oracle.rs`.
 2. **Add a coordinator** with the consistent-hash ring + content routing (§3) over K local shards in
    one process. ✅ **Done** (ADR-027): `cluster::ClusterEngine` + `HashRing` over anchor `FeatureId`,
    entity-anchor placement, a designated broad-lane shard (§7), cross-shard merge — validated by the
    multi-shard correctness oracle (`tests/cluster_oracle.rs`: cluster ≡ single-node ≡ brute, K∈{1,3,8,16}).
-3. **Externalize the mutation log** (start with a single-node WAL, then Raft) and make segments
-   loadable from a shared path (local dir → object store) — gets the Aurora storage shape.
+3. **Externalize the mutation log** (start with a single-node WAL, then Raft) and keep each shard's
+   compiled segments durable on **local disk** — the shared-nothing storage shape (ADR-033; **no object
+   store**, the source of truth is the local WAL + replicas).
    - 3a. **Single-node coordinator WAL.** ✅ **Done** (ADR-031): a durable, ordered `trait ClusterLog`
      (`FileClusterLog`/`NullClusterLog`) plus a coordinator manifest + base snapshot; `ClusterEngine::{open,
      checkpoint}` rebuild the whole cluster — byte-identical placement, zero false negatives — from the log
      alone (proven by `tests/cluster_durability_oracle.rs`). Raw DSL is the logged source of truth; one
      `apply` funnel serves both live writes and replay.
-   - 3b. **Shared-path per-shard segments.** ✅ **Done (local dir)** (ADR-032): each shard is a segments-only
-     durable engine (`shard_<i>/segments/*.seg`, no per-shard WAL/manifest); `ClusterEngine::open`
-     **attaches-and-mmaps** each shard's committed compiled segments and replays only the log tail — no
-     re-ingest/recompile. The coordinator manifest (v2) is the single atomic commit point recording the
-     per-shard segment registry + cursor; `checkpoint` re-seals tombstoned base segments so a truncated
-     `Remove` can't resurrect a query. Proven by `tests/cluster_durability_oracle.rs`. *Still design-only:*
-     **object-store** segments (S3 behind a path abstraction) and a **Raft-backed `ClusterLog`** behind the
-     same seam (the seam + `apply` funnel + epoch were shaped for this swap).
-4. **Add the cluster-manager quorum** (Raft) holding ring + epoch; multi-process cluster. *(design-only)*
-5. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
-6. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
+   - 3b. **Per-shard local durable segments.** ✅ **Done** (ADR-032): each shard is a segments-only
+     durable engine (`shard_<i>/segments/*.seg` on **local disk**, no per-shard WAL/manifest);
+     `ClusterEngine::open` **attaches-and-mmaps** each shard's committed compiled segments and replays only
+     the log tail — no re-ingest/recompile. The coordinator manifest (v2) is the single atomic commit point
+     recording the per-shard segment registry + cursor; `checkpoint` re-seals tombstoned base segments so a
+     truncated `Remove` can't resurrect a query. Proven by `tests/cluster_durability_oracle.rs`. *(ADR-033:
+     these local segments are the durable base — there is no object-store step; the **Raft-backed
+     `ClusterLog`** still drops in behind the same seam, which the `apply` funnel + epoch were shaped for.)*
+4. **Per-shard replication + peer recovery** — a primary + N replicas per shard on different nodes; a new
+   or recovering replica streams the shard's local segments from a peer + replays the log tail (the
+   Elasticsearch/Cassandra HA primitive). *(design-only)*
+5. **Add the cluster-manager quorum** (Raft) holding ring + shard→node map + feature-model version +
+   epoch; multi-process cluster. *(design-only)*
+6. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
+7. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
-(Steps 1–2 — the in-process core — step 1's gRPC transport, step 3a's single-node coordinator log, and step 3b's per-shard durable segments (local dir) are built; ADR-027 + ADR-029 + ADR-031 + ADR-032. Step 3b's object-store/Raft half and steps 4–5 are design-only. See [`../STATUS.md`](../STATUS.md).)
+(Steps 1–2 — the in-process core — step 1's gRPC transport + dict shipping, step 3a's coordinator log, and
+step 3b's per-shard local durable segments are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032. The
+shared-nothing multi-node steps 4–6 — per-shard replication, the Raft control plane, autoscale — are
+design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
 
 ---
 
 ## 11. Bottom line
 Our workload lets us replace a search engine's expensive scatter-gather with **content-routed
 percolation by anchor entity** — fan-out of a few shards, with a clean no-false-negative proof. Wrap
-that in **Aurora's disaggregated log-is-the-database storage** (shared immutable segments + quorum
-mutation log → fast replicas, fast failover, cheap rebalance) and **OpenSearch's quorum
-cluster-manager** (election, allocation, rebalance), and make every knob **self-tuning** (shard count,
-splits, scaling, and the feature model all driven by telemetry). The result is a cluster that an
-operator starts with one command and otherwise leaves alone — proven patterns underneath, specialized
-routing on top.
+that in a **shared-nothing** storage layer — local per-shard segments + a per-node/coordinator mutation
+log + replicas with peer recovery (the Elasticsearch/Cassandra model, **no shared object store**;
+ADR-033) — and an **Elasticsearch-style quorum cluster-manager** (election, allocation, rebalance), and
+make every knob **self-tuning** (shard count, splits, scaling, and the feature model all driven by
+telemetry). The result is a cluster that an operator starts with one command and otherwise leaves alone,
+with **no cloud dependency** — proven patterns underneath, specialized routing on top.

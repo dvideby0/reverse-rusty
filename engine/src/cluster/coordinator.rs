@@ -917,19 +917,18 @@ impl ClusterEngine {
 #[cfg(feature = "distributed")]
 impl ClusterEngine {
     /// Assemble a cluster whose K shards are REMOTE (gRPC) — one per `endpoints[i]`,
-    /// connected on the given tokio `handle`. `norm`/`dict` MUST be the same frozen
-    /// feature space the servers were built over: placement + routing run here on the
-    /// coordinator, while each server re-compiles DSL read-only against its copy of
-    /// that dict, so the ids line up only when the dicts match (the shared-dict
-    /// invariant extended across the wire). `endpoints.len()` must equal
-    /// `config.num_shards`; endpoint `i` serves shard `i`. Load the corpus afterwards
-    /// with [`Self::ingest`].
-    ///
-    /// The shared-dict invariant is enforced across the wire by a connect-time
-    /// dict-fingerprint handshake (ADR-029): this returns [`ShardError::DictMismatch`] if
-    /// any server's frozen dict diverges from `dict`, so a divergent dict fails loud
-    /// instead of dropping matches silently. (The handshake guards correctness; it does
-    /// not *ship* the dict — servers must still be built over the same feature space.)
+    /// connected on the given tokio `handle`. Placement + routing run here on the
+    /// coordinator, while each server re-compiles DSL read-only against its copy of the
+    /// frozen dict, so the ids line up only when the dicts match. To guarantee that, the
+    /// coordinator **ships** its dict to each server at connect (ADR-034): an empty/pending
+    /// server adopts it, a server already holding it no-ops, and a server holding *data*
+    /// under a divergent dict refuses — surfaced as [`ShardError::DictMismatch`], so a
+    /// divergent feature space fails loud instead of dropping matches silently (the ADR-029
+    /// handshake, now backed by shipping). A data node therefore need not rebuild a
+    /// byte-identical dict from the corpus out-of-band; only `norm` must still match the
+    /// servers' (`default_vocab()` today — normalizer shipping is a later step, ADR-034).
+    /// `endpoints.len()` must equal `config.num_shards`; endpoint `i` serves shard `i`.
+    /// Load the corpus afterwards with [`Self::ingest`].
     pub fn connect_remote(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
@@ -946,13 +945,21 @@ impl ClusterEngine {
             )));
         }
         let ring = HashRing::new(config.num_shards, config.vnodes)?;
-        // Cross-process shared-dict invariant: every server MUST be frozen over the same
-        // dict as this coordinator, else placement/routing ids diverge and matches drop
-        // silently. Verify it loudly at connect via a fingerprint handshake (ADR-029).
+        // Cross-process shared-dict invariant: placement/routing ids line up only when every
+        // server's frozen dict equals this coordinator's. SHIP it (ADR-034): serialize once,
+        // then adopt per endpoint. An empty server adopts; a server already holding this dict
+        // no-ops; a server holding data under a divergent dict refuses → DictMismatch (loud,
+        // never a silent drop). Servers therefore needn't rebuild the dict from the corpus.
         let expected = dict.fingerprint();
+        let dict_bytes = crate::storage::serialize_dict(&dict);
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(endpoints.len());
         for ep in endpoints {
-            let remote = super::remote::RemoteShard::connect(ep.clone(), handle.clone(), expected)?;
+            let remote = super::remote::RemoteShard::connect_and_adopt(
+                ep.clone(),
+                handle.clone(),
+                dict_bytes.clone(),
+                expected,
+            )?;
             shards.push(Box::new(remote) as Box<dyn Shard>);
         }
         // A remote cluster is non-durable at the coordinator in this increment (the

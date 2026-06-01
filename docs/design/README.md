@@ -14,8 +14,9 @@ validate the numbers (see [`../STATUS.md`](../STATUS.md) for what's built vs des
 - [`ingestion-and-updates.md`](ingestion-and-updates.md) — immutable segments + hot delta + tombstones,
   the LSM write path, deltas-with-merge, bulk-ingest vs rebuild rules, and feature-model versioning.
 - [`clustering-and-scaling.md`](clustering-and-scaling.md) — sharding sketch and the full
-  horizontal-scaling design (entity-anchor content routing, OpenSearch/Aurora cluster layers,
-  self-tuning autoscaling).
+  horizontal-scaling design (entity-anchor content routing, **shared-nothing** cluster layers à la
+  Elasticsearch/Cassandra — local segments + WAL + replication + quorum control plane, no object store;
+  ADR-033 — self-tuning autoscaling).
 
 ---
 

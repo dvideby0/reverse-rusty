@@ -1065,7 +1065,9 @@ Find an ADR by its number in the records below. (Implementation status of each d
     full dict-shipping: exchange a dict fingerprint at connect / first RPC and error on mismatch — turns a
     silent FN into a loud failure.* **→ DONE (ADR-030): the handshake landed; a divergent dict now fails
     the connect with `ShardError::DictMismatch`. Full dict-shipping is still deferred, so cross-process use
-    still requires matching dicts — but it no longer fails *silently*.**
+    still requires matching dicts — but it no longer fails *silently*.** **→ Dict-shipping LANDED (ADR-034):
+    `connect_remote` now ships the frozen dict to each server, so a data node need not rebuild it from the
+    corpus out-of-band.**
   - *The `MatchStats` wire map is unverified.* `cluster_grpc_oracle.rs` asserts matched-ID sets, not the
     11 round-tripped stats fields, so a transposition in `cluster/proto.rs` would go undetected. *Cheap
     fix: assert a stats round-trip.* **→ DONE (ADR-030): a `proto.rs` round-trip unit test (by field name,
@@ -1100,7 +1102,8 @@ Find an ADR by its number in the records below. (Implementation status of each d
     A new `DictFingerprint` RPC lets `RemoteShard::connect` fetch the server's fingerprint and compare it to
     the coordinator's; a mismatch returns the new `ShardError::DictMismatch` instead of connecting. This
     turns the silent-FN path into a loud connect-time failure. It does **not** ship the dict (servers must
-    still be built over the same feature space) — full dict-shipping stays deferred (ADR-029 out-of-scope).
+    still be built over the same feature space) — full dict-shipping stays deferred (ADR-029 out-of-scope;
+    **shipped in ADR-034**).
   - **Fully-fallible construction.** `HashRing::new`, `ClusterEngine::from_parts`, `build`, and
     `connect_remote` now return `Result<_, ShardError>`, replacing the four construction `assert!`s with the
     new `ShardError::Config`. Chosen over a boundary-only conversion (which would leave `build` infallible):
@@ -1177,7 +1180,9 @@ Find an ADR by its number in the records below. (Implementation status of each d
   checkpoint generation) and merely *shaped* like their Raft counterparts. **Deliberately deferred** (dead
   surface without Raft): per-entry epoch fencing, quorum / read-your-writes append modes, per-shard logs,
   object-store snapshots, and cross-process coordinator durability (`connect_remote` uses an in-memory log
-  this increment).
+  this increment). *(Amended by **ADR-033**: the "object-store" framing is dropped — the cluster is
+  **shared-nothing** (local segments + per-node/coordinator WAL); object storage, if ever added, is only an
+  optional pluggable backup target, never the serving path.)*
 - **See also:** ADR-027 (the in-process core this extends), ADR-029 (the DSL-on-wire invariant replay relies
   on), ADR-030 (the dict-fingerprint check reused on `open`), ADR-013 (the engine WAL whose framing this
   copies), ADR-017 (the durable all-or-nothing ingest contract), ADR-021 (the `DurabilityFailure` event
@@ -1238,13 +1243,104 @@ Find an ADR by its number in the records below. (Implementation status of each d
   tests for attach-with-the-log-deleted, the **checkpoint-after-removing-a-build-time-query** bug-catcher (verified
   to fail without the re-seal), orphan-segment-ignored-and-GC'd, and corrupt-segment-fails-loud. Dependency-free
   (lean core, **not** behind `distributed`); `tests/cluster_oracle.rs` (in-memory) and the gRPC oracle are
-  unchanged. **Deliberately deferred:** object-store segments (S3 behind a path abstraction), a Raft-backed
-  `ClusterLog`, cross-process / remote-shard durability (`RemoteShard::segment_filenames` returns `Err`),
-  incremental (non-full) re-seal, and retaining build-time raw DSL on disk *before the first checkpoint* (the
-  compiled segments are the base; sources.dat is written at the first flush/checkpoint, sufficient for a future
-  feature-model re-materialize).
+  unchanged. **Deliberately deferred:** ~~object-store segments (S3 behind a path abstraction)~~ *(this
+  "multi-node half" framing is superseded by **ADR-033** — the cluster is **shared-nothing**: per-shard local
+  segments stay the durable base, no object store)*, a Raft-backed `ClusterLog`, cross-process / remote-shard
+  durability (`RemoteShard::segment_filenames` returns `Err`), incremental (non-full) re-seal, and retaining
+  build-time raw DSL on disk *before the first checkpoint* (the compiled segments are the base; sources.dat is
+  written at the first flush/checkpoint, sufficient for a future feature-model re-materialize).
 - **See also:** ADR-031 (step 3a, the coordinator log this builds the base on), ADR-027 (the in-process core),
   ADR-030 (the dict-fingerprint check reused on `open`), ADR-017 (all-or-nothing durable ingest), ADR-012 (the mmap
   segment format attached here), ADR-021 (the `DurabilityFailure` event), `clustering-and-scaling.md` §4.2 + §10
   step 3b, `src/cluster/coordinator.rs`, `src/cluster/shard.rs`, `src/segment/{lifecycle,compaction,persistence}.rs`,
   `src/storage.rs` (cluster manifest v2 + `MmapSegment::class_counts`), `tests/cluster_durability_oracle.rs`.
+
+### ADR-033: Shared-nothing cluster storage — supersede the Aurora-disaggregated / object-store framing
+
+- **Status:** Accepted.
+- **Context:** The clustering design (`clustering-and-scaling.md` §4) modeled the durable layer on **Aurora's
+  disaggregated storage**: a quorum mutation log + immutable compiled segments living in **shared object
+  storage** (S3-shaped), with replicas/failover "attaching" to that shared storage. ADR-032's stated
+  "multi-node half" was therefore *object-store segments* (swap the local `MmapSegment::open` for an S3 fetch).
+  On review that is the wrong fit: (1) it implies an **external storage service** in the serving path, which
+  clashes with this project's lean, self-contained, dependency-light ethos (16 deps, std-only core); (2) the
+  payoff it buys — "cheap replicas / fast failover from shared storage" — only materializes once a multi-node
+  control plane exists, which it does **not** yet; (3) it nudges the design toward a cloud-storage coupling we
+  do not want. Crucially, **the systems we actually take cues from do not work this way.**
+- **Decision:** Adopt the **shared-nothing** model that Elasticsearch/OpenSearch, Cassandra, and Kafka use,
+  and which our building blocks already match:
+  - **Local storage per node.** Each shard keeps its compiled segments on **local disk** (already true —
+    ADR-032's per-shard `shard_<i>/segments/*.seg`). No shared storage in the serving path.
+  - **Durability = a per-node/coordinator WAL** (already true — ADR-031's `ClusterLog`), the analogue of
+    ES's per-shard translog.
+  - **HA = primary/replica with peer recovery** (future): a new owner streams segments from a peer + replays
+    the log tail, *not* from object storage — the ES/Cassandra recipe.
+  - **Membership/routing = a quorum/Raft control plane** (future): holds the ring + shard→node map +
+    feature-model version + log epoch.
+  - **Object storage is NOT a dependency.** If it ever returns, it is only an **optional, pluggable
+    snapshot/backup** target with a **local-filesystem default** (the shape of ES's `fs` snapshot repository,
+    which is a plain shared directory — no cloud), never in the serving path and never AWS-coupled.
+  *(Rejected: keep the Aurora-disaggregated model. It is a legitimate school — Aurora/Neon — but it trades
+  self-containment for an external storage service to make replicas cheap; we get the same "cheap replicas"
+  property from warm replicas + peer recovery without taking on that dependency, and the shared-nothing
+  primitives are already built.)*
+- **Consequence:** The clustering critical path is re-pointed: **dict shipping (ADR-034) → per-shard
+  replication + peer recovery → Raft/quorum control plane → auto-split + autoscale.** Object-store
+  segments leave the roadmap. ADR-031's and ADR-032's "deferred: object-store" notes are amended in place
+  (their *local-disk* durability decisions stand unchanged — only the "object-store next" framing is dropped;
+  ADRs are never renumbered/rewritten). `clustering-and-scaling.md` §4/§5/§8/§10 are reworked to the
+  shared-nothing model; §2/§3 (the title-fan-out asymmetry + the anchor-routing no-false-negative argument)
+  are **model-independent and unchanged**. No engine code changes in this ADR — it is a design realignment;
+  the code increment that accompanies it is ADR-034.
+- **See also:** ADR-031 (the coordinator WAL = the shared-nothing durable log), ADR-032 (per-shard local
+  segments = the shared-nothing local base), ADR-027 (the in-process core), ADR-034 (dict shipping, the first
+  shared-nothing multi-node step), `clustering-and-scaling.md` §4/§5/§8/§10,
+  `research/clustering-prior-art.md` (the ES/Cassandra/Kafka vs Aurora/Neon comparison).
+
+### ADR-034: Cross-process dict shipping over gRPC (the first shared-nothing multi-node step)
+
+- **Status:** Accepted.
+- **Context:** ADR-029/030 built the gRPC `ShardServer`/`RemoteShard` transport and a connect-time
+  dict-fingerprint *handshake* (a divergent dict fails loud, not silently). But the handshake only *verifies*;
+  it never *ships*. So a shard server had to obtain a **byte-identical frozen dict out-of-band** — in practice
+  by rebuilding it from the **entire corpus** (`shardserver.rs` ran a full extract pass over the queries just
+  to construct the dict). That is the opposite of a data node you can stand up empty, and it was the headline
+  caveat on the cross-process transport. Under the shared-nothing realignment (ADR-033), making the existing
+  transport actually deployable cross-process is the first concrete multi-node step.
+- **Decision:** The coordinator **ships its authoritative frozen dict to each server at connect.**
+  - **A new `AdoptDict` RPC.** Payload = the dict serialized by the existing core
+    `crate::storage::serialize_dict` + the coordinator's `Dict::fingerprint` of it (an integrity check; the
+    server recomputes and rejects a mismatch as `invalid_argument`). Reuses the *exact* bytes the cluster
+    manifest already persists — no new serialization surface.
+  - **Servers can start *pending* (dict-less).** New `ShardServer::pending(norm, config)` holds its
+    `(dict, shard)` behind an `ArcSwapOption` (the codebase's `ArcSwap` snapshot idiom); reads against a
+    pending server return `failed_precondition`. `ShardServer::new(norm, dict, config)` (pre-built) is kept,
+    signature unchanged.
+  - **Adoption contract (the load-bearing part).** On `AdoptDict`: **empty** shard (pending, or zero
+    queries) → adopt (build a fresh `LocalShard` over the shipped dict); **same** fingerprint already held →
+    idempotent no-op; **non-empty** shard whose dict **differs** → refuse with `failed_precondition`, because
+    re-basing already-loaded data onto a different feature space would silently corrupt matches. The client
+    (`RemoteShard::connect_and_adopt`) maps that refusal to `ShardError::DictMismatch` (reading back the
+    server's actual fingerprint), so the silent-FN guard from ADR-030 is *preserved* — just relocated to where
+    it is a real risk (a *committed* server), since adopting onto an empty server is correct, not an error.
+  - **`connect_remote` ships by default.** It serializes the dict once and adopts per endpoint. Shipping an
+    identical dict to a pre-built server is an idempotent no-op (the fingerprint matches), so existing callers
+    (and the gRPC oracle's pre-built-server test) are behavior-preserved; the returned fingerprint *is* the
+    handshake. No `ClusterConfig` change.
+  - **Scope — dict only.** The fingerprint (and thus shipping) covers the **dict**. The **normalizer** must
+    still match on both sides; everything uses `Normalizer::default_vocab()` today, which is corpus-independent
+    and reproduced identically on any node, so the default case works end-to-end after shipping. Shipping +
+    fingerprinting the vocab→normalizer is the explicit next hardening, **deferred** here.
+- **Consequence:** A data node starts **empty** and is handed the frozen dict by the coordinator — no corpus,
+  no out-of-band dict coordination. Proven by `tests/cluster_grpc_oracle.rs`: a new
+  `grpc_cluster_with_dict_shipping` stands up K **pending** servers, ships the dict via `connect_remote`, and
+  asserts the cluster ≡ single-node ≡ brute (broad on/off); the divergence test is updated to load data first
+  (an empty server correctly *adopts*, so the guard now fires on a populated server holding a divergent dict);
+  a `server.rs` unit test exercises every arm of the adoption contract. All behind the off-by-default
+  `distributed` feature (lean core untouched). **Deferred:** normalizer/vocab shipping + fingerprint, TLS/auth
+  on the transport, and the per-shard replication / Raft control-plane steps (ADR-033 roadmap).
+- **See also:** ADR-029 (the transport + the DSL-on-wire invariant this completes), ADR-030 (the
+  dict-fingerprint handshake this turns from verify-only into ship-then-verify), ADR-033 (the shared-nothing
+  realignment this is the first step of), ADR-027 (the one-frozen-dict invariant), `src/cluster/server.rs`
+  (`pending` + `AdoptDict`), `src/cluster/remote.rs` (`connect_and_adopt`), `src/cluster/coordinator.rs`
+  (`connect_remote`), `engine/grpc/proto/shard.proto`, `tests/cluster_grpc_oracle.rs`.

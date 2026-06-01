@@ -307,6 +307,124 @@ fn grpc_cluster_matches_single_node_and_oracle() {
     );
 }
 
+/// Dict shipping (ADR-034): the shard servers start **pending** (dict-less) — NOT pre-built
+/// over the corpus — and the coordinator SHIPS its authoritative frozen dict to each at
+/// connect. The dict-shipped cluster must still return exactly the brute oracle's and the
+/// single-node engine's sets (broad on/off). This proves a data node no longer needs the
+/// corpus / out-of-band dict matching: only `norm` (`default_vocab()`) is arranged out-of-band.
+#[test]
+fn grpc_cluster_with_dict_shipping() {
+    let (queries, titles) = build_corpus();
+
+    let brute = Brute::build(&queries);
+    let mut reference = Engine::new(vocab());
+    reference.build_from_queries(&queries);
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    let mut blc = String::new();
+    let mut bfeats = Vec::new();
+    let mut ref_broad: Vec<HashSet<u64>> = Vec::with_capacity(titles.len());
+    let mut ref_selective: Vec<HashSet<u64>> = Vec::with_capacity(titles.len());
+    let mut oracle: Vec<HashSet<u64>> = Vec::with_capacity(titles.len());
+    let mut total_truth = 0usize;
+    for title in &titles {
+        reference.match_title(title, &mut s, &mut out, true);
+        ref_broad.push(out.iter().copied().collect());
+        reference.match_title(title, &mut s, &mut out, false);
+        ref_selective.push(out.iter().copied().collect());
+        let truth = brute.matches(title, &mut blc, &mut bfeats);
+        total_truth += truth.len();
+        oracle.push(truth);
+    }
+    assert!(total_truth > 0, "degenerate corpus: no matches at all");
+
+    // The coordinator owns the ONE authoritative frozen dict (built over the corpus). The
+    // shard servers do NOT — they start dict-less and receive it via AdoptDict.
+    let norm = Arc::new(vocab());
+    let dict = {
+        let mut d = Dict::new();
+        let mut lc = String::new();
+        for (_id, text) in &queries {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+                let _ = extract(&ast, &norm, &mut d, &mut lc);
+            }
+        }
+        d.finalize_mask();
+        Arc::new(d)
+    };
+
+    let k = 3usize;
+    let cfg = ClusterConfig {
+        num_shards: k,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut addrs: Vec<SocketAddr> = Vec::with_capacity(k);
+    {
+        let _enter = rt.enter();
+        for _ in 0..k {
+            let incoming =
+                TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind ephemeral port");
+            addrs.push(incoming.local_addr().expect("local_addr"));
+            // PENDING: no dict. Only `norm` is shared out-of-band (default_vocab); the dict
+            // arrives over the wire during connect_remote.
+            let server = ShardServer::pending(Arc::clone(&norm), EngineConfig::default());
+            rt.spawn(server.serve_with_incoming(incoming));
+        }
+    }
+    for &addr in &addrs {
+        wait_until_listening(addr);
+    }
+    let endpoints: Vec<String> = addrs.iter().map(|a| format!("http://{a}")).collect();
+
+    // connect_remote SHIPS the dict to each pending server (the behavior under test), then
+    // the corpus loads over the wire and compiles against the adopted dict.
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        &cfg,
+        &endpoints,
+        rt.handle(),
+    )
+    .expect("connect remote cluster ships the dict to pending servers");
+    cluster.ingest(&queries).expect("ingest corpus over gRPC");
+
+    let cc = cluster.class_counts().expect("class_counts over gRPC");
+    assert!(
+        cc[0] > 0 && cc[1] > 0 && cc[2] > 0,
+        "every placement class must be exercised: {cc:?}"
+    );
+
+    for (i, title) in titles.iter().enumerate() {
+        let got: HashSet<u64> = cluster
+            .percolate(title)
+            .expect("percolate over gRPC")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got, oracle[i],
+            "dict-shipped cluster vs brute oracle on {title:?}"
+        );
+        assert_eq!(
+            got, ref_broad[i],
+            "dict-shipped cluster vs single-node on {title:?}"
+        );
+
+        let got_sel: HashSet<u64> = cluster
+            .percolate_with_broad(title, false)
+            .expect("percolate (broad off) over gRPC")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got_sel, ref_selective[i],
+            "dict-shipped cluster broad=off vs single-node selective on {title:?}"
+        );
+    }
+}
+
 /// Build a small frozen dict from a fixed base plus `extra` DSL snippets (interned in
 /// order against `norm`). Two dicts built with different `extra` have different
 /// fingerprints — the divergence the handshake must catch.
@@ -323,10 +441,12 @@ fn frozen_dict_with(extra: &[&str], norm: &Normalizer) -> Arc<Dict> {
     Arc::new(d)
 }
 
-/// The dict-fingerprint handshake (ADR-029): a coordinator whose frozen dict diverges
-/// from a server's MUST fail the connect with `DictMismatch`, not silently drop matches.
-/// (The oracle above can't exercise this — it shares ONE `Arc<Dict>`, so the fingerprints
-/// always agree; here the two sides deliberately differ.)
+/// Dict shipping + the divergence guard (ADR-034/029): connecting to a server that already
+/// holds DATA under a divergent dict MUST fail loud with `DictMismatch`, not silently drop
+/// matches. Shipping *adopts* onto an EMPTY server (the happy path the test above covers), so
+/// the guard fires only once a server has committed to a feature space — here the server is
+/// populated under `dict_server` while the coordinator ships `dict_coord`. The server refuses
+/// the adopt (`FailedPrecondition`) and the client surfaces it as `DictMismatch`.
 #[test]
 fn grpc_connect_rejects_divergent_dict() {
     let norm = Arc::new(vocab());
@@ -350,6 +470,9 @@ fn grpc_connect_rejects_divergent_dict() {
             Arc::clone(&dict_server),
             EngineConfig::default(),
         );
+        // Load data so the shard is NON-EMPTY under dict_server. Shipping would happily adopt
+        // onto an empty server; the divergence guard only fires once data depends on a dict.
+        server.ingest_dsl(&[(1u64, "1994 upper deck".to_string())]);
         rt.spawn(server.serve_with_incoming(incoming));
         addr
     };

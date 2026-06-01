@@ -26,6 +26,12 @@ service ShardService {
   // Connect-time dict-identity check: the coordinator compares the server's frozen-dict
   // fingerprint to its own and refuses a mismatch (ADR-029).
   rpc DictFingerprint (Empty) returns (DictFingerprintReply);
+  // ---- dict shipping ----
+  // The coordinator SHIPS its authoritative frozen dict to an (ideally empty) server so a
+  // data node need not rebuild a byte-identical dict from the corpus out-of-band (ADR-034).
+  // Empty shard => adopt; same fingerprint => idempotent no-op; non-empty shard whose
+  // fingerprint differs => the server refuses (re-basing loaded data is unsafe).
+  rpc AdoptDict (AdoptDictRequest) returns (AdoptDictReply);
 }
 
 message Empty {}
@@ -91,3 +97,13 @@ message ClassCountsReply { repeated uint64 counts = 1; }  // exactly 4: [A, B, C
 
 // 64-bit fingerprint of the server's frozen dict (engine `Dict::fingerprint`).
 message DictFingerprintReply { uint64 fingerprint = 1; }
+
+// The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
+// plus the coordinator's own `Dict::fingerprint` of it. The server deserializes `dict`,
+// recomputes the fingerprint, and rejects a `fingerprint` mismatch as a corrupt/skewed ship.
+message AdoptDictRequest {
+  bytes dict = 1;
+  uint64 fingerprint = 2;
+}
+// The server's frozen-dict fingerprint AFTER adoption (equals the request's on success).
+message AdoptDictReply { uint64 fingerprint = 1; }

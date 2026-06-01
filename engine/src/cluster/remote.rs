@@ -55,6 +55,57 @@ impl RemoteShard {
         }
         Ok(RemoteShard { client, handle })
     }
+
+    /// Connect, then **ship** the coordinator's frozen dict to the server (`AdoptDict`,
+    /// ADR-034) before trusting it — so a data node need not have rebuilt a byte-identical
+    /// dict from the corpus out-of-band. `dict_bytes` is `crate::storage::serialize_dict` of
+    /// the coordinator's dict; `expected_fp` is its [`crate::dict::Dict::fingerprint`].
+    ///
+    /// The server adopts onto an empty shard and no-ops if it already holds this dict; the
+    /// returned fingerprint then *is* the handshake (it must equal `expected_fp`). If the
+    /// server holds data under a **different** dict it refuses (`FailedPrecondition`), which
+    /// we surface as [`ShardError::DictMismatch`] (reading back its actual fingerprint) — a
+    /// divergent populated server fails loud instead of dropping matches silently.
+    pub fn connect_and_adopt(
+        endpoint: String,
+        handle: Handle,
+        dict_bytes: Vec<u8>,
+        expected_fp: u64,
+    ) -> Result<Self, ShardError> {
+        let client = handle
+            .block_on(ShardServiceClient::connect(endpoint))
+            .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
+        let mut shipper = client.clone();
+        let req = proto::AdoptDictRequest {
+            dict: dict_bytes,
+            fingerprint: expected_fp,
+        };
+        let adopted = match handle.block_on(async move { shipper.adopt_dict(req).await }) {
+            Ok(reply) => reply.into_inner().fingerprint,
+            // The server holds data under a different dict and refused ours. Read its actual
+            // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
+            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+                let mut probe = client.clone();
+                let actual = handle
+                    .block_on(async move { probe.dict_fingerprint(proto::Empty {}).await })
+                    .map_or(0, |r| r.into_inner().fingerprint);
+                return Err(ShardError::DictMismatch {
+                    expected: expected_fp,
+                    actual,
+                });
+            }
+            Err(status) => return Err(ShardError::Remote(format!("adopt_dict: {status}"))),
+        };
+        // On success the server echoes the fingerprint it now serves — this equality IS the
+        // dict-identity handshake, so no separate `dict_fingerprint` round-trip is needed.
+        if adopted != expected_fp {
+            return Err(ShardError::DictMismatch {
+                expected: expected_fp,
+                actual: adopted,
+            });
+        }
+        Ok(RemoteShard { client, handle })
+    }
 }
 
 fn rpc_err<E: std::fmt::Display>(e: E) -> ShardError {
