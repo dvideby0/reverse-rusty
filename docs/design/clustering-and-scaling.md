@@ -45,8 +45,11 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > (step 5e; ADR-041) — a CRC-framed Raft log + persisted vote/committed/snapshot let a `controlserver --data-dir`
 > survive a restart and rejoin the quorum. A **shard→node allocator** is built too (step 5f; ADR-042) —
 > rendezvous (HRW) hashing plans a balanced, minimal-movement map that `ClusterEngine::{register_node,
-> deregister_node, rebalance}` commit through the control plane. Still design-only: an autoscaler that drives
-> rebalance + the data-moving handoff on a reassignment, normalizer/vocab shipping, TLS/auth, and auto-split.
+> deregister_node, rebalance}` commit through the control plane. A **runtime-swappable shard backing** is built
+> too (step 6a; ADR-043) — a `HandoffShard` re-points a position at a new owner at runtime (serve-then-drop,
+> lock-free), the routing-flip half of a live handoff. Still design-only: the cross-node move that *drives* the
+> swap (step 6b — peer-recover → brief quiesce → flip → fence → drop), an autoscaler that triggers rebalance +
+> handoff on membership events, normalizer/vocab shipping, TLS/auth, and auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
@@ -219,8 +222,11 @@ Elasticsearch's per-shard **translog** / Cassandra's commitlog.
   placement by **rendezvous (HRW)** hashing — balanced, deterministic, minimal-movement (≈1/N on a membership
   change). `ClusterEngine::{register_node, deregister_node, rebalance}` manage membership + commit the desired
   map through the control plane (the *decision*); physically relocating a shard's segments on a reassignment
-  reuses peer recovery (§4.2) and is the deployment wiring on top — the serve-then-drop handoff + epoch fencing
-  during a live move (§9) and an autoscaler that drives `rebalance` on membership events (§8) are the next steps.
+  reuses peer recovery (§4.2) and is the deployment wiring on top. The **routing-flip half** of that live move
+  is built (step 6a; ADR-043) — a `HandoffShard` makes a position's backing atomically swappable, so the
+  coordinator can re-point it at a new owner with **serve-then-drop** (§9) and a generation fence stamp. Still
+  the next steps: the cross-node move that *drives* the swap (step 6b — peer-recover → brief quiesce → flip →
+  fence → drop) and an autoscaler that drives `rebalance` + the handoff on membership events (§8).
 
 ---
 
@@ -315,7 +321,10 @@ without operator action. The defaults are the product.
 - **Split-brain** prevented by manager quorum (OpenSearch model); writes need quorum on the log.
 - **Stale reads during rebalance** — a title in flight to an old owner is correct as long as the old
   owner still serves that range until handoff completes; consistent-hash handoff + epoch fencing makes
-  this safe (serve-then-drop).
+  this safe (serve-then-drop). The mechanism is built (step 6a; ADR-043): a position's backing is an
+  `ArcSwap` (`HandoffShard`), so an in-flight probe completes against the *old* backing while a swap re-points
+  the slot lock-free, and each swap stamps a generation (the fence token). The cross-node move that drives the
+  swap — and fences + drops the demoted owner — is step 6b.
 - **Hot keys** (a viral player) — that shard gets more *replicas* (throughput), and if its corpus grows
   too large it auto-splits; the broad lane absorbs the truly non-selective anchors.
 
@@ -431,18 +440,30 @@ without operator action. The defaults are the product.
      process the map is advisory, so matching is unaffected. Proven by `allocator.rs` unit tests +
      `tests/cluster_allocator_oracle.rs` (a balanced fully-assigned map; idempotent; a deregistered node drops
      out; `percolate` byte-identical before/after every rebalance ⇒ zero false negatives). Lean core, no new dep.
-6. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas (drives
-   `rebalance`/`register_node` on membership events). *(design-only)*
+6. **Live data-moving handoff, then auto-split + autoscale.**
+   - 6a. **Swappable shard backing (the routing-flip mechanism).** ✅ **Done** (ADR-043): a `HandoffShard`
+     (`src/cluster/handoff.rs`) wraps a position's backing in an `ArcSwap<Box<dyn Shard>>` + a generation stamp
+     and implements `Shard` on `Arc<HandoffShard>`, so the gRPC builders wrap each position and keep a typed
+     handle to **re-point it at a new owner at runtime**. Serve-then-drop falls out of `arc_swap` (an in-flight
+     probe completes against the old backing, lock-free — §9); the generation is the epoch-fence stamp.
+     `distributed`-gated ⇒ the in-process/default path is byte-identical. Proven by six `handoff.rs` unit tests.
+   - 6b. **The cross-node move that drives it.** *(design-only)* `ClusterEngine::execute_handoff` =
+     `peer_recover_replica` (ADR-036/039, the byte mover) → a brief catch-up quiesce so the new owner ≡ the
+     source at the flip instant → `swap_backing` → `Fence` the old owner → drop it; plus an **autoscaler** that
+     calls `rebalance`/`register_node` on membership events and triggers the handoff.
+   - 6c. **Auto-split + `recommended_shard_count`** from telemetry (the ES `_split` analogue). *(design-only)*
 7. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
 (Steps 1–2 — the in-process core — step 1's gRPC transport + dict shipping, step 3a's coordinator log,
 step 3b's per-shard local durable segments, step 4's per-shard replication + peer recovery (4a in-process,
 4b over gRPC), the **quorum/Raft control plane** — step 5a's seam AND step 5b's openraft backend + gRPC
-`ControlService` — AND step 5c's **per-shard translog + no-quiesce peer recovery** are built; ADR-027 + ADR-029
-+ ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040 + ADR-041 +
-ADR-042. The remaining shared-nothing multi-node work — an autoscaler that drives rebalance + the data-moving
-handoff on a reassignment, and auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
+`ControlService` — AND step 5c's **per-shard translog + no-quiesce peer recovery**, step 5d's retention/finalize,
+step 5e's durable Raft log, step 5f's **shard→node allocator**, and step 6a's **runtime-swappable shard backing**
+are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 +
+ADR-040 + ADR-041 + ADR-042 + ADR-043. The remaining shared-nothing multi-node work — the cross-node move that
+drives a live handoff (step 6b), an autoscaler that triggers rebalance + handoff on membership events, and
+auto-split (step 6c) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
 
 ---
 

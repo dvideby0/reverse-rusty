@@ -51,6 +51,8 @@ use super::control::{
     ClusterState, ClusterStateChange, ControlPlane, InMemoryControlPlane, NodeDescriptor, NodeId,
     ShardAssignment,
 };
+#[cfg(feature = "distributed")]
+use super::handoff::{wrap_handoff, HandoffShard};
 use super::ring::{HashRing, DEFAULT_VNODES};
 use super::shard::{LocalShard, Shard, ShardError};
 
@@ -210,6 +212,13 @@ pub struct ClusterEngine {
     /// feature-model version + epoch (ADR-037). Read at assembly / introspection time only,
     /// never on the per-title hot path. [`InMemoryControlPlane`] today; openraft-backed later.
     control: Box<dyn ControlPlane>,
+    /// Per-position handoff handles (ADR-043), index-aligned with `shards`. Empty on the
+    /// in-process/default path (no position is handoff-wrapped ⇒ byte-identical to pre-6a);
+    /// populated by the gRPC builders, which wrap each position's backing in a [`HandoffShard`]
+    /// so a position can be re-pointed at a new owner at runtime (Stage 6b's `execute_handoff`)
+    /// without downcasting `dyn Shard`. `handoffs[i]` and `shards[i]` share one `HandoffShard`.
+    #[cfg(feature = "distributed")]
+    handoffs: Vec<Arc<HandoffShard>>,
 }
 
 /// Observer callback for cluster durability events — the `Arc` analogue of the
@@ -433,6 +442,10 @@ impl ClusterEngine {
             control: durable.control,
             observer: Mutex::new(None),
             pending_events: Mutex::new(Vec::new()),
+            // No position is handoff-wrapped by default; the gRPC builders install handles via
+            // `with_handoffs`. Empty here ⇒ the in-process/default path is byte-identical (ADR-043).
+            #[cfg(feature = "distributed")]
+            handoffs: Vec::new(),
         })
     }
 
@@ -1150,6 +1163,25 @@ pub struct ShardGroup {
 /// gRPC remote-cluster construction (behind the `distributed` feature).
 #[cfg(feature = "distributed")]
 impl ClusterEngine {
+    /// Install per-position handoff handles built by a gRPC builder (ADR-043). Consumes + returns
+    /// `self` so a builder can chain it after [`Self::from_parts`]; `handoffs` must be index-aligned
+    /// with `shards` (one [`HandoffShard`] per position, sharing the boxed copy already in `shards`,
+    /// both produced by [`wrap_handoff`]). The in-process/default path never calls this, so its
+    /// `handoffs` stays empty and the cluster is byte-identical to pre-6a.
+    fn with_handoffs(mut self, handoffs: Vec<Arc<HandoffShard>>) -> Self {
+        self.handoffs = handoffs;
+        self
+    }
+
+    /// The fence generation each shard position's backing is currently serving under (ADR-043) —
+    /// introspection for the handoff state, index-aligned with positions. Empty on the
+    /// in-process/default path (no position is handoff-wrapped). Stage 6b's `execute_handoff`
+    /// advances a position's generation when it re-points it to a new owner; this is how a
+    /// test/operator observes the live map.
+    pub fn handoff_generations(&self) -> Vec<u64> {
+        self.handoffs.iter().map(|h| h.generation()).collect()
+    }
+
     /// Assemble a cluster whose K shards are REMOTE (gRPC) — one per `endpoints[i]`,
     /// connected on the given tokio `handle`. Placement + routing run here on the
     /// coordinator, while each server re-compiles DSL read-only against its copy of the
@@ -1194,6 +1226,9 @@ impl ClusterEngine {
         let expected = dict.fingerprint();
         let dict_bytes = crate::storage::serialize_dict(&dict);
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(endpoints.len());
+        // Wrap each remote position in a `HandoffShard` so it can be re-pointed at a new owner at
+        // runtime (ADR-043); the typed handles are installed via `with_handoffs` below.
+        let mut handoffs: Vec<Arc<HandoffShard>> = Vec::with_capacity(endpoints.len());
         for ep in endpoints {
             let remote = super::remote::RemoteShard::connect_and_adopt(
                 ep.clone(),
@@ -1201,14 +1236,19 @@ impl ClusterEngine {
                 dict_bytes.clone(),
                 expected,
             )?;
-            shards.push(Box::new(remote) as Box<dyn Shard>);
+            let (boxed, h) = wrap_handoff(Box::new(remote), 0);
+            shards.push(boxed);
+            handoffs.push(h);
         }
         // A remote cluster is non-durable at the coordinator in this increment (the
         // coordinator-level durable log is the in-process story; cross-node durability
         // is a later step). Use the in-memory log so behavior is unchanged.
         let durable =
             ClusterDurable::in_memory(config.num_shards as u32, config.vnodes, dict.fingerprint());
-        Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)
+        Ok(
+            Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)?
+                .with_handoffs(handoffs),
+        )
     }
 
     /// Assemble a cluster whose K shard POSITIONS are each a [`ReplicatedShard`](super::replica::ReplicatedShard)
@@ -1237,6 +1277,9 @@ impl ClusterEngine {
         let expected = dict.fingerprint();
         let dict_bytes = crate::storage::serialize_dict(&dict);
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(groups.len());
+        // Each position (a bare remote or a ReplicatedShard group) is wrapped in a `HandoffShard`
+        // so the whole group can be re-pointed at a new owner at runtime (ADR-043).
+        let mut handoffs: Vec<Arc<HandoffShard>> = Vec::with_capacity(groups.len());
         for g in groups {
             let primary = super::remote::RemoteShard::connect_and_adopt(
                 g.primary.clone(),
@@ -1262,11 +1305,16 @@ impl ClusterEngine {
                     replicas,
                 ))
             };
-            shards.push(shard);
+            let (boxed, h) = wrap_handoff(shard, 0);
+            shards.push(boxed);
+            handoffs.push(h);
         }
         let durable =
             ClusterDurable::in_memory(config.num_shards as u32, config.vnodes, dict.fingerprint());
-        Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)
+        Ok(
+            Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)?
+                .with_handoffs(handoffs),
+        )
     }
 
     /// Cross-node peer recovery (ADR-036 + ADR-039 + ADR-040): bring a fresh, durable, **pending**

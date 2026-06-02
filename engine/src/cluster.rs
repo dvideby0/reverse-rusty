@@ -38,6 +38,8 @@ mod control_server;
 #[cfg(feature = "distributed")]
 mod control_store;
 #[cfg(feature = "distributed")]
+mod handoff;
+#[cfg(feature = "distributed")]
 mod proto;
 #[cfg(feature = "distributed")]
 mod remote;
