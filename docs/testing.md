@@ -40,6 +40,21 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 | Coverage gaps | `tests/coverage_gaps.rs` | Parallel matching, compaction, broad-lane isolation, edge cases. |
 | Error paths | `tests/error_paths.rs` | API error handling (parse errors, class-D rejection). |
 | **Pressure / soak** | `tests/stress.rs` | Mixed read/write/delete churn, parallel-vs-sequential agreement under mutation, metrics/event consistency. Self-contained (seeded `gen`, no data files). |
+| **Cluster oracle** | `tests/cluster_oracle.rs` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}; every placement class + fan-out asserted; dynamic-vocabulary absorb-correctly (hashed new tokens don't broaden, declared + auto-learned aliases make both surface forms match). **Half the Cluster-v1 gate (below).** |
+| **Cluster durability** | `tests/cluster_durability_oracle.rs` | A `data_dir` cluster rebuilt from manifest + per-shard segments + coordinator log ≡ pre-crash ≡ brute, K∈{1,3,8} × broad; checkpoint, torn-tail recovery, fail-loud guards, alias-survives-reopen. **Half the Cluster-v1 gate (below).** |
+
+### The Cluster-v1 acceptance gate
+
+`tests/cluster_oracle.rs` + `tests/cluster_durability_oracle.rs` are the **named acceptance gate for
+Cluster v1** (the in-process multi-shard core + durable reopen + dynamic vocabulary): _cluster ≡
+single-node ≡ brute_ and _reopen ≡ pre-crash ≡ brute_, with the dynamic-vocabulary absorb-correctly
+assertions baked in (ADR-046). Both already run on the default `cargo test --release`, so the gate is
+live — naming them here makes the contract explicit: keep them green, never weaken them. The
+experimental distributed layers add three more oracles that `check.sh` runs in its
+`--features distributed` lane — `tests/cluster_grpc_oracle.rs` (gRPC transport + dict shipping +
+replication/recovery, and the `block_on` rayon-fanout guard), `tests/cluster_control_raft_oracle.rs`
+(openraft control plane), and `tests/cluster_autoscale_oracle.rs` (autoscaler). Those are
+oracle-proven **on localhost**, not a multi-machine gate.
 
 ## Pressure & soak tests
 

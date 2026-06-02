@@ -52,6 +52,9 @@ run "clippy (-D warnings)" cargo clippy --all-targets --release -- -D warnings
 # gate. Keeps the `--no-default-features` build (the lean dependency surface) honest.
 run "clippy (lean core)"   cargo clippy --no-default-features --release -- -D warnings
 if [ "$fast" -eq 0 ]; then
+    # The Cluster-v1 acceptance gate (tests/cluster_oracle.rs +
+    # tests/cluster_durability_oracle.rs — see docs/testing.md) runs here on the default
+    # feature set; the distributed-gated cluster oracles run in the `distributed` lane below.
     run "tests (--release)"    cargo test --release
     # Distributed (gRPC ShardServer) lane: the default lanes never compile the
     # `distributed` feature, so without this the cluster gRPC code + its oracle would
