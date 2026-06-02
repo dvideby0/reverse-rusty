@@ -38,11 +38,13 @@ HOW TO RUN
                                                             #   columnar batch win + amortization sweep
   cargo run --release --bin segbench -- 300000 3000 0.0     # read-amp vs 1/2/4/8 segments
   cargo run --release --bin snapbench -- 1000000 200        # snapshot-publish cost (ADR-016)
+  cargo run --release --bin clusterbench -- 100000 5000 8 0.05  # CLUSTER fan-out + candidate structure
   cargo run --release --bin learn -- 500000 50 0.30         # NPMI corpus learner (see appendix)
 
-  bench args:     <num_queries> <num_titles> <broad_frac> <skew> <seed> [reps]
-  segbench args:  <num_queries> <num_titles> <broad_frac> <seed>
-  snapbench args: <num_queries> <iters>
+  bench args:        <num_queries> <num_titles> <broad_frac> <skew> <seed> [reps]
+  segbench args:     <num_queries> <num_titles> <broad_frac> <seed>
+  snapbench args:    <num_queries> <iters>
+  clusterbench args: <num_queries> <num_titles> <num_shards> <broad_frac> <seed>
   Seeds default to 0x00C0FFEE so runs are reproducible. Budget: each is <~30s except the 5M+
   bench memory passes (they build the corpus to disk twice — a few minutes) and the 10M soak.
 
@@ -78,6 +80,17 @@ INVARIANTS — the regression gate (machine-INDEPENDENT; must reproduce)
     CORRECTNESS: match_titles_batch[t] is byte-identical to per-title match_title(t, broad=true) for
     ALL t and ALL bs (tests/broad_batch.rs, 7/7) — batch size is a perf knob, never a semantic one.
 
+  CLUSTER FAN-OUT  (clusterbench 100000 5000 8 0.05) — fixed by the corpus + the ring, NOT the CPU:
+    shards probed / title @K=8:   avg 3.84   p50 4   p95 5   p99 6   max 7     (of 8 shards)
+    FAN-OUT SCALING (same corpus, K = 1 / 2 / 4 / 8 / 16 / 32):
+      avg_fanout   1.00 / 1.90 / 3.08 / 3.84 / 4.36 / 4.60     <- BOUNDED: saturates ~4-5, never -> N
+      p99_fanout      1 /    2 /    4 /    6 /    7 /    7
+    candidates/title (85.64) AND broad share (26.9%) are IDENTICAL at every K — the cluster distributes
+    selectivity without inflating it: the probed shards' candidate union is exactly the single-node
+    candidate set, however many shards K splits it across (a corollary of the lossless cover, ADR-027).
+    -> the load-bearing cluster invariants: content routing touches a handful of shards (~2-5, never
+       all N), and candidates/title does NOT grow with K. Both reproduce on any machine.
+
   CORRECTNESS  (must be exactly these — this is the contract):
     oracle:   false_neg = 0,  false_pos = 0      (~109k matches over 40k queries x 4k titles)
     stress:   15/15 pass;  ghosts (deleted ids in results) = 0;  par == seq, 0 mismatches
@@ -105,6 +118,17 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-06-02] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  Cluster fan-out harness (clusterbench,
+              Tier-0 observability).  Loaded interactive box — throughput indicative; the fan-out +
+              candidate structural numbers are NOT (they are K-invariant and reproduce bit-for-bit).
+  INVARIANTS — clusterbench 100000 5000 8 0.05 (see CLUSTER FAN-OUT block above):
+    fan-out @K=8:  avg 3.84  p50 4  p95 5  p99 6  max 7   (of 8 shards)
+    scaling avg_fanout  1.00/1.90/3.08/3.84/4.36/4.60  for K 1/2/4/8/16/32  (saturates ~4-5, never ->N)
+    cand/title 85.64 and broad share 26.9% IDENTICAL at every K  (lossless cover: union == single-node set)
+    build  A=99565 B=223 C=212;  per-shard counts min 11741 / max 13858 (shard 0 = 12728)
+  THROUGHPUT — indicative, K=8, single driver thread (per-title fan-out parallelised internally):
+    selective ~21.6k titles/s   |   with broad ~21.7k titles/s
+
 [2026-05-30b] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  Broad-lane columnar batch
               evaluation (ADR-026, Stage 2).  Loaded interactive box — throughput is indicative;
               the broad-amortization structural numbers are NOT (they reproduced bit-for-bit).
