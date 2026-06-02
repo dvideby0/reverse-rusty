@@ -43,8 +43,10 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > in-flight recovery (and the translog GCs when idle), and a lease-held convergence loop + atomic in-sync
 > promotion shrink the quiesce window to the residual delta. The openraft control plane is **durable** too
 > (step 5e; ADR-041) — a CRC-framed Raft log + persisted vote/committed/snapshot let a `controlserver --data-dir`
-> survive a restart and rejoin the quorum. Still design-only: an allocator on the shard→node map,
-> normalizer/vocab shipping, TLS/auth, and autoscaling/auto-split.
+> survive a restart and rejoin the quorum. A **shard→node allocator** is built too (step 5f; ADR-042) —
+> rendezvous (HRW) hashing plans a balanced, minimal-movement map that `ClusterEngine::{register_node,
+> deregister_node, rebalance}` commit through the control plane. Still design-only: an autoscaler that drives
+> rebalance + the data-moving handoff on a reassignment, normalizer/vocab shipping, TLS/auth, and auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
@@ -212,8 +214,13 @@ Elasticsearch's per-shard **translog** / Cassandra's commitlog.
   (reusing `storage::crc32` + the `clog`/`wal` torn-tail pattern). A `controlserver --data-dir` manager node
   survives a crash, resumes its committed cluster-state document, and rejoins the quorum; the in-memory backend
   (no dir) stays byte-identical to ADR-038. The state machine is rebuilt from the snapshot + replayed log on
-  restart, so `apply` stays the in-memory funnel. The allocator that *acts* on the shard→node map (physically
-  moving shards on a reassignment) is the next increment.
+  restart, so `apply` stays the in-memory funnel.
+- **The allocator that fills the map (ADR-042).** `src/cluster/allocator.rs` computes the shard→node
+  placement by **rendezvous (HRW)** hashing — balanced, deterministic, minimal-movement (≈1/N on a membership
+  change). `ClusterEngine::{register_node, deregister_node, rebalance}` manage membership + commit the desired
+  map through the control plane (the *decision*); physically relocating a shard's segments on a reassignment
+  reuses peer recovery (§4.2) and is the deployment wiring on top — the serve-then-drop handoff + epoch fencing
+  during a live move (§9) and an autoscaler that drives `rebalance` on membership events (§8) are the next steps.
 
 ---
 
@@ -412,7 +419,20 @@ without operator action. The defaults are the product.
      manager node durable, so it survives a crash and rejoins the quorum. Proven by
      `tests/cluster_control_raft_oracle.rs::durable_node_recovers_committed_document_after_restart` +
      `control_store.rs` unit tests. All `distributed`-gated; no new dependency.
-6. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
+   - 5f. **Shard→node allocator.** ✅ **Done** (ADR-042): the decision layer that fills the control-plane
+     shard→node map. `src/cluster/allocator.rs` plans a placement by **rendezvous (HRW)** hashing
+     (`util::fnv1a64` over `(position, node)`): each position's top-RF nodes by weight (primary + replicas) —
+     balanced, deterministic, and **minimal-movement** (a node add/remove reassigns ≈1/N of positions, not all
+     — the §8 auto-rebalance property; the same hashing family as the entity-anchor ring, keyed on
+     `(position, node)`). `ClusterEngine::{register_node, deregister_node}` manage membership and `rebalance(rf)`
+     commits only the changed positions (`AssignShard` proposals) — idempotent, fail-closed, a no-op on the
+     single-node default. **Decision, not data movement:** it commits the *desired* map; physically relocating a
+     shard's segments on a reassignment reuses peer recovery (5c/5d) and is the deployment wiring on top — in
+     process the map is advisory, so matching is unaffected. Proven by `allocator.rs` unit tests +
+     `tests/cluster_allocator_oracle.rs` (a balanced fully-assigned map; idempotent; a deregistered node drops
+     out; `percolate` byte-identical before/after every rebalance ⇒ zero false negatives). Lean core, no new dep.
+6. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas (drives
+   `rebalance`/`register_node` on membership events). *(design-only)*
 7. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
@@ -420,9 +440,9 @@ without operator action. The defaults are the product.
 step 3b's per-shard local durable segments, step 4's per-shard replication + peer recovery (4a in-process,
 4b over gRPC), the **quorum/Raft control plane** — step 5a's seam AND step 5b's openraft backend + gRPC
 `ControlService` — AND step 5c's **per-shard translog + no-quiesce peer recovery** are built; ADR-027 + ADR-029
-+ ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040 + ADR-041. The
-remaining shared-nothing multi-node work — an allocator acting on the shard→node map, and autoscale +
-auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
++ ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040 + ADR-041 +
+ADR-042. The remaining shared-nothing multi-node work — an autoscaler that drives rebalance + the data-moving
+handoff on a reassignment, and auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
 
 ---
 

@@ -45,9 +45,11 @@ use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
 use crate::segment::MatchStats;
 
+use super::allocator;
 use super::clog::{ClusterLog, ClusterMutation, FileClusterLog, LogPos, NullClusterLog};
 use super::control::{
-    ClusterState, ClusterStateChange, ControlPlane, InMemoryControlPlane, ShardAssignment,
+    ClusterState, ClusterStateChange, ControlPlane, InMemoryControlPlane, NodeDescriptor, NodeId,
+    ShardAssignment,
 };
 use super::ring::{HashRing, DEFAULT_VNODES};
 use super::shard::{LocalShard, Shard, ShardError};
@@ -1004,6 +1006,51 @@ impl ClusterEngine {
         self.control
             .propose(ClusterStateChange::AssignShard(assignment))?;
         Ok(())
+    }
+
+    /// Register (or replace, by id) a cluster member in the control-plane document — the membership
+    /// half of the allocator's inputs (ADR-042). Idempotent; errors fail-closed. A subsequent
+    /// [`Self::rebalance`] folds the node into the shard→node map.
+    pub fn register_node(&self, node: NodeDescriptor) -> Result<(), ShardError> {
+        self.control.propose(ClusterStateChange::AddNode(node))?;
+        Ok(())
+    }
+
+    /// Deregister a member by id (idempotent). Pruning it from the shard→node map is the separate
+    /// [`Self::rebalance`] (exactly as removing a node is distinct from re-placing its shards).
+    pub fn deregister_node(&self, id: NodeId) -> Result<(), ShardError> {
+        self.control.propose(ClusterStateChange::RemoveNode(id))?;
+        Ok(())
+    }
+
+    /// Recompute the desired **shard→node placement** from the current membership at replication
+    /// factor `rf`, and commit only the positions that changed (ADR-042). Uses rendezvous (HRW)
+    /// hashing so the map is balanced, deterministic, and minimal-movement: a node added/removed
+    /// since the last rebalance reassigns ≈1/N of positions, not all of them. Returns the number of
+    /// positions reassigned (0 ⇒ already balanced — e.g. the single-node default, a no-op). Errors
+    /// fail-closed (a rejected proposal leaves the prior map intact).
+    ///
+    /// This is the **decision** layer: it commits the map the control plane holds. Physically
+    /// relocating a shard's segments to a new owner on a reassignment reuses the existing
+    /// peer-recovery path ([`Self::peer_recover_replica`], ADR-036/039) and is the deployment wiring
+    /// on top — an in-process cluster holds every shard locally, so the map is advisory there and
+    /// matching is unaffected (the local shards do not move).
+    pub fn rebalance(&self, rf: usize) -> Result<usize, ShardError> {
+        let state = self.control.cluster_state()?;
+        let nodes: Vec<NodeId> = state.nodes.iter().map(|n| n.id).collect();
+        if nodes.is_empty() {
+            return Err(ShardError::ControlPlane(
+                "rebalance: the cluster has no nodes to place shards on".into(),
+            ));
+        }
+        let desired = allocator::plan_assignments(&nodes, state.num_shards, rf);
+        let changed = allocator::changed_assignments(&state.assignments, desired);
+        let count = changed.len();
+        for assignment in changed {
+            self.control
+                .propose(ClusterStateChange::AssignShard(assignment))?;
+        }
+        Ok(count)
     }
 
     /// Runtime replica growth (ADR-040): bring up an additional in-process replica for shard

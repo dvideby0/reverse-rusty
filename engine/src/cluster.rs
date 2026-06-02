@@ -22,6 +22,7 @@
 //! lossless (zero false negatives). See [`coordinator`] for the placement/routing rules
 //! and the no-false-negative argument.
 
+mod allocator;
 mod clog;
 mod control;
 mod coordinator;

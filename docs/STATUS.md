@@ -229,7 +229,21 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   `tests/cluster_control_raft_oracle.rs::durable_node_recovers_committed_document_after_restart` (commit → shutdown
   → rebuild from disk → the committed doc survives + a fresh write commits) + `control_store.rs` unit tests. All
   `distributed`-gated (the lean core never compiles openraft); no new dependency. **Honest scope:** an end-to-end
-  durable-multi-node rolling-restart harness + TLS/auth + an allocator on the shard→node map remain design-only.
+  durable-multi-node rolling-restart harness + TLS/auth remain design-only.
+- **Shard→node allocator (ADR-042)** — clustering build-path step 5f, the decision layer that fills the
+  control-plane shard→node map. `src/cluster/allocator.rs` plans a placement via **rendezvous (HRW)** hashing
+  (`util::fnv1a64` over `(position, node)`): for each shard position the top-RF nodes by weight (primary +
+  replicas) — balanced, deterministic, and **minimal-movement** (a node add/remove reassigns ≈1/N of positions,
+  not all, like Elasticsearch/Cassandra rebalance). `ClusterEngine` gained `register_node`/`deregister_node`
+  (membership via the control plane) + `rebalance(rf)`, which commits only the changed positions
+  (`changed_assignments`) as `AssignShard` proposals — idempotent (no membership change ⇒ 0 moves), fail-closed,
+  a no-op on the single-node default. Lean core, dependency-free. **Scope:** this commits the *desired* map;
+  physically relocating a shard's segments on a reassignment reuses peer recovery (ADR-036/039) and is the
+  deployment wiring on top (in-process the map is advisory — matching is unaffected). Proven by `allocator.rs`
+  unit tests (distinct primary+replicas, RF clamp, determinism, ≈1/N movement, balance, the diff) +
+  `tests/cluster_allocator_oracle.rs` (register → rebalance ⇒ a balanced fully-assigned map; idempotent; a
+  deregistered node drops out; `percolate` byte-identical before/after every rebalance ⇒ zero-FN preserved).
+  Foundation for autoscale/auto-split (step 6).
 
 ## Measured
 
@@ -317,9 +331,12 @@ the selective candidate count further.
   convergence loop + atomic in-sync promotion shrink the quiesce window to the residual delta. The openraft
   control plane is **durable** too (step 5e / ADR-041): a CRC-framed Raft log + persisted vote/committed/snapshot
   (`src/cluster/control_store.rs`) let a `controlserver --data-dir` survive a restart and rejoin the quorum,
-  resuming its committed cluster-state document. **Still design-only** (the shared-nothing multi-node roadmap):
-  an allocator that acts on the shard→node map, normalizer/vocab shipping, autoscaling, auto-split,
-  replicate-broad-to-all, and TLS/auth.
+  resuming its committed cluster-state document. A **shard→node allocator** is built too (step 5f / ADR-042):
+  `src/cluster/allocator.rs` plans a balanced, minimal-movement placement via rendezvous (HRW) hashing, and
+  `ClusterEngine::{register_node, deregister_node, rebalance}` commit it through the control plane (the
+  decision layer; physically moving a shard's segments on a reassignment reuses peer recovery). **Still
+  design-only** (the shared-nothing multi-node roadmap): an autoscaler that *drives* rebalance on membership
+  events, normalizer/vocab shipping, auto-split, replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
@@ -457,9 +474,12 @@ from the audit's former P3 list). Roughly grouped:
   an in-flight recovery (and the translog GCs when idle), and a lease-held convergence loop + atomic in-sync
   promotion shrink the quiesce window to the residual delta. The openraft control plane is **durable** too
   (ADR-041): a CRC-framed Raft log + persisted vote/committed/snapshot (`control_store.rs`) let a
-  `controlserver --data-dir` survive a restart and rejoin the quorum. A full multi-node deployment still needs
-  the remaining **shared-nothing** layers — an allocator that acts on the shard→node map, plus autoscaling —
-  designed but not built (no object store / cloud dependency anywhere; ADR-033); see Tier 3.
+  `controlserver --data-dir` survive a restart and rejoin the quorum. A **shard→node allocator** (ADR-042)
+  computes + commits a balanced, minimal-movement placement map (rendezvous hashing) via
+  `ClusterEngine::{register_node, deregister_node, rebalance}`. A full multi-node deployment still needs the
+  remaining **shared-nothing** layers — an autoscaler that drives rebalance + the data-moving handoff on a
+  reassignment, plus auto-split — designed but not built (no object store / cloud dependency anywhere;
+  ADR-033); see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator
   **ships** its frozen dict to each server at connect (ADR-034), and the ADR-030 fingerprint handshake fails
   loud (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can
