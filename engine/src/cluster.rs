@@ -23,6 +23,7 @@
 //! and the no-false-negative argument.
 
 mod allocator;
+mod autoscale;
 mod clog;
 mod control;
 mod coordinator;
@@ -46,6 +47,7 @@ mod remote;
 #[cfg(feature = "distributed")]
 mod server;
 
+pub use autoscale::{evaluate, AutoscaleConfig, AutoscaleDecision, LoadSnapshot, ScalingAction};
 pub use control::{
     ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane,
     NodeDescriptor, NodeId, NodeRole, ShardAssignment, StateVersion,

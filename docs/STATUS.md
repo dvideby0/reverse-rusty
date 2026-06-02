@@ -243,7 +243,7 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   unit tests (distinct primary+replicas, RF clamp, determinism, ≈1/N movement, balance, the diff) +
   `tests/cluster_allocator_oracle.rs` (register → rebalance ⇒ a balanced fully-assigned map; idempotent; a
   deregistered node drops out; `percolate` byte-identical before/after every rebalance ⇒ zero-FN preserved).
-  Foundation for autoscale/auto-split (step 6).
+  Foundation for the autoscaler (ADR-045, built) + auto-split (step 6).
 - **Swappable shard backing — the live-handoff routing-flip mechanism (ADR-043)** — clustering build-path
   step 6a: the routing half of the data-moving handoff (the byte mover, peer recovery, already exists). A
   `HandoffShard` (`src/cluster/handoff.rs`) wraps one shard position's backing in an `ArcSwap<Box<dyn Shard>>`
@@ -277,8 +277,26 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   serialized); a fence-window write is fail-closed + retryable (never lost); a non-converging source aborts
   the flip fail-closed (the source stays fenced — a stuck position, never a lost write); "drop the old owner" =
   drop from routing, not teardown; RF>1 group relocation reuses the same swap but the oracle covers the
-  single-owner move. **Still design-only:** the autoscaler that *triggers* a handoff on a membership/rebalance
-  event (step 6c) + auto-split.
+  single-owner move. **Still design-only:** wiring the autoscaler's (advisory) handoff recommendation to
+  `execute_handoff` + auto-split.
+- **Autoscaler — the policy/trigger layer (ADR-045)** — clustering build-path step 6c: the policy that
+  *decides when* to drive the built mechanisms. A pure, deterministic `cluster::autoscale::evaluate(snapshot,
+  config)` over a `LoadSnapshot` (membership + the shard→node map + per-shard corpus — the only load signal
+  that crosses the `Shard` seam, so it behaves identically in-process and across nodes) emits `ScalingAction`s:
+  **membership drift → `Rebalance` (executable)**, **per-node skew → `Handoff` (advisory)**, **per-shard corpus
+  over a threshold → `RecommendSplit` (advisory)**. The thin `ClusterEngine` driver (`coordinator::autoscale`)
+  `tick(config)` collects the snapshot, runs `evaluate`, executes the executable subset (each `Rebalance` → the
+  idempotent `rebalance(rf)`), and returns the full decision incl. advisories; `on_node_joined`/`on_node_left`
+  are the event-driven entries. The membership trigger is coarse (it never recomputes HRW — `evaluate` stays a
+  pure function of the snapshot); the idempotent `rebalance` is the truth for the exact moves, so there is **no
+  clock / hysteresis** (idempotence *is* the hysteresis). `AutoscaleConfig::default()` is **disabled** ⇒ `tick`
+  is a no-op ⇒ every prior oracle is byte-identical. Lean core, no new dependency. **Honest scope:** auto-split
+  is **advisory only** (no split mechanism — the ring's `num_shards` is fixed at construction; it needs ring
+  re-keying + a `recommended_shard_count` signal); load-driven handoff is **advisory only** (`execute_handoff`
+  is gRPC-gated, not driven); QPS/compute-replica autoscaling (HPA-style) is out of engine scope. Proven by
+  `src/cluster/autoscale.rs` unit tests (the deterministic policy) + `tests/cluster_autoscale_oracle.rs`
+  (`tick` ≡ a manual `rebalance`; `percolate` byte-identical before/after a tick ⇒ zero-FN; a second tick
+  commits nothing; a disabled config is a no-op; a split advisory mutates nothing).
 - **Cluster module restructured for agent-friendliness (no behavior change)** — the four largest `src/cluster/`
   files were split into focused submodules following the `segment.rs` pattern (root = the type *defs*, `impl`
   blocks split by responsibility): `coordinator.rs` (1,698 lines → `coordinator/{lifecycle,ingest,matching,
@@ -349,18 +367,19 @@ the selective candidate count further.
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
 - **Clustering — the 100M horizontal-scale story** (built on the **shared-nothing** model: local segments +
   per-node/coordinator WAL + replication + a quorum control plane — **no object store, no cloud dependency**;
-  ADR-033). The stack is **built and oracle-proven through build-path step 6b** — in-process multi-shard core,
+  ADR-033). The stack is **built and oracle-proven through build-path step 6c** — in-process multi-shard core,
   the gRPC transport + dict shipping, the durable coordinator log + per-shard local segments, replication +
   peer recovery, a durable openraft control plane, a per-shard translog with no-quiesce recovery +
   retention/finalize, a rendezvous-hash shard→node allocator, a runtime-swappable shard backing (the
-  live-handoff routing-flip mechanism), and the **live data-moving handoff** itself (the cross-node move:
-  peer-recover → fence → drain-to-convergence → flip, under concurrent writes) (ADR-027, 029, 031–044).
+  live-handoff routing-flip mechanism), the **live data-moving handoff** itself (the cross-node move:
+  peer-recover → fence → drain-to-convergence → flip, under concurrent writes), and the **autoscaler** policy
+  that drives `rebalance` on membership/skew events (ADR-027, 029, 031–045).
   **Per-ADR detail is
   in [Implemented](#implemented-working-tested) above**; the build path + cross-shard correctness argument are
   in [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §10 (hashing-variant survey:
   [`research/clustering-prior-art.md`](research/clustering-prior-art.md)). **Still design-only** — the
-  production multi-node residue (step 6c + hardening): an **autoscaler** that drives `rebalance`/`register_node`
-  on membership events and *triggers* the now-built handoff; **auto-split** + `recommended_shard_count`;
+  production multi-node residue (hardening): **auto-split** + `recommended_shard_count` and wiring the
+  autoscaler's (advisory) handoff recommendation to `execute_handoff` (the policy itself landed in ADR-045);
   **normalizer/vocab shipping** (dict shipping landed in ADR-034; the normalizer is still a shared
   `default_vocab()` assumption); **replicate-broad-to-all** (in-process uses the shard-0 lane only);
   **TLS/auth** on the gRPC + control transports; auto-unfence-on-abort + a translog-lease TTL; and an
@@ -487,12 +506,13 @@ from the audit's former P3 list). Roughly grouped:
   replication + peer recovery (in-process + gRPC), a durable openraft control plane (multi-process elections +
   leader failover + restart recovery), a per-shard translog (no-quiesce peer recovery + retention/finalize),
   a rendezvous-hash shard→node allocator, a runtime-swappable shard backing (the live-handoff routing-flip
-  mechanism, ADR-043), and the **live data-moving handoff** itself (the cross-node move under concurrent
-  writes — peer-recover → fence → drain-to-convergence → flip, ADR-044) (ADR-027, 029, 031–044; per-ADR detail
+  mechanism, ADR-043), the **live data-moving handoff** itself (the cross-node move under concurrent
+  writes — peer-recover → fence → drain-to-convergence → flip, ADR-044), and the **autoscaler** policy that
+  drives `rebalance` on membership/skew events (ADR-045) (ADR-027, 029, 031–045; per-ADR detail
   in [Implemented](#implemented-working-tested) above). But it is exercised **single-process / on localhost** by
   the oracles — not yet deployed and hardened across real machines. **Remaining for production multi-node** (all
-  design-only; ADR-033 — no object store / cloud dependency anywhere): an **autoscaler** that drives
-  `rebalance`/`register_node` on membership events and *triggers* the now-built handoff (step 6c), **auto-split**,
+  design-only; ADR-033 — no object store / cloud dependency anywhere): **auto-split** + `recommended_shard_count`
+  and wiring the autoscaler's (advisory) handoff recommendation to `execute_handoff`,
   **normalizer/vocab shipping**, **replicate-broad-to-all**, **TLS/auth** on the (currently plaintext)
   transports, and auto-unfence-on-abort + a translog-lease TTL — see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator **ships**

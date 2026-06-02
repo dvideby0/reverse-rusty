@@ -50,15 +50,17 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > lock-free) — and the **live data-moving handoff** that drives it (step 6b; ADR-044): `execute_handoff`
 > peer-recovers the target, **fences** the old owner's writes, drains its tail to convergence, then **flips**
 > routing, so a shard moves between owners under concurrent writes with zero false negatives and uninterrupted
-> reads. Still design-only: an autoscaler that *triggers* rebalance + handoff on membership events,
-> normalizer/vocab shipping, TLS/auth, and auto-split.
+> reads. The **autoscaler** policy that triggers `rebalance` on membership/skew events is built too (step 6c;
+> ADR-045 — a pure `evaluate` + a `ClusterEngine` `tick` driver; split/handoff emitted as advisories). Still
+> design-only: auto-split + `recommended_shard_count`, wiring that advisory handoff to `execute_handoff`,
+> normalizer/vocab shipping, and TLS/auth.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** Elasticsearch/Cassandra **shared-nothing** (local segments + WAL + peer recovery + quorum control plane) and consistent hashing — **not** Aurora's shared object storage (ADR-033)
-- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`), and the **quorum/Raft control plane** — its seam (step 5a; ADR-037 — a `trait ControlPlane` + in-memory backend holding the shard→node map) and the **openraft backend** behind it (step 5b; ADR-038 — a `RaftControlPlane` + gRPC `ControlService`, multi-process elections + leader failover); the remaining multi-node layers (a durable per-shard query log / step 5c, autoscale) are design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`), and the **quorum/Raft control plane** — its seam (step 5a; ADR-037 — a `trait ControlPlane` + in-memory backend holding the shard→node map) and the **openraft backend** behind it (step 5b; ADR-038 — a `RaftControlPlane` + gRPC `ControlService`, multi-process elections + leader failover); steps 5c–6c (translog/no-quiesce recovery, retention/finalize, durable Raft log, the shard→node allocator, the runtime-swappable backing + live data-moving handoff, and the **autoscaler** — ADR-039–045) are built too; only auto-split + hardening remain design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary; **no object store / cloud dependency** — durability is a local WAL + replicas (ADR-033)
 
 ---
@@ -228,8 +230,9 @@ Elasticsearch's per-shard **translog** / Cassandra's commitlog.
   — a `HandoffShard` makes a position's backing atomically swappable, with **serve-then-drop** (§9) and a
   generation fence stamp), and the **cross-node move that drives it** (step 6b; ADR-044 — `execute_handoff`
   peer-recovers the new owner, **fences** the old owner's writes, drains its tail to convergence, then flips the
-  backing, so a shard moves between owners under concurrent writes with zero false negatives). Still the next
-  step: an autoscaler that *triggers* `rebalance` + the handoff on membership events (§8).
+  backing, so a shard moves between owners under concurrent writes with zero false negatives). Built on top
+  (step 6c; ADR-045): the **autoscaler** policy that *triggers* `rebalance` on membership/skew events (§8);
+  load-driven handoff + auto-split remain advisory/design-only.
 
 ---
 
@@ -462,9 +465,16 @@ without operator action. The defaults are the product.
      retryable, never a lost write). Proven by `tests/cluster_grpc_oracle.rs::grpc_live_handoff_under_sustained_writes`
      (a position moves owner under a concurrent writer; the cluster ≡ brute over the final set, zero FN) +
      `server.rs::fence_rejects_writes_but_serves_reads`.
-   - 6c. **Autoscale + auto-split.** *(design-only)* An autoscaler that *triggers* `rebalance`/`register_node`
-     + the now-built handoff on membership events; **auto-split** + `recommended_shard_count` from telemetry
-     (the ES `_split` analogue).
+   - 6c. **Autoscaler.** ✅ **Done** (ADR-045): a pure `cluster::autoscale::evaluate(snapshot, config)` over a
+     `LoadSnapshot` (membership + the shard→node map + per-shard corpus) emits `ScalingAction`s — **membership
+     drift → `Rebalance` (executable)**, **per-node skew → `Handoff` (advisory)**, **per-shard corpus over a
+     threshold → `RecommendSplit` (advisory)**; the `ClusterEngine` `tick`/`on_node_*` driver executes the
+     `Rebalance` (the idempotent `rebalance(rf)`) and surfaces the advisories. Disabled by default ⇒
+     byte-identical; lean core. Proven by `autoscale.rs` units + `tests/cluster_autoscale_oracle.rs` (`tick` ≡ a
+     manual rebalance; `percolate` byte-identical before/after ⇒ zero FN; a second tick commits nothing; a split
+     advisory mutates nothing). **Still design-only:** **auto-split** + `recommended_shard_count` (the ES
+     `_split` analogue — the ring's `num_shards` is fixed at construction) and wiring the advisory handoff to
+     `execute_handoff`.
 7. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
@@ -473,10 +483,11 @@ step 3b's per-shard local durable segments, step 4's per-shard replication + pee
 4b over gRPC), the **quorum/Raft control plane** — step 5a's seam AND step 5b's openraft backend + gRPC
 `ControlService` — AND step 5c's **per-shard translog + no-quiesce peer recovery**, step 5d's retention/finalize,
 step 5e's durable Raft log, step 5f's **shard→node allocator**, step 6a's **runtime-swappable shard backing**,
-and step 6b's **live data-moving handoff** are built; ADR-027 + ADR-029 + ADR-034 + ADR-031 + ADR-032 + ADR-035
-+ ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040 + ADR-041 + ADR-042 + ADR-043 + ADR-044. The remaining
-shared-nothing multi-node work — an autoscaler that triggers rebalance + handoff on membership events, and
-auto-split (step 6c) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
+step 6b's **live data-moving handoff**, and step 6c's **autoscaler** are built; ADR-027 + ADR-029 + ADR-034 +
+ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040 + ADR-041 + ADR-042 + ADR-043 +
+ADR-044 + ADR-045. The remaining shared-nothing multi-node work — **auto-split** + `recommended_shard_count`
+and wiring the autoscaler's advisory handoff to `execute_handoff` — is design-only (ADR-033). See
+[`../STATUS.md`](../STATUS.md).)
 
 ---
 

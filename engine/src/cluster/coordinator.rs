@@ -32,6 +32,7 @@
 //! is a verbatim single-node engine, so its lossless cover + exact verify finish
 //! the job. No shard boundary can drop a match.
 
+mod autoscale;
 mod control_plane;
 mod ingest;
 mod lifecycle;
