@@ -51,16 +51,20 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > peer-recovers the target, **fences** the old owner's writes, drains its tail to convergence, then **flips**
 > routing, so a shard moves between owners under concurrent writes with zero false negatives and uninterrupted
 > reads. The **autoscaler** policy that triggers `rebalance` on membership/skew events is built too (step 6c;
-> ADR-045 — a pure `evaluate` + a `ClusterEngine` `tick` driver; split/handoff emitted as advisories). Still
-> design-only: auto-split + `recommended_shard_count`, wiring that advisory handoff to `execute_handoff`,
-> normalizer/vocab shipping, and TLS/auth.
+> ADR-045 — a pure `evaluate` + a `ClusterEngine` `tick` driver; split/handoff emitted as advisories). **All
+> of the above is oracle-proven _in-process / on localhost_, but experimental beyond the in-process v1 core
+> — not yet hardened for real multi-machine deployment.** The **Cluster v1** correctness item is **dynamic
+> vocabulary** (absorbing new terms after the dict is frozen — see
+> [`../research/dynamic-vocabulary.md`](../research/dynamic-vocabulary.md) → ADR-046). Still design-only
+> beyond that: auto-split + `recommended_shard_count`, wiring that advisory handoff to `execute_handoff`,
+> and TLS/auth.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** Elasticsearch/Cassandra **shared-nothing** (local segments + WAL + peer recovery + quorum control plane) and consistent hashing — **not** Aurora's shared object storage (ADR-033)
-- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`), and the **quorum/Raft control plane** — its seam (step 5a; ADR-037 — a `trait ControlPlane` + in-memory backend holding the shard→node map) and the **openraft backend** behind it (step 5b; ADR-038 — a `RaftControlPlane` + gRPC `ControlService`, multi-process elections + leader failover); steps 5c–6c (translog/no-quiesce recovery, retention/finalize, durable Raft log, the shard→node allocator, the runtime-swappable backing + live data-moving handoff, and the **autoscaler** — ADR-039–045) are built too; only auto-split + hardening remain design-only (roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`), and the **quorum/Raft control plane** — its seam (step 5a; ADR-037 — a `trait ControlPlane` + in-memory backend holding the shard→node map) and the **openraft backend** behind it (step 5b; ADR-038 — a `RaftControlPlane` + gRPC `ControlService`, multi-process elections + leader failover); steps 5c–6c (translog/no-quiesce recovery, retention/finalize, durable Raft log, the shard→node allocator, the runtime-swappable backing + live data-moving handoff, and the **autoscaler** — ADR-039–045) are built too — **all oracle-proven _in-process / on localhost_ but experimental beyond the v1 core.** **Cluster v1** = the in-process multi-shard core + durable reopen + **dynamic vocabulary** (absorbing new terms after the dict is frozen — the immediate priority; [`dynamic-vocabulary`](../research/dynamic-vocabulary.md) → ADR-046); auto-split + TLS/auth + the rest of the multi-node hardening are beyond v1 (roadmap Tier 0 then Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary; **no object store / cloud dependency** — durability is a local WAL + replicas (ADR-033)
 
 ---
@@ -340,6 +344,13 @@ without operator action. The defaults are the product.
 ---
 
 ## 10. Incremental build path from today's single-node engine
+
+> **Status SSOT is [`../STATUS.md`](../STATUS.md); this is the build-path *map*.** **Cluster v1** = the
+> in-process multi-shard core (steps 1–2) + durable local reopen (3a/3b) + **dynamic vocabulary** (the
+> Tier-0 item — [`../research/dynamic-vocabulary.md`](../research/dynamic-vocabulary.md)). Steps 4–6c
+> below are **built and oracle-proven _in-process / on localhost_, but experimental** — not yet hardened
+> for real multi-machine deployment. A ✅ here means "built + oracle-proven," **not** "production-hardened."
+
 1. **Wrap the current engine as a shard.** ✅ **Done** (ADR-027, ADR-029, ADR-034): the in-process
    `LocalShard` owns an `Engine` + `ArcSwap<EngineSnapshot>`; the local↔remote `trait Shard` seam abstracts
    the per-shard operation, and behind the `distributed` feature a gRPC `ShardServer` + `RemoteShard` lift it

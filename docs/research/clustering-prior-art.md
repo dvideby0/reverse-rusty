@@ -9,11 +9,14 @@ against the Aurora-style disaggregated alternative. The hashing decision is reco
 [`../DECISIONS.md`](../DECISIONS.md) ADR-027; the storage-model decision (shared-nothing over a shared
 object store — i.e. no S3/cloud dependency) in **ADR-033**.
 
-> Status: the in-process multi-shard core + gRPC transport + dict shipping + durable coordinator log +
-> per-shard local segments are **built** (ADR-027/029/034/031/032); the multi-node layers (per-shard
-> replication + peer recovery, the Raft/quorum control plane) are design-only (roadmap Tier 3 — see
-> [`../STATUS.md`](../STATUS.md)). This file is the prior-art backing those decisions, per the
-> "research first, implement second" ethos.
+> Status: **Cluster v1** = the in-process multi-shard core + durable local reopen (built, oracle-proven).
+> The distributed multi-node layers (gRPC transport + dict shipping, replication + peer recovery, the
+> Raft/quorum control plane, the shard→node allocator, live handoff, autoscaler) are **built but
+> experimental** — oracle-proven in-process / on localhost, not yet hardened for real multi-machine
+> deployment (ADR-027 through ADR-045; roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)). Absorbing
+> new vocabulary after the dict is frozen is the Cluster v1 item — see
+> [`dynamic-vocabulary.md`](dynamic-vocabulary.md) (→ ADR-046). This file is the prior-art backing those
+> decisions, per the "research first, implement second" ethos.
 
 ---
 

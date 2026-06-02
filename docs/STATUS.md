@@ -67,6 +67,14 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   path (`tests/broad_batch.rs` + batch oracle); broad postings scanned amortize ~1/batch_size (29× at
   256). Four dynamic knobs (`broad_batch_size`/`broad_columnar`/`broad_materialize`/`max_percolate_batch`)
   + broad Prometheus counters; `broad_columnar=false` is the inline kill-switch.
+- **Cluster scope frame — read before the cluster entries below.** **Cluster v1** (shippable) = the
+  in-process multi-shard core + durable local reopen + dynamic vocabulary (Roadmap **Tier 0**) —
+  oracle-proven, zero false negatives. The gRPC / replication / control-plane / handoff / autoscaler
+  layers in the entries below are **built and oracle-proven _in-process / on localhost_ but
+  experimental** — not yet hardened for real multi-machine deployment (no TLS/auth, write-quiesce
+  windows, advisory-only autoscaler, no auto-split). Each entry's *Honest scope* note records the
+  per-feature boundary **as of that increment** (some items it flags as design-only were built in a
+  later entry below); the prioritized path to v1 is Roadmap **Tier 0**.
 - **In-process multi-shard core (ADR-027)** — the first, dependency-free step of clustering
   (`src/cluster/`): a `ClusterEngine` coordinator over K `Shard`s (each a `Shard`-wrapped `Engine` +
   `ArcSwap` snapshot), a consistent-hash `HashRing` over the query's **anchor `FeatureId`**, and content
@@ -80,7 +88,8 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   fan-out asserted. This is build-path steps 1–2 plus step 1's gRPC transport (ADR-029): behind the
   off-by-default `distributed` feature a `ShardServer` + gRPC `RemoteShard` carry a shard over the
   network — proven by `tests/cluster_grpc_oracle.rs` (gRPC cluster ≡ single-node ≡ brute, broad on/off).
-  The remaining distributed layers stay design-only (see Tier 3).
+  The remaining distributed layers are built later in this list (ADR-029→045) — oracle-proven
+  _in-process / on localhost_ but experimental; see the **Cluster scope frame** above and Tier 3.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §3/§7/§10.)
 - **Durable cluster coordinator log (ADR-031)** — clustering build-path step 3a: the `ClusterEngine`
   coordinator now has durability of its own. A `trait ClusterLog` (`cluster/clog.rs`) with a CRC-framed
@@ -330,6 +339,45 @@ selective match path is already ~255× the spec target with a flat ~54 candidate
 is in the **broad lane**, **memory/footprint**, and the **durability + scale** story — not in shaving
 the selective candidate count further.
 
+### Tier 0 — Cluster v1 acceptance gate (the immediate priority, before further cluster buildout)
+
+The one tier here that is **active build work, not design-only research.** It makes **Cluster v1** —
+the in-process multi-shard core + durable local reopen — a defensible, shippable milestone before the
+broader distributed cluster roadmap (Tier 3) resumes. These are the critical-core items from an
+external review, re-ranked to the top:
+
+- **Dynamic vocabulary — "it just works" (research-first → ADR-046 → build).** The headline v1
+  correctness item. Today a live write whose query introduces a term absent from the frozen shared
+  dict **silently drops** it (`coordinator/ingest.rs` + `server.rs` compile read-only against the
+  frozen dict), so the query broadens and an all-unknown any-of group risks a *false negative*. v1
+  must instead **absorb** the new term and keep matching correct (**zero false negatives**). Because
+  the hard part is cross-shard agreement on each term's integer `FeatureId`, the approach is chosen
+  research-first — prior art surveyed in
+  [`research/dynamic-vocabulary.md`](research/dynamic-vocabulary.md) (ES/OS global ordinals + dynamic
+  mapping, Vespa real-time indexing, RocksDB shared-dictionary versioning, Lucene FST, and
+  deterministic feature-hashing — the no-consensus path) — then recorded in **ADR-046** and built in
+  the in-process core. **Honest boundary** (to pin in the spike): new single *tokens* may "just work"
+  via hashing, while new multi-token *alias/synonym rules* (e.g. `Upper Deck` ≡ `UD`) need normalizer
+  shipping and may stay a documented v1 limitation. *(Absorbs the former Tier-3 "normalizer/vocab
+  shipping" residue — it is a v1 correctness item now.)*
+- **`block_on` regression guard test.** `RemoteShard`'s sync→async bridge is *safe by design* (rayon
+  workers aren't tokio runtime threads — `remote.rs:9-14`), but nothing exercises it from a rayon
+  fan-out today. Add a guard test so a future refactor can't silently introduce a nested-runtime
+  panic. (A test, not a fix.)
+- **Name + lock the Cluster-v1 acceptance gate.** Designate `tests/cluster_oracle.rs` (cluster ≡
+  single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}) + `tests/cluster_durability_oracle.rs`
+  (reopen ≡ pre-crash ≡ brute) as the explicit Cluster-v1 gate — both already run on default
+  `cargo test --release`; this names them the contract and keeps them green (incl. the new
+  dynamic-vocab absorb-correctly assertions).
+- **Cluster fan-out / broad-lane benchmark output.** Emit aggregate shards-probed-per-title
+  (avg/p95/p99) + broad-lane contribution from a cluster bench (extend `clusterdemo.rs` or a new
+  `clusterbench.rs`); add a CLUSTER section to
+  [`performance/benchmark-results.txt`](performance/benchmark-results.txt). (Observability, not
+  correctness.)
+- **Stop overclaiming.** The v1/experimental reframe across this doc, the design doc, `CLAUDE.md`,
+  and PR #18 — distinguishing "oracle-proven *in-process / on localhost*" from "production
+  multi-node." (The doc pass that introduced this tier.)
+
 ### Tier 1 — highest leverage (the measured bottlenecks)
 
 - ~~**Broad-lane batch / columnar evaluation.**~~ **✅ Shipped (ADR-026).** The broad lane now runs
@@ -367,23 +415,27 @@ the selective candidate count further.
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
 - **Clustering — the 100M horizontal-scale story** (built on the **shared-nothing** model: local segments +
   per-node/coordinator WAL + replication + a quorum control plane — **no object store, no cloud dependency**;
-  ADR-033). The stack is **built and oracle-proven through build-path step 6c** — in-process multi-shard core,
-  the gRPC transport + dict shipping, the durable coordinator log + per-shard local segments, replication +
-  peer recovery, a durable openraft control plane, a per-shard translog with no-quiesce recovery +
-  retention/finalize, a rendezvous-hash shard→node allocator, a runtime-swappable shard backing (the
-  live-handoff routing-flip mechanism), the **live data-moving handoff** itself (the cross-node move:
-  peer-recover → fence → drain-to-convergence → flip, under concurrent writes), and the **autoscaler** policy
-  that drives `rebalance` on membership/skew events (ADR-027, 029, 031–045).
+  ADR-033). **Scope frame:** **Cluster v1** = the in-process multi-shard core + durable local reopen +
+  dynamic vocabulary (Roadmap **Tier 0**) — oracle-proven and shippable. The **distributed multi-node
+  layers** — the gRPC transport + dict shipping, the durable coordinator log + per-shard local segments,
+  replication + peer recovery, a durable openraft control plane, a per-shard translog with no-quiesce
+  recovery + retention/finalize, a rendezvous-hash shard→node allocator, a runtime-swappable shard backing
+  (the live-handoff routing-flip mechanism), the **live data-moving handoff** (peer-recover → fence →
+  drain-to-convergence → flip, under concurrent writes), and the **autoscaler** — are **built and
+  oracle-proven _in-process / on localhost_, but experimental: not yet hardened for real multi-machine
+  deployment** (ADR-027, 029, 031–045). **The immediate priority is Tier 0** (make v1 defensible); this
+  distributed buildout resumes after.
   **Per-ADR detail is
   in [Implemented](#implemented-working-tested) above**; the build path + cross-shard correctness argument are
   in [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §10 (hashing-variant survey:
   [`research/clustering-prior-art.md`](research/clustering-prior-art.md)). **Still design-only** — the
   production multi-node residue (hardening): **auto-split** + `recommended_shard_count` and wiring the
   autoscaler's (advisory) handoff recommendation to `execute_handoff` (the policy itself landed in ADR-045);
-  **normalizer/vocab shipping** (dict shipping landed in ADR-034; the normalizer is still a shared
-  `default_vocab()` assumption); **replicate-broad-to-all** (in-process uses the shard-0 lane only);
+  **replicate-broad-to-all** (in-process uses the shard-0 lane only);
   **TLS/auth** on the gRPC + control transports; auto-unfence-on-abort + a translog-lease TTL; and an
-  end-to-end durable-multi-node rolling-restart harness.
+  end-to-end durable-multi-node rolling-restart harness. *(**Dynamic vocabulary / normalizer shipping moved
+  up to Tier 0** — it is a v1 correctness item now, not Tier-3 residue; the cross-process phasing of it may
+  remain here per the [research spike](research/dynamic-vocabulary.md).)*
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
 
@@ -501,7 +553,7 @@ from the audit's former P3 list). Roughly grouped:
 ## Current limitations
 
 - **Not yet a hardened multi-node deployment.** The full shared-nothing multi-node stack is **built and
-  oracle-proven** — sharding + content routing, the gRPC `ShardServer`/`RemoteShard` transport with coordinator
+  oracle-proven _in-process / on localhost_ (experimental)** — sharding + content routing, the gRPC `ShardServer`/`RemoteShard` transport with coordinator
   dict shipping, a durable coordinator log, per-shard local durable segments (attach-and-mmap reopen), per-shard
   replication + peer recovery (in-process + gRPC), a durable openraft control plane (multi-process elections +
   leader failover + restart recovery), a per-shard translog (no-quiesce peer recovery + retention/finalize),
@@ -513,17 +565,19 @@ from the audit's former P3 list). Roughly grouped:
   the oracles — not yet deployed and hardened across real machines. **Remaining for production multi-node** (all
   design-only; ADR-033 — no object store / cloud dependency anywhere): **auto-split** + `recommended_shard_count`
   and wiring the autoscaler's (advisory) handoff recommendation to `execute_handoff`,
-  **normalizer/vocab shipping**, **replicate-broad-to-all**, **TLS/auth** on the (currently plaintext)
+  **cross-process dynamic vocabulary** (the in-process piece is the Tier-0 v1 item — [research
+  spike](research/dynamic-vocabulary.md)), **replicate-broad-to-all**, **TLS/auth** on the (currently plaintext)
   transports, and auto-unfence-on-abort + a translog-lease TTL — see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator **ships**
   its frozen dict at connect (ADR-034) and the ADR-030 fingerprint handshake fails loud
   (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can never drop
-  matches *silently*. The **normalizer** must still match on both sides (`default_vocab()` today — vocab shipping
-  is the next step), and the transport is unauthenticated/plaintext. Treat the gRPC surface as correctness-safe,
-  not yet a hardened multi-process deployment.
+  matches *silently*. The **normalizer** must still match on both sides (`default_vocab()` today — absorbing
+  vocabulary that appears after the frozen dict is the **Tier-0 dynamic-vocabulary** item), and the transport is
+  unauthenticated/plaintext. Treat the gRPC surface as correctness-safe, not yet a hardened multi-process deployment.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
   runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving it from the corpus is the
-  NPMI-wiring item in Tier 2.
+  NPMI-wiring item in Tier 2. Absorbing vocabulary that first appears *after* the dict is frozen
+  (live writes against a cluster's shared frozen dict) is the **Tier-0 dynamic-vocabulary** item.
 - **Validated on synthetic data only.** The differential oracle and the benchmarks run against the
   seeded synthetic generator ([`gen.rs`](../engine/src/gen.rs)), which is deliberately adversarial
   (ADR-008); one design-validation pass ran ~20 real eBay titles through the normalizer
