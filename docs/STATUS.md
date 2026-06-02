@@ -279,6 +279,15 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   drop from routing, not teardown; RF>1 group relocation reuses the same swap but the oracle covers the
   single-owner move. **Still design-only:** the autoscaler that *triggers* a handoff on a membership/rebalance
   event (step 6c) + auto-split.
+- **Cluster module restructured for agent-friendliness (no behavior change)** — the four largest `src/cluster/`
+  files were split into focused submodules following the `segment.rs` pattern (root = the type *defs*, `impl`
+  blocks split by responsibility): `coordinator.rs` (1,698 lines → `coordinator/{lifecycle,ingest,matching,
+  control_plane,distributed,tests}`), `replica.rs` (1,205 → `replica/{shard_impl,test_support,tests}`),
+  `control_raft.rs` (1,091 → `control_raft/{log_store,state_machine,network,builders}`), and `server.rs`
+  (1,004 → `server/{service,tests}`) — no cluster file now exceeds ~600 lines. A pure refactor: cross-sibling
+  private items widen to `pub(in crate::cluster::<mod>)`, public API + matching are unchanged, proven by the
+  full cluster oracle suite + `check.sh` staying green. The per-area router is the module map in
+  [`../CLAUDE.md`](../CLAUDE.md).
 
 ## Measured
 
