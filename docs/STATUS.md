@@ -339,12 +339,12 @@ selective match path is already ~255× the spec target with a flat ~54 candidate
 is in the **broad lane**, **memory/footprint**, and the **durability + scale** story — not in shaving
 the selective candidate count further.
 
-### Tier 0 — Cluster v1 acceptance gate (the immediate priority, before further cluster buildout)
+### Tier 0 — Cluster v1 acceptance gate (**complete** — the shippable milestone)
 
-The one tier here that is **active build work, not design-only research.** It makes **Cluster v1** —
-the in-process multi-shard core + durable local reopen — a defensible, shippable milestone before the
-broader distributed cluster roadmap (Tier 3) resumes. These are the critical-core items from an
-external review, re-ranked to the top:
+The one tier here that was **active build work, not design-only research.** It makes **Cluster v1** —
+the in-process multi-shard core + durable local reopen + dynamic vocabulary — a defensible, shippable
+milestone before the broader distributed cluster roadmap (Tier 3) resumes. These were the critical-core
+items from an external review, re-ranked to the top; **all are now done:**
 
 - **Dynamic vocabulary — "it just works" (spike done → ADR-046 → build).** The headline v1 correctness
   item. Today a live write whose query introduces a term absent from the frozen shared dict **silently
@@ -373,24 +373,30 @@ external review, re-ranked to the top:
   rebind) + `tests/hardening_fixes.rs`. **Remaining (deferred, not v1-blocking):** the background re-materialize
   that consolidates hashed terms / learned synonyms on compaction (the "improve" phase), and cross-process
   normalizer shipping. *(Absorbed the former Tier-3 "normalizer/vocab shipping" residue.)*
-- **`block_on` regression guard test.** `RemoteShard`'s sync→async bridge is *safe by design* (rayon
-  workers aren't tokio runtime threads — `remote.rs:9-14`), but nothing exercises it from a rayon
-  fan-out today. Add a guard test so a future refactor can't silently introduce a nested-runtime
-  panic. (A test, not a fix.)
-- **Name + lock the Cluster-v1 acceptance gate.** Designate `tests/cluster_oracle.rs` (cluster ≡
+- **`block_on` regression guard test — done.** `RemoteShard`'s sync→async bridge is *safe by design*
+  (rayon workers aren't tokio runtime threads — `remote.rs:9-14`). A guard test now drives a
+  multi-shard (fan-out ≥ 2) `RemoteShard` percolate so the bridge runs `block_on` on rayon workers,
+  asserting no nested-runtime panic + correctness vs the brute oracle
+  (`tests/cluster_grpc_oracle.rs::remote_fanout_block_on_does_not_panic_on_rayon_workers`). A future
+  refactor that drove the fan-out from inside an async context would fail loudly here. (A test, not a fix.)
+- **Name + lock the Cluster-v1 acceptance gate — done.** `tests/cluster_oracle.rs` (cluster ≡
   single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}) + `tests/cluster_durability_oracle.rs`
-  (reopen ≡ pre-crash ≡ brute) as the explicit Cluster-v1 gate — both already run on default
-  `cargo test --release`; this names them the contract and keeps them green. The dynamic-vocab
-  absorb-correctly assertions are now present in both (declared-alias both-forms-match + auto-learn in
-  `cluster_oracle`; alias-survives-reopen + rebind in `cluster_durability_oracle`).
-- **Cluster fan-out / broad-lane benchmark output.** Emit aggregate shards-probed-per-title
-  (avg/p95/p99) + broad-lane contribution from a cluster bench (extend `clusterdemo.rs` or a new
-  `clusterbench.rs`); add a CLUSTER section to
-  [`performance/benchmark-results.txt`](performance/benchmark-results.txt). (Observability, not
-  correctness.)
-- **Stop overclaiming.** The v1/experimental reframe across this doc, the design doc, `CLAUDE.md`,
-  and PR #18 — distinguishing "oracle-proven *in-process / on localhost*" from "production
-  multi-node." (The doc pass that introduced this tier.)
+  (reopen ≡ pre-crash ≡ brute) are named the explicit Cluster-v1 gate in [`testing.md`](testing.md)
+  (+ a comment in `check.sh`) — both already run on default `cargo test --release`; this names them
+  the contract and keeps them green. The dynamic-vocab absorb-correctly assertions are present in both
+  (declared-alias both-forms-match + auto-learn in `cluster_oracle`; alias-survives-reopen + rebind in
+  `cluster_durability_oracle`).
+- **Cluster fan-out / broad-lane benchmark output — done.** New `src/bin/clusterbench.rs` emits
+  aggregate shards-probed-per-title (avg/p50/p95/p99/max), a fan-out-vs-K sweep, and the broad-lane
+  candidate share; a CLUSTER section is in
+  [`performance/benchmark-results.txt`](performance/benchmark-results.txt) (HOW TO RUN + INVARIANTS +
+  capture log) and CI runs it. Machine-independent invariants: fan-out is bounded ~2–5 (never → N) and
+  candidates/title is identical at every K (the cluster distributes selectivity without inflating it).
+  (Observability, not correctness.)
+- **Stop overclaiming — done.** The v1/experimental reframe is applied across this doc, the design
+  doc, `CLAUDE.md`, and PR #18 — dynamic vocab marked **built + oracle-proven**, and the distributed
+  layers consistently framed "oracle-proven *in-process / on localhost*," not "production
+  multi-node."
 
 ### Tier 1 — highest leverage (the measured bottlenecks)
 
