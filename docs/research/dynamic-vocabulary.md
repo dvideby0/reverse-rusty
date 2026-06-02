@@ -7,9 +7,11 @@ in [`../DECISIONS.md`](../DECISIONS.md) **ADR-046**; this file is the prior-art 
 feasibility + the reasoning behind it, per the "research first, implement second" ethos
 ([`../../CLAUDE.md`](../../CLAUDE.md)).
 
-> **Status: spike complete.** Decision: **(1) deterministic feature-hashing for new tokens + (2) runtime
-> normalizer learning for new alias/synonym rules.** Both land in the in-process Cluster v1 core; the
-> cross-process *shipping* of alias updates is deferred to the experimental distributed layers.
+> **Status: spike complete → BUILT + oracle-proven (ADR-046).** Decision: **(1) deterministic
+> feature-hashing for new tokens + (2) runtime normalizer learning for new alias/synonym rules.** Both
+> are now built in the in-process Cluster v1 core (see [`../STATUS.md`](../STATUS.md) Tier 0 + ADR-046);
+> the cross-process *shipping* of alias updates is deferred to the experimental distributed layers. The
+> prior-art survey + reasoning below are preserved as the research artifact that motivated the build.
 
 ---
 
@@ -20,8 +22,9 @@ integer `FeatureId`, and *all* shards plus the coordinator agree on that mapping
 `FeatureId`s are what make the cross-shard signature cover **lossless** — anchors and title features are
 compared as integers, so if the integers disagree across shards a real match can be dropped (ADR-027).
 
-Freezing the dict was the right simplification. The cost: a term absent from the frozen dict has no
-`FeatureId`, and today it is **silently dropped** in the read-only compile that live writes use
+Freezing the dict was the right simplification. The cost (the problem ADR-046 now solves): a term
+absent from the frozen dict has no `FeatureId`, and **before ADR-046 it was silently dropped** in the
+read-only compile that live writes use
 (`cluster/coordinator/ingest.rs:140`, `cluster/server.rs:211` → `compile::extract_readonly` →
 `normalize::compile_features_readonly`, which only keeps features `dict.get(name)` resolves). So a
 required positive term vanishes → the query **broadens**; an any-of group whose members are all unknown

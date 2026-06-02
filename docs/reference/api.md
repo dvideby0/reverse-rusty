@@ -541,6 +541,28 @@ The `min_count` parameter (default: 2) controls how many times a synonym pair mu
 different queries before it's included. Higher values reduce noise. See [`dsl.md`](dsl.md#vocabulary)
 for how vocabulary affects matching.
 
+## `POST /_vocab/learn_and_apply` — Learn from stored queries and apply
+
+Learn synonyms from the engine's **own** already-ingested queries and apply them in one step (unlike
+`POST /_vocab/learn`, which only returns synonyms learned from caller-supplied queries for review). The
+engine re-mints its vocabulary, recompiles every stored query under the new normalizer, and atomically
+swaps — so both surface forms of each learned alias match immediately, with zero false negatives
+(ADR-046). The change is durable (it survives reopen).
+
+```bash
+curl -X POST 'localhost:9200/_vocab/learn_and_apply?min_count=2'
+```
+
+```json
+{
+  "acknowledged": true,
+  "recompiled": 1280
+}
+```
+
+`min_count` (query parameter, default: 2) is the minimum any-of occurrences before a synonym pair is
+learned; `recompiled` is the number of stored queries rebuilt under the new vocabulary.
+
 ## `GET /_settings` — Read live settings
 
 ES-style runtime configuration (ADR-022), read lock-free from the snapshot. Fields mirror
@@ -632,5 +654,6 @@ Attempting to set a static or unknown key returns `400`:
 | `/_vocab` | GET | Current vocabulary as JSON |
 | `/_vocab` | PUT | Replace vocabulary |
 | `/_vocab/learn` | POST | Learn synonyms from raw query text |
+| `/_vocab/learn_and_apply` | POST | Learn synonyms from stored queries + apply (`?min_count=N`) |
 | `/_settings` | GET | Read live engine settings (`?include_defaults`) |
 | `/_settings` | PUT | Update the dynamic settings subset |
