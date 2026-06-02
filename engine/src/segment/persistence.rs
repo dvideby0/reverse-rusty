@@ -182,6 +182,14 @@ impl Engine {
     /// Save the manifest file if persistence is enabled. Returns true if the
     /// write succeeded (or persistence is not enabled), false on failure.
     pub(in crate::segment) fn save_manifest_if_persistent(&mut self) -> bool {
+        // Cluster shards (ADR-032) do not own a manifest: the coordinator's
+        // `cluster_manifest.bin` is the sole segment registry + dict store. Segment
+        // `.seg` files are still written (by `make_base_segment`); only the per-shard
+        // manifest is suppressed. Reported as success so the flush/compaction paths
+        // (which gate WAL reset on this) proceed normally.
+        if !self.owns_manifest {
+            return true;
+        }
         if let Some(ref dir) = self.config.data_dir {
             let segment_files: Vec<String> = self
                 .segments

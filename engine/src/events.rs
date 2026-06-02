@@ -64,6 +64,12 @@ pub enum DurabilityOp {
     /// An ingest batch could not be durably committed and was rolled back
     /// entirely (nothing committed). Data at risk: the caller's batch did not land.
     IngestRollback,
+    /// A replica in a [`ReplicatedShard`](crate::cluster) group could not apply a
+    /// replicated write (or failed a read probe) and was dropped from its in-sync
+    /// set. NOT data at risk: the primary still holds the data and the op succeeded;
+    /// the replica is flagged for peer re-recovery (clustering build-path step 4).
+    /// Redundancy/availability is reduced until it recovers.
+    ReplicaDesync,
 }
 
 impl DurabilityOp {
@@ -85,6 +91,7 @@ impl DurabilityOp {
             DurabilityOp::SourceStoreLoad => "source_store_load",
             DurabilityOp::WalTornTail => "wal_torn_tail",
             DurabilityOp::IngestRollback => "ingest_rollback",
+            DurabilityOp::ReplicaDesync => "replica_desync",
         }
     }
 
@@ -107,7 +114,8 @@ impl DurabilityOp {
             | DurabilityOp::SourceStoreWrite
             | DurabilityOp::SourceStoreRemap
             | DurabilityOp::SourceStoreLoad
-            | DurabilityOp::WalTornTail => false,
+            | DurabilityOp::WalTornTail
+            | DurabilityOp::ReplicaDesync => false,
         }
     }
 }

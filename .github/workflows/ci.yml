@@ -73,6 +73,8 @@ jobs:
           cargo run --release --bin segbench -- 300000 3000 0.0      2>&1 | tee -a ../bench-output/segbench.txt
           echo "== snapbench (200k queries) =="                      | tee ../bench-output/snapbench.txt
           cargo run --release --bin snapbench -- 200000             2>&1 | tee -a ../bench-output/snapbench.txt
+          echo "== clusterbench (100k queries, 5k titles, K=8) =="    | tee ../bench-output/clusterbench.txt
+          cargo run --release --bin clusterbench -- 100000 5000 8 0.05  2>&1 | tee -a ../bench-output/clusterbench.txt
 
       - name: Upload benchmark output
         if: always()

@@ -145,16 +145,40 @@ pub struct SigPlan {
     pub class: CostClass,
 }
 
-/// Choose a lossless signature cover and a cost class (pass B, after the mask
-/// is finalized so `is_hot` is meaningful).
-pub fn build_signatures(ex: &Extracted, dict: &Dict) -> SigPlan {
-    let mut main_sigs = Vec::new();
-    let mut broad_sigs = Vec::new();
+/// The pre-hash form of a [`SigPlan`]: the actual *feature groups* the lossless
+/// cover is built from, before they are folded into `sig_key`s. Each `main`/`broad`
+/// entry is one signature's feature group (arity 1, or arity 2 for the escalated
+/// class-B pair). `build_signatures` is exactly `anchor_plan` followed by
+/// `sig_key` over each group, so the two cannot drift.
+///
+/// Exists so the cluster coordinator can place a query by its *anchor feature
+/// identity* (not just the opaque hash) while reusing the optimizer's per-class
+/// selection verbatim — see [`crate::cluster`]. The forbidden-feature invariant
+/// holds for free: like `build_signatures`, this only ever reads
+/// `ex.required` / `ex.anyof`, never `ex.forbidden`.
+#[derive(Clone, Debug)]
+pub struct AnchorPlan {
+    /// Each group = one main-index signature's features (arity 1, or 2 for the
+    /// escalated class-B pair). Empty for class C and class D.
+    pub main_anchors: Vec<Vec<FeatureId>>,
+    /// Each group = one broad-lane signature's features (always arity 1). Non-empty
+    /// only for class C. Empty otherwise.
+    pub broad_anchors: Vec<Vec<FeatureId>>,
+    pub class: CostClass,
+}
+
+/// Choose the lossless signature cover's *anchor feature groups* and the cost
+/// class (pass B, after the mask is finalized so `is_hot` is meaningful). This is
+/// the single source of truth for anchor selection; [`build_signatures`] just
+/// hashes the groups it returns.
+pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
+    let mut main_anchors: Vec<Vec<FeatureId>> = Vec::new();
+    let mut broad_anchors: Vec<Vec<FeatureId>> = Vec::new();
 
     if ex.required.is_empty() && ex.anyof.is_empty() {
-        return SigPlan {
-            main_sigs,
-            broad_sigs,
+        return AnchorPlan {
+            main_anchors,
+            broad_anchors,
             class: CostClass::D,
         };
     }
@@ -169,29 +193,29 @@ pub fn build_signatures(ex: &Extracted, dict: &Dict) -> SigPlan {
             .iter()
             .min_by_key(|g| g.iter().map(|&f| dict.freq(f)).max().unwrap_or(u32::MAX))
         else {
-            return SigPlan {
-                main_sigs,
-                broad_sigs,
+            return AnchorPlan {
+                main_anchors,
+                broad_anchors,
                 class: CostClass::D,
             };
         };
         let all_selective = best.iter().all(|&f| !is_hot(dict, f));
         if all_selective {
             for &f in best {
-                main_sigs.push(sig_key(&[f]));
+                main_anchors.push(vec![f]);
             }
-            SigPlan {
-                main_sigs,
-                broad_sigs,
+            AnchorPlan {
+                main_anchors,
+                broad_anchors,
                 class: CostClass::B,
             }
         } else {
             for &f in best {
-                broad_sigs.push(sig_key(&[f]));
+                broad_anchors.push(vec![f]);
             }
-            SigPlan {
-                main_sigs,
-                broad_sigs,
+            AnchorPlan {
+                main_anchors,
+                broad_anchors,
                 class: CostClass::C,
             }
         }
@@ -202,31 +226,44 @@ pub fn build_signatures(ex: &Extracted, dict: &Dict) -> SigPlan {
         let r1 = r[0];
         if !is_hot(dict, r1) {
             // arity-1 selective anchor
-            main_sigs.push(sig_key(&[r1]));
-            SigPlan {
-                main_sigs,
-                broad_sigs,
+            main_anchors.push(vec![r1]);
+            AnchorPlan {
+                main_anchors,
+                broad_anchors,
                 class: CostClass::A,
             }
         } else if r.len() >= 2 {
             // hot rarest feature -> escalate to arity-2 with next-rarest
             let r2 = r[1];
             let (a, b) = if r1 < r2 { (r1, r2) } else { (r2, r1) };
-            main_sigs.push(sig_key(&[a, b]));
-            SigPlan {
-                main_sigs,
-                broad_sigs,
+            main_anchors.push(vec![a, b]);
+            AnchorPlan {
+                main_anchors,
+                broad_anchors,
                 class: CostClass::B,
             }
         } else {
             // single, hot required feature and nothing to pair -> broad lane
-            broad_sigs.push(sig_key(&[r1]));
-            SigPlan {
-                main_sigs,
-                broad_sigs,
+            broad_anchors.push(vec![r1]);
+            AnchorPlan {
+                main_anchors,
+                broad_anchors,
                 class: CostClass::C,
             }
         }
+    }
+}
+
+/// Choose a lossless signature cover and a cost class (pass B, after the mask
+/// is finalized so `is_hot` is meaningful). Thin wrapper over [`anchor_plan`]:
+/// hashes each anchor group into its `sig_key`. Keeping the two in lockstep is
+/// what lets the cluster place by anchor identity without re-deriving selection.
+pub fn build_signatures(ex: &Extracted, dict: &Dict) -> SigPlan {
+    let plan = anchor_plan(ex, dict);
+    SigPlan {
+        main_sigs: plan.main_anchors.iter().map(|g| sig_key(g)).collect(),
+        broad_sigs: plan.broad_anchors.iter().map(|g| sig_key(g)).collect(),
+        class: plan.class,
     }
 }
 
@@ -256,8 +293,10 @@ pub fn compile_one(
 }
 
 /// Read-only extract: resolves features via `dict.get()` without interning.
-/// Skips features not already in the dictionary. Safe for the read path.
-fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut String) -> Extracted {
+/// Skips features not already in the dictionary. Safe for the read path — and
+/// for the cluster coordinator's incremental adds against a frozen shared dict,
+/// where interning new vocabulary would fork the `Arc<Dict>` shared across shards.
+pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut String) -> Extracted {
     let mut required: Vec<FeatureId> = Vec::new();
     let mut forbidden: Vec<FeatureId> = Vec::new();
     let mut anyof: Vec<Vec<FeatureId>> = Vec::new();

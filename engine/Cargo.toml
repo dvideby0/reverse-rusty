@@ -11,32 +11,92 @@ license = "MIT"
 # this local crate regardless, and "MIT" is allow-listed in deny.toml anyway.
 publish = false
 
+# `engine` is the workspace root package; `grpc` is the generated gRPC proto crate
+# (reverse-rusty-shard-proto), pulled in only under the `distributed` feature. The
+# root package + every documented command stay unchanged — the member is built only
+# when something activates the optional dependency on it.
+[workspace]
+members = ["grpc"]
+
 [dependencies]
+# ---- Core library (always compiled; this is the lean `--no-default-features` build) ----
 daachorse = "3"
 memmap2 = "0.9"
 rayon = "1"
 roaring = "0.11"
 arc-swap = "1"
-
-# HTTP server (only compiled into the server binary)
-axum = { version = "0.8", features = ["json"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+# serde/serde_json are core, not server: Vocab JSON persistence (vocab.rs),
+# EngineConfig Serialize (config.rs), ExplainDetail (explain.rs), and the JSONL
+# query loader (loader.rs) all live in the library. They must NOT be gated.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-clap = { version = "4", features = ["derive"] }
-parking_lot = "0.12"
-tower = { version = "0.5", features = ["limit"] }
-uuid = { version = "1", features = ["v4"] }
 
-# Observability
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+# ---- HTTP server + observability (behind the default-on `server` feature) ----
+# Used only by src/bin/server.rs; `optional = true` keeps them out of the lean
+# core. The `server` feature (default-on) re-enables them, and the server bin
+# carries `required-features = ["server"]` so it is skipped when they are off.
+# A stray `use` of any of these in the library proper fails the "clippy (lean
+# core)" lane in check.sh.
+axum = { version = "0.8", features = ["json"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"], optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+parking_lot = { version = "0.12", optional = true }
+tower = { version = "0.5", features = ["limit"], optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }
 # default-features disabled to drop the optional `protobuf` feature: we only emit
 # the text exposition format (TextEncoder), which lives in prometheus core and
 # needs no protobuf. (Under 0.13 this also dodged RUSTSEC-2024-0437's vulnerable
 # protobuf 2.x; 0.14 ships protobuf 3.7.2, so disabling it is now a lean-deps
 # choice, not a security workaround.)
-prometheus = { version = "0.14", default-features = false }
+prometheus = { version = "0.14", default-features = false, optional = true }
+
+# ---- Distributed: gRPC ShardServer / RemoteShard (behind the `distributed` feature; ADR-029) ----
+# The generated proto crate is the workspace member `grpc/`; `tonic` is the runtime.
+# Off by default — pulls in the tonic/hyper/tokio-net stack only when enabled, so the
+# lean core and the standard server build never compile it.
+reverse-rusty-shard-proto = { path = "grpc", optional = true }
+tonic = { version = "0.14", optional = true }
+# Server-streaming peer recovery (ADR-036) wraps an mpsc receiver as a `Stream`
+# (`ReceiverStream`); `sync` is the feature that gates that wrapper. Distributed-only.
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+# Cluster-manager consensus (the openraft control-plane backend; ADR-038, clustering
+# step 5b). Pinned EXACT (`=`) like the rest of the distributed stack — 0.9.24 is the
+# latest STABLE line (0.10 is alpha; a zero-false-negatives project pins stable). Off
+# by default and distributed-gated, so neither the lean core nor the standard server
+# build ever compiles a consensus engine. Owns the dangerous parts (joint-consensus
+# membership + snapshots) behind the stable `trait ControlPlane` seam. Features:
+#  - `serde`: makes the Raft RPC/state types serializable for the opaque-bytes gRPC envelope.
+#  - `storage-v2`: unseals the split `RaftLogStorage` + `RaftStateMachine` traits (the
+#    non-deprecated path; the legacy combined `RaftStorage` + `Adaptor` would trip our
+#    `-D warnings` clippy lane on deprecation).
+#  - `generic-snapshot-data`: ships the (tiny) cluster-state snapshot whole via
+#    `full_snapshot` instead of chunked `install_snapshot` — one Snapshot RPC, no streaming.
+openraft = { version = "=0.9.24", features = ["serde", "storage-v2", "generic-snapshot-data"], optional = true }
+
+[features]
+# Default-on so every documented command (`cargo build --release`,
+# `cargo run --release --bin server`, `cargo test --release`) behaves exactly as
+# before. The lean core is opt-in via `--no-default-features` and is enforced by
+# the "clippy (lean core)" lane in check.sh. See docs/DECISIONS.md ADR-028.
+default = ["server"]
+server = [
+    "dep:axum",
+    "dep:tokio",
+    "dep:clap",
+    "dep:parking_lot",
+    "dep:tower",
+    "dep:uuid",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+    "dep:prometheus",
+]
+# gRPC shard transport (ADR-029): the generated proto crate + tonic + tokio's `net`
+# stack. Off by default, so neither the lean core nor the standard server build sees
+# it. `dep:tokio` re-enables tokio (optional since the lean split) with its declared
+# features; `tokio/net` adds the socket support tonic's transport needs.
+distributed = ["dep:reverse-rusty-shard-proto", "dep:tonic", "dep:tokio", "tokio/net", "dep:tokio-stream", "dep:openraft"]
 
 [[bin]]
 name = "bench"
@@ -45,6 +105,10 @@ path = "src/bin/bench.rs"
 [[bin]]
 name = "demo"
 path = "src/bin/demo.rs"
+
+[[bin]]
+name = "clusterdemo"
+path = "src/bin/clusterdemo.rs"
 
 [[bin]]
 name = "learn"
@@ -61,6 +125,24 @@ path = "src/bin/snapbench.rs"
 [[bin]]
 name = "server"
 path = "src/bin/server.rs"
+# The HTTP server is the only consumer of the gated server/observability crates,
+# so it only builds when the `server` feature is on. Under `--no-default-features`
+# Cargo skips this bin (its `use axum::…` etc. never compile).
+required-features = ["server"]
+
+[[bin]]
+name = "shardserver"
+path = "src/bin/shardserver.rs"
+# A deployable shard node: serves ShardService over gRPC. Builds only with the
+# `distributed` feature (and its tonic/proto deps).
+required-features = ["distributed"]
+
+[[bin]]
+name = "controlserver"
+path = "src/bin/controlserver.rs"
+# A deployable cluster-manager node: serves the openraft ControlService over gRPC
+# (ADR-038). Builds only with the `distributed` feature (tonic/proto + openraft).
+required-features = ["distributed"]
 
 [profile.release]
 opt-level = 3

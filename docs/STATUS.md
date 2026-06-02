@@ -67,6 +67,254 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   path (`tests/broad_batch.rs` + batch oracle); broad postings scanned amortize ~1/batch_size (29× at
   256). Four dynamic knobs (`broad_batch_size`/`broad_columnar`/`broad_materialize`/`max_percolate_batch`)
   + broad Prometheus counters; `broad_columnar=false` is the inline kill-switch.
+- **Cluster scope frame — read before the cluster entries below.** **Cluster v1** (shippable) = the
+  in-process multi-shard core + durable local reopen + dynamic vocabulary (Roadmap **Tier 0**) —
+  oracle-proven, zero false negatives. The gRPC / replication / control-plane / handoff / autoscaler
+  layers in the entries below are **built and oracle-proven _in-process / on localhost_ but
+  experimental** — not yet hardened for real multi-machine deployment (no TLS/auth, write-quiesce
+  windows, advisory-only autoscaler, no auto-split). Each entry's *Honest scope* note records the
+  per-feature boundary **as of that increment** (some items it flags as design-only were built in a
+  later entry below); the prioritized path to v1 is Roadmap **Tier 0**.
+- **In-process multi-shard core (ADR-027)** — the first, dependency-free step of clustering
+  (`src/cluster/`): a `ClusterEngine` coordinator over K `Shard`s (each a `Shard`-wrapped `Engine` +
+  `ArcSwap` snapshot), a consistent-hash `HashRing` over the query's **anchor `FeatureId`**, and content
+  routing that sends a title only to its ~2–5 anchor shards (not all N) plus a designated replicated lane
+  (shard 0) for class-C / class-B-arity-2 queries that have no rare anchor. One authoritative `Dict` is
+  built over the whole corpus, frozen, and shared read-only into every shard, so `sig_key`s and hotness
+  are globally consistent — a shard's indexing matches the coordinator's placement by construction.
+  `compile::anchor_plan` (refactored out of `build_signatures`, byte-identical) is the placement SSOT.
+  Proven by `tests/cluster_oracle.rs`: cluster ≡ single-node ≡ independent brute-force oracle across
+  K∈{1,3,8,16} × broad on/off, zero false negatives / false positives, every placement class + small
+  fan-out asserted. This is build-path steps 1–2 plus step 1's gRPC transport (ADR-029): behind the
+  off-by-default `distributed` feature a `ShardServer` + gRPC `RemoteShard` carry a shard over the
+  network — proven by `tests/cluster_grpc_oracle.rs` (gRPC cluster ≡ single-node ≡ brute, broad on/off).
+  The remaining distributed layers are built later in this list (ADR-029→045) — oracle-proven
+  _in-process / on localhost_ but experimental; see the **Cluster scope frame** above and Tier 3.
+  ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §3/§7/§10.)
+- **Durable cluster coordinator log (ADR-031)** — clustering build-path step 3a: the `ClusterEngine`
+  coordinator now has durability of its own. A `trait ClusterLog` (`cluster/clog.rs`) with a CRC-framed
+  `FileClusterLog` + in-memory `NullClusterLog`, a coordinator-level manifest + base snapshot (`storage.rs`),
+  and log-first/fail-closed `add_query`/`remove_query` make an in-process cluster built with a `data_dir`
+  rebuildable from disk alone: `ClusterEngine::open` re-derives byte-identical placement (zero false
+  negatives) from manifest + snapshot + replayed log, and `checkpoint()` compacts the log. Raw DSL is the
+  logged source of truth; one `apply` funnel serves both live writes and replay (the Raft state-machine
+  apply in disguise — the seam is shaped for a Raft-backed log later). Dependency-free (lean core); proven
+  by `tests/cluster_durability_oracle.rs` (rebuild ≡ pre-crash ≡ brute across K∈{1,3,8} × broad, +
+  checkpoint, torn-tail, fail-closed, two-backend differential, fsync parity).
+- **Per-shard durable segments — attach-and-mmap reopen (ADR-032)** — clustering build-path step 3b
+  (local dir). Each shard is now a segments-only durable engine (`shard_<i>/segments/*.seg`, no per-shard
+  WAL or manifest, built over the one shared frozen dict). `ClusterEngine::open` **attaches-and-mmaps** each
+  shard's committed compiled segments and replays only the log tail — **no re-ingest/recompile of the
+  corpus** (the cost that re-ingest paid at 100M). The coordinator manifest (v2) is the single atomic
+  commit point recording the per-shard segment registry + per-shard `next_seg_id` + log cursor (the raw-DSL
+  base snapshot + coordinator `live` set are gone). `checkpoint()` re-seals tombstoned base segments so a
+  truncated `Remove` can't resurrect a query, and a missing/corrupt committed segment fails `open` loud
+  (no silent shard-sized false negative). Crash-safety mirrors 3a (manifest = sole commit point; pre-commit
+  crash ⇒ old registry authoritative + orphan segments recovered via log replay). Dependency-free; proven by
+  the extended `tests/cluster_durability_oracle.rs` (the existing rebuild ≡ pre-crash ≡ brute, plus
+  attach-with-no-log, the checkpoint-after-removing-a-build-time-query bug-catcher, orphan-ignored, and
+  corrupt-segment-fails-loud). The durable base is **local-disk** segments — the shared-nothing model
+  (ADR-033); a **Raft-backed** `ClusterLog` still drops in behind the same seam. Still design-only:
+  cross-process/remote coordinator durability.
+- **Cross-process dict shipping (ADR-034)** — completes the gRPC transport so a data node need not rebuild a
+  byte-identical dict from the corpus out-of-band. The coordinator **ships** its frozen dict to each server
+  at connect (new `AdoptDict` RPC over the existing `serialize_dict`/`Dict::fingerprint`); a server can start
+  **pending** (dict-less) via `ShardServer::pending` and adopt it. Contract: empty shard → adopt; same
+  fingerprint → idempotent no-op; **non-empty shard under a divergent dict → refuse** (surfaced as
+  `ShardError::DictMismatch`), so the ADR-030 silent-FN guard is preserved where it matters. `connect_remote`
+  ships by default (identical-dict shipping is a no-op, so pre-built callers are behavior-preserved). Behind
+  the `distributed` feature; proven by `tests/cluster_grpc_oracle.rs` (a new dict-less-servers oracle ≡
+  single-node ≡ brute, plus the updated divergence test) + a `server.rs` adoption-contract unit test. Scope:
+  ships the **dict**; the normalizer is still a shared-vocab assumption (`default_vocab()` today) — vocab
+  shipping is the next hardening. This is the first shared-nothing multi-node step (ADR-033 roadmap).
+- **Per-shard replication + peer recovery — in-process (ADR-035)** — clustering build-path step 4, the
+  Elasticsearch/Cassandra HA primitive. A `ReplicatedShard` composite (`src/cluster/replica.rs`) wraps one
+  shard position's **primary + N replicas** behind the existing `trait Shard`, so the coordinator is
+  unchanged (RF copies live inside one `Box<dyn Shard>`): writes fan out to the in-sync replicas, reads
+  **fail over** to an in-sync replica on a transport error (never a stale one → no false negative), and
+  aggregation + durability present the **primary's** view (so `num_queries`/`class_counts`/remove counts are
+  rf-independent). A fresh replica is brought up by **peer recovery** — seal the primary, copy its `.seg`,
+  attach-and-mmap (the in-process analogue of "stream segments from a peer"). `ClusterConfig::replication_factor`
+  (default 1 = byte-identical to before) drives it; replicas are HA copies rebuilt from the primary on `open`,
+  so the durable manifest is unchanged (primary + log remain the durable truth). Dependency-free; proven by
+  `tests/cluster_oracle.rs` (RF∈{2,3}×K ≡ single-node ≡ brute, counts not inflated, live add/remove) and
+  `tests/cluster_durability_oracle.rs` (durable RF=2 reopen ≡ pre-crash ≡ brute; checkpoint seals primaries
+  only) + `replica.rs` unit tests. The **gRPC multi-node lift** (replicas as remote shards + a streaming
+  segment-fetch RPC) is built in ADR-036.
+- **gRPC multi-node replication + peer recovery (ADR-036)** — lifts ADR-035 onto the gRPC transport.
+  `ClusterEngine::connect_replicated(groups)` wraps each position's primary + replica `RemoteShard`s in a
+  `ReplicatedShard` (coordinator unchanged; reads fail over, writes fan out); `ShardServer` gains durable
+  ctors (`pending_durable`/`new_durable`) and `AdoptDict` builds a durable shard when a `data_dir` is set.
+  Two new RPCs — server-streaming `FetchSegments` (seal → manifest frame → chunked `.seg` runs; the receiver
+  rejects a truncated stream rather than attaching a subset) and target-driven `RecoverFrom` (the recovering
+  node pulls a peer's segments + attaches — the Elasticsearch model), orchestrated by `peer_recover_replica`.
+  One new distributed-only dep (`tokio-stream`). Proven by `cluster_grpc_oracle.rs`'s
+  `grpc_replicated_failover_and_peer_recovery` (K×RF servers ≡ brute; primary-stop failover; fresh-node peer
+  recovery). **Honest scope:** recovery quiesces writes (there is no durable remote coordinator log to replay
+  a tail from — that couples to the Raft step); shard→node placement / membership and TLS/auth stay design-only.
+- **Cluster-state control-plane seam (ADR-037)** — clustering build-path step 5a, the dependency-free first
+  increment of the quorum/Raft control plane. A `trait ControlPlane` (`src/cluster/control.rs`) — the
+  document-mutation + linearizable-read sibling of `ClusterLog` — holds the small, low-rate cluster-state
+  document (`ClusterState`: ring params + the **shard→node map** + membership + feature-model version +
+  epoch), with an in-memory `InMemoryControlPlane` backend (the `NullClusterLog` analogue + fast differential
+  backend). `ClusterEngine` carries it as a `Box<dyn ControlPlane>` defaulted to one logical node owning every
+  shard, so the RF=1 / in-process path is **byte-identical**; new introspection `control_state()` /
+  `assignment_for()` / `reassign_shard()`. The seam's shape (membership distinct from `propose`, a
+  `ForwardToLeader` error, snapshot-read not watch, an app epoch distinct from the Raft term) is fixed so the
+  **openraft** backend drops in behind it (step 5b) without touching the coordinator — and openraft is
+  `distributed`-gated, so the lean core never sees it. Consensus holds the cluster-state doc **only**: query
+  mutations stay on `ClusterLog` + the per-shard primary→replica path, the segment registry stays in the local
+  manifest. Dependency-free; proven by `tests/cluster_control_plane_oracle.rs` (default ≡ brute across K×RF;
+  document well-formed; reassignment preserves correctness; two-backend differential) + `control.rs` unit
+  tests. **Honest scope:** the control plane alone does **not** lift the ADR-036 recovery-quiesce window — that
+  needs a durable/replicated *per-shard query log* (step 5c, distinct from the control-plane doc); the openraft
+  backend (5b), multi-process elections, and an allocator acting on the map are design-only.
+- **openraft control-plane backend (ADR-038)** — clustering build-path step 5b: the real consensus engine
+  behind the ADR-037 seam. A `RaftControlPlane` (`src/cluster/control_raft.rs`) implements `trait ControlPlane`
+  over openraft's `Raft<C>` — `propose` → `client_write`, `change_membership` → `Raft::change_membership`,
+  `cluster_state` → `ensure_linearizable` + state-machine read, openraft's `ForwardToLeader` mapped 1:1 — so the
+  coordinator changes **no call site** and its default backend stays in-memory (every existing oracle byte-
+  identical). The state machine routes each committed `Normal` entry through the SAME `control::apply` funnel as
+  the in-memory backend (live ≡ replay) and derives `voters` from Raft membership entries. Cross-process consensus
+  rides a new gRPC `ControlService` (3 RPCs carrying an **opaque serde envelope** — the proto never mirrors
+  openraft's message types) added to the existing `shard.proto`, with a tonic `RaftNetwork` + a `ControlServer`
+  and a `controlserver` manager bin. openraft is pinned `=0.9.24`, `optional`, and **`distributed`-gated — absent
+  from the lean (`--no-default-features`) dependency graph**. Proven by `tests/cluster_control_raft_oracle.rs`:
+  a 3-node in-process cluster (genuine elections + replication + quorum commit) converges to the in-memory
+  backend's document (voters/nodes/assignments/model — not the epoch, which openraft's own Blank/Membership
+  commits perturb), a follower `propose` returns `ForwardToLeader`, `change_membership` routes to Raft, and —
+  over real gRPC servers on localhost — the cluster **survives its leader being killed** (re-elects from quorum,
+  preserves the committed document, accepts a fresh write). **Honest scope:** this does **not** close the ADR-036
+  recovery-quiesce window (that is step 5c — a durable/replicated per-shard *query* log); a durable Raft log
+  (CRC-framed, reusing `storage::crc32`), TLS/auth, and an allocator acting on the shard→node map remain
+  design-only.
+- **Durable + replicated per-shard query log (translog) + no-quiesce peer recovery (ADR-039)** — clustering
+  build-path step 5c, closing the ADR-036 recovery-quiesce gap. Each durable shard owns a per-shard **translog**
+  (`src/cluster/translog.rs`) — the Elasticsearch translog, reusing ADR-031's CRC-framed `FileClusterLog` /
+  `NullClusterLog` + the logical-id-and-DSL `ClusterMutation` + `LogPos` verbatim, re-homed per shard. Writes are
+  log-first/fail-closed; `seal_for_checkpoint` captures the snapshot position `P` and trims the tail (segments
+  hold ops ≤ `P`, the translog holds exactly the un-sealed ops > `P` — the no-double-apply boundary). Peer
+  recovery now streams a peer's segments at `P` **then replays the translog tail (> `P`)** — the writes that land
+  during the copy window are recovered rather than lost, so recovery need **not quiesce** writes, both in-process
+  (`peer_recover` + `catch_up_replica`) and over gRPC (a new server-streaming `FetchTranslog(after_seqno)` RPC +
+  `FetchManifest.up_to_seqno` + the coordinator's `peer_recover_replica`). A durable data node also **self-restarts**
+  from a per-shard checkpoint sidecar (`shard.ckpt`: committed segments + `P` + dict fingerprint), attaching its
+  segments + replaying its translog tail after its own crash (no coordinator manifest on the remote path). The
+  default in-memory / RF=1 / in-process paths are byte-identical (a `NullClusterLog` translog), so every prior
+  oracle is unchanged. Proven by `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_without_quiescing` (recovered
+  ≡ live source ≡ brute over the final live set across the wire), `replica.rs::peer_recover_replays_tail_without_quiescing`
+  + `::durable_shard_self_restarts_from_translog`, and `translog.rs` unit tests. `translog.rs` is std-only (lean
+  core); the gRPC pieces are `distributed`-gated. **Honest scope (closed by ADR-040 below):** retention/GC and the
+  finalize loop landed in step 5d; TLS/auth and an allocator acting on the shard→node map remain design-only.
+- **Translog retention leases + finalize under sustained writes (ADR-040)** — clustering build-path step 5d,
+  closing ADR-039's two scope gaps. (1) **Retention leases** (the Elasticsearch peer-recovery retention lease):
+  the recovery source (`LocalShard`) holds a lease set, and `seal_for_checkpoint` now trims the translog to
+  `min(P, lease_floor)` instead of `P` — so a **concurrent** seal (another recovery's `FetchSegments`, a
+  checkpoint) can no longer trim away the tail an in-flight recovery still needs (a latent false negative in
+  ADR-039's no-quiesce path), and with no lease held it trims to `P` (**byte-identical** to ADR-039) so the
+  translog GCs the moment no recovery needs it. Three `Shard` methods (acquire/renew/release, default no-op);
+  over gRPC a `RetentionLease` RPC. (2) **Finalize:** recovery holds one lease across a **convergence loop**
+  (`catch_up_replica` until the tail stops advancing), then promotes the replica into the in-sync set under a
+  brief write quiesce — the window shrinks to the residual delta, not the whole copy. `ReplicatedShard` gained
+  runtime replica growth (`add_recovered_replica`) and `ClusterEngine::add_replica` exposes it; correctness
+  never depends on the loop converging (the lease keeps the tail safe), only the window size does. Default
+  in-memory / RF=1 paths byte-identical; proven by `replica.rs` unit tests (retention-keeps-tail-across-a-
+  concurrent-seal, runtime in-sync promotion) + `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_converges_under_sustained_writes`
+  (a writer thread streams adds concurrently with the recovery; recovered ≡ live source ≡ brute over the final
+  set). Lean-core retention + finalize; the RPC is `distributed`-gated. **Honest scope:** a stuck lease has no
+  time/size expiry yet; cross-node in-sync promotion of a remote replica routes through the allocator (design-only);
+  TLS/auth deferred.
+- **Durable Raft log + control-plane restart recovery (ADR-041)** — clustering build-path step 5e, making the
+  ADR-038 openraft backend survive a restart. A new `src/cluster/control_store.rs` is the byte-level durable
+  substrate: a CRC-framed append-only record log (reusing the `clog`/`wal` forward-scan / torn-tail pattern +
+  `storage::crc32`) for the Raft entries, plus atomic single-value files (tmp + fsync + rename) for the **vote**
+  (election safety), the **committed** log id (`save_committed`, so a restart re-applies `(snapshot.last,
+  committed]`), the last-purged id, and the state-machine **snapshot**. The state machine is NOT persisted
+  per-apply — openraft rebuilds it on restart from the snapshot + the replayed log (so `apply` stays the
+  in-memory `control::apply` ⇒ live ≡ replay unchanged). `LogStore`/`StateMachine` gained `in_memory()` (the
+  ADR-038 path — byte-identical) + `open(dir, fsync)`; `build_node` takes `Option<&Path>`, `in_process_cluster`
+  stays in-RAM, and `start_grpc_node` + the new `controlserver --data-dir` flag make a manager node durable. A
+  `RaftControlPlane::shutdown()` releases the files for a clean restart. Proven by
+  `tests/cluster_control_raft_oracle.rs::durable_node_recovers_committed_document_after_restart` (commit → shutdown
+  → rebuild from disk → the committed doc survives + a fresh write commits) + `control_store.rs` unit tests. All
+  `distributed`-gated (the lean core never compiles openraft); no new dependency. **Honest scope:** an end-to-end
+  durable-multi-node rolling-restart harness + TLS/auth remain design-only.
+- **Shard→node allocator (ADR-042)** — clustering build-path step 5f, the decision layer that fills the
+  control-plane shard→node map. `src/cluster/allocator.rs` plans a placement via **rendezvous (HRW)** hashing
+  (`util::fnv1a64` over `(position, node)`): for each shard position the top-RF nodes by weight (primary +
+  replicas) — balanced, deterministic, and **minimal-movement** (a node add/remove reassigns ≈1/N of positions,
+  not all, like Elasticsearch/Cassandra rebalance). `ClusterEngine` gained `register_node`/`deregister_node`
+  (membership via the control plane) + `rebalance(rf)`, which commits only the changed positions
+  (`changed_assignments`) as `AssignShard` proposals — idempotent (no membership change ⇒ 0 moves), fail-closed,
+  a no-op on the single-node default. Lean core, dependency-free. **Scope:** this commits the *desired* map;
+  physically relocating a shard's segments on a reassignment reuses peer recovery (ADR-036/039) and is the
+  deployment wiring on top (in-process the map is advisory — matching is unaffected). Proven by `allocator.rs`
+  unit tests (distinct primary+replicas, RF clamp, determinism, ≈1/N movement, balance, the diff) +
+  `tests/cluster_allocator_oracle.rs` (register → rebalance ⇒ a balanced fully-assigned map; idempotent; a
+  deregistered node drops out; `percolate` byte-identical before/after every rebalance ⇒ zero-FN preserved).
+  Foundation for the autoscaler (ADR-045, built) + auto-split (step 6).
+- **Swappable shard backing — the live-handoff routing-flip mechanism (ADR-043)** — clustering build-path
+  step 6a: the routing half of the data-moving handoff (the byte mover, peer recovery, already exists). A
+  `HandoffShard` (`src/cluster/handoff.rs`) wraps one shard position's backing in an `ArcSwap<Box<dyn Shard>>`
+  + a generation stamp and implements `Shard` on `Arc<HandoffShard>`, so the gRPC builders
+  (`connect_remote`/`connect_replicated`) wrap each position and keep a typed handle (a `handoffs` side-table)
+  that step 6b uses to **re-point a position at a new owner at runtime** without downcasting `dyn Shard`.
+  **Serve-then-drop falls out of `arc_swap`:** an in-flight probe completes against the *old* backing
+  (lock-free, safe under the coordinator's rayon fan-out) while a swap re-points the slot atomically; the
+  generation is the epoch-fence stamp step 6b reads (inert here). The whole capability is `distributed`-gated,
+  so the lean core and the in-process/RF=1 default path are **byte-identical** (every prior oracle unchanged).
+  Proven by six `handoff.rs` unit tests (a swap to a set-equal backing is byte-identical in ids + stats; an
+  in-flight read serves the old backing while a fresh read sees the new one; the generation tracks swaps;
+  concurrent readers survive repeated swaps; writes and the defaulted `set_event_sink` forward to the backing).
+  The cross-node move that *drives* the swap is step 6b (ADR-044, below).
+- **Live data-moving handoff — the cross-node move (ADR-044)** — clustering build-path step 6b: wires
+  decide→move→flip into one **live** shard move (a position's owner changes while the cluster keeps serving).
+  A new `Fence` RPC + a monotonic, write-only server-side fence demote the old owner: once fenced, its
+  data-mutating writes (`insert`/`delete`/`ingest`) return `failed_precondition` while **reads + the recovery
+  RPCs stay served** (so an in-flight read never hits the fence — serve-then-drop). `ClusterEngine::execute_handoff`
+  orchestrates it under one retention lease: no-quiesce bulk peer-recover the target → **fence** the source
+  (the position's brief write-quiesce begins) → **drain to convergence** (the fenced source's tail is finite +
+  frozen, so looping the catch-up captures every op it ever accepted — closing the TOCTOU a single final
+  catch-up would leave) → **flip** the 6a `HandoffShard` backing source→target. Fence-LATE (after the
+  no-quiesce copy) keeps the no-quiesce property; only the converge-then-flip is write-quiesced. The byte
+  mover is peer recovery (ADR-036/039); the lease (ADR-040) pins the tail so a concurrent seal can't strand
+  it. Proven by `tests/cluster_grpc_oracle.rs::grpc_live_handoff_under_sustained_writes` (reassign a position
+  source→target under a concurrent writer that retries the brief fence-window rejections; the SAME cluster,
+  re-pointed to the new owner, ≡ the brute oracle over the final live set — zero false negatives, reads never
+  paused) + `src/cluster/server.rs::fence_rejects_writes_but_serves_reads`. `distributed`-gated; no new
+  dependency. **Honest scope:** single-coordinator (the fence is the multi-coordinator guard; the flip is
+  serialized); a fence-window write is fail-closed + retryable (never lost); a non-converging source aborts
+  the flip fail-closed (the source stays fenced — a stuck position, never a lost write); "drop the old owner" =
+  drop from routing, not teardown; RF>1 group relocation reuses the same swap but the oracle covers the
+  single-owner move. **Still design-only:** wiring the autoscaler's (advisory) handoff recommendation to
+  `execute_handoff` + auto-split.
+- **Autoscaler — the policy/trigger layer (ADR-045)** — clustering build-path step 6c: the policy that
+  *decides when* to drive the built mechanisms. A pure, deterministic `cluster::autoscale::evaluate(snapshot,
+  config)` over a `LoadSnapshot` (membership + the shard→node map + per-shard corpus — the only load signal
+  that crosses the `Shard` seam, so it behaves identically in-process and across nodes) emits `ScalingAction`s:
+  **membership drift → `Rebalance` (executable)**, **per-node skew → `Handoff` (advisory)**, **per-shard corpus
+  over a threshold → `RecommendSplit` (advisory)**. The thin `ClusterEngine` driver (`coordinator::autoscale`)
+  `tick(config)` collects the snapshot, runs `evaluate`, executes the executable subset (each `Rebalance` → the
+  idempotent `rebalance(rf)`), and returns the full decision incl. advisories; `on_node_joined`/`on_node_left`
+  are the event-driven entries. The membership trigger is coarse (it never recomputes HRW — `evaluate` stays a
+  pure function of the snapshot); the idempotent `rebalance` is the truth for the exact moves, so there is **no
+  clock / hysteresis** (idempotence *is* the hysteresis). `AutoscaleConfig::default()` is **disabled** ⇒ `tick`
+  is a no-op ⇒ every prior oracle is byte-identical. Lean core, no new dependency. **Honest scope:** auto-split
+  is **advisory only** (no split mechanism — the ring's `num_shards` is fixed at construction; it needs ring
+  re-keying + a `recommended_shard_count` signal); load-driven handoff is **advisory only** (`execute_handoff`
+  is gRPC-gated, not driven); QPS/compute-replica autoscaling (HPA-style) is out of engine scope. Proven by
+  `src/cluster/autoscale.rs` unit tests (the deterministic policy) + `tests/cluster_autoscale_oracle.rs`
+  (`tick` ≡ a manual `rebalance`; `percolate` byte-identical before/after a tick ⇒ zero-FN; a second tick
+  commits nothing; a disabled config is a no-op; a split advisory mutates nothing).
+- **Cluster module restructured for agent-friendliness (no behavior change)** — the four largest `src/cluster/`
+  files were split into focused submodules following the `segment.rs` pattern (root = the type *defs*, `impl`
+  blocks split by responsibility): `coordinator.rs` (1,698 lines → `coordinator/{lifecycle,ingest,matching,
+  control_plane,distributed,tests}`), `replica.rs` (1,205 → `replica/{shard_impl,test_support,tests}`),
+  `control_raft.rs` (1,091 → `control_raft/{log_store,state_machine,network,builders}`), and `server.rs`
+  (1,004 → `server/{service,tests}`) — no cluster file now exceeds ~600 lines. A pure refactor: cross-sibling
+  private items widen to `pub(in crate::cluster::<mod>)`, public API + matching are unchanged, proven by the
+  full cluster oracle suite + `check.sh` staying green. The per-area router is the module map in
+  [`../CLAUDE.md`](../CLAUDE.md).
 
 ## Measured
 
@@ -90,6 +338,65 @@ Priority follows the bottleneck analysis ([`performance/results.md`](performance
 selective match path is already ~255× the spec target with a flat ~54 candidates/title, so the leverage
 is in the **broad lane**, **memory/footprint**, and the **durability + scale** story — not in shaving
 the selective candidate count further.
+
+### Tier 0 — Cluster v1 acceptance gate (**complete** — the shippable milestone)
+
+The one tier here that was **active build work, not design-only research.** It makes **Cluster v1** —
+the in-process multi-shard core + durable local reopen + dynamic vocabulary — a defensible, shippable
+milestone before the broader distributed cluster roadmap (Tier 3) resumes. These were the critical-core
+items from an external review, re-ranked to the top; **all are now done:**
+
+- **Dynamic vocabulary — "it just works" (spike done → ADR-046 → build).** The headline v1 correctness
+  item. Today a live write whose query introduces a term absent from the frozen shared dict **silently
+  drops** it (`coordinator/ingest.rs` + `server.rs` compile read-only against the frozen dict), so the
+  query broadens and an all-unknown any-of group risks a *false negative*. v1 **absorbs** the new term
+  with matching still correct (**zero false negatives**). The research spike
+  ([`research/dynamic-vocabulary.md`](research/dynamic-vocabulary.md)) is complete and the approach is
+  **decided ([ADR-046](DECISIONS.md))** — two complementary mechanisms: **(1) new tokens →
+  deterministic feature-hashing** into a reserved `FeatureId` range (every shard computes the same id
+  with no coordination — in-process ≡ cross-process for free; collisions = bounded over-match, *never*
+  a missed match), and **(2) new alias/synonym rules → runtime normalizer learning** (reuse the ADR-015
+  `Vocab` machinery + an atomic in-process `Arc<Normalizer>` swap). Both land in the in-process v1 core;
+  the *cross-process shipping* of alias updates is deferred to the experimental distributed layers.
+  **Both mechanisms are built and oracle-proven.** (1) feature-hashing — `dict::synthetic_id`/`get_or_synthetic`
+  (a reserved high-`u32` range) + both readonly paths (`normalize::compile_features_readonly` + `match_features`)
+  hash unknown terms instead of dropping them; **additive** (synthetic ids are disjoint from interned ids, so
+  every prior oracle is byte-identical). (2) alias learning — a synchronous **recompile pass**
+  (`Engine::recompile_stale_segments`, the single-engine path that also fixes the server's `PUT /_vocab`) + a
+  cluster **blue/green rebuild** (`ClusterEngine::set_vocab` — re-mint the dict, **re-place** every query since
+  an alias can change a query's anchor/shard, atomic swap; durable via a manifest `vocab_data` blob, manifest
+  **v3**, so an alias survives reopen) + **auto-learning** (`Engine`/`ClusterEngine::learn_and_apply` wire the
+  ADR-015 any-of learner; `POST /_vocab/learn_and_apply`). In-process only — `set_vocab` refuses a non-local
+  cluster (cross-process normalizer shipping stays in the experimental distributed layers). Proven by
+  `tests/cluster_oracle.rs` (absorb-without-broadening, satisfiable all-unknown any-of, **declared alias makes
+  both surface forms match**, auto-learn) + `tests/cluster_durability_oracle.rs` (alias survives reopen +
+  rebind) + `tests/hardening_fixes.rs`. **Remaining (deferred, not v1-blocking):** the background re-materialize
+  that consolidates hashed terms / learned synonyms on compaction (the "improve" phase), and cross-process
+  normalizer shipping. *(Absorbed the former Tier-3 "normalizer/vocab shipping" residue.)*
+- **`block_on` regression guard test — done.** `RemoteShard`'s sync→async bridge is *safe by design*
+  (rayon workers aren't tokio runtime threads — `remote.rs:9-14`). A guard test now drives a
+  multi-shard (fan-out ≥ 2) `RemoteShard` percolate so the bridge runs `block_on` on rayon workers,
+  asserting no nested-runtime panic + correctness vs the brute oracle
+  (`tests/cluster_grpc_oracle.rs::remote_fanout_block_on_does_not_panic_on_rayon_workers`). A future
+  refactor that drove the fan-out from inside an async context would fail loudly here. (A test, not a fix.)
+- **Name + lock the Cluster-v1 acceptance gate — done.** `tests/cluster_oracle.rs` (cluster ≡
+  single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}) + `tests/cluster_durability_oracle.rs`
+  (reopen ≡ pre-crash ≡ brute) are named the explicit Cluster-v1 gate in [`testing.md`](testing.md)
+  (+ a comment in `check.sh`) — both already run on default `cargo test --release`; this names them
+  the contract and keeps them green. The dynamic-vocab absorb-correctly assertions are present in both
+  (declared-alias both-forms-match + auto-learn in `cluster_oracle`; alias-survives-reopen + rebind in
+  `cluster_durability_oracle`).
+- **Cluster fan-out / broad-lane benchmark output — done.** New `src/bin/clusterbench.rs` emits
+  aggregate shards-probed-per-title (avg/p50/p95/p99/max), a fan-out-vs-K sweep, and the broad-lane
+  candidate share; a CLUSTER section is in
+  [`performance/benchmark-results.txt`](performance/benchmark-results.txt) (HOW TO RUN + INVARIANTS +
+  capture log) and CI runs it. Machine-independent invariants: fan-out is bounded ~2–5 (never → N) and
+  candidates/title is identical at every K (the cluster distributes selectivity without inflating it).
+  (Observability, not correctness.)
+- **Stop overclaiming — done.** The v1/experimental reframe is applied across this doc, the design
+  doc, `CLAUDE.md`, and PR #18 — dynamic vocab marked **built + oracle-proven**, and the distributed
+  layers consistently framed "oracle-proven *in-process / on localhost*," not "production
+  multi-node."
 
 ### Tier 1 — highest leverage (the measured bottlenecks)
 
@@ -126,12 +433,29 @@ the selective candidate count further.
 
 - **Feature-model versioning + blue/green re-materialize.** Frozen common-mask across minor versions;
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
-- **Clustering.** Consistent-hash entity-anchor sharding, content routing, quorum cluster-manager,
-  autoscaling, broad-lane replication — the 100M-query horizontal-scale story. *Prior art + the hashing
-  variant (ring + virtual nodes) and the cross-shard correctness argument are now locked
-  ([`DECISIONS.md`](DECISIONS.md) ADR-027, [`research/clustering-prior-art.md`](research/clustering-prior-art.md));
-  implementation pending.*
-  ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
+- **Clustering — the 100M horizontal-scale story** (built on the **shared-nothing** model: local segments +
+  per-node/coordinator WAL + replication + a quorum control plane — **no object store, no cloud dependency**;
+  ADR-033). **Scope frame:** **Cluster v1** = the in-process multi-shard core + durable local reopen +
+  dynamic vocabulary (Roadmap **Tier 0**) — oracle-proven and shippable. The **distributed multi-node
+  layers** — the gRPC transport + dict shipping, the durable coordinator log + per-shard local segments,
+  replication + peer recovery, a durable openraft control plane, a per-shard translog with no-quiesce
+  recovery + retention/finalize, a rendezvous-hash shard→node allocator, a runtime-swappable shard backing
+  (the live-handoff routing-flip mechanism), the **live data-moving handoff** (peer-recover → fence →
+  drain-to-convergence → flip, under concurrent writes), and the **autoscaler** — are **built and
+  oracle-proven _in-process / on localhost_, but experimental: not yet hardened for real multi-machine
+  deployment** (ADR-027, 029, 031–045). **The immediate priority is Tier 0** (make v1 defensible); this
+  distributed buildout resumes after.
+  **Per-ADR detail is
+  in [Implemented](#implemented-working-tested) above**; the build path + cross-shard correctness argument are
+  in [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §10 (hashing-variant survey:
+  [`research/clustering-prior-art.md`](research/clustering-prior-art.md)). **Still design-only** — the
+  production multi-node residue (hardening): **auto-split** + `recommended_shard_count` and wiring the
+  autoscaler's (advisory) handoff recommendation to `execute_handoff` (the policy itself landed in ADR-045);
+  **replicate-broad-to-all** (in-process uses the shard-0 lane only);
+  **TLS/auth** on the gRPC + control transports; auto-unfence-on-abort + a translog-lease TTL; and an
+  end-to-end durable-multi-node rolling-restart harness. *(**Dynamic vocabulary / normalizer shipping moved
+  up to Tier 0** — it is a v1 correctness item now, not Tier-3 residue; the cross-process phasing of it may
+  remain here per the [research spike](research/dynamic-vocabulary.md).)*
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
 
@@ -227,9 +551,13 @@ from the audit's former P3 list). Roughly grouped:
   publish), and `get_vocab` reads `state.snapshot.load().vocab()` instead of locking the engine. Vocab
   reads are now lock-free like every other read endpoint, closing the last ADR-016 violation. (No new
   ADR — this completes ADR-016's stated design.)
-- **Server/observability deps are not feature-gated** — the library crate unconditionally compiles
-  `axum`/`tokio`/`tower`/`uuid`/`prometheus` even for pure-engine embeddings. Add an optional `server`
-  feature to keep the embeddable core lean (compile time, binary size, supply-chain surface).
+- ~~**Server/observability deps are not feature-gated.**~~ **✅ Fixed (ADR-028).** The nine
+  HTTP/observability crates (`axum`/`tokio`/`clap`/`parking_lot`/`tower`/`uuid`/`tracing`/
+  `tracing-subscriber`/`prometheus`) are now `optional` behind a default-on `server` feature, and the
+  server bin carries `required-features = ["server"]`. `cargo build --no-default-features` yields the
+  lean embeddable core (daachorse/memmap2/rayon/roaring/arc-swap/serde/serde_json + transitives),
+  enforced by the new `clippy (lean core)` lane in `check.sh`. `serde`/`serde_json` stay core (Vocab
+  JSON, `EngineConfig`, `ExplainDetail`, JSONL loader are all library code).
 - ~~**Durability/persistence failures log to stderr, not the observability stack.**~~ **✅ Shipped
   (ADR-021).** All 14 durability/persistence failure sites in
   `src/segment/{lifecycle,ingest,persistence}.rs` (WAL init/append/checkpoint/reset, manifest write,
@@ -244,11 +572,32 @@ from the audit's former P3 list). Roughly grouped:
 
 ## Current limitations
 
-- **Single-node.** Horizontal scale (sharding / routing / autoscaling) is designed but not built — see
-  Tier 3 above.
+- **Not yet a hardened multi-node deployment.** The full shared-nothing multi-node stack is **built and
+  oracle-proven _in-process / on localhost_ (experimental)** — sharding + content routing, the gRPC `ShardServer`/`RemoteShard` transport with coordinator
+  dict shipping, a durable coordinator log, per-shard local durable segments (attach-and-mmap reopen), per-shard
+  replication + peer recovery (in-process + gRPC), a durable openraft control plane (multi-process elections +
+  leader failover + restart recovery), a per-shard translog (no-quiesce peer recovery + retention/finalize),
+  a rendezvous-hash shard→node allocator, a runtime-swappable shard backing (the live-handoff routing-flip
+  mechanism, ADR-043), the **live data-moving handoff** itself (the cross-node move under concurrent
+  writes — peer-recover → fence → drain-to-convergence → flip, ADR-044), and the **autoscaler** policy that
+  drives `rebalance` on membership/skew events (ADR-045) (ADR-027, 029, 031–045; per-ADR detail
+  in [Implemented](#implemented-working-tested) above). But it is exercised **single-process / on localhost** by
+  the oracles — not yet deployed and hardened across real machines. **Remaining for production multi-node** (all
+  design-only; ADR-033 — no object store / cloud dependency anywhere): **auto-split** + `recommended_shard_count`
+  and wiring the autoscaler's (advisory) handoff recommendation to `execute_handoff`,
+  **cross-process dynamic vocabulary** (the in-process piece is the Tier-0 v1 item — [research
+  spike](research/dynamic-vocabulary.md)), **replicate-broad-to-all**, **TLS/auth** on the (currently plaintext)
+  transports, and auto-unfence-on-abort + a translog-lease TTL — see Tier 3.
+  **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator **ships**
+  its frozen dict at connect (ADR-034) and the ADR-030 fingerprint handshake fails loud
+  (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can never drop
+  matches *silently*. The **normalizer** must still match on both sides (`default_vocab()` today — absorbing
+  vocabulary that appears after the frozen dict is the **Tier-0 dynamic-vocabulary** item), and the transport is
+  unauthenticated/plaintext. Treat the gRPC surface as correctness-safe, not yet a hardened multi-process deployment.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
   runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving it from the corpus is the
-  NPMI-wiring item in Tier 2.
+  NPMI-wiring item in Tier 2. Absorbing vocabulary that first appears *after* the dict is frozen
+  (live writes against a cluster's shared frozen dict) is the **Tier-0 dynamic-vocabulary** item.
 - **Validated on synthetic data only.** The differential oracle and the benchmarks run against the
   seeded synthetic generator ([`gen.rs`](../engine/src/gen.rs)), which is deliberately adversarial
   (ADR-008); one design-validation pass ran ~20 real eBay titles through the normalizer

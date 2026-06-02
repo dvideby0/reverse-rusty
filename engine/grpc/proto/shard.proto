@@ -1,0 +1,250 @@
+syntax = "proto3";
+
+// gRPC transport for ONE reverse-rusty shard. The coordinator (client) owns
+// placement + content routing + cross-shard merge; the server is a dumb executor
+// of percolate / ingest / etc. over its `LocalShard`.
+//
+// The write path carries the raw query DSL (not pre-extracted feature ids) so the
+// wire stays dict-agnostic: the server re-compiles read-only against ITS OWN frozen
+// dict, exactly like in-process `ClusterEngine::add_query`. Raw `FeatureId`s would
+// only be valid if both sides' dicts were byte-identical; sending DSL fails loud
+// (a term absent from the server's dict is dropped) instead of corrupting matches.
+// See engine ADR-029.
+package reverse_rusty.shard.v1;
+
+service ShardService {
+  // ---- reads ----
+  rpc Percolate   (PercolateRequest) returns (PercolateReply);
+  rpc NumQueries  (Empty)            returns (CountReply);
+  rpc ClassCounts (Empty)            returns (ClassCountsReply);
+  // ---- writes ----
+  rpc IngestExtracted (IngestRequest) returns (IngestReply);
+  rpc InsertExtracted (InsertRequest) returns (InsertReply);
+  rpc Delete          (DeleteRequest) returns (DeleteReply);
+  rpc Flush           (FlushRequest)  returns (FlushReply);
+  // ---- handshake ----
+  // Connect-time dict-identity check: the coordinator compares the server's frozen-dict
+  // fingerprint to its own and refuses a mismatch (ADR-029).
+  rpc DictFingerprint (Empty) returns (DictFingerprintReply);
+  // ---- dict shipping ----
+  // The coordinator SHIPS its authoritative frozen dict to an (ideally empty) server so a
+  // data node need not rebuild a byte-identical dict from the corpus out-of-band (ADR-034).
+  // Empty shard => adopt; same fingerprint => idempotent no-op; non-empty shard whose
+  // fingerprint differs => the server refuses (re-basing loaded data is unsafe).
+  rpc AdoptDict (AdoptDictRequest) returns (AdoptDictReply);
+  // ---- peer recovery (ADR-035/036, clustering build-path step 4b) ----
+  // Server-streams this shard's sealed durable state (committed .seg files + the sources.dat
+  // blob) so a fresh replica can materialize a byte-identical base. The source seals a
+  // consistent snapshot (flush + reseal tombstones) before streaming, carries the
+  // coordinator's dict fingerprint, and refuses a mismatch. Requires a DURABLE server (a
+  // data_dir); a non-durable/pending server returns FailedPrecondition.
+  rpc FetchSegments (FetchSegmentsRequest) returns (stream FetchSegmentsChunk);
+  // Target-driven peer recovery (the Elasticsearch model: the recovering node pulls from a
+  // peer): this (durable, dict-adopted) node drains `source_endpoint`'s FetchSegments stream,
+  // writes the files under its own data_dir, attaches them (open_segments), and swaps in the
+  // recovered shard. Returns the attached segment count + post-attach query count.
+  rpc RecoverFrom (RecoverFromRequest) returns (RecoverFromReply);
+  // ---- per-shard query log / translog (ADR-039, clustering step 5c) ----
+  // Server-streams this shard's UN-SEALED translog tail — every logged mutation with position
+  // strictly after `after_seqno`, oldest-first. The recovering node drains FetchSegments at
+  // position P (FetchManifest.up_to_seqno) then FetchTranslog(after = P) here to replay the
+  // writes that landed during the copy window — so peer recovery need NOT quiesce writes
+  // (closing ADR-036's gap). Read-only: it does NOT seal (unlike FetchSegments), so the source
+  // keeps serving + accepting writes. Refuses a dict-fingerprint mismatch.
+  rpc FetchTranslog (FetchTranslogRequest) returns (stream TranslogEntry);
+  // ---- translog retention leases (ADR-040, clustering step 5d) ----
+  // A peer recovery pins the source's un-sealed translog tail so a CONCURRENT seal (another
+  // recovery's FetchSegments, a checkpoint) cannot trim away the ops it still needs — a latent
+  // false negative ADR-039's no-quiesce path left open. op: 0 = acquire (returns a lease id + the
+  // pinned position), 1 = renew (advance the lease to `pos` as the consumer catches up, so the
+  // source may GC the now-consumed prefix), 2 = release (recovery done — trim freely again).
+  // Refuses a dict-fingerprint mismatch (never coordinates retention across a divergent space).
+  rpc RetentionLease (RetentionLeaseRequest) returns (RetentionLeaseReply);
+  // ---- live handoff: write fence (ADR-044, clustering step 6b) ----
+  // Demote this node as the owner of its shard at `generation` (the control-plane epoch the new
+  // owner is taking over under): once fenced, the data-mutating writes (InsertExtracted / Delete /
+  // IngestExtracted) return FailedPrecondition, so a brief write-quiesce holds while a live handoff
+  // flips routing to the new owner. READS (Percolate / counts) and the recovery RPCs (FetchSegments
+  // / FetchTranslog / RetentionLease) stay served — the demoted owner keeps serving until the
+  // coordinator stops routing to it (serve-then-drop), so an in-flight read never hits the fence.
+  // Monotonic: a later, lower-generation Fence never un-fences. Refuses a dict-fingerprint mismatch.
+  rpc Fence (FenceRequest) returns (FenceReply);
+}
+
+message Empty {}
+
+message PercolateRequest {
+  string title = 1;
+  // ALREADY-RESOLVED per-shard broad toggle: the coordinator applies the
+  // "broad lane only on shard 0" rule (`include_broad && s == 0`) before sending.
+  bool include_broad = 2;
+}
+message PercolateReply {
+  repeated uint64 ids = 1;
+  MatchStats stats = 2;
+}
+
+// Field order pinned to engine `segment.rs` MatchStats (11 u32 fields). The
+// engine-side mapper in src/cluster/proto.rs converts field-by-field; keep in sync.
+message MatchStats {
+  uint32 unique_candidates       = 1;
+  uint32 postings_scanned        = 2;
+  uint32 broad_postings_scanned  = 3;
+  uint32 main_candidates         = 4;
+  uint32 broad_candidates        = 5;
+  uint32 matches                 = 6;
+  uint32 probes_attempted        = 7;
+  uint32 probes_skipped          = 8;
+  uint32 broad_queries_evaluated = 9;
+  uint32 broad_anchors_scanned   = 10;
+  uint32 broad_batches           = 11;
+}
+
+// One query to (re)compile on the server, identified by logical id. `dsl` is the
+// raw query DSL; `version` is the engine version tag (1 for in-process shards).
+message AddItem {
+  uint64 logical_id = 1;
+  string dsl = 2;
+  uint32 version = 3;
+}
+
+message IngestRequest { repeated AddItem items = 1; }
+// Mirrors engine IngestReport { ingested, rejected_parse, rejected_class_d }.
+message IngestReply {
+  uint64 ingested = 1;
+  uint64 rejected_parse = 2;
+  uint64 rejected_class_d = 3;
+}
+
+message InsertRequest { AddItem item = 1; }
+// Option<u32>: present => Some(local_id); !present => None (class-D rejection).
+message InsertReply {
+  bool present = 1;
+  uint32 local_id = 2;
+}
+
+message DeleteRequest { uint64 logical_id = 1; }
+message DeleteReply   { uint64 removed = 1; }  // # tombstones written (usize)
+
+message FlushRequest {}
+message FlushReply   {}
+
+message CountReply       { uint64 count = 1; }            // usize num_queries
+message ClassCountsReply { repeated uint64 counts = 1; }  // exactly 4: [A, B, C, D]
+
+// 64-bit fingerprint of the server's frozen dict (engine `Dict::fingerprint`).
+message DictFingerprintReply { uint64 fingerprint = 1; }
+
+// The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
+// plus the coordinator's own `Dict::fingerprint` of it. The server deserializes `dict`,
+// recomputes the fingerprint, and rejects a `fingerprint` mismatch as a corrupt/skewed ship.
+message AdoptDictRequest {
+  bytes dict = 1;
+  uint64 fingerprint = 2;
+}
+// The server's frozen-dict fingerprint AFTER adoption (equals the request's on success).
+message AdoptDictReply { uint64 fingerprint = 1; }
+
+// ---- peer recovery (ADR-035/036) ----
+message FetchSegmentsRequest {
+  // The coordinator's frozen-dict fingerprint; the source refuses a mismatch (never ships
+  // segments compiled against a divergent feature space).
+  uint64 dict_fingerprint = 1;
+}
+// First stream frame: the snapshot manifest — the COMPLETE file set + the seg-id cursor — so
+// the receiver can pre-validate completeness and reject a truncated stream (never attach a
+// subset, which would be a silent shard-sized false negative).
+message FetchManifest {
+  repeated string segment_files = 1; // .seg base names, in attach order (segment_filenames())
+  uint64 next_seg_id = 2;
+  uint64 dict_fingerprint = 3;       // echoed; the receiver re-checks it == its adopted dict
+  bool has_sources = 4;              // whether a "sources.dat" file run follows the segments
+  // The per-shard translog position the sealed segments capture through (ADR-039): every op
+  // <= up_to_seqno is in these segments; the recovering node then replays the tail (> this) via
+  // FetchTranslog. proto3 default 0 is back-compatible (a pre-5c sender = "replay from the start").
+  uint64 up_to_seqno = 5;
+}
+// One run of bytes for a single file: contiguous chunks sharing `name`, terminated by `last`.
+// The sentinel name "sources.dat" carries the optional (display-only) source blob; every
+// other name is a .seg file. `data` is <= 256 KiB so each message stays well under gRPC's
+// 4 MiB default decode cap.
+message FileChunk {
+  string name = 1;
+  bytes data = 2;
+  bool last = 3;
+}
+message FetchSegmentsChunk {
+  oneof frame {
+    FetchManifest manifest = 1; // exactly once, first
+    FileChunk file = 2;         // zero+ runs, in manifest order
+  }
+}
+
+message RecoverFromRequest {
+  string source_endpoint = 1;  // the peer to pull from (e.g. "http://127.0.0.1:50051")
+  uint64 dict_fingerprint = 2; // must match this node's adopted dict
+}
+message RecoverFromReply {
+  uint64 segments_attached = 1;
+  uint64 num_queries = 2;      // post-attach count, for the orchestrator to sanity-check
+  uint64 up_to_seqno = 3;      // the snapshot's translog position P (ADR-039); the orchestrator
+                               // replays the source tail > P to finish a no-quiesce recovery
+}
+
+// ---- per-shard query log / translog (ADR-039, clustering step 5c) ----
+message FetchTranslogRequest {
+  uint64 after_seqno = 1;      // stream only ops with position strictly after this (the snapshot P)
+  uint64 dict_fingerprint = 2; // the source refuses a mismatch (never ships ops for a divergent space)
+}
+// One un-sealed translog entry: its position + the logical mutation. Mirrors engine
+// `clog::ClusterMutation` 1:1 — the Add arm REUSES `AddItem {logical_id, dsl, version}` (the
+// DSL-on-wire form the data node re-compiles read-only), and Remove carries just the logical id.
+message TranslogEntry {
+  uint64 seqno = 1;
+  oneof op {
+    AddItem add = 2;
+    uint64 remove_logical = 3;
+  }
+}
+
+// ---- translog retention leases (ADR-040, clustering step 5d) ----
+message RetentionLeaseRequest {
+  uint32 op = 1;               // 0 = acquire, 1 = renew, 2 = release
+  uint64 lease_id = 2;         // the lease to renew/release (ignored for acquire)
+  uint64 pos = 3;              // renew: the new retained position (the consumer's high-water)
+  uint64 dict_fingerprint = 4; // the source refuses a mismatch (divergent feature space)
+}
+message RetentionLeaseReply {
+  uint64 lease_id = 1;         // acquire: the newly assigned lease id (0 for renew/release)
+  uint64 pos = 2;              // acquire: the pinned translog position (0 for renew/release)
+}
+
+// ---- live handoff: write fence (ADR-044, clustering step 6b) ----
+message FenceRequest {
+  uint64 generation = 1;       // the control-plane epoch the new owner is taking over under (> 0)
+  uint64 dict_fingerprint = 2; // the source refuses a mismatch (divergent feature space)
+}
+message FenceReply {
+  uint64 fenced_at_generation = 1; // the server's fence generation after this call (monotonic max)
+}
+
+// ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----
+// The three Raft RPCs between cluster-manager nodes, carried as an OPAQUE serialized envelope:
+// `data` is the serde-encoded openraft request/response (AppendEntries / Vote / full Snapshot).
+// Keeping the wire opaque means shard.proto need not mirror openraft's intricate, version-coupled
+// message types in protobuf — the consensus engine owns its own schema, and the gRPC layer is a
+// dumb byte pipe. The handler's `Result<Resp, RaftError>` is encoded INSIDE the reply envelope;
+// only transport failures surface as a gRPC status. This service is distinct from ShardService:
+// a manager node serves it (the data path stays on ShardService). See engine ADR-038.
+service ControlService {
+  rpc AppendEntries (RaftEnvelope) returns (RaftEnvelope);
+  rpc Vote          (RaftEnvelope) returns (RaftEnvelope);
+  rpc Snapshot      (RaftEnvelope) returns (RaftEnvelope);
+}
+
+// One serialized openraft message (request on the way in, response on the way out). The encoding
+// is the engine's choice (serde_json today); both ends are the same binary, so it never crosses a
+// version boundary mid-flight.
+message RaftEnvelope {
+  bytes data = 1;
+}

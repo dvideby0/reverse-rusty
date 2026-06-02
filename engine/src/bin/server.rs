@@ -15,7 +15,8 @@
 //!   GET  /_metrics           Prometheus text exposition format
 //!   GET  /_vocab             Current vocabulary as JSON
 //!   PUT  /_vocab             Replace vocabulary (body: Vocab JSON)
-//!   POST /_vocab/learn       Learn synonyms from raw query text
+//!   POST /_vocab/learn       Learn synonyms from raw query text (returns them)
+//!   POST /_vocab/learn_and_apply  Learn synonyms from stored queries + apply (?min_count=N)
 //!   GET  /_settings          Engine settings as JSON (?include_defaults=true)
 //!   PUT  /_settings          Update dynamic settings (body: flat JSON, e.g. {"max_segments":16})
 //!
@@ -697,9 +698,9 @@ struct CompactResponse {
 #[derive(Serialize)]
 struct PutVocabResponse {
     acknowledged: bool,
-    stale_segments: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    warning: Option<&'static str>,
+    /// Number of stored queries recompiled under the new normalizer so the change
+    /// takes effect immediately with zero false negatives (0 if none were affected).
+    recompiled: usize,
 }
 
 // -- POST /_search
@@ -2285,21 +2286,23 @@ async fn put_vocab(
     let result = {
         let mut engine = state.engine.lock();
         match engine.set_vocab(vocab) {
-            Ok(stale) => (
-                StatusCode::OK,
-                Json(PutVocabResponse {
-                    acknowledged: true,
-                    stale_segments: stale,
-                    warning: (stale > 0).then_some(
-                        "normalizer changed with existing queries; reingest for consistent matching",
-                    ),
-                }),
-            )
-                .into_response(),
-            Err(e) => {
-                ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
+            Ok(_) => {
+                // Recompile every stored query under the new normalizer so the
+                // change takes effect with zero false negatives — under the same
+                // lock and BEFORE the snapshot is published, so readers never see
+                // the new normalizer against not-yet-recompiled segments.
+                let recompiled = engine.recompile_stale_segments();
+                (
+                    StatusCode::OK,
+                    Json(PutVocabResponse {
+                        acknowledged: true,
+                        recompiled,
+                    }),
+                )
                     .into_response()
             }
+            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
+                .into_response(),
         }
     };
     state.publish_snapshot();
@@ -2323,6 +2326,48 @@ fn default_min_count() -> usize {
 async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoResponse {
     let vocab = reverse_rusty::vocab::learn_from_queries(&req.queries, req.min_count);
     Json(vocab)
+}
+
+#[derive(Deserialize, Default)]
+struct LearnApplyQuery {
+    /// Minimum any-of occurrences for a synonym to be learned (ES-style query param).
+    #[serde(default = "default_min_count")]
+    min_count: usize,
+}
+
+#[derive(Serialize)]
+struct LearnApplyResponse {
+    acknowledged: bool,
+    /// Number of stored queries recompiled under the learned-and-applied vocabulary.
+    recompiled: usize,
+}
+
+/// POST /_vocab/learn_and_apply — learn synonyms from the engine's OWN stored queries
+/// (ADR-015 any-of learning) and APPLY them immediately (ADR-046), recompiling the index
+/// so both surface forms of each learned alias match (zero false negatives). `?min_count=N`
+/// (default 2) sets the minimum any-of occurrences. Unlike `POST /_vocab/learn` — which only
+/// returns a vocabulary learned from caller-supplied queries — this changes the live vocabulary.
+async fn learn_and_apply_vocab(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<LearnApplyQuery>,
+) -> impl IntoResponse {
+    let result = {
+        let mut engine = state.engine.lock();
+        match engine.learn_and_apply(q.min_count) {
+            Ok(recompiled) => (
+                StatusCode::OK,
+                Json(LearnApplyResponse {
+                    acknowledged: true,
+                    recompiled,
+                }),
+            )
+                .into_response(),
+            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
+                .into_response(),
+        }
+    };
+    state.publish_snapshot();
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -2631,18 +2676,16 @@ async fn main() {
             Ok(mut e) => {
                 info!(data_dir = ?data_dir, "recovered engine from persistence");
                 if let Some(v) = vocab {
-                    match e.set_vocab(v) {
-                        Ok(stale) if stale > 0 => warn!(
-                            stale_segments = stale,
-                            "recovered segments were compiled against an older vocab \
-                             epoch; reingest affected queries for consistent matching"
-                        ),
-                        Ok(_) => {}
-                        Err(err) => warn!(
+                    // The engine was opened with this vocab's normalizer, so its
+                    // segments already align with it — just record the Vocab object
+                    // (for GET /_vocab) without recompiling. A genuine vocabulary
+                    // *change* goes through PUT /_vocab (set_vocab + recompile).
+                    if let Err(err) = e.adopt_vocab(v) {
+                        warn!(
                             error = %err,
                             "failed to apply vocab file to recovered engine; \
                              continuing with the recovered normalizer"
-                        ),
+                        );
                     }
                 }
                 e
@@ -2815,6 +2858,7 @@ async fn main() {
         .route("/_metrics", get(prometheus_metrics))
         .route("/_vocab", get(get_vocab).put(put_vocab))
         .route("/_vocab/learn", post(learn_vocab))
+        .route("/_vocab/learn_and_apply", post(learn_and_apply_vocab))
         .route("/_settings", get(get_settings).put(put_settings))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
@@ -2828,7 +2872,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn",
+        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply",
         "server listening"
     );
 

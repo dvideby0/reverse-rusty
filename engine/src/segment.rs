@@ -58,7 +58,7 @@ mod snapshot;
 #[cfg(test)]
 mod wal_failure_tests;
 
-#[derive(Default, Clone, Copy, Debug)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MatchStats {
     pub unique_candidates: u32, // distinct queries exact-checked
     pub postings_scanned: u32,  // total posting entries unioned (main + broad)
@@ -76,6 +76,26 @@ pub struct MatchStats {
     pub broad_queries_evaluated: u32, // distinct broad queries exact-checked via bitmap eval
     pub broad_anchors_scanned: u32,   // distinct broad anchors (postings) probed per batch
     pub broad_batches: u32,           // broad sub-batches (chunks) processed
+}
+
+impl MatchStats {
+    /// Field-wise accumulate `other` into `self`. The single shared body for
+    /// merging per-title stats in the parallel matchers and per-shard stats in
+    /// the cluster coordinator. `matches` is summed like the rest; callers that
+    /// dedup across sources (e.g. the cluster union) overwrite it afterward.
+    pub fn merge(&mut self, other: MatchStats) {
+        self.unique_candidates += other.unique_candidates;
+        self.postings_scanned += other.postings_scanned;
+        self.broad_postings_scanned += other.broad_postings_scanned;
+        self.main_candidates += other.main_candidates;
+        self.broad_candidates += other.broad_candidates;
+        self.matches += other.matches;
+        self.probes_attempted += other.probes_attempted;
+        self.probes_skipped += other.probes_skipped;
+        self.broad_queries_evaluated += other.broad_queries_evaluated;
+        self.broad_anchors_scanned += other.broad_anchors_scanned;
+        self.broad_batches += other.broad_batches;
+    }
 }
 
 /// Which broad-lane strategy a batch match uses. `Columnar` is the new
@@ -309,6 +329,14 @@ pub struct Engine {
     /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,
+    /// Whether this engine writes its own `manifest.bin`. True for a standalone
+    /// engine. False for a **cluster shard** (ADR-032): the coordinator's
+    /// `cluster_manifest.bin` is the sole metadata authority (it records the
+    /// per-shard segment registry + the one shared dict), so a shard suppresses its
+    /// own manifest — segment `.seg` files are still written, but no per-shard dict
+    /// copy. Such an engine is opened via [`Engine::open_shared_segments`], not
+    /// [`Engine::open`].
+    owns_manifest: bool,
 }
 
 impl std::fmt::Debug for Engine {
@@ -330,6 +358,7 @@ impl std::fmt::Debug for Engine {
             .field("skipped_segments", &self.skipped_segments)
             .field("query_store_entries", &self.query_store.len())
             .field("vocab_epoch", &self.vocab_epoch)
+            .field("owns_manifest", &self.owns_manifest)
             .finish()
     }
 }

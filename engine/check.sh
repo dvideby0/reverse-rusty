@@ -47,8 +47,20 @@ run() {
 
 run "rustfmt (--check)"    cargo fmt --check
 run "clippy (-D warnings)" cargo clippy --all-targets --release -- -D warnings
+# Lean-core lane: lints the library + non-server bins with the server/observability
+# stack gated off, so a stray `use` of a server-only crate in library code fails the
+# gate. Keeps the `--no-default-features` build (the lean dependency surface) honest.
+run "clippy (lean core)"   cargo clippy --no-default-features --release -- -D warnings
 if [ "$fast" -eq 0 ]; then
+    # The Cluster-v1 acceptance gate (tests/cluster_oracle.rs +
+    # tests/cluster_durability_oracle.rs — see docs/testing.md) runs here on the default
+    # feature set; the distributed-gated cluster oracles run in the `distributed` lane below.
     run "tests (--release)"    cargo test --release
+    # Distributed (gRPC ShardServer) lane: the default lanes never compile the
+    # `distributed` feature, so without this the cluster gRPC code + its oracle would
+    # rot. Uses the pure-Rust `protox` build-dep — no system `protoc` needed.
+    run "clippy (distributed)" cargo clippy --features distributed --all-targets --release -- -D warnings
+    run "tests (distributed)"  cargo test --features distributed --release
     run "cargo audit"          cargo audit
     run "cargo deny"           cargo deny check
 fi

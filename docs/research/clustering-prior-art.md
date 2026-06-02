@@ -1,17 +1,22 @@
 # Clustering prior art — consistent hashing & content-routed percolation
 
 Evidence base for the horizontal-scaling design
-([`../design/clustering-and-scaling.md`](../design/clustering-and-scaling.md)). That design names
-OpenSearch, Aurora, and "consistent hashing" as pattern sources but does **not** pick a hashing *variant*
-or cite the routing literature. This doc closes that gap: it surveys the consistent-hashing family
-against *our* constraints, shows that "content-routed percolation by anchor entity" is a known-good
-technique in content-based publish/subscribe, and contrasts our approach with Elasticsearch's distributed
-percolator. The decision distilled from this survey is recorded in [`../DECISIONS.md`](../DECISIONS.md)
-ADR-027.
+([`../design/clustering-and-scaling.md`](../design/clustering-and-scaling.md)). It surveys the
+consistent-hashing family against *our* constraints, shows that "content-routed percolation by anchor
+entity" is a known-good technique in content-based publish/subscribe, contrasts our approach with
+Elasticsearch's distributed percolator, and (§5) compares the **shared-nothing** storage model we adopt
+against the Aurora-style disaggregated alternative. The hashing decision is recorded in
+[`../DECISIONS.md`](../DECISIONS.md) ADR-027; the storage-model decision (shared-nothing over a shared
+object store — i.e. no S3/cloud dependency) in **ADR-033**.
 
-> Status: research complete; the clustering *implementation* is design-only (roadmap Tier 3 — see
-> [`../STATUS.md`](../STATUS.md)). This file is the prior-art backing the eventual build, gathered
-> before any ring code is locked, per the "research first, implement second" ethos.
+> Status: **Cluster v1** = the in-process multi-shard core + durable local reopen (built, oracle-proven).
+> The distributed multi-node layers (gRPC transport + dict shipping, replication + peer recovery, the
+> Raft/quorum control plane, the shard→node allocator, live handoff, autoscaler) are **built but
+> experimental** — oracle-proven in-process / on localhost, not yet hardened for real multi-machine
+> deployment (ADR-027 through ADR-045; roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)). Absorbing
+> new vocabulary after the dict is frozen is the Cluster v1 item — see
+> [`dynamic-vocabulary.md`](dynamic-vocabulary.md) (→ ADR-046). This file is the prior-art backing those
+> decisions, per the "research first, implement second" ethos.
 
 ---
 
@@ -50,7 +55,9 @@ is the one variant that satisfies every axis at once, and its token-range model 
 Dynamo/Cassandra split when a shard grows hot — matching design §8.3 directly.
 
 → **Decision: ring + virtual nodes, hashed with `util::fnv1a64`.** Full rationale and the rejected
-alternatives are in [`../DECISIONS.md`](../DECISIONS.md) ADR-027.
+alternatives are in [`../DECISIONS.md`](../DECISIONS.md) ADR-027. *As built (ADR-027): the ring hashes the
+globally-stable integer `FeatureId` — the one shared frozen dict makes those ids identical across shards —
+rather than re-hashing the feature-name token this survey assumed a per-shard-dict design would need.*
 
 ---
 
@@ -112,16 +119,47 @@ provably lossless** by deriving it from the same anchor feature the single-node 
 
 | Source | Borrowed | Not adopted (and why) |
 |---|---|---|
-| Ring + vnodes (Dynamo/Cassandra) | token-range placement, ~1/N rebalance, native range-split | name/IP-keyed routing — we key on the stable feature *token* |
+| Ring + vnodes (Dynamo/Cassandra) | token-range placement, ~1/N rebalance, native range-split | name/IP-keyed routing — we key on the feature itself (the globally-stable `FeatureId`; ADR-027) |
 | Content-based pub/sub (Ferry et al.) | attribute-rendezvous placement; broadcast+prune two-layer | multi-attribute server-overlay routing trees — our title fan-out is tiny (~2–5) |
 | ES percolator | route-by-stored-value to escape scatter-gather | manual routing value; no lossless guarantee |
-| OpenSearch cluster-manager (design §4) | quorum election, shard allocation | deferred — no control plane in the first slice |
-| Aurora "log is the database" (design §4) | shared immutable segments + replicated log | deferred — no shared log in the first slice |
+| Elasticsearch/Cassandra **shared-nothing** (design §4, ADR-033) | local segments + per-node WAL + replication + peer recovery + quorum control plane | — (this is the adopted model; see §5) |
+| Aurora "log is the database" | the disaggregated shared-storage shape | **rejected (ADR-033)** — we are shared-nothing (local WAL + replicas, no shared object store); see §5 |
 
 **Thesis.** A percolator can replace a search engine's scatter-gather with **content-routed placement by
 the compiler-chosen anchor feature** — borrowing ring placement from Dynamo and the broadcast+prune split
 from content-based pub/sub, while adding the one thing the prior art leaves out: an automatic,
-provably-lossless routing key.
+provably-lossless routing key. Its storage layer is **shared-nothing** (§5), so it needs no cloud object
+store.
+
+---
+
+## 5. Storage model — shared-nothing, not disaggregated (ADR-033)
+
+The design doc's durable layer originally borrowed **Aurora's disaggregated "log is the database"** shape
+(compute nodes attach to *shared* object storage). We rejected that (ADR-033) for the **shared-nothing**
+model. The deciding question was concrete: *"how do you scale this without depending on a cloud object
+store like S3?"* — and the production systems answer it the same way.
+
+| System | Durability (source of truth) | HA / replicas | Recovery / rebalance | Control plane | Object store in serving path? |
+|---|---|---|---|---|---|
+| **Elasticsearch / OpenSearch** | per-shard **translog** (WAL), local disk | primary + N replica shards on other nodes | **peer recovery** — stream segments from a peer | Raft-like master quorum (cluster state = routing table) | **No** — only optional snapshot/backup (`fs`/S3/HDFS/Azure/GCS; `fs` = a plain shared dir) + optional cold "searchable snapshots" |
+| **Cassandra / Scylla** | local **commitlog** + memtable→SSTable | replication factor N over the ring | hinted handoff + **repair/streaming** from peers | gossip; newer versions drop the single coordinator | **No** |
+| **Kafka** | per-partition **local log** | ISR follower replicas on other brokers | follower fetch from the leader | **KRaft** (Raft) / ZooKeeper | **No** — optional *tiered storage* offloads only cold segments |
+| **Aurora / Neon** (disaggregated) | redo log → **shared** distributed storage | readers attach to the shared volume | attach-from-shared-storage (no data copy) | managed | **Yes — central to the model** |
+
+**The first three do not rely on AWS/S3 for the serving path.** Durability is a **local WAL + N
+replicas**; recovery/rebalance is **peer-to-peer streaming**; membership is a **quorum/Raft** control
+plane. Object storage, where it appears at all, is an *optional, pluggable* backup/cold tier — never the
+hot path, and the on-prem default (ES's `fs` repository) is just a shared directory.
+
+That is the model Reverse Rusty adopts (ADR-033). It is **self-contained** (fits the lean, std-only-core,
+no-cloud-dependency ethos), and our building blocks already match it: per-shard **local** segments
+(ADR-032) + a coordinator **WAL** (ADR-031), with the gRPC transport now **shipping the dict** so a data
+node starts empty (ADR-034). The Aurora school's upside — cheap replicas / fast failover because storage
+is shared — is bought instead with **warm replicas + peer recovery** (a bounded one-time segment copy, or
+none at all for an already-warm standby); its downside — a distributed object-store dependency in the
+critical path — is exactly what we decline to take on. The remaining shared-nothing steps (per-shard
+replication, the Raft control plane) are in `clustering-and-scaling.md` §4/§10.
 
 ---
 

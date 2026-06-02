@@ -20,6 +20,17 @@ impl Engine {
     /// Create an engine with explicit configuration. If `config.data_dir` is set,
     /// initializes the data directory and WAL.
     pub fn with_config(norm: Normalizer, config: EngineConfig) -> Self {
+        Self::with_shared(Arc::new(norm), Arc::new(Dict::new()), config)
+    }
+
+    /// Create an engine that SHARES a pre-built normalizer and dictionary (by
+    /// `Arc`) instead of owning fresh ones. This is how a cluster shard is built:
+    /// every shard shares the coordinator's one authoritative, already-finalized
+    /// `Dict` so `FeatureId`s / `sig_key`s / hotness are globally consistent (see
+    /// [`crate::cluster`]). The dict must be treated as frozen — shard ingest uses
+    /// the read-only `*_extracted` paths so it is never `Arc::make_mut`'d (which
+    /// would fork it and break cross-shard agreement).
+    pub fn with_shared(norm: Arc<Normalizer>, dict: Arc<Dict>, config: EngineConfig) -> Self {
         let mut wal_healthy = true;
         // Diagnostics raised here predate any observer (it is attached after
         // construction via `set_observer`), so they are buffered and replayed on
@@ -52,9 +63,9 @@ impl Engine {
         let query_store = Arc::new(SourceStore::empty(config.retain_source));
         Engine {
             config: Arc::new(config),
-            norm: Arc::new(norm),
+            norm,
             vocab: None,
-            dict: Arc::new(Dict::new()),
+            dict,
             segments: Vec::new(),
             memtable: Arc::new(Segment::new()),
             rejected_parse: 0,
@@ -68,6 +79,7 @@ impl Engine {
             skipped_segments: 0,
             query_store,
             vocab_epoch: 0,
+            owns_manifest: true,
         }
     }
 
@@ -78,6 +90,55 @@ impl Engine {
         std::fs::create_dir_all(dir)?;
         std::fs::create_dir_all(dir.join("segments"))?;
         Wal::open(&dir.join("wal.log"), wal_sync_on_write)
+    }
+
+    /// Create the data directory and its `segments` subdirectory WITHOUT opening a WAL —
+    /// the segments-only-durable path ([`with_shared_segments_only`](Self::with_shared_segments_only)).
+    fn init_segments_dir(dir: &std::path::Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir.join("segments"))
+    }
+
+    /// Create a **cluster-shard** engine (ADR-032): shares the coordinator's frozen
+    /// normalizer + dict (like [`with_shared`](Self::with_shared)) and persists sealed
+    /// segments under `config.data_dir`, but runs WITHOUT a WAL and WITHOUT writing its
+    /// own `manifest.bin`. The coordinator's `ClusterLog` is the durable tail and its
+    /// `cluster_manifest.bin` is the sole segment registry + dict store, so a per-shard
+    /// WAL would double-log the tail and a per-shard manifest would duplicate the shared
+    /// dict. `config.data_dir` MUST be set; reopen via
+    /// [`open_shared_segments`](Self::open_shared_segments).
+    pub fn with_shared_segments_only(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        config: EngineConfig,
+    ) -> std::io::Result<Self> {
+        let dir = config.data_dir.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "with_shared_segments_only requires config.data_dir",
+            )
+        })?;
+        Self::init_segments_dir(dir)?;
+        let query_store = Arc::new(SourceStore::empty(config.retain_source));
+        Ok(Engine {
+            config: Arc::new(config),
+            norm,
+            vocab: None,
+            dict,
+            segments: Vec::new(),
+            memtable: Arc::new(Segment::new()),
+            rejected_parse: 0,
+            rejected_class_d: 0,
+            observer: None,
+            pending_events: Vec::new(),
+            wal: None,
+            next_seg_id: 1,
+            wal_healthy: true,
+            persistence_healthy: true,
+            skipped_segments: 0,
+            query_store,
+            vocab_epoch: 0,
+            owns_manifest: false,
+        })
     }
 
     /// Create an engine from a [`Vocab`](crate::vocab::Vocab), which is
@@ -131,6 +192,119 @@ impl Engine {
     /// The current vocab epoch. Segments compiled at this epoch are up-to-date.
     pub fn vocab_epoch(&self) -> u64 {
         self.vocab_epoch
+    }
+
+    /// Record a vocabulary on an engine that is ALREADY consistent with it,
+    /// WITHOUT recompiling or bumping the epoch. Used at startup after
+    /// [`open`](Self::open): the engine was opened with this vocab's normalizer,
+    /// so its segments already align with it and only the [`Vocab`](crate::vocab::Vocab)
+    /// object needs installing (so `GET /_vocab` can serve it). Unlike
+    /// [`set_vocab`](Self::set_vocab) — which signals a normalizer *change* by
+    /// bumping the epoch and marking segments stale — this is a pure metadata
+    /// record. Use [`set_vocab`] + [`recompile_stale_segments`](Self::recompile_stale_segments)
+    /// to actually *change* the vocabulary at runtime.
+    pub fn adopt_vocab(
+        &mut self,
+        vocab: crate::vocab::Vocab,
+    ) -> Result<(), crate::error::NormalizerError> {
+        self.norm = Arc::new(vocab.to_normalizer()?);
+        self.vocab = Some(Arc::new(vocab));
+        Ok(())
+    }
+
+    /// The current live `(logical_id, query_text)` set — the source corpus the
+    /// index is a materialized view of, sorted by logical id for deterministic
+    /// rebuilds. Backed by the query store (kept in sync with the index by the
+    /// insert/delete paths), so it reflects exactly the queries that should be
+    /// matchable. Used by [`recompile_stale_segments`](Self::recompile_stale_segments).
+    pub fn live_sources(&self) -> Vec<(u64, String)> {
+        let mut out: Vec<(u64, String)> = Vec::with_capacity(self.query_store.len());
+        self.query_store
+            .for_each_live(|logical, text| out.push((logical, text.to_string())));
+        out.sort_unstable_by_key(|&(l, _)| l);
+        out
+    }
+
+    /// Recompile every live query under the CURRENT normalizer, replacing all
+    /// base segments (and the memtable) with one freshly-compiled segment at the
+    /// current vocab epoch. This is the recompile pass that makes a normalizer
+    /// change ([`set_vocab`](Self::set_vocab)) actually take effect on
+    /// already-ingested queries: without it, segments compiled under the old
+    /// normalizer carry stale feature ids, and a title normalized with the new
+    /// normalizer can miss them — a **false negative**.
+    ///
+    /// Queries are recompiled READ-ONLY against the existing (frozen) dict via
+    /// [`extract_readonly`](crate::compile::extract_readonly): a declared alias
+    /// collapses both surface forms to one feature (so both now match), and a new
+    /// alias canonical that isn't interned resolves to a stable synthetic id
+    /// (mechanism 1). The dict's feature space is unchanged.
+    ///
+    /// A no-op (returns 0) when nothing is stale; after it, `has_stale_segments()`
+    /// is false. Returns the number of queries recompiled.
+    ///
+    /// Atomicity: a caller that publishes snapshots (e.g. the server) must call
+    /// this **before** publishing the next snapshot, so readers never observe the
+    /// new normalizer against not-yet-recompiled segments.
+    pub fn recompile_stale_segments(&mut self) -> usize {
+        if !self.has_stale_segments() {
+            return 0;
+        }
+        // Recompile the live source set read-only against the frozen dict under
+        // the current normalizer into one fresh segment.
+        let live = self.live_sources();
+        let mut seg = Segment::new();
+        seg.vocab_epoch = self.vocab_epoch;
+        let mut lc = String::new();
+        let mut recompiled = 0usize;
+        for (logical, text) in &live {
+            if let Ok(ast) = crate::dsl::parse(text) {
+                let ex = crate::compile::extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+                if seg.add_compiled(&ex, &self.dict, *logical, 1).is_some() {
+                    recompiled += 1;
+                }
+            }
+        }
+        seg.build_filter();
+
+        // Atomic swap: drop every (stale) base segment + the memtable and install
+        // the one freshly-compiled segment, so no live query is left at an old
+        // epoch. Old segment files are GC'd after the manifest commit.
+        let old_files = self.collect_mmap_paths();
+        self.segments.clear();
+        let mut fresh_mem = Segment::new();
+        fresh_mem.vocab_epoch = self.vocab_epoch;
+        self.memtable = Arc::new(fresh_mem);
+        self.seal_and_push(seg);
+
+        // Persist like a flush: WAL checkpoint + manifest (the commit point) +
+        // WAL reset (every live query now lives in the sealed segment), then GC
+        // the superseded segment files.
+        self.checkpoint_wal();
+        if self.save_manifest_if_persistent() {
+            self.reset_wal_if_safe();
+        }
+        self.cleanup_segment_files(&old_files);
+        recompiled
+    }
+
+    /// Learn alias/synonym rules from this engine's live corpus (ADR-015 any-of learning)
+    /// and apply them (ADR-046 mechanism 2): a synonym appearing in at least `min_count`
+    /// any-of groups (e.g. `(rookie,rc)` ⇒ `rc → rookie`) is merged UNDER the current
+    /// vocabulary (a previously set alias wins) and the index is recompiled so the change
+    /// takes effect immediately. Returns the number of queries recompiled.
+    pub fn learn_and_apply(
+        &mut self,
+        min_count: usize,
+    ) -> Result<usize, crate::error::NormalizerError> {
+        let corpus = self.live_sources();
+        let learned = crate::vocab::learn_from_queries(&corpus, min_count);
+        let mut merged = crate::vocab::Vocab::new();
+        if let Some(v) = &self.vocab {
+            merged.merge(v);
+        }
+        merged.merge(&learned);
+        self.set_vocab(merged)?; // bumps the epoch / marks segments stale
+        Ok(self.recompile_stale_segments())
     }
 
     /// Open an engine from an existing data directory, recovering state from
@@ -223,6 +397,7 @@ impl Engine {
             skipped_segments,
             query_store,
             vocab_epoch: 0,
+            owns_manifest: true,
         };
 
         // Replay WAL entries after last checkpoint
@@ -259,6 +434,64 @@ impl Engine {
         }
 
         Ok(engine)
+    }
+
+    /// Reopen a **cluster-shard** engine (ADR-032) by attaching an EXPLICIT list of
+    /// committed segment files against the SUPPLIED shared dict — no per-shard manifest,
+    /// no dict deserialize, no WAL. The coordinator supplies `files` (relative `.seg`
+    /// names under `config.data_dir/segments/`) and `next_seg_id` from its
+    /// `cluster_manifest.bin`, having already fingerprint-checked the dict. This is
+    /// attach-and-mmap, NOT re-ingest: the compiled segments ARE the materialized base.
+    ///
+    /// Fails LOUD (returns `Err`) on any missing or CRC-corrupt segment — deliberately
+    /// unlike [`open`](Self::open), which skips corrupt segments and degrades. A skipped
+    /// shard segment is a silent, shard-sized false negative, which the cluster's
+    /// zero-false-negative contract forbids; the caller surfaces the error instead.
+    pub fn open_shared_segments(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+    ) -> std::io::Result<Self> {
+        let dir = config.data_dir.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "open_shared_segments requires config.data_dir",
+            )
+        })?;
+        Self::init_segments_dir(dir)?;
+        let seg_dir = dir.join("segments");
+        let mut segments = Vec::with_capacity(files.len());
+        for name in files {
+            // Fail loud: a missing / CRC-corrupt committed segment is a false-negative risk.
+            let mmap_seg = MmapSegment::open(&seg_dir.join(name))?;
+            segments.push(Arc::new(BaseSegment::Mmap(mmap_seg)));
+        }
+        let query_store = Arc::new(SourceStore::open(
+            &dir.join("sources.dat"),
+            config.retain_source,
+        )?);
+        Ok(Engine {
+            config: Arc::new(config),
+            norm,
+            vocab: None,
+            dict,
+            segments,
+            memtable: Arc::new(Segment::new()),
+            rejected_parse: 0,
+            rejected_class_d: 0,
+            observer: None,
+            pending_events: Vec::new(),
+            wal: None,
+            next_seg_id,
+            wal_healthy: true,
+            persistence_healthy: true,
+            skipped_segments: 0,
+            query_store,
+            vocab_epoch: 0,
+            owns_manifest: false,
+        })
     }
 
     /// Set an observer callback that receives [`EngineEvent`](crate::events::EngineEvent)s
@@ -359,6 +592,46 @@ impl Engine {
     /// Read-only access to the normalizer.
     pub fn normalizer(&self) -> &Normalizer {
         &self.norm
+    }
+
+    /// The current next segment-id counter — recorded per shard in the cluster manifest
+    /// so a flush after reopen never reuses a committed segment filename (ADR-032).
+    pub fn next_seg_id(&self) -> u64 {
+        self.next_seg_id
+    }
+
+    /// The filenames of this engine's live (mmap'd) base segments, in order — the
+    /// per-shard registry the cluster coordinator commits (ADR-032). Returns `Err` if
+    /// ANY base segment is in-memory: that means a segment write fell back to `Memory`
+    /// (e.g. a disk error, `persistence.rs`), and committing a registry that omits it
+    /// would silently lose that segment's data on reopen, so the caller must refuse to
+    /// commit and surface the failure instead.
+    pub fn segment_filenames(&self) -> std::io::Result<Vec<String>> {
+        let mut names = Vec::with_capacity(self.segments.len());
+        for seg in &self.segments {
+            match seg.as_ref() {
+                BaseSegment::Mmap(m) => {
+                    let name = m
+                        .path()
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "segment path has no filename",
+                            )
+                        })?;
+                    names.push(name.to_string());
+                }
+                BaseSegment::Memory(_) => {
+                    return Err(std::io::Error::other(
+                        "a base segment is in-memory (segment write fell back); refusing \
+                         to commit a cluster segment registry that would lose it on reopen",
+                    ));
+                }
+            }
+        }
+        Ok(names)
     }
 
     /// Look up the original query text for a logical ID. Returns `None` if

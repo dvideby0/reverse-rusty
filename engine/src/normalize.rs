@@ -340,8 +340,11 @@ impl Normalizer {
         ids
     }
 
-    /// Read-only compile: resolve features by name without interning new ones.
-    /// Used for re-deriving a CompiledQuery on the read path (explain).
+    /// Read-only compile: resolve features by name without interning new ones. A term
+    /// absent from the (frozen) dict is assigned a deterministic *synthetic* ID
+    /// (dynamic vocabulary, ADR-046) rather than dropped — so a query added after the
+    /// dict is frozen is *absorbed* with its full semantics instead of silently
+    /// broadening. Used by the cluster live-write path and by explain.
     pub fn compile_features_readonly(
         &self,
         text: &str,
@@ -350,18 +353,19 @@ impl Normalizer {
     ) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
         self.emit(text, lc, &mut |name, _kind| {
-            if let Some(id) = dict.get(name) {
-                ids.push(id);
-            }
+            ids.push(dict.get_or_synthetic(name));
         });
         ids.sort_unstable();
         ids.dedup();
         ids
     }
 
-    /// Match path: look up existing features only (titles can't create features).
-    /// Unknown tokens are skipped — no query references them, so they can't
-    /// affect any match. Fills `out` with sorted+deduped existing IDs.
+    /// Match path: resolve title features by name. A token absent from the (frozen)
+    /// dict is assigned a deterministic *synthetic* ID (dynamic vocabulary, ADR-046)
+    /// rather than dropped — so a live-added query that references a new term still
+    /// matches a title containing it (the title side must hash too, or that match
+    /// would be a false negative). Interned tokens keep their dense ID. Fills `out`
+    /// with sorted+deduped IDs.
     pub fn match_features(
         &self,
         text: &str,
@@ -372,9 +376,7 @@ impl Normalizer {
         out.clear();
         let mut tmp: Vec<FeatureId> = Vec::new();
         self.emit(text, lc, &mut |name, _kind| {
-            if let Some(id) = dict.get(name) {
-                tmp.push(id);
-            }
+            tmp.push(dict.get_or_synthetic(name));
         });
         tmp.sort_unstable();
         tmp.dedup();
