@@ -16,13 +16,16 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, ShardError, ShardGroup, ShardServer};
+use reverse_rusty::cluster::{
+    AddOutcome, ClusterConfig, ClusterEngine, ShardError, ShardGroup, ShardServer,
+};
 use reverse_rusty::compile::{extract, Extracted};
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::Dict;
+use reverse_rusty::events::{DurabilityOp, EngineEvent};
 use reverse_rusty::gen::{generate, GenConfig, BRANDS};
 use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::{Engine, MatchScratch};
@@ -411,6 +414,226 @@ fn remote_fanout_block_on_does_not_panic_on_rayon_workers() {
     assert!(
         covered > 0,
         "guard needs >=1 title routing to >=2 shards (the rayon-parallel `par_iter` branch)"
+    );
+}
+
+/// Guard (ADR-047): the `block_on` bridge must ALSO be safe on the SEQUENTIAL single-target
+/// path — a title routing to only shard 0 (`fanout == 1`) skips the rayon `par_iter` branch and
+/// runs `RemoteShard::percolate` directly on the CALLER's thread. If that caller is a tokio
+/// runtime worker (a future async coordinator probing `percolate` from an axum/tonic handler),
+/// a naive `Handle::block_on` panics with the nested-runtime error. `block_on_in_context`
+/// detects the multi-thread worker and re-enters via `block_in_place` instead. This is exactly
+/// the case the rayon guard above SKIPS (`fanout < 2`), so it is asserted here: a single-target
+/// percolate is driven from INSIDE a spawned task on the runtime and must not panic + must equal
+/// the brute-oracle set.
+#[test]
+fn remote_single_target_percolate_safe_from_tokio_worker() {
+    let (queries, titles) = build_corpus();
+    let oracle = build_oracle(&queries, &titles);
+
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+
+    let k = 3usize;
+    let cfg = ClusterConfig {
+        num_shards: k,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut addrs: Vec<SocketAddr> = Vec::with_capacity(k);
+    {
+        let _enter = rt.enter();
+        for _ in 0..k {
+            let incoming =
+                TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind ephemeral port");
+            addrs.push(incoming.local_addr().expect("local_addr"));
+            let server = ShardServer::new(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                EngineConfig::default(),
+            );
+            rt.spawn(server.serve_with_incoming(incoming));
+        }
+    }
+    for &addr in &addrs {
+        wait_until_listening(addr);
+    }
+    let endpoints: Vec<String> = addrs.iter().map(|a| format!("http://{a}")).collect();
+
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        &cfg,
+        &endpoints,
+        rt.handle(),
+    )
+    .expect("connect remote cluster");
+    cluster.ingest(&queries).expect("ingest corpus over gRPC");
+
+    // Single-target titles route to shard 0 only — the sequential (non-rayon) probe path.
+    let single: Vec<usize> = titles
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| cluster.shard_fanout(t).len() == 1)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        !single.is_empty(),
+        "guard needs >=1 single-target title (the sequential block_on path)"
+    );
+
+    // Drive each single-target percolate from INSIDE a tokio worker: `spawn` runs the closure
+    // on a multi-thread worker, so `RemoteShard::percolate`'s `block_on` executes in a runtime
+    // context — the exact arrangement that panics without `block_in_place`. A panic surfaces as
+    // a `JoinError` (the first `expect`), so the guard bites even though the seam is sync.
+    let cluster = Arc::new(cluster);
+    for i in single {
+        let title = titles[i].clone();
+        let c = Arc::clone(&cluster);
+        let got: HashSet<u64> = rt
+            .block_on(async move { tokio::task::spawn(async move { c.percolate(&title) }).await })
+            .expect("spawned percolate task must not panic on the block_on bridge")
+            .expect("single-target percolate over gRPC")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got, oracle[i],
+            "single-target block_on bridge (from tokio worker) vs brute oracle on title #{i}"
+        );
+    }
+}
+
+/// Partial-apply DETECTION over the real wire (ADR-047): when a selective add's target shard
+/// server is down, the fan-out write must surface as [`ShardError::PartiallyApplied`] (NOT a
+/// swallowed error or a silent half-write), emit a `ClusterPartialApply` durability event, and
+/// queue the failed shard for repair. (Convergence — `resync` re-driving once the shard is back —
+/// is proven deterministically by the in-process `partial_apply_is_detected_then_resync_converges`
+/// unit test; reconnect-to-a-restarted-server is out of scope for this wire-level detection test.)
+#[test]
+fn grpc_partial_apply_is_detected_and_queued() {
+    let (queries, _titles) = build_corpus();
+
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+
+    let k = 3usize;
+    let cfg = ClusterConfig {
+        num_shards: k,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut addrs: Vec<SocketAddr> = Vec::with_capacity(k);
+    {
+        let _enter = rt.enter();
+        for _ in 0..k {
+            let incoming =
+                TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind ephemeral port");
+            addrs.push(incoming.local_addr().expect("local_addr"));
+            let server = ShardServer::new(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                EngineConfig::default(),
+            );
+            rt.spawn(server.serve_with_incoming(incoming));
+        }
+    }
+    for &addr in &addrs {
+        wait_until_listening(addr);
+    }
+    let endpoints: Vec<String> = addrs.iter().map(|a| format!("http://{a}")).collect();
+
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        &cfg,
+        &endpoints,
+        rt.handle(),
+    )
+    .expect("connect remote cluster");
+    cluster.ingest(&queries).expect("ingest corpus over gRPC");
+
+    // Capture durability events so we can assert the partial-apply event fires over the wire.
+    let events: Arc<Mutex<Vec<EngineEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = Arc::clone(&events);
+        cluster.set_observer(Arc::new(move |ev: &EngineEvent| {
+            sink.lock().unwrap().push(ev.clone());
+        }));
+    }
+
+    // A single out-of-dict required term ⇒ a synthetic (freq-0, never-hot) feature ⇒ class A ⇒
+    // selective placement on exactly one shard. Discover that shard via a healthy add, then free
+    // the id so the failing case re-uses the same placement.
+    let dsl = "zznovelaterm";
+    let target = match cluster
+        .add_query(900_001, dsl)
+        .expect("healthy selective add over gRPC")
+    {
+        AddOutcome::Placed { shards } => {
+            assert_eq!(
+                shards.len(),
+                1,
+                "a synthetic single-term query must be single-shard selective: {shards:?}"
+            );
+            shards[0]
+        }
+        other => panic!("expected selective Placed, got {other:?}"),
+    };
+    cluster.remove_query(900_001).expect("remove probe query");
+
+    // FENCE the target shard's server so it REJECTS writes (`failed_precondition`) while staying
+    // connected — a deterministic transient write failure. (Aborting the serve task would NOT do
+    // it: tonic's per-connection handler tasks outlive the accept loop, so the cluster's existing
+    // HTTP/2 connection keeps serving.) A separate client flips the server-side fence flag, which
+    // every client to that server then observes.
+    let fencer = reverse_rusty::cluster::RemoteShard::connect(
+        endpoints[target].clone(),
+        rt.handle().clone(),
+        dict.fingerprint(),
+    )
+    .expect("connect fencer to target server");
+    fencer.fence(1).expect("fence target server");
+
+    match cluster.add_query(900_002, dsl) {
+        Err(ShardError::PartiallyApplied {
+            logical,
+            applied,
+            failed,
+            ..
+        }) => {
+            assert_eq!(logical, 900_002);
+            assert_eq!(
+                failed,
+                vec![target],
+                "the downed shard must be the one reported failed"
+            );
+            assert!(
+                applied.is_empty(),
+                "a single-target add applies nowhere when its shard is down: {applied:?}"
+            );
+        }
+        other => {
+            panic!("expected PartiallyApplied after the target shard went down, got {other:?}")
+        }
+    }
+    assert_eq!(
+        cluster.pending_repairs(),
+        1,
+        "the failed mutation must be queued for repair"
+    );
+    assert!(
+        events.lock().unwrap().iter().any(|e| matches!(
+            e,
+            EngineEvent::DurabilityFailure {
+                op: DurabilityOp::ClusterPartialApply,
+                ..
+            }
+        )),
+        "a ClusterPartialApply durability event must be emitted over the wire too"
     );
 }
 

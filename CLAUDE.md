@@ -17,8 +17,8 @@ multi-shard core** (entity-anchor sharding + content routing) is built and oracl
 ([ADR-027](docs/DECISIONS.md)). The **distributed multi-node layers** — a gRPC shard transport with dict
 shipping (ADR-029/034), durable per-shard segments + coordinator log (ADR-031/032), replication + peer
 recovery, a **shared-nothing** Raft control plane (no object store; ADR-033), an allocator, live handoff,
-and an autoscaler (through ADR-045) — are built and oracle-proven **in-process / on localhost, but
-experimental** (not yet hardened for real multi-machine deployment). **Cluster v1** — the in-process
+an autoscaler, and remote partial-apply repair (through ADR-047) — are built and oracle-proven **in-process
+/ on localhost, but experimental** (not yet hardened for real multi-machine deployment). **Cluster v1** — the in-process
 core + durable reopen + **dynamic vocabulary** (absorbing new terms after the shared dict is frozen,
 ADR-046) — is **built and oracle-proven**, zero false negatives including across reopen
 ([docs/STATUS.md](docs/STATUS.md) Tier 0). It gates candidates on **semantic signatures** (not raw terms), verifies
@@ -189,7 +189,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | "Why was it done this way?" / "why was X NOT built?" | [`docs/DECISIONS.md`](docs/DECISIONS.md) (ADR index; declined → ADR-019) |
 | Performance numbers / 100M extrapolation | [`docs/performance/results.md`](docs/performance/results.md); regression gate: `benchmark-results.txt` INVARIANTS |
 | Run/change tests, benchmarks, pressure tests, hooks, or CI | [`docs/testing.md`](docs/testing.md) (gate: `engine/check.sh`; CI: `.github/workflows/ci.yml`) |
-| Clustering / sharding / scale-out | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md); **shared-nothing** model (ADR-033, no object store). **Cluster v1** = in-process core + durable reopen + **dynamic vocabulary** (Tier 0, ADR-046 — built + oracle-proven). The **distributed layers, built but experimental / localhost-proven**: gRPC transport + dict shipping + replication + Raft control plane (durable, restart-recoverable) + **per-shard translog / no-quiesce peer recovery + retention/finalize** + **shard→node allocator** + **live data-moving handoff** (swappable backing + cross-node move + write fence) + **autoscaler** (membership/skew → `rebalance`; split/handoff advisories) → `src/cluster/`, `engine/grpc/`, [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-027 + ADR-029 + ADR-034 + ADR-035/036 + ADR-037/038 + ADR-039/040/041 + ADR-042/043/044 + ADR-045 |
+| Clustering / sharding / scale-out | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md); **shared-nothing** model (ADR-033, no object store). **Cluster v1** = in-process core + durable reopen + **dynamic vocabulary** (Tier 0, ADR-046 — built + oracle-proven). The **distributed layers, built but experimental / localhost-proven**: gRPC transport + dict shipping + replication + Raft control plane (durable, restart-recoverable) + **per-shard translog / no-quiesce peer recovery + retention/finalize** + **shard→node allocator** + **live data-moving handoff** (swappable backing + cross-node move + write fence) + **autoscaler** (membership/skew → `rebalance`; split/handoff advisories) + **remote partial-apply repair** (observe + fail-closed + `resync`, ADR-047) → `src/cluster/`, `engine/grpc/`, [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-027 + ADR-029 + ADR-034 + ADR-035/036 + ADR-037/038 + ADR-039/040/041 + ADR-042/043/044 + ADR-045 + ADR-047 |
 | Prior art (Lucene / ES / Tantivy) | [`docs/research/prior-art.md`](docs/research/prior-art.md) |
 | Dependency versions / why a crate | [`engine/Cargo.toml`](engine/Cargo.toml) |
 | Full docs index + where-new-info-goes rules | [`docs/README.md`](docs/README.md) |

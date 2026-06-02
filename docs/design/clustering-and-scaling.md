@@ -368,7 +368,12 @@ without operator action. The defaults are the product.
      (`FileClusterLog`/`NullClusterLog`) plus a coordinator manifest + base snapshot; `ClusterEngine::{open,
      checkpoint}` rebuild the whole cluster — byte-identical placement, zero false negatives — from the log
      alone (proven by `tests/cluster_durability_oracle.rs`). Raw DSL is the logged source of truth; one
-     `apply` funnel serves both live writes and replay.
+     `apply` funnel serves both live writes and replay. A **remote** multi-shard live write can *partially*
+     apply (one shard's RPC fails after another's insert lands); the funnel detects this, returns the honest
+     `ShardError::PartiallyApplied`, emits a `ClusterPartialApply` event, and queues the failed shards for
+     `ClusterEngine::resync` (ADR-047) — which re-drives only those shards (the autoscaler `tick` calls it
+     opportunistically). The log stays authoritative (a reopen re-drives every target), so `resync` is a
+     *liveness* repair; the in-process / RF=1 path is infallible, so a partial apply never occurs there.
    - 3b. **Per-shard local durable segments.** ✅ **Done** (ADR-032): each shard is a segments-only
      durable engine (`shard_<i>/segments/*.seg` on **local disk**, no per-shard WAL/manifest);
      `ClusterEngine::open` **attaches-and-mmaps** each shard's committed compiled segments and replays only

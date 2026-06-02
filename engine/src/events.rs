@@ -70,6 +70,14 @@ pub enum DurabilityOp {
     /// the replica is flagged for peer re-recovery (clustering build-path step 4).
     /// Redundancy/availability is reduced until it recovers.
     ReplicaDesync,
+    /// A cluster multi-shard mutation (a selective Add or a Remove) applied to SOME but not
+    /// all of its target shards: a remote shard write failed mid-fan-out (ADR-047). The
+    /// mutation is durably logged (so it WILL converge on `ClusterEngine::resync` or reopen)
+    /// and the failed shards are queued for repair — but until then the query is only
+    /// partially visible: a transient FALSE-NEGATIVE window on the un-applied shards. Data at
+    /// risk (a missed match is this system's worst outcome). Distributed layer only; the
+    /// in-process / RF=1 path never produces it (its `LocalShard` writes are infallible).
+    ClusterPartialApply,
 }
 
 impl DurabilityOp {
@@ -92,6 +100,7 @@ impl DurabilityOp {
             DurabilityOp::WalTornTail => "wal_torn_tail",
             DurabilityOp::IngestRollback => "ingest_rollback",
             DurabilityOp::ReplicaDesync => "replica_desync",
+            DurabilityOp::ClusterPartialApply => "cluster_partial_apply",
         }
     }
 
@@ -108,7 +117,8 @@ impl DurabilityOp {
             | DurabilityOp::SegmentMmap
             | DurabilityOp::SegmentRecovery
             | DurabilityOp::ManifestWrite
-            | DurabilityOp::IngestRollback => true,
+            | DurabilityOp::IngestRollback
+            | DurabilityOp::ClusterPartialApply => true,
             DurabilityOp::WalCheckpoint
             | DurabilityOp::WalReset
             | DurabilityOp::SourceStoreWrite

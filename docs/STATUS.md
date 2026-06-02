@@ -306,6 +306,22 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   `src/cluster/autoscale.rs` unit tests (the deterministic policy) + `tests/cluster_autoscale_oracle.rs`
   (`tick` ≡ a manual `rebalance`; `percolate` byte-identical before/after a tick ⇒ zero-FN; a second tick
   commits nothing; a disabled config is a no-op; a split advisory mutates nothing).
+- **Remote live-write partial-apply: observe + fail-closed + repair (ADR-047)** — distributed-layer hardening
+  from an external review. A selective query placed on 2+ remote shards could see one insert succeed and the
+  next RPC fail, leaving a **silent partial mutation** (a transient false-negative window until reopen).
+  Now: `apply_add`/`apply_remove` **try every target shard and collect failures**; a partial failure emits a
+  `DurabilityFailure { op: ClusterPartialApply }` event, returns the honest `ShardError::PartiallyApplied`,
+  and **queues the failed shards for repair**; `ClusterEngine::resync()` re-drives only the still-failed
+  shards (the autoscaler `tick` calls it opportunistically). The `RemoteShard` `block_on` bridge is now
+  **thread-context-safe** (`block_on_in_context`: `block_in_place` on a multi-thread runtime worker, plain
+  `block_on` off-runtime) so a future async coordinator can't hit the nested-runtime panic on the
+  single-target read path. The **in-process / RF=1 default is byte-identical** (infallible writes ⇒ no partial
+  apply ever recorded) — the Cluster-v1 oracles stay green unchanged. **Honest scope:** still **no cross-write
+  fencing / quorum** (concurrent overlapping writers + a `resync`/same-id-write race resolve last-writer-wins
+  in memory, authoritatively by the log on reopen); single-shard (replicated-lane) failures converge on reopen,
+  not live `resync`; the durable log remains the correctness backstop, `resync` a liveness optimization. Proven
+  by `cluster/coordinator/tests.rs` (deterministic detect→resync→converge + requeue-while-failing) +
+  `tests/cluster_grpc_oracle.rs` (wire-level detection + the single-target `block_on` guard).
 - **Cluster module restructured for agent-friendliness (no behavior change)** — the four largest `src/cluster/`
   files were split into focused submodules following the `segment.rs` pattern (root = the type *defs*, `impl`
   blocks split by responsibility): `coordinator.rs` (1,698 lines → `coordinator/{lifecycle,ingest,matching,

@@ -44,6 +44,10 @@ impl ClusterEngine {
                 problems.join("; ")
             )));
         }
+        // Opportunistically converge any partial-apply divergence (ADR-047) each cycle — a cheap
+        // no-op when nothing is queued (the default path). Repairing before snapshotting load
+        // keeps the autoscaler's view consistent with the converged cluster.
+        let _ = self.resync();
         let snapshot = self.collect_load(config)?;
         let decision = evaluate(&snapshot, config);
         for action in &decision.actions {

@@ -52,7 +52,7 @@ pub use control::{
     ClusterState, ClusterStateChange, ControlError, ControlPlane, InMemoryControlPlane,
     NodeDescriptor, NodeId, NodeRole, ShardAssignment, StateVersion,
 };
-pub use coordinator::{AddOutcome, ClusterConfig, ClusterEngine};
+pub use coordinator::{AddOutcome, ClusterConfig, ClusterEngine, ResyncReport};
 pub use ring::{HashRing, DEFAULT_VNODES};
 pub use shard::ShardError;
 
