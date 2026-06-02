@@ -258,6 +258,7 @@ impl ClusterEngine {
             control: durable.control,
             observer: Mutex::new(None),
             pending_events: Mutex::new(Vec::new()),
+            pending_repair: Mutex::new(std::collections::BTreeMap::new()),
             // No position is handoff-wrapped by default; the gRPC builders install handles via
             // `with_handoffs`. Empty here ⇒ the in-process/default path is byte-identical (ADR-043).
             #[cfg(feature = "distributed")]

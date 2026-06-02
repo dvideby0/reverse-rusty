@@ -45,6 +45,7 @@ mod distributed;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
@@ -56,7 +57,7 @@ use crate::error::ParseError;
 use crate::events::EngineEvent;
 use crate::normalize::Normalizer;
 
-use super::clog::{ClusterLog, NullClusterLog};
+use super::clog::{ClusterLog, ClusterMutation, NullClusterLog};
 use super::control::{ControlPlane, InMemoryControlPlane};
 #[cfg(feature = "distributed")]
 use super::handoff::HandoffShard;
@@ -145,6 +146,27 @@ pub enum AddOutcome {
     RejectedParse(ParseError),
 }
 
+/// One mutation that applied to some target shards but failed on others, queued for repair by
+/// [`ClusterEngine::resync`] (ADR-047). Held in memory only — the durable backstop is the
+/// cluster log, whose replay on [`ClusterEngine::open`] re-drives every target shard.
+#[derive(Clone)]
+struct PendingRepair {
+    /// The mutation to re-drive (raw DSL for an Add; just the id for a Remove).
+    mutation: ClusterMutation,
+    /// Target shards that did NOT yet apply it — the only shards `resync` re-drives.
+    failed_shards: Vec<usize>,
+}
+
+/// Outcome of a [`ClusterEngine::resync`] pass (ADR-047): how many queued partial-apply
+/// mutations fully converged this pass, and how many remain (a target shard still unreachable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResyncReport {
+    /// Mutations that converged (every previously-failed shard applied this pass).
+    pub repaired: usize,
+    /// Mutations still pending (at least one target shard still failed); they stay queued.
+    pub still_pending: usize,
+}
+
 /// Internal placement decision for one compiled query.
 enum Target {
     Reject,
@@ -226,6 +248,13 @@ pub struct ClusterEngine {
     /// Buffered until set, mirroring the engine's `set_observer` pattern.
     observer: Mutex<Option<ClusterObserver>>,
     pending_events: Mutex<Vec<EngineEvent>>,
+    /// Multi-shard mutations that applied to some target shards but failed on others (ADR-047),
+    /// keyed by logical id so a later mutation for the same id supersedes an earlier pending one
+    /// (a successful full apply / a Remove clears any stale entry). Drained + re-driven by
+    /// [`Self::resync`]. Empty on the in-process / RF=1 path (its `LocalShard` writes never
+    /// fail), so the default path is byte-identical. In memory only — the durable backstop is
+    /// the cluster log, replayed on [`Self::open`].
+    pending_repair: Mutex<BTreeMap<u64, PendingRepair>>,
     /// The cluster-state control plane: membership + the shard→node map + ring params +
     /// feature-model version + epoch (ADR-037). Read at assembly / introspection time only,
     /// never on the per-title hot path. [`InMemoryControlPlane`] today; openraft-backed later.

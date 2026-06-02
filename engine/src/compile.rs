@@ -292,10 +292,13 @@ pub fn compile_one(
     })
 }
 
-/// Read-only extract: resolves features via `dict.get()` without interning.
-/// Skips features not already in the dictionary. Safe for the read path — and
-/// for the cluster coordinator's incremental adds against a frozen shared dict,
-/// where interning new vocabulary would fork the `Arc<Dict>` shared across shards.
+/// Read-only extract: resolves features against the frozen dict WITHOUT interning
+/// (interning new vocabulary would fork the `Arc<Dict>` shared across shards). A term
+/// absent from the dict is NOT skipped — `compile_features_readonly` resolves it to a
+/// deterministic synthetic `FeatureId` via `dict.get_or_synthetic()` (dynamic
+/// vocabulary, ADR-046), so a new required term still anchors its query (a collision is
+/// a bounded over-match, never a dropped match). Safe for the read path and the cluster
+/// coordinator's incremental adds against a frozen shared dict.
 pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut String) -> Extracted {
     let mut required: Vec<FeatureId> = Vec::new();
     let mut forbidden: Vec<FeatureId> = Vec::new();

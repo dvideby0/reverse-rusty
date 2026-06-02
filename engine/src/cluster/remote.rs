@@ -6,14 +6,21 @@
 //! [`ShardError::Remote`] — never a swallowed empty result, which would shrink a
 //! percolate's union into a false negative.
 //!
-//! `block_on` is safe here because rayon worker threads (where `percolate_inner` fans
-//! out) are NOT tokio runtime threads, so parking one on `block_on` cannot panic with
-//! a nested-runtime error; the RPC's I/O is driven by the separate tokio pool the
-//! `Handle` belongs to. The cost — a parked worker per in-flight RPC — is the latency
-//! of distribution itself; an async fan-out is the documented later optimization
-//! (ADR-029).
+//! All RPCs are driven through [`block_on_in_context`], which keeps the sync→async bridge
+//! safe regardless of the CALLER's thread context (the seam is sync, but a coordinator may
+//! probe a shard from a rayon worker, a plain thread, OR — for a future async coordinator
+//! server — a tokio runtime worker). The naive `Handle::block_on` panics with a
+//! nested-runtime error when called on a runtime worker, so the bridge dispatches on the
+//! caller's context: off any runtime (rayon fan-out / the in-process build path) it is a
+//! plain `block_on`; on a multi-thread runtime worker it wraps `block_on` in
+//! `task::block_in_place` (the documented re-entry pattern); on a current-thread runtime it
+//! offloads to a scoped non-runtime thread. The cost — a parked worker per in-flight RPC —
+//! is the latency of distribution itself; an async fan-out is the documented later
+//! optimization (ADR-029). See ADR-047 for the thread-context contract.
 
-use tokio::runtime::Handle;
+use std::future::Future;
+
+use tokio::runtime::{Handle, RuntimeFlavor};
 use tonic::transport::Channel;
 
 use crate::compile::Extracted;
@@ -40,17 +47,17 @@ impl RemoteShard {
     /// [`crate::dict::Dict::fingerprint`]). A mismatch returns [`ShardError::DictMismatch`]
     /// — a divergent dict would otherwise drop matches silently across the wire (ADR-029).
     pub fn connect(endpoint: String, handle: Handle, expected_fp: u64) -> Result<Self, ShardError> {
-        let client = handle
-            .block_on(ShardServiceClient::connect(endpoint))
+        let client = block_on_in_context(&handle, ShardServiceClient::connect(endpoint))
             .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
         // Handshake before trusting the shard: clone the client for the probe RPC (a cheap
         // Channel bump, mirroring the per-call pattern below).
         let mut probe = client.clone();
-        let actual_fp = handle
-            .block_on(async move { probe.dict_fingerprint(proto::Empty {}).await })
-            .map_err(rpc_err)?
-            .into_inner()
-            .fingerprint;
+        let actual_fp = block_on_in_context(&handle, async move {
+            probe.dict_fingerprint(proto::Empty {}).await
+        })
+        .map_err(rpc_err)?
+        .into_inner()
+        .fingerprint;
         if actual_fp != expected_fp {
             return Err(ShardError::DictMismatch {
                 expected: expected_fp,
@@ -80,30 +87,31 @@ impl RemoteShard {
         dict_bytes: Vec<u8>,
         expected_fp: u64,
     ) -> Result<Self, ShardError> {
-        let client = handle
-            .block_on(ShardServiceClient::connect(endpoint))
+        let client = block_on_in_context(&handle, ShardServiceClient::connect(endpoint))
             .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
         let mut shipper = client.clone();
         let req = proto::AdoptDictRequest {
             dict: dict_bytes,
             fingerprint: expected_fp,
         };
-        let adopted = match handle.block_on(async move { shipper.adopt_dict(req).await }) {
-            Ok(reply) => reply.into_inner().fingerprint,
-            // The server holds data under a different dict and refused ours. Read its actual
-            // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
-            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
-                let mut probe = client.clone();
-                let actual = handle
-                    .block_on(async move { probe.dict_fingerprint(proto::Empty {}).await })
+        let adopted =
+            match block_on_in_context(&handle, async move { shipper.adopt_dict(req).await }) {
+                Ok(reply) => reply.into_inner().fingerprint,
+                // The server holds data under a different dict and refused ours. Read its actual
+                // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
+                Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+                    let mut probe = client.clone();
+                    let actual = block_on_in_context(&handle, async move {
+                        probe.dict_fingerprint(proto::Empty {}).await
+                    })
                     .map_or(0, |r| r.into_inner().fingerprint);
-                return Err(ShardError::DictMismatch {
-                    expected: expected_fp,
-                    actual,
-                });
-            }
-            Err(status) => return Err(ShardError::Remote(format!("adopt_dict: {status}"))),
-        };
+                    return Err(ShardError::DictMismatch {
+                        expected: expected_fp,
+                        actual,
+                    });
+                }
+                Err(status) => return Err(ShardError::Remote(format!("adopt_dict: {status}"))),
+            };
         // On success the server echoes the fingerprint it now serves — this equality IS the
         // dict-identity handshake, so no separate `dict_fingerprint` round-trip is needed.
         if adopted != expected_fp {
@@ -117,6 +125,18 @@ impl RemoteShard {
             handle,
             dict_fp: expected_fp,
         })
+    }
+
+    /// Drive an async RPC to completion from the synchronous [`Shard`] seam, safe regardless
+    /// of the caller's thread context (see the module docs + ADR-047). Every RPC method below
+    /// goes through this rather than `self.handle.block_on` directly, so a percolate or write
+    /// issued from a tokio runtime worker re-enters via `block_in_place` instead of panicking.
+    fn block_on<F>(&self, fut: F) -> F::Output
+    where
+        F: Future + Send,
+        F::Output: Send,
+    {
+        block_on_in_context(&self.handle, fut)
     }
 
     /// Drive this remote node's `RecoverFrom` RPC (ADR-036): it pulls `source_endpoint`'s sealed
@@ -137,7 +157,6 @@ impl RemoteShard {
             dict_fingerprint: dict_fp,
         };
         let reply = self
-            .handle
             .block_on(async move { client.recover_from(req).await })
             .map_err(rpc_err)?
             .into_inner();
@@ -161,11 +180,42 @@ impl RemoteShard {
             dict_fingerprint: self.dict_fp,
         };
         let reply = self
-            .handle
             .block_on(async move { client.fence(req).await })
             .map_err(rpc_err)?
             .into_inner();
         Ok(reply.fenced_at_generation)
+    }
+}
+
+/// Drive `fut` on `handle` from a SYNCHRONOUS caller, dispatching on the caller's tokio
+/// context so the bridge never panics with the nested-runtime error (ADR-047):
+/// - **off any runtime** (a rayon fan-out worker, the in-process build path, a plain thread):
+///   a plain [`Handle::block_on`] — the fast path, unchanged from before.
+/// - **on a multi-thread runtime worker**: [`tokio::task::block_in_place`] around `block_on`,
+///   the documented way to re-enter a multi-thread scheduler's async context without starving
+///   it (`Runtime::new()` / tonic / axum are all multi-thread).
+/// - **on a current-thread runtime**: `block_in_place` is unavailable there, so the drive is
+///   offloaded to a scoped helper thread — not a runtime worker, so `block_on` is safe on it.
+///
+/// `Handle::try_current` only DETECTS the caller's context/flavor; the future is always driven
+/// on the passed `handle` (the shard's runtime), which may or may not be the current one.
+fn block_on_in_context<F>(handle: &Handle, fut: F) -> F::Output
+where
+    F: Future + Send,
+    F::Output: Send,
+{
+    match Handle::try_current() {
+        Err(_) => handle.block_on(fut),
+        Ok(current) => match current.runtime_flavor() {
+            RuntimeFlavor::MultiThread => tokio::task::block_in_place(|| handle.block_on(fut)),
+            // Current-thread (or any non-multi-thread) runtime: can't park the only worker, so
+            // drive on a scoped non-runtime thread, forwarding any panic from the future intact.
+            _ => std::thread::scope(|s| {
+                s.spawn(|| handle.block_on(fut))
+                    .join()
+                    .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+            }),
+        },
     }
 }
 
@@ -185,7 +235,6 @@ impl Shard for RemoteShard {
             include_broad,
         };
         let reply = self
-            .handle
             .block_on(async move { client.percolate(req).await })
             .map_err(rpc_err)?
             .into_inner();
@@ -196,7 +245,6 @@ impl Shard for RemoteShard {
     fn num_queries(&self) -> Result<usize, ShardError> {
         let mut client = self.client.clone();
         let reply = self
-            .handle
             .block_on(async move { client.num_queries(proto::Empty {}).await })
             .map_err(rpc_err)?
             .into_inner();
@@ -206,7 +254,6 @@ impl Shard for RemoteShard {
     fn class_counts(&self) -> Result<[u64; 4], ShardError> {
         let mut client = self.client.clone();
         let reply = self
-            .handle
             .block_on(async move { client.class_counts(proto::Empty {}).await })
             .map_err(rpc_err)?
             .into_inner();
@@ -239,7 +286,6 @@ impl Shard for RemoteShard {
                 .collect(),
         };
         let reply = self
-            .handle
             .block_on(async move { client.ingest_extracted(req).await })
             .map_err(rpc_err)?
             .into_inner();
@@ -266,7 +312,6 @@ impl Shard for RemoteShard {
             }),
         };
         let reply = self
-            .handle
             .block_on(async move { client.insert_extracted(req).await })
             .map_err(rpc_err)?
             .into_inner();
@@ -279,7 +324,6 @@ impl Shard for RemoteShard {
             logical_id: logical,
         };
         let reply = self
-            .handle
             .block_on(async move { client.delete(req).await })
             .map_err(rpc_err)?
             .into_inner();
@@ -288,8 +332,7 @@ impl Shard for RemoteShard {
 
     fn flush(&self) -> Result<(), ShardError> {
         let mut client = self.client.clone();
-        self.handle
-            .block_on(async move { client.flush(proto::FlushRequest {}).await })
+        self.block_on(async move { client.flush(proto::FlushRequest {}).await })
             .map_err(rpc_err)?;
         Ok(())
     }
@@ -328,7 +371,7 @@ impl Shard for RemoteShard {
             after_seqno: from.0,
             dict_fingerprint: self.dict_fp,
         };
-        self.handle.block_on(async move {
+        self.block_on(async move {
             let mut stream = client
                 .fetch_translog(req)
                 .await
@@ -354,7 +397,6 @@ impl Shard for RemoteShard {
             dict_fingerprint: self.dict_fp,
         };
         let reply = self
-            .handle
             .block_on(async move { client.retention_lease(req).await })
             .map_err(rpc_err)?
             .into_inner();
@@ -369,8 +411,7 @@ impl Shard for RemoteShard {
             pos: to.0,
             dict_fingerprint: self.dict_fp,
         };
-        self.handle
-            .block_on(async move { client.retention_lease(req).await })
+        self.block_on(async move { client.retention_lease(req).await })
             .map_err(rpc_err)?;
         Ok(())
     }
@@ -383,8 +424,7 @@ impl Shard for RemoteShard {
             pos: 0,
             dict_fingerprint: self.dict_fp,
         };
-        self.handle
-            .block_on(async move { client.retention_lease(req).await })
+        self.block_on(async move { client.retention_lease(req).await })
             .map_err(rpc_err)?;
         Ok(())
     }

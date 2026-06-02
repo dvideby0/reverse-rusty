@@ -52,9 +52,12 @@ assertions baked in (ADR-046). Both already run on the default `cargo test --rel
 live — naming them here makes the contract explicit: keep them green, never weaken them. The
 experimental distributed layers add three more oracles that `check.sh` runs in its
 `--features distributed` lane — `tests/cluster_grpc_oracle.rs` (gRPC transport + dict shipping +
-replication/recovery, and the `block_on` rayon-fanout guard), `tests/cluster_control_raft_oracle.rs`
+replication/recovery; the `block_on` **rayon-fanout** and **single-target-from-a-tokio-worker** guards;
+and **remote partial-apply detection** over the wire — ADR-047), `tests/cluster_control_raft_oracle.rs`
 (openraft control plane), and `tests/cluster_autoscale_oracle.rs` (autoscaler). Those are
-oracle-proven **on localhost**, not a multi-machine gate.
+oracle-proven **on localhost**, not a multi-machine gate. The partial-apply → `resync` **convergence**
+cycle (ADR-047) is proven deterministically in the lean core by `cluster/coordinator/tests.rs`
+(`partial_apply_is_detected_then_resync_converges` + `resync_requeues_when_shard_still_failing`).
 
 ## Pressure & soak tests
 
