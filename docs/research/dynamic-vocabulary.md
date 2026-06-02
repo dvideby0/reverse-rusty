@@ -180,6 +180,23 @@ with the experimental distributed layers and is **beyond v1**.
    query introduces a new token is found (zero FN); an all-unknown any-of group is satisfiable; a declared
    alias makes both surface forms match; a measured-bounded false-positive check.
 
+**Resolved in the build (ADR-046 shipped — both mechanisms):**
+1. **Reserved range** — `dict::SYNTHETIC_BASE = 0x8000_0000`; interned ids stay below it (dense `u32`).
+2. **Anchor selection** — a synthetic id has `freq()==0` / `mask_bit()==NO_MASK_BIT`, so `anchor_plan` treats
+   it as rarest + non-hot (a good selective anchor) with no `freq`-lookup panic.
+3. **Vocab-epoch recompile** — **synchronous** (a lazy window would drop matches against a still-stale
+   segment, whose old-normalizer ids no longer match a title normalized with the new one):
+   `Engine::recompile_stale_segments` for the single engine (also fixes the server's `PUT /_vocab`); at the
+   cluster level a full **blue/green rebuild** (`ClusterEngine::set_vocab`) that re-mints the dict +
+   **re-places** every query (an alias can move a query's anchor → its shard, so an in-shard recompile would
+   strand it), under `&mut self` (the write quiesce), durable via a manifest `vocab_data` blob (v3). The
+   alias half is in-process only — `set_vocab` refuses a non-local cluster. Auto-learning: `learn_and_apply`
+   wires the ADR-015 any-of learner (`POST /_vocab/learn_and_apply`).
+4. **Oracle assertions** — all present + green: `cluster_oracle.rs` (absorb-without-broadening, satisfiable
+   all-unknown any-of, **declared alias makes both surface forms match**, auto-learn) +
+   `cluster_durability_oracle.rs` (alias survives reopen + rebind) + `hardening_fixes.rs` (single-engine
+   recompile + learn).
+
 ---
 
 ## Sources
