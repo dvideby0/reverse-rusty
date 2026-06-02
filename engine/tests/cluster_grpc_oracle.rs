@@ -332,6 +332,88 @@ fn grpc_cluster_matches_single_node_and_oracle() {
     );
 }
 
+/// Guard: the `RemoteShard` sync→async `block_on` bridge ([`remote.rs`] lines 9-14) must be
+/// drivable from a rayon fan-out without a nested-runtime panic. `percolate_inner`
+/// parallelizes the per-shard probes with rayon `par_iter` when a title routes to >1 shard,
+/// so each `RemoteShard::percolate` runs `Handle::block_on` on a *rayon worker* thread —
+/// which is safe precisely because rayon workers are NOT tokio runtime threads. This is the
+/// only place that arrangement is asserted to be load-bearing: a future refactor that drives
+/// the fan-out from inside an async context (or onto tokio's own threads) would re-introduce
+/// the nested-runtime panic and fail loudly HERE, even if the broader oracle were weakened.
+#[test]
+fn remote_fanout_block_on_does_not_panic_on_rayon_workers() {
+    let (queries, titles) = build_corpus();
+    let oracle = build_oracle(&queries, &titles);
+
+    // ONE authoritative frozen feature space, shared into every server + the coordinator.
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+
+    let k = 3usize;
+    let cfg = ClusterConfig {
+        num_shards: k,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+
+    // Stand up K real gRPC shard servers over the shared dict/norm (same pattern as the
+    // oracle above: bind inside the runtime, connect — which `block_on`s — outside it).
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut addrs: Vec<SocketAddr> = Vec::with_capacity(k);
+    {
+        let _enter = rt.enter();
+        for _ in 0..k {
+            let incoming =
+                TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind ephemeral port");
+            addrs.push(incoming.local_addr().expect("local_addr"));
+            let server = ShardServer::new(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                EngineConfig::default(),
+            );
+            rt.spawn(server.serve_with_incoming(incoming));
+        }
+    }
+    for &addr in &addrs {
+        wait_until_listening(addr);
+    }
+    let endpoints: Vec<String> = addrs.iter().map(|a| format!("http://{a}")).collect();
+
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        &cfg,
+        &endpoints,
+        rt.handle(),
+    )
+    .expect("connect remote cluster");
+    cluster.ingest(&queries).expect("ingest corpus over gRPC");
+
+    // The guard only bites on titles that route to >1 shard (the rayon-parallel branch); a
+    // single-target title takes the sequential branch and never parks `block_on` on a worker.
+    // Drive every multi-shard title and assert (a) no panic and (b) the brute-oracle set.
+    let mut covered = 0usize;
+    for (i, title) in titles.iter().enumerate() {
+        if cluster.shard_fanout(title).len() < 2 {
+            continue;
+        }
+        covered += 1;
+        let got: HashSet<u64> = cluster
+            .percolate(title)
+            .expect("multi-shard percolate must not panic on the block_on bridge")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got, oracle[i],
+            "rayon-fanout block_on bridge vs brute oracle on {title:?}"
+        );
+    }
+    assert!(
+        covered > 0,
+        "guard needs >=1 title routing to >=2 shards (the rayon-parallel `par_iter` branch)"
+    );
+}
+
 /// Dict shipping (ADR-034): the shard servers start **pending** (dict-less) — NOT pre-built
 /// over the corpus — and the coordinator SHIPS its authoritative frozen dict to each at
 /// connect. The dict-shipped cluster must still return exactly the brute oracle's and the
