@@ -2022,8 +2022,11 @@ Find an ADR by its number in the records below. (Implementation status of each d
 
 ### ADR-046: Dynamic vocabulary (Cluster v1) — feature-hashing for new tokens + runtime normalizer learning for aliases
 
-- **Status:** Accepted (approach chosen by the dynamic-vocabulary research spike; implementation tracked in
-  [STATUS.md](STATUS.md) Tier 0). Prior-art survey + codebase feasibility:
+- **Status:** Accepted (approach chosen by the dynamic-vocabulary research spike). **Mechanism (1)
+  feature-hashing for new tokens is implemented** (`dict::synthetic_id`/`get_or_synthetic` + both readonly
+  paths hash) and proven by `tests/cluster_oracle.rs` (absorb-without-broadening + a satisfiable all-unknown
+  any-of) + `dict.rs` unit tests; additive (every prior oracle byte-identical). Mechanism (2) alias learning
+  is pending — tracked in [STATUS.md](STATUS.md) Tier 0. Prior-art survey + codebase feasibility:
   [`research/dynamic-vocabulary.md`](research/dynamic-vocabulary.md).
 - **Context:** The cluster freezes one shared dictionary so every shard agrees on each term's integer
   `FeatureId` (ADR-027 — globally-consistent ids are what make the cross-shard signature cover lossless).

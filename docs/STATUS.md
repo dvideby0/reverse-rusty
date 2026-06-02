@@ -358,9 +358,14 @@ external review, re-ranked to the top:
   a missed match), and **(2) new alias/synonym rules → runtime normalizer learning** (reuse the ADR-015
   `Vocab` machinery + an atomic in-process `Arc<Normalizer>` swap). Both land in the in-process v1 core;
   the *cross-process shipping* of alias updates is deferred to the experimental distributed layers.
-  Remaining: implement in the in-process core + the absorb-correctly oracle assertions (zero FN, bounded
-  FP, incl. the all-unknown any-of group and a declared alias). *(Absorbs the former Tier-3
-  "normalizer/vocab shipping" residue — it is a v1 correctness item now.)*
+  **Mechanism (1) feature-hashing is built** — `dict::synthetic_id`/`get_or_synthetic` (a reserved
+  high-`u32` range) + both readonly paths (`normalize::compile_features_readonly` + `match_features`) hash
+  unknown terms instead of dropping them; proven by `tests/cluster_oracle.rs` (a live-added query with a
+  new required term is found and does **not** broaden; an all-unknown any-of group is satisfiable) +
+  `dict.rs` unit tests; **additive** (synthetic ids are disjoint from interned ids, so every prior oracle
+  is byte-identical). **Remaining:** mechanism (2) alias learning (wire the `Vocab` learner + the atomic
+  `Arc<Normalizer>` swap) + the background re-materialize that consolidates hashed terms/learned synonyms
+  on compaction. *(Absorbs the former Tier-3 "normalizer/vocab shipping" residue — a v1 correctness item now.)*
 - **`block_on` regression guard test.** `RemoteShard`'s sync→async bridge is *safe by design* (rayon
   workers aren't tokio runtime threads — `remote.rs:9-14`), but nothing exercises it from a rayon
   fan-out today. Add a guard test so a future refactor can't silently introduce a nested-runtime

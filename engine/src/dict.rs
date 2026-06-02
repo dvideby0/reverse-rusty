@@ -14,6 +14,31 @@ pub type FeatureId = u32;
 
 pub const NO_MASK_BIT: u8 = 64; // sentinel: this feature is not in the common mask
 
+/// Base of the reserved synthetic-ID range (the top bit of the `u32` ID space). A term
+/// absent from the frozen dict is assigned a deterministic *synthetic* `FeatureId` at or
+/// above this value (dynamic vocabulary, ADR-046), disjoint from the densely-interned IDs
+/// below it. The interned range cannot reach this size in practice — a `debug_assert` in
+/// [`Dict::intern`] guards the disjointness.
+pub const SYNTHETIC_BASE: FeatureId = 0x8000_0000;
+
+/// True if `id` is a synthetic (hash-assigned) feature ID rather than an interned one.
+#[inline]
+pub fn is_synthetic(id: FeatureId) -> bool {
+    id >= SYNTHETIC_BASE
+}
+
+/// Deterministically hash a term `name` into the reserved synthetic-ID range. Every node
+/// and the coordinator compute the *same* ID for the same name with **no coordination**
+/// (ADR-046) because [`crate::util::fnv1a64`] is stable across runs and processes — exactly
+/// the cross-shard agreement that content routing needs. A collision is a bounded over-match
+/// (a false positive the exact matcher accepts), *never* a missed match.
+#[inline]
+pub fn synthetic_id(name: &str) -> FeatureId {
+    let h = crate::util::fnv1a64(name.as_bytes());
+    let folded = (h ^ (h >> 32)) as FeatureId;
+    SYNTHETIC_BASE | (folded & (SYNTHETIC_BASE - 1))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatureKind {
     Year,
@@ -76,6 +101,10 @@ impl Dict {
         if let Some(&id) = self.map.get(name) {
             return id;
         }
+        debug_assert!(
+            self.names.len() < SYNTHETIC_BASE as usize,
+            "interned dict reached the reserved synthetic-ID range"
+        );
         let id = self.names.len() as FeatureId;
         self.map.insert(name.to_string(), id);
         self.names.push(name.to_string());
@@ -91,6 +120,20 @@ impl Dict {
         self.map.get(name).copied()
     }
 
+    /// Resolve a feature name to its interned ID, or a deterministic *synthetic* ID if the
+    /// term is absent from the (frozen) dict — dynamic vocabulary (ADR-046). The read-only
+    /// compile + match paths use this so a term that first appears after the dict is frozen is
+    /// *absorbed* (a consistent ID every node agrees on) instead of dropped — dropping would
+    /// broaden a query or drop a match. Interned terms keep their dense ID; only true misses
+    /// are hashed (see [`synthetic_id`]).
+    #[inline]
+    pub fn get_or_synthetic(&self, name: &str) -> FeatureId {
+        match self.map.get(name) {
+            Some(&id) => id,
+            None => synthetic_id(name),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.names.len()
     }
@@ -98,21 +141,33 @@ impl Dict {
         self.names.is_empty()
     }
 
+    /// Feature name for an interned ID; `"<oov>"` for a synthetic/out-of-range ID (a hashed
+    /// term has no stored name, so explain shows the placeholder).
     #[inline]
     pub fn name(&self, id: FeatureId) -> &str {
-        &self.names[id as usize]
+        self.names.get(id as usize).map_or("<oov>", String::as_str)
     }
     #[inline]
     pub fn kind(&self, id: FeatureId) -> FeatureKind {
-        self.kinds[id as usize]
+        self.kinds
+            .get(id as usize)
+            .copied()
+            .unwrap_or(FeatureKind::Generic)
     }
+    /// Query-document frequency; `0` for a synthetic/out-of-range ID (a hashed term is rare by
+    /// construction, so it sorts as the rarest — a good selective anchor).
     #[inline]
     pub fn freq(&self, id: FeatureId) -> u32 {
-        self.freq[id as usize]
+        self.freq.get(id as usize).copied().unwrap_or(0)
     }
+    /// Common-mask bit; `NO_MASK_BIT` for a synthetic/out-of-range ID (hashed terms are never
+    /// in the 64-hot mask, so they always land in the exact verifier's non-mask tail).
     #[inline]
     pub fn mask_bit(&self, id: FeatureId) -> u8 {
-        self.mask_bit[id as usize]
+        self.mask_bit
+            .get(id as usize)
+            .copied()
+            .unwrap_or(NO_MASK_BIT)
     }
 
     /// Record that a compiled query referenced this feature (drives frequency).
@@ -222,5 +277,49 @@ impl std::fmt::Debug for Dict {
 impl Default for Dict {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_ids_are_stable_in_range_and_disjoint_from_interned() {
+        // Deterministic: the same name hashes to the same id every call (the basis for
+        // every node agreeing with no coordination).
+        assert_eq!(synthetic_id("term:vapormax"), synthetic_id("term:vapormax"));
+        // Always in the reserved range.
+        assert!(is_synthetic(synthetic_id("term:vapormax")));
+        assert!(synthetic_id("term:anything") >= SYNTHETIC_BASE);
+        // Distinct unknown names get distinct ids (no trivial collision).
+        assert_ne!(synthetic_id("term:aaa"), synthetic_id("term:bbb"));
+
+        // Interned ids are dense and never land in the synthetic range.
+        let mut d = Dict::new();
+        let topps = d.intern("term:topps", FeatureKind::Generic);
+        let rookie = d.intern("term:rookie", FeatureKind::Category);
+        assert!(!is_synthetic(topps));
+        assert!(!is_synthetic(rookie));
+
+        // get_or_synthetic: a hit keeps its dense id; a miss hashes (and matches the
+        // free function, so the compile path and the match path agree).
+        assert_eq!(d.get_or_synthetic("term:topps"), topps);
+        let miss = d.get_or_synthetic("term:never-seen");
+        assert!(is_synthetic(miss));
+        assert_eq!(miss, synthetic_id("term:never-seen"));
+    }
+
+    #[test]
+    fn by_id_accessors_are_safe_for_synthetic_ids() {
+        // A synthetic id is out of the interned Vecs' range; the accessors must return
+        // safe defaults (not panic), so a hashed term flows through compile/exact as a
+        // rare, non-mask, unknown-name feature.
+        let d = Dict::new();
+        let s = synthetic_id("term:oov");
+        assert_eq!(d.mask_bit(s), NO_MASK_BIT);
+        assert_eq!(d.freq(s), 0);
+        assert_eq!(d.kind(s), FeatureKind::Generic);
+        assert_eq!(d.name(s), "<oov>");
     }
 }

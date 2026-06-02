@@ -121,7 +121,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/lib.rs` | Library root, public API re-exports | — |
 | `src/dsl.rs` | Query DSL parser → AST (compile-time only) | [normalization.md](docs/design/normalization.md) §1 |
 | `src/normalize.rs` | Shared query/title normalizer (daachorse automaton) + `NormalizerBuilder` | [normalization.md](docs/design/normalization.md) §2–4 |
-| `src/dict.rs` | Feature dictionary, frequency tracking, 64-bit common mask | [normalization.md](docs/design/normalization.md) §5 |
+| `src/dict.rs` | Feature dictionary, frequency tracking, 64-bit common mask, synthetic-ID hashing for out-of-dict terms (dynamic vocab, ADR-046) | [normalization.md](docs/design/normalization.md) §5 |
 | `src/compile.rs` | Signature-cover optimizer + cost classes A/B/C/D + read-only compile path for explain + `anchor_plan` (pre-hash anchor groups — the placement SSOT for clustering) | [matching.md](docs/design/matching.md) §1; ADR-027 |
 | `src/config.rs` | `EngineConfig` — runtime-tunable knobs for compaction, flush, merge scoring, and the broad-lane batch evaluator (`Serialize`; dynamic subset updatable at runtime via `/_settings`) | ADR-022, ADR-026 |
 | `src/filter.rs` | Per-segment anchor filter (cache-line blocked bloom, 512-bit blocks) | [ingestion-and-updates.md](docs/design/ingestion-and-updates.md) §6 |
