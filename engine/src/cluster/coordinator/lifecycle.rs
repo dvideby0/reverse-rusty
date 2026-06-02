@@ -192,6 +192,9 @@ impl ClusterEngine {
             segment_registry,
             next_seg_ids,
             dict_data: crate::storage::serialize_dict(dict),
+            // A freshly built cluster has no runtime vocabulary change yet; a
+            // declared alias lands here on a later `set_vocab` → `checkpoint`.
+            vocab_data: Vec::new(),
         };
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
@@ -310,6 +313,25 @@ impl ClusterEngine {
                 manifest.next_seg_ids.len()
             )));
         }
+        // ADR-046: if a runtime vocabulary change was committed, the manifest carries
+        // the serialized vocab — rebuild the normalizer from IT (authoritative over the
+        // caller-supplied one) so a declared alias survives the restart, and retain the
+        // vocab so a later checkpoint re-persists it (else the next reopen would lose it).
+        let restored_vocab = if manifest.vocab_data.is_empty() {
+            None
+        } else {
+            let json = std::str::from_utf8(&manifest.vocab_data)
+                .map_err(|e| ShardError::Config(format!("cluster vocab not utf-8: {e}")))?;
+            let v = crate::vocab::Vocab::from_json(json)
+                .map_err(|e| ShardError::Config(format!("deserializing cluster vocab: {e}")))?;
+            Some(Arc::new(v))
+        };
+        let norm = match &restored_vocab {
+            Some(v) => v.to_normalizer().map_err(|e| {
+                ShardError::Config(format!("building normalizer from cluster vocab: {e}"))
+            })?,
+            None => norm,
+        };
         let norm = Arc::new(norm);
         let ring = HashRing::new(num_shards, manifest.vnodes)?;
 
@@ -374,7 +396,7 @@ impl ClusterEngine {
                 manifest.dict_fingerprint,
             )),
         };
-        let engine = Self::from_parts(
+        let mut engine = Self::from_parts(
             norm,
             dict,
             ring,
@@ -384,6 +406,8 @@ impl ClusterEngine {
             per_shard,
             durable,
         )?;
+        // Retain the vocab restored from the manifest so a later checkpoint re-persists it.
+        engine.vocab = restored_vocab;
 
         // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the
         // log tail strictly after snapshot_pos, through the SAME apply funnel as live
@@ -440,6 +464,16 @@ impl ClusterEngine {
         }
 
         // 3. Coordinator manifest = the atomic commit point (new base + new cursor).
+        //    Persist the installed vocab (ADR-046) so a runtime alias survives reopen;
+        //    serialization failure fails the checkpoint loudly rather than silently
+        //    dropping the alias (which would be a false negative on the next open).
+        let vocab_data = match &self.vocab {
+            Some(v) => v
+                .to_json()
+                .map_err(|e| ShardError::Log(format!("serializing cluster vocab: {e}")))?
+                .into_bytes(),
+            None => Vec::new(),
+        };
         let manifest = crate::storage::ClusterManifest {
             epoch: new_epoch,
             snapshot_pos: up_to.0,
@@ -450,6 +484,7 @@ impl ClusterEngine {
             segment_registry: segment_registry.clone(),
             next_seg_ids,
             dict_data: crate::storage::serialize_dict(&self.dict),
+            vocab_data,
         };
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;

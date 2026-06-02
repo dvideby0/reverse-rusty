@@ -26,7 +26,7 @@ use crate::compile::{extract, Extracted};
 use crate::dict::Dict;
 use crate::vocab::Vocab;
 
-use super::{into_shard, placement_of, ClusterEngine, Target};
+use super::{into_shard, placement_of, replica_dir, shard_dir, ClusterEngine, Target};
 use crate::cluster::shard::{LocalShard, Shard, ShardError};
 
 impl ClusterEngine {
@@ -66,16 +66,7 @@ impl ClusterEngine {
                 .map_err(|e| ShardError::Config(format!("building normalizer from vocab: {e}")))?,
         );
 
-        // 3. Durable rebuild (persist the re-minted dict + vocab into the manifest)
-        //    lands in a follow-on; in-process clusters are fully supported here.
-        if self.data_dir.is_some() {
-            return Err(ShardError::Config(
-                "set_vocab on a durable cluster is not yet supported (in-process clusters only)"
-                    .into(),
-            ));
-        }
-
-        // 4. Gather the deduped live `(logical, dsl)` set across shards. A selective /
+        // 3. Gather the deduped live `(logical, dsl)` set across shards. A selective /
         //    any-of query lives on several shards but has ONE dsl — dedup by logical id.
         let mut live: BTreeMap<u64, String> = BTreeMap::new();
         for s in &self.shards {
@@ -84,7 +75,7 @@ impl ClusterEngine {
             }
         }
 
-        // 5. Pass A — re-mint the dict over the live corpus under the new normalizer
+        // 4. Pass A — re-mint the dict over the live corpus under the new normalizer
         //    (interning + frequencies + hot-mask), exactly as `build`.
         let mut dict = Dict::new();
         let mut lc = String::new();
@@ -99,7 +90,7 @@ impl ClusterEngine {
         let new_dict = Arc::new(dict);
         let rebuilt = extracted.len();
 
-        // 6. Pass B — re-place each query under the NEW dict and bucket per shard.
+        // 5. Pass B — re-place each query under the NEW dict and bucket per shard.
         let num_shards = self.ring.num_shards();
         let mut buckets: Vec<Vec<(u64, Extracted, String, u32)>> =
             (0..num_shards).map(|_| Vec::new()).collect();
@@ -115,19 +106,45 @@ impl ClusterEngine {
             }
         }
 
-        // 7. Construct fresh in-memory shards sharing the new norm + re-minted dict,
-        //    `replication_factor` copies per position, and ingest each bucket into
-        //    EVERY copy (identical op stream ⇒ copies set-equal, as in `build`).
+        // 6. Construct fresh shards sharing the new norm + re-minted dict, `replication_factor`
+        //    copies per position, and ingest each bucket into EVERY copy (identical op stream ⇒
+        //    copies set-equal, as in `build`). A durable cluster rebuilds each shard as a
+        //    segments-only engine in the SAME shard dir, numbered ABOVE the old segments so the
+        //    new `.seg` files coexist with the still-committed old ones until the manifest commit
+        //    (step 8) — crash-safe: a crash before the commit leaves the old manifest + old
+        //    segments authoritative. An in-memory cluster builds in-RAM copies.
         let rf = self.replication_factor.max(1);
+        let data_dir = self.data_dir.clone();
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
-        for bucket in buckets {
+        for (s, bucket) in buckets.into_iter().enumerate() {
             let mut copies = Vec::with_capacity(rf);
-            for _ in 0..rf {
-                let copy = LocalShard::new(
-                    Arc::clone(&new_norm),
-                    Arc::clone(&new_dict),
-                    self.per_shard.clone(),
-                );
+            for r in 0..rf {
+                let copy = match &data_dir {
+                    Some(dir) => {
+                        let mut sc = self.per_shard.clone();
+                        sc.data_dir = Some(if r == 0 {
+                            shard_dir(dir, s)
+                        } else {
+                            replica_dir(dir, s, r)
+                        });
+                        // Seed green segment numbering above the old shard's (primary and every
+                        // replica share the counter, kept equal by identical op streams), so the
+                        // freshly written `.seg` never collide with the old ones.
+                        let next_seg = self.shards[s].next_seg_id()?;
+                        LocalShard::open_segments(
+                            Arc::clone(&new_norm),
+                            Arc::clone(&new_dict),
+                            sc,
+                            &[],
+                            next_seg,
+                        )?
+                    }
+                    None => LocalShard::new(
+                        Arc::clone(&new_norm),
+                        Arc::clone(&new_dict),
+                        self.per_shard.clone(),
+                    ),
+                };
                 if !bucket.is_empty() {
                     copy.ingest_local(&bucket);
                 }
@@ -136,11 +153,17 @@ impl ClusterEngine {
             shards.push(into_shard(copies)?);
         }
 
-        // 8. Atomic swap (under `&mut self`, so no read observes a half-state).
+        // 7. Atomic swap (under `&mut self`, so no read observes a half-state). For a durable
+        //    cluster, `checkpoint` then seals the green shards, writes the new manifest (the
+        //    re-minted dict + serialized vocab + green segment registry — the atomic commit
+        //    point), truncates the log, and GCs the superseded old segment files.
         self.norm = new_norm;
         self.dict = new_dict;
         self.shards = shards;
         self.vocab = Some(Arc::new(vocab));
+        if data_dir.is_some() {
+            self.checkpoint()?;
+        }
         Ok(rebuilt)
     }
 
