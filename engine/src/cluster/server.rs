@@ -572,6 +572,52 @@ impl ShardService for ShardServer {
             .collect();
         Ok(Response::new(Box::pin(tokio_stream::iter(entries))))
     }
+
+    // ---- translog retention leases (ADR-040) ----
+    /// Acquire / renew / release a translog retention lease on this shard (`op` 0 / 1 / 2), so a
+    /// recovering peer can pin the un-sealed tail it still needs against a concurrent seal
+    /// (ADR-040, closing a latent false negative in ADR-039's no-quiesce path). Refuses a
+    /// dict-fingerprint mismatch. `acquire` returns the new lease id + the pinned position;
+    /// `renew`/`release` return zeros.
+    async fn retention_lease(
+        &self,
+        request: Request<proto::RetentionLeaseRequest>,
+    ) -> Result<Response<proto::RetentionLeaseReply>, Status> {
+        let st = self.loaded()?;
+        let req = request.into_inner();
+        if req.dict_fingerprint != st.dict.fingerprint() {
+            return Err(Status::failed_precondition(
+                "RetentionLease dict-fingerprint mismatch (divergent feature space)",
+            ));
+        }
+        match req.op {
+            0 => {
+                let (lease_id, pos) = st
+                    .shard
+                    .acquire_retention_lease()
+                    .map_err(|e| Status::internal(format!("acquire retention lease: {e}")))?;
+                Ok(Response::new(proto::RetentionLeaseReply {
+                    lease_id,
+                    pos: pos.0,
+                }))
+            }
+            1 => {
+                st.shard
+                    .renew_retention_lease(req.lease_id, LogPos(req.pos))
+                    .map_err(|e| Status::internal(format!("renew retention lease: {e}")))?;
+                Ok(Response::new(proto::RetentionLeaseReply::default()))
+            }
+            2 => {
+                st.shard
+                    .release_retention_lease(req.lease_id)
+                    .map_err(|e| Status::internal(format!("release retention lease: {e}")))?;
+                Ok(Response::new(proto::RetentionLeaseReply::default()))
+            }
+            other => Err(Status::invalid_argument(format!(
+                "RetentionLease: unknown op {other} (expected 0=acquire, 1=renew, 2=release)"
+            ))),
+        }
+    }
 }
 
 /// Stream one file as a contiguous run of ≤256 KiB `FileChunk`s ending with `last = true`.

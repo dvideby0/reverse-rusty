@@ -934,3 +934,171 @@ fn grpc_peer_recovery_without_quiescing() {
     let _ = std::fs::remove_dir_all(&src_dir);
     let _ = std::fs::remove_dir_all(&tgt_dir);
 }
+
+/// ADR-040 (retention + finalize): peer recovery under SUSTAINED, concurrent writes. Unlike
+/// `grpc_peer_recovery_without_quiescing` (ordered snapshot → write → catch-up), here a writer
+/// thread streams adds onto the source CONCURRENTLY with the recovery. The recovery holds a
+/// translog RETENTION LEASE across its segment copy + convergence loop, so the racing writes are
+/// neither trimmed by the copy's seal nor lost; its bounded loop drains what it can while writes
+/// continue. After the writer finishes (no further seals), a final lease-free catch-up — now
+/// race-free — converges the target to BOTH the live source AND the brute oracle over the final
+/// live set: zero false negatives across the wire with writes never paused.
+#[test]
+fn grpc_peer_recovery_converges_under_sustained_writes() {
+    let (queries, titles) = build_corpus();
+    let mut next_id = queries.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
+    let by_id: HashMap<u64, String> = queries.iter().map(|(id, d)| (*id, d.clone())).collect();
+
+    let oracle_corpus = build_oracle(&queries, &titles);
+    let matched: Vec<u64> = {
+        let mut s: HashSet<u64> = HashSet::new();
+        for set in &oracle_corpus {
+            s.extend(set);
+        }
+        let mut v: Vec<u64> = s.into_iter().collect();
+        v.sort_unstable();
+        v
+    };
+    assert!(
+        matched.len() >= 20,
+        "need ≥20 matching queries; got {}",
+        matched.len()
+    );
+
+    // The writer's known add sequence: 20 copies of matching DSLs with fresh ids → a deterministic
+    // final live set. A pure stream of adds (no removes) keeps it a clean firehose racing the copy.
+    let additions: Vec<(u64, String)> = matched
+        .iter()
+        .take(20)
+        .map(|id| {
+            let nid = next_id;
+            next_id += 1;
+            (nid, by_id[id].clone())
+        })
+        .collect();
+    let final_live: Vec<(u64, String)> = queries
+        .iter()
+        .cloned()
+        .chain(additions.iter().cloned())
+        .collect();
+    let oracle_final = build_oracle(&final_live, &titles);
+    assert!(
+        oracle_corpus != oracle_final,
+        "test setup: the concurrent adds must change some title results"
+    );
+
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let src_dir = server_dir("sw_src");
+    let tgt_dir = server_dir("sw_tgt");
+    let (src_addr, tgt_addr) = {
+        let _enter = rt.enter();
+        let si = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind src");
+        let sa = si.local_addr().expect("src addr");
+        rt.spawn(
+            ShardServer::pending_durable(
+                Arc::clone(&norm),
+                EngineConfig::default(),
+                src_dir.clone(),
+            )
+            .serve_with_incoming(si),
+        );
+        let ti = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind tgt");
+        let ta = ti.local_addr().expect("tgt addr");
+        rt.spawn(
+            ShardServer::pending_durable(
+                Arc::clone(&norm),
+                EngineConfig::default(),
+                tgt_dir.clone(),
+            )
+            .serve_with_incoming(ti),
+        );
+        (sa, ta)
+    };
+    wait_until_listening(src_addr);
+    wait_until_listening(tgt_addr);
+    let src_ep = format!("http://{src_addr}");
+    let tgt_ep = format!("http://{tgt_addr}");
+
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        &cfg,
+        std::slice::from_ref(&src_ep),
+        rt.handle(),
+    )
+    .expect("connect source cluster");
+    cluster.ingest(&queries).expect("ingest corpus");
+
+    // Recover the target CONCURRENTLY with a writer streaming the additions onto the source.
+    let hwm = std::thread::scope(|s| {
+        let cluster_ref = &cluster;
+        let adds = &additions;
+        let writer = s.spawn(move || {
+            for (id, dsl) in adds {
+                cluster_ref.add_query(*id, dsl).expect("writer add");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        // The recovery runs while the writer is mid-stream — its retention lease keeps the racing
+        // writes safe and its convergence loop drains what it can.
+        let (_n, hwm) = cluster
+            .peer_recover_replica(&src_ep, &tgt_ep, rt.handle())
+            .expect("peer recovery under writes");
+        writer.join().expect("writer thread");
+        hwm
+    });
+
+    // Writer done + no further seals ⇒ a final lease-free catch-up is race-free; drain to a fixed
+    // point (covers any residual the recovery's bounded loop did not reach while writes raced).
+    let mut cursor = hwm;
+    loop {
+        let next = cluster
+            .catch_up_recovered_replica(&src_ep, &tgt_ep, cursor, rt.handle())
+            .expect("final catch up");
+        if next == cursor {
+            break;
+        }
+        cursor = next;
+    }
+
+    let verify = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        &cfg,
+        std::slice::from_ref(&tgt_ep),
+        rt.handle(),
+    )
+    .expect("connect verify cluster");
+
+    for (i, title) in titles.iter().enumerate() {
+        let tgt: HashSet<u64> = verify
+            .percolate(title)
+            .expect("verify")
+            .into_iter()
+            .collect();
+        let src: HashSet<u64> = cluster
+            .percolate(title)
+            .expect("source")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            tgt, oracle_final[i],
+            "recovered target vs brute(final) on {title:?}"
+        );
+        assert_eq!(
+            src, oracle_final[i],
+            "live source vs brute(final) on {title:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&src_dir);
+    let _ = std::fs::remove_dir_all(&tgt_dir);
+}

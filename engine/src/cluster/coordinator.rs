@@ -1006,6 +1006,43 @@ impl ClusterEngine {
         Ok(())
     }
 
+    /// Runtime replica growth (ADR-040): bring up an additional in-process replica for shard
+    /// `position` from its durable primary WITHOUT quiescing writes — peer-recover a snapshot +
+    /// translog tail, loop the catch-up to shrink the residual, then promote it into the in-sync
+    /// set under a brief quiesce (the finalize that closes ADR-036's whole-copy quiesce window). A
+    /// retention lease pins the primary's tail across the copy so a concurrent seal cannot strand
+    /// it. `replica_dir` roots the new copy's local segments + translog; `max_passes` bounds the
+    /// convergence loop (the final quiesce covers whatever residual remains, so correctness never
+    /// depends on convergence — only the window size does). Requires a durable cluster whose
+    /// `position` is already replicated (a [`ReplicatedShard`](super::replica::ReplicatedShard));
+    /// errors fail-closed otherwise. Uses the default per-shard [`EngineConfig`] for the new copy.
+    pub fn add_replica(
+        &self,
+        position: usize,
+        replica_dir: &Path,
+        max_passes: usize,
+    ) -> Result<(), ShardError> {
+        let Some(base) = self.data_dir.as_deref() else {
+            return Err(ShardError::Config(
+                "add_replica requires a durable cluster (no on-disk segments to copy)".into(),
+            ));
+        };
+        let shard = self.shards.get(position).ok_or_else(|| {
+            ShardError::Config(format!(
+                "add_replica: shard position {position} out of range"
+            ))
+        })?;
+        let primary_dir = shard_dir(base, position);
+        shard.add_recovered_replica(
+            &self.norm,
+            &self.dict,
+            EngineConfig::default(),
+            &primary_dir,
+            replica_dir,
+            max_passes,
+        )
+    }
+
     /// Register an observer for durability events (recovery torn-tail, append failures).
     /// Any events buffered before this call are delivered immediately, mirroring the
     /// engine's `set_observer`.
@@ -1185,45 +1222,78 @@ impl ClusterEngine {
         Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)
     }
 
-    /// Cross-node peer recovery (ADR-036 + ADR-039): bring a fresh, durable, **pending** node up
-    /// as a copy of a shard by streaming a peer's segments AND replaying its translog tail — so
-    /// writes to the source need **not** be quiesced for the copy window (ADR-036's gap, closed by
-    /// the per-shard translog). Ships the frozen dict to `target_endpoint` (adopt); drives its
-    /// `RecoverFrom`, which pulls `source_endpoint`'s sealed segments at position `P`, attaches
-    /// them, and reports `P`; then replays the source's translog tail (ops > `P` — the writes that
-    /// landed during the copy) into the target via the shared apply funnel. Returns
-    /// `(num_queries, high_water)` — the post-recovery count and the source position the target is
-    /// caught up to. Under sustained writes a brief finalize via [`Self::catch_up_recovered_replica`]
-    /// drains any residual that arrived during the tail replay.
+    /// Cross-node peer recovery (ADR-036 + ADR-039 + ADR-040): bring a fresh, durable, **pending**
+    /// node up as a copy of a shard by streaming a peer's segments AND replaying its translog tail —
+    /// so writes to the source need **not** be quiesced for the copy window (ADR-036's gap, closed
+    /// by the per-shard translog). The flow: pin the source's un-sealed tail with a **retention
+    /// lease** (ADR-040) so the segment-copy seal — and any concurrent seal — cannot trim it away;
+    /// ship the frozen dict to `target_endpoint` (adopt); drive its `RecoverFrom`, which pulls
+    /// `source_endpoint`'s sealed segments at position `P`, attaches them, and reports `P`; then
+    /// replay the source's translog tail (ops > `P`) into the target via the shared apply funnel,
+    /// **looping** to drain residual writes until it stops advancing (the finalize — the window a
+    /// final external quiesce would cover shrinks toward zero). Releases the lease on completion.
+    /// Returns `(num_queries, high_water)`. Correctness never depends on the loop converging — the
+    /// lease keeps the tail safe — only the residual size does.
     pub fn peer_recover_replica(
         &self,
         source_endpoint: &str,
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
     ) -> Result<(u64, u64), ShardError> {
+        // Bound on the convergence loop (a safety cap, not a correctness requirement).
+        const FINALIZE_PASSES: usize = 8;
         let expected = self.dict.fingerprint();
-        let dict_bytes = crate::storage::serialize_dict(&self.dict);
-        // Ship the dict so the fresh node attaches segments against the right feature space.
-        let target = super::remote::RemoteShard::connect_and_adopt(
-            target_endpoint.to_string(),
-            handle.clone(),
-            dict_bytes,
-            expected,
-        )?;
-        // Bulk copy: segments at snapshot position P (the source keeps serving + accepting writes).
-        let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
-        // Tail replay: drain the source's translog (ops > P) and apply to the target through the
-        // SAME apply funnel as a live write (re-derived from DSL against the frozen dict), so the
-        // recovered copy converges to the same logical set — the no-quiesce delta (ADR-039).
+        // Pin the source's tail BEFORE the segment-copy seal trims it (ADR-040). Held across the
+        // whole recovery; released below whether it converges or errors.
         let source = super::remote::RemoteShard::connect(
             source_endpoint.to_string(),
             handle.clone(),
             expected,
         )?;
-        let hwm =
-            super::replica::catch_up_replica(&target, &source, &self.norm, &self.dict, LogPos(p))?;
-        let num_queries = target.num_queries()? as u64;
-        Ok((num_queries, hwm.0))
+        let (lease, _pinned) = source.acquire_retention_lease()?;
+
+        let recover = || -> Result<(u64, u64), ShardError> {
+            let dict_bytes = crate::storage::serialize_dict(&self.dict);
+            // Ship the dict so the fresh node attaches segments against the right feature space.
+            let target = super::remote::RemoteShard::connect_and_adopt(
+                target_endpoint.to_string(),
+                handle.clone(),
+                dict_bytes,
+                expected,
+            )?;
+            // Bulk copy: segments at snapshot position P (the source keeps serving + writing).
+            let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
+            // Tail replay + convergence: drain the source tail (> P) through the SAME apply funnel
+            // as a live write (re-derived from DSL against the frozen dict), looping until it stops
+            // advancing. Renew the lease each pass so the source may GC the consumed prefix.
+            let mut hwm = LogPos(p);
+            for _ in 0..FINALIZE_PASSES {
+                let next = super::replica::catch_up_replica(
+                    &target, &source, &self.norm, &self.dict, hwm,
+                )?;
+                source.renew_retention_lease(lease, next)?;
+                if next == hwm {
+                    break; // tail drained at this instant — converged
+                }
+                hwm = next;
+            }
+            let num_queries = target.num_queries()? as u64;
+            Ok((num_queries, hwm.0))
+        };
+        let out = recover();
+        // Always release the lease (a held one would pin the source's translog forever). A release
+        // failure on an otherwise-successful recovery is surfaced as an event, not conflated with
+        // the recovery outcome (the replica is good; the source may just retain extra translog).
+        if let Err(e) = source.release_retention_lease(lease) {
+            self.emit(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::ReplicaDesync,
+                detail: "releasing the peer-recovery retention lease on the source failed; the \
+                         source may retain extra translog until its next successful seal"
+                    .into(),
+                error: e.to_string(),
+            });
+        }
+        out
     }
 
     /// Re-run the translog catch-up (ADR-039): replay `source`'s tail (ops strictly after

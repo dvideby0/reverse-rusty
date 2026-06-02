@@ -52,6 +52,14 @@ service ShardService {
   // (closing ADR-036's gap). Read-only: it does NOT seal (unlike FetchSegments), so the source
   // keeps serving + accepting writes. Refuses a dict-fingerprint mismatch.
   rpc FetchTranslog (FetchTranslogRequest) returns (stream TranslogEntry);
+  // ---- translog retention leases (ADR-040, clustering step 5d) ----
+  // A peer recovery pins the source's un-sealed translog tail so a CONCURRENT seal (another
+  // recovery's FetchSegments, a checkpoint) cannot trim away the ops it still needs — a latent
+  // false negative ADR-039's no-quiesce path left open. op: 0 = acquire (returns a lease id + the
+  // pinned position), 1 = renew (advance the lease to `pos` as the consumer catches up, so the
+  // source may GC the now-consumed prefix), 2 = release (recovery done — trim freely again).
+  // Refuses a dict-fingerprint mismatch (never coordinates retention across a divergent space).
+  rpc RetentionLease (RetentionLeaseRequest) returns (RetentionLeaseReply);
 }
 
 message Empty {}
@@ -188,6 +196,18 @@ message TranslogEntry {
     AddItem add = 2;
     uint64 remove_logical = 3;
   }
+}
+
+// ---- translog retention leases (ADR-040, clustering step 5d) ----
+message RetentionLeaseRequest {
+  uint32 op = 1;               // 0 = acquire, 1 = renew, 2 = release
+  uint64 lease_id = 2;         // the lease to renew/release (ignored for acquire)
+  uint64 pos = 3;              // renew: the new retained position (the consumer's high-water)
+  uint64 dict_fingerprint = 4; // the source refuses a mismatch (divergent feature space)
+}
+message RetentionLeaseReply {
+  uint64 lease_id = 1;         // acquire: the newly assigned lease id (0 for renew/release)
+  uint64 pos = 2;              // acquire: the pinned translog position (0 for renew/release)
 }
 
 // ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----

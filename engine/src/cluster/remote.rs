@@ -323,4 +323,49 @@ impl Shard for RemoteShard {
             Ok(out)
         })
     }
+
+    // ---- translog retention leases (ADR-040) ----
+    fn acquire_retention_lease(&self) -> Result<(u64, LogPos), ShardError> {
+        let mut client = self.client.clone();
+        let req = proto::RetentionLeaseRequest {
+            op: 0,
+            lease_id: 0,
+            pos: 0,
+            dict_fingerprint: self.dict_fp,
+        };
+        let reply = self
+            .handle
+            .block_on(async move { client.retention_lease(req).await })
+            .map_err(rpc_err)?
+            .into_inner();
+        Ok((reply.lease_id, LogPos(reply.pos)))
+    }
+
+    fn renew_retention_lease(&self, lease: u64, to: LogPos) -> Result<(), ShardError> {
+        let mut client = self.client.clone();
+        let req = proto::RetentionLeaseRequest {
+            op: 1,
+            lease_id: lease,
+            pos: to.0,
+            dict_fingerprint: self.dict_fp,
+        };
+        self.handle
+            .block_on(async move { client.retention_lease(req).await })
+            .map_err(rpc_err)?;
+        Ok(())
+    }
+
+    fn release_retention_lease(&self, lease: u64) -> Result<(), ShardError> {
+        let mut client = self.client.clone();
+        let req = proto::RetentionLeaseRequest {
+            op: 2,
+            lease_id: lease,
+            pos: 0,
+            dict_fingerprint: self.dict_fp,
+        };
+        self.handle
+            .block_on(async move { client.retention_lease(req).await })
+            .map_err(rpc_err)?;
+        Ok(())
+    }
 }

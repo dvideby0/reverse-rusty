@@ -38,8 +38,11 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > + leader failover, `distributed`-gated). The durable/replicated **per-shard query log (translog)** is built
 > too (step 5c; ADR-039) — peer recovery streams a peer's segments then replays the translog tail, so it need
 > **not quiesce** writes for the copy window (in-process + over gRPC via `FetchTranslog`), and a durable data
-> node self-restarts from its own checkpoint sidecar. Still design-only: translog retention/GC + a brief
-> finalize under sustained writes, normalizer/vocab shipping, TLS/auth, and autoscaling/auto-split.
+> node self-restarts from its own checkpoint sidecar. **Translog retention leases + finalize** (step 5d; ADR-040)
+> close 5c's gaps: `seal_for_checkpoint` trims to `min(P, lease_floor)` so a concurrent seal can't strand an
+> in-flight recovery (and the translog GCs when idle), and a lease-held convergence loop + atomic in-sync
+> promotion shrink the quiesce window to the residual delta. Still design-only: a durable Raft log + restart
+> recovery, an allocator on the shard→node map, normalizer/vocab shipping, TLS/auth, and autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
@@ -180,6 +183,11 @@ Elasticsearch's per-shard **translog** / Cassandra's commitlog.
   from a peer** that already holds them, then replays the log tail — the Elasticsearch/Cassandra model.
   (No attach-from-shared-storage, because there is no shared storage; the cost is one peer-to-peer segment
   copy at recovery, which a warm standby replica avoids — failover is then just promotion.)
+- **Recovery does not pause writes** (built — ADR-039/040). The source keeps serving and accepting writes
+  during the copy: the new owner streams segments at position `P` then replays the per-shard **translog** tail
+  (> `P`). A **retention lease** pins that tail so a concurrent seal can't trim it (the Elasticsearch
+  peer-recovery retention lease), and a brief **finalize** loop drains the residual before the replica is
+  promoted into the in-sync set — so the quiesce window is the residual delta, not the whole copy.
 
 ### 4.3 Control plane — quorum cluster-manager (Elasticsearch-style)
 - A small set of **cluster-manager-eligible nodes** hold the **cluster state**: the consistent-hash
@@ -372,6 +380,19 @@ without operator action. The defaults are the product.
      `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_without_quiescing` + `replica.rs` in-process tests.
      **Distinct from the control-plane doc** — the control plane (5a/5b) holds cluster *state*, never the query
      mutations this log carries.
+   - 5d. **Translog retention + finalize.** ✅ **Done** (ADR-040): closes step 5c's two scope gaps. **Retention
+     leases** (the Elasticsearch peer-recovery retention lease): the recovery source holds a lease set and
+     `seal_for_checkpoint` trims the translog to `min(P, lease_floor)` instead of `P`, so a **concurrent** seal
+     (another recovery's `FetchSegments`, a checkpoint) can no longer trim away the tail an in-flight recovery
+     still needs — a latent false negative 5c left open — while an idle shard (no lease) trims to `P` (byte-
+     identical to 5c) so the translog GCs. **Finalize:** recovery holds one lease across a convergence loop
+     (`catch_up_replica` until the tail stops advancing), then promotes the replica into the in-sync set under a
+     brief write quiesce, so the window shrinks to the residual delta, not the whole copy. `ReplicatedShard`
+     gained runtime replica growth (`add_recovered_replica`); `ClusterEngine::add_replica` exposes it; over gRPC
+     a `RetentionLease` RPC plumbs acquire/renew/release. Correctness never depends on the loop converging (the
+     lease keeps the tail safe), only the window size does. Proven by `replica.rs` unit tests +
+     `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_converges_under_sustained_writes` (a writer thread streams
+     adds CONCURRENTLY with the recovery; recovered ≡ live source ≡ brute over the final set).
 6. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
 7. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
@@ -380,9 +401,9 @@ without operator action. The defaults are the product.
 step 3b's per-shard local durable segments, step 4's per-shard replication + peer recovery (4a in-process,
 4b over gRPC), the **quorum/Raft control plane** — step 5a's seam AND step 5b's openraft backend + gRPC
 `ControlService` — AND step 5c's **per-shard translog + no-quiesce peer recovery** are built; ADR-027 + ADR-029
-+ ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039. The remaining shared-nothing
-multi-node work — translog retention/GC + a brief finalize under sustained writes, a durable Raft log, and
-autoscale + auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
++ ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040. The remaining
+shared-nothing multi-node work — a durable Raft log + restart recovery, an allocator acting on the shard→node
+map, and autoscale + auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
 
 ---
 

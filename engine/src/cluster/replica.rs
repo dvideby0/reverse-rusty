@@ -66,9 +66,15 @@ struct ReplicaSlot {
 /// A [`Shard`] composite: one primary + N replicas for a single shard position.
 pub(crate) struct ReplicatedShard {
     primary: Box<dyn Shard>,
-    replicas: Vec<ReplicaSlot>,
-    /// Serializes write/seal so a write never interleaves with another op's replica fan-out
-    /// (and so a future live peer-recovery can quiesce the position). Reads are lock-free.
+    /// The replica set. `Mutex<Vec<Arc<_>>>` (not a bare `Vec`) so a peer-recovered replica can be
+    /// promoted into the in-sync set AT RUNTIME (ADR-040's finalize) without rebuilding the
+    /// composite. Reads/fan-out snapshot-clone the `Arc` handles out under the lock and then work
+    /// on the clones, so a slow (remote) probe never holds the lock; mutation of the set happens
+    /// only under `write_lock`, so it can't race a fan-out.
+    replicas: Mutex<Vec<Arc<ReplicaSlot>>>,
+    /// Serializes write/seal so a write never interleaves with another op's replica fan-out, and
+    /// so the finalize step ([`Self::promote_recovered_replica`]) can briefly quiesce the position
+    /// to drain the last residual + insert the new replica atomically. Reads are lock-free.
     write_lock: Mutex<()>,
     /// Where degraded-redundancy events go once the coordinator installs its observer; until
     /// then they buffer in `pending_events` and flush on [`Self::set_event_sink`].
@@ -82,18 +88,29 @@ impl ReplicatedShard {
     pub(crate) fn new(primary: Box<dyn Shard>, replicas: Vec<Box<dyn Shard>>) -> Self {
         let replicas = replicas
             .into_iter()
-            .map(|shard| ReplicaSlot {
-                shard,
-                in_sync: AtomicBool::new(true),
+            .map(|shard| {
+                Arc::new(ReplicaSlot {
+                    shard,
+                    in_sync: AtomicBool::new(true),
+                })
             })
             .collect();
         ReplicatedShard {
             primary,
-            replicas,
+            replicas: Mutex::new(replicas),
             write_lock: Mutex::new(()),
             event_sink: Mutex::new(None),
             pending_events: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Snapshot-clone the current replica handles (cheap `Arc` clones) so a read/fan-out can work
+    /// on a stable list without holding the replica-set lock across a (possibly remote) probe.
+    fn replica_handles(&self) -> Vec<Arc<ReplicaSlot>> {
+        self.replicas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
@@ -129,7 +146,7 @@ impl ReplicatedShard {
             Err(e @ ShardError::Remote(_)) => e,
             Err(e) => return Err(e),
         };
-        for slot in &self.replicas {
+        for slot in self.replica_handles() {
             if !slot.in_sync.load(Ordering::Acquire) {
                 continue; // never serve a stale replica
             }
@@ -146,7 +163,7 @@ impl ReplicatedShard {
     /// errors is dropped from the in-sync set and flagged; the op still succeeds (the
     /// authoritative primary holds the write). Caller holds [`Self::lock`].
     fn fan_to_replicas(&self, op: impl Fn(&dyn Shard) -> Result<(), ShardError>) {
-        for (i, slot) in self.replicas.iter().enumerate() {
+        for (i, slot) in self.replica_handles().iter().enumerate() {
             if !slot.in_sync.load(Ordering::Acquire) {
                 continue;
             }
@@ -162,6 +179,35 @@ impl ReplicatedShard {
                 });
             }
         }
+    }
+
+    /// Atomically promote a peer-recovered `replica` into the in-sync set under a brief write
+    /// quiesce (ADR-040). Holding `write_lock` blocks every composite write/fan-out, so the final
+    /// residual drain + the in-sync insertion happen with NO write able to slip between them (which
+    /// would be a silently-missed replica write — a redundancy gap, not a correctness gap, but
+    /// closed regardless). The window is just the residual the convergence loop left, then the
+    /// retention lease is released so the primary may trim the consumed tail again.
+    fn promote_recovered_replica(
+        &self,
+        replica: Box<dyn Shard>,
+        from: LogPos,
+        norm: &Normalizer,
+        dict: &Dict,
+        lease: u64,
+    ) -> Result<(), ShardError> {
+        let _g = self.lock();
+        // Re-entrancy-safe under `write_lock`: this reads the primary's translog + writes the new
+        // replica's engine, neither of which takes the composite lock.
+        catch_up_replica(replica.as_ref(), self.primary.as_ref(), norm, dict, from)?;
+        self.replicas
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::new(ReplicaSlot {
+                shard: replica,
+                in_sync: AtomicBool::new(true),
+            }));
+        self.primary.release_retention_lease(lease)?;
+        Ok(())
     }
 }
 
@@ -239,6 +285,81 @@ impl Shard for ReplicatedShard {
     // source); a recovering replica is brought up from the primary's segments + this tail.
     fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
         self.primary.translog_tail(from)
+    }
+
+    // ---- translog retention (ADR-040): the PRIMARY is the recovery source, so leases live there ----
+    fn acquire_retention_lease(&self) -> Result<(u64, LogPos), ShardError> {
+        self.primary.acquire_retention_lease()
+    }
+    fn renew_retention_lease(&self, lease: u64, to: LogPos) -> Result<(), ShardError> {
+        self.primary.renew_retention_lease(lease, to)
+    }
+    fn release_retention_lease(&self, lease: u64) -> Result<(), ShardError> {
+        self.primary.release_retention_lease(lease)
+    }
+
+    /// Bring up a NEW replica and add it to the in-sync set WITHOUT quiescing writes for the
+    /// segment-copy window (ADR-040's finalize, closing ADR-036's whole-copy quiesce): peer-recover
+    /// a snapshot at `P` + the initial tail, loop the catch-up until the tail stops advancing (a
+    /// `max_passes` safety bound), then promote under a brief write quiesce. A retention lease held
+    /// on the primary for the whole flow guarantees the tail the recovery still needs is never
+    /// trimmed by a concurrent seal — so correctness never depends on the loop converging, only the
+    /// final quiesce window's size does (`max_passes` shrinks it toward zero). Durable primary only.
+    fn add_recovered_replica(
+        &self,
+        norm: &Arc<Normalizer>,
+        dict: &Arc<Dict>,
+        config: EngineConfig,
+        primary_dir: &Path,
+        replica_dir: &Path,
+        max_passes: usize,
+    ) -> Result<(), ShardError> {
+        // One lease pins the primary's tail across the whole recovery; released at promotion, or
+        // on failure (below) so a botched recovery can't pin the translog forever.
+        let (lease, _at) = self.primary.acquire_retention_lease()?;
+        let recover = || -> Result<(Box<dyn Shard>, LogPos), ShardError> {
+            // Bulk copy at P + the initial tail replay — writes to the primary continue throughout.
+            let (replica, mut hwm) = peer_recover(
+                norm,
+                dict,
+                config,
+                self.primary.as_ref(),
+                primary_dir,
+                replica_dir,
+            )?;
+            self.primary.renew_retention_lease(lease, hwm)?;
+            // Convergence loop: drain the un-sealed tail repeatedly until it stops advancing,
+            // shrinking the residual the final quiesce must cover. Renew the lease each pass so the
+            // primary can GC the now-consumed prefix on its next seal.
+            for _ in 0..max_passes {
+                let next = catch_up_replica(&replica, self.primary.as_ref(), norm, dict, hwm)?;
+                self.primary.renew_retention_lease(lease, next)?;
+                if next == hwm {
+                    break; // tail fully drained at this instant — converged
+                }
+                hwm = next;
+            }
+            Ok((Box::new(replica) as Box<dyn Shard>, hwm))
+        };
+        match recover() {
+            Ok((replica, hwm)) => self.promote_recovered_replica(replica, hwm, norm, dict, lease),
+            Err(e) => {
+                // Best-effort cleanup: release the lease so a botched recovery can't pin the
+                // primary's translog forever. A release failure (only a remote primary could
+                // produce one) is surfaced, not swallowed; the original recovery error is returned.
+                if let Err(rel) = self.primary.release_retention_lease(lease) {
+                    self.emit(EngineEvent::DurabilityFailure {
+                        op: DurabilityOp::ReplicaDesync,
+                        detail: "releasing the retention lease after a failed peer recovery also \
+                                 failed; the primary may retain extra translog until its next \
+                                 successful seal"
+                            .into(),
+                        error: rel.to_string(),
+                    });
+                }
+                Err(e)
+            }
+        }
     }
 
     // ---- observability ----
@@ -532,7 +653,9 @@ mod tests {
 
         // Drop the replica out of sync: with no healthy copy the read must ERR, never return
         // an empty set (that would be a silent false negative).
-        rs.replicas[0].in_sync.store(false, Ordering::Release);
+        rs.replica_handles()[0]
+            .in_sync
+            .store(false, Ordering::Release);
         assert!(
             matches!(
                 rs.percolate("alpha bravo zulu", false),
@@ -618,7 +741,7 @@ mod tests {
             "a replica write failure must not fail the op (primary is authoritative)"
         );
         assert!(
-            !rs.replicas[0].in_sync.load(Ordering::Acquire),
+            !rs.replica_handles()[0].in_sync.load(Ordering::Acquire),
             "the failed replica must drop out of the in-sync set"
         );
         assert!(
@@ -659,7 +782,10 @@ mod tests {
         // Primary and replica must hold the same live set.
         assert_eq!(
             rs.primary.num_queries().expect("primary count"),
-            rs.replicas[0].shard.num_queries().expect("replica count"),
+            rs.replica_handles()[0]
+                .shard
+                .num_queries()
+                .expect("replica count"),
             "primary and replica query counts diverged"
         );
         for title in [
@@ -669,7 +795,7 @@ mod tests {
             "nothing here",
         ] {
             let (mut p, _) = rs.primary.percolate(title, true).expect("primary read");
-            let (mut r, _) = rs.replicas[0]
+            let (mut r, _) = rs.replica_handles()[0]
                 .shard
                 .percolate(title, true)
                 .expect("replica read");
@@ -930,6 +1056,149 @@ mod tests {
             reopened.num_queries().expect("count"),
             4,
             "physical count = 2 sealed + 2 tail (id 1 tombstoned, awaiting compaction)"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn seal_honors_retention_lease_so_concurrent_seal_keeps_the_recovery_tail() {
+        // ADR-040: a peer recovery acquires a retention lease at position `at`, then more writes
+        // land and the source SEALS AGAIN (a concurrent checkpoint, or another recovery's
+        // FetchSegments). Without the lease that seal would trim the translog to its new `P`,
+        // erasing the tail (> at) the in-flight recovery still needs — a silent false negative.
+        // With the lease the seal trims only to `at`, so the tail survives; releasing it lets the
+        // source GC again. (This is the latent FN ADR-039's no-quiesce path left open.)
+        let (norm, dict, corpus) = compile_corpus(&[
+            (1, "alpha bravo"),
+            (2, "charlie delta"),
+            (3, "echo foxtrot"),
+        ]);
+        let dir = scratch_dir("retain");
+        let cfg = EngineConfig {
+            data_dir: Some(dir.clone()),
+            ..EngineConfig::default()
+        };
+        let primary = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), cfg)
+            .expect("durable primary");
+        // Seed id 1 and seal a base — the recovery baseline.
+        primary
+            .insert_extracted(&corpus[0].1, 1, 1, &corpus[0].2)
+            .expect("ins 1");
+        let at_seal = primary.seal_for_checkpoint().expect("seal 1");
+
+        // The recovery pins the tail at the current high-water.
+        let (lease, at) = primary.acquire_retention_lease().expect("lease");
+        assert_eq!(at, at_seal, "lease pins the post-seal high-water");
+
+        // Writes land AFTER the snapshot (into the translog, > at).
+        primary
+            .insert_extracted(&corpus[1].1, 2, 1, &corpus[1].2)
+            .expect("ins 2");
+        primary
+            .insert_extracted(&corpus[2].1, 3, 1, &corpus[2].2)
+            .expect("ins 3");
+
+        // A concurrent seal: WITHOUT the lease it would trim to its new P and drop (at, P]; the
+        // lease holds the floor at `at`, so the tail the recovery needs survives.
+        let p1 = primary.seal_for_checkpoint().expect("seal 2");
+        assert!(
+            p1 > at,
+            "the second seal advanced the checkpoint past the pinned point"
+        );
+        let tail = primary.translog_tail(at).expect("tail");
+        let ids: Vec<u64> = tail
+            .iter()
+            .map(|(_, m)| match m {
+                ClusterMutation::Add { logical, .. } | ClusterMutation::Remove { logical } => {
+                    *logical
+                }
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![2, 3],
+            "the lease kept the post-snapshot tail (> at)"
+        );
+
+        // Release: the next seal trims freely again (GC), so the pinned tail is now gone.
+        primary.release_retention_lease(lease).expect("release");
+        primary.seal_for_checkpoint().expect("seal 3");
+        assert!(
+            primary
+                .translog_tail(at)
+                .expect("tail after release")
+                .is_empty(),
+            "a released lease lets the source GC the consumed tail"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_recovered_replica_promotes_an_in_sync_set_equal_replica() {
+        // ADR-040 finalize: add a replica to a live position at runtime — peer-recover + converge +
+        // promote under a brief quiesce. The promoted replica is in-sync (a later write fans out to
+        // it) and set-equal to the primary.
+        let (norm, dict, corpus) = compile_corpus(&[
+            (1, "alpha bravo"),
+            (2, "charlie delta"),
+            (3, "golf hotel"), // written AFTER promotion, so the frozen dict must already know it
+        ]);
+        let tmp = scratch_dir("addrep");
+        let primary_dir = tmp.join("primary");
+        let replica_dir = tmp.join("replica");
+        let pc = EngineConfig {
+            data_dir: Some(primary_dir.clone()),
+            ..EngineConfig::default()
+        };
+        let primary = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), pc)
+            .expect("durable primary");
+        primary
+            .insert_extracted(&corpus[0].1, 1, 1, &corpus[0].2)
+            .expect("ins 1");
+        primary
+            .insert_extracted(&corpus[1].1, 2, 1, &corpus[1].2)
+            .expect("ins 2");
+
+        // A composite with the durable primary and NO replicas yet; grow one at runtime.
+        let rs = ReplicatedShard::new(Box::new(primary), vec![]);
+        rs.add_recovered_replica(
+            &norm,
+            &dict,
+            EngineConfig::default(),
+            &primary_dir,
+            &replica_dir,
+            8,
+        )
+        .expect("add replica");
+
+        assert_eq!(rs.replica_handles().len(), 1, "one replica promoted");
+        assert!(
+            rs.replica_handles()[0].in_sync.load(Ordering::Acquire),
+            "the promoted replica is in the in-sync set"
+        );
+
+        // A write AFTER promotion must fan out to the new replica (proof it is truly in-sync).
+        rs.insert_extracted(&corpus[2].1, 3, 1, &corpus[2].2)
+            .expect("post-promotion write");
+
+        let replica = rs.replica_handles()[0].clone();
+        for title in ["alpha bravo zulu", "charlie delta zulu", "golf hotel zulu"] {
+            let (mut p, _) = rs.primary.percolate(title, true).expect("primary");
+            let (mut r, _) = replica.shard.percolate(title, true).expect("replica");
+            p.sort_unstable();
+            r.sort_unstable();
+            assert_eq!(
+                p, r,
+                "replica diverged from primary on {title:?} after promotion"
+            );
+        }
+        let (probe, _) = replica
+            .shard
+            .percolate("golf hotel zulu", true)
+            .expect("read");
+        assert!(
+            probe.contains(&3),
+            "the post-promotion write must have fanned out to the in-sync replica: {probe:?}"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -195,9 +195,26 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   oracle is unchanged. Proven by `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_without_quiescing` (recovered
   ≡ live source ≡ brute over the final live set across the wire), `replica.rs::peer_recover_replays_tail_without_quiescing`
   + `::durable_shard_self_restarts_from_translog`, and `translog.rs` unit tests. `translog.rs` is std-only (lean
-  core); the gRPC pieces are `distributed`-gated. **Honest scope:** under sustained writes full convergence still
-  needs a brief finalize (the quiesce window shrinks to the residual delta, not the whole copy); translog
-  retention/GC for a slow follower, TLS/auth, and an allocator acting on the shard→node map remain design-only.
+  core); the gRPC pieces are `distributed`-gated. **Honest scope (closed by ADR-040 below):** retention/GC and the
+  finalize loop landed in step 5d; TLS/auth and an allocator acting on the shard→node map remain design-only.
+- **Translog retention leases + finalize under sustained writes (ADR-040)** — clustering build-path step 5d,
+  closing ADR-039's two scope gaps. (1) **Retention leases** (the Elasticsearch peer-recovery retention lease):
+  the recovery source (`LocalShard`) holds a lease set, and `seal_for_checkpoint` now trims the translog to
+  `min(P, lease_floor)` instead of `P` — so a **concurrent** seal (another recovery's `FetchSegments`, a
+  checkpoint) can no longer trim away the tail an in-flight recovery still needs (a latent false negative in
+  ADR-039's no-quiesce path), and with no lease held it trims to `P` (**byte-identical** to ADR-039) so the
+  translog GCs the moment no recovery needs it. Three `Shard` methods (acquire/renew/release, default no-op);
+  over gRPC a `RetentionLease` RPC. (2) **Finalize:** recovery holds one lease across a **convergence loop**
+  (`catch_up_replica` until the tail stops advancing), then promotes the replica into the in-sync set under a
+  brief write quiesce — the window shrinks to the residual delta, not the whole copy. `ReplicatedShard` gained
+  runtime replica growth (`add_recovered_replica`) and `ClusterEngine::add_replica` exposes it; correctness
+  never depends on the loop converging (the lease keeps the tail safe), only the window size does. Default
+  in-memory / RF=1 paths byte-identical; proven by `replica.rs` unit tests (retention-keeps-tail-across-a-
+  concurrent-seal, runtime in-sync promotion) + `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_converges_under_sustained_writes`
+  (a writer thread streams adds concurrently with the recovery; recovered ≡ live source ≡ brute over the final
+  set). Lean-core retention + finalize; the RPC is `distributed`-gated. **Honest scope:** a stuck lease has no
+  time/size expiry yet; cross-node in-sync promotion of a remote replica routes through the allocator (design-only);
+  TLS/auth deferred.
 
 ## Measured
 
@@ -279,10 +296,13 @@ the selective candidate count further.
   per-shard query log (translog)** is **built** too (step 5c / ADR-039): peer recovery now streams a peer's
   segments at position `P` then replays the per-shard translog tail (> `P`), so it need **not quiesce** writes
   for the copy window (the ADR-036 gap closed, both in-process and over gRPC via `FetchTranslog`), and a durable
-  data node self-restarts from its own checkpoint sidecar. **Still design-only** (the shared-nothing multi-node
-  roadmap): translog retention/GC for a slow follower + a brief finalize under sustained writes, a durable Raft
-  log (CRC-framed) + restart recovery, an allocator that acts on the shard→node map, normalizer/vocab shipping,
-  autoscaling, auto-split, replicate-broad-to-all, and TLS/auth.
+  data node self-restarts from its own checkpoint sidecar. **Translog retention + finalize** is built too (step
+  5d / ADR-040): retention leases make `seal_for_checkpoint` trim to `min(P, lease_floor)` so a concurrent seal
+  can't strand an in-flight recovery's tail (and the translog GCs when no recovery needs it), and a lease-held
+  convergence loop + atomic in-sync promotion shrink the quiesce window to the residual delta. **Still
+  design-only** (the shared-nothing multi-node roadmap): a durable Raft log (CRC-framed) + restart recovery, an
+  allocator that acts on the shard→node map, normalizer/vocab shipping, autoscaling, auto-split,
+  replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
@@ -415,10 +435,13 @@ from the audit's former P3 list). Roughly grouped:
   lean core never compiles openraft). The **durable + replicated per-shard query log (translog) is built** too
   (ADR-039): peer recovery streams a peer's segments then replays the per-shard translog tail, so it need **not
   quiesce** writes for the copy window (in-process + over gRPC via `FetchTranslog`), and a durable data node
-  self-restarts from its own checkpoint sidecar. A full multi-node deployment still needs the remaining
-  **shared-nothing** layers — translog retention/GC for a slow follower (+ a brief finalize under sustained
-  writes), a durable Raft log + restart recovery, an allocator that acts on the shard→node map, plus
-  autoscaling — designed but not built (no object store / cloud dependency anywhere; ADR-033); see Tier 3.
+  self-restarts from its own checkpoint sidecar. **Translog retention leases + finalize** (ADR-040) close
+  ADR-039's scope gaps — `seal_for_checkpoint` trims to `min(P, lease_floor)` so a concurrent seal can't strand
+  an in-flight recovery (and the translog GCs when idle), and a lease-held convergence loop + atomic in-sync
+  promotion shrink the quiesce window to the residual delta. A full multi-node deployment still needs the
+  remaining **shared-nothing** layers — a durable Raft log + restart recovery, an allocator that acts on the
+  shard→node map, plus autoscaling — designed but not built (no object store / cloud dependency anywhere;
+  ADR-033); see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator
   **ships** its frozen dict to each server at connect (ADR-034), and the ADR-030 fingerprint handshake fails
   loud (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can

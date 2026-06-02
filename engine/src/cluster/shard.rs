@@ -20,7 +20,8 @@
 //! the `distributed` feature) lives in `super::remote` and satisfies the same trait
 //! by issuing gRPC calls.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use arc_swap::ArcSwap;
@@ -177,12 +178,92 @@ pub(crate) trait Shard: Send + Sync {
     /// (closing ADR-036's gap). A non-durable (in-memory) shard returns an empty tail.
     fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError>;
 
+    // ---- translog retention leases (ADR-040; clustering step 5d) ----
+    /// Acquire a retention lease pinning this shard's current un-sealed translog tail: until
+    /// the lease is renewed or released, [`seal_for_checkpoint`](Shard::seal_for_checkpoint)
+    /// will NOT trim the translog past the returned position. A peer recovery acquires one
+    /// before snapshotting segments, so even if the source seals AGAIN during the copy (another
+    /// concurrent recovery, a checkpoint) the tail the recovery still needs survives — closing a
+    /// latent false negative in ADR-039's no-quiesce path (a concurrent seal could strand it).
+    /// Returns `(lease_id, pinned_pos)`. Default (in-memory / non-durable): a no-op lease at
+    /// `LogPos(0)` — such a shard has no on-disk tail to retain and is never a recovery source.
+    fn acquire_retention_lease(&self) -> Result<(u64, LogPos), ShardError> {
+        Ok((0, LogPos(0)))
+    }
+    /// Advance a retention lease to `to` as a recovery consumer catches up, so the source may GC
+    /// the now-consumed prefix on its next seal (the lease only ever moves forward). Idempotent;
+    /// an unknown lease id is ignored. Default: a no-op.
+    fn renew_retention_lease(&self, _lease: u64, _to: LogPos) -> Result<(), ShardError> {
+        Ok(())
+    }
+    /// Release a retention lease — the recovery finished or aborted, so the source may again trim
+    /// freely to its checkpoint. Idempotent (releasing twice, or an unknown id, is a no-op).
+    /// Default: a no-op.
+    fn release_retention_lease(&self, _lease: u64) -> Result<(), ShardError> {
+        Ok(())
+    }
+
+    // ---- runtime replica growth (ADR-040; clustering step 5d) ----
+    /// Bring up a NEW replica for this position from its primary and add it to the in-sync set
+    /// WITHOUT quiescing writes for the segment-copy window — peer-recover a snapshot + tail, loop
+    /// the catch-up to shrink the residual, then promote under a brief write quiesce (the finalize).
+    /// A retention lease pins the primary's tail across the flow, so a concurrent seal can't strand
+    /// it. Default: error — only a replicated position ([`ReplicatedShard`](super::replica::ReplicatedShard))
+    /// can grow a local replica here (a bare/remote position has no in-process primary to copy from).
+    fn add_recovered_replica(
+        &self,
+        _norm: &Arc<Normalizer>,
+        _dict: &Arc<Dict>,
+        _config: EngineConfig,
+        _primary_dir: &Path,
+        _replica_dir: &Path,
+        _max_passes: usize,
+    ) -> Result<(), ShardError> {
+        Err(ShardError::Config(
+            "this shard position cannot grow an in-process replica (not a replicated local position)"
+                .into(),
+        ))
+    }
+
     // ---- observability (ADR-035) ----
     /// Install an event sink so this shard can surface degraded-redundancy events — e.g. a
     /// [`ReplicatedShard`](super::replica::ReplicatedShard) replica falling out of its
     /// in-sync set. Default: a no-op (a plain [`LocalShard`]/`RemoteShard` emits nothing
     /// here). The coordinator fans its observer in via `ClusterEngine::set_observer`.
     fn set_event_sink(&self, _sink: EventSink) {}
+}
+
+/// Translog retention leases (ADR-040): a set of `lease_id → retained_pos`. A recovery source
+/// keeps every translog op strictly after `min(retained_pos)`, so an in-flight peer recovery's
+/// tail is never trimmed out from under it by a concurrent seal. With no leases the floor is
+/// absent and a seal trims to its checkpoint `P` — byte-identical to ADR-039.
+#[derive(Default)]
+struct RetentionLeases {
+    next_id: u64,
+    held: BTreeMap<u64, u64>,
+}
+
+impl RetentionLeases {
+    /// Register a lease pinning ops `> at`; returns its id.
+    fn acquire(&mut self, at: u64) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.held.insert(id, at);
+        id
+    }
+    /// Advance a lease forward (monotonic — a lease never moves a consumer's cursor back).
+    fn renew(&mut self, id: u64, to: u64) {
+        if let Some(p) = self.held.get_mut(&id) {
+            *p = (*p).max(to);
+        }
+    }
+    fn release(&mut self, id: u64) {
+        self.held.remove(&id);
+    }
+    /// The lowest pinned position across all leases (`None` ⇒ no lease ⇒ trim freely to `P`).
+    fn floor(&self) -> Option<u64> {
+        self.held.values().copied().min()
+    }
 }
 
 /// One in-process shard: owned engine for writes + lock-free snapshot for reads, plus a
@@ -196,6 +277,11 @@ pub(crate) struct LocalShard {
     engine: Mutex<Engine>,
     snapshot: ArcSwap<EngineSnapshot>,
     translog: Box<translog::ShardLog>,
+    /// Open peer-recovery retention leases (ADR-040): while any is held, `seal_for_checkpoint`
+    /// trims the translog only to `min(P, leases.floor())`, so a concurrent seal can't strand an
+    /// in-flight recovery's tail. A separate `Mutex` from `engine` (lock order is always
+    /// engine→retention; the lease methods take only this one).
+    retention: Mutex<RetentionLeases>,
     /// Retained for translog replay (re-derive features from raw DSL) on self-restart, and to
     /// stamp the per-shard checkpoint sidecar's dict fingerprint.
     norm: Arc<Normalizer>,
@@ -215,6 +301,7 @@ impl LocalShard {
             engine: Mutex::new(engine),
             snapshot,
             translog: translog::null(),
+            retention: Mutex::new(RetentionLeases::default()),
             norm,
             dict,
             data_dir: None,
@@ -246,6 +333,7 @@ impl LocalShard {
             engine: Mutex::new(engine),
             snapshot,
             translog,
+            retention: Mutex::new(RetentionLeases::default()),
             norm,
             dict,
             data_dir: Some(dir),
@@ -283,6 +371,7 @@ impl LocalShard {
             engine: Mutex::new(engine),
             snapshot,
             translog,
+            retention: Mutex::new(RetentionLeases::default()),
             norm,
             dict,
             data_dir: dir,
@@ -325,6 +414,7 @@ impl LocalShard {
             engine: Mutex::new(engine),
             snapshot,
             translog,
+            retention: Mutex::new(RetentionLeases::default()),
             norm,
             dict,
             data_dir: Some(dir),
@@ -497,7 +587,19 @@ impl Shard for LocalShard {
                 },
             )?;
         }
-        self.translog.checkpoint(p)?;
+        // Trim the translog only to the retention floor (ADR-040): a held peer-recovery lease
+        // keeps the tail a recovery still needs even though we seal here. With no lease the floor
+        // is absent and this is `p` — byte-identical to ADR-039. The segments still capture every
+        // op ≤ `p` (the sidecar's `local_checkpoint` is `p`); any retained ops in `(trim_to, p]`
+        // are redundant with the segments and position-filtered out on replay (replay is from `p`).
+        let trim_to = {
+            let r = self
+                .retention
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            r.floor().map_or(p.0, |f| p.0.min(f))
+        };
+        self.translog.checkpoint(LogPos(trim_to))?;
         Ok(p)
     }
 
@@ -513,6 +615,36 @@ impl Shard for LocalShard {
 
     fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
         Ok(self.translog.replay(from)?.entries)
+    }
+
+    fn acquire_retention_lease(&self) -> Result<(u64, LogPos), ShardError> {
+        // Pin at the current high-water so every un-sealed op is retained for the recovery. The
+        // read-then-register is benign under a racing seal: a seal that trims to `L' > at` before
+        // this lease registers also sealed `(at, L']` into segments, so a recovery copying segments
+        // at `P ≥ L'` still has them; once registered, no future seal trims past `at`.
+        let at = self.translog.last_pos()?;
+        let id = self
+            .retention
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .acquire(at.0);
+        Ok((id, at))
+    }
+
+    fn renew_retention_lease(&self, lease: u64, to: LogPos) -> Result<(), ShardError> {
+        self.retention
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .renew(lease, to.0);
+        Ok(())
+    }
+
+    fn release_retention_lease(&self, lease: u64) -> Result<(), ShardError> {
+        self.retention
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .release(lease);
+        Ok(())
     }
 }
 
