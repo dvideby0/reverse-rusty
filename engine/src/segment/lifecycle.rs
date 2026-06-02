@@ -287,6 +287,26 @@ impl Engine {
         recompiled
     }
 
+    /// Learn alias/synonym rules from this engine's live corpus (ADR-015 any-of learning)
+    /// and apply them (ADR-046 mechanism 2): a synonym appearing in at least `min_count`
+    /// any-of groups (e.g. `(rookie,rc)` ⇒ `rc → rookie`) is merged UNDER the current
+    /// vocabulary (a previously set alias wins) and the index is recompiled so the change
+    /// takes effect immediately. Returns the number of queries recompiled.
+    pub fn learn_and_apply(
+        &mut self,
+        min_count: usize,
+    ) -> Result<usize, crate::error::NormalizerError> {
+        let corpus = self.live_sources();
+        let learned = crate::vocab::learn_from_queries(&corpus, min_count);
+        let mut merged = crate::vocab::Vocab::new();
+        if let Some(v) = &self.vocab {
+            merged.merge(v);
+        }
+        merged.merge(&learned);
+        self.set_vocab(merged)?; // bumps the epoch / marks segments stale
+        Ok(self.recompile_stale_segments())
+    }
+
     /// Open an engine from an existing data directory, recovering state from
     /// the manifest and WAL. The normalizer must be the same one used when the
     /// engine was originally built (feature spaces must align).

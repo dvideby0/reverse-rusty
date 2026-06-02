@@ -231,6 +231,41 @@ fn recompile_stale_segments_absorbs_declared_alias() {
     );
 }
 
+#[test]
+fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
+    // Engine::learn_and_apply learns `rc → rookie` from the corpus's any-of groups
+    // (ADR-015) and recompiles (ADR-046) so a query phrased with the abbreviation
+    // matches a title with the canonical form — zero false negatives.
+    let mut engine = Engine::new(make_norm());
+    let mut qs: Vec<(u64, String)> = vec![(1, "fleer rc".into())];
+    for i in 0..4u64 {
+        qs.push((100 + i, "(rookie,rc)".into())); // ≥ min_count any-of groups
+    }
+    engine.build_from_queries(&qs);
+
+    // Before learning, "rc" and "rookie" are distinct, so the rookie title doesn't match.
+    assert!(!match_ids(&engine, "fleer rookie").contains(&1));
+
+    let recompiled = engine.learn_and_apply(2).expect("learn_and_apply");
+    assert!(recompiled >= 1, "the corpus is recompiled");
+    assert!(
+        !engine.has_stale_segments(),
+        "learn_and_apply clears staleness"
+    );
+
+    // After learning rc → rookie, the rc-phrased query matches a rookie title.
+    assert!(
+        match_ids(&engine, "fleer rookie").contains(&1),
+        "after learning rc→rookie, a rookie title matches the rc-phrased query"
+    );
+    assert!(
+        engine
+            .vocab()
+            .is_some_and(|v| v.synonyms().iter().any(|s| s.token == "rc")),
+        "the learned rc→rookie synonym is recorded"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fix 2: corrupt data graceful handling (no panics)
 // ---------------------------------------------------------------------------

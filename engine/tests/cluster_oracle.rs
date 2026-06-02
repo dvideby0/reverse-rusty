@@ -570,6 +570,59 @@ fn declared_alias_makes_both_surface_forms_match() {
     }
 }
 
+#[test]
+fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
+    // ADR-046 mechanism (2) auto-learning (ADR-015): the cluster learns a synonym from its
+    // OWN corpus's any-of groups — `(rookie,rc)` seen ≥ min_count ⇒ `rc → rookie` — and
+    // applies it. A query phrased with the abbreviation then matches a title written with
+    // the canonical form (zero FN). The learned rule merges under the current vocabulary.
+    let (mut queries, _titles) = build_corpus();
+    let q_rc = 8_300_001u64;
+    queries.push((q_rc, "1994 fleer rc".into())); // a query phrased with the abbreviation
+                                                  // Plant ≥ min_count any-of groups so the learner discovers rc → rookie.
+    for i in 0..4u64 {
+        queries.push((8_300_100 + i, "(rookie,rc)".into()));
+    }
+
+    let cfg = ClusterConfig {
+        num_shards: 8,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+
+    let title_rookie = "1994 fleer rookie psa 10";
+    // Before learning, "rc" and "rookie" are distinct features (the default vocab is empty).
+    assert!(
+        !cluster.percolate(title_rookie).unwrap().contains(&q_rc),
+        "before learning, a rookie title must not match the rc-phrased query"
+    );
+
+    // Learn from the corpus's any-of groups (min_count = 2) and apply.
+    let rebuilt = cluster.learn_and_apply(2).expect("learn_and_apply");
+    assert!(rebuilt > 100, "learn_and_apply rebuilds the whole corpus");
+
+    // After learning rc → rookie, both surface forms match the rc-phrased query (zero FN).
+    assert!(
+        cluster.percolate(title_rookie).unwrap().contains(&q_rc),
+        "after learning rc→rookie, a rookie title matches the rc-phrased query"
+    );
+    assert!(
+        cluster
+            .percolate("1994 fleer rc psa 10")
+            .unwrap()
+            .contains(&q_rc),
+        "the abbreviation form still matches after learning"
+    );
+    // The learned synonym is recorded + introspectable on the cluster.
+    assert!(
+        cluster
+            .vocab()
+            .is_some_and(|v| v.synonyms().iter().any(|s| s.token == "rc")),
+        "the learned rc→rookie synonym is recorded in the cluster vocab"
+    );
+}
+
 /// `ingest()` must refuse a non-empty cluster: it re-indexes from scratch, so calling it
 /// on an already-populated cluster would silently duplicate entries (the ADR-029 footgun).
 /// It returns `ShardError::Config` instead. (The happy path — ingest into a freshly

@@ -15,7 +15,8 @@
 //!   GET  /_metrics           Prometheus text exposition format
 //!   GET  /_vocab             Current vocabulary as JSON
 //!   PUT  /_vocab             Replace vocabulary (body: Vocab JSON)
-//!   POST /_vocab/learn       Learn synonyms from raw query text
+//!   POST /_vocab/learn       Learn synonyms from raw query text (returns them)
+//!   POST /_vocab/learn_and_apply  Learn synonyms from stored queries + apply (?min_count=N)
 //!   GET  /_settings          Engine settings as JSON (?include_defaults=true)
 //!   PUT  /_settings          Update dynamic settings (body: flat JSON, e.g. {"max_segments":16})
 //!
@@ -2327,6 +2328,48 @@ async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoResponse {
     Json(vocab)
 }
 
+#[derive(Deserialize, Default)]
+struct LearnApplyQuery {
+    /// Minimum any-of occurrences for a synonym to be learned (ES-style query param).
+    #[serde(default = "default_min_count")]
+    min_count: usize,
+}
+
+#[derive(Serialize)]
+struct LearnApplyResponse {
+    acknowledged: bool,
+    /// Number of stored queries recompiled under the learned-and-applied vocabulary.
+    recompiled: usize,
+}
+
+/// POST /_vocab/learn_and_apply — learn synonyms from the engine's OWN stored queries
+/// (ADR-015 any-of learning) and APPLY them immediately (ADR-046), recompiling the index
+/// so both surface forms of each learned alias match (zero false negatives). `?min_count=N`
+/// (default 2) sets the minimum any-of occurrences. Unlike `POST /_vocab/learn` — which only
+/// returns a vocabulary learned from caller-supplied queries — this changes the live vocabulary.
+async fn learn_and_apply_vocab(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<LearnApplyQuery>,
+) -> impl IntoResponse {
+    let result = {
+        let mut engine = state.engine.lock();
+        match engine.learn_and_apply(q.min_count) {
+            Ok(recompiled) => (
+                StatusCode::OK,
+                Json(LearnApplyResponse {
+                    acknowledged: true,
+                    recompiled,
+                }),
+            )
+                .into_response(),
+            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
+                .into_response(),
+        }
+    };
+    state.publish_snapshot();
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Settings management (ES-style /_settings)
 // ---------------------------------------------------------------------------
@@ -2815,6 +2858,7 @@ async fn main() {
         .route("/_metrics", get(prometheus_metrics))
         .route("/_vocab", get(get_vocab).put(put_vocab))
         .route("/_vocab/learn", post(learn_vocab))
+        .route("/_vocab/learn_and_apply", post(learn_and_apply_vocab))
         .route("/_settings", get(get_settings).put(put_settings))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
@@ -2828,7 +2872,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn",
+        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply",
         "server listening"
     );
 

@@ -167,8 +167,38 @@ impl ClusterEngine {
         Ok(rebuilt)
     }
 
+    /// Learn alias/synonym rules from the cluster's OWN live corpus (ADR-015 any-of
+    /// learning) and apply them (ADR-046 mechanism 2). A synonym appearing in at least
+    /// `min_count` any-of groups (e.g. `(rookie,rc)` ⇒ `rc → rookie`) is merged UNDER
+    /// the current vocabulary — a previously *declared* alias wins over a learned one —
+    /// and the cluster is rebuilt via [`Self::set_vocab`]. Returns the number of queries
+    /// rebuilt. Refuses a non-local cluster (the gather can't enumerate a remote shard).
+    ///
+    /// On-demand: a future step can drive this from compaction's "improve" phase (the
+    /// LSM-shaped background re-materialize); this is the explicit trigger.
+    pub fn learn_and_apply(&mut self, min_count: usize) -> Result<usize, ShardError> {
+        // Gather the live corpus to learn from (de-dup by logical id; a non-local shard
+        // errors here — same boundary `set_vocab` enforces).
+        let mut live: BTreeMap<u64, String> = BTreeMap::new();
+        for s in &self.shards {
+            for (logical, dsl) in s.live_sources()? {
+                live.entry(logical).or_insert(dsl);
+            }
+        }
+        let corpus: Vec<(u64, String)> = live.into_iter().collect();
+        let learned = crate::vocab::learn_from_queries(&corpus, min_count);
+        // Merge learned rules UNDER the current vocab (declared aliases win), then rebuild.
+        let mut merged = Vocab::new();
+        if let Some(v) = &self.vocab {
+            merged.merge(v);
+        }
+        merged.merge(&learned);
+        self.set_vocab(merged)
+    }
+
     /// The vocabulary behind the current normalizer, if one was installed via
-    /// [`Self::set_vocab`] (`None` when built directly from a `Normalizer`).
+    /// [`Self::set_vocab`]/[`Self::learn_and_apply`] (`None` when built directly from
+    /// a `Normalizer`).
     pub fn vocab(&self) -> Option<&Vocab> {
         self.vocab.as_deref()
     }
