@@ -60,6 +60,15 @@ service ShardService {
   // source may GC the now-consumed prefix), 2 = release (recovery done — trim freely again).
   // Refuses a dict-fingerprint mismatch (never coordinates retention across a divergent space).
   rpc RetentionLease (RetentionLeaseRequest) returns (RetentionLeaseReply);
+  // ---- live handoff: write fence (ADR-044, clustering step 6b) ----
+  // Demote this node as the owner of its shard at `generation` (the control-plane epoch the new
+  // owner is taking over under): once fenced, the data-mutating writes (InsertExtracted / Delete /
+  // IngestExtracted) return FailedPrecondition, so a brief write-quiesce holds while a live handoff
+  // flips routing to the new owner. READS (Percolate / counts) and the recovery RPCs (FetchSegments
+  // / FetchTranslog / RetentionLease) stay served — the demoted owner keeps serving until the
+  // coordinator stops routing to it (serve-then-drop), so an in-flight read never hits the fence.
+  // Monotonic: a later, lower-generation Fence never un-fences. Refuses a dict-fingerprint mismatch.
+  rpc Fence (FenceRequest) returns (FenceReply);
 }
 
 message Empty {}
@@ -208,6 +217,15 @@ message RetentionLeaseRequest {
 message RetentionLeaseReply {
   uint64 lease_id = 1;         // acquire: the newly assigned lease id (0 for renew/release)
   uint64 pos = 2;              // acquire: the pinned translog position (0 for renew/release)
+}
+
+// ---- live handoff: write fence (ADR-044, clustering step 6b) ----
+message FenceRequest {
+  uint64 generation = 1;       // the control-plane epoch the new owner is taking over under (> 0)
+  uint64 dict_fingerprint = 2; // the source refuses a mismatch (divergent feature space)
+}
+message FenceReply {
+  uint64 fenced_at_generation = 1; // the server's fence generation after this call (monotonic max)
 }
 
 // ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----

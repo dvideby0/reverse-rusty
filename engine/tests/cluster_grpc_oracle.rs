@@ -1102,3 +1102,161 @@ fn grpc_peer_recovery_converges_under_sustained_writes() {
     let _ = std::fs::remove_dir_all(&src_dir);
     let _ = std::fs::remove_dir_all(&tgt_dir);
 }
+
+/// ADR-044 (live handoff): MOVE a shard from one owner to another while a writer streams adds —
+/// no match dropped, reads never paused. Where `grpc_peer_recovery_converges_under_sustained_writes`
+/// recovers a *replica* and verifies it out-of-band, this drives the full handoff through
+/// `execute_handoff` (peer-recover → FENCE the source → drain to convergence → FLIP routing), then
+/// asserts the SAME cluster — its position now re-pointed at the new owner — matches the brute
+/// oracle over the final live set. The writer's adds (drained from the source, or landing on the
+/// target after the flip, or briefly rejected mid-fence and retried) all converge onto the new owner.
+#[test]
+fn grpc_live_handoff_under_sustained_writes() {
+    let (queries, titles) = build_corpus();
+    let mut next_id = queries.iter().map(|(id, _)| *id).max().unwrap_or(0) + 1;
+    let by_id: HashMap<u64, String> = queries.iter().map(|(id, d)| (*id, d.clone())).collect();
+
+    let oracle_corpus = build_oracle(&queries, &titles);
+    let matched: Vec<u64> = {
+        let mut s: HashSet<u64> = HashSet::new();
+        for set in &oracle_corpus {
+            s.extend(set);
+        }
+        let mut v: Vec<u64> = s.into_iter().collect();
+        v.sort_unstable();
+        v
+    };
+    assert!(
+        matched.len() >= 20,
+        "need ≥20 matching queries; got {}",
+        matched.len()
+    );
+
+    // 20 adds of matching DSLs with fresh ids → a deterministic final live set (a clean firehose).
+    let additions: Vec<(u64, String)> = matched
+        .iter()
+        .take(20)
+        .map(|id| {
+            let nid = next_id;
+            next_id += 1;
+            (nid, by_id[id].clone())
+        })
+        .collect();
+    let final_live: Vec<(u64, String)> = queries
+        .iter()
+        .cloned()
+        .chain(additions.iter().cloned())
+        .collect();
+    let oracle_final = build_oracle(&final_live, &titles);
+    assert!(
+        oracle_corpus != oracle_final,
+        "test setup: the concurrent adds must change some title results"
+    );
+
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let src_dir = server_dir("ho_src");
+    let tgt_dir = server_dir("ho_tgt");
+    let (src_addr, tgt_addr) = {
+        let _enter = rt.enter();
+        let si = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind src");
+        let sa = si.local_addr().expect("src addr");
+        rt.spawn(
+            ShardServer::pending_durable(
+                Arc::clone(&norm),
+                EngineConfig::default(),
+                src_dir.clone(),
+            )
+            .serve_with_incoming(si),
+        );
+        let ti = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind tgt");
+        let ta = ti.local_addr().expect("tgt addr");
+        rt.spawn(
+            ShardServer::pending_durable(
+                Arc::clone(&norm),
+                EngineConfig::default(),
+                tgt_dir.clone(),
+            )
+            .serve_with_incoming(ti),
+        );
+        (sa, ta)
+    };
+    wait_until_listening(src_addr);
+    wait_until_listening(tgt_addr);
+    let src_ep = format!("http://{src_addr}");
+    let tgt_ep = format!("http://{tgt_addr}");
+
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        &cfg,
+        std::slice::from_ref(&src_ep),
+        rt.handle(),
+    )
+    .expect("connect source cluster");
+    cluster.ingest(&queries).expect("ingest corpus");
+    assert_eq!(
+        cluster.handoff_generations(),
+        vec![0],
+        "position 0 starts at generation 0 (the source owner)"
+    );
+
+    // Run the handoff CONCURRENTLY with a writer streaming the additions through the cluster. The
+    // add routes to position 0's CURRENT backing — the source pre-flip, the target post-flip — and is
+    // briefly REJECTED in the fence→flip window (the source is fenced, routing not yet flipped); the
+    // writer retries until it lands, so no add is lost.
+    std::thread::scope(|s| {
+        let cluster_ref = &cluster;
+        let adds = &additions;
+        let writer = s.spawn(move || {
+            for (id, dsl) in adds {
+                loop {
+                    match cluster_ref.add_query(*id, dsl) {
+                        Ok(_) => break,
+                        // The brief fence→flip window: the fenced source rejects the write
+                        // (failed_precondition → ShardError::Remote). Retry — after the flip it lands
+                        // on the new owner.
+                        Err(ShardError::Remote(_)) => std::thread::sleep(Duration::from_millis(2)),
+                        Err(e) => panic!("unexpected writer error: {e}"),
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        cluster
+            .execute_handoff(0, &src_ep, &tgt_ep, rt.handle())
+            .expect("execute handoff");
+        writer.join().expect("writer thread");
+    });
+
+    // The flip happened: position 0's generation bumped, and the cluster now routes to the new owner.
+    assert_eq!(
+        cluster.handoff_generations(),
+        vec![1],
+        "the handoff bumped position 0's generation"
+    );
+
+    // Over EVERY title the cluster (now serving from the new owner) matches the brute oracle over the
+    // final live set — zero false negatives across a live data move under concurrent writes.
+    for (i, title) in titles.iter().enumerate() {
+        let got: HashSet<u64> = cluster
+            .percolate(title)
+            .expect("percolate after handoff")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got, oracle_final[i],
+            "post-handoff cluster vs brute(final) on {title:?}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&src_dir);
+    let _ = std::fs::remove_dir_all(&tgt_dir);
+}

@@ -257,9 +257,28 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   Proven by six `handoff.rs` unit tests (a swap to a set-equal backing is byte-identical in ids + stats; an
   in-flight read serves the old backing while a fresh read sees the new one; the generation tracks swaps;
   concurrent readers survive repeated swaps; writes and the defaulted `set_event_sink` forward to the backing).
-  **Still design-only:** the cross-node move that *drives* the swap — `execute_handoff` = peer-recover → a
-  brief catch-up quiesce → flip → `Fence` the old owner → drop — is step 6b (ADR-044), plus the autoscaler
-  that triggers it on membership events.
+  The cross-node move that *drives* the swap is step 6b (ADR-044, below).
+- **Live data-moving handoff — the cross-node move (ADR-044)** — clustering build-path step 6b: wires
+  decide→move→flip into one **live** shard move (a position's owner changes while the cluster keeps serving).
+  A new `Fence` RPC + a monotonic, write-only server-side fence demote the old owner: once fenced, its
+  data-mutating writes (`insert`/`delete`/`ingest`) return `failed_precondition` while **reads + the recovery
+  RPCs stay served** (so an in-flight read never hits the fence — serve-then-drop). `ClusterEngine::execute_handoff`
+  orchestrates it under one retention lease: no-quiesce bulk peer-recover the target → **fence** the source
+  (the position's brief write-quiesce begins) → **drain to convergence** (the fenced source's tail is finite +
+  frozen, so looping the catch-up captures every op it ever accepted — closing the TOCTOU a single final
+  catch-up would leave) → **flip** the 6a `HandoffShard` backing source→target. Fence-LATE (after the
+  no-quiesce copy) keeps the no-quiesce property; only the converge-then-flip is write-quiesced. The byte
+  mover is peer recovery (ADR-036/039); the lease (ADR-040) pins the tail so a concurrent seal can't strand
+  it. Proven by `tests/cluster_grpc_oracle.rs::grpc_live_handoff_under_sustained_writes` (reassign a position
+  source→target under a concurrent writer that retries the brief fence-window rejections; the SAME cluster,
+  re-pointed to the new owner, ≡ the brute oracle over the final live set — zero false negatives, reads never
+  paused) + `src/cluster/server.rs::fence_rejects_writes_but_serves_reads`. `distributed`-gated; no new
+  dependency. **Honest scope:** single-coordinator (the fence is the multi-coordinator guard; the flip is
+  serialized); a fence-window write is fail-closed + retryable (never lost); a non-converging source aborts
+  the flip fail-closed (the source stays fenced — a stuck position, never a lost write); "drop the old owner" =
+  drop from routing, not teardown; RF>1 group relocation reuses the same swap but the oracle covers the
+  single-owner move. **Still design-only:** the autoscaler that *triggers* a handoff on a membership/rebalance
+  event (step 6c) + auto-split.
 
 ## Measured
 
@@ -321,22 +340,22 @@ the selective candidate count further.
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
 - **Clustering — the 100M horizontal-scale story** (built on the **shared-nothing** model: local segments +
   per-node/coordinator WAL + replication + a quorum control plane — **no object store, no cloud dependency**;
-  ADR-033). The stack is **built and oracle-proven through build-path step 6a** — in-process multi-shard core,
+  ADR-033). The stack is **built and oracle-proven through build-path step 6b** — in-process multi-shard core,
   the gRPC transport + dict shipping, the durable coordinator log + per-shard local segments, replication +
   peer recovery, a durable openraft control plane, a per-shard translog with no-quiesce recovery +
-  retention/finalize, a rendezvous-hash shard→node allocator, and a runtime-swappable shard backing (the
-  live-handoff routing-flip mechanism) (ADR-027, 029, 031–043). **Per-ADR detail is
+  retention/finalize, a rendezvous-hash shard→node allocator, a runtime-swappable shard backing (the
+  live-handoff routing-flip mechanism), and the **live data-moving handoff** itself (the cross-node move:
+  peer-recover → fence → drain-to-convergence → flip, under concurrent writes) (ADR-027, 029, 031–044).
+  **Per-ADR detail is
   in [Implemented](#implemented-working-tested) above**; the build path + cross-shard correctness argument are
   in [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §10 (hashing-variant survey:
   [`research/clustering-prior-art.md`](research/clustering-prior-art.md)). **Still design-only** — the
-  production multi-node residue (step 6 + hardening): the **cross-node move that drives a live handoff**
-  (step 6b — peer-recover → a brief catch-up quiesce → flip the swappable backing → `Fence` + drop the old
-  owner; the routing-flip mechanism + the fence stamp landed in 6a/ADR-043, and the byte mover is peer
-  recovery); an **autoscaler** that drives `rebalance`/`register_node` on membership events and triggers the
-  handoff; **auto-split** + `recommended_shard_count`; **normalizer/vocab shipping** (dict shipping landed in
-  ADR-034; the normalizer is still a shared `default_vocab()` assumption); **replicate-broad-to-all**
-  (in-process uses the shard-0 lane only); **TLS/auth** on the gRPC + control transports; and a translog-lease
-  TTL + an end-to-end durable-multi-node rolling-restart harness.
+  production multi-node residue (step 6c + hardening): an **autoscaler** that drives `rebalance`/`register_node`
+  on membership events and *triggers* the now-built handoff; **auto-split** + `recommended_shard_count`;
+  **normalizer/vocab shipping** (dict shipping landed in ADR-034; the normalizer is still a shared
+  `default_vocab()` assumption); **replicate-broad-to-all** (in-process uses the shard-0 lane only);
+  **TLS/auth** on the gRPC + control transports; auto-unfence-on-abort + a translog-lease TTL; and an
+  end-to-end durable-multi-node rolling-restart harness.
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
 
@@ -458,15 +477,15 @@ from the audit's former P3 list). Roughly grouped:
   dict shipping, a durable coordinator log, per-shard local durable segments (attach-and-mmap reopen), per-shard
   replication + peer recovery (in-process + gRPC), a durable openraft control plane (multi-process elections +
   leader failover + restart recovery), a per-shard translog (no-quiesce peer recovery + retention/finalize),
-  a rendezvous-hash shard→node allocator, and a runtime-swappable shard backing (the live-handoff routing-flip
-  mechanism, ADR-043) (ADR-027, 029, 031–043; per-ADR detail in
-  [Implemented](#implemented-working-tested) above). But it is exercised **single-process / on localhost** by the
-  oracles — not yet deployed and hardened across real machines. **Remaining for production multi-node** (all
-  design-only; ADR-033 — no object store / cloud dependency anywhere): the **cross-node move that drives a live
-  handoff** (step 6b — peer-recover → brief quiesce → flip the swappable backing → fence + drop; the
-  routing-flip mechanism + fence stamp landed in ADR-043), an **autoscaler** driving `rebalance` + that handoff
-  on membership events, **auto-split**, **normalizer/vocab shipping**, **replicate-broad-to-all**, and
-  **TLS/auth** on the (currently plaintext) transports — see Tier 3.
+  a rendezvous-hash shard→node allocator, a runtime-swappable shard backing (the live-handoff routing-flip
+  mechanism, ADR-043), and the **live data-moving handoff** itself (the cross-node move under concurrent
+  writes — peer-recover → fence → drain-to-convergence → flip, ADR-044) (ADR-027, 029, 031–044; per-ADR detail
+  in [Implemented](#implemented-working-tested) above). But it is exercised **single-process / on localhost** by
+  the oracles — not yet deployed and hardened across real machines. **Remaining for production multi-node** (all
+  design-only; ADR-033 — no object store / cloud dependency anywhere): an **autoscaler** that drives
+  `rebalance`/`register_node` on membership events and *triggers* the now-built handoff (step 6c), **auto-split**,
+  **normalizer/vocab shipping**, **replicate-broad-to-all**, **TLS/auth** on the (currently plaintext)
+  transports, and auto-unfence-on-abort + a translog-lease TTL — see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator **ships**
   its frozen dict at connect (ADR-034) and the ADR-030 fingerprint handshake fails loud
   (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can never drop

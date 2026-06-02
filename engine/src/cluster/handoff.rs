@@ -93,7 +93,7 @@ impl HandoffShard {
     /// `Release`, so any reader/fencer that `Acquire`-loads the new generation also observes the
     /// new backing. Infallible (a pointer swap + an atomic store). In-flight probes against the
     /// previous backing complete correctly — the old `Arc` lives until the last `Guard` drops.
-    #[allow(dead_code)] // Stage 6b (execute_handoff) is the production caller; exercised by the unit tests.
+    /// The production caller is `ClusterEngine::execute_handoff` (ADR-044, step 6b).
     pub(crate) fn swap_backing(&self, new: Box<dyn Shard>, generation: u64) {
         self.current.store(Arc::new(new));
         self.generation.store(generation, Ordering::Release);

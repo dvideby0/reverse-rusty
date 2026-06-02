@@ -147,6 +147,26 @@ impl RemoteShard {
             reply.up_to_seqno,
         ))
     }
+
+    /// Fence this remote node as the owner of its shard at `generation` (ADR-044, step 6b): the
+    /// server stops accepting data-mutating writes (they return `failed_precondition`) while it
+    /// keeps serving reads + the recovery RPCs — the brief write-quiesce a live handoff holds across
+    /// the routing flip (serve-then-drop). Monotonic server-side (a stale lower-generation fence is
+    /// a no-op). Returns the server's fence generation after the call. Inherent (not a [`Shard`]
+    /// method): only the handoff orchestrator fences a specific old owner, addressed by endpoint.
+    pub fn fence(&self, generation: u64) -> Result<u64, ShardError> {
+        let mut client = self.client.clone();
+        let req = proto::FenceRequest {
+            generation,
+            dict_fingerprint: self.dict_fp,
+        };
+        let reply = self
+            .handle
+            .block_on(async move { client.fence(req).await })
+            .map_err(rpc_err)?
+            .into_inner();
+        Ok(reply.fenced_at_generation)
+    }
 }
 
 fn rpc_err<E: std::fmt::Display>(e: E) -> ShardError {

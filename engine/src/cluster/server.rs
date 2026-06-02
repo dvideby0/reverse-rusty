@@ -10,6 +10,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -53,6 +54,13 @@ pub struct ShardServer {
     /// `None` until a dict is adopted; reads against a pending server return
     /// `failed_precondition`.
     state: ArcSwapOption<ServerState>,
+    /// The fence generation (ADR-044, step 6b): `0` ⇒ not fenced; `> 0` ⇒ this node has been
+    /// demoted as the owner of its shard at that generation, so data-mutating writes
+    /// (`insert`/`delete`/`ingest`) return `failed_precondition`. Reads + the recovery RPCs stay
+    /// served (serve-then-drop). Set monotonically by the `Fence` RPC (a stale lower-gen Fence
+    /// never un-fences). A live handoff fences the old owner, drains its tail to the new owner, then
+    /// flips routing — the fence holds a brief write-quiesce across that flip.
+    fenced_at_generation: AtomicU64,
 }
 
 impl ShardServer {
@@ -66,6 +74,7 @@ impl ShardServer {
             config,
             data_dir: None,
             state,
+            fenced_at_generation: AtomicU64::new(0),
         }
     }
 
@@ -79,6 +88,7 @@ impl ShardServer {
             config,
             data_dir: None,
             state: ArcSwapOption::from(None),
+            fenced_at_generation: AtomicU64::new(0),
         }
     }
 
@@ -92,6 +102,7 @@ impl ShardServer {
             config,
             data_dir: Some(data_dir),
             state: ArcSwapOption::from(None),
+            fenced_at_generation: AtomicU64::new(0),
         }
     }
 
@@ -113,6 +124,7 @@ impl ShardServer {
             config,
             data_dir: Some(data_dir),
             state,
+            fenced_at_generation: AtomicU64::new(0),
         })
     }
 
@@ -121,6 +133,20 @@ impl ShardServer {
         self.state
             .load_full()
             .ok_or_else(|| Status::failed_precondition("shard has not adopted a dict yet"))
+    }
+
+    /// Reject a data-mutating write if this node has been fenced (demoted by a live handoff,
+    /// ADR-044). Called by `insert`/`delete`/`ingest` only — reads + the recovery RPCs deliberately
+    /// do NOT call it, so the demoted owner keeps serving them until the coordinator stops routing
+    /// to it (serve-then-drop), and an in-flight read never hits the fence.
+    fn check_not_fenced(&self) -> Result<(), Status> {
+        let gen = self.fenced_at_generation.load(Ordering::Acquire);
+        if gen > 0 {
+            return Err(Status::failed_precondition(format!(
+                "shard is fenced at generation {gen} (demoted by a handoff); writes are rejected"
+            )));
+        }
+        Ok(())
     }
 
     /// Compile + bulk-load raw `(id, DSL)` queries into this shard before serving —
@@ -323,6 +349,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::IngestRequest>,
     ) -> Result<Response<proto::IngestReply>, Status> {
+        self.check_not_fenced()?;
         let st = self.loaded()?;
         let items = request.into_inner().items;
         let mut lc = String::new();
@@ -346,6 +373,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::InsertRequest>,
     ) -> Result<Response<proto::InsertReply>, Status> {
+        self.check_not_fenced()?;
         let st = self.loaded()?;
         let item = request
             .into_inner()
@@ -374,6 +402,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::DeleteRequest>,
     ) -> Result<Response<proto::DeleteReply>, Status> {
+        self.check_not_fenced()?;
         let removed = self
             .loaded()?
             .shard
@@ -618,6 +647,34 @@ impl ShardService for ShardServer {
             ))),
         }
     }
+
+    // ---- live handoff: write fence (ADR-044, clustering step 6b) ----
+    /// Demote this node at `generation`: data-mutating writes (`insert`/`delete`/`ingest`) are
+    /// rejected thereafter, while reads + the recovery RPCs stay served (serve-then-drop). Monotonic
+    /// — a stale, lower-generation Fence never un-fences. Refuses a dict-fingerprint mismatch
+    /// (consistent with the other guarded RPCs). The handoff orchestrator
+    /// (`ClusterEngine::execute_handoff`) fences the old owner here, drains its tail to the new
+    /// owner, then flips routing — so the fence holds a brief write-quiesce across the flip.
+    async fn fence(
+        &self,
+        request: Request<proto::FenceRequest>,
+    ) -> Result<Response<proto::FenceReply>, Status> {
+        let st = self.loaded()?;
+        let req = request.into_inner();
+        if req.dict_fingerprint != st.dict.fingerprint() {
+            return Err(Status::failed_precondition(
+                "Fence dict-fingerprint mismatch (divergent feature space)",
+            ));
+        }
+        // Monotonic max: a later, lower-generation Fence (a stale/duplicate message) never lowers
+        // the fence. `fetch_max` returns the previous value; the stored value becomes the max.
+        let prev = self
+            .fenced_at_generation
+            .fetch_max(req.generation, Ordering::AcqRel);
+        Ok(Response::new(proto::FenceReply {
+            fenced_at_generation: prev.max(req.generation),
+        }))
+    }
 }
 
 /// Stream one file as a contiguous run of ≤256 KiB `FileChunk`s ending with `last = true`.
@@ -844,5 +901,104 @@ mod tests {
         rt.block_on(srv.adopt_dict(adopt_req(&d2)))
             .expect("same dict on a populated shard is a no-op");
         assert_eq!(current_fp(&srv), d2.fingerprint());
+    }
+
+    /// The live-handoff write fence (ADR-044): once `Fence` lands, data-mutating writes
+    /// (`insert`/`delete`/`ingest`) are rejected with `FailedPrecondition`, while reads stay served
+    /// (serve-then-drop); the fence is monotonic and dict-fingerprint-guarded.
+    #[test]
+    fn fence_rejects_writes_but_serves_reads() {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let n = norm();
+        let d = frozen_dict(&["1994 upper deck", "psa 10"], &n);
+        let fp = d.fingerprint();
+        let srv = ShardServer::new(Arc::clone(&n), Arc::new(d), EngineConfig::default());
+        srv.ingest_dsl(&[(1u64, "1994 upper deck".to_string())]);
+
+        let insert = |id: u64, dsl: &str| {
+            Request::new(proto::InsertRequest {
+                item: Some(proto::AddItem {
+                    logical_id: id,
+                    dsl: dsl.to_string(),
+                    version: 1,
+                }),
+            })
+        };
+
+        // Before the fence: a write succeeds.
+        rt.block_on(srv.insert_extracted(insert(2, "psa 10")))
+            .expect("insert before fence");
+
+        // Fence at generation 5.
+        let fenced = rt
+            .block_on(srv.fence(Request::new(proto::FenceRequest {
+                generation: 5,
+                dict_fingerprint: fp,
+            })))
+            .expect("fence")
+            .into_inner()
+            .fenced_at_generation;
+        assert_eq!(fenced, 5);
+
+        // After the fence: every data-mutating write is rejected.
+        assert_eq!(
+            rt.block_on(srv.insert_extracted(insert(3, "psa 10")))
+                .expect_err("insert after fence")
+                .code(),
+            Code::FailedPrecondition
+        );
+        assert_eq!(
+            rt.block_on(srv.delete(Request::new(proto::DeleteRequest { logical_id: 1 })))
+                .expect_err("delete after fence")
+                .code(),
+            Code::FailedPrecondition
+        );
+        assert_eq!(
+            rt.block_on(srv.ingest_extracted(Request::new(proto::IngestRequest { items: vec![] })))
+                .expect_err("ingest after fence")
+                .code(),
+            Code::FailedPrecondition
+        );
+
+        // ...but reads still serve (serve-then-drop): num_queries + percolate keep working.
+        let cnt = rt
+            .block_on(srv.num_queries(Request::new(proto::Empty {})))
+            .expect("read after fence")
+            .into_inner()
+            .count;
+        assert!(cnt >= 1, "reads stay served while fenced: {cnt}");
+        rt.block_on(srv.percolate(Request::new(proto::PercolateRequest {
+            title: "1994 upper deck".to_string(),
+            include_broad: false,
+        })))
+        .expect("percolate after fence");
+
+        // Monotonic: a stale, lower-generation fence never lowers the fence.
+        let after_stale = rt
+            .block_on(srv.fence(Request::new(proto::FenceRequest {
+                generation: 3,
+                dict_fingerprint: fp,
+            })))
+            .expect("stale fence")
+            .into_inner()
+            .fenced_at_generation;
+        assert_eq!(after_stale, 5, "a lower-gen fence must not lower the fence");
+        assert_eq!(
+            rt.block_on(srv.insert_extracted(insert(4, "psa 10")))
+                .expect_err("still fenced after a stale fence")
+                .code(),
+            Code::FailedPrecondition
+        );
+
+        // A dict-fingerprint mismatch is refused (never fences across a divergent feature space).
+        assert_eq!(
+            rt.block_on(srv.fence(Request::new(proto::FenceRequest {
+                generation: 9,
+                dict_fingerprint: fp ^ 0xDEAD_BEEF,
+            })))
+            .expect_err("fence fp mismatch")
+            .code(),
+            Code::FailedPrecondition
+        );
     }
 }
