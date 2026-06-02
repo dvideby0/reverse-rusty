@@ -303,41 +303,22 @@ the selective candidate count further.
 
 - **Feature-model versioning + blue/green re-materialize.** Frozen common-mask across minor versions;
   a major model change is replayed from the log into a parallel index, then an atomic alias/epoch swap.
-- **Clustering.** The 100M-query horizontal-scale story, built on the **shared-nothing** model
-  (Elasticsearch/Cassandra: local segments + per-node/coordinator WAL + replication + quorum control plane —
-  **no object store, no cloud dependency**; ADR-033). **In-process core (build-path steps 1–2), the gRPC
-  transport with coordinator dict shipping, the durable coordinator log, and per-shard local durable
-  segments are built and oracle-proven** — consistent-hash entity-anchor sharding + content routing + a
-  designated broad-lane replicated shard over K shards in one process (ADR-027), a `distributed`-gated gRPC
-  `ShardServer` + `RemoteShard` so a shard can be remote (ADR-029) with the coordinator **shipping its frozen
-  dict** at connect so a data node starts empty (ADR-034), an externalized coordinator mutation log with
-  crash-rebuild (ADR-031), per-shard compiled segments that reopen by attach-and-mmap instead of
-  re-ingesting (ADR-032), and a **per-shard primary+replica layer with read failover + peer recovery** —
-  in-process (ADR-035; the `ReplicatedShard` composite) and over **gRPC** (ADR-036; remote replicas + a
-  streaming segment-fetch RPC for cross-node peer recovery) — all in Implemented above. The hashing-variant
-  survey + the cross-shard correctness argument behind ADR-027 are written up in
-  [`research/clustering-prior-art.md`](research/clustering-prior-art.md). The quorum/Raft control plane is now
-  **built**: its dependency-free seam — a `trait ControlPlane` + an in-memory backend holding the cluster-state
-  document (ring + the **shard→node map** + membership + feature-model version + epoch), step 5a / ADR-037 —
-  plus the **openraft backend** behind it (step 5b / ADR-038): a `RaftControlPlane` over `Raft<C>` + a gRPC
-  `ControlService` (opaque-bytes envelope) + a `controlserver` manager bin, giving multi-process elections and
-  leader failover, `distributed`-gated so the lean core never sees openraft. The **durable + replicated
-  per-shard query log (translog)** is **built** too (step 5c / ADR-039): peer recovery now streams a peer's
-  segments at position `P` then replays the per-shard translog tail (> `P`), so it need **not quiesce** writes
-  for the copy window (the ADR-036 gap closed, both in-process and over gRPC via `FetchTranslog`), and a durable
-  data node self-restarts from its own checkpoint sidecar. **Translog retention + finalize** is built too (step
-  5d / ADR-040): retention leases make `seal_for_checkpoint` trim to `min(P, lease_floor)` so a concurrent seal
-  can't strand an in-flight recovery's tail (and the translog GCs when no recovery needs it), and a lease-held
-  convergence loop + atomic in-sync promotion shrink the quiesce window to the residual delta. The openraft
-  control plane is **durable** too (step 5e / ADR-041): a CRC-framed Raft log + persisted vote/committed/snapshot
-  (`src/cluster/control_store.rs`) let a `controlserver --data-dir` survive a restart and rejoin the quorum,
-  resuming its committed cluster-state document. A **shard→node allocator** is built too (step 5f / ADR-042):
-  `src/cluster/allocator.rs` plans a balanced, minimal-movement placement via rendezvous (HRW) hashing, and
-  `ClusterEngine::{register_node, deregister_node, rebalance}` commit it through the control plane (the
-  decision layer; physically moving a shard's segments on a reassignment reuses peer recovery). **Still
-  design-only** (the shared-nothing multi-node roadmap): an autoscaler that *drives* rebalance on membership
-  events, normalizer/vocab shipping, auto-split, replicate-broad-to-all, and TLS/auth.
-  ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
+- **Clustering — the 100M horizontal-scale story** (built on the **shared-nothing** model: local segments +
+  per-node/coordinator WAL + replication + a quorum control plane — **no object store, no cloud dependency**;
+  ADR-033). The stack is **built and oracle-proven through build-path step 5f** — in-process multi-shard core,
+  the gRPC transport + dict shipping, the durable coordinator log + per-shard local segments, replication +
+  peer recovery, a durable openraft control plane, a per-shard translog with no-quiesce recovery +
+  retention/finalize, and a rendezvous-hash shard→node allocator (ADR-027, 029, 031–042). **Per-ADR detail is
+  in [Implemented](#implemented-working-tested) above**; the build path + cross-shard correctness argument are
+  in [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §10 (hashing-variant survey:
+  [`research/clustering-prior-art.md`](research/clustering-prior-art.md)). **Still design-only** — the
+  production multi-node residue (step 6 + hardening): an **autoscaler** that drives `rebalance`/`register_node`
+  on membership events; the **live data-moving handoff** on a reassignment (serve-then-drop + epoch fencing —
+  the allocator decides the map, peer recovery already moves the bytes); **auto-split** +
+  `recommended_shard_count`; **normalizer/vocab shipping** (dict shipping landed in ADR-034; the normalizer is
+  still a shared `default_vocab()` assumption); **replicate-broad-to-all** (in-process uses the shard-0 lane
+  only); **TLS/auth** on the gRPC + control transports; and a translog-lease TTL + an end-to-end
+  durable-multi-node rolling-restart harness.
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
 
@@ -454,39 +435,24 @@ from the audit's former P3 list). Roughly grouped:
 
 ## Current limitations
 
-- **Single-node deployment.** The multi-shard core (ADR-027), the gRPC `ShardServer`/`RemoteShard`
-  transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (ADR-031),
-  per-shard local durable segments with attach-and-mmap reopen (ADR-032), and **per-shard replication +
-  peer recovery** both in-process (ADR-035) and over **gRPC** (ADR-036) are built — the `distributed`
-  feature can already run a coordinator over remote shards (on localhost today) that start **empty** and
-  receive the frozen dict at connect, run `replication_factor > 1` with reads **failing over** to a replica
-  when a primary dies, and bring a fresh node up by **streaming a peer's segments** (`FetchSegments` /
-  `RecoverFrom`); an in-process cluster built with a `data_dir` survives a crash and reopens by mmap'ing its
-  compiled segments (no corpus recompile) via `ClusterEngine::open`. The quorum/Raft **control plane is built**
-  too: its seam (ADR-037: a `trait ControlPlane` + in-memory backend holding the cluster-state document) AND the
-  **openraft backend** behind it (ADR-038: a `RaftControlPlane` over `Raft<C>` + a gRPC `ControlService` + a
-  `controlserver` manager bin), giving multi-process elections and leader failover (`distributed`-gated — the
-  lean core never compiles openraft). The **durable + replicated per-shard query log (translog) is built** too
-  (ADR-039): peer recovery streams a peer's segments then replays the per-shard translog tail, so it need **not
-  quiesce** writes for the copy window (in-process + over gRPC via `FetchTranslog`), and a durable data node
-  self-restarts from its own checkpoint sidecar. **Translog retention leases + finalize** (ADR-040) close
-  ADR-039's scope gaps — `seal_for_checkpoint` trims to `min(P, lease_floor)` so a concurrent seal can't strand
-  an in-flight recovery (and the translog GCs when idle), and a lease-held convergence loop + atomic in-sync
-  promotion shrink the quiesce window to the residual delta. The openraft control plane is **durable** too
-  (ADR-041): a CRC-framed Raft log + persisted vote/committed/snapshot (`control_store.rs`) let a
-  `controlserver --data-dir` survive a restart and rejoin the quorum. A **shard→node allocator** (ADR-042)
-  computes + commits a balanced, minimal-movement placement map (rendezvous hashing) via
-  `ClusterEngine::{register_node, deregister_node, rebalance}`. A full multi-node deployment still needs the
-  remaining **shared-nothing** layers — an autoscaler that drives rebalance + the data-moving handoff on a
-  reassignment, plus auto-split — designed but not built (no object store / cloud dependency anywhere;
-  ADR-033); see Tier 3.
-  **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator
-  **ships** its frozen dict to each server at connect (ADR-034), and the ADR-030 fingerprint handshake fails
-  loud (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can
-  never drop matches *silently*. Remaining gaps: the **normalizer** must still match on both sides
-  (`default_vocab()` today — vocab shipping is the next step), and the transport is unauthenticated/plaintext.
-  Treat the gRPC surface as correctness-safe, not yet a hardened multi-process deployment (vocab shipping +
-  TLS/auth remain — see Tier 3).
+- **Not yet a hardened multi-node deployment.** The full shared-nothing multi-node stack is **built and
+  oracle-proven** — sharding + content routing, the gRPC `ShardServer`/`RemoteShard` transport with coordinator
+  dict shipping, a durable coordinator log, per-shard local durable segments (attach-and-mmap reopen), per-shard
+  replication + peer recovery (in-process + gRPC), a durable openraft control plane (multi-process elections +
+  leader failover + restart recovery), a per-shard translog (no-quiesce peer recovery + retention/finalize), and
+  a rendezvous-hash shard→node allocator (ADR-027, 029, 031–042; per-ADR detail in
+  [Implemented](#implemented-working-tested) above). But it is exercised **single-process / on localhost** by the
+  oracles — not yet deployed and hardened across real machines. **Remaining for production multi-node** (all
+  design-only; ADR-033 — no object store / cloud dependency anywhere): an **autoscaler** driving `rebalance` +
+  the **live data-moving handoff** on a reassignment (serve-then-drop + epoch fencing), **auto-split**,
+  **normalizer/vocab shipping**, **replicate-broad-to-all**, and **TLS/auth** on the (currently plaintext)
+  transports — see Tier 3.
+  **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator **ships**
+  its frozen dict at connect (ADR-034) and the ADR-030 fingerprint handshake fails loud
+  (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can never drop
+  matches *silently*. The **normalizer** must still match on both sides (`default_vocab()` today — vocab shipping
+  is the next step), and the transport is unauthenticated/plaintext. Treat the gRPC surface as correctness-safe,
+  not yet a hardened multi-process deployment.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
   runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving it from the corpus is the
   NPMI-wiring item in Tier 2.
