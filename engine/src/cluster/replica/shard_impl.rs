@@ -34,6 +34,16 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.class_counts())
     }
 
+    fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
+        // Replicas are set-equal copies of the primary, so any in-sync copy yields
+        // the same source set — read with the same in-sync failover as `num_queries`.
+        self.read(|s| s.live_sources())
+    }
+
+    fn is_local(&self) -> bool {
+        true
+    }
+
     // ---- writes (primary-authoritative, fan out to replicas) ----
     fn ingest_extracted(
         &self,

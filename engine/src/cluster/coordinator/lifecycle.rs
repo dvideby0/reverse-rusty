@@ -148,7 +148,16 @@ impl ClusterEngine {
         for copies in groups {
             shards.push(into_shard(copies)?);
         }
-        Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)
+        Self::from_parts(
+            norm,
+            dict,
+            ring,
+            shards,
+            config.include_broad,
+            config.replication_factor,
+            config.per_shard.clone(),
+            durable,
+        )
     }
 
     /// Commit the initial durable base for a freshly built cluster: collect each shard's
@@ -209,12 +218,18 @@ impl ClusterEngine {
     /// [`Self::build`] (which supplies `LocalShard`s) and the distributed builder /
     /// gRPC integration test (which supply boxed `RemoteShard`s). `shards.len()` must
     /// equal `ring.num_shards()`.
+    // The internal assembly seam genuinely takes many independent parts (feature
+    // space, ring, shards, the broad toggle, the rebuild config, and the durability
+    // bundle); grouping them further would only obscure the construction.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_parts(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
         ring: HashRing,
         shards: Vec<Box<dyn Shard>>,
         include_broad: bool,
+        replication_factor: usize,
+        per_shard: crate::config::EngineConfig,
         durable: ClusterDurable,
     ) -> Result<Self, ShardError> {
         if shards.len() != ring.num_shards() {
@@ -227,9 +242,12 @@ impl ClusterEngine {
         Ok(ClusterEngine {
             norm,
             dict,
+            vocab: None,
             ring,
             shards,
             include_broad,
+            replication_factor: replication_factor.max(1),
+            per_shard,
             log: durable.log,
             epoch: AtomicU64::new(durable.epoch),
             vnodes: durable.vnodes,
@@ -356,7 +374,16 @@ impl ClusterEngine {
                 manifest.dict_fingerprint,
             )),
         };
-        let engine = Self::from_parts(norm, dict, ring, shards, manifest.include_broad, durable)?;
+        let engine = Self::from_parts(
+            norm,
+            dict,
+            ring,
+            shards,
+            manifest.include_broad,
+            rf,
+            per_shard,
+            durable,
+        )?;
 
         // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the
         // log tail strictly after snapshot_pos, through the SAME apply funnel as live

@@ -96,10 +96,17 @@ impl ClusterEngine {
         // is a later step). Use the in-memory log so behavior is unchanged.
         let durable =
             ClusterDurable::in_memory(config.num_shards as u32, config.vnodes, dict.fingerprint());
-        Ok(
-            Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)?
-                .with_handoffs(handoffs),
-        )
+        Ok(Self::from_parts(
+            norm,
+            dict,
+            ring,
+            shards,
+            config.include_broad,
+            config.replication_factor,
+            config.per_shard.clone(),
+            durable,
+        )?
+        .with_handoffs(handoffs))
     }
 
     /// Assemble a cluster whose K shard POSITIONS are each a [`ReplicatedShard`](crate::cluster::replica::ReplicatedShard)
@@ -162,10 +169,17 @@ impl ClusterEngine {
         }
         let durable =
             ClusterDurable::in_memory(config.num_shards as u32, config.vnodes, dict.fingerprint());
-        Ok(
-            Self::from_parts(norm, dict, ring, shards, config.include_broad, durable)?
-                .with_handoffs(handoffs),
-        )
+        Ok(Self::from_parts(
+            norm,
+            dict,
+            ring,
+            shards,
+            config.include_broad,
+            config.replication_factor,
+            config.per_shard.clone(),
+            durable,
+        )?
+        .with_handoffs(handoffs))
     }
 
     /// Cross-node peer recovery (ADR-036 + ADR-039 + ADR-040): bring a fresh, durable, **pending**

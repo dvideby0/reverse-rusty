@@ -37,6 +37,7 @@ mod control_plane;
 mod ingest;
 mod lifecycle;
 mod matching;
+mod vocab;
 
 #[cfg(feature = "distributed")]
 mod distributed;
@@ -199,6 +200,11 @@ pub struct ClusterEngine {
     /// The one shared feature space (frozen after [`Self::build`]).
     norm: Arc<Normalizer>,
     dict: Arc<Dict>,
+    /// The vocabulary behind the current normalizer, if one was installed via
+    /// [`Self::set_vocab`] (ADR-046). `None` when the cluster was built directly
+    /// from a `Normalizer`. Retained so a durable cluster can persist it and a
+    /// re-learn can merge into it.
+    vocab: Option<Arc<crate::vocab::Vocab>>,
     ring: HashRing,
     shards: Vec<Box<dyn Shard>>,
     include_broad: bool,
@@ -208,6 +214,12 @@ pub struct ClusterEngine {
     epoch: AtomicU64,
     /// Ring vnode count (for re-deriving the ring in the manifest on checkpoint).
     vnodes: u32,
+    /// Replication factor (copies per shard position) — retained so a vocabulary
+    /// change ([`Self::set_vocab`], ADR-046) can rebuild every position's copies.
+    replication_factor: usize,
+    /// Per-shard engine config — retained so [`Self::set_vocab`] can reconstruct
+    /// shards under a new normalizer with the settings the cluster was built with.
+    per_shard: EngineConfig,
     /// Durable-artifact directory (`Some` ⇔ durable).
     data_dir: Option<PathBuf>,
     /// Optional observer for durability events (recovery torn-tail, append failures).

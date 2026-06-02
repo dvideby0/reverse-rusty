@@ -36,7 +36,14 @@ struct Brute {
 
 impl Brute {
     fn build(queries: &[(u64, String)]) -> Self {
-        let norm = vocab();
+        Self::build_with_vocab(queries, vocab())
+    }
+
+    /// Build the oracle with an EXPLICIT normalizer (e.g. one carrying a declared
+    /// alias), so it stays an independent ground truth that applies the SAME
+    /// alias the cluster was given — its own dict, its own code path, never the
+    /// engine's normalizer instance.
+    fn build_with_vocab(queries: &[(u64, String)], norm: Normalizer) -> Self {
         let mut dict = Dict::new();
         let mut lc = String::new();
         let mut qs = Vec::new();
@@ -469,6 +476,98 @@ fn live_add_with_all_unknown_anyof_group_is_satisfiable() {
             .contains(&qid),
         "an all-new any-of group must be satisfiable, not collapse to a missed match"
     );
+}
+
+#[test]
+fn declared_alias_makes_both_surface_forms_match() {
+    // ADR-046 mechanism (2): after a declared alias (zzabbr ≡ zzcanon), a query
+    // written with ONE surface form matches a title written with the OTHER —
+    // cluster-wide, with zero false negatives. `set_vocab` re-mints the shared dict,
+    // re-places every query under the new normalizer, and atomically swaps the
+    // shards. The two tokens never appear in build_corpus, so before the alias they
+    // are distinct (synthetic) features that do not cross-match.
+    let (mut queries, titles) = build_corpus();
+    let q_abbr = 8_000_001u64;
+    let q_canon = 8_000_002u64;
+    queries.push((q_abbr, "1994 fleer zzabbr".into()));
+    queries.push((q_canon, "1994 fleer zzcanon".into()));
+
+    // The declared alias as a Vocab — built manually (keeping this gate orthogonal
+    // to the learning heuristic). Rebuilt per use: set_vocab and the oracle each
+    // consume one.
+    let make_vocab = || {
+        let mut v = reverse_rusty::vocab::Vocab::new();
+        v.add_synonym(
+            "zzabbr",
+            "term:zzcanon",
+            reverse_rusty::dict::FeatureKind::Generic,
+        );
+        v
+    };
+
+    let title_abbr = "1994 fleer zzabbr psa 10";
+    let title_canon = "1994 fleer zzcanon psa 10";
+
+    for &k in &[1usize, 3, 8, 16] {
+        let cfg = ClusterConfig {
+            num_shards: k,
+            include_broad: true,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+
+        // Before the alias the two forms are distinct: the canonical-form title does
+        // not match the abbreviation query, and vice versa.
+        assert!(
+            !cluster.percolate(title_canon).unwrap().contains(&q_abbr),
+            "K={k}: before alias, the canonical title must not match the abbreviation query"
+        );
+        assert!(
+            !cluster.percolate(title_abbr).unwrap().contains(&q_canon),
+            "K={k}: before alias, the abbreviation title must not match the canonical query"
+        );
+
+        // Declare the alias + rebuild the cluster under the new normalizer.
+        let rebuilt = cluster.set_vocab(make_vocab()).expect("set_vocab");
+        assert!(
+            rebuilt > 100,
+            "K={k}: set_vocab should rebuild the whole live corpus, not just the 2 added \
+             queries (got {rebuilt})"
+        );
+
+        // After the alias, BOTH queries match BOTH surface forms (the headline; zero FN).
+        for title in [title_abbr, title_canon] {
+            let got = cluster.percolate(title).unwrap();
+            assert!(
+                got.contains(&q_abbr),
+                "K={k}: {title:?} must match the abbreviation-form query after the alias"
+            );
+            assert!(
+                got.contains(&q_canon),
+                "K={k}: {title:?} must match the canonical-form query after the alias"
+            );
+        }
+
+        // Differential equivalence STILL holds post-alias: cluster ≡ an independent,
+        // alias-aware brute over the full live set — for the alias titles AND a sample
+        // of corpus titles (proving the rebuild preserved base matching, zero FN/FP).
+        let brute = Brute::build_with_vocab(&queries, make_vocab().to_normalizer().unwrap());
+        let mut lc = String::new();
+        let mut feats = Vec::new();
+        for title in titles
+            .iter()
+            .map(String::as_str)
+            .take(100)
+            .chain([title_abbr, title_canon])
+        {
+            let got: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
+            let truth = brute.matches(title, &mut lc, &mut feats);
+            assert_eq!(
+                got, truth,
+                "K={k}: cluster disagrees with the alias-aware oracle for {title:?}"
+            );
+        }
+    }
 }
 
 /// `ingest()` must refuse a non-empty cluster: it re-indexes from scratch, so calling it

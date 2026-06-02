@@ -125,6 +125,30 @@ pub(crate) trait Shard: Send + Sync {
     /// Per-class entry tally `[A, B, C, D]` for this shard (introspection/tests).
     fn class_counts(&self) -> Result<[u64; 4], ShardError>;
 
+    /// This shard's live `(logical_id, dsl)` source set — the corpus the shard's
+    /// index is a materialized view of. Used by `ClusterEngine::set_vocab` to
+    /// rebuild every shard under a new normalizer (ADR-046). Default: `Err` — only
+    /// a shard backed by an in-process [`Engine`] (`LocalShard`/`ReplicatedShard`)
+    /// can enumerate its sources; a `RemoteShard`'s sources live in another process
+    /// (a cross-process vocabulary change is out of scope for v1, and `set_vocab`
+    /// refuses a non-local cluster before ever calling this).
+    fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
+        Err(ShardError::Config(
+            "live_sources is only supported for in-process shards".into(),
+        ))
+    }
+
+    /// Whether this shard is backed by an in-process [`Engine`], so its normalizer
+    /// can be swapped in place by a vocabulary change. `false` for a
+    /// `RemoteShard`/`HandoffShard`, whose normalizer lives in another process and
+    /// is NOT shipped a vocabulary change in v1 — `ClusterEngine::set_vocab` refuses
+    /// to run unless every shard is local, so an alias can never silently diverge
+    /// across processes (a cross-process false negative the dict-fingerprint
+    /// handshake would not catch, since an alias is normalizer-only).
+    fn is_local(&self) -> bool {
+        false
+    }
+
     // ---- writes ----
     /// Bulk-ingest a pre-extracted bucket into a new immutable base segment — the
     /// distributed load path ([`crate::cluster::ClusterEngine::ingest`]). NOTE:
@@ -507,6 +531,14 @@ impl Shard for LocalShard {
 
     fn class_counts(&self) -> Result<[u64; 4], ShardError> {
         Ok(self.snapshot.load().class_counts())
+    }
+
+    fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
+        Ok(self.lock().live_sources())
+    }
+
+    fn is_local(&self) -> bool {
+        true
     }
 
     fn ingest_extracted(
