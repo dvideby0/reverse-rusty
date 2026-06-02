@@ -52,6 +52,7 @@ use std::fmt::Debug;
 use std::future::Future;
 use std::io::Cursor;
 use std::ops::RangeBounds;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -77,6 +78,7 @@ use super::control::{
     single_node_state, ClusterState, ClusterStateChange, ControlError, ControlPlane, NodeId,
     StateVersion,
 };
+use super::control_store;
 use super::proto;
 use super::proto::control_service_client::ControlServiceClient;
 
@@ -102,25 +104,94 @@ openraft::declare_raft_types!(
 // serialization), so there are no holes and reads are clones.
 // ===========================================================================
 
-#[derive(Default)]
 struct LogStoreInner {
     /// Log entries keyed by index — consecutive, no holes (the Raft correctness requirement).
     log: BTreeMap<u64, Entry<TypeConfig>>,
     last_purged: Option<LogId<u64>>,
     vote: Option<Vote<u64>>,
     committed: Option<LogId<u64>>,
+    /// Durable backing (ADR-041): `None` ⇒ in-memory (the in-process oracle / single-process
+    /// embedding — byte-identical to ADR-038); `Some` ⇒ persisted under this manager node's raft
+    /// dir, with `log_file` the CRC-framed append handle and `fsync` the durability policy.
+    paths: Option<control_store::RaftPaths>,
+    log_file: Option<std::fs::File>,
+    fsync: bool,
 }
 
-/// In-memory [`RaftLogStorage`]. `Arc`-shared so `get_log_reader` hands out a cheap clone.
-#[derive(Clone, Default)]
+/// A [`RaftLogStorage`] for the control plane — in-memory or durable (ADR-041). `Arc`-shared so
+/// `get_log_reader` hands out a cheap clone over the SAME inner (and, when durable, the same
+/// append handle).
+#[derive(Clone)]
 struct LogStore {
     inner: Arc<Mutex<LogStoreInner>>,
 }
 
 impl LogStore {
+    /// In-memory store (no disk) — the in-process oracle / single-process path.
+    fn in_memory() -> Self {
+        LogStore {
+            inner: Arc::new(Mutex::new(LogStoreInner {
+                log: BTreeMap::new(),
+                last_purged: None,
+                vote: None,
+                committed: None,
+                paths: None,
+                log_file: None,
+                fsync: false,
+            })),
+        }
+    }
+
+    /// Durable store rooted at `dir` (ADR-041): load the persisted log (dropping a torn tail) +
+    /// vote + committed + last-purged, then open the append handle. A restarting manager node
+    /// resumes its Raft hard state from here.
+    fn open(dir: &Path, fsync: bool) -> Result<Self, ControlError> {
+        // A `Copy` fn-pointer mapper (non-capturing closure) so each `?` site reuses it.
+        let cf: fn(std::io::Error) -> ControlError =
+            |e| ControlError::Backend(format!("raft store open: {e}"));
+        let paths = control_store::RaftPaths::new(dir.to_path_buf());
+        let entries: Vec<Entry<TypeConfig>> =
+            control_store::read_records(&paths.log()).map_err(cf)?;
+        let mut log = BTreeMap::new();
+        for e in entries {
+            log.insert(e.log_id.index, e);
+        }
+        let vote = control_store::read_value(&paths.vote()).map_err(cf)?;
+        let committed: Option<LogId<u64>> = control_store::read_value(&paths.committed())
+            .map_err(cf)?
+            .flatten();
+        let last_purged = control_store::read_value(&paths.purged()).map_err(cf)?;
+        let log_file = control_store::ensure_log(&paths.log()).map_err(cf)?;
+        Ok(LogStore {
+            inner: Arc::new(Mutex::new(LogStoreInner {
+                log,
+                last_purged,
+                vote,
+                committed,
+                paths: Some(paths),
+                log_file: Some(log_file),
+                fsync,
+            })),
+        })
+    }
+
     fn lock(&self) -> MutexGuard<'_, LogStoreInner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// Atomically rewrite the durable log to its current entries and re-open the append handle — the
+/// durable form of `truncate`/`purge` (which drop a suffix/prefix). A no-op for an in-memory store.
+fn rewrite_and_reopen(inner: &mut LogStoreInner) -> std::io::Result<()> {
+    let Some(path) = inner.paths.as_ref().map(control_store::RaftPaths::log) else {
+        return Ok(());
+    };
+    {
+        let records: Vec<&Entry<TypeConfig>> = inner.log.values().collect();
+        control_store::rewrite_records(&path, &records, inner.fsync)?;
+    }
+    inner.log_file = Some(control_store::ensure_log(&path)?);
+    Ok(())
 }
 
 impl RaftLogReader<TypeConfig> for LogStore {
@@ -155,7 +226,14 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 
     async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
-        self.lock().vote = Some(*vote);
+        let mut inner = self.lock();
+        inner.vote = Some(*vote);
+        // The vote is hard state — durable before returning, else a crash could lose an election
+        // promise and allow two leaders in one term (Raft safety). fsync per the policy.
+        if let Some(paths) = &inner.paths {
+            control_store::write_value(&paths.vote(), vote, inner.fsync)
+                .map_err(|e| StorageIOError::write_vote(&e))?;
+        }
         Ok(())
     }
 
@@ -167,7 +245,14 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         &mut self,
         committed: Option<LogId<u64>>,
     ) -> Result<(), StorageError<u64>> {
-        self.lock().committed = committed;
+        let mut inner = self.lock();
+        inner.committed = committed;
+        // Persist committed so a restart re-applies (snapshot.last, committed] (openraft's
+        // save_committed contract — without it the SM would resume only at the last snapshot).
+        if let Some(paths) = &inner.paths {
+            control_store::write_value(&paths.committed(), &committed, inner.fsync)
+                .map_err(|e| StorageIOError::write_logs(&e))?;
+        }
         Ok(())
     }
 
@@ -186,12 +271,18 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     {
         {
             let mut inner = self.lock();
+            let fsync = inner.fsync;
             for entry in entries {
+                // Durable-first: persist the framed record BEFORE acknowledging the flush, so a
+                // crash never loses an appended entry the leader believes is durable (Raft
+                // correctness). In-memory ⇒ no file ⇒ readable the instant it's in the map.
+                if let Some(file) = inner.log_file.as_mut() {
+                    control_store::append_record(file, &entry, fsync)
+                        .map_err(|e| StorageIOError::write_logs(&e))?;
+                }
                 inner.log.insert(entry.log_id.index, entry);
             }
         }
-        // In-memory: the entries are readable the instant they are in the map, so signal the
-        // flush complete immediately. (A durable store would fsync the appended run first.)
         callback.log_io_completed(Ok(()));
         Ok(())
     }
@@ -202,6 +293,8 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         for k in keys {
             inner.log.remove(&k);
         }
+        // Drop the conflicting suffix on disk too (atomic rewrite + reopen the append handle).
+        rewrite_and_reopen(&mut inner).map_err(|e| StorageIOError::write_logs(&e))?;
         Ok(())
     }
 
@@ -212,6 +305,13 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         for k in keys {
             inner.log.remove(&k);
         }
+        // Persist the new lower bound (so get_log_state is consistent after restart) + compact the
+        // file. A snapshot already covers the purged prefix (openraft only purges post-snapshot).
+        if let Some(paths) = &inner.paths {
+            control_store::write_value(&paths.purged(), &log_id, inner.fsync)
+                .map_err(|e| StorageIOError::write_logs(&e))?;
+        }
+        rewrite_and_reopen(&mut inner).map_err(|e| StorageIOError::write_logs(&e))?;
         Ok(())
     }
 }
@@ -220,8 +320,9 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 // State machine — the ClusterState document, applied through control::apply.
 // ===========================================================================
 
-/// A built snapshot: the serialized [`ClusterState`] + its meta.
-#[derive(Clone)]
+/// A built snapshot: the serialized [`ClusterState`] + its meta. `serde` so the durable backend
+/// (ADR-041) persists it whole (`SnapshotMeta`/`Vec<u8>` are already serde — cf. `SnapshotEnvelope`).
+#[derive(Clone, Serialize, Deserialize)]
 struct StoredSnapshot {
     meta: SnapshotMeta<u64, BasicNode>,
     data: Vec<u8>,
@@ -235,29 +336,78 @@ struct SmInner {
     snapshot: Option<StoredSnapshot>,
     /// Monotonic counter for unique snapshot ids (no wall-clock in library code).
     snapshot_idx: u64,
+    /// Durable backing (ADR-041): `None` ⇒ in-memory; `Some` ⇒ the snapshot is persisted here so a
+    /// restart rebuilds the SM from it (+ the log tail openraft replays up to `committed`).
+    paths: Option<control_store::RaftPaths>,
+    fsync: bool,
 }
 
-/// In-memory [`RaftStateMachine`] over the cluster-state document. `Arc`-shared so the owning
-/// [`RaftControlPlane`] can read the committed document directly (after a linearizable check),
-/// and so `get_snapshot_builder` hands out a cheap clone.
+/// A [`RaftStateMachine`] over the cluster-state document — in-memory or durable (ADR-041).
+/// `Arc`-shared so the owning [`RaftControlPlane`] can read the committed document directly (after
+/// a linearizable check), and so `get_snapshot_builder` hands out a cheap clone.
 #[derive(Clone)]
 struct StateMachine {
     inner: Arc<Mutex<SmInner>>,
 }
 
 impl StateMachine {
-    /// Genesis from a seed document — the openraft-side analogue of
+    /// In-memory genesis from a seed document — the openraft-side analogue of
     /// [`InMemoryControlPlane::single_node`](super::control::InMemoryControlPlane::single_node),
     /// so both backends start from a byte-identical document.
-    fn new(genesis: ClusterState) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(SmInner {
+    fn in_memory(genesis: ClusterState) -> Self {
+        Self::with_inner(SmInner {
+            last_applied: None,
+            last_membership: StoredMembership::default(),
+            state: genesis,
+            snapshot: None,
+            snapshot_idx: 0,
+            paths: None,
+            fsync: false,
+        })
+    }
+
+    /// Durable state machine rooted at `dir` (ADR-041): if a snapshot is persisted, rebuild the SM
+    /// from it (state + last_applied + membership = the snapshot point); else genesis. openraft then
+    /// replays the durable log tail (snapshot.last, committed] on top, so the SM resumes at committed.
+    fn open(dir: &Path, genesis: ClusterState, fsync: bool) -> Result<Self, ControlError> {
+        let cf: fn(std::io::Error) -> ControlError =
+            |e| ControlError::Backend(format!("raft store open: {e}"));
+        let paths = control_store::RaftPaths::new(dir.to_path_buf());
+        let stored: Option<StoredSnapshot> =
+            control_store::read_value(&paths.snapshot()).map_err(cf)?;
+        let inner = match stored {
+            Some(s) => {
+                let state: ClusterState = serde_json::from_slice(&s.data).map_err(|e| {
+                    ControlError::Backend(format!("control snapshot decode on restart: {e}"))
+                })?;
+                let last_applied = s.meta.last_log_id;
+                let last_membership = s.meta.last_membership.clone();
+                SmInner {
+                    last_applied,
+                    last_membership,
+                    state,
+                    snapshot: Some(s),
+                    snapshot_idx: 0,
+                    paths: Some(paths),
+                    fsync,
+                }
+            }
+            None => SmInner {
                 last_applied: None,
                 last_membership: StoredMembership::default(),
                 state: genesis,
                 snapshot: None,
                 snapshot_idx: 0,
-            })),
+                paths: Some(paths),
+                fsync,
+            },
+        };
+        Ok(Self::with_inner(inner))
+    }
+
+    fn with_inner(inner: SmInner) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
         }
     }
 
@@ -287,10 +437,17 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
             last_membership: inner.last_membership.clone(),
             snapshot_id,
         };
-        inner.snapshot = Some(StoredSnapshot {
+        let stored = StoredSnapshot {
             meta: meta.clone(),
             data: data.clone(),
-        });
+        };
+        // Persist the snapshot (ADR-041): it is what a restart rebuilds the SM from, and it lets
+        // openraft purge the covered log prefix.
+        if let Some(paths) = &inner.paths {
+            control_store::write_value(&paths.snapshot(), &stored, inner.fsync)
+                .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
+        }
+        inner.snapshot = Some(stored);
         Ok(Snapshot {
             meta,
             snapshot: Box::new(Cursor::new(data)),
@@ -363,10 +520,17 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         inner.state = state;
         inner.last_applied = meta.last_log_id;
         inner.last_membership = meta.last_membership.clone();
-        inner.snapshot = Some(StoredSnapshot {
+        let stored = StoredSnapshot {
             meta: meta.clone(),
             data,
-        });
+        };
+        // Persist an installed snapshot too (a follower catching up via the leader must survive its
+        // own restart from the same point — ADR-041).
+        if let Some(paths) = &inner.paths {
+            control_store::write_value(&paths.snapshot(), &stored, inner.fsync)
+                .map_err(|e| StorageIOError::write_snapshot(Some(meta.signature()), &e))?;
+        }
+        inner.snapshot = Some(stored);
         Ok(())
     }
 
@@ -660,6 +824,14 @@ impl RaftControlPlane {
             Err(e) => Err(ControlError::Backend(format!("initialize: {e}"))),
         }
     }
+
+    /// Cleanly stop this node's Raft core (await the background task's join) — releases the durable
+    /// files so a restart from the same dir (ADR-041) does not race a still-running core, and the
+    /// graceful path for a manager node shutting down. Best-effort: a join error (already stopped)
+    /// is benign.
+    pub fn shutdown(&self) {
+        self.handle.block_on(self.raft.shutdown()).ok();
+    }
 }
 
 impl ControlPlane for RaftControlPlane {
@@ -749,18 +921,28 @@ fn control_config() -> Result<Config, ControlError> {
 
 /// Build a [`RaftControlPlane`] over an explicit network factory + genesis document. Shared by
 /// [`in_process_cluster`] (in-process registry network) and the gRPC manager node (step 5b-2).
+/// `dir` selects the store backend: `None` ⇒ in-memory (byte-identical to ADR-038); `Some` ⇒
+/// durable under that dir (ADR-041), so the node resumes its Raft hard state + committed document
+/// on restart. `fsync` is the durability policy for the durable backend (ignored when in-memory).
 fn build_node<N>(
     node_id: u64,
     genesis: ClusterState,
     network: N,
     handle: &Handle,
+    dir: Option<&Path>,
+    fsync: bool,
 ) -> Result<RaftControlPlane, ControlError>
 where
     N: RaftNetworkFactory<TypeConfig>,
 {
     let config = Arc::new(control_config()?);
-    let log = LogStore::default();
-    let sm = StateMachine::new(genesis);
+    let (log, sm) = match dir {
+        Some(d) => (
+            LogStore::open(d, fsync)?,
+            StateMachine::open(d, genesis, fsync)?,
+        ),
+        None => (LogStore::in_memory(), StateMachine::in_memory(genesis)),
+    };
     let raft = handle
         .block_on(Raft::new(node_id, config, network, log, sm.clone()))
         .map_err(|e| ControlError::Backend(format!("Raft::new({node_id}): {e}")))?;
@@ -775,16 +957,27 @@ where
 /// step 5b-2). Seeds the [`single_node_state`] genesis (every manager starts from the same
 /// document); the caller serves a [`ControlServer`](super::control_server::ControlServer) over
 /// `node.raft()` and, on exactly ONE node, calls [`RaftControlPlane::initialize`] with the manager
-/// addresses once all peers are listening. Returns the node handle (not yet serving).
+/// addresses once all peers are listening. Returns the node handle (not yet serving). `data_dir`
+/// makes the node **durable** (ADR-041) — it resumes its Raft state + committed document after a
+/// restart and rejoins the quorum; `None` keeps the (ADR-038) in-memory store.
 pub fn start_grpc_node(
     node_id: u64,
     num_shards: u32,
     vnodes: u32,
     dict_fingerprint: u64,
     handle: &Handle,
+    data_dir: Option<&Path>,
 ) -> Result<RaftControlPlane, ControlError> {
     let genesis = single_node_state(num_shards, vnodes, dict_fingerprint);
-    build_node(node_id, genesis, GrpcControlNetworkFactory, handle)
+    // Durable manager nodes fsync their hard state (election safety + no committed-data loss).
+    build_node(
+        node_id,
+        genesis,
+        GrpcControlNetworkFactory,
+        handle,
+        data_dir,
+        true,
+    )
 }
 
 /// Build an in-process multi-node control-plane cluster: `ids.len()` real [`Raft`] nodes wired by
@@ -817,7 +1010,7 @@ pub fn in_process_cluster(
         let factory = InProcFactory {
             registry: Arc::clone(&registry),
         };
-        let plane = build_node(id, genesis.clone(), factory, handle)?;
+        let plane = build_node(id, genesis.clone(), factory, handle, None, false)?;
         // Register the handle so peers can reach it. Raft tolerates the brief window before all
         // handles are present (uninitialized nodes do not campaign, so no RPCs fly until bootstrap).
         registry
@@ -838,6 +1031,42 @@ pub fn in_process_cluster(
     }
     wait_for_leader(&planes, first_id, Duration::from_secs(10))?;
     Ok(planes)
+}
+
+/// Build a SINGLE durable in-process control-plane node (its own leader) rooted at `dir` — the
+/// restart-recovery vehicle for ADR-041 (and a single-manager durable embedding). It reuses the
+/// in-process registry network (a one-node cluster), persists its Raft state under `dir`, and is
+/// idempotent across a restart: calling it again over the SAME `dir` rebuilds the node from disk
+/// (`initialize` returns `NotAllowed`, ignored), re-elects itself, and replays its committed log so
+/// the committed cluster-state document survives. `distributed`-gated.
+pub fn durable_single_node(
+    node_id: u64,
+    dir: &Path,
+    num_shards: u32,
+    vnodes: u32,
+    dict_fingerprint: u64,
+    handle: &Handle,
+) -> Result<RaftControlPlane, ControlError> {
+    let registry: Registry = Arc::new(Mutex::new(BTreeMap::new()));
+    let genesis = single_node_state(num_shards, vnodes, dict_fingerprint);
+    let factory = InProcFactory {
+        registry: Arc::clone(&registry),
+    };
+    // Durable: fsync the hard state (this is the deployment path, not the fast oracle path).
+    let node = build_node(node_id, genesis, factory, handle, Some(dir), true)?;
+    registry
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(node_id, node.raft());
+    // First build forms the one-node cluster; a restart finds it already initialized (NotAllowed,
+    // ignored) and re-elects from the persisted vote/log.
+    node.initialize(&[(node_id, format!("inproc://{node_id}"))])?;
+    wait_for_leader(
+        std::slice::from_ref(&node),
+        node_id,
+        Duration::from_secs(10),
+    )?;
+    Ok(node)
 }
 
 /// Poll until some node reports an elected leader, or `timeout` elapses (fail-closed — a silent

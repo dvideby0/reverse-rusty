@@ -215,6 +215,21 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   set). Lean-core retention + finalize; the RPC is `distributed`-gated. **Honest scope:** a stuck lease has no
   time/size expiry yet; cross-node in-sync promotion of a remote replica routes through the allocator (design-only);
   TLS/auth deferred.
+- **Durable Raft log + control-plane restart recovery (ADR-041)** — clustering build-path step 5e, making the
+  ADR-038 openraft backend survive a restart. A new `src/cluster/control_store.rs` is the byte-level durable
+  substrate: a CRC-framed append-only record log (reusing the `clog`/`wal` forward-scan / torn-tail pattern +
+  `storage::crc32`) for the Raft entries, plus atomic single-value files (tmp + fsync + rename) for the **vote**
+  (election safety), the **committed** log id (`save_committed`, so a restart re-applies `(snapshot.last,
+  committed]`), the last-purged id, and the state-machine **snapshot**. The state machine is NOT persisted
+  per-apply — openraft rebuilds it on restart from the snapshot + the replayed log (so `apply` stays the
+  in-memory `control::apply` ⇒ live ≡ replay unchanged). `LogStore`/`StateMachine` gained `in_memory()` (the
+  ADR-038 path — byte-identical) + `open(dir, fsync)`; `build_node` takes `Option<&Path>`, `in_process_cluster`
+  stays in-RAM, and `start_grpc_node` + the new `controlserver --data-dir` flag make a manager node durable. A
+  `RaftControlPlane::shutdown()` releases the files for a clean restart. Proven by
+  `tests/cluster_control_raft_oracle.rs::durable_node_recovers_committed_document_after_restart` (commit → shutdown
+  → rebuild from disk → the committed doc survives + a fresh write commits) + `control_store.rs` unit tests. All
+  `distributed`-gated (the lean core never compiles openraft); no new dependency. **Honest scope:** an end-to-end
+  durable-multi-node rolling-restart harness + TLS/auth + an allocator on the shard→node map remain design-only.
 
 ## Measured
 
@@ -299,9 +314,11 @@ the selective candidate count further.
   data node self-restarts from its own checkpoint sidecar. **Translog retention + finalize** is built too (step
   5d / ADR-040): retention leases make `seal_for_checkpoint` trim to `min(P, lease_floor)` so a concurrent seal
   can't strand an in-flight recovery's tail (and the translog GCs when no recovery needs it), and a lease-held
-  convergence loop + atomic in-sync promotion shrink the quiesce window to the residual delta. **Still
-  design-only** (the shared-nothing multi-node roadmap): a durable Raft log (CRC-framed) + restart recovery, an
-  allocator that acts on the shard→node map, normalizer/vocab shipping, autoscaling, auto-split,
+  convergence loop + atomic in-sync promotion shrink the quiesce window to the residual delta. The openraft
+  control plane is **durable** too (step 5e / ADR-041): a CRC-framed Raft log + persisted vote/committed/snapshot
+  (`src/cluster/control_store.rs`) let a `controlserver --data-dir` survive a restart and rejoin the quorum,
+  resuming its committed cluster-state document. **Still design-only** (the shared-nothing multi-node roadmap):
+  an allocator that acts on the shard→node map, normalizer/vocab shipping, autoscaling, auto-split,
   replicate-broad-to-all, and TLS/auth.
   ([`design/clustering-and-scaling.md`](design/clustering-and-scaling.md).)
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
@@ -438,10 +455,11 @@ from the audit's former P3 list). Roughly grouped:
   self-restarts from its own checkpoint sidecar. **Translog retention leases + finalize** (ADR-040) close
   ADR-039's scope gaps — `seal_for_checkpoint` trims to `min(P, lease_floor)` so a concurrent seal can't strand
   an in-flight recovery (and the translog GCs when idle), and a lease-held convergence loop + atomic in-sync
-  promotion shrink the quiesce window to the residual delta. A full multi-node deployment still needs the
-  remaining **shared-nothing** layers — a durable Raft log + restart recovery, an allocator that acts on the
-  shard→node map, plus autoscaling — designed but not built (no object store / cloud dependency anywhere;
-  ADR-033); see Tier 3.
+  promotion shrink the quiesce window to the residual delta. The openraft control plane is **durable** too
+  (ADR-041): a CRC-framed Raft log + persisted vote/committed/snapshot (`control_store.rs`) let a
+  `controlserver --data-dir` survive a restart and rejoin the quorum. A full multi-node deployment still needs
+  the remaining **shared-nothing** layers — an allocator that acts on the shard→node map, plus autoscaling —
+  designed but not built (no object store / cloud dependency anywhere; ADR-033); see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator
   **ships** its frozen dict to each server at connect (ADR-034), and the ADR-030 fingerprint handshake fails
   loud (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can

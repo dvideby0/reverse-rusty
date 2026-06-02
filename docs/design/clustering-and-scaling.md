@@ -41,8 +41,10 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > node self-restarts from its own checkpoint sidecar. **Translog retention leases + finalize** (step 5d; ADR-040)
 > close 5c's gaps: `seal_for_checkpoint` trims to `min(P, lease_floor)` so a concurrent seal can't strand an
 > in-flight recovery (and the translog GCs when idle), and a lease-held convergence loop + atomic in-sync
-> promotion shrink the quiesce window to the residual delta. Still design-only: a durable Raft log + restart
-> recovery, an allocator on the shard→node map, normalizer/vocab shipping, TLS/auth, and autoscaling/auto-split.
+> promotion shrink the quiesce window to the residual delta. The openraft control plane is **durable** too
+> (step 5e; ADR-041) — a CRC-framed Raft log + persisted vote/committed/snapshot let a `controlserver --data-dir`
+> survive a restart and rejoin the quorum. Still design-only: an allocator on the shard→node map,
+> normalizer/vocab shipping, TLS/auth, and autoscaling/auto-split.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
@@ -204,8 +206,14 @@ Elasticsearch's per-shard **translog** / Cassandra's commitlog.
   reuses the single `control::apply` funnel, so the two backends are live ≡ replay. Consensus holds **only**
   the cluster-state document — never the ~750k/sec query mutations (those stay on the `ClusterLog` + the
   per-shard primary→replica path) nor the per-shard segment registry (the local manifest). openraft is
-  `distributed`-gated, so the lean core never compiles a consensus engine. The allocator that *acts* on the
-  shard→node map (physically moving shards on a reassignment) is the next increment.
+  `distributed`-gated, so the lean core never compiles a consensus engine.
+- **Durable + restart-recoverable (ADR-041).** The openraft backend's hard state is persisted by
+  `src/cluster/control_store.rs` — a CRC-framed Raft log + atomic vote/committed/last-purged/snapshot files
+  (reusing `storage::crc32` + the `clog`/`wal` torn-tail pattern). A `controlserver --data-dir` manager node
+  survives a crash, resumes its committed cluster-state document, and rejoins the quorum; the in-memory backend
+  (no dir) stays byte-identical to ADR-038. The state machine is rebuilt from the snapshot + replayed log on
+  restart, so `apply` stays the in-memory funnel. The allocator that *acts* on the shard→node map (physically
+  moving shards on a reassignment) is the next increment.
 
 ---
 
@@ -393,6 +401,17 @@ without operator action. The defaults are the product.
      lease keeps the tail safe), only the window size does. Proven by `replica.rs` unit tests +
      `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_converges_under_sustained_writes` (a writer thread streams
      adds CONCURRENTLY with the recovery; recovered ≡ live source ≡ brute over the final set).
+   - 5e. **Durable Raft log + restart recovery.** ✅ **Done** (ADR-041): closes ADR-038's deferred durability.
+     A new `src/cluster/control_store.rs` persists the openraft backend's hard state — a CRC-framed append-only
+     Raft log (reusing the `clog`/`wal` forward-scan / torn-tail pattern + `storage::crc32`), plus atomic
+     single-value files for the **vote** (election safety), the **committed** log id (`save_committed`, so a
+     restart re-applies `(snapshot.last, committed]`), the last-purged id, and the SM **snapshot**. The state
+     machine is rebuilt on restart from the snapshot + the replayed log (so `apply` stays the in-memory
+     `control::apply` ⇒ live ≡ replay unchanged). `LogStore`/`StateMachine` gained `in_memory()` (the ADR-038
+     path — byte-identical) + `open(dir, fsync)`; `start_grpc_node` + a `controlserver --data-dir` flag make a
+     manager node durable, so it survives a crash and rejoins the quorum. Proven by
+     `tests/cluster_control_raft_oracle.rs::durable_node_recovers_committed_document_after_restart` +
+     `control_store.rs` unit tests. All `distributed`-gated; no new dependency.
 6. **Auto-split + recommended_shard_count** from telemetry; **autoscale** matcher replicas. *(design-only)*
 7. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
@@ -401,9 +420,9 @@ without operator action. The defaults are the product.
 step 3b's per-shard local durable segments, step 4's per-shard replication + peer recovery (4a in-process,
 4b over gRPC), the **quorum/Raft control plane** — step 5a's seam AND step 5b's openraft backend + gRPC
 `ControlService` — AND step 5c's **per-shard translog + no-quiesce peer recovery** are built; ADR-027 + ADR-029
-+ ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040. The remaining
-shared-nothing multi-node work — a durable Raft log + restart recovery, an allocator acting on the shard→node
-map, and autoscale + auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
++ ADR-034 + ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040 + ADR-041. The
+remaining shared-nothing multi-node work — an allocator acting on the shard→node map, and autoscale +
+auto-split (step 6) — is design-only (ADR-033). See [`../STATUS.md`](../STATUS.md).)
 
 ---
 

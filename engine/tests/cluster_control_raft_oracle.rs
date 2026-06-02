@@ -23,9 +23,9 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use reverse_rusty::cluster::{
-    in_process_cluster, start_grpc_node, ClusterState, ClusterStateChange, ControlError,
-    ControlPlane, ControlServer, InMemoryControlPlane, NodeDescriptor, NodeId, NodeRole,
-    RaftControlPlane, ShardAssignment,
+    durable_single_node, in_process_cluster, start_grpc_node, ClusterState, ClusterStateChange,
+    ControlError, ControlPlane, ControlServer, InMemoryControlPlane, NodeDescriptor, NodeId,
+    NodeRole, RaftControlPlane, ShardAssignment,
 };
 use tokio::runtime::Runtime;
 use tonic::transport::server::TcpIncoming;
@@ -255,7 +255,9 @@ fn grpc_three_node_survives_leader_failure() {
     let mut planes: Vec<RaftControlPlane> = Vec::new();
     for &id in &ids {
         planes.push(
-            start_grpc_node(id, NUM_SHARDS, VNODES, GENESIS_FP, rt.handle())
+            // In-memory store here (None): this test exercises elections/failover, not durability
+            // (the durable restart path is covered by `durable_node_recovers_*` below).
+            start_grpc_node(id, NUM_SHARDS, VNODES, GENESIS_FP, rt.handle(), None)
                 .expect("start grpc manager node"),
         );
     }
@@ -315,4 +317,73 @@ fn grpc_three_node_survives_leader_failure() {
         "both the pre- and post-failover commits are present: {:?}",
         doc2.nodes
     );
+}
+
+/// ADR-041 (durable Raft log + restart): a durable single-node control plane commits a document,
+/// the node is cleanly stopped (its hard state is on disk — vote/log/committed/snapshot fsync'd per
+/// write), then a FRESH node is rebuilt from the SAME data dir. It resumes its Raft state, replays
+/// its committed log, and serves the committed document; a new write still commits. Single-node so
+/// it is its own leader — deterministic, with no multi-node restart race.
+#[test]
+fn durable_node_recovers_committed_document_after_restart() {
+    let rt = Runtime::new().expect("tokio runtime");
+    let dir = std::env::temp_dir().join(format!("rr_raft_restart_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Build → commit the document script → capture the committed doc → cleanly stop.
+    let committed = {
+        let node = durable_single_node(7, &dir, NUM_SHARDS, VNODES, GENESIS_FP, rt.handle())
+            .expect("durable node");
+        run_doc_script(&node); // add nodes 1,2 + assign shard 0 + bump model fingerprint
+        let doc = node.cluster_state().expect("read committed doc");
+        assert!(
+            doc.nodes.iter().any(|n| n.id == NodeId(1))
+                && doc.nodes.iter().any(|n| n.id == NodeId(2)),
+            "pre-restart membership committed"
+        );
+        assert_eq!(
+            doc.dict_fingerprint, MODEL_FP,
+            "pre-restart model committed"
+        );
+        assert!(
+            doc.assignments
+                .iter()
+                .any(|a| a.position == 0 && a.primary == NodeId(1)),
+            "pre-restart assignment committed"
+        );
+        node.shutdown(); // release the durable files before reopening the same dir
+        doc
+    };
+
+    // Restart from the SAME dir: a fresh node rebuilds its committed state from disk.
+    let reopened = durable_single_node(7, &dir, NUM_SHARDS, VNODES, GENESIS_FP, rt.handle())
+        .expect("restart durable node");
+    let recovered = reopened.cluster_state().expect("read recovered doc");
+    assert_eq!(
+        recovered.nodes, committed.nodes,
+        "membership survived the restart"
+    );
+    assert_eq!(
+        recovered.assignments, committed.assignments,
+        "the shard→node assignment survived the restart"
+    );
+    assert_eq!(
+        recovered.dict_fingerprint, committed.dict_fingerprint,
+        "the model fingerprint survived the restart"
+    );
+
+    // ...and the cluster is LIVE after restart: a fresh write commits on top of the recovered state.
+    reopened
+        .propose(ClusterStateChange::AddNode(node(3, NodeRole::Data)))
+        .expect("post-restart write commits");
+    let after = reopened
+        .cluster_state()
+        .expect("read after post-restart write");
+    assert!(
+        after.nodes.iter().any(|n| n.id == NodeId(3)),
+        "the post-restart write is present on the recovered node"
+    );
+
+    reopened.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
 }

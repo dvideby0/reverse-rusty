@@ -13,6 +13,7 @@
 //! (the data path stays on `ShardService`); consensus holds only the cluster-state document.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use reverse_rusty::cluster::{start_grpc_node, ControlServer};
@@ -32,10 +33,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut shards = DEFAULT_SHARDS;
     let mut vnodes = DEFAULT_VNODES;
     let mut fingerprint: u64 = 0;
+    let mut data_dir: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--data-dir" => {
+                if let Some(v) = args.get(i + 1) {
+                    data_dir = Some(PathBuf::from(v));
+                }
+                i += 1;
+            }
             "--peer" => {
                 // `--peer ID=http://host:port`
                 if let Some(spec) = args.get(i + 1) {
@@ -79,7 +87,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let self_url = format!("http://{bind}");
 
     let rt = tokio::runtime::Runtime::new()?;
-    let plane = start_grpc_node(node_id, shards, vnodes, fingerprint, rt.handle())?;
+    // `--data-dir` makes this manager node DURABLE (ADR-041): it persists its Raft log/vote/
+    // committed/snapshot and resumes its committed cluster-state document on restart. Without it the
+    // node keeps the in-memory store (ADR-038) and starts fresh each launch.
+    let plane = start_grpc_node(
+        node_id,
+        shards,
+        vnodes,
+        fingerprint,
+        rt.handle(),
+        data_dir.as_deref(),
+    )?;
+    if let Some(dir) = &data_dir {
+        println!(
+            "controlserver: node {node_id} DURABLE (raft state under {})",
+            dir.display()
+        );
+    }
     let server = ControlServer::new(plane.raft());
     let serve = rt.spawn(server.serve(addr));
 
