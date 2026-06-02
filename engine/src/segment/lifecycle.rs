@@ -194,6 +194,99 @@ impl Engine {
         self.vocab_epoch
     }
 
+    /// Record a vocabulary on an engine that is ALREADY consistent with it,
+    /// WITHOUT recompiling or bumping the epoch. Used at startup after
+    /// [`open`](Self::open): the engine was opened with this vocab's normalizer,
+    /// so its segments already align with it and only the [`Vocab`](crate::vocab::Vocab)
+    /// object needs installing (so `GET /_vocab` can serve it). Unlike
+    /// [`set_vocab`](Self::set_vocab) — which signals a normalizer *change* by
+    /// bumping the epoch and marking segments stale — this is a pure metadata
+    /// record. Use [`set_vocab`] + [`recompile_stale_segments`](Self::recompile_stale_segments)
+    /// to actually *change* the vocabulary at runtime.
+    pub fn adopt_vocab(
+        &mut self,
+        vocab: crate::vocab::Vocab,
+    ) -> Result<(), crate::error::NormalizerError> {
+        self.norm = Arc::new(vocab.to_normalizer()?);
+        self.vocab = Some(Arc::new(vocab));
+        Ok(())
+    }
+
+    /// The current live `(logical_id, query_text)` set — the source corpus the
+    /// index is a materialized view of, sorted by logical id for deterministic
+    /// rebuilds. Backed by the query store (kept in sync with the index by the
+    /// insert/delete paths), so it reflects exactly the queries that should be
+    /// matchable. Used by [`recompile_stale_segments`](Self::recompile_stale_segments).
+    pub fn live_sources(&self) -> Vec<(u64, String)> {
+        let mut out: Vec<(u64, String)> = Vec::with_capacity(self.query_store.len());
+        self.query_store
+            .for_each_live(|logical, text| out.push((logical, text.to_string())));
+        out.sort_unstable_by_key(|&(l, _)| l);
+        out
+    }
+
+    /// Recompile every live query under the CURRENT normalizer, replacing all
+    /// base segments (and the memtable) with one freshly-compiled segment at the
+    /// current vocab epoch. This is the recompile pass that makes a normalizer
+    /// change ([`set_vocab`](Self::set_vocab)) actually take effect on
+    /// already-ingested queries: without it, segments compiled under the old
+    /// normalizer carry stale feature ids, and a title normalized with the new
+    /// normalizer can miss them — a **false negative**.
+    ///
+    /// Queries are recompiled READ-ONLY against the existing (frozen) dict via
+    /// [`extract_readonly`](crate::compile::extract_readonly): a declared alias
+    /// collapses both surface forms to one feature (so both now match), and a new
+    /// alias canonical that isn't interned resolves to a stable synthetic id
+    /// (mechanism 1). The dict's feature space is unchanged.
+    ///
+    /// A no-op (returns 0) when nothing is stale; after it, `has_stale_segments()`
+    /// is false. Returns the number of queries recompiled.
+    ///
+    /// Atomicity: a caller that publishes snapshots (e.g. the server) must call
+    /// this **before** publishing the next snapshot, so readers never observe the
+    /// new normalizer against not-yet-recompiled segments.
+    pub fn recompile_stale_segments(&mut self) -> usize {
+        if !self.has_stale_segments() {
+            return 0;
+        }
+        // Recompile the live source set read-only against the frozen dict under
+        // the current normalizer into one fresh segment.
+        let live = self.live_sources();
+        let mut seg = Segment::new();
+        seg.vocab_epoch = self.vocab_epoch;
+        let mut lc = String::new();
+        let mut recompiled = 0usize;
+        for (logical, text) in &live {
+            if let Ok(ast) = crate::dsl::parse(text) {
+                let ex = crate::compile::extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+                if seg.add_compiled(&ex, &self.dict, *logical, 1).is_some() {
+                    recompiled += 1;
+                }
+            }
+        }
+        seg.build_filter();
+
+        // Atomic swap: drop every (stale) base segment + the memtable and install
+        // the one freshly-compiled segment, so no live query is left at an old
+        // epoch. Old segment files are GC'd after the manifest commit.
+        let old_files = self.collect_mmap_paths();
+        self.segments.clear();
+        let mut fresh_mem = Segment::new();
+        fresh_mem.vocab_epoch = self.vocab_epoch;
+        self.memtable = Arc::new(fresh_mem);
+        self.seal_and_push(seg);
+
+        // Persist like a flush: WAL checkpoint + manifest (the commit point) +
+        // WAL reset (every live query now lives in the sealed segment), then GC
+        // the superseded segment files.
+        self.checkpoint_wal();
+        if self.save_manifest_if_persistent() {
+            self.reset_wal_if_safe();
+        }
+        self.cleanup_segment_files(&old_files);
+        recompiled
+    }
+
     /// Open an engine from an existing data directory, recovering state from
     /// the manifest and WAL. The normalizer must be the same one used when the
     /// engine was originally built (feature spaces must align).

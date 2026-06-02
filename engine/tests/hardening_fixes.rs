@@ -182,6 +182,55 @@ fn memtable_staleness_tracked_after_vocab_change_and_insert() {
     assert_eq!(engine.stale_segment_count(), 1); // only the old segment
 }
 
+#[test]
+fn recompile_stale_segments_absorbs_declared_alias() {
+    // The headline mechanism-(2) property: a declared alias (rc ≡ rookie) makes
+    // BOTH surface forms match after a recompile. set_vocab marks the segments
+    // stale; recompile_stale_segments recompiles every live query under the new
+    // normalizer so a query written one way matches a title written the other —
+    // with zero false negatives. Without the recompile pass the stale segment
+    // keeps the old feature ids and the cross-form title is silently missed.
+    let mut engine = Engine::new(make_norm());
+    engine.build_from_queries(&[
+        (1, "rc fleer".into()),     // query phrased with the abbreviation
+        (2, "rookie fleer".into()), // query phrased with the canonical form
+    ]);
+
+    // Before the alias, "rc" and "rookie" are distinct features — the forms do
+    // not cross-match. (Also validates that "rc" is a real feature, not dropped.)
+    assert_eq!(match_ids(&engine, "rc fleer"), vec![1]);
+    assert_eq!(match_ids(&engine, "rookie fleer"), vec![2]);
+
+    // Declare rc → rookie and recompile.
+    let mut vocab = Vocab::new();
+    vocab.add_synonym(
+        "rc",
+        "term:rookie",
+        reverse_rusty::dict::FeatureKind::Category,
+    );
+    let stale = engine.set_vocab(vocab).unwrap();
+    assert!(stale > 0, "set_vocab marks the existing segment stale");
+    let recompiled = engine.recompile_stale_segments();
+    assert_eq!(recompiled, 2, "both live queries recompiled");
+    assert!(
+        !engine.has_stale_segments(),
+        "recompile clears all staleness"
+    );
+
+    // After the alias both surface forms collapse to one feature, so each query
+    // matches a title written with EITHER form — and no false negatives.
+    assert_eq!(
+        match_ids(&engine, "rc fleer"),
+        vec![1, 2],
+        "abbreviation title now matches both queries"
+    );
+    assert_eq!(
+        match_ids(&engine, "rookie fleer"),
+        vec![1, 2],
+        "canonical title now matches both queries"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fix 2: corrupt data graceful handling (no panics)
 // ---------------------------------------------------------------------------

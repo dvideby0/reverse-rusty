@@ -2003,6 +2003,41 @@ impl SourceStore {
             }
         }
     }
+
+    /// Visit every live `(logical, text)` pair (arbitrary order). Mirrors
+    /// [`write_to`](Self::write_to)'s live-entry resolution — for `Lazy`, the
+    /// overlay shadows the mmap base and a `None` overlay entry is a tombstone —
+    /// but hands each pair to `f` instead of serializing. This is the read side
+    /// of the "sources are the source of truth, segments are the materialized
+    /// view" model: it lets the engine rebuild the index from the live source set
+    /// after a normalizer change (see [`Engine::recompile_stale_segments`]).
+    pub fn for_each_live(&self, mut f: impl FnMut(u64, &str)) {
+        match self {
+            SourceStore::Resident(m) => {
+                for (k, v) in rw_read(m).iter() {
+                    f(*k, v.as_str());
+                }
+            }
+            SourceStore::Lazy { base, overlay } => {
+                let ov = rw_read(overlay);
+                if let Some(b) = base {
+                    for i in 0..b.count {
+                        if let Some((logical, text)) = b.record(i) {
+                            // overlay (incl. tombstones) shadows the mmap base
+                            if !ov.contains_key(&logical) {
+                                f(logical, text);
+                            }
+                        }
+                    }
+                }
+                for (k, v) in ov.iter() {
+                    if let Some(s) = v {
+                        f(*k, s.as_str());
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Peek the version field of a sources file (magic-checked).

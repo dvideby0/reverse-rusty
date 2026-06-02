@@ -697,9 +697,9 @@ struct CompactResponse {
 #[derive(Serialize)]
 struct PutVocabResponse {
     acknowledged: bool,
-    stale_segments: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    warning: Option<&'static str>,
+    /// Number of stored queries recompiled under the new normalizer so the change
+    /// takes effect immediately with zero false negatives (0 if none were affected).
+    recompiled: usize,
 }
 
 // -- POST /_search
@@ -2285,21 +2285,23 @@ async fn put_vocab(
     let result = {
         let mut engine = state.engine.lock();
         match engine.set_vocab(vocab) {
-            Ok(stale) => (
-                StatusCode::OK,
-                Json(PutVocabResponse {
-                    acknowledged: true,
-                    stale_segments: stale,
-                    warning: (stale > 0).then_some(
-                        "normalizer changed with existing queries; reingest for consistent matching",
-                    ),
-                }),
-            )
-                .into_response(),
-            Err(e) => {
-                ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
+            Ok(_) => {
+                // Recompile every stored query under the new normalizer so the
+                // change takes effect with zero false negatives — under the same
+                // lock and BEFORE the snapshot is published, so readers never see
+                // the new normalizer against not-yet-recompiled segments.
+                let recompiled = engine.recompile_stale_segments();
+                (
+                    StatusCode::OK,
+                    Json(PutVocabResponse {
+                        acknowledged: true,
+                        recompiled,
+                    }),
+                )
                     .into_response()
             }
+            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
+                .into_response(),
         }
     };
     state.publish_snapshot();
@@ -2631,18 +2633,16 @@ async fn main() {
             Ok(mut e) => {
                 info!(data_dir = ?data_dir, "recovered engine from persistence");
                 if let Some(v) = vocab {
-                    match e.set_vocab(v) {
-                        Ok(stale) if stale > 0 => warn!(
-                            stale_segments = stale,
-                            "recovered segments were compiled against an older vocab \
-                             epoch; reingest affected queries for consistent matching"
-                        ),
-                        Ok(_) => {}
-                        Err(err) => warn!(
+                    // The engine was opened with this vocab's normalizer, so its
+                    // segments already align with it — just record the Vocab object
+                    // (for GET /_vocab) without recompiling. A genuine vocabulary
+                    // *change* goes through PUT /_vocab (set_vocab + recompile).
+                    if let Err(err) = e.adopt_vocab(v) {
+                        warn!(
                             error = %err,
                             "failed to apply vocab file to recovered engine; \
                              continuing with the recovered normalizer"
-                        ),
+                        );
                     }
                 }
                 e
