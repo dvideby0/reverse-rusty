@@ -197,9 +197,11 @@ Reverse Rusty is built on a minimal dependency set (versions pinned in
 | `tracing` | Structured logging |
 | `prometheus` | Metrics export |
 
-The core matching library depends only on `daachorse`, `memmap2`, `roaring`, and `rayon`; the rest are
-pulled in by the server binary (today they are not yet feature-gated — see
-[`docs/STATUS.md`](docs/STATUS.md)).
+The lean core (`cargo build --no-default-features`) depends only on `daachorse`, `memmap2`, `roaring`,
+`rayon`, `arc-swap`, and `serde`/`serde_json`; the `axum`/`tokio`/`clap`/`tracing`/`prometheus` server and
+observability crates sit behind the default-on `server` feature (ADR-028; the lean build is enforced by a
+`check.sh` lane). The optional `distributed` feature adds the gRPC/Raft cluster stack. See
+[`docs/STATUS.md`](docs/STATUS.md) and [`engine/Cargo.toml`](engine/Cargo.toml).
 
 ## License
 

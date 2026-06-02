@@ -41,8 +41,9 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) — LSM write path, segments,
   tombstones, compaction, feature-model versioning.
 - [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) — sharding and horizontal
-  scale (Cluster v1 = the in-process multi-shard core, built — ADR-027, `src/cluster/`; the distributed
-  multi-node layers are built but **experimental** — oracle-proven in-process / on localhost).
+  scale (Cluster v1 = the in-process multi-shard core + durable reopen + dynamic vocabulary, built —
+  ADR-027/046, `src/cluster/`; the distributed multi-node layers are built but **experimental** —
+  oracle-proven in-process / on localhost).
 
 ### Reference — how to use it
 - [`reference/api.md`](reference/api.md) — the complete REST API (every endpoint + server flags).
@@ -62,7 +63,8 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`research/clustering-prior-art.md`](research/clustering-prior-art.md) — consistent-hashing variants,
   content-based routing, and the ES distributed-percolator contrast (clustering design; → ADR-027).
 - [`research/dynamic-vocabulary.md`](research/dynamic-vocabulary.md) — absorbing new vocabulary after the
-  dict is frozen (the Cluster v1 spike: ES global ordinals, Vespa, RocksDB dict, feature hashing; → ADR-046).
+  dict is frozen (the Cluster v1 dynamic-vocab work, **built**: ES global ordinals, Vespa, RocksDB dict,
+  feature hashing; → ADR-046).
 - [`research/corpus-feature-learning.md`](research/corpus-feature-learning.md) — learning the feature
   extractor from the query corpus (NPMI).
 - [`research/real-data-findings.md`](research/real-data-findings.md) — testing the normalizer against

@@ -68,13 +68,13 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   256). Four dynamic knobs (`broad_batch_size`/`broad_columnar`/`broad_materialize`/`max_percolate_batch`)
   + broad Prometheus counters; `broad_columnar=false` is the inline kill-switch.
 - **Cluster scope frame — read before the cluster entries below.** **Cluster v1** (shippable) = the
-  in-process multi-shard core + durable local reopen + dynamic vocabulary (Roadmap **Tier 0**) —
-  oracle-proven, zero false negatives. The gRPC / replication / control-plane / handoff / autoscaler
-  layers in the entries below are **built and oracle-proven _in-process / on localhost_ but
-  experimental** — not yet hardened for real multi-machine deployment (no TLS/auth, write-quiesce
-  windows, advisory-only autoscaler, no auto-split). Each entry's *Honest scope* note records the
-  per-feature boundary **as of that increment** (some items it flags as design-only were built in a
-  later entry below); the prioritized path to v1 is Roadmap **Tier 0**.
+  in-process multi-shard core + durable local reopen + dynamic vocabulary — **built and oracle-proven,
+  zero false negatives (Roadmap Tier 0, now complete)**. The gRPC / replication / control-plane /
+  handoff / autoscaler layers in the entries below are **built and oracle-proven _in-process / on
+  localhost_ but experimental** — not yet hardened for real multi-machine deployment (no TLS/auth,
+  write-quiesce windows, advisory-only autoscaler, no auto-split). Each entry's *Honest scope* note
+  records the per-feature boundary **as of that increment** (some items it flags as design-only were
+  built in a later entry below).
 - **In-process multi-shard core (ADR-027)** — the first, dependency-free step of clustering
   (`src/cluster/`): a `ClusterEngine` coordinator over K `Shard`s (each a `Shard`-wrapped `Engine` +
   `ArcSwap` snapshot), a consistent-hash `HashRing` over the query's **anchor `FeatureId`**, and content
@@ -346,11 +346,11 @@ the in-process multi-shard core + durable local reopen + dynamic vocabulary — 
 milestone before the broader distributed cluster roadmap (Tier 3) resumes. These were the critical-core
 items from an external review, re-ranked to the top; **all are now done:**
 
-- **Dynamic vocabulary — "it just works" (spike done → ADR-046 → build).** The headline v1 correctness
-  item. Today a live write whose query introduces a term absent from the frozen shared dict **silently
-  drops** it (`coordinator/ingest.rs` + `server.rs` compile read-only against the frozen dict), so the
-  query broadens and an all-unknown any-of group risks a *false negative*. v1 **absorbs** the new term
-  with matching still correct (**zero false negatives**). The research spike
+- **Dynamic vocabulary — "it just works" (built + oracle-proven, ADR-046).** The headline v1 correctness
+  item. **Before ADR-046**, a live write whose query introduced a term absent from the frozen shared dict
+  **silently dropped** it (`coordinator/ingest.rs` + `server.rs` compile read-only against the frozen
+  dict), so the query broadened and an all-unknown any-of group risked a *false negative*. v1 now
+  **absorbs** the new term with matching still correct (**zero false negatives**). The research spike
   ([`research/dynamic-vocabulary.md`](research/dynamic-vocabulary.md)) is complete and the approach is
   **decided ([ADR-046](DECISIONS.md))** — two complementary mechanisms: **(1) new tokens →
   deterministic feature-hashing** into a reserved `FeatureId` range (every shard computes the same id
@@ -443,8 +443,8 @@ items from an external review, re-ranked to the top; **all are now done:**
   (the live-handoff routing-flip mechanism), the **live data-moving handoff** (peer-recover → fence →
   drain-to-convergence → flip, under concurrent writes), and the **autoscaler** — are **built and
   oracle-proven _in-process / on localhost_, but experimental: not yet hardened for real multi-machine
-  deployment** (ADR-027, 029, 031–045). **The immediate priority is Tier 0** (make v1 defensible); this
-  distributed buildout resumes after.
+  deployment** (ADR-027, 029, 031–045). **Tier 0 (the v1 acceptance gate) is complete**; this
+  distributed buildout resumes next.
   **Per-ADR detail is
   in [Implemented](#implemented-working-tested) above**; the build path + cross-shard correctness argument are
   in [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §10 (hashing-variant survey:
@@ -585,14 +585,15 @@ from the audit's former P3 list). Roughly grouped:
   the oracles — not yet deployed and hardened across real machines. **Remaining for production multi-node** (all
   design-only; ADR-033 — no object store / cloud dependency anywhere): **auto-split** + `recommended_shard_count`
   and wiring the autoscaler's (advisory) handoff recommendation to `execute_handoff`,
-  **cross-process dynamic vocabulary** (the in-process piece is the Tier-0 v1 item — [research
+  **cross-process dynamic vocabulary** (the in-process piece is the now-complete Tier-0 v1 item — [research
   spike](research/dynamic-vocabulary.md)), **replicate-broad-to-all**, **TLS/auth** on the (currently plaintext)
   transports, and auto-unfence-on-abort + a translog-lease TTL — see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator **ships**
   its frozen dict at connect (ADR-034) and the ADR-030 fingerprint handshake fails loud
   (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can never drop
   matches *silently*. The **normalizer** must still match on both sides (`default_vocab()` today — absorbing
-  vocabulary that appears after the frozen dict is the **Tier-0 dynamic-vocabulary** item), and the transport is
+  new vocabulary after the dict is frozen is **done in-process (Tier 0, ADR-046)**; shipping learned aliases
+  *cross-process* to a remote shard's normalizer remains deferred), and the transport is
   unauthenticated/plaintext. Treat the gRPC surface as correctness-safe, not yet a hardened multi-process deployment.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
   runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving it from the corpus is the
