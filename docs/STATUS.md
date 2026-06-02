@@ -346,20 +346,21 @@ the in-process multi-shard core + durable local reopen — a defensible, shippab
 broader distributed cluster roadmap (Tier 3) resumes. These are the critical-core items from an
 external review, re-ranked to the top:
 
-- **Dynamic vocabulary — "it just works" (research-first → ADR-046 → build).** The headline v1
-  correctness item. Today a live write whose query introduces a term absent from the frozen shared
-  dict **silently drops** it (`coordinator/ingest.rs` + `server.rs` compile read-only against the
-  frozen dict), so the query broadens and an all-unknown any-of group risks a *false negative*. v1
-  must instead **absorb** the new term and keep matching correct (**zero false negatives**). Because
-  the hard part is cross-shard agreement on each term's integer `FeatureId`, the approach is chosen
-  research-first — prior art surveyed in
-  [`research/dynamic-vocabulary.md`](research/dynamic-vocabulary.md) (ES/OS global ordinals + dynamic
-  mapping, Vespa real-time indexing, RocksDB shared-dictionary versioning, Lucene FST, and
-  deterministic feature-hashing — the no-consensus path) — then recorded in **ADR-046** and built in
-  the in-process core. **Honest boundary** (to pin in the spike): new single *tokens* may "just work"
-  via hashing, while new multi-token *alias/synonym rules* (e.g. `Upper Deck` ≡ `UD`) need normalizer
-  shipping and may stay a documented v1 limitation. *(Absorbs the former Tier-3 "normalizer/vocab
-  shipping" residue — it is a v1 correctness item now.)*
+- **Dynamic vocabulary — "it just works" (spike done → ADR-046 → build).** The headline v1 correctness
+  item. Today a live write whose query introduces a term absent from the frozen shared dict **silently
+  drops** it (`coordinator/ingest.rs` + `server.rs` compile read-only against the frozen dict), so the
+  query broadens and an all-unknown any-of group risks a *false negative*. v1 **absorbs** the new term
+  with matching still correct (**zero false negatives**). The research spike
+  ([`research/dynamic-vocabulary.md`](research/dynamic-vocabulary.md)) is complete and the approach is
+  **decided ([ADR-046](DECISIONS.md))** — two complementary mechanisms: **(1) new tokens →
+  deterministic feature-hashing** into a reserved `FeatureId` range (every shard computes the same id
+  with no coordination — in-process ≡ cross-process for free; collisions = bounded over-match, *never*
+  a missed match), and **(2) new alias/synonym rules → runtime normalizer learning** (reuse the ADR-015
+  `Vocab` machinery + an atomic in-process `Arc<Normalizer>` swap). Both land in the in-process v1 core;
+  the *cross-process shipping* of alias updates is deferred to the experimental distributed layers.
+  Remaining: implement in the in-process core + the absorb-correctly oracle assertions (zero FN, bounded
+  FP, incl. the all-unknown any-of group and a declared alias). *(Absorbs the former Tier-3
+  "normalizer/vocab shipping" residue — it is a v1 correctness item now.)*
 - **`block_on` regression guard test.** `RemoteShard`'s sync→async bridge is *safe by design* (rayon
   workers aren't tokio runtime threads — `remote.rs:9-14`), but nothing exercises it from a rayon
   fan-out today. Add a guard test so a future refactor can't silently introduce a nested-runtime
