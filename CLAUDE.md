@@ -169,7 +169,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/bin/norm.rs` | Title introspection tool | — |
 | `src/bin/segbench.rs` | Read-amplification vs segment count harness | — |
 | `src/bin/snapbench.rs` | Snapshot read/publish concurrency benchmark | ADR-016 |
-| `src/bin/server.rs` | HTTP server (axum) — ES-style REST API (incl. batch `/_mpercolate`), snapshot-based concurrency, structured logging, Prometheus metrics, graceful shutdown. Endpoint reference: [`docs/reference/api.md`](docs/reference/api.md) | ADR-014, ADR-016, ADR-021, ADR-022, ADR-023, ADR-026 |
+| `src/bin/server/` | HTTP server (axum, **module**) — ES-style REST API (incl. batch `/_mpercolate`), snapshot-based concurrency, structured logging, Prometheus metrics, graceful shutdown. `server/main.rs` is the entry point (CLI parse, engine build, router wiring, shutdown); submodules split by concern — `cli` (flags), `metrics` (Prometheus registry + the `EngineEvent`→counter bridge), `state` (`AppState` + request-id/in-flight middleware), `dto` (cross-handler response types — the error envelope + `_source`), and `handlers/` (endpoint handlers grouped by family — `doc`/`search`/`admin`/`vocab`, each owning its endpoint-specific DTOs + co-located tests). Endpoint reference: [`docs/reference/api.md`](docs/reference/api.md) | ADR-014, ADR-016, ADR-021, ADR-022, ADR-023, ADR-026 |
 
 *(All test files above are committed and run by `cargo test --release`. `tests/stress.rs`'s one 10M-query soak is `#[ignore]`d — run it explicitly or via the CI `run_soak` dispatch input. How-we-test guide: [`docs/testing.md`](docs/testing.md).)*
 
@@ -182,9 +182,9 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | Edit the DSL parser / normalizer / dictionary | [`docs/design/normalization.md`](docs/design/normalization.md) (+ `src/dsl.rs`, `normalize.rs`, `dict.rs`) |
 | Edit the signature optimizer / candidate index / exact matcher | [`docs/design/matching.md`](docs/design/matching.md) (+ `src/compile.rs`, `index.rs`, `exact.rs`) |
 | Edit the broad lane (class C) | [`docs/design/matching.md`](docs/design/matching.md) §4; evidence: [`docs/performance/results.md`](docs/performance/results.md) §9 |
-| Per-query tags / filtered percolation (the `TagPredicate`, `tagdict.rs`, REST filter) | [`docs/design/matching.md`](docs/design/matching.md) §5 + [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-049 (+ `src/tagdict.rs`, `exact.rs`, `bin/server.rs`) |
+| Per-query tags / filtered percolation (the `TagPredicate`, `tagdict.rs`, REST filter) | [`docs/design/matching.md`](docs/design/matching.md) §5 + [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-049 (+ `src/tagdict.rs`, `exact.rs`, `bin/server/handlers/` — `doc`/`search`) |
 | Edit segments / flush / compaction / WAL / mmap | [`docs/design/ingestion-and-updates.md`](docs/design/ingestion-and-updates.md) (+ `src/segment/`, `storage.rs`, `wal.rs`) |
-| Edit the HTTP server / REST endpoints | [`docs/reference/api.md`](docs/reference/api.md) (+ `src/bin/server.rs`) |
+| Edit the HTTP server / REST endpoints | [`docs/reference/api.md`](docs/reference/api.md) (+ `src/bin/server/` — `handlers/{doc,search,admin,vocab}.rs`) |
 | Query DSL syntax / vocabulary | [`docs/reference/dsl.md`](docs/reference/dsl.md) |
 | Add/understand a config knob or `/_settings` | [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-022; `src/config.rs` |
 | "Is X built or just designed?" / what to work on next | [`docs/STATUS.md`](docs/STATUS.md) (built vs design-only); the prioritized roadmap → [`docs/roadmap.md`](docs/roadmap.md) |

@@ -182,7 +182,7 @@ intersection for the very broadest postings is a further micro-optimization, not
 > [`../research/percolator-workload.md`](../research/percolator-workload.md), whose dominant read
 > pattern is "percolate, then narrow to one category." Code: `src/tagdict.rs` (tag interning), `src/exact.rs`
 > (`TagPredicate` + SoA tag column + verify-stage filter), `src/segment/` (ingest/match threading),
-> `src/storage/segment.rs` + `src/wal.rs` (`.seg` v3 / WAL v2 persistence), `src/bin/server.rs` (the REST
+> `src/storage/segment.rs` + `src/wal.rs` (`.seg` v3 / WAL v2 persistence), `src/bin/server/` (the REST
 > filter surface).
 
 Production percolators store **structured tags** alongside each query (a category, a status, secondary

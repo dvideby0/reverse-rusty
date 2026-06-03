@@ -9,7 +9,7 @@
   build-hygiene gap (compile time, binary size, supply-chain surface). It also became *timely*: the next
   increment (gRPC `ShardServer`, ADR-029) adds `tonic`/`prost` — a heavy, network-only dependency that
   needs a clean home behind a feature, not bolted onto the always-on surface. A usage audit confirmed
-  all nine crates are imported **only** in `src/bin/server.rs`; none leak into the library.
+  all nine crates are imported **only** in the `src/bin/server/` bin; none leak into the library.
 - **Decision:** Mark the nine crates `optional = true` and gather them under a **`server` feature**, with
   **`default = ["server"]`** so every documented command (`cargo build --release`,
   `cargo run --release --bin server`, `cargo test --release`) behaves exactly as before. The server bin

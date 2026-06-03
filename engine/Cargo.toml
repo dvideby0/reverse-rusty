@@ -32,7 +32,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # ---- HTTP server + observability (behind the default-on `server` feature) ----
-# Used only by src/bin/server.rs; `optional = true` keeps them out of the lean
+# Used only by the `src/bin/server/` bin; `optional = true` keeps them out of the lean
 # core. The `server` feature (default-on) re-enables them, and the server bin
 # carries `required-features = ["server"]` so it is skipped when they are off.
 # A stray `use` of any of these in the library proper fails the "clippy (lean
@@ -124,7 +124,7 @@ path = "src/bin/snapbench.rs"
 
 [[bin]]
 name = "server"
-path = "src/bin/server.rs"
+path = "src/bin/server/main.rs"
 # The HTTP server is the only consumer of the gated server/observability crates,
 # so it only builds when the `server` feature is on. Under `--no-default-features`
 # Cargo skips this bin (its `use axum::…` etc. never compile).
