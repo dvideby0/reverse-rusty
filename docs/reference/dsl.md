@@ -71,11 +71,11 @@ phrases, synonyms, grader keywords, and grade words. Vocabulary can come from th
 
 1. **Learned from queries** — the engine scans any-of groups in your query corpus to discover synonym
    relationships. If many queries contain `(rookie,rc)`, the engine learns that `rookie ≈ rc` and maps
-   both to the same canonical feature (ADR-015). Use [`POST /_vocab/learn`](api.md#post-_vocablearn--learn-vocabulary-from-queries)
+   both to the same canonical feature (ADR-015). Use [`POST /_vocab/learn`](api/vocab.md#post-_vocablearn--learn-vocabulary-from-queries)
    to preview learned vocabulary.
 
 2. **Manual configuration** — add phrases, synonyms, graders, and grade words through the `Vocab` API
-   or the [`PUT /_vocab`](api.md#put-_vocab--replace-vocabulary) REST endpoint.
+   or the [`PUT /_vocab`](api/vocab.md#put-_vocab--replace-vocabulary) REST endpoint.
 
 3. **File-based** — load a vocabulary JSON file at startup with `--vocab-file`, or save/load at
    runtime. Vocabularies are composable via `merge()`.

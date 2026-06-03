@@ -84,7 +84,7 @@ history showed that cache-line blocked bloom was a better match for our 1-memory
   also documents the one default-feature exclusion — `prometheus`).
 - **Build:** `cd engine && export CARGO_TARGET_DIR=/tmp/reverse-rusty-target && cargo build --release`
 - **Test:** `cargo test --release` (oracle + parser + error-path + persistence + hardening + coverage-gap + pressure/stress suites). How-we-test guide → [`docs/testing.md`](docs/testing.md).
-- **Lint/gate:** `engine/check.sh` (fmt + clippy + test + audit + deny) — the local gate; `--fast` runs fmt + clippy only. **CI runs this same script**, so a green `check.sh` locally means a green PR.
+- **Lint/gate:** `engine/check.sh` (fmt + clippy + test + audit + deny) — the local gate; `--fast` runs fmt + clippy only. **CI runs this same script**, so a green `check.sh` locally means a green PR. It also prints a non-failing >600-line file-size advisory (a refactor nudge that never blocks the gate).
 - **Git hooks:** `./setup-hooks.sh` once per clone — pre-commit runs the fast gate, pre-push runs the full gate (bypass with `--no-verify`; CI is the backstop).
 - **CI:** GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `check.sh` + benchmarks on every PR and push to `main`; the 10M soak is on-demand (`workflow_dispatch` → `run_soak`). Rationale → [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-024.
 - **Toolchain:** pinned in [`engine/rust-toolchain.toml`](engine/rust-toolchain.toml) (rustc + rustfmt + clippy) so local and CI builds match.
@@ -187,8 +187,8 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | Edit the HTTP server / REST endpoints | [`docs/reference/api.md`](docs/reference/api.md) (+ `src/bin/server.rs`) |
 | Query DSL syntax / vocabulary | [`docs/reference/dsl.md`](docs/reference/dsl.md) |
 | Add/understand a config knob or `/_settings` | [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-022; `src/config.rs` |
-| "Is X built or just designed?" / what to work on next | [`docs/STATUS.md`](docs/STATUS.md) |
-| "Why was it done this way?" / "why was X NOT built?" | [`docs/DECISIONS.md`](docs/DECISIONS.md) (ADR index; declined → ADR-019) |
+| "Is X built or just designed?" / what to work on next | [`docs/STATUS.md`](docs/STATUS.md) (built vs design-only); the prioritized roadmap → [`docs/roadmap.md`](docs/roadmap.md) |
+| "Why was it done this way?" / "why was X NOT built?" | [`docs/DECISIONS.md`](docs/DECISIONS.md) (the ADR index → one file per ADR in [`docs/decisions/`](docs/decisions/); declined → ADR-019) |
 | Performance numbers / 100M extrapolation | [`docs/performance/results.md`](docs/performance/results.md); regression gate: `benchmark-results.txt` INVARIANTS |
 | Run/change tests, benchmarks, pressure tests, hooks, or CI | [`docs/testing.md`](docs/testing.md) (gate: `engine/check.sh`; CI: `.github/workflows/ci.yml`) |
 | Clustering / sharding / scale-out | [`docs/design/clustering-and-scaling.md`](docs/design/clustering-and-scaling.md); **shared-nothing** model (ADR-033, no object store). **Cluster v1** = in-process core + durable reopen + **dynamic vocabulary** (Tier 0, ADR-046 — built + oracle-proven). The **distributed layers, built but experimental / localhost-proven**: gRPC transport + dict shipping + replication + Raft control plane (durable, restart-recoverable) + **per-shard translog / no-quiesce peer recovery + retention/finalize** + **shard→node allocator** + **live data-moving handoff** (swappable backing + cross-node move + write fence) + **autoscaler** (membership/skew → `rebalance`; split/handoff advisories) + **remote partial-apply repair** (observe + fail-closed + `resync`, ADR-047) → `src/cluster/`, `engine/grpc/`, [`docs/DECISIONS.md`](docs/DECISIONS.md) ADR-027 + ADR-029 + ADR-034 + ADR-035/036 + ADR-037/038 + ADR-039/040/041 + ADR-042/043/044 + ADR-045 + ADR-047 |
@@ -210,9 +210,10 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 - Three-tier adaptive postings: inline (≤8) → Vec (≤256) → RoaringBitmap (>256).
 
 **Where new information goes** (full rules + SSOT registry in [`docs/README.md`](docs/README.md)):
-decision → `docs/DECISIONS.md` (new ADR, never renumber); component design → `docs/design/<topic>.md`;
-"is it built / what's next" → `docs/STATUS.md`; benchmark numbers → `docs/performance/`; dependency
-version → `engine/Cargo.toml`; new `src/` file → update the module map above.
+decision → a new `docs/decisions/adr-NNN-slug.md` file + an index row in `docs/DECISIONS.md` (never
+renumber); component design → `docs/design/<topic>.md`; "is it built" → `docs/STATUS.md`, "what's next"
+→ `docs/roadmap.md`; benchmark numbers → `docs/performance/`; dependency version → `engine/Cargo.toml`;
+new `src/` file → update the module map above.
 
 ## When modifying this file
 
@@ -221,8 +222,9 @@ This file is the *safety + orientation* layer, not a mirror of the docs. So:
   sentence and the critical-invariants list. Keep them byte-identical to
   [`docs/design/README.md`](docs/design/README.md) §2.
 - **Never inline here (link the one canonical home instead):** performance numbers (→ `docs/performance/`),
-  dependency versions (→ `engine/Cargo.toml`), full implemented/roadmap status (→ `docs/STATUS.md`),
-  per-component design (→ `docs/design/`), decision rationale (→ `docs/DECISIONS.md` by ADR number).
+  dependency versions (→ `engine/Cargo.toml`), implemented status (→ `docs/STATUS.md`) + the roadmap
+  (→ `docs/roadmap.md`), per-component design (→ `docs/design/`), decision rationale
+  (→ `docs/DECISIONS.md` + `docs/decisions/`).
 - **Update the module map** when files are added/removed/renamed.
 - If you're about to paste a number, a version, or a paragraph that already lives in one of those
   homes, write a one-line pointer instead.

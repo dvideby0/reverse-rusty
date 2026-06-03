@@ -25,6 +25,11 @@ Every step runs even if an earlier one fails, so one invocation surfaces every p
 exits non-zero if any step failed. It needs the `rustfmt` + `clippy` components (supplied by the
 pinned toolchain) and two cargo plugins: `cargo install cargo-audit cargo-deny`.
 
+It also prints a **non-failing file-size advisory** at the end of every run (full and `--fast`): any
+`.rs` file under `src/` or `tests/` over 600 lines is listed as a refactor candidate. It is purely
+informational — it never changes the exit status, so an oversized file never blocks a commit, push, or
+CI run. Retune the threshold in `size_advisory()` in [`../engine/check.sh`](../engine/check.sh).
+
 ## Test suites
 
 All live in `engine/` and run under `cargo test --release` (release because the oracle and stress
