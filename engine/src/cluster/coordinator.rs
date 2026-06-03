@@ -117,6 +117,25 @@ pub struct ClusterConfig {
     /// only at checkpoints (survives process crash), `true` fsyncs every append
     /// (survives power loss). Mirrors `EngineConfig::wal_sync_on_write`.
     pub wal_sync_on_write: bool,
+    /// Live-handoff (ADR-044) pre-fence drain passes: the best-effort drain of the source's tail
+    /// to the target while writes still flow, before fencing. Correctness rests on the post-fence
+    /// drain CONVERGING, not on this cap — so it is purely a tuning knob (a larger value shrinks
+    /// the post-fence quiesce window). Only consulted by `execute_handoff` (the `distributed`
+    /// feature); ignored otherwise.
+    pub handoff_drain_passes: usize,
+    /// Live-handoff (ADR-044) post-fence drain-to-convergence cap: the fenced source's tail is
+    /// finite + frozen, so the drain converges in O(in-flight writes) passes; this cap only bounds
+    /// a misbehaving source. Past it the flip aborts fail-closed and the source AUTO-UNFENCES
+    /// (ADR-048) so it is not left permanently write-quiesced. Only consulted by `execute_handoff`
+    /// (the `distributed` feature). A test sets it to `0` to force the abort deterministically.
+    pub handoff_final_drain_cap: usize,
+}
+
+impl ClusterConfig {
+    /// Default pre-fence handoff drain passes (best-effort while writes flow).
+    pub const DEFAULT_HANDOFF_DRAIN_PASSES: usize = 8;
+    /// Default post-fence drain-to-convergence cap (bounds a misbehaving source).
+    pub const DEFAULT_HANDOFF_FINAL_DRAIN_CAP: usize = 1024;
 }
 
 impl Default for ClusterConfig {
@@ -129,6 +148,8 @@ impl Default for ClusterConfig {
             include_broad: true,
             data_dir: None,
             wal_sync_on_write: false,
+            handoff_drain_passes: Self::DEFAULT_HANDOFF_DRAIN_PASSES,
+            handoff_final_drain_cap: Self::DEFAULT_HANDOFF_FINAL_DRAIN_CAP,
         }
     }
 }
@@ -266,6 +287,21 @@ pub struct ClusterEngine {
     /// without downcasting `dyn Shard`. `handoffs[i]` and `shards[i]` share one `HandoffShard`.
     #[cfg(feature = "distributed")]
     handoffs: Vec<Arc<HandoffShard>>,
+    /// Live-handoff drain caps (ADR-044/048), retained from `ClusterConfig` by the gRPC builders so
+    /// `execute_handoff` can read them. Defaults (8 / 1024) on the in-process path, which never
+    /// hands off; the gRPC builders override them via `with_handoff_caps`. Overridable so an
+    /// operator can tune drain aggressiveness and a test can force the abort (final cap = 0).
+    #[cfg(feature = "distributed")]
+    handoff_drain_passes: usize,
+    #[cfg(feature = "distributed")]
+    handoff_final_drain_cap: usize,
+    /// The tokio runtime handle the gRPC builders connected on (ADR-048), retained so the
+    /// autoscaler's `tick` can drive `execute_handoff` (which needs a handle for its `block_on`
+    /// bridge). `None` for an in-process `build` cluster — which has no remote endpoints to hand
+    /// off to anyway, so a `Handoff` action is simply skipped there. Set by the gRPC builders via
+    /// `with_handle`.
+    #[cfg(feature = "distributed")]
+    handle: Option<tokio::runtime::Handle>,
 }
 
 /// Observer callback for cluster durability events — the `Arc` analogue of the

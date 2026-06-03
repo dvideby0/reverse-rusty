@@ -263,6 +263,16 @@ impl ClusterEngine {
             // `with_handoffs`. Empty here ⇒ the in-process/default path is byte-identical (ADR-043).
             #[cfg(feature = "distributed")]
             handoffs: Vec::new(),
+            // Handoff drain caps default here (the in-process path never hands off); the gRPC
+            // builders override them from `ClusterConfig` via `with_handoff_caps` (ADR-044/048).
+            #[cfg(feature = "distributed")]
+            handoff_drain_passes: ClusterConfig::DEFAULT_HANDOFF_DRAIN_PASSES,
+            #[cfg(feature = "distributed")]
+            handoff_final_drain_cap: ClusterConfig::DEFAULT_HANDOFF_FINAL_DRAIN_CAP,
+            // No runtime handle on the in-process path (it never hands off); the gRPC builders set
+            // it via `with_handle` so the autoscaler can drive `execute_handoff` (ADR-048).
+            #[cfg(feature = "distributed")]
+            handle: None,
         })
     }
     /// Reopen a durable cluster from `data_dir` (built earlier with a `data_dir` set).

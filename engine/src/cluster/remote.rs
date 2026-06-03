@@ -185,6 +185,25 @@ impl RemoteShard {
             .into_inner();
         Ok(reply.fenced_at_generation)
     }
+
+    /// Lift this remote node's fence at `generation` (ADR-048): the CAS-guarded inverse of
+    /// [`Self::fence`]. The server clears the fence only if it currently holds exactly
+    /// `generation` (a stale unfence, or a newer handoff's higher-generation re-fence, is a
+    /// no-op), then resumes accepting writes. Returns the server's fence generation after the
+    /// call (0 ⇒ un-fenced). Called by the handoff orchestrator when a handoff aborts after
+    /// fencing, so the source self-heals instead of staying permanently write-quiesced.
+    pub fn unfence(&self, generation: u64) -> Result<u64, ShardError> {
+        let mut client = self.client.clone();
+        let req = proto::UnfenceRequest {
+            generation,
+            dict_fingerprint: self.dict_fp,
+        };
+        let reply = self
+            .block_on(async move { client.unfence(req).await })
+            .map_err(rpc_err)?
+            .into_inner();
+        Ok(reply.fenced_at_generation)
+    }
 }
 
 /// Drive `fut` on `handle` from a SYNCHRONOUS caller, dispatching on the caller's tokio

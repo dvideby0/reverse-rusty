@@ -286,8 +286,9 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   serialized); a fence-window write is fail-closed + retryable (never lost); a non-converging source aborts
   the flip fail-closed (the source stays fenced — a stuck position, never a lost write); "drop the old owner" =
   drop from routing, not teardown; RF>1 group relocation reuses the same swap but the oracle covers the
-  single-owner move. **Still design-only:** wiring the autoscaler's (advisory) handoff recommendation to
-  `execute_handoff` + auto-split.
+  single-owner move. A non-converging (or any post-fence) abort now **auto-unfences the source** so it
+  resumes serving instead of staying stuck (ADR-048); the drain caps are `ClusterConfig` knobs. **Still
+  design-only:** auto-split.
 - **Autoscaler — the policy/trigger layer (ADR-045)** — clustering build-path step 6c: the policy that
   *decides when* to drive the built mechanisms. A pure, deterministic `cluster::autoscale::evaluate(snapshot,
   config)` over a `LoadSnapshot` (membership + the shard→node map + per-shard corpus — the only load signal
@@ -301,8 +302,9 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   clock / hysteresis** (idempotence *is* the hysteresis). `AutoscaleConfig::default()` is **disabled** ⇒ `tick`
   is a no-op ⇒ every prior oracle is byte-identical. Lean core, no new dependency. **Honest scope:** auto-split
   is **advisory only** (no split mechanism — the ring's `num_shards` is fixed at construction; it needs ring
-  re-keying + a `recommended_shard_count` signal); load-driven handoff is **advisory only** (`execute_handoff`
-  is gRPC-gated, not driven); QPS/compute-replica autoscaling (HPA-style) is out of engine scope. Proven by
+  re-keying + a `recommended_shard_count` signal); load-driven handoff is now **driven** — `tick` calls
+  `execute_handoff` for a `Handoff` (gRPC-gated, ADR-048), guarded so it never runs in the same tick as a
+  rebalance; QPS/compute-replica autoscaling (HPA-style) is out of engine scope. Proven by
   `src/cluster/autoscale.rs` unit tests (the deterministic policy) + `tests/cluster_autoscale_oracle.rs`
   (`tick` ≡ a manual `rebalance`; `percolate` byte-identical before/after a tick ⇒ zero-FN; a second tick
   commits nothing; a disabled config is a no-op; a split advisory mutates nothing).
@@ -322,6 +324,26 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   not live `resync`; the durable log remains the correctness backstop, `resync` a liveness optimization. Proven
   by `cluster/coordinator/tests.rs` (deterministic detect→resync→converge + requeue-while-failing) +
   `tests/cluster_grpc_oracle.rs` (wire-level detection + the single-target `block_on` guard).
+- **Reliability hardening: auto-unfence-on-abort + translog-lease TTL + autoscaler-driven handoff (ADR-048)** —
+  closes three explicitly-deferred items (ADR-040/044/045) that each left a cluster needing manual recovery or
+  a control loop open. (1) **Auto-unfence-on-abort:** a new CAS-guarded `Unfence` RPC (lift the fence only at
+  the exact generation this handoff set — preserving the Fence monotonic-safety story); `execute_handoff` now
+  lifts the fence on *any* post-fence failure, so an aborted move resumes serving instead of staying
+  write-quiesced. The drain caps became `ClusterConfig` knobs. (2) **Translog-lease TTL:** each retention lease
+  carries a `last_renewed` heartbeat (`renew` refreshes it), and `seal_for_checkpoint` reaps a lease idle past
+  `retention_lease_ttl_secs` (default 1800; `0` = disabled) so a crashed recovery's tail is reclaimable — a
+  reap is surfaced as a `DurabilityFailure { op: ReplicaDesync }` (a plain `LocalShard` now honors the
+  observer's sink). (3) **Autoscaler-driven handoff:** the `tick` driver resolves a `Handoff`'s nodes to
+  endpoints and calls `execute_handoff`, guarded so it never runs in the same tick as a rebalance (stale
+  target) and self-healing on failure (item 1). All three are **`distributed`-gated / byte-identical on the
+  lean + in-process path**; the lease TTL default never reaps a live (heartbeating) recovery. Proven by
+  `retention_lease_tests::*` + `ttl_reaps_a_stuck_lease_…` (lean core), `grpc_handoff_abort_unfences_source` +
+  `grpc_autoscaler_tick_drives_handoff_resolution_and_preserves_matching` (real wire), and
+  `tick_emits_handoff_under_skew_without_perturbing_matching`. **Honest scope:** driving a load move to
+  *completion* over gRPC additionally needs the control-plane node→endpoint map to match the shard endpoints
+  (one-server-per-shard can't host a moved shard on a busy endpoint) — deployment-model maturity (Tier-3
+  residue); the oracle proves the driver's resolution + fail-safe skip + zero-FN, the move's happy path is
+  `grpc_live_handoff_under_sustained_writes`.
 - **Cluster module restructured for agent-friendliness (no behavior change)** — the four largest `src/cluster/`
   files were split into focused submodules following the `segment.rs` pattern (root = the type *defs*, `impl`
   blocks split by responsibility): `coordinator.rs` (1,698 lines → `coordinator/{lifecycle,ingest,matching,
@@ -464,11 +486,12 @@ items from an external review, re-ranked to the top; **all are now done:**
   **Per-ADR detail is
   in [Implemented](#implemented-working-tested) above**; the build path + cross-shard correctness argument are
   in [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §10 (hashing-variant survey:
-  [`research/clustering-prior-art.md`](research/clustering-prior-art.md)). **Still design-only** — the
-  production multi-node residue (hardening): **auto-split** + `recommended_shard_count` and wiring the
-  autoscaler's (advisory) handoff recommendation to `execute_handoff` (the policy itself landed in ADR-045);
-  **replicate-broad-to-all** (in-process uses the shard-0 lane only);
-  **TLS/auth** on the gRPC + control transports; auto-unfence-on-abort + a translog-lease TTL; and an
+  [`research/clustering-prior-art.md`](research/clustering-prior-art.md)). *(Reliability hardening —
+  auto-unfence-on-abort, the translog-lease TTL, and wiring the autoscaler's handoff to `execute_handoff` —
+  **landed in ADR-048**; see Implemented above.)* **Still design-only** — the production multi-node residue:
+  **auto-split** + `recommended_shard_count` (the autoscaler's split recommendation needs a real split
+  mechanism + the clean node→endpoint move it implies); **replicate-broad-to-all** (in-process uses the
+  shard-0 lane only); **TLS/auth** on the gRPC + control transports; and an
   end-to-end durable-multi-node rolling-restart harness. *(**Dynamic vocabulary / normalizer shipping moved
   up to Tier 0** — it is a v1 correctness item now, not Tier-3 residue; the cross-process phasing of it may
   remain here per the [research spike](research/dynamic-vocabulary.md).)*
@@ -596,14 +619,15 @@ from the audit's former P3 list). Roughly grouped:
   a rendezvous-hash shard→node allocator, a runtime-swappable shard backing (the live-handoff routing-flip
   mechanism, ADR-043), the **live data-moving handoff** itself (the cross-node move under concurrent
   writes — peer-recover → fence → drain-to-convergence → flip, ADR-044), and the **autoscaler** policy that
-  drives `rebalance` on membership/skew events (ADR-045) (ADR-027, 029, 031–045; per-ADR detail
+  drives `rebalance` on membership/skew events (ADR-045) — with reliability hardening (auto-unfence-on-abort,
+  translog-lease TTL, autoscaler-driven handoff; ADR-048) (ADR-027, 029, 031–048; per-ADR detail
   in [Implemented](#implemented-working-tested) above). But it is exercised **single-process / on localhost** by
   the oracles — not yet deployed and hardened across real machines. **Remaining for production multi-node** (all
   design-only; ADR-033 — no object store / cloud dependency anywhere): **auto-split** + `recommended_shard_count`
-  and wiring the autoscaler's (advisory) handoff recommendation to `execute_handoff`,
+  (and the clean node→endpoint move a real load-driven handoff implies),
   **cross-process dynamic vocabulary** (the in-process piece is the now-complete Tier-0 v1 item — [research
   spike](research/dynamic-vocabulary.md)), **replicate-broad-to-all**, **TLS/auth** on the (currently plaintext)
-  transports, and auto-unfence-on-abort + a translog-lease TTL — see Tier 3.
+  transports, and an end-to-end durable-multi-node rolling-restart harness — see Tier 3.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator **ships**
   its frozen dict at connect (ADR-034) and the ADR-030 fingerprint handshake fails loud
   (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can never drop

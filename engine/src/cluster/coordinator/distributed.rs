@@ -24,6 +24,24 @@ impl ClusterEngine {
         self
     }
 
+    /// Install the live-handoff drain caps from `ClusterConfig` (ADR-044/048). The in-process
+    /// default leaves the `from_parts` defaults (8 / 1024); the gRPC builders chain this after
+    /// `from_parts` so a handoff on a remote cluster honors the configured caps (and a test can
+    /// force the abort path with `handoff_final_drain_cap = 0`).
+    fn with_handoff_caps(mut self, drain_passes: usize, final_drain_cap: usize) -> Self {
+        self.handoff_drain_passes = drain_passes;
+        self.handoff_final_drain_cap = final_drain_cap;
+        self
+    }
+
+    /// Retain the tokio runtime handle the cluster was connected on (ADR-048), so the autoscaler's
+    /// `tick` can drive `execute_handoff` (which needs a handle for its sync→async `block_on`
+    /// bridge). Only the gRPC builders call this; the in-process path leaves it `None`.
+    fn with_handle(mut self, handle: tokio::runtime::Handle) -> Self {
+        self.handle = Some(handle);
+        self
+    }
+
     /// The fence generation each shard position's backing is currently serving under (ADR-043) —
     /// introspection for the handoff state, index-aligned with positions. Empty on the
     /// in-process/default path (no position is handoff-wrapped). Stage 6b's `execute_handoff`
@@ -106,7 +124,9 @@ impl ClusterEngine {
             config.per_shard.clone(),
             durable,
         )?
-        .with_handoffs(handoffs))
+        .with_handoffs(handoffs)
+        .with_handoff_caps(config.handoff_drain_passes, config.handoff_final_drain_cap)
+        .with_handle(handle.clone()))
     }
 
     /// Assemble a cluster whose K shard POSITIONS are each a [`ReplicatedShard`](crate::cluster::replica::ReplicatedShard)
@@ -179,7 +199,9 @@ impl ClusterEngine {
             config.per_shard.clone(),
             durable,
         )?
-        .with_handoffs(handoffs))
+        .with_handoffs(handoffs)
+        .with_handoff_caps(config.handoff_drain_passes, config.handoff_final_drain_cap)
+        .with_handle(handle.clone()))
     }
 
     /// Cross-node peer recovery (ADR-036 + ADR-039 + ADR-040): bring a fresh, durable, **pending**
@@ -315,12 +337,15 @@ impl ClusterEngine {
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
-        // Safety cap on the pre-fence drain loop (best-effort, while writes still flow); correctness
-        // rests on the post-fence drain converging, not on this.
-        const DRAIN_PASSES: usize = 8;
-        // Generous cap on the post-fence drain. The fenced source has a finite, frozen tail, so this
-        // converges in O(in-flight writes) passes; the cap only bounds a misbehaving source.
-        const FINAL_DRAIN_CAP: usize = 1024;
+        // Drain caps (ADR-044/048), tunable via `ClusterConfig` and retained on the engine.
+        // `drain_passes` bounds the pre-fence drain (best-effort, while writes still flow);
+        // correctness rests on the post-fence drain CONVERGING, not on this. `final_drain_cap`
+        // bounds the post-fence drain — the fenced source has a finite, frozen tail, so it
+        // converges in O(in-flight writes) passes and the cap only bounds a misbehaving source
+        // (past it the flip aborts and the source auto-unfences, ADR-048). A test sets the cap to
+        // 0 to force the abort deterministically.
+        let drain_passes = self.handoff_drain_passes;
+        let final_drain_cap = self.handoff_final_drain_cap;
         let handoff = self
             .handoffs
             .get(position)
@@ -356,7 +381,7 @@ impl ClusterEngine {
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
             // Drain the tail (writes that landed during the copy), renewing the lease each pass.
             let mut hwm = LogPos(p);
-            for _ in 0..DRAIN_PASSES {
+            for _ in 0..drain_passes {
                 let next = crate::cluster::replica::catch_up_replica(
                     &target, &source, &self.norm, &self.dict, hwm,
                 )?;
@@ -369,6 +394,12 @@ impl ClusterEngine {
             // FENCE the source: it stops accepting writes (the write-quiesce for `position` begins).
             // Reads + FetchTranslog stay served, so the catch-up below still works.
             source.fence(new_gen)?;
+            // From here the source is write-quiesced. Any failure BEFORE the flip must LIFT the
+            // fence (ADR-048) so the source resumes serving — otherwise an aborted handoff leaves it
+            // permanently quiesced (a write-rejecting node needing a manual restart). The
+            // drain-to-convergence and its cap live in this scope; the flip (the success path) is
+            // outside it and deliberately keeps the old owner fenced/dropped (serve-then-drop).
+            //
             // Final drain to CONVERGENCE. A write that passed the source's fence check just before
             // the fence took effect can still append AFTER a single catch-up reads the tail (a
             // TOCTOU), so one pass is not enough. But the fenced source accepts no new writes, so its
@@ -377,25 +408,46 @@ impl ClusterEngine {
             // source ever accepted — the flip below therefore cannot drop a write. The fence
             // guarantees this terminates; the cap only guards a misbehaving (still-accepting) source,
             // in which case we abort fail-closed rather than flip onto a not-yet-converged target.
-            let mut converged = false;
-            for _ in 0..FINAL_DRAIN_CAP {
-                let next = crate::cluster::replica::catch_up_replica(
-                    &target, &source, &self.norm, &self.dict, hwm,
-                )?;
-                source.renew_retention_lease(lease, next)?;
-                if next == hwm {
-                    converged = true;
-                    break;
+            let drained = (|| -> Result<(), ShardError> {
+                let mut converged = false;
+                for _ in 0..final_drain_cap {
+                    let next = crate::cluster::replica::catch_up_replica(
+                        &target, &source, &self.norm, &self.dict, hwm,
+                    )?;
+                    source.renew_retention_lease(lease, next)?;
+                    if next == hwm {
+                        converged = true;
+                        break;
+                    }
+                    hwm = next;
                 }
-                hwm = next;
-            }
-            if !converged {
-                return Err(ShardError::Remote(format!(
-                    "execute_handoff: fenced source {source_endpoint} did not converge (tail still \
-                     advancing past {}) within {FINAL_DRAIN_CAP} passes; aborting the flip to avoid \
-                     dropping a write (the source remains fenced)",
-                    hwm.0
-                )));
+                if !converged {
+                    return Err(ShardError::Remote(format!(
+                        "execute_handoff: fenced source {source_endpoint} did not converge (tail \
+                         still advancing past {}) within {final_drain_cap} passes; aborting the \
+                         flip to avoid dropping a write",
+                        hwm.0
+                    )));
+                }
+                Ok(())
+            })();
+            if let Err(e) = drained {
+                // AUTO-UNFENCE (ADR-048): lift the fence we set so the source resumes accepting
+                // writes instead of staying permanently quiesced. CAS-guarded server-side (only
+                // this generation's fence is cleared), so it is safe even under a concurrent
+                // handoff. If the unfence RPC ITSELF fails, the source is still fenced and needs
+                // manual recovery — surface that as an event, but return the ORIGINAL abort error
+                // (don't mask why the handoff failed).
+                if let Err(ue) = source.unfence(new_gen) {
+                    self.emit(EngineEvent::DurabilityFailure {
+                        op: DurabilityOp::ReplicaDesync,
+                        detail: "auto-unfence after an aborted handoff failed; the source remains \
+                                 fenced at the handoff generation and needs manual recovery"
+                            .into(),
+                        error: ue.to_string(),
+                    });
+                }
+                return Err(e);
             }
             // FLIP: re-point `position` at the target (reuse the recovery `target` as the new
             // backing). The old source backing is dropped from routing — serve-then-drop — and

@@ -481,6 +481,42 @@ impl ShardService for ShardServer {
             fenced_at_generation: prev.max(req.generation),
         }))
     }
+
+    // ---- live handoff: un-fence on abort (ADR-048) ----
+    /// Lift a fence held at EXACTLY `generation` (a compare-and-swap from `generation` back to 0):
+    /// data-mutating writes resume. The CAS preserves the `fence` monotonic-safety story — only the
+    /// handoff that fenced at this generation can lift it, so a stale/duplicate Unfence, or a node
+    /// since re-fenced at a higher generation by a newer handoff, is a safe no-op (the fence is
+    /// untouched). Refuses a dict-fingerprint mismatch (consistent with the other guarded RPCs).
+    /// Returns the fence generation after the call (0 ⇒ un-fenced). `execute_handoff` calls this
+    /// when a handoff aborts after fencing, so the source is not left permanently write-quiesced.
+    async fn unfence(
+        &self,
+        request: Request<proto::UnfenceRequest>,
+    ) -> Result<Response<proto::UnfenceReply>, Status> {
+        let st = self.loaded()?;
+        let req = request.into_inner();
+        if req.dict_fingerprint != st.dict.fingerprint() {
+            return Err(Status::failed_precondition(
+                "Unfence dict-fingerprint mismatch (divergent feature space)",
+            ));
+        }
+        // CAS from the exact generation this handoff fenced at. If the node is at 0 (not fenced)
+        // or at a higher generation (a newer handoff re-fenced it), the swap fails and the fence
+        // is left as-is — we report its current value.
+        let now_gen = match self.fenced_at_generation.compare_exchange(
+            req.generation,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => 0,
+            Err(actual) => actual,
+        };
+        Ok(Response::new(proto::UnfenceReply {
+            fenced_at_generation: now_gen,
+        }))
+    }
 }
 
 /// Stream one file as a contiguous run of ≤256 KiB `FileChunk`s ending with `last = true`.

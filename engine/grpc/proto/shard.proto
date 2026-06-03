@@ -69,6 +69,15 @@ service ShardService {
   // coordinator stops routing to it (serve-then-drop), so an in-flight read never hits the fence.
   // Monotonic: a later, lower-generation Fence never un-fences. Refuses a dict-fingerprint mismatch.
   rpc Fence (FenceRequest) returns (FenceReply);
+
+  // ---- live handoff: un-fence on abort (ADR-048) ----
+  // Lift a fence this node holds at EXACTLY `generation` (a compare-and-swap from `generation`
+  // back to 0): writes resume. The CAS preserves the Fence monotonic-safety story — a stale
+  // Unfence, or a node since re-fenced at a higher generation by a newer handoff, is a safe no-op.
+  // The handoff orchestrator calls this when a handoff aborts AFTER fencing, so the source is not
+  // left permanently write-quiesced (it would otherwise need a manual restart). Refuses a
+  // dict-fingerprint mismatch. Returns the server's fence generation after the call.
+  rpc Unfence (UnfenceRequest) returns (UnfenceReply);
 }
 
 message Empty {}
@@ -226,6 +235,15 @@ message FenceRequest {
 }
 message FenceReply {
   uint64 fenced_at_generation = 1; // the server's fence generation after this call (monotonic max)
+}
+
+// ---- live handoff: un-fence on abort (ADR-048) ----
+message UnfenceRequest {
+  uint64 generation = 1;       // CAS target: lift the fence only if it currently equals this gen
+  uint64 dict_fingerprint = 2; // the source refuses a mismatch (divergent feature space)
+}
+message UnfenceReply {
+  uint64 fenced_at_generation = 1; // the server's fence generation after this call (0 ⇒ un-fenced)
 }
 
 // ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----
