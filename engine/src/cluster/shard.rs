@@ -780,6 +780,20 @@ impl LocalShard {
         let mut eng = self.lock();
         eng.flush(); // seal the memtable into a base segment
         eng.reseal_tombstoned_segments(); // bake base-segment tombstones onto disk
+                                          // Fail closed (ADR-051): if the flush or reseal could not durably persist,
+                                          // the segments on disk do NOT yet reflect every flushed write / applied
+                                          // delete (a failed reseal keeps the original, un-baked segment). Bail BEFORE
+                                          // reading `p` and trimming the translog, so its tail still carries those ops
+                                          // for the next recovery — advancing the checkpoint now would let a delete
+                                          // resurrect (false positive) or a write vanish on reopen. The caller treats
+                                          // this as a transient failed checkpoint; the data is safe in the translog.
+        if !eng.persistence_healthy {
+            return Err(ShardError::Log(
+                "checkpoint aborted: flush/reseal could not durably persist; translog left intact \
+                 so the un-sealed tail replays on recovery"
+                    .into(),
+            ));
+        }
         Self::publish(&eng, &self.snapshot);
         // Everything ≤ `p` is now durably in the sealed/resealed segments; trim the translog
         // to it so its remaining tail is exactly the un-sealed ops > `p` (ADR-039). Held under

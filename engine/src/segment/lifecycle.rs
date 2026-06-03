@@ -303,16 +303,23 @@ impl Engine {
         let mut fresh_mem = Segment::new();
         fresh_mem.vocab_epoch = self.vocab_epoch;
         self.memtable = Arc::new(fresh_mem);
-        self.seal_and_push(seg);
+        let persisted = self.seal_and_push(seg);
 
-        // Persist like a flush: WAL checkpoint + manifest (the commit point) +
-        // WAL reset (every live query now lives in the sealed segment), then GC
-        // the superseded segment files.
-        self.checkpoint_wal();
-        if self.save_manifest_if_persistent() {
+        // Persist like a flush, but FAIL CLOSED (ADR-051): only retire the old
+        // segment files and advance the WAL (checkpoint marks the live queries
+        // materialized, reset truncates them) once the freshly-compiled segment is
+        // durably on disk AND the manifest — the commit point referencing it — has
+        // been written. We just cleared the old segments from the vec, so if the
+        // recompiled segment did NOT persist, deleting the old files or resetting
+        // the WAL would erase the only durable copy of the whole corpus. Leaving
+        // both intact lets a restart recover the pre-recompile state and re-apply
+        // the vocab change. The recompiled segment is still served from memory
+        // meanwhile; `persistence_healthy` is false to signal the degraded state.
+        if persisted && self.save_manifest_if_persistent() {
+            self.checkpoint_wal();
             self.reset_wal_if_safe();
+            self.cleanup_segment_files(&old_files);
         }
-        self.cleanup_segment_files(&old_files);
         recompiled
     }
 

@@ -24,7 +24,11 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
 - **Persistence** — mmap'd `.seg` segment format with frozen hash tables (ADR-012), write-ahead log
   with CRC framing + crash recovery and configurable fsync policy (ADR-013), durable all-or-nothing
   bulk ingest (ADR-017), `Engine::open()` manifest + WAL recovery, query source store + `sources.dat`
-  (ADR-014).
+  (ADR-014). **Flush, compaction, reseal, and vocab-recompile are fail-closed (ADR-051):** they build
+  the replacement segment durable before destroying what it replaces and gate the WAL-advance /
+  old-file deletion on the manifest commit, so a disk-write failure degrades durability
+  (`persistence_healthy = false`, `/_flush` + `/_compact` return 503) instead of silently losing
+  acknowledged writes on the next restart.
 - **Read concurrency** — snapshot reads via `ArcSwap<EngineSnapshot>` + `parking_lot::Mutex` writer
   (ADR-016): lock-free reads, zero reader/writer contention.
 - **Skip filter** — per-segment cache-line blocked bloom over signature keys (ADR-011), checked before

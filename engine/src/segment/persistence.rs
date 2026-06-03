@@ -16,15 +16,24 @@ impl Engine {
         name
     }
 
-    /// Seal a segment: if persistent, write to disk and mmap back;
-    /// otherwise keep in memory. Pushes onto self.segments.
-    pub(in crate::segment) fn seal_and_push(&mut self, seg: Segment) {
-        let base = self.make_base_segment(seg);
+    /// Seal a segment: if persistent, write to disk and mmap back; otherwise keep
+    /// in memory. Pushes onto self.segments. Returns `true` if the seal is durable
+    /// for the engine's mode — i.e. it was written to disk as an `Mmap` segment, OR
+    /// the engine is in-memory (no `data_dir`, so there is nothing to persist).
+    /// Returns `false` only when persistent-mode persistence failed and the segment
+    /// fell back to in-memory: the data is served from RAM but is NOT on disk, so a
+    /// caller about to advance/​truncate the WAL must not (see [`Engine::flush`]).
+    pub(in crate::segment) fn seal_and_push(&mut self, seg: Segment) -> bool {
+        let (base, persisted) = self.make_base_segment(seg);
         self.segments.push(Arc::new(base));
+        persisted
     }
 
-    /// Convert a sealed Segment into a BaseSegment (mmap'd if persistent).
-    pub(in crate::segment) fn make_base_segment(&mut self, seg: Segment) -> BaseSegment {
+    /// Convert a sealed Segment into a BaseSegment (mmap'd if persistent). The
+    /// returned bool is the durability signal documented on [`Self::seal_and_push`]:
+    /// `true` for a disk-backed `Mmap` (or for in-memory mode), `false` for a
+    /// persistent-mode write/mmap failure that fell back to `Memory`.
+    pub(in crate::segment) fn make_base_segment(&mut self, seg: Segment) -> (BaseSegment, bool) {
         let data_dir = self.config.data_dir.clone();
         if let Some(ref dir) = data_dir {
             let name = self.next_segment_filename();
@@ -32,7 +41,7 @@ impl Engine {
             let path = seg_dir.join(&name);
             match crate::storage::write_segment(&seg, &path) {
                 Ok(()) => match MmapSegment::open(&path) {
-                    Ok(mmap_seg) => return BaseSegment::Mmap(mmap_seg),
+                    Ok(mmap_seg) => return (BaseSegment::Mmap(mmap_seg), true),
                     Err(e) => {
                         self.persistence_healthy = false;
                         self.emit(crate::events::EngineEvent::DurabilityFailure {
@@ -57,10 +66,13 @@ impl Engine {
                     });
                 }
             }
-            // Fall back to in-memory if write/mmap fails
-            BaseSegment::Memory(seg)
+            // Fall back to in-memory if write/mmap fails — NOT durable (false).
+            (BaseSegment::Memory(seg), false)
         } else {
-            BaseSegment::Memory(seg)
+            // In-memory mode: there is no disk to persist to, so the seal is as
+            // durable as the engine gets (true) — callers must not treat it as a
+            // persistence failure.
+            (BaseSegment::Memory(seg), true)
         }
     }
 
@@ -70,7 +82,7 @@ impl Engine {
     /// base segment plus its on-disk path, so a later commit failure can delete
     /// the orphaned file. In-memory mode (no `data_dir`) returns a `Memory` base
     /// and `None`.
-    fn build_durable_base(
+    pub(in crate::segment) fn build_durable_base(
         &mut self,
         seg: Segment,
     ) -> std::io::Result<(BaseSegment, Option<PathBuf>)> {
@@ -288,7 +300,7 @@ impl Engine {
     /// discarding the error (which could leak orphan files unnoticed), we surface
     /// it through the observer as [`EngineEvent::SegmentCleanupFailed`]. A missing
     /// file is the expected, benign case and is not reported.
-    fn best_effort_remove_segment(&self, path: &std::path::Path) {
+    pub(in crate::segment) fn best_effort_remove_segment(&self, path: &std::path::Path) {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
