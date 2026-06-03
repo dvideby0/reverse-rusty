@@ -353,4 +353,124 @@ mod tests {
             "a raised max_clauses accepts the same query"
         );
     }
+
+    // ---- Golden AST cases (full-structure assertions) ----
+    //
+    // These pin the exact parse output for every DSL construct, with expectations
+    // authored by hand from the spec (docs/reference/dsl.md operator table +
+    // docs/design/normalization.md §1 grammar) — NOT captured from the parser. They
+    // exist because the differential oracle (tests/oracle.rs) builds its ground truth
+    // by calling this same `parse`, so a parser bug would corrupt both sides equally
+    // and stay invisible there. A hand-written `assert_eq!` cannot share that bug.
+    // See docs/DECISIONS.md ADR-050.
+    //
+    // Case is preserved at the AST layer on purpose: folding/lowercasing is the
+    // normalizer's job (normalize.rs), not the parser's.
+
+    fn t(s: &str) -> Clause {
+        Clause {
+            negated: false,
+            atom: Atom::Term(s.into()),
+        }
+    }
+    fn nt(s: &str) -> Clause {
+        Clause {
+            negated: true,
+            atom: Atom::Term(s.into()),
+        }
+    }
+    fn ph(s: &str) -> Clause {
+        Clause {
+            negated: false,
+            atom: Atom::Phrase(s.into()),
+        }
+    }
+    fn nph(s: &str) -> Clause {
+        Clause {
+            negated: true,
+            atom: Atom::Phrase(s.into()),
+        }
+    }
+    fn grp(ms: &[&str]) -> Clause {
+        Clause {
+            negated: false,
+            atom: Atom::AnyOf(ms.iter().map(ToString::to_string).collect()),
+        }
+    }
+    fn ngrp(ms: &[&str]) -> Clause {
+        Clause {
+            negated: true,
+            atom: Atom::AnyOf(ms.iter().map(ToString::to_string).collect()),
+        }
+    }
+    fn ast(clauses: Vec<Clause>) -> Ast {
+        Ast { clauses }
+    }
+
+    #[test]
+    fn golden_single_term() {
+        // dsl.md: `word` -> required term
+        assert_eq!(parse("laptop").unwrap(), ast(vec![t("laptop")]));
+    }
+
+    #[test]
+    fn golden_phrase_is_trimmed() {
+        // dsl.md: `"a b"` -> required phrase; phrase content is trimmed.
+        assert_eq!(
+            parse("\"running shoes\"").unwrap(),
+            ast(vec![ph("running shoes")])
+        );
+    }
+
+    #[test]
+    fn golden_anyof_group() {
+        // dsl.md: `(a,b,c)` -> any-of group
+        assert_eq!(
+            parse("(red,blue,green)").unwrap(),
+            ast(vec![grp(&["red", "blue", "green"])])
+        );
+    }
+
+    #[test]
+    fn golden_negations() {
+        // dsl.md: `-word`, `-"a b"`, `-(a,b,c)` -> the MUST_NOT forms.
+        assert_eq!(parse("-refurbished").unwrap(), ast(vec![nt("refurbished")]));
+        assert_eq!(
+            parse("-\"for parts\"").unwrap(),
+            ast(vec![nph("for parts")])
+        );
+        assert_eq!(
+            parse("-(used,open box,returned)").unwrap(),
+            // note: "open box" stays ONE member — internal single spaces are kept.
+            ast(vec![ngrp(&["used", "open box", "returned"])])
+        );
+    }
+
+    #[test]
+    fn golden_group_trims_members_and_drops_empties() {
+        // Members are trimmed; internal single spaces preserved.
+        assert_eq!(
+            parse("(brown, tan ,cognac)").unwrap(),
+            ast(vec![grp(&["brown", "tan", "cognac"])])
+        );
+        // Doubled comma drops the empty member. (Parser robustness — the spec does
+        // not define doubled commas; this pins the documented "trim, drop empty".)
+        assert_eq!(parse("(a ,, b)").unwrap(), ast(vec![grp(&["a", "b"])]));
+    }
+
+    #[test]
+    fn golden_all_operators_example() {
+        // docs/reference/dsl.md "Full example using all operators".
+        let q =
+            "vintage (leather,suede) \"bomber jacket\" (brown,tan,black) -womens -(replica,faux,vegan)";
+        let expected = ast(vec![
+            t("vintage"),
+            grp(&["leather", "suede"]),
+            ph("bomber jacket"),
+            grp(&["brown", "tan", "black"]),
+            nt("womens"),
+            ngrp(&["replica", "faux", "vegan"]),
+        ]);
+        assert_eq!(parse(q).unwrap(), expected);
+    }
 }
