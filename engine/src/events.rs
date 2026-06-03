@@ -64,6 +64,15 @@ pub enum DurabilityOp {
     /// An ingest batch could not be durably committed and was rolled back
     /// entirely (nothing committed). Data at risk: the caller's batch did not land.
     IngestRollback,
+    /// A flush, compaction, or reseal could not durably persist its new segment and
+    /// was failed closed: the WAL was left intact (flush) or the merge was rolled
+    /// back to its source segments (compaction/reseal), so nothing was lost. NOT
+    /// data at risk — the pre-operation state is fully recoverable — but durability
+    /// is degraded and the operation did not advance on disk. Distinguished from
+    /// [`SegmentWrite`](Self::SegmentWrite) (a write that fell back to in-memory,
+    /// leaving the data durable *only* in RAM) precisely because this path keeps a
+    /// durable copy. See ADR-051.
+    Compaction,
     /// A replica in a [`ReplicatedShard`](crate::cluster) group could not apply a
     /// replicated write (or failed a read probe) and was dropped from its in-sync
     /// set. NOT data at risk: the primary still holds the data and the op succeeded;
@@ -99,6 +108,7 @@ impl DurabilityOp {
             DurabilityOp::SourceStoreLoad => "source_store_load",
             DurabilityOp::WalTornTail => "wal_torn_tail",
             DurabilityOp::IngestRollback => "ingest_rollback",
+            DurabilityOp::Compaction => "compaction",
             DurabilityOp::ReplicaDesync => "replica_desync",
             DurabilityOp::ClusterPartialApply => "cluster_partial_apply",
         }
@@ -125,6 +135,7 @@ impl DurabilityOp {
             | DurabilityOp::SourceStoreRemap
             | DurabilityOp::SourceStoreLoad
             | DurabilityOp::WalTornTail
+            | DurabilityOp::Compaction
             | DurabilityOp::ReplicaDesync => false,
         }
     }

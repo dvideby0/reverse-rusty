@@ -51,6 +51,7 @@ not deleted (the record of *why something was not done* is as load-bearing as th
 | [017](decisions/adr-017-durable-bulk-ingest.md) | Durable bulk ingest (segment = artifact, manifest = commit) | Bulk ingest is durable-or-rejected (RocksDB IngestExternalFile model); no silent in-memory fallback, manifest write is the atomic commit point. | Accepted |
 | [018](decisions/adr-018-bulk-ingest-per-item-outcomes.md) | Bulk ingest reports per-item outcomes (ES-style) | `/_bulk` returns per-item statuses (which queries were dropped + why), not just an aggregate count. | Accepted |
 | [020](decisions/adr-020-resident-memory-reduction.md) | Production-scale resident-memory reduction | Lazy on-disk source store + flat logical-index columns cut resident memory ~148 → ~96 B/query (→ ~4.5 with both, opt-in) ahead of sharding. | Accepted |
+| [051](decisions/adr-051-fail-closed-flush-compaction.md) | Fail-closed flush, compaction & reseal | Extend ADR-017's durable-or-rejected discipline to flush/compaction/reseal/recompile: build the replacement durable before destroying what it replaces, gate WAL-advance/file-deletion on the commit point. No silent restart data loss on disk failure. | Accepted |
 
 ## Engine, errors, dependencies & ops
 
