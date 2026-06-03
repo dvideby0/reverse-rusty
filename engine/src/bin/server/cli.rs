@@ -10,6 +10,15 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "reverse-rusty-server", about = "Reverse Rusty HTTP server")]
 pub(crate) struct Cli {
+    /// IP address to bind. Defaults to `127.0.0.1` (loopback), so the server is NOT
+    /// reachable beyond the local host unless you opt in — the REST API has no
+    /// built-in authentication and exposes mutating/admin endpoints (`_doc`, `_bulk`,
+    /// `_flush`, `_compact`, `_vocab`, `_settings`). Set to `0.0.0.0` to listen on all
+    /// interfaces only behind a trusted network or an authenticating reverse proxy
+    /// (see docs/reference/api.md). Matches the loopback default the gRPC bins use.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub(crate) host: std::net::IpAddr,
+
     /// Port to listen on.
     #[arg(long, default_value_t = 9200)]
     pub(crate) port: u16,

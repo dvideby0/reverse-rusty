@@ -359,7 +359,7 @@ async fn main() {
         ))
         .with_state(Arc::clone(&state));
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], cli.port));
+    let addr = SocketAddr::new(cli.host, cli.port);
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,

@@ -99,7 +99,13 @@ pub fn parse_with_limits(input: &str, limits: &ParseLimits) -> Result<Ast, Parse
             let dash = i;
             negated = true;
             i += 1;
-            if i >= n {
+            // A '-' must be IMMEDIATELY followed by the atom it negates. Reject both
+            // end-of-input (`foo -`) and a following space (`foo - bar`) — the latter
+            // would otherwise parse as a negated EMPTY term plus a stray *positive*
+            // `bar`, silently flipping the user's intent. Whitespace-significant
+            // negation matches the rest of the grammar (`-bar` negates, `- bar` is an
+            // error, not a guess).
+            if i >= n || chars[i].is_whitespace() {
                 return Err(ParseError::new(ParseErrorKind::TrailingDash, dash));
             }
         }
@@ -224,6 +230,31 @@ mod tests {
         let e = parse("jordan -").unwrap_err();
         assert_eq!(e.kind, ParseErrorKind::TrailingDash);
         assert_eq!(e.pos, 7); // index of the '-'
+    }
+
+    #[test]
+    fn dash_followed_by_space_errors_at_dash() {
+        // `foo - bar` must NOT parse as `foo AND NOT "" AND bar` (a negated empty term
+        // plus a stray positive `bar`). A '-' with a space after it is rejected at the
+        // dash, exactly like a trailing dash. `-bar` (no space) still negates normally.
+        let e = parse("foo - bar").unwrap_err();
+        assert_eq!(e.kind, ParseErrorKind::TrailingDash);
+        assert_eq!(e.pos, 4); // index of the '-'
+
+        let e2 = parse("- bar").unwrap_err();
+        assert_eq!(e2.kind, ParseErrorKind::TrailingDash);
+        assert_eq!(e2.pos, 0);
+
+        // Sanity: the no-space form is unaffected — `-bar` is a single negated term.
+        let ast = parse("foo -bar").unwrap();
+        assert!(ast
+            .clauses
+            .iter()
+            .any(|c| c.negated && c.atom == Atom::Term("bar".into())));
+        assert!(ast
+            .clauses
+            .iter()
+            .all(|c| c.atom != Atom::Term(String::new())));
     }
 
     #[test]

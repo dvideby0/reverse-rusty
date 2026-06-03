@@ -462,9 +462,28 @@ pub(crate) async fn search(
         // Multi-document percolation.
         (None, Some(docs)) => {
             let num_docs = docs.len();
-            let titles: Vec<String> = docs.into_iter().map(|d| d.title).collect();
             let prom = state.prom.clone();
             let snap = Arc::clone(&state.snapshot.load());
+            // Bound per-request fan-out exactly as `/_mpercolate` does (ADR-052): a
+            // multi-doc `/_search` is otherwise limited only by the HTTP body-size cap,
+            // so one large body could schedule millions of parallel matches. Reject an
+            // oversized batch with 400 before building titles or scheduling any work.
+            let max_batch = snap.config().max_percolate_batch;
+            if num_docs > max_batch {
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["search", "400"])
+                    .inc();
+                return Err(ApiError::response(
+                    StatusCode::BAD_REQUEST,
+                    "validation_error",
+                    format!(
+                        "batch of {num_docs} documents exceeds max_percolate_batch ({max_batch})"
+                    ),
+                ));
+            }
+            let titles: Vec<String> = docs.into_iter().map(|d| d.title).collect();
             let pred = snap.compile_tag_predicate(&filter_spec);
             let state_inner = Arc::clone(&state);
 
@@ -841,7 +860,7 @@ mod mpercolate_tests {
     //! (`match_title`), so the batch endpoint can't silently diverge from
     //! `/_search`. The library already proves batch == scalar (tests/broad_batch);
     //! this proves the HTTP layer threads results through in order and unchanged.
-    use super::{mpercolate, AppState, DocBody, MPercolateBody, State};
+    use super::{mpercolate, search, AppState, DocBody, MPercolateBody, SearchBody, State};
     use crate::metrics::PrometheusMetrics;
     use axum::Json;
     use reverse_rusty::gen::{generate, GenConfig};
@@ -910,6 +929,44 @@ mod mpercolate_tests {
             .err()
             .expect("missing documents must error");
         assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn search_rejects_batch_over_max_percolate_batch() {
+        // A multi-doc `/_search` must reject an oversized batch with 400 before
+        // scheduling work, exactly like `/_mpercolate` (ADR-052) — otherwise it is
+        // bounded only by the HTTP body size. A tiny cap keeps the test small.
+        use reverse_rusty::config::EngineConfig;
+        let cfg = EngineConfig {
+            max_percolate_batch: 2,
+            ..EngineConfig::default()
+        };
+        let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg);
+        eng.build_from_queries(&[(1u64, "michael jordan".to_string())]);
+        let state = state_with(eng, false);
+
+        // 3 documents > cap of 2 ⇒ 400 before any matching runs.
+        let over: SearchBody = serde_json::from_value(serde_json::json!({
+            "documents": [{"title": "a"}, {"title": "b"}, {"title": "c"}],
+            "include_source": false,
+        }))
+        .expect("valid SearchBody");
+        let err = search(State(Arc::clone(&state)), Json(over))
+            .await
+            .err()
+            .expect("a batch over max_percolate_batch must 400");
+        assert_eq!(err.0, axum::http::StatusCode::BAD_REQUEST);
+
+        // A batch AT the cap is accepted (the guard is strictly `>`).
+        let at_cap: SearchBody = serde_json::from_value(serde_json::json!({
+            "documents": [{"title": "a"}, {"title": "b"}],
+            "include_source": false,
+        }))
+        .expect("valid SearchBody");
+        assert!(
+            search(State(state), Json(at_cap)).await.is_ok(),
+            "a batch at the cap must be accepted"
+        );
     }
 
     #[tokio::test]

@@ -26,13 +26,23 @@ Optional request fields:
 
 | Field | Default | Description |
 |---|---|---|
-| `timeout_ms` | 30000 | Per-request timeout in milliseconds (returns 408 on expiry) |
+| `timeout_ms` | 30000 | Per-request **response** timeout in ms; returns 408 on expiry. In-flight matching is not cancelled — see note. |
 | `size` | 1000 | Maximum number of hits to return |
 | `from` | 0 | Offset into the result set for pagination |
 | `include_source` | true | Include original query text in each hit |
 
 `total` always reflects the full match count; `hits` is the paginated window. Set
 `include_source: false` to skip query text lookup for faster responses.
+
+> **`timeout_ms` is a response deadline, not a compute budget.** On expiry the request
+> returns `408`, but the matching work already dispatched to the blocking/Rayon pool
+> runs to completion in the background — it is not interrupted (there is no
+> cooperative cancellation on the match path, which is kept branch-predictable and
+> allocation-free by design). So `timeout_ms` bounds *when the client gets a
+> response*, not how long the server spends. Under a flood of slow titles with a short
+> timeout, abandoned work can still occupy worker threads; bound load with a modest
+> request-concurrency limit rather than relying on `timeout_ms` to shed CPU. The same
+> applies to `/_mpercolate`.
 
 Match multiple titles in a single request:
 
@@ -181,7 +191,7 @@ Optional request fields:
 | `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class-C (broad) queries for this batch |
 | `include_source` | true | Include original query text in each hit |
 | `size` | 1000 | Maximum hits per document |
-| `timeout_ms` | 30000 | Per-request timeout in milliseconds (returns 408 on expiry) |
+| `timeout_ms` | 30000 | Per-request **response** timeout in ms; returns 408 on expiry. In-flight matching is not cancelled — see note. |
 | `profile` | false | Include the top-level `broad` summary |
 
 Each per-document result is **byte-identical** to calling `/_search` with that single title — batching
