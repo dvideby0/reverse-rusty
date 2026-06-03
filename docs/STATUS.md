@@ -512,15 +512,30 @@ narrow to one category"* — makes the **metadata + filtering pair the high-valu
 pagination are smaller, lower-priority items. *(Validating RR against this workload's **real corpus** — a
 false-negative / throughput audit — remains the open step in **Current limitations** below.)*
 
-- **Per-query metadata + filtered percolation — the lead item.** The dominant read pattern: stored
-  queries carry structured tags (a category, a status, secondary keys) and callers percolate, then
-  **narrow the candidates by those tags**. RR today returns a bare `Vec<u64>` with no tag awareness.
-  **Design decided ([ADR-049](DECISIONS.md)):** tags interned to integer ids and held as an exact-match
-  **SoA column**; the tag filter **pushed into verification** (a hot-path integer test); and —
-  load-bearing — tags **checked only post-candidate, never in signature gating**, so the lossless-cover
-  contract is untouched (structurally the same rule as ADR-006's "forbidden features never gate"). Full
-  design: [`design/matching.md`](design/matching.md) §5 (model + filtering + ranking) and
-  [`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) §11 (storage + reopen).
+- **Per-query metadata + filtered percolation — the lead item. ✅ BUILT (single-node) + oracle-proven
+  (2026-06-03, [ADR-049](DECISIONS.md)).** The dominant read pattern: stored queries carry structured tags
+  (a category, a status, secondary keys) and callers percolate, then **narrow the candidates by those
+  tags**. Tags are interned to integer `TagId`s (`tagdict.rs`, a space disjoint from `FeatureId`) and held
+  as an exact-match **SoA column** (`exact.rs`); the tag filter is **pushed into verification** (a hot-path
+  sorted-slice intersection); and — load-bearing — tags are **checked only post-candidate, never in
+  signature gating**, so the lossless-cover contract is untouched (structurally ADR-006's "forbidden
+  features never gate"). Persisted in `.seg` **v3** + WAL **v2** (survive reopen/recovery; v1/v2 read back
+  untagged). Exposed over REST as the ES `bool`/`terms`/`percolate` envelope **and** a native `filter`
+  block, with ES-style sibling-tag ingest on `PUT /_doc` + `/_bulk`. **Proven:** `tests/oracle.rs`
+  (filtered differential — zero false negatives/positives + "filtering only removes" monotonicity),
+  `tests/broad_batch.rs` (batch≡scalar under filter, incl. pure-anchor materialization),
+  `tests/persistence.rs` (tagged `.seg`/WAL reopen). **Remaining:** ranking + `/_mpercolate` `from`
+  pagination (decision point 4, below); and **threading tags through the (experimental) cluster path** —
+  the cluster's add path doesn't accept tags today (untagged-but-consistent, no silent loss). That
+  follow-on touches `cluster/clog.rs` (`ClusterMutation::Add` + a versioned `tags` field),
+  `cluster/shard.rs` (`Shard::{insert_extracted, ingest_extracted, percolate}` + every impl — `LocalShard`,
+  `ReplicatedShard`, `HandoffShard`, and the `distributed` `RemoteShard`/`ShardServer` + a gRPC proto field),
+  `cluster/coordinator/{ingest,lifecycle,matching}.rs` (resolve tags → `TagId` via `get_or_synthetic`, the
+  coordinator `TagDict` + `ClusterManifest.tag_dict_data` wiring, and a `TagPredicate` through `percolate`),
+  and extends `tests/cluster_oracle.rs` + `tests/cluster_durability_oracle.rs` (filter sweep + tags survive
+  rebuild-from-log). Full design:
+  [`design/matching.md`](design/matching.md) §5 and
+  [`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) §11.
 - **Match scoring / ranking + `/_mpercolate` pagination — lower priority.** An optional layer *over* the
   boolean-correct result set: sort or boost by a priority tag, top-K, and `from`/offset on `/_mpercolate`
   (`size`-only today, unlike `/_search`). Lower priority because in the reference workload only a public

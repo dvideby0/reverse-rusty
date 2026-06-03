@@ -635,6 +635,11 @@ struct PutDocBody {
     query: String,
     #[serde(default = "default_version")]
     version: u32,
+    /// Per-query metadata tags (ADR-049): a canonical `tags` object plus any ES-style
+    /// sibling fields (everything not named `query`/`version`/`tags`). See
+    /// [`extract_ingest_tags`].
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 fn default_version() -> u32 {
     1
@@ -708,6 +713,13 @@ struct PutVocabResponse {
 struct SearchBody {
     document: Option<DocBody>,
     documents: Option<Vec<DocBody>>,
+    /// Native tag filter (ADR-049): an object `{key: value|[values]}` narrowing the
+    /// percolated candidates. Conjunction across keys, OR within a key's values.
+    filter: Option<serde_json::Value>,
+    /// ES-compatible percolate envelope: `{bool:{must:{percolate:{document(s)}}, filter:[…]}}`
+    /// or a bare `{percolate:{document(s)}}`. When present, the documents and tag filter are
+    /// taken from here instead of the native fields.
+    query: Option<serde_json::Value>,
     /// Optional per-request timeout in milliseconds (default: 30000).
     timeout_ms: Option<u64>,
     /// Maximum number of hits to return (default: 1000).
@@ -725,6 +737,193 @@ struct SearchBody {
 #[derive(Deserialize)]
 struct DocBody {
     title: String,
+}
+
+/// A request filter: a conjunction of `(key, [values])` groups (ADR-049).
+type FilterSpec = Vec<(String, Vec<String>)>;
+
+/// Reserved top-level fields on an ingest body that are NOT metadata tags.
+const RESERVED_INGEST_FIELDS: [&str; 3] = ["query", "version", "tags"];
+
+/// Extract per-query metadata tags from an ingest body's top-level fields (`PUT /_doc` or a
+/// `/_bulk` source line), ES-style (ADR-049). Tags come from a canonical `tags` object
+/// **and** any other non-reserved top-level scalar/array field (ES stores percolator
+/// metadata as siblings of `query`). A value that is neither a string nor an array of
+/// strings is ignored.
+fn extract_ingest_tags(obj: &serde_json::Map<String, serde_json::Value>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut push_kv = |key: &str, v: &serde_json::Value| match v {
+        serde_json::Value::String(s) => out.push((key.to_string(), s.clone())),
+        serde_json::Value::Array(arr) => {
+            for e in arr {
+                if let serde_json::Value::String(s) = e {
+                    out.push((key.to_string(), s.clone()));
+                }
+            }
+        }
+        _ => {}
+    };
+    // canonical `tags` object
+    if let Some(serde_json::Value::Object(tags)) = obj.get("tags") {
+        for (k, v) in tags {
+            push_kv(k, v);
+        }
+    }
+    // ES-style sibling fields
+    for (k, v) in obj {
+        if !RESERVED_INGEST_FIELDS.contains(&k.as_str()) {
+            push_kv(k, v);
+        }
+    }
+    out
+}
+
+/// Parse the ES `bool.filter` clause list into a [`FilterSpec`]. Each clause is a
+/// `{"terms": {key: [values]}}` or `{"term": {key: value}}`; any other clause type is a
+/// hard error (so an unsupported filter never silently widens the result set). Accepts a
+/// single clause object or an array of them.
+fn parse_es_filter(filter: &serde_json::Value) -> Result<FilterSpec, String> {
+    let clauses: Vec<&serde_json::Value> = match filter {
+        serde_json::Value::Array(a) => a.iter().collect(),
+        other => vec![other],
+    };
+    let mut spec = FilterSpec::new();
+    for clause in clauses {
+        let obj = clause
+            .as_object()
+            .ok_or_else(|| "filter clause must be an object".to_string())?;
+        if let Some(terms) = obj.get("terms").and_then(|t| t.as_object()) {
+            for (k, v) in terms {
+                let vals = match v {
+                    serde_json::Value::Array(a) => a
+                        .iter()
+                        .filter_map(|e| e.as_str().map(str::to_string))
+                        .collect(),
+                    serde_json::Value::String(s) => vec![s.clone()],
+                    _ => return Err(format!("terms[{k}] must be a string or array of strings")),
+                };
+                spec.push((k.clone(), vals));
+            }
+        } else if let Some(term) = obj.get("term").and_then(|t| t.as_object()) {
+            for (k, v) in term {
+                let val = v
+                    .as_str()
+                    .ok_or_else(|| format!("term[{k}] must be a string"))?;
+                spec.push((k.clone(), vec![val.to_string()]));
+            }
+        } else {
+            return Err(
+                "unsupported filter clause: only `terms` and `term` are supported".to_string(),
+            );
+        }
+    }
+    Ok(spec)
+}
+
+/// Parse a native filter block — an object `{key: value|[values], ...}` — into a
+/// [`FilterSpec`].
+fn parse_native_filter(filter: &serde_json::Value) -> Result<FilterSpec, String> {
+    let obj = filter
+        .as_object()
+        .ok_or_else(|| "`filter` must be an object of key → value(s)".to_string())?;
+    let mut spec = FilterSpec::new();
+    for (k, v) in obj {
+        let vals = match v {
+            serde_json::Value::String(s) => vec![s.clone()],
+            serde_json::Value::Array(a) => a
+                .iter()
+                .filter_map(|e| e.as_str().map(str::to_string))
+                .collect(),
+            _ => return Err(format!("filter[{k}] must be a string or array of strings")),
+        };
+        spec.push((k.clone(), vals));
+    }
+    Ok(spec)
+}
+
+/// The percolate documents + tag filter resolved from a request, normalizing BOTH the
+/// native RR shape (`document`/`documents` + `filter`) and the ES `bool`/`terms`/`percolate`
+/// envelope (`query.bool.must.percolate` + `query.bool.filter`). Returns the titles, whether
+/// the request was single-document (drives the response shape), and the filter spec. Any
+/// unsupported ES query node is a hard error (never silently ignored).
+fn resolve_percolate(
+    document: Option<DocBody>,
+    documents: Option<Vec<DocBody>>,
+    native_filter: Option<serde_json::Value>,
+    es_query: Option<serde_json::Value>,
+) -> Result<(Vec<String>, bool, FilterSpec), String> {
+    if let Some(q) = es_query {
+        return resolve_es_query(&q);
+    }
+    let mut filter = FilterSpec::new();
+    if let Some(f) = native_filter {
+        filter = parse_native_filter(&f)?;
+    }
+    match (document, documents) {
+        (Some(d), _) => Ok((vec![d.title], true, filter)),
+        (None, Some(ds)) => Ok((ds.into_iter().map(|d| d.title).collect(), false, filter)),
+        (None, None) => Err("request must include 'document' or 'documents'".to_string()),
+    }
+}
+
+/// Resolve the ES percolate envelope: `{query:{bool:{must:{percolate:{document(s)}}, filter:[…]}}}`
+/// or the bare `{query:{percolate:{document(s)}}}`. Only the percolate + bool.filter(terms/term)
+/// subset is supported.
+fn resolve_es_query(query: &serde_json::Value) -> Result<(Vec<String>, bool, FilterSpec), String> {
+    let obj = query
+        .as_object()
+        .ok_or_else(|| "`query` must be an object".to_string())?;
+    let (percolate, filter) = if let Some(b) = obj.get("bool") {
+        let b = b
+            .as_object()
+            .ok_or_else(|| "`query.bool` must be an object".to_string())?;
+        // must → the percolate clause (single object or a one-element array)
+        let must = b
+            .get("must")
+            .ok_or_else(|| "`query.bool` must contain a `must` percolate clause".to_string())?;
+        let must_clause = match must {
+            serde_json::Value::Array(a) if a.len() == 1 => &a[0],
+            serde_json::Value::Array(_) => {
+                return Err("only a single `percolate` clause is supported in `must`".to_string())
+            }
+            obj => obj,
+        };
+        let percolate = must_clause
+            .get("percolate")
+            .ok_or_else(|| "`query.bool.must` must be a `percolate` clause".to_string())?;
+        let filter = match b.get("filter") {
+            Some(f) => parse_es_filter(f)?,
+            None => FilterSpec::new(),
+        };
+        (percolate, filter)
+    } else if let Some(p) = obj.get("percolate") {
+        (p, FilterSpec::new())
+    } else {
+        return Err("`query` must be a `percolate` or `bool` percolate clause".to_string());
+    };
+    let (titles, single) = extract_percolate_docs(percolate)?;
+    Ok((titles, single, filter))
+}
+
+/// Pull the document(s) out of an ES `percolate` clause (`{field, document}` or
+/// `{field, documents}`); `field` is accepted but ignored (RR has one query field).
+fn extract_percolate_docs(percolate: &serde_json::Value) -> Result<(Vec<String>, bool), String> {
+    let p = percolate
+        .as_object()
+        .ok_or_else(|| "`percolate` must be an object".to_string())?;
+    let title_of = |doc: &serde_json::Value| -> Result<String, String> {
+        doc.get("title")
+            .and_then(|t| t.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "percolate document must have a string `title`".to_string())
+    };
+    if let Some(doc) = p.get("document") {
+        Ok((vec![title_of(doc)?], true))
+    } else if let Some(docs) = p.get("documents").and_then(|d| d.as_array()) {
+        Ok((docs.iter().map(title_of).collect::<Result<_, _>>()?, false))
+    } else {
+        Err("`percolate` must contain `document` or `documents`".to_string())
+    }
 }
 
 #[derive(Serialize)]
@@ -817,6 +1016,12 @@ struct MPercolateBody {
     /// The batch of documents to percolate. Each entry is matched independently;
     /// `responses[i]` corresponds to `documents[i]`.
     documents: Option<Vec<DocBody>>,
+    /// Native tag filter (ADR-049): an object `{key: value|[values]}` applied to every
+    /// document in the batch.
+    filter: Option<serde_json::Value>,
+    /// ES-compatible percolate envelope (see [`SearchBody::query`]); when present the
+    /// batch documents and filter are taken from here.
+    query: Option<serde_json::Value>,
     /// Per-request override of the server's broad-lane default. When set, controls
     /// whether class-C (broad) queries are evaluated for this batch.
     include_broad: Option<bool>,
@@ -1039,9 +1244,10 @@ async fn put_doc(
     Json(body): Json<PutDocBody>,
 ) -> impl IntoResponse {
     let start = Instant::now();
+    let tags = extract_ingest_tags(&body.rest);
     let result = {
         let mut engine = state.engine.lock();
-        match engine.try_insert_live(&body.query, id, body.version) {
+        match engine.try_insert_live_with_tags(&body.query, id, body.version, &tags) {
             Ok(reverse_rusty::segment::InsertOutcome::Inserted(_)) => {
                 info!(query_id = id, "query registered");
                 state
@@ -1247,7 +1453,34 @@ async fn search(
     let page_size = body.size.unwrap_or(1000);
     let page_from = body.from.unwrap_or(0);
 
-    let response = match (body.document, body.documents) {
+    // Resolve documents + tag filter from EITHER the native shape (document/documents +
+    // filter) or the ES bool/terms percolate envelope (query). A malformed/unsupported
+    // request is a 400 (an unsupported query node never silently widens the result set).
+    let (titles, single, filter_spec) =
+        match resolve_percolate(body.document, body.documents, body.filter, body.query) {
+            Ok(t) => t,
+            Err(msg) => {
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["search", "400"])
+                    .inc();
+                return Err(ApiError::response(
+                    StatusCode::BAD_REQUEST,
+                    "validation_error",
+                    msg,
+                ));
+            }
+        };
+    let (eff_document, eff_documents) = if single {
+        let title = titles.into_iter().next().unwrap_or_default();
+        (Some(DocBody { title }), None)
+    } else {
+        let docs: Vec<DocBody> = titles.into_iter().map(|title| DocBody { title }).collect();
+        (None, Some(docs))
+    };
+
+    let response = match (eff_document, eff_documents) {
         // Single document percolation.
         (Some(doc), _) => {
             let title = doc.title;
@@ -1258,6 +1491,7 @@ async fn search(
             };
             let prom = state.prom.clone();
             let snap = Arc::clone(&state.snapshot.load());
+            let pred = snap.compile_tag_predicate(&filter_spec);
             let state_inner = Arc::clone(&state);
 
             let search_fut = tokio::task::spawn_blocking(move || {
@@ -1265,7 +1499,13 @@ async fn search(
                     SCRATCH.with(|cell| {
                         let mut scratch = cell.borrow_mut();
                         let mut out = Vec::new();
-                        let stats = snap.match_title(&title, &mut scratch, &mut out, include_broad);
+                        let stats = snap.match_title_filtered(
+                            &title,
+                            &mut scratch,
+                            &mut out,
+                            include_broad,
+                            &pred,
+                        );
                         (out, stats)
                     })
                 })
@@ -1350,12 +1590,13 @@ async fn search(
             let titles: Vec<String> = docs.into_iter().map(|d| d.title).collect();
             let prom = state.prom.clone();
             let snap = Arc::clone(&state.snapshot.load());
+            let pred = snap.compile_tag_predicate(&filter_spec);
             let state_inner = Arc::clone(&state);
 
             let search_fut = tokio::task::spawn_blocking(move || {
                 state_inner
                     .pool
-                    .install(|| snap.match_titles_par(&titles, include_broad))
+                    .install(|| snap.match_titles_par_filtered(&titles, include_broad, &pred))
             });
 
             let results = match tokio::time::timeout(timeout, search_fut).await {
@@ -1506,18 +1747,24 @@ async fn mpercolate(
 ) -> Result<Json<MPercolateResponse>, (StatusCode, Json<ApiError>)> {
     let start = Instant::now();
 
-    let Some(docs) = body.documents else {
-        state
-            .prom
-            .http_requests_total
-            .with_label_values(&["mpercolate", "400"])
-            .inc();
-        return Err(ApiError::response(
-            StatusCode::BAD_REQUEST,
-            "validation_error",
-            "request must include 'documents' (an array of {\"title\": ...})",
-        ));
-    };
+    // Resolve the batch + tag filter from the native (`documents` + `filter`) or ES
+    // (`query`) shape; an unsupported request is a 400.
+    let (titles, _single, filter_spec) =
+        match resolve_percolate(None, body.documents, body.filter, body.query) {
+            Ok(t) => t,
+            Err(msg) => {
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["mpercolate", "400"])
+                    .inc();
+                return Err(ApiError::response(
+                    StatusCode::BAD_REQUEST,
+                    "validation_error",
+                    msg,
+                ));
+            }
+        };
 
     let include_broad = body.include_broad.unwrap_or(state.include_broad);
     let include_source = body.include_source.unwrap_or(true);
@@ -1527,7 +1774,7 @@ async fn mpercolate(
 
     // Empty batch: a valid no-op — return an empty responses[] without scheduling
     // any work.
-    if docs.is_empty() {
+    if titles.is_empty() {
         state
             .prom
             .http_requests_total
@@ -1540,7 +1787,7 @@ async fn mpercolate(
         }));
     }
 
-    let num_docs = docs.len();
+    let num_docs = titles.len();
 
     // Read the live broad-lane config from the snapshot (ADR-026 dynamic knobs):
     // batch size, columnar-vs-inline kill-switch, pure-anchor materialization, and
@@ -1573,12 +1820,12 @@ async fn mpercolate(
         broad_materialize: cfg.broad_materialize,
     };
 
-    let titles: Vec<String> = docs.into_iter().map(|d| d.title).collect();
+    let pred = snap.compile_tag_predicate(&filter_spec);
     let state_inner = Arc::clone(&state);
     let search_fut = tokio::task::spawn_blocking(move || {
         state_inner
             .pool
-            .install(|| snap.match_titles_batch_with_stats(&titles, opts))
+            .install(|| snap.match_titles_batch_with_stats_filtered(&titles, opts, &pred))
     });
 
     let (results, stats) = match tokio::time::timeout(timeout, search_fut).await {
@@ -1750,6 +1997,8 @@ async fn bulk_ingest(
     // Parse NDJSON action/source pairs.
     let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
     let mut pairs: Vec<(u64, String)> = Vec::new();
+    // Per-query metadata tags (ADR-049), parallel to `pairs`.
+    let mut tags_per_pair: Vec<Vec<(String, String)>> = Vec::new();
     // For each entry in `pairs`, the index of its provisional item in `items`,
     // so the engine's per-item outcome can be mapped back to the right slot.
     let mut pair_item_idx: Vec<usize> = Vec::new();
@@ -1841,6 +2090,12 @@ async fn bulk_ingest(
         };
 
         pairs.push((id, query));
+        tags_per_pair.push(
+            source
+                .as_object()
+                .map(extract_ingest_tags)
+                .unwrap_or_default(),
+        );
         // Provisional success; the engine outcome (below) may downgrade this
         // item to a 400 once the batch is compiled.
         pair_item_idx.push(items.len());
@@ -1857,7 +2112,7 @@ async fn bulk_ingest(
     if !pairs.is_empty() {
         let result = {
             let mut engine = state.engine.lock();
-            engine.try_bulk_ingest_detailed(&pairs)
+            engine.try_bulk_ingest_detailed_with_tags(&pairs, &tags_per_pair)
         };
 
         let (report, item_status) = match result {
@@ -3203,6 +3458,8 @@ mod mpercolate_tests {
                     })
                     .collect()
             }),
+            filter: None,
+            query: None,
             include_broad,
             include_source: Some(false),
             // Large cap so no per-document truncation can mask a result mismatch.

@@ -5,8 +5,22 @@ use super::{Engine, IngestItemStatus, IngestReport, InsertOutcome, Segment};
 use std::sync::Arc;
 
 use crate::compile::{extract, Extracted};
+use crate::tagdict::TagId;
 
 impl Engine {
+    /// Intern a query's `(key, value)` metadata tags into the engine's tag dictionary
+    /// (copy-on-write, like the feature dict), returning a sorted + deduped `TagId` slice
+    /// ready for the SoA tag column (ADR-049). Empty input ⇒ empty (no CoW clone).
+    fn intern_tags(&mut self, tags: &[(String, String)]) -> Vec<TagId> {
+        if tags.is_empty() {
+            return Vec::new();
+        }
+        let td = Arc::make_mut(&mut self.tag_dict);
+        let mut ids: Vec<TagId> = tags.iter().map(|(k, v)| td.intern(k, v)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
     /// Build the first BASE segment from a batch of `(logical_id, query_text)`.
     /// Two passes:
     ///   A: parse + extract + bump frequencies
@@ -46,19 +60,31 @@ impl Engine {
         &mut self,
         queries: &[(u64, String)],
     ) -> std::io::Result<IngestReport> {
+        self.try_build_from_queries_with_tags(queries, &[])
+    }
+
+    /// [`try_build_from_queries`](Self::try_build_from_queries) carrying per-query
+    /// metadata tags (ADR-049). `tags` is parallel to `queries` (`tags[i]` describes
+    /// `queries[i]`); an empty slice means no query is tagged.
+    pub fn try_build_from_queries_with_tags(
+        &mut self,
+        queries: &[(u64, String)],
+        tags: &[Vec<(String, String)>],
+    ) -> std::io::Result<IngestReport> {
         let mut report = IngestReport::default();
         let mut lc = String::new();
-        let mut extracted: Vec<(u64, Extracted, &str)> = Vec::with_capacity(queries.len());
+        // carry the original query index so we can pair each accepted query with its tags
+        let mut extracted: Vec<(usize, u64, Extracted, &str)> = Vec::with_capacity(queries.len());
         let limits = self.config.parse_limits();
 
         // Pass A — intern features + bump frequencies. Take a single copy-on-write
         // handle to the dict for the whole pass (clones at most once if shared).
         {
             let dict = Arc::make_mut(&mut self.dict);
-            for (logical, text) in queries {
+            for (idx, (logical, text)) in queries.iter().enumerate() {
                 if let Ok(ast) = crate::dsl::parse_with_limits(text, &limits) {
                     let ex = extract(&ast, &self.norm, dict, &mut lc);
-                    extracted.push((*logical, ex, text));
+                    extracted.push((idx, *logical, ex, text));
                 } else {
                     self.rejected_parse += 1;
                     report.rejected_parse += 1;
@@ -68,14 +94,25 @@ impl Engine {
             dict.finalize_mask();
         }
 
+        // Intern each accepted query's tags (separate pass to avoid borrowing `self`
+        // mutably while the dict is read in pass B).
+        let mut tag_ids: Vec<Vec<TagId>> = Vec::with_capacity(extracted.len());
+        for (idx, _, _, _) in &extracted {
+            let qtags = tags.get(*idx).map_or(&[][..], Vec::as_slice);
+            tag_ids.push(self.intern_tags(qtags));
+        }
+
         // Pass B -> first base segment. Accepted source text is collected and
         // applied to the query store only after the durable commit succeeds
         // (see commit_base_segment), so a failed batch leaves no partial sources.
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
-        for (logical, ex, text) in &extracted {
-            if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
+        for (i, (_, logical, ex, text)) in extracted.iter().enumerate() {
+            if seg
+                .add_compiled(ex, &tag_ids[i], &self.dict, *logical, 1)
+                .is_none()
+            {
                 self.rejected_class_d += 1;
                 report.rejected_class_d += 1;
             } else {
@@ -96,7 +133,18 @@ impl Engine {
     /// automatic flush is triggered (which may in turn trigger compaction if
     /// `auto_compact_on_flush` is set).
     pub fn insert_live(&mut self, text: &str, logical: u64, version: u32) -> Option<u32> {
-        match self.try_insert_live(text, logical, version) {
+        self.insert_live_with_tags(text, logical, version, &[])
+    }
+
+    /// [`insert_live`](Self::insert_live) carrying per-query metadata tags (ADR-049).
+    pub fn insert_live_with_tags(
+        &mut self,
+        text: &str,
+        logical: u64,
+        version: u32,
+        tags: &[(String, String)],
+    ) -> Option<u32> {
+        match self.try_insert_live_with_tags(text, logical, version, tags) {
             Ok(InsertOutcome::Inserted(local)) => {
                 self.maybe_flush();
                 Some(local)
@@ -138,6 +186,19 @@ impl Engine {
         logical: u64,
         version: u32,
     ) -> Result<InsertOutcome, crate::error::WriteError> {
+        self.try_insert_live_with_tags(text, logical, version, &[])
+    }
+
+    /// [`try_insert_live`](Self::try_insert_live) carrying per-query metadata tags
+    /// (ADR-049). Tags ride the same WAL-first / fail-closed path as the query: they are
+    /// logged before the in-memory apply, so a recovered insert keeps its tags.
+    pub fn try_insert_live_with_tags(
+        &mut self,
+        text: &str,
+        logical: u64,
+        version: u32,
+        tags: &[(String, String)],
+    ) -> Result<InsertOutcome, crate::error::WriteError> {
         // Parse first: a malformed query is a caller error and must never reach
         // the WAL (it carries no replayable mutation). Enforce the configured
         // complexity limits here, at the front door.
@@ -145,20 +206,22 @@ impl Engine {
             .map_err(crate::error::WriteError::Parse)?;
         // WAL FIRST (durability before visibility). If the append fails the
         // mutation is not durable, so reject it and leave in-memory state
-        // untouched rather than acknowledge a write a crash would lose.
+        // untouched rather than acknowledge a write a crash would lose. Tags are
+        // logged alongside the query so a replayed insert recovers them.
         if let Some(ref mut wal) = self.wal {
-            if let Err(e) = wal.append_insert(logical, version, text) {
+            if let Err(e) = wal.append_insert(logical, version, text, tags) {
                 self.wal_healthy = false;
                 return Err(crate::error::WriteError::Wal(e));
             }
         }
+        let tag_ids = self.intern_tags(tags);
         let mut lc = String::new();
         let ex = {
             let dict = Arc::make_mut(&mut self.dict);
             extract(&ast, &self.norm, dict, &mut lc)
         };
-        let outcome =
-            Arc::make_mut(&mut self.memtable).add_compiled(&ex, &self.dict, logical, version);
+        let outcome = Arc::make_mut(&mut self.memtable)
+            .add_compiled(&ex, &tag_ids, &self.dict, logical, version);
         if let Some(local) = outcome {
             self.query_store.insert(logical, text.to_string());
             Ok(InsertOutcome::Inserted(local))
@@ -313,6 +376,17 @@ impl Engine {
         &mut self,
         queries: &[(u64, String)],
     ) -> std::io::Result<(IngestReport, Vec<IngestItemStatus>)> {
+        self.try_bulk_ingest_detailed_with_tags(queries, &[])
+    }
+
+    /// [`try_bulk_ingest_detailed`](Self::try_bulk_ingest_detailed) carrying per-query
+    /// metadata tags (ADR-049). `tags` is parallel to `queries` (`tags[i]` describes
+    /// `queries[i]`); an empty slice means no query is tagged.
+    pub fn try_bulk_ingest_detailed_with_tags(
+        &mut self,
+        queries: &[(u64, String)],
+        tags: &[Vec<(String, String)>],
+    ) -> std::io::Result<(IngestReport, Vec<IngestItemStatus>)> {
         let mut report = IngestReport::default();
         let mut lc = String::new();
         let mut extracted: Vec<(usize, u64, Extracted, &str)> = Vec::with_capacity(queries.len());
@@ -339,11 +413,21 @@ impl Engine {
                 dict.finalize_mask();
             }
         }
+        // Intern each accepted query's tags (separate pass so `self` is not borrowed
+        // mutably while the dict is read in pass B).
+        let mut tag_ids: Vec<Vec<TagId>> = Vec::with_capacity(extracted.len());
+        for (idx, _, _, _) in &extracted {
+            let qtags = tags.get(*idx).map_or(&[][..], Vec::as_slice);
+            tag_ids.push(self.intern_tags(qtags));
+        }
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
-        for (idx, logical, ex, text) in &extracted {
-            if seg.add_compiled(ex, &self.dict, *logical, 1).is_none() {
+        for (i, (idx, logical, ex, text)) in extracted.iter().enumerate() {
+            if seg
+                .add_compiled(ex, &tag_ids[i], &self.dict, *logical, 1)
+                .is_none()
+            {
                 self.rejected_class_d += 1;
                 report.rejected_class_d += 1;
                 item_status[*idx] = IngestItemStatus::RejectedClassD;
@@ -376,8 +460,10 @@ impl Engine {
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
         for (logical, ex, text, version) in items {
+            // The cluster shard ingest path is untagged today (filtered percolation is a
+            // single-node feature; threading tags through the cluster is a follow-on).
             if seg
-                .add_compiled(ex, &self.dict, *logical, *version)
+                .add_compiled(ex, &[], &self.dict, *logical, *version)
                 .is_some()
             {
                 accepted.push((*logical, text.clone()));
@@ -406,8 +492,10 @@ impl Engine {
         version: u32,
         text: &str,
     ) -> Option<u32> {
+        // The cluster shard insert path is untagged today (filtered percolation is a
+        // single-node feature; threading tags through the cluster is a follow-on).
         let outcome =
-            Arc::make_mut(&mut self.memtable).add_compiled(ex, &self.dict, logical, version);
+            Arc::make_mut(&mut self.memtable).add_compiled(ex, &[], &self.dict, logical, version);
         if outcome.is_some() {
             self.query_store.insert(logical, text.to_string());
         } else {
@@ -423,15 +511,22 @@ impl Engine {
     /// so re-applying a (possibly since-tightened) limit here could silently drop
     /// an already-acknowledged write and diverge the recovered state from the log.
     /// The compiled-in ceiling still bounds resource use during replay.
-    pub(in crate::segment) fn replay_insert(&mut self, text: &str, logical: u64, version: u32) {
+    pub(in crate::segment) fn replay_insert(
+        &mut self,
+        text: &str,
+        logical: u64,
+        version: u32,
+        tags: &[(String, String)],
+    ) {
         if let Ok(ast) = crate::dsl::parse(text) {
+            let tag_ids = self.intern_tags(tags);
             let mut lc = String::new();
             let ex = {
                 let dict = Arc::make_mut(&mut self.dict);
                 extract(&ast, &self.norm, dict, &mut lc)
             };
             if Arc::make_mut(&mut self.memtable)
-                .add_compiled(&ex, &self.dict, logical, version)
+                .add_compiled(&ex, &tag_ids, &self.dict, logical, version)
                 .is_some()
             {
                 self.query_store.insert(logical, text.to_string());

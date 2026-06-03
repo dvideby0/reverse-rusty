@@ -11,6 +11,112 @@
 
 use crate::compile::Extracted;
 use crate::dict::{Dict, FeatureId, NO_MASK_BIT};
+use crate::tagdict::TagId;
+
+/// A compiled tag filter (ADR-049): a conjunction of per-key value-sets, each value-set a
+/// sorted, deduped list of `TagId`s. A query passes iff EVERY group shares at least one
+/// `TagId` with the query's sorted tag set (AND across keys, OR within a key). Compiled
+/// once per request from the REST filter; tested only in the post-candidate verify stage,
+/// never in candidate retrieval — so it can only ever *remove* queries the caller did not
+/// ask for, never drop a wanted match (the "tags never gate" invariant, matching.md §5.3).
+///
+/// - **Empty** (`groups` empty) ⇒ no filter ⇒ every query passes. The verify clause is a
+///   single never-taken branch, so the no-filter path is unchanged from before tags.
+/// - **A present-but-empty group** ⇒ matches nothing (a filter on an all-unknown value):
+///   intersecting a sorted set with an empty slice is empty, so the group fails — the
+///   safe direction (a filter can never over-return).
+#[derive(Clone, Debug, Default)]
+pub struct TagPredicate {
+    groups: Vec<Vec<TagId>>,
+}
+
+impl TagPredicate {
+    /// The empty predicate — matches everything (no filtering). `const` so callers can
+    /// pass `&TagPredicate::empty()` with no allocation.
+    #[inline]
+    #[must_use]
+    pub const fn empty() -> Self {
+        TagPredicate { groups: Vec::new() }
+    }
+
+    /// Build from per-key value-sets — each inner vec is one key's accepted `TagId`s.
+    /// Each group is sorted+deduped here (off the hot path) so the per-candidate check is
+    /// a sorted-slice intersection.
+    #[must_use]
+    pub fn new(mut groups: Vec<Vec<TagId>>) -> Self {
+        for g in &mut groups {
+            g.sort_unstable();
+            g.dedup();
+        }
+        TagPredicate { groups }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn groups(&self) -> &[Vec<TagId>] {
+        &self.groups
+    }
+
+    /// Whether a query's sorted `TagId` slice satisfies this predicate (every group must
+    /// intersect `qtags`). Empty predicate ⇒ always true. Used by the broad-lane
+    /// pure-anchor fast path, which has the query's tags but bypasses `verify`.
+    #[inline]
+    #[must_use]
+    pub fn matches(&self, qtags: &[TagId]) -> bool {
+        for group in &self.groups {
+            if !sorted_intersects(qtags, group) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// True if two sorted `TagId` slices share at least one element. Gallops the smaller
+/// slice via binary search through the larger — integer-only, allocation-free. An empty
+/// slice on either side yields `false` (a group with no resolvable value matches nothing).
+#[inline]
+fn sorted_intersects(a: &[TagId], b: &[TagId]) -> bool {
+    let (small, large) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    for &x in small {
+        if large.binary_search(&x).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether query `i`'s tag set satisfies `pred`: every group must intersect the query's
+/// sorted `tag_blob[tag_off[i]..+tag_len[i]]`. An untagged query (empty tag slice) fails
+/// any non-empty predicate — exactly the back-compat reading of a tag-less (v1/v2) segment.
+/// Integer-only and allocation-free; only reached when `pred` is non-empty.
+#[inline]
+fn query_passes_tags(
+    i: usize,
+    pred: &TagPredicate,
+    tag_off: &[u32],
+    tag_len: &[u16],
+    tag_blob: &[TagId],
+) -> bool {
+    // A query with no tag entry — a pre-tag (v1/v2) segment exposes empty tag columns —
+    // is untagged, so its tag slice is empty and it fails any non-empty group.
+    let qtags: &[TagId] = match (tag_off.get(i), tag_len.get(i)) {
+        (Some(&o), Some(&l)) => &tag_blob[o as usize..o as usize + l as usize],
+        _ => &[],
+    };
+    for group in &pred.groups {
+        if !sorted_intersects(qtags, group) {
+            return false;
+        }
+    }
+    true
+}
 
 /// Shared exact-verification logic operating on raw slices. Used by both
 /// in-memory ExactStore::verify and MmapSegment::verify to avoid duplication.
@@ -35,6 +141,10 @@ pub fn verify_slices(
     group_off: &[u32],
     group_len: &[u16],
     anyof_blob: &[u32],
+    pred: &TagPredicate,
+    tag_off: &[u32],
+    tag_len: &[u16],
+    tag_blob: &[TagId],
 ) -> bool {
     let i = id as usize;
 
@@ -83,6 +193,14 @@ pub fn verify_slices(
         }
     }
 
+    // 5) tag predicate (post-candidate; NEVER gates retrieval — matching.md §5.3). Only a
+    //    candidate that already satisfies the query is filtered by the caller's tags, so a
+    //    filter can only remove, never drop a wanted match. Skipped entirely (one untaken
+    //    branch) when no filter is supplied, keeping the no-filter path unchanged.
+    if !pred.is_empty() && !query_passes_tags(i, pred, tag_off, tag_len, tag_blob) {
+        return false;
+    }
+
     true
 }
 
@@ -125,7 +243,21 @@ pub fn eval_batch_slices<'a>(
     group_off: &[u32],
     group_len: &[u16],
     anyof_blob: &[u32],
+    pred: &TagPredicate,
+    tag_off: &[u32],
+    tag_len: &[u16],
+    tag_blob: &[TagId],
 ) {
+    // 0) tag predicate (post-candidate; NEVER gates). The filter is title-independent, so
+    //    it is a per-query scalar gate: a query failing the caller's tags matches no title.
+    //    Mirrors verify step 5; skipped (one untaken branch) when no filter is supplied.
+    if !pred.is_empty() && !query_passes_tags(i, pred, tag_off, tag_len, tag_blob) {
+        for a in acc.iter_mut() {
+            *a = 0;
+        }
+        return;
+    }
+
     // 1) common-mask gate -> per-title gate bitmap (verify step 1, transposed)
     let rm = req_mask[i];
     let fm = forb_mask[i];
@@ -207,6 +339,11 @@ pub struct ExactStore {
     group_off: Vec<u32>,
     group_len: Vec<u16>,
     anyof_blob: Vec<u32>,
+    // per-query metadata tags (ADR-049): sorted TagIds sliced from tag_blob, exactly
+    // parallel to the required tail. Verify-stage only — never gates retrieval (§5.3).
+    tag_off: Vec<u32>,
+    tag_len: Vec<u16>,
+    tag_blob: Vec<TagId>,
     // identity, resolved only on a confirmed match
     version: Vec<u32>,
     logical: Vec<u64>,
@@ -235,8 +372,17 @@ impl ExactStore {
         self.req_mask.is_empty()
     }
 
-    /// Append a compiled query; returns its SegmentLocalQueryId.
-    pub fn push(&mut self, ex: &Extracted, dict: &Dict, version: u32, logical: u64) -> u32 {
+    /// Append a compiled query; returns its SegmentLocalQueryId. `tags` are the query's
+    /// interned metadata `TagId`s (ADR-049); the caller MUST pass them sorted + deduped
+    /// (like `ex.required`) so the verify-stage filter is a sorted-slice intersection.
+    pub fn push(
+        &mut self,
+        ex: &Extracted,
+        tags: &[TagId],
+        dict: &Dict,
+        version: u32,
+        logical: u64,
+    ) -> u32 {
         let id = self.req_mask.len() as u32;
 
         let mut rmask = 0u64;
@@ -284,6 +430,12 @@ impl ExactStore {
         self.forb_len.push(f_len);
         self.q_group_start.push(g_start);
         self.q_group_count.push(g_count);
+
+        let t_off = self.tag_blob.len() as u32;
+        self.tag_blob.extend_from_slice(tags);
+        self.tag_off.push(t_off);
+        self.tag_len.push(tags.len() as u16);
+
         self.version.push(version);
         self.logical.push(logical);
         id
@@ -297,11 +449,21 @@ impl ExactStore {
     pub fn version(&self, id: u32) -> u32 {
         self.version[id as usize]
     }
+    /// The sorted `TagId` slice for query `id` (ADR-049). Used by the `set_vocab`
+    /// recompile to carry a query's tags forward unchanged (same tag space).
+    #[inline]
+    pub fn tags_of(&self, id: u32) -> &[TagId] {
+        let i = id as usize;
+        let o = self.tag_off[i] as usize;
+        let l = self.tag_len[i] as usize;
+        &self.tag_blob[o..o + l]
+    }
 
     /// Verify one candidate against a title. `tmask` is the title's common-mask
-    /// word; `tfeats` is the title's full sorted feature slice (for tail checks).
+    /// word; `tfeats` is the title's full sorted feature slice (for tail checks); `pred`
+    /// is the request's compiled tag filter (`TagPredicate::empty()` ⇒ no filtering).
     #[inline]
-    pub fn verify(&self, id: u32, tmask: u64, tfeats: &[FeatureId]) -> bool {
+    pub fn verify(&self, id: u32, tmask: u64, tfeats: &[FeatureId], pred: &TagPredicate) -> bool {
         let i = id as usize;
 
         // 1) common-mask gate — the cheap reject (two u64 ops, no memory traffic)
@@ -349,12 +511,21 @@ impl ExactStore {
             }
         }
 
+        // 5) tag predicate (post-candidate; never gates — matching.md §5.3). Mirrors
+        //    `verify_slices` clause 5; skipped (one untaken branch) with no filter.
+        if !pred.is_empty()
+            && !query_passes_tags(i, pred, &self.tag_off, &self.tag_len, &self.tag_blob)
+        {
+            return false;
+        }
+
         true
     }
 
     /// Columnar batch verification for one query against a title batch. Writes
     /// the matching-title bitmap into `acc`. The bitmap transpose of [`verify`],
-    /// sharing [`eval_batch_slices`] with the mmap path so the two cannot drift.
+    /// sharing [`eval_batch_slices`] with the mmap path so the two cannot drift. `pred`
+    /// is the request's compiled tag filter (applied as a per-query scalar gate).
     #[inline]
     pub fn eval_batch<'a>(
         &self,
@@ -363,6 +534,7 @@ impl ExactStore {
         lookup: impl Fn(FeatureId) -> Option<&'a [u64]>,
         acc: &mut [u64],
         grp: &mut [u64],
+        pred: &TagPredicate,
     ) {
         eval_batch_slices(
             local as usize,
@@ -383,6 +555,10 @@ impl ExactStore {
             &self.group_off,
             &self.group_len,
             &self.anyof_blob,
+            pred,
+            &self.tag_off,
+            &self.tag_len,
+            &self.tag_blob,
         );
     }
 
@@ -445,6 +621,14 @@ impl ExactStore {
         dest.q_group_start.push(new_gs);
         dest.q_group_count.push(gc as u16);
 
+        // tag column — compaction carries tags through the merge (ingestion §11)
+        let to = self.tag_off[i] as usize;
+        let tl = self.tag_len[i] as usize;
+        let new_to = dest.tag_blob.len() as u32;
+        dest.tag_blob.extend_from_slice(&self.tag_blob[to..to + tl]);
+        dest.tag_off.push(new_to);
+        dest.tag_len.push(tl as u16);
+
         // identity
         dest.version.push(self.version[i]);
         dest.logical.push(self.logical[i]);
@@ -497,9 +681,19 @@ impl ExactStore {
     pub fn logicals(&self) -> &[u64] {
         &self.logical
     }
+    pub fn tag_offs(&self) -> &[u32] {
+        &self.tag_off
+    }
+    pub fn tag_lens(&self) -> &[u16] {
+        &self.tag_len
+    }
+    pub fn tag_blobs(&self) -> &[TagId] {
+        &self.tag_blob
+    }
 
     /// Push a raw entry (pre-computed masks and blobs). Used by MmapSegment::to_memory_segment
-    /// to reconstruct an in-memory ExactStore from mmap'd data.
+    /// to reconstruct an in-memory ExactStore from mmap'd data. `tags` is the query's sorted
+    /// `TagId` slice (ADR-049).
     // Args mirror the SoA columns being reconstructed; a struct would add no clarity.
     #[allow(clippy::too_many_arguments)]
     pub fn push_raw(
@@ -509,6 +703,7 @@ impl ExactStore {
         req_tail: &[u32],
         forb_tail: &[u32],
         groups: (usize, usize, &[u32], &[u16], &[u32]), // (gs, gc, group_off, group_len, anyof_blob)
+        tags: &[TagId],
         version: u32,
         logical: u64,
     ) -> u32 {
@@ -539,6 +734,11 @@ impl ExactStore {
         self.q_group_start.push(new_gs);
         self.q_group_count.push(gc as u16);
 
+        let t_off = self.tag_blob.len() as u32;
+        self.tag_blob.extend_from_slice(tags);
+        self.tag_off.push(t_off);
+        self.tag_len.push(tags.len() as u16);
+
         self.version.push(version);
         self.logical.push(logical);
         id
@@ -559,7 +759,121 @@ impl ExactStore {
             + self.group_off.capacity() * size_of::<u32>()
             + self.group_len.capacity() * size_of::<u16>()
             + self.anyof_blob.capacity() * size_of::<u32>()
+            + self.tag_off.capacity() * size_of::<u32>()
+            + self.tag_len.capacity() * size_of::<u16>()
+            + self.tag_blob.capacity() * size_of::<TagId>()
             + self.version.capacity() * size_of::<u32>()
             + self.logical.capacity() * size_of::<u64>()
+    }
+}
+
+#[cfg(test)]
+mod tag_filter_tests {
+    use super::*;
+    use crate::dict::FeatureKind;
+
+    #[test]
+    fn sorted_intersects_basics() {
+        assert!(sorted_intersects(&[1, 5, 9], &[5])); // shares 5
+        assert!(sorted_intersects(&[5], &[1, 5, 9])); // order-independent
+        assert!(!sorted_intersects(&[1, 2, 3], &[4, 5, 6])); // disjoint
+        assert!(!sorted_intersects(&[1, 2, 3], &[])); // empty group ⇒ no match
+        assert!(!sorted_intersects(&[], &[1, 2, 3])); // untagged query ⇒ no match
+    }
+
+    #[test]
+    fn predicate_is_and_across_keys_or_within_a_key() {
+        // q0 tags {10,20}, q1 tags {11}, q2 untagged — laid out as the SoA tag column.
+        let tag_blob = [10u32, 20, 11];
+        let tag_off = [0u32, 2, 3];
+        let tag_len = [2u16, 1, 0];
+        let passes = |i: usize, pred: &TagPredicate| {
+            pred.is_empty() || query_passes_tags(i, pred, &tag_off, &tag_len, &tag_blob)
+        };
+
+        // empty predicate ⇒ everything passes (no filter)
+        let none = TagPredicate::empty();
+        assert!(passes(0, &none) && passes(1, &none) && passes(2, &none));
+
+        // category ∈ {A=10, B=11}: tagged q0/q1 pass, untagged q2 fails
+        let cat = TagPredicate::new(vec![vec![11, 10]]); // unsorted input → new() sorts
+        assert!(passes(0, &cat) && passes(1, &cat));
+        assert!(!passes(2, &cat));
+
+        // category ∈ {A=10} AND status ∈ {X=20}: only q0 has both (AND across keys)
+        let both = TagPredicate::new(vec![vec![10], vec![20]]);
+        assert!(passes(0, &both));
+        assert!(!passes(1, &both) && !passes(2, &both));
+
+        // a present-but-empty group matches nothing (filter on an all-unknown value) —
+        // the load-bearing "can never over-return" rule.
+        let empty_group = TagPredicate::new(vec![Vec::new()]);
+        assert!(!empty_group.is_empty());
+        assert!(!passes(0, &empty_group) && !passes(1, &empty_group));
+    }
+
+    #[test]
+    fn verify_filters_post_candidate_and_only_removes() {
+        // A store with one query requiring feature id 7, tagged {10, 20} (sorted).
+        let mut dict = Dict::new();
+        for i in 0..8 {
+            dict.intern(&format!("f{i}"), FeatureKind::Generic);
+        }
+        let ex = Extracted {
+            required: vec![7],
+            forbidden: vec![],
+            anyof: vec![],
+        };
+        let mut store = ExactStore::new();
+        store.push(&ex, &[10, 20], &dict, 1, 100);
+
+        let tfeats = [7u32]; // a title that satisfies the query's expression
+        let tmask = 0u64;
+
+        // No filter → matches (the query's expression is satisfied).
+        assert!(store.verify(0, tmask, &tfeats, &TagPredicate::empty()));
+        // A filter the query satisfies (category=A=10) → still matches.
+        assert!(store.verify(0, tmask, &tfeats, &TagPredicate::new(vec![vec![10]])));
+        // A filter the query does NOT satisfy (category=99) → removed, even though the
+        // expression matches. Proves filtering happens post-candidate and only removes.
+        assert!(!store.verify(0, tmask, &tfeats, &TagPredicate::new(vec![vec![99]])));
+
+        // eval_batch (columnar) must agree with verify for the same predicate.
+        let mut acc = [0u64; 1];
+        let mut grp = [0u64; 1];
+        let lookup = |f: FeatureId| -> Option<&[u64]> {
+            if f == 7 {
+                Some(&[1u64]) // title 0 contains feature 7
+            } else {
+                None
+            }
+        };
+        store.eval_batch(
+            0,
+            &[tmask],
+            lookup,
+            &mut acc,
+            &mut grp,
+            &TagPredicate::new(vec![vec![10]]),
+        );
+        assert_eq!(
+            acc[0] & 1,
+            1,
+            "columnar path matches with a satisfied filter"
+        );
+        let mut acc2 = [0u64; 1];
+        store.eval_batch(
+            0,
+            &[tmask],
+            lookup,
+            &mut acc2,
+            &mut grp,
+            &TagPredicate::new(vec![vec![99]]),
+        );
+        assert_eq!(
+            acc2[0] & 1,
+            0,
+            "columnar path drops with an unsatisfied filter"
+        );
     }
 }

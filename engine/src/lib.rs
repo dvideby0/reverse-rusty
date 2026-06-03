@@ -48,6 +48,7 @@ pub mod loader;
 pub mod normalize;
 pub mod segment;
 pub mod storage;
+pub mod tagdict;
 pub mod util;
 pub mod vocab;
 pub mod wal;
@@ -65,6 +66,7 @@ pub use segment::{
     CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport, InsertOutcome,
     MatchStats,
 };
+pub use tagdict::{TagDict, TagId};
 pub use vocab::Vocab;
 
 // Compile-time trait assertions — these ensure key types are safe for

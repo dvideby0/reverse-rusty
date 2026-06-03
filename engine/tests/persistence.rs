@@ -118,6 +118,127 @@ fn persist_and_reopen() {
 }
 
 #[test]
+fn tagged_queries_survive_reopen_and_filter_on_mmap() {
+    // The .seg v3 tag column (ADR-049) must survive reopen: build two queries that match
+    // the same title but carry different category tags, persist, reopen (now mmap-backed),
+    // and confirm a tag filter narrows correctly against the mmap'd tag column.
+    let dir = test_dir("tagged_reopen");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let queries = vec![
+        (1u64, "topps chrome".to_string()),
+        (2u64, "topps chrome".to_string()),
+    ];
+    let tags = vec![
+        vec![("category".to_string(), "cards".to_string())],
+        vec![("category".to_string(), "coins".to_string())],
+    ];
+    let mut engine = Engine::with_config(make_norm(), config.clone());
+    engine
+        .try_build_from_queries_with_tags(&queries, &tags)
+        .expect("tagged durable build");
+    drop(engine);
+
+    // Reopen — the base segment is now mmap'd, so the tag column is read from the v3 .seg.
+    let engine2 = Engine::open(make_norm(), config).unwrap();
+    let snap = engine2.snapshot();
+    let title = "2020 topps chrome update";
+
+    let mut s = reverse_rusty::segment::MatchScratch::new();
+    let mut out = Vec::new();
+
+    snap.match_title(title, &mut s, &mut out, true);
+    out.sort_unstable();
+    assert_eq!(
+        out,
+        vec![1, 2],
+        "both queries match the title unfiltered after reopen"
+    );
+
+    let cards = snap.compile_tag_predicate(&[("category".to_string(), vec!["cards".to_string()])]);
+    snap.match_title_filtered(title, &mut s, &mut out, true, &cards);
+    out.sort_unstable();
+    assert_eq!(
+        out,
+        vec![1],
+        "category=cards narrows to query 1 on the reopened mmap segment"
+    );
+
+    let coins = snap.compile_tag_predicate(&[("category".to_string(), vec!["coins".to_string()])]);
+    snap.match_title_filtered(title, &mut s, &mut out, true, &coins);
+    out.sort_unstable();
+    assert_eq!(out, vec![2], "category=coins narrows to query 2");
+
+    // A value never ingested matches nothing (safe `terms` semantics).
+    let none = snap.compile_tag_predicate(&[("category".to_string(), vec!["stamps".to_string()])]);
+    snap.match_title_filtered(title, &mut s, &mut out, true, &none);
+    assert!(out.is_empty(), "an unseen filter value returns ∅");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn tagged_inserts_survive_wal_recovery() {
+    // Tags ride the WAL (v2, ADR-049): a live tagged insert that has NOT been flushed is
+    // replayed on reopen WITH its tags, so a filter still narrows correctly.
+    let dir = test_dir("tagged_wal");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        memtable_flush_threshold: usize::MAX, // keep live inserts in WAL + memtable
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        // A base build writes the manifest (open replays the WAL only when one exists);
+        // the seed query is unrelated to the title/filters below.
+        engine.build_from_queries(&[(99, "zzz placeholder seed".to_string())]);
+        engine.insert_live_with_tags(
+            "topps chrome",
+            1,
+            1,
+            &[("category".to_string(), "cards".to_string())],
+        );
+        engine.insert_live_with_tags(
+            "topps chrome",
+            2,
+            1,
+            &[("category".to_string(), "coins".to_string())],
+        );
+        // No flush — the tagged inserts live only in the WAL + memtable, so reopen must
+        // replay them (with tags) to reconstruct the memtable.
+        drop(engine);
+    }
+    let engine2 = Engine::open(make_norm(), config).unwrap();
+    let snap = engine2.snapshot();
+    let title = "2020 topps chrome update";
+
+    let mut s = reverse_rusty::segment::MatchScratch::new();
+    let mut out = Vec::new();
+
+    let cards = snap.compile_tag_predicate(&[("category".to_string(), vec!["cards".to_string()])]);
+    snap.match_title_filtered(title, &mut s, &mut out, true, &cards);
+    out.sort_unstable();
+    assert_eq!(
+        out,
+        vec![1],
+        "WAL-replayed tags narrow category=cards to query 1"
+    );
+
+    let coins = snap.compile_tag_predicate(&[("category".to_string(), vec!["coins".to_string()])]);
+    snap.match_title_filtered(title, &mut s, &mut out, true, &coins);
+    out.sort_unstable();
+    assert_eq!(
+        out,
+        vec![2],
+        "WAL-replayed tags narrow category=coins to query 2"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn wal_recovery_inserts() {
     // Insert via insert_live (goes through WAL), then simulate crash + recovery.
     let dir = test_dir("wal_recovery");
@@ -272,8 +393,8 @@ fn wal_recovery_reports_corrupt_tail() {
     // Write a valid WAL with two inserts
     {
         let mut wal = Wal::open(&wal_path, false).unwrap();
-        wal.append_insert(1, 1, "michael jordan card").unwrap();
-        wal.append_insert(2, 1, "lebron james rookie").unwrap();
+        wal.append_insert(1, 1, "michael jordan card", &[]).unwrap();
+        wal.append_insert(2, 1, "lebron james rookie", &[]).unwrap();
     }
 
     // Append garbage to simulate a torn write

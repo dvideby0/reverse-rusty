@@ -2280,10 +2280,19 @@ Find an ADR by its number in the records below. (Implementation status of each d
 
 ### ADR-049: Per-query metadata, filtered percolation, and optional ranking (percolator parity)
 
-- **Status:** Accepted as a **design-only direction** — not yet built; implementation tracked in
-  [`STATUS.md`](STATUS.md) Tier 4. This ADR records the decision and the general framing so that the
-  build, when it happens, preserves the correctness contract *by construction*. The in-process engine
-  today is unaffected.
+- **Status:** **Built (single-node) + oracle-proven (2026-06-03)** — the lead item (decision points 1–3:
+  per-query metadata + filtered percolation) is implemented end-to-end on the single-node engine: tag
+  interning (`tagdict.rs`), the SoA tag column + verify-stage filter (`exact.rs`), `.seg` v3 + WAL v2
+  persistence, the Engine/snapshot filtered match API, and the REST surface (ES `bool`/`terms`/`percolate`
+  envelope + a native `filter` block, with ES-style sibling-tag ingest). Proven by the filtered
+  differential oracle (`tests/oracle.rs` — zero false negatives/positives + the "filtering only removes"
+  monotonicity property), the batch≡scalar-under-filter matrix (`tests/broad_batch.rs`, incl. the
+  pure-anchor materialization path), and tagged `.seg`/WAL reopen (`tests/persistence.rs`). Decision point 4
+  (ranking + `/_mpercolate` `from` pagination) remains design-only. The single-node server is the drop-in
+  target and is complete; threading tags through the **cluster** (in-process coordinator + durable log +
+  the `distributed` gRPC wire-format) follows the experimental-path cadence. Originally accepted as a
+  design-only direction — the framing below preserved the correctness contract *by construction* through
+  the build.
 - **Context:** Reverse Rusty matches titles to stored queries and returns a bare set of matched
   `logical_id`s. Real percolator deployments — captured abstractly in
   [`research/percolator-workload.md`](research/percolator-workload.md) — do more: each stored query

@@ -21,8 +21,11 @@ use super::{crc32, durable_rename, read_u32_at, read_u64_at, write_u32, write_u6
 const MAGIC: [u8; 4] = *b"PERC";
 // v1: original layout. v2 (ADR-020 Item 2): adds a sorted logical-index column
 // section (logical_index_off at header bytes 56..64); v1 files are still read
-// (the reverse index is reconstructed in memory on open).
-const FORMAT_VERSION: u32 = 2;
+// (the reverse index is reconstructed in memory on open). v3 (ADR-049): adds a
+// per-query tag section (tag_section_off at header bytes 64..72) holding the SoA
+// tag column behind filtered percolation; v1/v2 files are still read (their queries
+// read back as untagged — an empty tag column).
+const FORMAT_VERSION: u32 = 3;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -37,7 +40,8 @@ const HEADER_SIZE: usize = 80;
 //   40..48  filter_off (u64 LE)
 //   48..56  meta_off (u64 LE)
 //   56..64  logical_index_off (u64 LE; 0 or absent in v1)
-//   64..80  reserved (16 bytes, zeroed)
+//   64..72  tag_section_off (u64 LE; 0 or absent in v1/v2)
+//   72..80  reserved (8 bytes, zeroed)
 
 // ---- frozen hash table for on-disk CandidateIndex ----
 
@@ -268,6 +272,17 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     write_u64_array(&mut f, &li_logical)?;
     write_u32_array(&mut f, &li_local)?;
 
+    // ---- Tag section (per-query metadata; ADR-049) ----
+    // Three parallel arrays exactly like the required tail: tag_off/tag_len index into
+    // a sorted tag_blob of TagIds. A reader of an older (v1/v2) file finds no section and
+    // reads back an empty tag column (every query untagged).
+    pad_to_8(&mut f)?;
+    let tag_off_pos = f.stream_position()?;
+    let exact = seg.exact_store();
+    write_u32_array(&mut f, exact.tag_offs())?;
+    write_u16_array(&mut f, exact.tag_lens())?;
+    write_u32_array(&mut f, exact.tag_blobs())?;
+
     // ---- Write header ----
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&MAGIC)?;
@@ -280,6 +295,7 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     write_u64(&mut f, filter_off)?;
     write_u64(&mut f, meta_off)?;
     write_u64(&mut f, logical_off)?;
+    write_u64(&mut f, tag_off_pos)?;
     // remaining header bytes are already zero (reserved)
 
     // Compute CRC32 of the entire file and append it as the trailing 4 bytes
@@ -428,6 +444,13 @@ pub struct MmapSegment {
     group_len: *const u16,
     anyof_blob: *const u32,
     anyof_blob_len: usize,
+    // Per-query tag column (ADR-049). `tag_count` is the number of tag_off/tag_len
+    // entries (== num_queries for a v3 segment, 0 for a pre-tag v1/v2 segment).
+    tag_off: *const u32,
+    tag_len: *const u16,
+    tag_blob: *const u32,
+    tag_blob_len: usize,
+    tag_count: usize,
     version_arr: *const u32,
     logical_arr: *const u64,
     // Main index
@@ -494,6 +517,11 @@ impl Clone for MmapSegment {
             group_len: self.group_len,
             anyof_blob: self.anyof_blob,
             anyof_blob_len: self.anyof_blob_len,
+            tag_off: self.tag_off,
+            tag_len: self.tag_len,
+            tag_blob: self.tag_blob,
+            tag_blob_len: self.tag_blob_len,
+            tag_count: self.tag_count,
             version_arr: self.version_arr,
             logical_arr: self.logical_arr,
             main_slots: self.main_slots,
@@ -568,8 +596,9 @@ impl MmapSegment {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
             }
             let version = read_u32_at(data, 4)?;
-            // v1 and v2 are both supported (v1 reconstructs the reverse index).
-            if version != 1 && version != FORMAT_VERSION {
+            // v1, v2 and v3 are all supported (v1 reconstructs the reverse index; v1/v2
+            // read back with an empty tag column).
+            if version != 1 && version != 2 && version != FORMAT_VERSION {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("unsupported format version {version}"),
@@ -692,6 +721,38 @@ impl MmapSegment {
             MmapLogicalIndex::Owned { logical, local }
         };
 
+        // Tag section (ADR-049): v3 borrows the SoA tag columns straight from the mmap;
+        // v1/v2 have no section, so the columns read back empty (every query untagged).
+        // A non-null dangling pointer keeps the empty-slice accessors sound.
+        let (tag_off_ptr, tag_len_ptr, tag_blob_ptr, tag_blob_len, tag_count) =
+            if format_version >= 3 {
+                let toff = read_u64_at(data_for_parse, 64)? as usize;
+                let (tag_off_s, after) = read_u32_slice(data_for_parse, toff)?;
+                let (tag_len_s, after2) = read_u16_slice(data_for_parse, after)?;
+                let (tag_blob_s, _) = read_u32_slice(data_for_parse, after2)?;
+                if tag_off_s.len() != tag_len_s.len() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "tag column length mismatch",
+                    ));
+                }
+                (
+                    tag_off_s.as_ptr(),
+                    tag_len_s.as_ptr(),
+                    tag_blob_s.as_ptr(),
+                    tag_blob_s.len(),
+                    tag_off_s.len(),
+                )
+            } else {
+                (
+                    std::ptr::NonNull::<u32>::dangling().as_ptr().cast_const(),
+                    std::ptr::NonNull::<u16>::dangling().as_ptr().cast_const(),
+                    std::ptr::NonNull::<u32>::dangling().as_ptr().cast_const(),
+                    0usize,
+                    0usize,
+                )
+            };
+
         Ok(MmapSegment {
             mmap,
             num_queries,
@@ -712,6 +773,11 @@ impl MmapSegment {
             group_len: group_len_s.as_ptr(),
             anyof_blob: anyof_blob_s.as_ptr(),
             anyof_blob_len: anyof_blob_s.len(),
+            tag_off: tag_off_ptr,
+            tag_len: tag_len_ptr,
+            tag_blob: tag_blob_ptr,
+            tag_blob_len,
+            tag_count,
             version_arr: version_s.as_ptr(),
             logical_arr: logical_s.as_ptr(),
             main_slots: main_slots_s.as_ptr(),
@@ -830,6 +896,18 @@ impl MmapSegment {
     #[inline]
     fn anyof_blob(&self) -> &[u32] {
         self.mmap_slice(self.anyof_blob, self.anyof_blob_len)
+    }
+    #[inline]
+    fn tag_off(&self) -> &[u32] {
+        self.mmap_slice(self.tag_off, self.tag_count)
+    }
+    #[inline]
+    fn tag_len(&self) -> &[u16] {
+        self.mmap_slice(self.tag_len, self.tag_count)
+    }
+    #[inline]
+    fn tag_blob(&self) -> &[crate::tagdict::TagId] {
+        self.mmap_slice(self.tag_blob, self.tag_blob_len)
     }
 
     #[inline]
@@ -968,10 +1046,29 @@ impl MmapSegment {
         unsafe { *self.logical_arr.add(id as usize) }
     }
 
-    /// Integer-only exact verification — same logic as ExactStore::verify but
-    /// operating on mmap'd slices.
+    /// The sorted `TagId` slice for a local id (ADR-049) — read back for the
+    /// `set_vocab` recompile. Empty for a pre-tag (v1/v2) segment.
     #[inline]
-    pub fn verify(&self, id: u32, tmask: u64, tfeats: &[FeatureId]) -> bool {
+    pub(crate) fn tags_of(&self, id: u32) -> &[crate::tagdict::TagId] {
+        let i = id as usize;
+        match (self.tag_off().get(i), self.tag_len().get(i)) {
+            (Some(&o), Some(&l)) => &self.tag_blob()[o as usize..o as usize + l as usize],
+            _ => &[],
+        }
+    }
+
+    /// Integer-only exact verification — same logic as ExactStore::verify but
+    /// operating on mmap'd slices. `pred` is the request's compiled tag filter
+    /// (`TagPredicate::empty()` ⇒ no filtering); the tag columns come from the mmap and are
+    /// empty for a pre-tag (v1/v2) segment (every query reads back untagged).
+    #[inline]
+    pub fn verify(
+        &self,
+        id: u32,
+        tmask: u64,
+        tfeats: &[FeatureId],
+        pred: &crate::exact::TagPredicate,
+    ) -> bool {
         crate::exact::verify_slices(
             id,
             tmask,
@@ -989,6 +1086,10 @@ impl MmapSegment {
             self.group_off(),
             self.group_len(),
             self.anyof_blob(),
+            pred,
+            self.tag_off(),
+            self.tag_len(),
+            self.tag_blob(),
         )
     }
 
@@ -1060,6 +1161,7 @@ impl MmapSegment {
         lookup: impl Fn(FeatureId) -> Option<&'a [u64]>,
         acc: &mut [u64],
         grp: &mut [u64],
+        pred: &crate::exact::TagPredicate,
     ) {
         crate::exact::eval_batch_slices(
             local as usize,
@@ -1080,6 +1182,10 @@ impl MmapSegment {
             self.group_off(),
             self.group_len(),
             self.anyof_blob(),
+            pred,
+            self.tag_off(),
+            self.tag_len(),
+            self.tag_blob(),
         );
     }
 
@@ -1103,6 +1209,7 @@ impl MmapSegment {
         seen: &mut [u32],
         out: &mut Vec<u64>,
         include_broad: bool,
+        pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
         let has_filter = self.filter_num_blocks > 0;
@@ -1115,7 +1222,9 @@ impl MmapSegment {
                 stats.probes_skipped += 1;
                 continue;
             }
-            self.probe_index(key, true, epoch, tmask, feats, seen, out, stats, false);
+            self.probe_index(
+                key, true, epoch, tmask, feats, seen, out, pred, stats, false,
+            );
         }
         // arity-2 signatures
         for &h in feats {
@@ -1129,7 +1238,9 @@ impl MmapSegment {
                             stats.probes_skipped += 1;
                             continue;
                         }
-                        self.probe_index(key, true, epoch, tmask, feats, seen, out, stats, false);
+                        self.probe_index(
+                            key, true, epoch, tmask, feats, seen, out, pred, stats, false,
+                        );
                     }
                 }
             }
@@ -1143,7 +1254,9 @@ impl MmapSegment {
                     stats.probes_skipped += 1;
                     continue;
                 }
-                self.probe_index(key, false, epoch, tmask, feats, seen, out, stats, true);
+                self.probe_index(
+                    key, false, epoch, tmask, feats, seen, out, pred, stats, true,
+                );
             }
         }
     }
@@ -1159,6 +1272,7 @@ impl MmapSegment {
         feats: &[FeatureId],
         seen: &mut [u32],
         out: &mut Vec<u64>,
+        pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
         is_broad: bool,
     ) {
@@ -1184,7 +1298,8 @@ impl MmapSegment {
                 if !self.alive_overlay[local as usize] {
                     continue;
                 }
-                if self.verify(local, tmask, feats) {
+                // Tag filter (ADR-049) — applied post-candidate inside verify.
+                if self.verify(local, tmask, feats, pred) {
                     out.push(self.logical(local));
                 }
             }
@@ -1217,6 +1332,14 @@ impl MmapSegment {
             // immutable mapping `self` owns.
             let (ver, log) = unsafe { (*self.version_arr.add(i), *self.logical_arr.add(i)) };
 
+            // Per-query tag slice (ADR-049); empty for a pre-tag (v1/v2) segment whose
+            // tag column has no entries, so compaction carries tags through faithfully.
+            let tags: &[crate::tagdict::TagId] =
+                match (self.tag_off().get(i), self.tag_len().get(i)) {
+                    (Some(&o), Some(&l)) => &self.tag_blob()[o as usize..o as usize + l as usize],
+                    _ => &[],
+                };
+
             exact.push_raw(
                 rm,
                 fm,
@@ -1229,6 +1352,7 @@ impl MmapSegment {
                     self.group_len(),
                     self.anyof_blob(),
                 ),
+                tags,
                 ver,
                 log,
             );

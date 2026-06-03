@@ -7,6 +7,7 @@
 
 use super::snapshot::MatchView;
 use super::{BatchMatchOptions, Engine, MatchScratch, MatchStats};
+use crate::exact::TagPredicate;
 
 impl Engine {
     /// THE HOT PATH. Match one title, appending matched logical IDs to `out`.
@@ -21,11 +22,26 @@ impl Engine {
         out: &mut Vec<u64>,
         include_broad: bool,
     ) -> MatchStats {
+        self.match_title_filtered(title, s, out, include_broad, &TagPredicate::empty())
+    }
+
+    /// [`match_title`](Self::match_title) narrowed by a tag filter (ADR-049). An empty
+    /// predicate is byte-identical to `match_title`; a non-empty one drops, in the
+    /// post-candidate verify stage, every match whose query does not satisfy the filter.
+    pub fn match_title_filtered(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        out: &mut Vec<u64>,
+        include_broad: bool,
+        pred: &TagPredicate,
+    ) -> MatchStats {
         MatchView {
             norm: &self.norm,
             dict: &self.dict,
             segments: &self.segments,
             memtable: &self.memtable,
+            pred,
         }
         .match_title(title, s, out, include_broad)
     }
@@ -100,6 +116,7 @@ impl Engine {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                pred: &TagPredicate::empty(),
             },
             titles,
             opts,
@@ -118,6 +135,7 @@ impl Engine {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                pred: &TagPredicate::empty(),
             },
             titles,
             opts,
@@ -138,6 +156,7 @@ impl Engine {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                pred: &TagPredicate::empty(),
             },
             titles,
             opts,

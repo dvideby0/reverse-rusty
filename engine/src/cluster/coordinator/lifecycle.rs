@@ -195,6 +195,10 @@ impl ClusterEngine {
             // A freshly built cluster has no runtime vocabulary change yet; a
             // declared alias lands here on a later `set_vocab` → `checkpoint`.
             vocab_data: Vec::new(),
+            // Per-query tag space (ADR-049). Filtered percolation is built on the
+            // single-node engine; threading tags through the (experimental) cluster
+            // ingest path is a follow-on, so a cluster persists an empty tag dict for now.
+            tag_dict_data: Vec::new(),
         };
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
@@ -496,6 +500,9 @@ impl ClusterEngine {
             next_seg_ids,
             dict_data: crate::storage::serialize_dict(&self.dict),
             vocab_data,
+            // Per-query tag space (ADR-049); threading tags through the cluster ingest
+            // path is a follow-on (filtered percolation is single-node today).
+            tag_dict_data: Vec::new(),
         };
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;

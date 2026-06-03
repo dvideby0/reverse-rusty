@@ -86,6 +86,13 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.locals_for_logical(logical_id),
         }
     }
+    /// The sorted `TagId` slice for a local id (ADR-049).
+    pub fn tags_of(&self, local_id: u32) -> &[crate::tagdict::TagId] {
+        match self {
+            BaseSegment::Memory(s) => s.tags_of(local_id),
+            BaseSegment::Mmap(s) => s.tags_of(local_id),
+        }
+    }
     // Dispatch wrapper — signature must mirror the inner segment's match_into.
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(
@@ -97,14 +104,35 @@ impl BaseSegment {
         seen: &mut [u32],
         out: &mut Vec<u64>,
         include_broad: bool,
+        pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
         match self {
             BaseSegment::Memory(s) => {
-                s.match_into(feats, tmask, dict, epoch, seen, out, include_broad, stats);
+                s.match_into(
+                    feats,
+                    tmask,
+                    dict,
+                    epoch,
+                    seen,
+                    out,
+                    include_broad,
+                    pred,
+                    stats,
+                );
             }
             BaseSegment::Mmap(s) => {
-                s.match_into(feats, tmask, dict, epoch, seen, out, include_broad, stats);
+                s.match_into(
+                    feats,
+                    tmask,
+                    dict,
+                    epoch,
+                    seen,
+                    out,
+                    include_broad,
+                    pred,
+                    stats,
+                );
             }
         }
     }

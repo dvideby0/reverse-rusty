@@ -258,3 +258,108 @@ fn batch_size_never_changes_results() {
         assert_eq!(other, reference, "results changed at batch_size {bs}");
     }
 }
+
+// ---- Filtered percolation (ADR-049): the columnar batch path must apply the SAME tag
+// filter as the scalar path, including the pure-anchor materialization fast path. ----
+
+const FILTER_CATS: [&str; 4] = ["cards", "coins", "stamps", "comics"];
+
+fn tags_for(logical: u64) -> Vec<(String, String)> {
+    vec![(
+        "category".to_string(),
+        FILTER_CATS[(logical as usize) % FILTER_CATS.len()].to_string(),
+    )]
+}
+
+fn build_single_tagged(data: &Dataset) -> Engine {
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    let tags: Vec<Vec<(String, String)>> = data.queries.iter().map(|(l, _)| tags_for(*l)).collect();
+    eng.try_build_from_queries_with_tags(&data.queries, &tags)
+        .expect("tagged build");
+    eng
+}
+
+fn scalar_filtered(
+    eng: &Engine,
+    titles: &[String],
+    filter: &[(String, Vec<String>)],
+) -> Vec<Vec<u64>> {
+    let snap = eng.snapshot();
+    let pred = snap.compile_tag_predicate(filter);
+    let mut scratch = MatchScratch::new();
+    let mut out = Vec::new();
+    titles
+        .iter()
+        .map(|t| {
+            out.clear();
+            snap.match_title_filtered(t, &mut scratch, &mut out, true, &pred);
+            let mut r = out.clone();
+            r.sort_unstable();
+            r.dedup();
+            r
+        })
+        .collect()
+}
+
+fn batch_filtered(
+    eng: &Engine,
+    titles: &[String],
+    opts: BatchMatchOptions,
+    filter: &[(String, Vec<String>)],
+) -> Vec<Vec<u64>> {
+    let snap = eng.snapshot();
+    let pred = snap.compile_tag_predicate(filter);
+    let mut res = vec![Vec::new(); titles.len()];
+    for (idx, mut ids) in snap.match_titles_batch_filtered(titles, opts, &pred) {
+        ids.sort_unstable();
+        ids.dedup();
+        res[idx] = ids;
+    }
+    res
+}
+
+#[test]
+fn batch_equals_scalar_under_tag_filter_including_materialized_pure_anchors() {
+    // A high broad fraction so the columnar broad lane (and its pure-anchor
+    // materialization fast path) is well exercised.
+    let data = gen(0x00F1_17E5, 24_000, 2_500, 0.18);
+    let eng = build_single_tagged(&data);
+
+    let filters: [Vec<(String, Vec<String>)>; 3] = [
+        vec![("category".to_string(), vec!["cards".to_string()])],
+        vec![(
+            "category".to_string(),
+            vec!["cards".to_string(), "coins".to_string()],
+        )],
+        // a value never ingested ⇒ ∅ on both paths
+        vec![("category".to_string(), vec!["nonexistent".to_string()])],
+    ];
+
+    let mut saw_nonempty = false;
+    for filter in &filters {
+        // `materialize` on AND off — `true` drives the pure-anchor fast path that the
+        // Step-5 fix had to teach to honor the filter.
+        for &materialize in &[true, false] {
+            let scalar = scalar_filtered(&eng, &data.titles, filter);
+            let batch = batch_filtered(
+                &eng,
+                &data.titles,
+                BatchMatchOptions {
+                    include_broad: true,
+                    broad_batch_size: 128,
+                    broad_strategy: BroadStrategy::Columnar,
+                    broad_materialize: materialize,
+                },
+                filter,
+            );
+            assert_eq!(
+                scalar, batch,
+                "batch ≠ scalar under filter {filter:?} (materialize={materialize})"
+            );
+            if scalar.iter().any(|r| !r.is_empty()) {
+                saw_nonempty = true;
+            }
+        }
+    }
+    assert!(saw_nonempty, "degenerate: no filter matched anything");
+}

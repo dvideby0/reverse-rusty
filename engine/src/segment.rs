@@ -34,6 +34,7 @@ use crate::exact::ExactStore;
 use crate::filter::SegmentFilter;
 use crate::index::CandidateIndex;
 use crate::normalize::Normalizer;
+use crate::tagdict::TagDict;
 // `SourceStore` backs the per-query source text (`logical_id → original query
 // text`), shared via `Arc` between the engine and every published snapshot.
 // Display-only — it enriches search hits and feeds `explain`, and never touches
@@ -205,6 +206,9 @@ pub struct MatchScratch {
 pub struct EngineSnapshot {
     norm: Arc<Normalizer>,
     dict: Arc<Dict>,
+    /// Tag dictionary at snapshot time (shared via `Arc`), so the read path resolves a
+    /// request's `(key,value)` filter terms to `TagId`s lock-free (ADR-049).
+    tag_dict: Arc<TagDict>,
     segments: Vec<Arc<BaseSegment>>,
     memtable: Arc<Segment>,
     query_store: Arc<SourceStore>,
@@ -296,6 +300,10 @@ pub struct Engine {
     /// copy-on-write handle via `Arc::make_mut` (the dict is O(vocab), which
     /// saturates, so the occasional CoW clone is bounded — not O(corpus)).
     dict: Arc<Dict>,
+    /// Per-query metadata tag dictionary (ADR-049). `Arc` + CoW exactly like `dict`:
+    /// a snapshot shares it; a tagged write interns new `(key,value)`s via
+    /// `Arc::make_mut`. Empty until the first tagged query is stored.
+    tag_dict: Arc<TagDict>,
     /// immutable base segments (sealed; never mutated after creation). Each
     /// segment is behind `Arc` so publishing a snapshot shares them by pointer
     /// instead of deep-copying every segment's SoA arrays (ADR-016 / P1-16).
