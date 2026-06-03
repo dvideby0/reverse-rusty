@@ -10,7 +10,10 @@ use super::{crc32, durable_rename, read_u32_at, read_u64_at, write_u32, write_u6
 // ---- Manifest file ----
 
 const MANIFEST_MAGIC: [u8; 4] = *b"PMAN";
-const MANIFEST_VERSION: u32 = 1;
+// v1: original layout. v2 (ADR-049): appends `tag_dict_data` — the serialized per-query
+// tag space (`TagDict`) behind filtered percolation, so interned tag ids survive reopen.
+// A v1 manifest reads back with an empty `tag_dict_data` (no tags).
+const MANIFEST_VERSION: u32 = 2;
 
 /// Engine manifest — records the list of active segment files, dict state,
 /// and counters. Written atomically (tmp + rename) alongside segment files.
@@ -18,6 +21,9 @@ pub struct Manifest {
     pub segment_files: Vec<String>,
     pub next_seg_id: u64,
     pub dict_data: Vec<u8>,
+    /// `serialize_tagdict(tag dict)` — the frozen tag space (ADR-049). Empty when no
+    /// tagged queries have been stored; a v1 manifest reads back empty.
+    pub tag_dict_data: Vec<u8>,
     pub rejected_parse: u64,
     pub rejected_class_d: u64,
 }
@@ -40,6 +46,9 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
     // dict blob
     write_u32(&mut f, manifest.dict_data.len() as u32)?;
     f.write_all(&manifest.dict_data)?;
+    // v2: tag-dict blob (ADR-049; empty when no tags).
+    write_u32(&mut f, manifest.tag_dict_data.len() as u32)?;
+    f.write_all(&manifest.tag_dict_data)?;
     // CRC of everything written so far
     f.sync_all()?;
     drop(f);
@@ -82,10 +91,11 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         ));
     }
     let version = read_u32_at(&data, 4)?;
-    if version != MANIFEST_VERSION {
+    // v1 and v2 are both accepted; v2 appends `tag_dict_data` (ADR-049), absent in v1.
+    if version != 1 && version != MANIFEST_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("unsupported manifest version {version} (expected {MANIFEST_VERSION})"),
+            format!("unsupported manifest version {version} (expected 1 or {MANIFEST_VERSION})"),
         ));
     }
     let mut cursor = 8usize;
@@ -111,12 +121,27 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
 
     let dict_len = read_u32_at(&data, cursor)? as usize;
     cursor += 4;
-    let dict_data = data[cursor..cursor + dict_len].to_vec();
+    let dict_data = data
+        .get(cursor..cursor + dict_len)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated dict blob"))?
+        .to_vec();
+    cursor += dict_len;
+    // v2 appends the tag-dict blob; v1 has none (read back as empty).
+    let tag_dict_data = if version >= 2 {
+        let tlen = read_u32_at(&data, cursor)? as usize;
+        cursor += 4;
+        data.get(cursor..cursor + tlen)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated tag-dict blob"))?
+            .to_vec()
+    } else {
+        Vec::new()
+    };
 
     Ok(Manifest {
         segment_files,
         next_seg_id,
         dict_data,
+        tag_dict_data,
         rejected_parse,
         rejected_class_d,
     })
@@ -138,7 +163,10 @@ const CLUSTER_MANIFEST_MAGIC: [u8; 4] = *b"RCMN";
 // v3 (ADR-046): appends `vocab_data` — the serialized `Vocab` behind the current
 // normalizer, so a runtime vocabulary change (an alias) survives reopen. A v2
 // manifest reads back with an empty `vocab_data` (no installed vocab).
-const CLUSTER_MANIFEST_VERSION: u32 = 3;
+// v4 (ADR-049): appends `tag_dict_data` — the serialized frozen tag space (`TagDict`)
+// behind filtered percolation, so interned tag ids survive reopen. A v2/v3 manifest
+// reads back with an empty `tag_dict_data` (no tags).
+const CLUSTER_MANIFEST_VERSION: u32 = 4;
 
 /// The coordinator's cluster-state document (the analogue of what a Raft quorum will
 /// later hold). Written atomically (tmp + CRC + rename) — the SINGLE commit point that
@@ -173,6 +201,10 @@ pub struct ClusterManifest {
     /// normalizer so a declared alias survives the restart. Written by v3; a v2
     /// manifest reads back as empty.
     pub vocab_data: Vec<u8>,
+    /// `serialize_tagdict(frozen tag dict)` — the authoritative tag space behind
+    /// filtered percolation (ADR-049), so reopened shards resolve `(key,value)` tags to
+    /// the SAME `TagId`s. Written by v4; a v2/v3 manifest reads back as empty (no tags).
+    pub tag_dict_data: Vec<u8>,
 }
 
 pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Result<()> {
@@ -206,6 +238,9 @@ pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Re
     // v3: the serialized vocab (empty when none installed).
     write_u32(&mut f, manifest.vocab_data.len() as u32)?;
     f.write_all(&manifest.vocab_data)?;
+    // v4: the serialized tag dict (empty when no tags; ADR-049).
+    write_u32(&mut f, manifest.tag_dict_data.len() as u32)?;
+    f.write_all(&manifest.tag_dict_data)?;
     f.sync_all()?;
     drop(f);
     // Read back for the trailing CRC (same simple approach as write_manifest).
@@ -242,8 +277,9 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         ));
     }
     let version = read_u32_at(&data, 4)?;
-    // v2 and v3 are both accepted; v3 appends `vocab_data` (ADR-046), absent in v2.
-    if version != 2 && version != CLUSTER_MANIFEST_VERSION {
+    // v2, v3 and v4 are accepted; v3 appends `vocab_data` (ADR-046) and v4 appends
+    // `tag_dict_data` (ADR-049), each absent in the earlier versions.
+    if !(2..=CLUSTER_MANIFEST_VERSION).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported cluster manifest version {version}"),
@@ -305,8 +341,21 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
     let vocab_data = if version >= 3 {
         let vlen = read_u32_at(&data, cursor)? as usize;
         cursor += 4;
-        data.get(cursor..cursor + vlen)
+        let v = data
+            .get(cursor..cursor + vlen)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated vocab blob"))?
+            .to_vec();
+        cursor += vlen;
+        v
+    } else {
+        Vec::new()
+    };
+    // v4 appends the serialized tag dict; v2/v3 have none (read back as empty).
+    let tag_dict_data = if version >= 4 {
+        let tlen = read_u32_at(&data, cursor)? as usize;
+        cursor += 4;
+        data.get(cursor..cursor + tlen)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated tag-dict blob"))?
             .to_vec()
     } else {
         Vec::new()
@@ -323,6 +372,7 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         next_seg_ids,
         dict_data,
         vocab_data,
+        tag_dict_data,
     })
 }
 
@@ -330,12 +380,12 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
 mod tests {
     use super::*;
 
-    /// The v3 cluster manifest's nested per-shard registry + next-seg-id columns + the
-    /// appended vocab blob must round-trip byte-exactly (varied per-shard file counts,
-    /// including an empty shard). The hand-rolled length-prefixed encoding is easy to get
-    /// cursor-wrong, so pin it.
+    /// The v4 cluster manifest's nested per-shard registry + next-seg-id columns + the
+    /// appended vocab and tag-dict blobs must round-trip byte-exactly (varied per-shard
+    /// file counts, including an empty shard). The hand-rolled length-prefixed encoding is
+    /// easy to get cursor-wrong, so pin it.
     #[test]
-    fn cluster_manifest_v3_round_trips_registry_and_vocab() {
+    fn cluster_manifest_v4_round_trips_registry_vocab_and_tagdict() {
         let dir = std::env::temp_dir().join(format!("rr_cmanifest_rt_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("cluster_manifest.bin");
@@ -355,6 +405,7 @@ mod tests {
             next_seg_ids: vec![5, 1, 3],
             dict_data: vec![1, 2, 3, 4, 5],
             vocab_data: vec![9, 8, 7, 6], // a non-empty (opaque) vocab blob — the v3 field
+            tag_dict_data: vec![11, 22, 33], // a non-empty (opaque) tag-dict blob — the v4 field
         };
         write_cluster_manifest(&manifest, &path).expect("write");
         let got = read_cluster_manifest(&path).expect("read");
@@ -369,6 +420,7 @@ mod tests {
         assert_eq!(got.next_seg_ids, manifest.next_seg_ids);
         assert_eq!(got.dict_data, manifest.dict_data);
         assert_eq!(got.vocab_data, manifest.vocab_data);
+        assert_eq!(got.tag_dict_data, manifest.tag_dict_data);
 
         // A flipped byte in the body must fail the trailing-CRC check (fail loud).
         let mut bytes = std::fs::read(&path).expect("read raw");

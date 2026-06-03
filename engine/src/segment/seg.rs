@@ -51,10 +51,12 @@ impl Segment {
     }
 
     /// Append one already-extracted query. Returns the new segment-local id, or
-    /// `None` if the query is class D (rejected, not stored).
+    /// `None` if the query is class D (rejected, not stored). `tags` are the query's
+    /// interned, sorted `TagId`s (ADR-049); pass `&[]` for an untagged query.
     pub fn add_compiled(
         &mut self,
         ex: &Extracted,
+        tags: &[crate::tagdict::TagId],
         dict: &Dict,
         logical: u64,
         version: u32,
@@ -63,7 +65,7 @@ impl Segment {
         if plan.class == CostClass::D {
             return None;
         }
-        let local = self.exact.push(ex, dict, version, logical);
+        let local = self.exact.push(ex, tags, dict, version, logical);
         for &s in &plan.main_sigs {
             self.main.insert(s, local);
         }
@@ -90,6 +92,18 @@ impl Segment {
         self.logical_index
             .get(&logical_id)
             .map_or(&[], |v| v.as_slice())
+    }
+
+    /// The sorted `TagId` slice for a local id (ADR-049) — read back for the
+    /// `set_vocab` recompile so tags survive a vocabulary change.
+    pub fn tags_of(&self, local_id: u32) -> &[crate::tagdict::TagId] {
+        self.exact.tags_of(local_id)
+    }
+
+    /// Whether a local id is alive (not tombstoned).
+    #[inline]
+    pub fn is_alive(&self, local_id: u32) -> bool {
+        self.alive.get(local_id as usize).copied().unwrap_or(false)
     }
 
     pub fn class_counts(&self, c: &mut [u64; 4]) {
@@ -120,6 +134,7 @@ impl Segment {
         seen: &mut [u32],
         out: &mut Vec<u64>,
         include_broad: bool,
+        pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
         let filter = self.filter.as_ref();
@@ -135,7 +150,7 @@ impl Segment {
                 }
             }
             self.probe(
-                key, &self.main, epoch, tmask, feats, seen, out, stats, false,
+                key, &self.main, epoch, tmask, feats, seen, out, pred, stats, false,
             );
         }
         // arity-2 signatures: {hot feature} x {every other feature}
@@ -153,7 +168,7 @@ impl Segment {
                             }
                         }
                         self.probe(
-                            key, &self.main, epoch, tmask, feats, seen, out, stats, false,
+                            key, &self.main, epoch, tmask, feats, seen, out, pred, stats, false,
                         );
                     }
                 }
@@ -178,6 +193,7 @@ impl Segment {
                     feats,
                     seen,
                     out,
+                    pred,
                     stats,
                     true,
                 );
@@ -196,6 +212,7 @@ impl Segment {
         feats: &[FeatureId],
         seen: &mut [u32],
         out: &mut Vec<u64>,
+        pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
         is_broad: bool,
     ) {
@@ -219,7 +236,8 @@ impl Segment {
                 if !self.alive[local as usize] {
                     return; // tombstoned
                 }
-                if self.exact.verify(local, tmask, feats) {
+                // Tag filter (ADR-049) — applied post-candidate inside verify.
+                if self.exact.verify(local, tmask, feats, pred) {
                     out.push(self.exact.logical(local));
                 }
             });

@@ -5,6 +5,7 @@
 use super::{BaseSegment, BatchMatchOptions, EngineSnapshot, MatchScratch, MatchStats, Segment};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
+use crate::exact::TagPredicate;
 use crate::normalize::Normalizer;
 use crate::vocab::Vocab;
 use std::sync::Arc;
@@ -62,6 +63,9 @@ pub(in crate::segment) struct MatchView<'a> {
     pub(in crate::segment) dict: &'a Dict,
     pub(in crate::segment) segments: &'a [Arc<BaseSegment>],
     pub(in crate::segment) memtable: &'a Segment,
+    /// Request-scoped tag filter (ADR-049). `TagPredicate::empty()` ⇒ no filtering, so
+    /// every existing (unfiltered) caller is byte-identical to before tags.
+    pub(in crate::segment) pred: &'a crate::exact::TagPredicate,
 }
 
 impl MatchView<'_> {
@@ -123,6 +127,7 @@ impl MatchView<'_> {
                 &mut s.seen[i],
                 out,
                 include_broad,
+                self.pred,
                 &mut stats,
             );
         }
@@ -134,6 +139,7 @@ impl MatchView<'_> {
             &mut s.seen[n_base],
             out,
             include_broad,
+            self.pred,
             &mut stats,
         );
 
@@ -321,13 +327,46 @@ impl EngineSnapshot {
         out: &mut Vec<u64>,
         include_broad: bool,
     ) -> MatchStats {
+        self.match_title_filtered(title, s, out, include_broad, &TagPredicate::empty())
+    }
+
+    /// [`match_title`](Self::match_title) narrowed by a tag filter (ADR-049). An empty
+    /// predicate is byte-identical to `match_title`; a non-empty one drops, in the
+    /// post-candidate verify stage, every match whose query does not satisfy the filter.
+    pub fn match_title_filtered(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        out: &mut Vec<u64>,
+        include_broad: bool,
+        pred: &TagPredicate,
+    ) -> MatchStats {
         MatchView {
             norm: &self.norm,
             dict: &self.dict,
             segments: &self.segments,
             memtable: &self.memtable,
+            pred,
         }
         .match_title(title, s, out, include_broad)
+    }
+
+    /// Compile a request filter — a conjunction of `(key, [values])` groups — into a
+    /// [`TagPredicate`] against this snapshot's tag space (ADR-049). Each value resolves
+    /// via [`get_or_synthetic`](crate::tagdict::TagDict::get_or_synthetic), so a value
+    /// never seen at ingest yields a `TagId` no stored query carries — it matches nothing
+    /// (the safe `terms` semantics), never an over-match.
+    pub fn compile_tag_predicate(&self, filter: &[(String, Vec<String>)]) -> TagPredicate {
+        let groups = filter
+            .iter()
+            .map(|(key, values)| {
+                values
+                    .iter()
+                    .map(|v| self.tag_dict.get_or_synthetic(key, v))
+                    .collect()
+            })
+            .collect();
+        TagPredicate::new(groups)
     }
 
     /// Parallel matching on the snapshot.
@@ -336,6 +375,16 @@ impl EngineSnapshot {
         titles: &[impl AsRef<str> + Sync],
         include_broad: bool,
     ) -> Vec<(usize, Vec<u64>, MatchStats)> {
+        self.match_titles_par_filtered(titles, include_broad, &TagPredicate::empty())
+    }
+
+    /// [`match_titles_par`](Self::match_titles_par) narrowed by a tag filter (ADR-049).
+    pub fn match_titles_par_filtered(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        include_broad: bool,
+        pred: &TagPredicate,
+    ) -> Vec<(usize, Vec<u64>, MatchStats)> {
         use rayon::prelude::*;
         titles
             .par_iter()
@@ -343,7 +392,13 @@ impl EngineSnapshot {
             .map_init(
                 || (MatchScratch::new(), Vec::new()),
                 |(scratch, out), (idx, title)| {
-                    let stats = self.match_title(title.as_ref(), scratch, out, include_broad);
+                    let stats = self.match_title_filtered(
+                        title.as_ref(),
+                        scratch,
+                        out,
+                        include_broad,
+                        pred,
+                    );
                     (idx, out.clone(), stats)
                 },
             )
@@ -388,12 +443,25 @@ impl EngineSnapshot {
         titles: &[impl AsRef<str> + Sync],
         opts: BatchMatchOptions,
     ) -> Vec<(usize, Vec<u64>)> {
+        self.match_titles_batch_filtered(titles, opts, &TagPredicate::empty())
+    }
+
+    /// [`match_titles_batch`](Self::match_titles_batch) narrowed by a tag filter
+    /// (ADR-049). The columnar broad lane applies the same filter as the selective lane,
+    /// so the batch result stays byte-identical to the per-title filtered path.
+    pub fn match_titles_batch_filtered(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        opts: BatchMatchOptions,
+        pred: &TagPredicate,
+    ) -> Vec<(usize, Vec<u64>)> {
         super::broad_batch::batch_results(
             &MatchView {
                 norm: &self.norm,
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                pred,
             },
             titles,
             opts,
@@ -412,6 +480,7 @@ impl EngineSnapshot {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                pred: &TagPredicate::empty(),
             },
             titles,
             opts,
@@ -427,12 +496,24 @@ impl EngineSnapshot {
         titles: &[impl AsRef<str> + Sync],
         opts: BatchMatchOptions,
     ) -> (Vec<(usize, Vec<u64>)>, MatchStats) {
+        self.match_titles_batch_with_stats_filtered(titles, opts, &TagPredicate::empty())
+    }
+
+    /// [`match_titles_batch_with_stats`](Self::match_titles_batch_with_stats) narrowed by
+    /// a tag filter (ADR-049) — the `/_mpercolate` filtered path.
+    pub fn match_titles_batch_with_stats_filtered(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        opts: BatchMatchOptions,
+        pred: &TagPredicate,
+    ) -> (Vec<(usize, Vec<u64>)>, MatchStats) {
         super::broad_batch::batch_results_with_stats(
             &MatchView {
                 norm: &self.norm,
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                pred,
             },
             titles,
             opts,

@@ -77,8 +77,8 @@ presentation-layer concern** that never needs to touch the matching core.
 | compile-time extract + match-time select | signature-cover optimizer | ✅ have |
 | over-match → app re-test (two stages) | integer-exact verifier ⇒ output is false-positive-free | ✅ **subsumes** — RR returns *final* matches, no second pass |
 | create / update / delete / bulk | memtable + tombstones + `/_bulk` + per-query `version` | ✅ have |
-| **per-query structured tags** | none (only `logical_id` + `version` + DSL text) | ❌ **gap → Tier 4 / ADR-049** |
-| **filter candidates by tag** | none | ❌ **gap → Tier 4 / ADR-049** |
+| **per-query structured tags** | interned `(key,value)` tags, SoA column | ✅ **built (single-node)** — ADR-049 |
+| **filter candidates by tag** | ES `bool`/`terms` + native filter, pushed into verify | ✅ **built (single-node)** — ADR-049 |
 | rank / boost / `_score` | pure boolean (`Vec<u64>`, no score) | ❌ gap → Tier 4 (lower priority — see above) |
 | pagination (limit / offset) | `/_search` has both; `/_mpercolate` is size-only | ◑ partial → Tier 4 |
 
@@ -88,11 +88,13 @@ is *subsumed*: because RR verifies candidates with an integer-only exact matcher
 **zero false positives**, so the application-side re-test that a generic percolator forces is unnecessary
 — RR returns final matches, not candidates.
 
-**The gaps that matter for this workload** are the two dominant-read-pattern needs — **per-query metadata**
-and **filtered percolation** — specified in [`../design/matching.md`](../design/matching.md) §5 and
+**The dominant-read-pattern needs** — **per-query metadata** and **filtered percolation** — are now
+**built and oracle-proven on the single-node engine** (specified in
+[`../design/matching.md`](../design/matching.md) §5 and
 [`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §11, decided in
-[`../DECISIONS.md`](../DECISIONS.md) ADR-049, and tracked in [`../STATUS.md`](../STATUS.md) Tier 4. Scoring
-and `/_mpercolate` pagination are smaller, lower-priority items in the same tier.
+[`../DECISIONS.md`](../DECISIONS.md) ADR-049, tracked in [`../STATUS.md`](../STATUS.md) Tier 4). Scoring and
+`/_mpercolate` pagination remain smaller, lower-priority items in the same tier; threading tags through the
+experimental cluster path is a separate follow-on.
 
 > **Validation still owed.** This file specifies the *workload*; it is not a correctness audit. Running RR
 > against this workload's **real corpus** (a false-negative / false-positive / throughput pass over messy

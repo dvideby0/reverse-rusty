@@ -237,12 +237,14 @@ versions interoperate (frozen mask), majors are isolated behind a blue/green swa
 
 ---
 
-## 11. Per-query metadata storage (design-only)
+## 11. Per-query metadata storage
 
-> **Status: design-only.** The metadata *model*, filtered percolation, and ranking live in
-> [`matching.md`](matching.md) §5; this section is the **storage / persistence** half — how per-query
-> tags are written, sealed, and recovered. Decided in [`../DECISIONS.md`](../DECISIONS.md) ADR-049,
-> tracked in [`../STATUS.md`](../STATUS.md) Tier 4.
+> **Status: built (single-node) + oracle-proven** (2026-06-03, ADR-049). The metadata *model*, filtered
+> percolation, and ranking live in [`matching.md`](matching.md) §5; this section is the **storage /
+> persistence** half — how per-query tags are written, sealed, and recovered. Tags are an SoA column in the
+> `.seg` **v3** format and ride the **v2** WAL (so a tagged insert survives crash recovery); both read older
+> files back as untagged. Decided in [`../DECISIONS.md`](../DECISIONS.md) ADR-049, tracked in
+> [`../STATUS.md`](../STATUS.md) Tier 4.
 
 The reference workload ([`../research/percolator-workload.md`](../research/percolator-workload.md))
 attaches structured tags (a category, a status, secondary keys) to every stored query. Storing them

@@ -88,6 +88,27 @@ error:
 {"_id": 1, "result": "rejected", "error": "query has no anchorable feature (cost class D)"}
 ```
 
+### Per-query metadata tags (ADR-049)
+
+A stored query may carry **structured tags** — `(key, value)` metadata used to *narrow* percolated
+results later (see [filtered percolation](#filtered-percolation-adr-049) below). Provide them either as
+a canonical `tags` object or, Elasticsearch-style, as sibling fields of `query` (anything that isn't
+`query`/`version`/`tags`); a value may be a string or an array of strings. The two forms are merged.
+
+```bash
+# ES-style siblings:
+curl -X PUT localhost:9200/_doc/1 -H 'Content-Type: application/json' \
+  -d '{"query": "dell laptop", "category": "electronics", "status": "active"}'
+
+# or the canonical `tags` object (equivalent):
+curl -X PUT localhost:9200/_doc/1 -H 'Content-Type: application/json' \
+  -d '{"query": "dell laptop", "tags": {"category": "electronics", "status": "active"}}'
+```
+
+Tags are interned to integers, stored as a hot-path SoA column, and persisted (they survive reopen and
+crash recovery). They **never** affect *which* queries a title matches — only the optional filter below
+can narrow an already-correct result set, so they cannot introduce a false negative.
+
 ## `GET /_doc/{id}` — Retrieve a query
 
 ```bash
@@ -210,6 +231,46 @@ from the index, how many posting lists were scanned, how many bloom-filter probe
 how many candidates survived to become confirmed matches. The search body also accepts `explain` and
 `profile` options for per-query match tracing (see [`../design/matching.md`](../design/matching.md) §6).
 
+### Filtered percolation (ADR-049)
+
+The dominant production read pattern is *"percolate, then narrow to one category."* Attach a tag filter
+to a percolate request to keep only the matches whose stored query carries the requested
+[metadata tags](#per-query-metadata-tags-adr-049). The filter is a **conjunction across keys** (AND) of
+**value sets** (OR within a key); it is applied in the hot-path verify stage and can only *remove*
+matches, never add or drop a wanted one. A filter value never seen at ingest matches nothing (the safe
+`terms` semantics). Two equivalent shapes are accepted:
+
+**Native** — a `filter` block alongside `document`/`documents`:
+
+```bash
+curl -X POST localhost:9200/_search -H 'Content-Type: application/json' -d '{
+  "document": {"title": "Dell XPS 15 Laptop 16GB RAM New"},
+  "filter": {"category": ["electronics", "computers"], "status": "active"}
+}'
+```
+
+**Elasticsearch `bool`/`terms` percolate envelope** — for drop-in compatibility with existing percolate
+clients. The document(s) come from `query.bool.must.percolate` and the filter from `query.bool.filter`
+(an array of `terms`/`term` clauses). A bare `query.percolate` (no `bool`) works for the unfiltered case.
+
+```bash
+curl -X POST localhost:9200/_search -H 'Content-Type: application/json' -d '{
+  "query": {
+    "bool": {
+      "must": {"percolate": {"field": "query", "document": {"title": "Dell XPS 15 Laptop New"}}},
+      "filter": [
+        {"terms": {"category": ["electronics", "computers"]}},
+        {"term":  {"status": "active"}}
+      ]
+    }
+  }
+}'
+```
+
+Only the `percolate` + `bool.filter(terms/term)` subset is supported; any other query clause (e.g.
+`match`, `range`) returns **400** rather than silently widening the result set. `/_mpercolate` accepts the
+same `filter` block and ES envelope (applied to every document in the batch).
+
 ## `POST /_mpercolate` — Batch percolate (high throughput)
 
 The throughput counterpart to `/_search`. Percolates a **batch** of documents in one request and
@@ -306,6 +367,9 @@ EOF
 
 If any query fails, `errors` is `true` and that item gets a `400` status with the parse error message;
 successfully ingested queries in the same batch are unaffected (per-item status — ADR-018).
+
+Each source line may also carry [metadata tags](#per-query-metadata-tags-adr-049) — a `tags` object or
+ES-style sibling fields — exactly as `PUT /_doc` does, e.g. `{"query": "...", "category": "electronics"}`.
 
 ## `POST /_flush` — Flush memtable
 

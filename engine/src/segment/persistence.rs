@@ -209,6 +209,7 @@ impl Engine {
                 segment_files,
                 next_seg_id: self.next_seg_id,
                 dict_data: crate::storage::serialize_dict(&self.dict),
+                tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),
                 rejected_parse: self.rejected_parse,
                 rejected_class_d: self.rejected_class_d,
             };

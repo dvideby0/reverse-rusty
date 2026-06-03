@@ -9,6 +9,7 @@ use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
 use crate::storage::{MmapSegment, SourceStore};
+use crate::tagdict::TagDict;
 use crate::wal::{Wal, WalEntry};
 
 impl Engine {
@@ -66,6 +67,7 @@ impl Engine {
             norm,
             vocab: None,
             dict,
+            tag_dict: Arc::new(TagDict::new()),
             segments: Vec::new(),
             memtable: Arc::new(Segment::new()),
             rejected_parse: 0,
@@ -124,6 +126,7 @@ impl Engine {
             norm,
             vocab: None,
             dict,
+            tag_dict: Arc::new(TagDict::new()),
             segments: Vec::new(),
             memtable: Arc::new(Segment::new()),
             rejected_parse: 0,
@@ -225,6 +228,26 @@ impl Engine {
         out
     }
 
+    /// The current `TagId`s of the live entry for `logical` (ADR-049), read from the
+    /// memtable or a base segment. Used by [`recompile_stale_segments`] to carry a
+    /// query's tags through a vocabulary change unchanged (same tag space ⇒ the ids stay
+    /// valid). Empty when the query is untagged or absent.
+    fn live_tag_ids_for(&self, logical: u64) -> Vec<crate::tagdict::TagId> {
+        for &local in self.memtable.locals_for_logical(logical) {
+            if self.memtable.is_alive(local) {
+                return self.memtable.tags_of(local).to_vec();
+            }
+        }
+        for seg in &self.segments {
+            for &local in seg.locals_for_logical(logical) {
+                if seg.is_alive(local) {
+                    return seg.tags_of(local).to_vec();
+                }
+            }
+        }
+        Vec::new()
+    }
+
     /// Recompile every live query under the CURRENT normalizer, replacing all
     /// base segments (and the memtable) with one freshly-compiled segment at the
     /// current vocab epoch. This is the recompile pass that makes a normalizer
@@ -259,7 +282,13 @@ impl Engine {
         for (logical, text) in &live {
             if let Ok(ast) = crate::dsl::parse(text) {
                 let ex = crate::compile::extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                if seg.add_compiled(&ex, &self.dict, *logical, 1).is_some() {
+                // Carry the query's existing tags forward unchanged — tags are orthogonal
+                // to the normalizer, so a vocabulary change must not drop them (ADR-049).
+                let tags = self.live_tag_ids_for(*logical);
+                if seg
+                    .add_compiled(&ex, &tags, &self.dict, *logical, 1)
+                    .is_some()
+                {
                     recompiled += 1;
                 }
             }
@@ -326,6 +355,8 @@ impl Engine {
 
         let manifest = crate::storage::read_manifest(&manifest_path)?;
         let dict = crate::storage::deserialize_dict(&manifest.dict_data)?;
+        // The frozen tag space (ADR-049); empty for a v1 manifest (no tags).
+        let tag_dict = crate::storage::deserialize_tagdict(&manifest.tag_dict_data)?;
 
         // Open mmap'd segments (skip corrupt ones rather than failing startup)
         let seg_dir = dir.join("segments");
@@ -384,6 +415,7 @@ impl Engine {
             norm: Arc::new(norm),
             vocab: None,
             dict: Arc::new(dict),
+            tag_dict: Arc::new(tag_dict),
             segments,
             memtable: Arc::new(Segment::new()),
             rejected_parse: manifest.rejected_parse,
@@ -417,10 +449,12 @@ impl Engine {
                     logical,
                     version,
                     text,
+                    tags,
                     ..
                 } => {
-                    // Replay without re-writing to WAL
-                    engine.replay_insert(&text, logical, version);
+                    // Replay without re-writing to WAL — tags included so a recovered
+                    // insert keeps its metadata (ADR-049).
+                    engine.replay_insert(&text, logical, version, &tags);
                 }
                 WalEntry::Tombstone {
                     seg_idx, local_id, ..
@@ -477,6 +511,10 @@ impl Engine {
             norm,
             vocab: None,
             dict,
+            // A cluster shard would share the coordinator's frozen tag space (ADR-049);
+            // threading tags through the cluster is a follow-on, so a shard starts with an
+            // empty tag dict today.
+            tag_dict: Arc::new(TagDict::new()),
             segments,
             memtable: Arc::new(Segment::new()),
             rejected_parse: 0,
@@ -569,6 +607,7 @@ impl Engine {
         EngineSnapshot {
             norm: Arc::clone(&self.norm),
             dict: Arc::clone(&self.dict),
+            tag_dict: Arc::clone(&self.tag_dict),
             segments: self.segments.clone(),
             memtable: Arc::clone(&self.memtable),
             query_store: Arc::clone(&self.query_store),

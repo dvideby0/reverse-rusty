@@ -132,18 +132,19 @@ Tier 4):
 | Compile-time extract + match-time select | term extraction stored with the query | signature-cover optimizer | ✅ same architecture |
 | Un-gateable query handling | silently becomes an always-candidate | compile-time **class-D reject** / **class-C broad lane** | ✅ improves (ADR-003) |
 | Recall → verify | over-matches; **caller must exact-re-test** | integer-exact verifier ⇒ output false-positive-free | ✅ **subsumes** — one stage, final matches |
-| Per-query **metadata** stored with the query | arbitrary JSON fields | only `logical_id` + `version` + DSL text | ❌ **gap → Tier 4 / ADR-049** |
-| **Filter** results by metadata (bool clauses) | `bool.filter` on stored fields | none | ❌ **gap → Tier 4 / ADR-049** (the dominant read pattern) |
+| Per-query **metadata** stored with the query | arbitrary JSON fields | interned `(key,value)` tags in the SoA | ✅ **built (single-node)** — ADR-049 |
+| **Filter** results by metadata (bool clauses) | `bool.filter` on stored fields | ES `bool`/`terms` + native filter, pushed into verify | ✅ **built (single-node)** — ADR-049 (the dominant read pattern) |
 | `_score` / relevance ranking | per-hit Lucene score | pure boolean (`Vec<u64>`) | ❌ gap → Tier 4 (lower priority) |
 | `function_score` boost by metadata | yes | none | ❌ gap → Tier 4 (lower priority) |
 | Pagination (`from` / `size`) | yes | `/_search` yes; `/_mpercolate` size-only | ◑ partial → Tier 4 |
 | Batch percolate (many docs / request) | yes | `/_mpercolate` (columnar broad lane) | ✅ have (ADR-026) |
 | Update / visibility model | index + **refresh** (segment churn) | immutable segments + memtable + epoch swap | ✅ improves (NRT, no refresh stall) |
 
-The four `❌`/`◑` rows are the substance of the Tier-4 parity roadmap; the metadata + filter pair is the
-high-value one (it is the workload's dominant read pattern), designed in
-[`../design/matching.md`](../design/matching.md) §5 and decided in [`../DECISIONS.md`](../DECISIONS.md)
-ADR-049.
+The **metadata + filter pair** — the workload's dominant read pattern — is **built and oracle-proven on
+the single-node engine** (designed in [`../design/matching.md`](../design/matching.md) §5, decided in
+[`../DECISIONS.md`](../DECISIONS.md) ADR-049). The remaining Tier-4 rows are ranking / `function_score` and
+`/_mpercolate` pagination (lower priority); threading tags through the experimental cluster path is a
+separate follow-on.
 
 ---
 

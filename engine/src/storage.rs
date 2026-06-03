@@ -20,6 +20,7 @@ mod dict;
 mod manifest;
 mod segment;
 mod sources;
+mod tagdict;
 
 pub use dict::{deserialize_dict, serialize_dict};
 pub use manifest::{
@@ -28,6 +29,7 @@ pub use manifest::{
 };
 pub use segment::{write_segment, MmapSegment};
 pub use sources::{load_query_sources, LazyBase, SourceStore};
+pub use tagdict::{deserialize_tagdict, serialize_tagdict};
 
 // ---- shared low-level binary primitives (used by the codec submodules) ----
 
@@ -63,6 +65,14 @@ fn write_u32(w: &mut impl Write, v: u32) -> io::Result<()> {
 
 fn write_u64(w: &mut impl Write, v: u64) -> io::Result<()> {
     w.write_all(&v.to_le_bytes())
+}
+
+fn read_u16_at(data: &[u8], off: usize) -> io::Result<u16> {
+    let b: [u8; 2] = data
+        .get(off..off + 2)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated u16"))?;
+    Ok(u16::from_le_bytes(b))
 }
 
 fn read_u32_at(data: &[u8], off: usize) -> io::Result<u32> {

@@ -16,7 +16,12 @@
 //!   payload:   [u8; ...]  (op-specific, variable length)
 //! ```
 //!
-//! Insert payload: `logical: u64, version: u32, text_len: u32, text: [u8; text_len]`
+//! Insert payload: `logical: u64, version: u32, text_len: u32, text: [u8; text_len]`,
+//!   then (WAL v2, ADR-049) an optional tag section: `tag_count: u16`, then per tag
+//!   `key_len: u16, key, val_len: u16, value`. A v1 entry has no tag section (the payload
+//!   ends after `text`); the parser detects this by the absence of trailing bytes, so v1
+//!   and v2 entries coexist in one file (e.g. across a binary upgrade) and v1 entries
+//!   read back untagged. Tags are not recoverable from `text`, so they must be logged.
 //! Tombstone payload: `seg_idx: u32, local_id: u32`
 //! FlushCheckpoint payload: `segment_file_len: u32, segment_file: [u8; ...]`
 //!
@@ -42,7 +47,10 @@ use std::path::{Path, PathBuf};
 use crate::storage::crc32;
 
 const WAL_MAGIC: [u8; 4] = *b"PWAL";
-const WAL_VERSION: u32 = 1;
+// v1: original layout. v2 (ADR-049): the Insert payload gains an optional trailing tag
+// section. The version is informational — the parser detects per entry whether tags are
+// present (by trailing bytes), so v1 and v2 entries coexist.
+const WAL_VERSION: u32 = 2;
 const WAL_HEADER_SIZE: usize = 8; // magic + version
 
 const OP_INSERT: u8 = 0;
@@ -57,6 +65,9 @@ pub enum WalEntry {
         logical: u64,
         version: u32,
         text: String,
+        /// Per-query metadata tags (ADR-049), `(key, value)` pairs. Empty for a v1 entry
+        /// or an untagged insert. Not derivable from `text`, so logged explicitly.
+        tags: Vec<(String, String)>,
     },
     Tombstone {
         seq: u64,
@@ -165,14 +176,32 @@ impl Wal {
         }
     }
 
-    /// Append an Insert entry. Returns the sequence number assigned.
-    pub fn append_insert(&mut self, logical: u64, version: u32, text: &str) -> io::Result<u64> {
+    /// Append an Insert entry. Returns the sequence number assigned. `tags` are the
+    /// query's `(key, value)` metadata pairs (ADR-049); pass `&[]` for an untagged insert.
+    pub fn append_insert(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+    ) -> io::Result<u64> {
         let seq = self.next_seq;
         self.next_seq += 1;
 
         let text_bytes = text.as_bytes();
-        // payload: logical(8) + version(4) + text_len(4) + text
-        let payload_len = 8 + 4 + 4 + text_bytes.len();
+        // tag section: tag_count(2) + per tag key_len(2)+key + val_len(2)+value
+        let mut tag_bytes = Vec::new();
+        tag_bytes.extend_from_slice(&(tags.len() as u16).to_le_bytes());
+        for (k, v) in tags {
+            let kb = k.as_bytes();
+            let vb = v.as_bytes();
+            tag_bytes.extend_from_slice(&(kb.len() as u16).to_le_bytes());
+            tag_bytes.extend_from_slice(kb);
+            tag_bytes.extend_from_slice(&(vb.len() as u16).to_le_bytes());
+            tag_bytes.extend_from_slice(vb);
+        }
+        // payload: logical(8) + version(4) + text_len(4) + text + tag section
+        let payload_len = 8 + 4 + 4 + text_bytes.len() + tag_bytes.len();
         // entry body: seq(8) + op(1) + payload
         let body_len = 8 + 1 + payload_len;
 
@@ -183,6 +212,7 @@ impl Wal {
         body.extend_from_slice(&version.to_le_bytes());
         body.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
         body.extend_from_slice(text_bytes);
+        body.extend_from_slice(&tag_bytes);
 
         let crc = crc32(&body);
         self.file.write_all(&(body.len() as u32).to_le_bytes())?;
@@ -269,6 +299,11 @@ impl Wal {
     }
 
     fn parse_entries(data: &[u8]) -> io::Result<(Vec<WalEntry>, usize)> {
+        fn get_u16(buf: &[u8], off: usize) -> Option<u16> {
+            buf.get(off..off + 2)
+                .and_then(|s| s.try_into().ok())
+                .map(u16::from_le_bytes)
+        }
         fn get_u32(buf: &[u8], off: usize) -> Option<u32> {
             buf.get(off..off + 4)
                 .and_then(|s| s.try_into().ok())
@@ -333,11 +368,46 @@ impl Wal {
                     let text = std::str::from_utf8(&payload[16..16 + text_len])
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                         .to_string();
+                    // Optional tag section (WAL v2). A v1 entry ends after `text` (no
+                    // trailing bytes), so its tags read back empty. The entry CRC has
+                    // already passed, so the section is intact; the bounds checks are
+                    // belt-and-suspenders.
+                    let mut tags: Vec<(String, String)> = Vec::new();
+                    let mut p = 16 + text_len;
+                    if let Some(tag_count) = get_u16(payload, p) {
+                        p += 2;
+                        for _ in 0..tag_count {
+                            let Some(kl) = get_u16(payload, p).map(usize::from) else {
+                                break;
+                            };
+                            p += 2;
+                            let Some(kb) = payload.get(p..p + kl) else {
+                                break;
+                            };
+                            p += kl;
+                            let Some(vl) = get_u16(payload, p).map(usize::from) else {
+                                break;
+                            };
+                            p += 2;
+                            let Some(vb) = payload.get(p..p + vl) else {
+                                break;
+                            };
+                            p += vl;
+                            let key = std::str::from_utf8(kb)
+                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                                .to_string();
+                            let value = std::str::from_utf8(vb)
+                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                                .to_string();
+                            tags.push((key, value));
+                        }
+                    }
                     entries.push(WalEntry::Insert {
                         seq,
                         logical,
                         version,
                         text,
+                        tags,
                     });
                 }
                 OP_TOMBSTONE => {
@@ -445,10 +515,10 @@ mod tests {
         let path = scratch_path("append_err");
         let mut wal = Wal::open(&path, false).unwrap();
         // A healthy append succeeds.
-        assert!(wal.append_insert(1, 1, "michael jordan").is_ok());
+        assert!(wal.append_insert(1, 1, "michael jordan", &[]).is_ok());
         // Once the file can no longer be written, the error is returned (not swallowed).
         wal.break_writes_for_test();
-        assert!(wal.append_insert(2, 1, "scottie pippen").is_err());
+        assert!(wal.append_insert(2, 1, "scottie pippen", &[]).is_err());
         assert!(wal.append_tombstone(u32::MAX, 0).is_err());
         let _ = std::fs::remove_file(&path);
     }
@@ -458,7 +528,7 @@ mod tests {
         let path = scratch_path("fsync_roundtrip");
         {
             let mut wal = Wal::open(&path, true).unwrap();
-            wal.append_insert(7, 2, "wander franco").unwrap();
+            wal.append_insert(7, 2, "wander franco", &[]).unwrap();
             wal.append_tombstone(0, 3).unwrap();
         }
         let recovered = Wal::recover(&path).unwrap();
@@ -474,6 +544,49 @@ mod tests {
                 assert_eq!(*logical, 7);
                 assert_eq!(*version, 2);
                 assert_eq!(text, "wander franco");
+            }
+            other => panic!("expected Insert, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn insert_tags_round_trip_through_recovery_and_untagged_reads_empty() {
+        let path = scratch_path("tags_roundtrip");
+        {
+            let mut wal = Wal::open(&path, true).unwrap();
+            // A tagged insert (the ADR-049 case) and an untagged one.
+            wal.append_insert(
+                7,
+                1,
+                "1994 upper deck",
+                &[
+                    ("category".to_string(), "cards".to_string()),
+                    ("status".to_string(), "active".to_string()),
+                ],
+            )
+            .unwrap();
+            wal.append_insert(8, 1, "no tags here", &[]).unwrap();
+        }
+        let recovered = Wal::recover(&path).unwrap();
+        assert_eq!(recovered.entries.len(), 2);
+        match &recovered.entries[0] {
+            WalEntry::Insert { logical, tags, .. } => {
+                assert_eq!(*logical, 7);
+                assert_eq!(
+                    tags,
+                    &vec![
+                        ("category".to_string(), "cards".to_string()),
+                        ("status".to_string(), "active".to_string()),
+                    ]
+                );
+            }
+            other => panic!("expected Insert, got {other:?}"),
+        }
+        match &recovered.entries[1] {
+            WalEntry::Insert { logical, tags, .. } => {
+                assert_eq!(*logical, 8);
+                assert!(tags.is_empty(), "an untagged insert recovers empty tags");
             }
             other => panic!("expected Insert, got {other:?}"),
         }
@@ -496,7 +609,7 @@ mod tests {
             let mut wal = Wal::open(&path, fsync).unwrap();
             let t = Instant::now();
             for i in 0..N {
-                wal.append_insert(i, 1, "1994 upper deck michael jordan sp psa 10")
+                wal.append_insert(i, 1, "1994 upper deck michael jordan sp psa 10", &[])
                     .unwrap();
             }
             let per = t.elapsed().as_secs_f64() / N as f64;

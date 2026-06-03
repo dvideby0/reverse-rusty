@@ -136,8 +136,13 @@ trait BroadBackend {
     fn alive(&self, local: u32) -> bool;
     fn pure_anchor(&self, local: u32) -> bool;
     fn logical_id(&self, local: u32) -> u64;
+    /// Whether query `local` satisfies the request's tag filter (ADR-049). The
+    /// pure-anchor fast path bypasses `verify`/`eval_into`, so it must check tags here
+    /// to avoid leaking a filtered-out query.
+    fn passes_tags(&self, local: u32, pred: &crate::exact::TagPredicate) -> bool;
     /// Write the matching-title bitmap for `local` into `acc` (bitmap transpose
-    /// of `verify`); `grp` is reused scratch of the same width.
+    /// of `verify`); `grp` is reused scratch of the same width. `pred` is the request's
+    /// tag filter, applied as a per-query scalar gate (same as the scalar path).
     #[allow(clippy::too_many_arguments)]
     fn eval_into(
         &self,
@@ -148,6 +153,7 @@ trait BroadBackend {
         words: usize,
         acc: &mut [u64],
         grp: &mut [u64],
+        pred: &crate::exact::TagPredicate,
     );
 }
 
@@ -206,6 +212,10 @@ impl BroadBackend for &Segment {
         self.exact.logical(local)
     }
     #[inline]
+    fn passes_tags(&self, local: u32, pred: &crate::exact::TagPredicate) -> bool {
+        pred.matches(self.exact.tags_of(local))
+    }
+    #[inline]
     fn eval_into(
         &self,
         local: u32,
@@ -215,6 +225,7 @@ impl BroadBackend for &Segment {
         words: usize,
         acc: &mut [u64],
         grp: &mut [u64],
+        pred: &crate::exact::TagPredicate,
     ) {
         self.exact.eval_batch(
             local,
@@ -222,6 +233,7 @@ impl BroadBackend for &Segment {
             lookup(feat_row, feat_bits, words),
             acc,
             grp,
+            pred,
         );
     }
 }
@@ -251,6 +263,10 @@ impl BroadBackend for &MmapSegment {
         self.logical(local)
     }
     #[inline]
+    fn passes_tags(&self, local: u32, pred: &crate::exact::TagPredicate) -> bool {
+        pred.matches(self.tags_of(local))
+    }
+    #[inline]
     fn eval_into(
         &self,
         local: u32,
@@ -260,6 +276,7 @@ impl BroadBackend for &MmapSegment {
         words: usize,
         acc: &mut [u64],
         grp: &mut [u64],
+        pred: &crate::exact::TagPredicate,
     ) {
         self.eval_batch(
             local,
@@ -267,6 +284,7 @@ impl BroadBackend for &MmapSegment {
             lookup(feat_row, feat_bits, words),
             acc,
             grp,
+            pred,
         );
     }
 }
@@ -289,6 +307,7 @@ fn eval_one_segment<B: BroadBackend>(
     grp: &mut [u64],
     outs: &mut [Vec<u64>],
     materialize: bool,
+    pred: &crate::exact::TagPredicate,
     stats: &mut MatchStats,
 ) {
     cands.clear();
@@ -320,20 +339,35 @@ fn eval_one_segment<B: BroadBackend>(
             // materialization is off, fall through to full verification — eval_into
             // on a pure-anchor query computes the same bitmap (its mask gate alone
             // selects exactly the titles containing the anchor), so results are
-            // identical, just slower.
+            // identical, just slower. The tag filter (ADR-049) must still be honored
+            // here, since this path bypasses `verify`/`eval_into`: a pure-anchor query
+            // that fails the filter emits nothing (an empty predicate always passes, so
+            // the no-filter path is unchanged).
             if materialize && backend.pure_anchor(local) {
-                let logical = backend.logical_id(local);
-                for_each_set_bit(fbits, |ti| outs[ti].push(logical));
+                if backend.passes_tags(local, pred) {
+                    let logical = backend.logical_id(local);
+                    for_each_set_bit(fbits, |ti| outs[ti].push(logical));
+                }
             } else {
                 non_pure.push(local);
             }
         }
     }
 
-    // Full bitmap verification for the rest.
+    // Full bitmap verification for the rest (eval_into applies the tag filter as a
+    // per-query scalar gate, so a filtered-out query writes an empty bitmap).
     for &local in non_pure.iter() {
         stats.broad_queries_evaluated += 1;
-        backend.eval_into(local, tmask_batch, feat_row, feat_bits, words, acc, grp);
+        backend.eval_into(
+            local,
+            tmask_batch,
+            feat_row,
+            feat_bits,
+            words,
+            acc,
+            grp,
+            pred,
+        );
         let logical = backend.logical_id(local);
         for_each_set_bit(acc, |ti| outs[ti].push(logical));
     }
@@ -411,6 +445,7 @@ fn match_batch_chunk(
                 &mut ms.seen[i],
                 out,
                 inline_broad,
+                view.pred,
                 stats,
             );
         }
@@ -422,6 +457,7 @@ fn match_batch_chunk(
             &mut ms.seen[n_base],
             out,
             inline_broad,
+            view.pred,
             stats,
         );
 
@@ -498,6 +534,7 @@ fn match_batch_chunk(
                 grp,
                 outs,
                 materialize,
+                view.pred,
                 stats,
             ),
             BaseSegment::Mmap(m) => eval_one_segment(
@@ -515,6 +552,7 @@ fn match_batch_chunk(
                 grp,
                 outs,
                 materialize,
+                view.pred,
                 stats,
             ),
         }
@@ -547,6 +585,7 @@ fn match_batch_chunk(
             grp,
             outs,
             materialize,
+            view.pred,
             stats,
         );
     }
