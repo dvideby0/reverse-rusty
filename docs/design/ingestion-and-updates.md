@@ -18,7 +18,7 @@ it's blue/green from the log, not stop-the-world).*
 - **Write path:** `insert_live` → memtable → `flush()` seals to base segment; `bulk_ingest()` compiles a batch directly into a new segment
 - **Update model:** tombstones + re-insert (new PhysicalVersionId); epoch-based atomic visibility
 - **Measured:** ~750k updates/sec/core, ~650k bulk compiles/sec/core (full numbers: [performance/results.md](../performance/results.md))
-- **Design-only:** compaction-that-improves (re-anchoring drift), feature-model versioning
+- **Design-only:** compaction-that-improves (re-anchoring drift), feature-model versioning, per-query metadata storage (§11)
 - **Recently implemented:** durable mutation log (WAL — ADR-013), mmap'd segments (ADR-012), per-segment anchor filters (cache-line blocked bloom — ADR-011), score-based compaction (ADR-009)
 
 Builds on [`../research/corpus-feature-learning.md`](../research/corpus-feature-learning.md) (feature
@@ -237,7 +237,39 @@ versions interoperate (frozen mask), majors are isolated behind a blue/green swa
 
 ---
 
-## 11. Bottom line (best-in-class, tailored to us)
+## 11. Per-query metadata storage (design-only)
+
+> **Status: design-only.** The metadata *model*, filtered percolation, and ranking live in
+> [`matching.md`](matching.md) §5; this section is the **storage / persistence** half — how per-query
+> tags are written, sealed, and recovered. Decided in [`../DECISIONS.md`](../DECISIONS.md) ADR-049,
+> tracked in [`../STATUS.md`](../STATUS.md) Tier 4.
+
+The reference workload ([`../research/percolator-workload.md`](../research/percolator-workload.md))
+attaches structured tags (a category, a status, secondary keys) to every stored query. Storing them
+follows the existing query-storage model with no new moving parts:
+
+- **What's stored.** Each query's tags are interned to `TagId`s (matching.md §5.1) and held as one more
+  **SoA column** alongside the exact-match arrays — `tag_off/tag_len` into a sorted `tag_blob` — indexed
+  by `SegmentLocalQueryId` like every other per-query column (§1; matching.md §3). Tag *strings* live in
+  the engine-level dictionary, never in the hot path or per segment.
+- **Write path (unchanged shape).** Tags ride the same routes as the query itself: `insert_live` carries
+  them into the memtable; `flush()` seals them into the base segment's tag column; `bulk_ingest()` packs
+  them as it compiles the batch (§4). An **update** re-inserts the new version (with its tags) and
+  tombstones the old physical id — tags are versioned exactly like the expression. Because the dominant
+  *update* in the workload is a **metadata/status-only change**, a future optimization may rewrite only
+  the tag column for a query whose expression is unchanged; the baseline simply re-compiles the query.
+- **Persistence + reopen.** The tag column is part of the immutable `.seg` payload (ADR-012), so it
+  mmaps back on `Engine::open()` / attach-and-mmap (ADR-032) with no rebuild — the same durability story
+  as the required/forbidden columns. The segment format gains one versioned section; older segments
+  without it read back as "no tags" (an empty column), so the change is backward-compatible.
+- **What does *not* change.** The candidate index (matching.md §2), the signature optimizer, and the
+  common-mask gate are untouched — tags are verify-stage data only (matching.md §5.3). The
+  lossless-cover contract and the segment / compaction lifecycle are unaffected; a compaction (§7)
+  simply carries the tag column through the merge like any other SoA column.
+
+---
+
+## 12. Bottom line (best-in-class, tailored to us)
 
 - **Log-structured, append-only, immutable segments** — the proven Lucene/LSM/Aurora write path.
 - **Deltas + eventual merge, but *read-optimized*:** bound the segment count and add per-segment anchor
