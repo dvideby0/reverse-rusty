@@ -53,6 +53,12 @@ curl -X POST localhost:9200/_flush
 }
 ```
 
+If the segment can't be durably written (disk failure), the flush falls back to an in-memory
+segment so reads keep matching, but it is **not** durable: the response is
+**`503 Service Unavailable`** with `"acknowledged": false`, and `persistence_healthy` flips false
+(see `GET /_health`). The data is retained in the WAL and recovers on restart — `acknowledged: true`
+is never returned for a write that isn't on disk (ADR-051).
+
 ## `POST /_compact` — Force compaction
 
 Trigger segment compaction to merge segments and reclaim tombstones:
@@ -81,4 +87,9 @@ When no compaction is needed:
   "message": "no compaction needed"
 }
 ```
+
+If the engine's persistence is degraded — a compaction that couldn't durably commit was rolled
+back, or an earlier durable write failed — `/_compact` returns **`503 Service Unavailable`** with
+`"acknowledged": false` and `"message": "persistence degraded; compaction not durably acknowledged"`.
+A failed compaction always rolls back to its source segments, so it never loses data (ADR-051).
 

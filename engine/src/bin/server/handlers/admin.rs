@@ -143,55 +143,87 @@ struct RootResponse {
 #[instrument(skip_all)]
 pub(crate) async fn flush(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let start = Instant::now();
-    let metrics = {
+    let (metrics, persistence_healthy) = {
         let mut engine = state.engine.lock();
         engine.flush();
-        engine.metrics()
+        (engine.metrics(), engine.persistence_healthy)
     };
     state.publish_snapshot();
-    info!(
-        total_queries = metrics.total_queries,
-        base_segments = metrics.base_segments,
-        "flush complete"
-    );
+    // Fail closed (ADR-051): when a flush can't durably persist its segment the
+    // engine retains the data in the WAL (so a restart recovers it), but durability
+    // is degraded and we must not acknowledge the flush as durable. Mirror the
+    // `/_bulk` 503 contract so a client never reads `acknowledged: true` for a write
+    // that isn't on disk.
+    let (status, code) = if persistence_healthy {
+        (StatusCode::OK, "200")
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "503")
+    };
+    if persistence_healthy {
+        info!(
+            total_queries = metrics.total_queries,
+            base_segments = metrics.base_segments,
+            "flush complete"
+        );
+    } else {
+        error!(
+            total_queries = metrics.total_queries,
+            base_segments = metrics.base_segments,
+            "flush could not be durably persisted; data retained in WAL, persistence degraded"
+        );
+    }
     state
         .prom
         .http_requests_total
-        .with_label_values(&["flush", "200"])
+        .with_label_values(&["flush", code])
         .inc();
     state
         .prom
         .http_request_duration
         .with_label_values(&["flush"])
         .observe(start.elapsed().as_secs_f64());
-    Json(FlushResponse {
-        took_ms: start.elapsed().as_secs_f64() * 1000.0,
-        acknowledged: true,
-        total_queries: metrics.total_queries,
-        base_segments: metrics.base_segments,
-    })
+    (
+        status,
+        Json(FlushResponse {
+            took_ms: start.elapsed().as_secs_f64() * 1000.0,
+            acknowledged: persistence_healthy,
+            total_queries: metrics.total_queries,
+            base_segments: metrics.base_segments,
+        }),
+    )
 }
 
 /// POST /_compact
 #[instrument(skip_all)]
 pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let start = Instant::now();
-    let report = {
+    let (report, persistence_healthy) = {
         let mut engine = state.engine.lock();
-        engine.maybe_compact()
+        let report = engine.maybe_compact();
+        (report, engine.persistence_healthy)
     };
     state.publish_snapshot();
-    state
-        .prom
-        .http_requests_total
-        .with_label_values(&["compact", "200"])
-        .inc();
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["compact"])
-        .observe(start.elapsed().as_secs_f64());
-    if let Some(r) = report {
+    let took_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // Fail closed (ADR-051): a compaction that can't durably commit is rolled back
+    // — the source segments stay intact, so no data is lost — but durability is
+    // degraded and we must not acknowledge it as durable. This also catches a
+    // sticky failure latched by an earlier op. 503 mirrors the `/_bulk` contract.
+    let (status, code, resp) = if !persistence_healthy {
+        error!("compaction not durably acknowledged; merge rolled back, persistence degraded");
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "503",
+            CompactResponse {
+                took_ms,
+                acknowledged: false,
+                segments_merged: None,
+                entries_before: None,
+                entries_after: None,
+                tombstones_reclaimed: None,
+                message: Some("persistence degraded; compaction not durably acknowledged"),
+            },
+        )
+    } else if let Some(r) = report {
         info!(
             segments_merged = r.segments_merged,
             entries_before = r.entries_before,
@@ -199,27 +231,46 @@ pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResp
             tombstones_reclaimed = r.tombstones_reclaimed,
             "compaction complete"
         );
-        Json(CompactResponse {
-            took_ms: start.elapsed().as_secs_f64() * 1000.0,
-            acknowledged: true,
-            segments_merged: Some(r.segments_merged),
-            entries_before: Some(r.entries_before),
-            entries_after: Some(r.entries_after),
-            tombstones_reclaimed: Some(r.tombstones_reclaimed),
-            message: None,
-        })
+        (
+            StatusCode::OK,
+            "200",
+            CompactResponse {
+                took_ms,
+                acknowledged: true,
+                segments_merged: Some(r.segments_merged),
+                entries_before: Some(r.entries_before),
+                entries_after: Some(r.entries_after),
+                tombstones_reclaimed: Some(r.tombstones_reclaimed),
+                message: None,
+            },
+        )
     } else {
         info!("compaction skipped: not needed");
-        Json(CompactResponse {
-            took_ms: start.elapsed().as_secs_f64() * 1000.0,
-            acknowledged: true,
-            segments_merged: None,
-            entries_before: None,
-            entries_after: None,
-            tombstones_reclaimed: None,
-            message: Some("no compaction needed"),
-        })
-    }
+        (
+            StatusCode::OK,
+            "200",
+            CompactResponse {
+                took_ms,
+                acknowledged: true,
+                segments_merged: None,
+                entries_before: None,
+                entries_after: None,
+                tombstones_reclaimed: None,
+                message: Some("no compaction needed"),
+            },
+        )
+    };
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["compact", code])
+        .inc();
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["compact"])
+        .observe(start.elapsed().as_secs_f64());
+    (status, Json(resp))
 }
 
 /// GET /_stats — JSON metrics snapshot.
