@@ -78,5 +78,5 @@
   [`research/percolator-workload.md`](../research/percolator-workload.md). Roadmap:
   [`STATUS.md`](../STATUS.md) Tier 4. Would-be code sites (when built): `src/dict.rs` (tag interning),
   `src/exact.rs` (the tag SoA column + verify-stage filter), `src/compile.rs` (carry tags through
-  compile), `src/storage/segment` (the `.seg` tag section), `src/bin/server.rs` + `reference/api.md`
+  compile), `src/storage/segment` (the `.seg` tag section), `src/bin/server/` + `reference/api.md`
   (the filter/rank request surface).

@@ -1,6 +1,6 @@
 # REST API reference
 
-The Reverse Rusty server (`src/bin/server.rs`) exposes an Elasticsearch-style REST API over HTTP. This
+The Reverse Rusty server (`src/bin/server/`) exposes an Elasticsearch-style REST API over HTTP. This
 page is the complete endpoint reference. For the query language used in `_doc` bodies see
 [`dsl.md`](dsl.md); for the engine internals behind these endpoints see
 [`../design/matching.md`](../design/matching.md) and [`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md).

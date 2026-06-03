@@ -41,7 +41,7 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   counter; recovery-time failures (pre-observer) are buffered and replayed on `set_observer` (ADR-021).
 - **Vocabulary** (`vocab.rs`) — `Vocab` learn-from-any-of-groups + JSON persistence (ADR-015), runtime
   swap with vocab-epoch staleness tracking, per-segment reverse index for O(segments) delete.
-- **HTTP server** (`bin/server.rs`) — ES-style REST (`/_doc`, `/_search` with explain/profile,
+- **HTTP server** (`bin/server/`) — ES-style REST (`/_doc`, `/_search` with explain/profile,
   `/_bulk` per-item status ADR-018, `/_stats`, `/_cat/stats`, `/_cat/segments` per-segment detail
   (text table + `?format=json`, ADR-023), `/_health`, `/_metrics`, `/_vocab*`,
   `/_settings` GET/PUT with dynamic-vs-static enforcement + `include_defaults` — ADR-022),
