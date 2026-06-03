@@ -15,19 +15,24 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 
 - **Level 0 — `../CLAUDE.md`:** the agent entry point. Inlines the correctness contract + invariants
   (safety) and routes to one doc per task. Not a reference manual.
-- **Level 1 — gateways:** this hub, plus [`STATUS.md`](STATUS.md), [`DECISIONS.md`](DECISIONS.md),
-  [`design/README.md`](design/README.md), [`performance/README.md`](performance/README.md),
-  [`research/README.md`](research/README.md), and the top [`../README.md`](../README.md). Each answers
-  its domain's top question and links deeper.
-- **Level 2 — deep dives:** the topic files below. Read only when a task needs the detail.
+- **Level 1 — gateways:** this hub, plus [`STATUS.md`](STATUS.md), [`roadmap.md`](roadmap.md),
+  [`DECISIONS.md`](DECISIONS.md), [`design/README.md`](design/README.md),
+  [`performance/README.md`](performance/README.md), [`research/README.md`](research/README.md), and the
+  top [`../README.md`](../README.md). Each answers its domain's top question and links deeper.
+- **Level 2 — deep dives:** the topic files below — including the per-ADR records in
+  [`decisions/`](decisions/) and the per-group endpoint files in [`reference/api/`](reference/api/).
+  Read only when a task needs the detail.
 
 ## Map — what to read when
 
 ### Status & decisions
-- [`STATUS.md`](STATUS.md) — **what's built vs design-only**, the measured numbers in brief, and the
-  prioritized roadmap. Read when asking "is X implemented?" or "what's next?".
-- [`DECISIONS.md`](DECISIONS.md) — the ADRs (architecture decision records) with an index at the
-  top. Read when asking "why was it done this way?" or "why was X *not* built?" (declined → ADR-019).
+- [`STATUS.md`](STATUS.md) — **what's built vs design-only**, the measured numbers in brief, and a
+  one-line tier glance. Read when asking "is X implemented?".
+- [`roadmap.md`](roadmap.md) — the **prioritized roadmap**: design-only work, the Cluster v1 gate, the
+  operational-polish backlog, and evaluated-and-declined. Read when asking "what's next?".
+- [`DECISIONS.md`](DECISIONS.md) — the **index** of ADRs (architecture decision records); each ADR's
+  full record is one file under [`decisions/`](decisions/). Read when asking "why was it done this
+  way?" or "why was X *not* built?" (declined → ADR-019).
 - [`testing.md`](testing.md) — **how we test**: the suites, pressure/soak tests, benchmarks, the git
   hooks, and the CI pipeline. Read when running or changing tests, benchmarks, or the gate.
 
@@ -46,7 +51,8 @@ Three levels, each giving *just enough* to decide whether to go deeper:
   oracle-proven in-process / on localhost).
 
 ### Reference — how to use it
-- [`reference/api.md`](reference/api.md) — the complete REST API (every endpoint + server flags).
+- [`reference/api.md`](reference/api.md) — the REST API index (server flags + endpoint groups + a
+  method/path matrix); per-group endpoint detail lives in [`reference/api/`](reference/api/).
 - [`reference/dsl.md`](reference/dsl.md) — the query DSL, normalization, and vocabulary.
 
 ### Performance
@@ -89,11 +95,11 @@ never a second copy. This is what keeps the docs from drifting.
 | Performance numbers | [`performance/results.md`](performance/results.md) (exact) + [`performance/benchmark-results.txt`](performance/benchmark-results.txt) (invariants) | everywhere else rounds (`~710k`) and links. |
 | Module map (file → purpose → ADR) | [`../CLAUDE.md`](../CLAUDE.md) | `design/README.md` §4 keeps a coarser design-topic↔module view + link. |
 | Implemented vs design-only | [`STATUS.md`](STATUS.md) | `../CLAUDE.md` keeps a 3–4 line skeleton + link. |
-| Roadmap / next steps | [`STATUS.md`](STATUS.md) | design docs point here with "tracked in STATUS Tier N". |
-| Architecture decisions / "why" | [`DECISIONS.md`](DECISIONS.md) | referenced by `ADR-NNN` (pointers, never copies). |
+| Roadmap / next steps | [`roadmap.md`](roadmap.md) | [`STATUS.md`](STATUS.md) keeps a one-line tier glance; "tracked in Tier N" refs resolve via either. |
+| Architecture decisions / "why" | [`DECISIONS.md`](DECISIONS.md) index → one file per ADR in [`decisions/`](decisions/) | referenced by `ADR-NNN` (pointers, never copies). |
 | Test count | `cargo test` | docs describe the suites qualitatively; no hand-maintained integer. |
 | Testing / benchmark / CI workflow | [`testing.md`](testing.md) | `../CLAUDE.md` Build/test/run keeps the commands; CI rationale in [`DECISIONS.md`](DECISIONS.md) ADR-024; benchmark numbers in `performance/`. |
-| REST API / query DSL | [`reference/api.md`](reference/api.md) / [`reference/dsl.md`](reference/dsl.md) | `../README.md` links here instead of inlining. |
+| REST API / query DSL | [`reference/api.md`](reference/api.md) index + [`reference/api/`](reference/api/) subfiles · [`reference/dsl.md`](reference/dsl.md) | `../README.md` links here instead of inlining. |
 
 ---
 
@@ -109,18 +115,19 @@ link-checker in CI — the discipline has to live here).
   + a section link, or nothing. Before adding a paragraph, ask "does this already live somewhere?" —
   if yes, link it.
 - **Where new information goes:**
-  - New architecture decision → [`DECISIONS.md`](DECISIONS.md) (new ADR at the bottom, next number,
-    **never renumber or delete** — superseded ones are marked, not removed).
+  - New architecture decision → a new `decisions/adr-NNN-slug.md` file (next number) + an index row in
+    [`DECISIONS.md`](DECISIONS.md); **never renumber or delete** — superseded ones are marked, not removed.
   - Component/algorithm design → the matching `design/<topic>.md` (extend, don't fork).
-  - "Is it built / what's next?" → [`STATUS.md`](STATUS.md) (the only home for implemented-vs-design
-    and the prioritized roadmap; design docs link here, they don't re-list).
+  - "Is it built?" → [`STATUS.md`](STATUS.md) (the home for implemented-vs-design); "what's next?" →
+    [`roadmap.md`](roadmap.md) (the prioritized roadmap). Design docs link here, they don't re-list.
   - Benchmark numbers → append a dated entry to [`performance/benchmark-results.txt`](performance/benchmark-results.txt)
     first, then narrate in [`performance/results.md`](performance/results.md).
   - Dependency version → `engine/Cargo.toml` only. Docs describe a crate's purpose, never its version.
   - A new `src/` file → update the module map in [`../CLAUDE.md`](../CLAUDE.md).
   - Testing / benchmark / CI workflow → [`testing.md`](testing.md) (the gate itself is `engine/check.sh`,
     which CI runs; decision rationale → [`DECISIONS.md`](DECISIONS.md) ADR-024).
-  - User-facing API/DSL change → [`reference/api.md`](reference/api.md) / [`reference/dsl.md`](reference/dsl.md).
+  - User-facing API/DSL change → the matching [`reference/api/`](reference/api/) subfile (+ the
+    [`reference/api.md`](reference/api.md) index/matrix) / [`reference/dsl.md`](reference/dsl.md).
   - Prior art / research → [`research/`](research/).
 - **Numbers convention.** Round in prose (`~710k titles/sec`); keep exact figures (six-significant-figure
   throughputs, p99 latencies) only in `performance/results.md` and `benchmark-results.txt`.

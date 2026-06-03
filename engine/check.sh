@@ -13,6 +13,10 @@
 #
 # All steps run even if an earlier one fails, so a single invocation surfaces
 # every problem at once; the script exits non-zero if any step failed.
+#
+# It also prints a non-failing advisory listing source files over 600 lines
+# (refactor candidates). The advisory is informational only — it never affects
+# the exit status, so an oversized file never blocks a commit, push, or CI run.
 
 set -uo pipefail
 
@@ -45,6 +49,22 @@ run() {
     fi
 }
 
+# Advisory (non-failing): list source files over the line threshold as refactor
+# candidates. Informational only — it never touches `failures` or the exit
+# status. Scans the crate's own src/ + tests/ (.rs); bump `threshold` to retune.
+size_advisory() {
+    local threshold=600 big
+    big=$(find src tests -name '*.rs' -type f 2>/dev/null | while read -r f; do
+        n=$(wc -l <"$f" | tr -d '[:space:]')
+        [ "$n" -gt "$threshold" ] && printf '%6d  %s\n' "$n" "$f"
+    done | sort -rn)
+    [ -z "$big" ] && return 0
+    printf '\n\033[1;33m==> file-size advisory: %s file(s) over %d lines — consider refactoring (non-blocking)\033[0m\n' \
+        "$(printf '%s\n' "$big" | grep -c .)" "$threshold"
+    printf '%s\n' "$big"
+    printf '\033[0;33m    advisory only — does not fail the gate\033[0m\n'
+}
+
 run "rustfmt (--check)"    cargo fmt --check
 run "clippy (-D warnings)" cargo clippy --all-targets --release -- -D warnings
 # Lean-core lane: lints the library + non-server bins with the server/observability
@@ -64,6 +84,10 @@ if [ "$fast" -eq 0 ]; then
     run "cargo audit"          cargo audit
     run "cargo deny"           cargo deny check
 fi
+
+# Non-failing refactor nudge. Runs in --fast and full, so it shows on commit,
+# push, and CI; printed just before the summary to stay visible.
+size_advisory
 
 printf '\n'
 if [ "${#failures[@]}" -eq 0 ]; then

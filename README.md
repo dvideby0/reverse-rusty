@@ -177,7 +177,7 @@ See [`docs/reference/dsl.md`](docs/reference/dsl.md) for loading and learning vo
 | [`docs/reference/api.md`](docs/reference/api.md) · [`dsl.md`](docs/reference/dsl.md) | REST API and query-DSL reference |
 | [`docs/design/`](docs/design/README.md) | How it works: normalization, matching, ingestion/LSM, clustering |
 | [`docs/performance/`](docs/performance/README.md) | Measured results, bottleneck analysis, benchmark runbook |
-| [`docs/STATUS.md`](docs/STATUS.md) · [`DECISIONS.md`](docs/DECISIONS.md) | What's built vs designed, the roadmap, and the architecture decision records |
+| [`docs/STATUS.md`](docs/STATUS.md) · [`roadmap.md`](docs/roadmap.md) · [`DECISIONS.md`](docs/DECISIONS.md) | What's built (STATUS), what's next (the prioritized roadmap), and the architecture decision records |
 
 ## Dependencies
 
