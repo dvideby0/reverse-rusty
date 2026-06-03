@@ -1,4 +1,4 @@
-# Matching — signature optimizer, candidate index, exact matcher, broad lane, explain
+# Matching — signature optimizer, candidate index, exact matcher, broad lane, metadata & ranking, explain
 
 *Scope: the heart of the engine — how compiled queries are gated and verified. Covers the
 signature-cover optimizer, the candidate index, the integer-only exact matcher, broad-query cost
@@ -16,7 +16,9 @@ correctness contract this section must uphold.*
 > clustered *implicitly* — they share signature anchors in the candidate index, so a single failed
 > anchor probe drops the whole cluster's candidates. An explicit query-family / shared-prefix-DAG
 > structure (subtree pruning) was evaluated and deliberately **not** pursued; see
-> [DECISIONS](../DECISIONS.md) ADR-019 for the reasoning. See [STATUS](../STATUS.md).
+> [DECISIONS](../DECISIONS.md) ADR-019 for the reasoning. **Per-query metadata, filtered percolation,
+> and ranking (§5) are design-only** — the percolator-parity work in [STATUS](../STATUS.md) Tier 4 /
+> [DECISIONS](../DECISIONS.md) ADR-049. See [STATUS](../STATUS.md).
 
 **TL;DR (for agents)**
 - **Owns:** signature optimizer (`compile.rs`), candidate index (`index.rs`), exact matcher (`exact.rs`), explain (`explain.rs`)
@@ -172,7 +174,70 @@ intersection for the very broadest postings is a further micro-optimization, not
 
 ---
 
-## 5. Explain / debug tooling (always available)
+## 5. Per-query metadata, filtered percolation, and ranking (design-only)
+
+> **Status: design-only** — not built. Specified here, decided in [DECISIONS](../DECISIONS.md) ADR-049,
+> tracked in [STATUS](../STATUS.md) Tier 4. Motivated by the reference workload in
+> [`../research/percolator-workload.md`](../research/percolator-workload.md), whose dominant read
+> pattern is "percolate, then narrow to one category."
+
+Production percolators store **structured tags** alongside each query (a category, a status, secondary
+keys) and at match time **filter the percolated candidates by those tags** — and sometimes rank them.
+Reverse Rusty today returns a bare `Vec<u64>` of matched `logical_id`s with no tag awareness. This is
+the design for closing that gap **without touching the lossless-cover contract**.
+
+### 5.1 Metadata model — interned integer tags in the SoA
+
+A stored query may carry a small set of `key → value` tags. Each distinct `(key, value)` is **interned
+to a dense integer `TagId`** at compile time — the same move that turns feature strings into
+`FeatureId`s (`dict.rs`), so **no strings reach the match path**. The per-query tags become one more
+**column in the exact-match SoA** (`exact.rs`, §3): `tag_off: [u32]` / `tag_len: [u16]` into a sorted
+`tag_blob: [u32]`, exactly parallel to the `required_blob` layout. Tags are written on insert / update /
+bulk, persist in the `.seg` format, and survive reopen (see [`ingestion-and-updates.md`](ingestion-and-updates.md) §11).
+
+### 5.2 Filtered percolation — push the filter into verification
+
+A percolate request may carry a **tag predicate** — a conjunction of "key ∈ {values}" terms (e.g.
+`category ∈ {A,B} AND status ∈ {X}`). Compile it once per request to required `TagId`s, then, **during
+exact verification** of each retrieved candidate (§3), test the candidate's `tag_blob` against the
+predicate — a sorted-slice / membership check that reuses the cursor already walking the
+required/forbidden tails. Candidates failing the predicate are dropped before they reach the output: no
+extra pass, no per-hit metadata lookup, allocation-free.
+
+### 5.3 The load-bearing invariant — tags never gate (mirror MUST_NOT)
+
+**Tags are checked only in the post-candidate verify stage — never in the signature optimizer.** This is
+structurally the same rule as "forbidden features never gate" (ADR-006, §1 invariant): signatures stay
+built **only** from required features + any-of groups, so the title→query **lossless-cover contract
+([overview](README.md) §2) is untouched**. A tag filter only ever *removes* queries the caller did not
+ask for; it cannot drop a query the caller *did* want, so it introduces **no false negative** within the
+requested tag scope. An implementer must not "optimize" by letting a tag influence candidate retrieval —
+that would couple a caller-supplied filter to the cover proof.
+
+### 5.4 Ranking — an optional layer *over* the boolean-correct set
+
+Matching stays boolean and complete; ranking is an **optional sort applied to the already-final result
+set**, never a change to which queries match. A query may carry a numeric **priority tag** (reusing 5.1)
+and/or the request may supply a **boost** keyed on a tag value; the engine orders the returned ids by
+`(boost, priority, …)` and applies top-K / `from` (closing the `/_mpercolate` pagination gap). Because it
+runs after verification on a `Vec<u64>`, it touches neither the candidate index nor the verifier —
+consistent with the reference workload, where ranking is a presentation-surface concern, not a
+matching-core one.
+
+### 5.5 Alternatives (documented, deferred)
+
+- **Post-match external filter** (return everything, look up each id's metadata afterward) — effectively
+  what callers do *today*, outside the engine. Rejected as the long-term design: it still verifies every
+  match and needs an external metadata store; 5.2 is strictly better once tags live in the SoA.
+- **Tag-partitioned segment skip** — for the *dominant* single-key filter (the `category` tag), index or
+  route queries by that tag so a filtered probe skips whole segments (composing with the entity-anchor
+  sharding in [`clustering-and-scaling.md`](clustering-and-scaling.md)). A real optimization, but it must
+  be **filter-driven and fail-open** (skip only when the request's filter proves a segment irrelevant;
+  when unsure, probe) so it can never drop a wanted query. **Deferred** past the 5.2 baseline.
+
+---
+
+## 6. Explain / debug tooling (always available)
 
 For any query: show parsed AST, compiled required/forbidden/any-of, chosen signatures with their cost
 scores, and cost class. For any (title, query) pair: show the title's extracted features, which

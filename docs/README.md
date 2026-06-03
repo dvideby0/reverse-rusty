@@ -26,7 +26,7 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 ### Status & decisions
 - [`STATUS.md`](STATUS.md) — **what's built vs design-only**, the measured numbers in brief, and the
   prioritized roadmap. Read when asking "is X implemented?" or "what's next?".
-- [`DECISIONS.md`](DECISIONS.md) — the 27 ADRs (architecture decision records) with an index at the
+- [`DECISIONS.md`](DECISIONS.md) — the ADRs (architecture decision records) with an index at the
   top. Read when asking "why was it done this way?" or "why was X *not* built?" (declined → ADR-019).
 - [`testing.md`](testing.md) — **how we test**: the suites, pressure/soak tests, benchmarks, the git
   hooks, and the CI pipeline. Read when running or changing tests, benchmarks, or the gate.
@@ -60,6 +60,9 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`research/README.md`](research/README.md) — index of the prior-art studies.
 - [`research/prior-art.md`](research/prior-art.md) — Lucene Monitor, ES/OS percolator, Tantivy,
   roaring, Aho-Corasick, set-containment joins.
+- [`research/percolator-workload.md`](research/percolator-workload.md) — the abstract **reference
+  workload** a production percolator serves (per-query tags, filter-by-tag, two-stage recall+verify,
+  ranking-as-presentation) and how Reverse Rusty maps to it (→ ADR-049, STATUS Tier 4).
 - [`research/clustering-prior-art.md`](research/clustering-prior-art.md) — consistent-hashing variants,
   content-based routing, and the ES distributed-percolator contrast (clustering design; → ADR-027).
 - [`research/dynamic-vocabulary.md`](research/dynamic-vocabulary.md) — absorbing new vocabulary after the

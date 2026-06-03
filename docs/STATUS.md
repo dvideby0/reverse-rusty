@@ -498,13 +498,34 @@ items from an external review, re-ranked to the top; **all are now done:**
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
 
-### Tier 4 — ES/OS percolator parity (not fully verified — based on initial gap analysis)
+### Tier 4 — ES/OS percolator parity (verified against a documented reference workload)
 
-These items would close the remaining gaps between Reverse Rusty's DSL/normalizer and what
-production ES/OS percolator deployments typically rely on. They are based on a preliminary
-comparison with a real-world percolator workload; the scope of each may shrink or grow once
-implementation begins.
+These items close the gaps between Reverse Rusty and how production percolator deployments are actually
+*operated* — now **verified against a documented reference workload**
+([`research/percolator-workload.md`](research/percolator-workload.md)), not just an initial guess. That
+write-up also records what already **aligns** (entity identity ↔ `logical_id`, the
+include/exclude/OR-group DSL, create/update/delete + bulk) and what RR **subsumes** (the two-stage
+recall→verify pattern — RR's integer-exact verifier makes output false-positive-free, so there is no
+app-side re-test); the capability-by-capability mapping is
+[`research/prior-art.md`](research/prior-art.md) §2. The **dominant read pattern** — *"percolate, then
+narrow to one category"* — makes the **metadata + filtering pair the high-value work**; scoring and batch
+pagination are smaller, lower-priority items. *(Validating RR against this workload's **real corpus** — a
+false-negative / throughput audit — remains the open step in **Current limitations** below.)*
 
+- **Per-query metadata + filtered percolation — the lead item.** The dominant read pattern: stored
+  queries carry structured tags (a category, a status, secondary keys) and callers percolate, then
+  **narrow the candidates by those tags**. RR today returns a bare `Vec<u64>` with no tag awareness.
+  **Design decided ([ADR-049](DECISIONS.md)):** tags interned to integer ids and held as an exact-match
+  **SoA column**; the tag filter **pushed into verification** (a hot-path integer test); and —
+  load-bearing — tags **checked only post-candidate, never in signature gating**, so the lossless-cover
+  contract is untouched (structurally the same rule as ADR-006's "forbidden features never gate"). Full
+  design: [`design/matching.md`](design/matching.md) §5 (model + filtering + ranking) and
+  [`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) §11 (storage + reopen).
+- **Match scoring / ranking + `/_mpercolate` pagination — lower priority.** An optional layer *over* the
+  boolean-correct result set: sort or boost by a priority tag, top-K, and `from`/offset on `/_mpercolate`
+  (`size`-only today, unlike `/_search`). Lower priority because in the reference workload only a public
+  search surface ranks — the core matching jobs take the tag-filtered set unranked. It never touches the
+  candidate index or verifier ([ADR-049](DECISIONS.md); [`design/matching.md`](design/matching.md) §5.4).
 - **Byte-cleaning: punctuation-equivalence rules.** `clean_into` currently maps all
   non-alphanumeric, non-marker characters to a space. Production title corpora treat
   mid-word hyphens (`-`), apostrophes (`'`, `'`), slashes (`/`), and periods differently
@@ -518,17 +539,6 @@ implementation begins.
   like `auto` ≡ `{autograph, autographed, signature, signed}`). Add a batch registration
   method and/or a file-based vocabulary loader so large synonym tables are easy to maintain
   outside of code.
-- **Metadata-aware result filtering.** ES/OS percolator queries are typically stored alongside
-  structured metadata (entity type, category, status) and filtered at search time via bool
-  clauses. Reverse Rusty today returns raw query-ID sets with no metadata awareness. Options:
-  per-query tag storage with post-match filtering, or partitioned indices. Design TBD —
-  the goal is to support the common pattern of "percolate title, then narrow by category"
-  without requiring a separate metadata lookup.
-- **Match scoring / ranking hooks.** ES/OS percolator returns `_score` from the stored
-  query's relevance model; production consumers use `function_score` wrappers to boost
-  results by metadata (e.g. status priority). Reverse Rusty currently returns binary
-  match/no-match. Add an optional scoring callback or rank-annotation layer so callers
-  can order results without a separate pass.
 
 ### Polish / niche
 
