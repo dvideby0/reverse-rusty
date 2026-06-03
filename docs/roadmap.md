@@ -248,6 +248,18 @@ from the audit's former P3 list). Roughly grouped:
   Optional refinement: emit `SegmentWrite`/`SegmentMmap` from inside `build_durable_base` for symmetric
   labeling. Low priority — the underlying error is already visible.
 - **Dict format not versioned** — adding a new `FeatureKind` variant would silently corrupt deserialization.
+- **Deferred from the external-review hardening pass (ADR-052):**
+  - **Optional bearer-token / API-key auth for mutating endpoints.** The HTTP server now defaults to
+    a loopback bind (`--host 127.0.0.1`), but has no built-in auth — exposing it requires a trusted
+    network or an authenticating reverse proxy. An opt-in `RR_AUTH_TOKEN`-style gate on
+    `_doc`/`_bulk`/`_flush`/`_compact`/`_vocab`/`_settings` would let it serve a wider network safely.
+  - **Cooperative cancellation on the match path.** `timeout_ms` is a response deadline only — a
+    timed-out `/_search`/`/_mpercolate` returns 408 but its `spawn_blocking`/Rayon work runs to
+    completion. A coarse per-segment deadline check could shed abandoned CPU, at the cost of a branch
+    on the (deliberately branch-predictable) hot path; weigh against simply bounding concurrency.
+  - **`from`/offset + per-slot hit truncation on the percolate endpoints.** `/_mpercolate` is
+    `size`-only (no `from`), and `/_search`'s per-slot `slots[*].hits` are complete-per-slot
+    (unpaginated). Fine today; revisit if per-slot response size becomes a concern.
 - ~~**`GET /_vocab` acquires the write mutex.**~~ **✅ Fixed.** `EngineSnapshot` now carries the vocab as
   an `Arc<Vocab>` (the `Engine` holds `Option<Arc<Vocab>>`, `Arc::clone`d into each snapshot — O(1) per
   publish), and `get_vocab` reads `state.snapshot.load().vocab()` instead of locking the engine. Vocab

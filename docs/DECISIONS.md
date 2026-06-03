@@ -66,6 +66,7 @@ not deleted (the record of *why something was not done* is as load-bearing as th
 | [024](decisions/adr-024-ci-github-actions.md) | CI via GitHub Actions mirroring `check.sh` | CI runs `check.sh` itself (one source of truth); commit the pressure suite + benchmark baseline; benchmarks run-and-print, never gate (hardware variance). | Accepted |
 | [028](decisions/adr-028-lean-core-feature-gate.md) | Feature-gate the server stack (lean core) | Gate the server/observability stack behind a default-on `server` feature (Cargo-level, zero `#[cfg]`); a lean-core clippy lane keeps server crates out of library code. | Accepted |
 | [050](decisions/adr-050-golden-front-end-tests.md) | Oracle front end pinned by spec-authored golden tests | The differential oracle shares the engine's parse/normalize/extract front end (and runs empty-vocab), so a front-end bug would hide; pin those three stages with hand-authored golden tests + a vocab-rich oracle pass. | Accepted |
+| [052](decisions/adr-052-external-review-hardening.md) | External-review hardening (batch) | Six small review fixes: reject `-` + space in the parser; reserve 0 in `sig_key` (frozen-table sentinel); apply `max_percolate_batch` to multi-doc `/_search`; bounds-validate segment sections before the unsafe cast; document `timeout_ms` as response-only; default the HTTP bind to `127.0.0.1` + `--host`. | Accepted |
 
 ## Clustering — core & transport
 

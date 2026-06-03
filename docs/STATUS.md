@@ -50,7 +50,8 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   (text table + `?format=json`, ADR-023), `/_health`, `/_metrics`, `/_vocab*`,
   `/_settings` GET/PUT with dynamic-vs-static enforcement + `include_defaults` — ADR-022),
   graceful shutdown, production hardening (body/concurrency limits, request IDs, slow-query log,
-  segment CRC, complexity limits).
+  segment CRC, complexity limits, loopback-by-default bind + `--host` — ADR-052). No built-in
+  auth — bind beyond `127.0.0.1` only on a trusted network / behind an authenticating proxy.
 - **Error handling** — typed `ParseError` / `NormalizerError`, fallible deserialization, zero
   panicking `unwrap()` in library code.
 - **Tooling** — explain (`explain.rs`), seeded data generator (`gen.rs`), NPMI corpus learner

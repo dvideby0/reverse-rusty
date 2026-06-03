@@ -19,6 +19,7 @@ Options:
 
 | Flag | Default | Description |
 |---|---|---|
+| `--host` | 127.0.0.1 | IP address to bind. Loopback by default; set `0.0.0.0` to listen on all interfaces (see Security below) |
 | `--port` | 9200 | Port to listen on |
 | `--data-dir` | *(in-memory)* | Persistence directory for segments and WAL |
 | `--load-file` | — | Pre-load queries from a CSV or JSONL file at startup |
@@ -52,6 +53,16 @@ and syncs the WAL before exiting.
 
 Many of these knobs are also tunable at runtime via [`PUT /_settings`](api/settings.md#put-_settings--update-settings)
 (the dynamic subset); the CLI flags remain the durable startup source.
+
+### Security
+
+The REST API has **no built-in authentication** and exposes mutating/admin endpoints
+(`_doc`, `_bulk`, `_flush`, `_compact`, `_vocab`, `_settings`). The server therefore binds
+**`127.0.0.1` (loopback) by default** (ADR-052) — not reachable beyond the local host. To serve
+other hosts, set `--host 0.0.0.0` (or a specific interface) **only** on a trusted network or behind
+a reverse proxy that terminates authentication/TLS; do not expose the port directly to an untrusted
+network. (TLS/auth on the engine itself is a tracked, not-yet-built item — see
+[STATUS.md](../STATUS.md).)
 
 ---
 
