@@ -180,6 +180,20 @@ re-runs the learner on the current query population, re-discovers entities and f
 anchors, and rewrites poor signature covers. The feature extractor becomes a living artifact that
 tracks the query corpus, instead of a static dictionary that goes stale.
 
+### 6.1 Now wired as a runtime vocab source (ADR-053)
+
+The phrase-induction half of this is **built**. The NPMI core is now a library module
+(`src/corpus.rs`) — `tokenize` / `learn_phrases` / `apply_phrases` plus `learn_phrases_from_text`,
+which returns the induced entities as a `Vocab` of phrase entries. It is composed **under** the
+ADR-015 any-of synonym learner via an opt-in `vocab::CorpusLearnConfig` (`corpus_phrases`, default
+off), threaded through `Engine::learn_and_apply_with` / `ClusterEngine::learn_and_apply_with` and the
+`POST /_vocab/learn[/_and_apply]?corpus_phrases=true` endpoints. So an operator can self-derive the
+phrase feature model from the live corpus on demand — no offline job, no hand-coded vocabulary — and
+apply it through the proven `set_vocab` + recompile / blue-green machinery (ADR-046) with **zero false
+negatives** (oracle-proven, single-engine + cluster). Phrases only; the **aliasing** safety rail (§5)
+and the **compaction**-driven re-materialize (§6, [`ADR-053`](../decisions/adr-053-corpus-phrase-vocab-source.md)
+scope note) remain future work.
+
 ---
 
 ## 7. Bottom line

@@ -623,6 +623,83 @@ fn learn_and_apply_absorbs_synonyms_from_anyof_groups() {
     );
 }
 
+#[test]
+fn learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives() {
+    // ADR-053: the cluster self-derives an ENTITY PHRASE from its OWN corpus via NPMI
+    // (`corpus_phrases=true`) and applies it through the same blue/green re-place rebuild
+    // as a declared alias. After the rebuild the cluster must STILL equal an independent,
+    // phrase-aware brute over the full live set — for the planted titles AND a sample of
+    // corpus titles (zero FN/FP), at every K. A phrase can move a query's anchor (hence its
+    // shard), so this exercises re-placement under an induced feature.
+    let (mut queries, titles) = build_corpus();
+    let q_plant = 8_400_001u64;
+    queries.push((q_plant, "1994 fleer zenith zonk".into())); // requires the adjacent pair
+    for id in 8_400_100u64..8_400_140 {
+        queries.push((id, "zenith zonk".into())); // plant a strong collocation
+    }
+    let plant_title = "1994 fleer zenith zonk psa 10";
+
+    let learn_cfg = reverse_rusty::vocab::CorpusLearnConfig {
+        corpus_phrases: true,
+        npmi_min_count: 3,
+        ..Default::default()
+    };
+
+    for &k in &[1usize, 3, 8] {
+        let cfg = ClusterConfig {
+            num_shards: k,
+            include_broad: true,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+
+        // Before induction "zenith"/"zonk" are distinct synthetic features; gluing has
+        // not happened, so the phrase-form title need not match yet — we only assert the
+        // POST-induction equivalence below (the headline).
+        let rebuilt = cluster
+            .learn_and_apply_with(&learn_cfg)
+            .expect("corpus-phrase learn_and_apply");
+        assert!(
+            rebuilt > 100,
+            "K={k}: learn_and_apply rebuilds the whole corpus (got {rebuilt})"
+        );
+
+        // The induced phrase is recorded on the cluster vocab (non-vacuous induction).
+        assert!(
+            cluster.vocab().is_some_and(|v| v
+                .phrases()
+                .iter()
+                .any(|p| p.tokens == vec!["zenith".to_string(), "zonk".to_string()])),
+            "K={k}: the planted zenith/zonk phrase must be induced + recorded"
+        );
+        // The phrase-form query matches the phrase-bearing title after induction (zero FN).
+        assert!(
+            cluster.percolate(plant_title).unwrap().contains(&q_plant),
+            "K={k}: the phrase-form query must match the phrase-bearing title after induction"
+        );
+
+        // Differential equivalence post-induction: cluster ≡ an independent phrase-aware
+        // brute carrying the SAME learned normalizer.
+        let learned = cluster.vocab().unwrap().clone();
+        let brute = Brute::build_with_vocab(&queries, learned.to_normalizer().unwrap());
+        let mut lc = String::new();
+        let mut feats = Vec::new();
+        for title in titles
+            .iter()
+            .map(String::as_str)
+            .take(120)
+            .chain([plant_title])
+        {
+            let got: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
+            let truth = brute.matches(title, &mut lc, &mut feats);
+            assert_eq!(
+                got, truth,
+                "K={k}: cluster disagrees with the phrase-aware oracle for {title:?}"
+            );
+        }
+    }
+}
+
 /// `ingest()` must refuse a non-empty cluster: it re-indexes from scratch, so calling it
 /// on an already-populated cluster would silently duplicate entries (the ADR-029 footgun).
 /// It returns `ShardError::Config` instead. (The happy path — ingest into a freshly

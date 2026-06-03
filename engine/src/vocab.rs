@@ -212,6 +212,63 @@ fn normalize_token(text: &str) -> String {
     out.trim_end_matches('_').to_string()
 }
 
+/// Configuration for [`learn_vocab_from_corpus`] — composes the ADR-015 any-of
+/// synonym learner with opt-in NPMI corpus phrase induction (ADR-053).
+///
+/// The default **disables** NPMI (`corpus_phrases = false`), so the result is
+/// byte-identical to [`learn_from_queries`] alone — every existing caller and
+/// oracle is unaffected until corpus phrases are explicitly requested.
+#[derive(Debug, Clone)]
+pub struct CorpusLearnConfig {
+    /// Minimum any-of occurrences for a synonym to be learned (the bare
+    /// `min_count` of [`learn_from_queries`]).
+    pub anyof_min_count: usize,
+    /// Enable NPMI corpus phrase induction (off by default).
+    pub corpus_phrases: bool,
+    /// NPMI binding-strength threshold for an induced phrase.
+    pub npmi_tau: f64,
+    /// Minimum adjacent co-occurrence count for an induced phrase. Defaults
+    /// small — a live corpus is far smaller than the `learn` binary's
+    /// 500k-query default (min_count 50).
+    pub npmi_min_count: usize,
+    /// Bigram -> trigram growth passes.
+    pub npmi_iterations: usize,
+}
+
+impl Default for CorpusLearnConfig {
+    fn default() -> Self {
+        Self {
+            anyof_min_count: 2,
+            corpus_phrases: false,
+            npmi_tau: 0.30,
+            npmi_min_count: 3,
+            npmi_iterations: 2,
+        }
+    }
+}
+
+/// Learn a vocabulary from a query corpus: the ADR-015 any-of synonym learner,
+/// plus — when `cfg.corpus_phrases` is set — NPMI-induced entity phrases
+/// ([`crate::corpus::learn_phrases_from_text`], ADR-053) merged on top.
+///
+/// The any-of result is the base and corpus phrases are merged **second**, so on
+/// a token collision the user-declared any-of phrase wins ([`Vocab::merge`] is
+/// first-wins). With `corpus_phrases = false` this returns exactly
+/// `learn_from_queries(corpus, cfg.anyof_min_count)`.
+pub fn learn_vocab_from_corpus(corpus: &[(u64, String)], cfg: &CorpusLearnConfig) -> Vocab {
+    let mut vocab = learn_from_queries(corpus, cfg.anyof_min_count);
+    if cfg.corpus_phrases {
+        let phrases = crate::corpus::learn_phrases_from_text(
+            corpus,
+            cfg.npmi_min_count,
+            cfg.npmi_tau,
+            cfg.npmi_iterations,
+        );
+        vocab.merge(&phrases);
+    }
+    vocab
+}
+
 // ── Vocab methods ───────────────────────────────────────────────────────────
 
 impl Vocab {
@@ -599,5 +656,60 @@ mod tests {
             crate::normalize::Normalizer::default_vocab().expect("default vocab"),
         );
         assert!(eng.snapshot().vocab().is_none());
+    }
+
+    #[test]
+    fn corpus_learn_default_off_equals_anyof_only() {
+        // The default CorpusLearnConfig disables NPMI, so the composer must be
+        // byte-identical to any-of learning alone (the back-compat guarantee, ADR-053).
+        let queries: Vec<(u64, String)> = (0..30)
+            .map(|i| (i, format!("(rookie,rc) upper deck unique{i:03}")))
+            .collect();
+        let cfg = CorpusLearnConfig {
+            anyof_min_count: 2,
+            ..Default::default()
+        };
+        let composed = learn_vocab_from_corpus(&queries, &cfg);
+        let anyof_only = learn_from_queries(&queries, 2);
+        assert_eq!(
+            composed.to_json().unwrap(),
+            anyof_only.to_json().unwrap(),
+            "with corpus_phrases off the composer must equal any-of learning alone"
+        );
+    }
+
+    #[test]
+    fn corpus_learn_on_adds_npmi_phrases() {
+        // No any-of groups -> any-of learning finds nothing; turning on NPMI induces the
+        // repeated adjacent "upper deck" entity as a phrase.
+        let queries: Vec<(u64, String)> = (0..30)
+            .map(|i| (i, format!("upper deck unique{i:03}")))
+            .collect();
+        let off = learn_vocab_from_corpus(
+            &queries,
+            &CorpusLearnConfig {
+                anyof_min_count: 2,
+                ..Default::default()
+            },
+        );
+        assert!(
+            off.phrases().is_empty(),
+            "no any-of groups -> no phrases when NPMI is off"
+        );
+        let on = learn_vocab_from_corpus(
+            &queries,
+            &CorpusLearnConfig {
+                anyof_min_count: 2,
+                corpus_phrases: true,
+                npmi_min_count: 3,
+                ..Default::default()
+            },
+        );
+        assert!(
+            on.phrases()
+                .iter()
+                .any(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()]),
+            "NPMI on must induce the upper/deck phrase"
+        );
     }
 }

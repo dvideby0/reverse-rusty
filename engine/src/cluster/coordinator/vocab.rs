@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::compile::{extract, Extracted};
 use crate::dict::Dict;
-use crate::vocab::Vocab;
+use crate::vocab::{CorpusLearnConfig, Vocab};
 
 use super::{into_shard, placement_of, replica_dir, shard_dir, ClusterEngine, Target};
 use crate::cluster::shard::{LocalShard, Shard, ShardError};
@@ -176,7 +176,25 @@ impl ClusterEngine {
     ///
     /// On-demand: a future step can drive this from compaction's "improve" phase (the
     /// LSM-shaped background re-materialize); this is the explicit trigger.
+    ///
+    /// A thin wrapper over [`learn_and_apply_with`](Self::learn_and_apply_with) with NPMI
+    /// corpus phrase induction disabled — behaviorally unchanged.
     pub fn learn_and_apply(&mut self, min_count: usize) -> Result<usize, ShardError> {
+        self.learn_and_apply_with(&CorpusLearnConfig {
+            anyof_min_count: min_count,
+            ..Default::default()
+        })
+    }
+
+    /// Like [`learn_and_apply`](Self::learn_and_apply) but also runs opt-in **NPMI corpus
+    /// phrase induction** when `cfg.corpus_phrases` is set (ADR-053): multi-token entities
+    /// induced from the cluster's live query text are merged UNDER the current vocabulary
+    /// (a declared alias/phrase wins on a token collision) and the cluster is rebuilt via
+    /// [`Self::set_vocab`] (which re-places every query — a phrase can move a query's anchor,
+    /// hence its shard). With `corpus_phrases = false` this is identical to
+    /// `learn_and_apply(cfg.anyof_min_count)`. Phrases only — never aliases — so the
+    /// same-normalizer gluing is lossless-cover safe. Refuses a non-local cluster.
+    pub fn learn_and_apply_with(&mut self, cfg: &CorpusLearnConfig) -> Result<usize, ShardError> {
         // Gather the live corpus to learn from (de-dup by logical id; a non-local shard
         // errors here — same boundary `set_vocab` enforces).
         let mut live: BTreeMap<u64, String> = BTreeMap::new();
@@ -186,7 +204,7 @@ impl ClusterEngine {
             }
         }
         let corpus: Vec<(u64, String)> = live.into_iter().collect();
-        let learned = crate::vocab::learn_from_queries(&corpus, min_count);
+        let learned = crate::vocab::learn_vocab_from_corpus(&corpus, cfg);
         // Merge learned rules UNDER the current vocab (declared aliases win), then rebuild.
         let mut merged = Vocab::new();
         if let Some(v) = &self.vocab {

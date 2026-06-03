@@ -23,6 +23,7 @@
 // visually parallel. It's a throwaway research tool, not library code.
 #![allow(clippy::zero_sized_map_values)]
 
+use reverse_rusty::corpus::{apply_phrases, learn_phrases, tokenize, Phrase};
 use reverse_rusty::gen::{generate, GenConfig};
 use std::collections::HashMap;
 
@@ -148,110 +149,6 @@ fn main() {
          statistics. The learner glues multi-token entities (raising selectivity) and the\n\
          signature optimizer already ranks anchors purely by frequency — no taxonomy required."
     );
-}
-
-#[derive(Clone)]
-struct Phrase {
-    token: String, // joined with '_'
-    count: usize,
-    npmi: f64,
-    df: usize,
-}
-
-fn tokenize(q: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    for ch in q.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '.' {
-            cur.push(ch.to_ascii_lowercase());
-        } else if !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-/// NPMI collocation mining over adjacent token pairs.
-fn learn_phrases(corpus: &[Vec<String>], min_count: usize, tau: f64) -> Vec<Phrase> {
-    let mut uni: HashMap<&str, usize> = HashMap::new();
-    let mut bi: HashMap<(&str, &str), usize> = HashMap::new();
-    let mut total_uni: u64 = 0;
-    let mut total_bi: u64 = 0;
-
-    for q in corpus {
-        for t in q {
-            *uni.entry(t.as_str()).or_insert(0) += 1;
-            total_uni += 1;
-        }
-        for w in q.windows(2) {
-            *bi.entry((w[0].as_str(), w[1].as_str())).or_insert(0) += 1;
-            total_bi += 1;
-        }
-    }
-
-    // df per bigram (count of queries containing the adjacent pair at least once)
-    let mut df: HashMap<(&str, &str), usize> = HashMap::new();
-    for q in corpus {
-        let mut seen: HashMap<(&str, &str), ()> = HashMap::new();
-        for w in q.windows(2) {
-            seen.entry((w[0].as_str(), w[1].as_str())).or_insert(());
-        }
-        for k in seen.keys() {
-            *df.entry(*k).or_insert(0) += 1;
-        }
-    }
-
-    let tu = total_uni as f64;
-    let tb = total_bi as f64;
-    let mut phrases = Vec::new();
-    for (&(a, b), &c) in &bi {
-        if c < min_count {
-            continue;
-        }
-        let p_ab = c as f64 / tb;
-        let p_a = *uni.get(a).unwrap_or(&1) as f64 / tu;
-        let p_b = *uni.get(b).unwrap_or(&1) as f64 / tu;
-        let pmi = (p_ab / (p_a * p_b)).ln();
-        let npmi = pmi / (-p_ab.ln());
-        if npmi >= tau {
-            phrases.push(Phrase {
-                token: format!("{a}_{b}"),
-                count: c,
-                npmi,
-                df: *df.get(&(a, b)).unwrap_or(&0),
-            });
-        }
-    }
-    phrases.sort_by_key(|p| std::cmp::Reverse(p.count));
-    phrases
-}
-
-/// Rewrite the corpus, merging any adjacent pair that was learned as a phrase.
-fn apply_phrases(corpus: &[Vec<String>], phrases: &[Phrase]) -> Vec<Vec<String>> {
-    let set: HashMap<String, ()> = phrases.iter().map(|p| (p.token.clone(), ())).collect();
-    corpus
-        .iter()
-        .map(|q| {
-            let mut out = Vec::with_capacity(q.len());
-            let mut i = 0;
-            while i < q.len() {
-                if i + 1 < q.len() {
-                    let cand = format!("{}_{}", q[i], q[i + 1]);
-                    if set.contains_key(&cand) {
-                        out.push(cand);
-                        i += 2;
-                        continue;
-                    }
-                }
-                out.push(q[i].clone());
-                i += 1;
-            }
-            out
-        })
-        .collect()
 }
 
 fn doc_freq_unigrams(corpus: &[Vec<String>]) -> HashMap<String, usize> {

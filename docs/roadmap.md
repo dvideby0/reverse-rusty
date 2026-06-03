@@ -98,9 +98,15 @@ items from an external review, re-ranked to the top; **all are now done:**
 - **Compaction-that-improves.** The merge mechanic is done; add the "improve" phase — recompute stats
   and re-anchor queries whose anchor drifted hot, repacking covers during a merge that's already
   happening. ([`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) §7.)
-- **Wire the NPMI learner as the runtime vocab source.** The `learn.rs` corpus learner and the `Vocab`
-  runtime plumbing both exist but aren't connected; wiring them lets the feature model self-derive from
-  the corpus. ([`research/corpus-feature-learning.md`](research/corpus-feature-learning.md).)
+- ~~**Wire the NPMI learner as the runtime vocab source.**~~ **✅ Shipped (ADR-053).** The `learn.rs`
+  NPMI collocation core is now a library module (`src/corpus.rs::learn_phrases_from_text`) that induces
+  multi-token entity **phrases** from the live query text and returns them as a `Vocab`, composed UNDER
+  the ADR-015 any-of learner via an **opt-in** `CorpusLearnConfig` threaded through
+  `Engine`/`ClusterEngine::learn_and_apply_with` (+ the `corpus_phrases` REST params on
+  `/_vocab/learn[/_and_apply]`). Phrases only — never aliases — so the same-normalizer gluing flows
+  through the proven `set_vocab`/recompile machinery with **zero false negatives** (oracle-proven,
+  single-engine + cluster); default-off ⇒ existing behavior byte-identical.
+  ([`research/corpus-feature-learning.md`](research/corpus-feature-learning.md).)
 - **Alias / equivalence learning** (e.g. `UD` ≡ `Upper Deck`) with the precision-first safety rail
   (expansion-not-collapse, feedback-validated, reversible) — the one feature-learning sub-problem that
   can affect correctness, so it stays confidence-gated.

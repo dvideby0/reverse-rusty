@@ -68,6 +68,21 @@ The `min_count` parameter (default: 2) controls how many times a synonym pair mu
 different queries before it's included. Higher values reduce noise. See [`dsl.md`](../dsl.md#vocabulary)
 for how vocabulary affects matching.
 
+**Opt-in NPMI corpus phrase induction (ADR-053).** Add `"corpus_phrases": true` to ALSO induce
+multi-token entity **phrases** (e.g. `upper deck` → `upper_deck`) from the supplied query text via NPMI
+collocation mining, on top of the any-of synonyms. Phrases only — never aliases — so applying them is
+lossless-cover safe (the same normalizer glues both queries and titles; zero false negatives). Tunable:
+`npmi_min_count` (min adjacent co-occurrence, default 3), `npmi_tau` (binding-strength threshold,
+default 0.30), `npmi_iterations` (bigram→trigram passes, default 2). Absent ⇒ any-of learning only,
+exactly as before.
+
+```bash
+curl -X POST localhost:9200/_vocab/learn \
+  -H 'Content-Type: application/json' \
+  -d '{"queries": [[1,"upper deck 1994"],[2,"upper deck rookie"]],
+       "corpus_phrases": true, "npmi_min_count": 2}'
+```
+
 ## `POST /_vocab/learn_and_apply` — Learn from stored queries and apply
 
 Learn synonyms from the engine's **own** already-ingested queries and apply them in one step (unlike
@@ -89,4 +104,13 @@ curl -X POST 'localhost:9200/_vocab/learn_and_apply?min_count=2'
 
 `min_count` (query parameter, default: 2) is the minimum any-of occurrences before a synonym pair is
 learned; `recompiled` is the number of stored queries rebuilt under the new vocabulary.
+
+Add `?corpus_phrases=true` to ALSO self-derive entity **phrases** from the engine's own live query text
+via NPMI corpus phrase induction (ADR-053), applied through the same recompile/blue-green rebuild with
+zero false negatives. Tunable via `npmi_min_count` (default 3), `npmi_tau` (default 0.30), and
+`npmi_iterations` (default 2). Absent ⇒ any-of learning only (byte-identical to before).
+
+```bash
+curl -X POST 'localhost:9200/_vocab/learn_and_apply?corpus_phrases=true&npmi_min_count=3'
+```
 

@@ -73,17 +73,54 @@ pub(crate) struct LearnRequest {
     queries: Vec<(u64, String)>,
     #[serde(default = "default_min_count")]
     min_count: usize,
+    /// Opt-in NPMI corpus phrase induction (ADR-053); off by default.
+    #[serde(default)]
+    corpus_phrases: bool,
+    #[serde(default)]
+    npmi_tau: Option<f64>,
+    #[serde(default)]
+    npmi_min_count: Option<usize>,
+    #[serde(default)]
+    npmi_iterations: Option<usize>,
 }
 
 fn default_min_count() -> usize {
     2
 }
 
-/// POST /_vocab/learn — learn synonyms from raw query text. Returns the
-/// learned vocabulary without applying it. The caller can review, edit,
-/// and then PUT /_vocab to apply.
+/// Build a [`CorpusLearnConfig`](reverse_rusty::vocab::CorpusLearnConfig) from the
+/// shared learn-endpoint params, falling back to the engine defaults for any absent
+/// NPMI knob (so `CorpusLearnConfig::default()` stays the single source of truth).
+fn build_corpus_config(
+    min_count: usize,
+    corpus_phrases: bool,
+    npmi_tau: Option<f64>,
+    npmi_min_count: Option<usize>,
+    npmi_iterations: Option<usize>,
+) -> reverse_rusty::vocab::CorpusLearnConfig {
+    let d = reverse_rusty::vocab::CorpusLearnConfig::default();
+    reverse_rusty::vocab::CorpusLearnConfig {
+        anyof_min_count: min_count,
+        corpus_phrases,
+        npmi_tau: npmi_tau.unwrap_or(d.npmi_tau),
+        npmi_min_count: npmi_min_count.unwrap_or(d.npmi_min_count),
+        npmi_iterations: npmi_iterations.unwrap_or(d.npmi_iterations),
+    }
+}
+
+/// POST /_vocab/learn — learn synonyms (ADR-015 any-of) and, with
+/// `corpus_phrases=true`, NPMI-induced entity phrases (ADR-053) from raw query
+/// text. Returns the learned vocabulary without applying it. The caller can
+/// review, edit, and then PUT /_vocab to apply.
 pub(crate) async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoResponse {
-    let vocab = reverse_rusty::vocab::learn_from_queries(&req.queries, req.min_count);
+    let cfg = build_corpus_config(
+        req.min_count,
+        req.corpus_phrases,
+        req.npmi_tau,
+        req.npmi_min_count,
+        req.npmi_iterations,
+    );
+    let vocab = reverse_rusty::vocab::learn_vocab_from_corpus(&req.queries, &cfg);
     Json(vocab)
 }
 
@@ -92,6 +129,19 @@ pub(crate) struct LearnApplyQuery {
     /// Minimum any-of occurrences for a synonym to be learned (ES-style query param).
     #[serde(default = "default_min_count")]
     min_count: usize,
+    /// Opt-in NPMI corpus phrase induction (ADR-053); off by default — when absent the
+    /// endpoint is byte-identical to before (any-of learning only).
+    #[serde(default)]
+    corpus_phrases: bool,
+    /// NPMI binding-strength threshold (defaults to the engine default).
+    #[serde(default)]
+    npmi_tau: Option<f64>,
+    /// Minimum adjacent co-occurrence count for an induced phrase.
+    #[serde(default)]
+    npmi_min_count: Option<usize>,
+    /// Bigram -> trigram growth passes.
+    #[serde(default)]
+    npmi_iterations: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -101,18 +151,27 @@ struct LearnApplyResponse {
     recompiled: usize,
 }
 
-/// POST /_vocab/learn_and_apply — learn synonyms from the engine's OWN stored queries
-/// (ADR-015 any-of learning) and APPLY them immediately (ADR-046), recompiling the index
-/// so both surface forms of each learned alias match (zero false negatives). `?min_count=N`
-/// (default 2) sets the minimum any-of occurrences. Unlike `POST /_vocab/learn` — which only
-/// returns a vocabulary learned from caller-supplied queries — this changes the live vocabulary.
+/// POST /_vocab/learn_and_apply — learn from the engine's OWN stored queries and APPLY
+/// immediately (ADR-046), recompiling the index so the change takes effect with zero false
+/// negatives. By default this is ADR-015 any-of synonym learning (`?min_count=N`, default 2).
+/// With `?corpus_phrases=true` it ALSO runs NPMI corpus phrase induction (ADR-053) — entity
+/// phrases self-derived from the live query text — tunable via `npmi_tau`, `npmi_min_count`,
+/// `npmi_iterations` (all defaulting to the engine defaults). Unlike `POST /_vocab/learn`,
+/// this changes the live vocabulary.
 pub(crate) async fn learn_and_apply_vocab(
     State(state): State<Arc<AppState>>,
     Query(q): Query<LearnApplyQuery>,
 ) -> impl IntoResponse {
+    let cfg = build_corpus_config(
+        q.min_count,
+        q.corpus_phrases,
+        q.npmi_tau,
+        q.npmi_min_count,
+        q.npmi_iterations,
+    );
     let result = {
         let mut engine = state.engine.lock();
-        match engine.learn_and_apply(q.min_count) {
+        match engine.learn_and_apply_with(&cfg) {
             Ok(recompiled) => (
                 StatusCode::OK,
                 Json(LearnApplyResponse {

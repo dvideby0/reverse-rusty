@@ -328,12 +328,33 @@ impl Engine {
     /// any-of groups (e.g. `(rookie,rc)` ⇒ `rc → rookie`) is merged UNDER the current
     /// vocabulary (a previously set alias wins) and the index is recompiled so the change
     /// takes effect immediately. Returns the number of queries recompiled.
+    ///
+    /// A thin wrapper over [`learn_and_apply_with`](Self::learn_and_apply_with) with NPMI
+    /// corpus phrase induction disabled — behaviorally unchanged.
     pub fn learn_and_apply(
         &mut self,
         min_count: usize,
     ) -> Result<usize, crate::error::NormalizerError> {
+        self.learn_and_apply_with(&crate::vocab::CorpusLearnConfig {
+            anyof_min_count: min_count,
+            ..Default::default()
+        })
+    }
+
+    /// Like [`learn_and_apply`](Self::learn_and_apply) but also runs opt-in **NPMI corpus
+    /// phrase induction** when `cfg.corpus_phrases` is set (ADR-053): multi-token entities
+    /// induced from the live query text (e.g. `upper deck`) are merged UNDER the current
+    /// vocabulary (a declared alias/phrase wins on a token collision) and the index is
+    /// recompiled. With `corpus_phrases = false` this is identical to
+    /// `learn_and_apply(cfg.anyof_min_count)`. Phrases only — never aliases — so the
+    /// same-normalizer gluing is lossless-cover safe (zero false negatives). Returns the
+    /// number of queries recompiled.
+    pub fn learn_and_apply_with(
+        &mut self,
+        cfg: &crate::vocab::CorpusLearnConfig,
+    ) -> Result<usize, crate::error::NormalizerError> {
         let corpus = self.live_sources();
-        let learned = crate::vocab::learn_from_queries(&corpus, min_count);
+        let learned = crate::vocab::learn_vocab_from_corpus(&corpus, cfg);
         let mut merged = crate::vocab::Vocab::new();
         if let Some(v) = &self.vocab {
             merged.merge(v);

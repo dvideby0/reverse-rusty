@@ -143,7 +143,8 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `grpc/` (member `reverse-rusty-shard-proto`) | Workspace member holding the generated gRPC `ShardService` (protobuf messages + tonic client/server). Built only under `distributed`; codegen via pure-Rust `protox` in `build.rs` (no system `protoc`), nothing checked in. | ADR-029 |
 | `src/explain.rs` | Debug/explain tooling (first-class, not bolt-on) + structured `ExplainDetail` for API | [matching.md](docs/design/matching.md) §6 |
 | `src/gen.rs` | Synthetic data generator (deterministic, seeded) | — |
-| `src/vocab.rs` | Runtime vocabulary learning from query any-of groups, `Vocab` struct, JSON persistence | ADR-015 |
+| `src/vocab.rs` | Runtime vocabulary: the any-of synonym learner + `Vocab` struct + JSON persistence (ADR-015); `CorpusLearnConfig`/`learn_vocab_from_corpus` compose the opt-in NPMI phrase learner under it (ADR-053) | ADR-015, ADR-053 |
+| `src/corpus.rs` | NPMI collocation core (`tokenize`/`learn_phrases`/`apply_phrases`) + `learn_phrases_from_text` → `Vocab` of induced entity phrases; lean-core, shared by `bin/learn.rs` + `vocab.rs` | ADR-053; [corpus-feature-learning.md](docs/research/corpus-feature-learning.md) |
 | `src/error.rs` | Typed `ParseError` with `ParseErrorKind` enum | — |
 | `src/loader.rs` | Query file loader (CSV + JSONL auto-detection) | — |
 | `src/util.rs` | FNV-1a hash (stable across runs), FastMap alias | — |
@@ -165,7 +166,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/bin/controlserver.rs` | Deployable cluster-manager node: serves the openraft `ControlService` over gRPC (feature `distributed`); `--bootstrap` forms the initial cluster from `--peer ID=URL` members; `--data-dir` makes it **durable** (ADR-041 — persists its Raft log/vote/committed/snapshot, resumes its committed cluster-state doc on restart) | ADR-038, ADR-041 |
 | `src/bin/bench.rs` | Benchmark harness | — |
 | `src/bin/clusterbench.rs` | Cluster fan-out benchmark: shards-probed/title (avg/p95/p99), candidate structure + broad share, fan-out-vs-K sweep (machine-independent) | ADR-027 |
-| `src/bin/learn.rs` | Corpus feature learner (NPMI) | [corpus-feature-learning.md](docs/research/corpus-feature-learning.md) |
+| `src/bin/learn.rs` | Corpus feature-learner CLI — a thin demo over `corpus.rs` (prints NPMI entity/selectivity tables) | [corpus-feature-learning.md](docs/research/corpus-feature-learning.md) |
 | `src/bin/norm.rs` | Title introspection tool | — |
 | `src/bin/segbench.rs` | Read-amplification vs segment count harness | — |
 | `src/bin/snapbench.rs` | Snapshot read/publish concurrency benchmark | ADR-016 |
