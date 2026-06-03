@@ -250,3 +250,72 @@ fn corpus_over_threshold_recommends_split() {
         "a split advisory changes no match set"
     );
 }
+
+#[test]
+fn tick_emits_handoff_under_skew_without_perturbing_matching() {
+    // ADR-048: node-skew's advisory `Handoff` (ADR-045) is now WIRED to `execute_handoff`. In a
+    // non-`distributed` (in-process) cluster there is no runtime handle and no remote endpoint, so
+    // the driver compiles the wiring out and the `Handoff` is RETURNED but never acted on. This
+    // proves the policy still emits it under skew AND — the load-bearing property — matching is
+    // byte-identical across the tick (the wiring introduces no false negative on the lean path).
+    let (cluster, titles) = build();
+    for id in 1..=3 {
+        cluster.register_node(data_node(id)).expect("register");
+    }
+    // Spread the corpus across the nodes so per-node load is well-defined and skewed.
+    cluster.rebalance(RF).expect("rebalance");
+    let base_broad = sweep(&cluster, &titles, true);
+    let base_plain = sweep(&cluster, &titles, false);
+
+    // Derive the actual per-node primary load from the committed map + live shard corpus, then set
+    // the skew threshold just below the observed max/mean so node-skew fires deterministically on
+    // this seeded corpus (no magic constant that could drift with the generator).
+    let state = cluster.control_state().expect("state");
+    let counts = cluster.shard_query_counts().expect("counts");
+    let mut node_load: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+    for a in &state.assignments {
+        if let Some(&c) = counts.get(a.position as usize) {
+            *node_load.entry(a.primary.0).or_default() += c;
+        }
+    }
+    assert!(
+        node_load.len() >= 2,
+        "need ≥2 loaded nodes to skew between: {node_load:?}"
+    );
+    let total: usize = node_load.values().sum();
+    let mean = total as f64 / node_load.len() as f64;
+    let max = *node_load.values().max().expect("non-empty") as f64;
+    assert!(
+        max > mean,
+        "the seeded corpus must distribute unevenly across nodes: {node_load:?}"
+    );
+    // Strictly between mean and max ⇒ hot_load > skew*mean ⇒ exactly the node-skew rule fires.
+    let skew = (max / mean - 0.01).max(1.0 + f64::EPSILON);
+    let cfg = AutoscaleConfig {
+        enabled: true,
+        target_replication_factor: RF,
+        max_node_load_skew: skew,
+        split_corpus_threshold: 0,
+    };
+
+    let decision = cluster.tick(&cfg).expect("tick");
+    assert!(
+        decision
+            .actions
+            .iter()
+            .any(|a| matches!(a, ScalingAction::Handoff { .. })),
+        "node load skewed past the threshold must recommend a handoff: {decision:?}"
+    );
+
+    // The crux: the wiring did not perturb matching (in-process ⇒ the handoff is advisory only).
+    assert_eq!(
+        sweep(&cluster, &titles, true),
+        base_broad,
+        "matching unchanged across the tick (broad on)"
+    );
+    assert_eq!(
+        sweep(&cluster, &titles, false),
+        base_plain,
+        "matching unchanged across the tick (broad off)"
+    );
+}

@@ -177,6 +177,21 @@ pub struct EngineConfig {
     ///
     /// Default: `10_000`
     pub max_percolate_batch: usize,
+
+    /// Translog peer-recovery retention-lease TTL, in seconds (ADR-048). A lease pins a
+    /// recovery source's un-sealed translog tail so a concurrent seal can't trim it
+    /// (ADR-040); a recovery renews its lease every catch-up pass (the heartbeat). If a
+    /// lease has not been renewed within this window it is presumed dead — a crashed or
+    /// stalled recovering node — and is reaped at the next `seal_for_checkpoint`, so the
+    /// source can reclaim its tail instead of pinning it forever.
+    ///
+    /// Must exceed the longest expected single-shard peer recovery (a stall this long means
+    /// the recovery is effectively dead). `0` disables the TTL entirely (a lease never
+    /// expires — byte-identical to ADR-040). Only affects durable cluster shards; ignored by
+    /// an in-memory shard that never seals.
+    ///
+    /// Default: `1800` (30 minutes)
+    pub retention_lease_ttl_secs: u64,
 }
 
 impl Default for EngineConfig {
@@ -198,6 +213,7 @@ impl Default for EngineConfig {
             broad_columnar: true,
             broad_materialize: true,
             max_percolate_batch: 10_000,
+            retention_lease_ttl_secs: 1800,
         }
     }
 }
