@@ -43,6 +43,22 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 | **Cluster oracle** | `tests/cluster_oracle.rs` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}; every placement class + fan-out asserted; dynamic-vocabulary absorb-correctly (hashed new tokens don't broaden, declared + auto-learned aliases make both surface forms match). **Half the Cluster-v1 gate (below).** |
 | **Cluster durability** | `tests/cluster_durability_oracle.rs` | A `data_dir` cluster rebuilt from manifest + per-shard segments + coordinator log ≡ pre-crash ≡ brute, K∈{1,3,8} × broad; checkpoint, torn-tail recovery, fail-loud guards, alias-survives-reopen. **Half the Cluster-v1 gate (below).** |
 
+### What the oracle does and does not verify
+
+The differential oracle independently reimplements only the **back half** of the pipeline — candidate
+retrieval and exact verification (a brute-force scan with its own `Dict`/`Normalizer` instances). For the
+**front half** it calls the engine's own `dsl::parse`, `compile::extract`, and `Normalizer`, and runs them
+under the empty `default_vocab`. So a semantic bug in the parser, the feature extractor, or the
+normalization model would corrupt the brute-force ground truth and the engine identically — the oracle
+would still pass — and the vocab-driven normalization paths (multiword phrases, synonyms, graders) are
+never exercised by it at all. Those three front-end stages are instead pinned by **hand-authored golden
+tests** (in-module `#[cfg(test)] mod golden` in `src/dsl.rs`, `src/normalize.rs`, `src/compile.rs`), whose
+expected values are written from the spec ([`reference/dsl.md`](reference/dsl.md),
+[`design/normalization.md`](design/normalization.md), [`design/matching.md`](design/matching.md) §1); the
+vocab-driven path is additionally run end-to-end by `zero_false_negatives_with_populated_vocab` in
+`tests/oracle.rs`. Rationale + the declined "independent reference extractor" alternative →
+[`DECISIONS.md`](DECISIONS.md) ADR-050.
+
 ### The Cluster-v1 acceptance gate
 
 `tests/cluster_oracle.rs` + `tests/cluster_durability_oracle.rs` are the **named acceptance gate for

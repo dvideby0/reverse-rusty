@@ -6,13 +6,18 @@
 //!   * ZERO false negatives  (every true match is returned)  <-- the hard requirement
 //!   * ZERO false positives  (the exact matcher is exact)
 //!
-//! The brute-force side uses its own independent Dict/Normalizer so it can't
-//! share a bug with the engine's index.
+//! The brute-force side uses its own Dict/Normalizer *instances* and independently
+//! reimplements candidate retrieval + exact verification — so an index / retrieval /
+//! verify bug can't hide here. It does NOT independently verify the FRONT END: it calls
+//! the engine's own `dsl::parse`, `compile::extract`, and `Normalizer` (and, except in
+//! `zero_false_negatives_with_populated_vocab`, the empty `default_vocab`). The parser,
+//! extractor, and normalization-model semantics are pinned instead by the spec-authored
+//! golden tests in `src/{dsl,normalize,compile}.rs` (`mod golden`). See DECISIONS.md ADR-050.
 
 use reverse_rusty::compile::{extract, Extracted};
-use reverse_rusty::dict::Dict;
+use reverse_rusty::dict::{Dict, FeatureKind};
 use reverse_rusty::gen::{generate, GenConfig};
-use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::normalize::{Normalizer, NormalizerBuilder};
 use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy, Engine, MatchScratch};
 use std::collections::HashSet;
 
@@ -25,7 +30,17 @@ struct Brute {
 
 impl Brute {
     fn build(queries: &[(u64, String)]) -> Self {
-        let norm = Normalizer::default_vocab().expect("built-in vocab");
+        Self::build_with(
+            queries,
+            Normalizer::default_vocab().expect("built-in vocab"),
+        )
+    }
+
+    /// Build the brute reference with an explicit normalizer vocabulary. The default
+    /// `build` uses the empty `default_vocab` (so the phrase/synonym/grader paths are
+    /// never exercised); `zero_false_negatives_with_populated_vocab` passes a populated
+    /// one so they are. See docs/DECISIONS.md ADR-050.
+    fn build_with(queries: &[(u64, String)], norm: Normalizer) -> Self {
         let mut dict = Dict::new();
         let mut lc = String::new();
         let mut qs = Vec::new();
@@ -718,4 +733,115 @@ fn spec_example_matches_expected() {
             "did NOT expect match for {t:?}, got {out:?}"
         );
     }
+}
+
+// ---- Vocab-rich oracle pass (ADR-050) ----
+
+/// A populated normalizer vocabulary aligned to the synthetic generator's surface
+/// forms (`gen.rs`): multiword player/brand phrases, single-token brand, brand-alt,
+/// and card-term synonyms, plus graders and grade words. The default oracle runs the
+/// empty `default_vocab`, so the multiword-phrase / synonym / grader normalization
+/// machinery is never exercised on either side; this builds it so the differential
+/// check covers that machinery end-to-end. Both the engine and the brute reference use
+/// it, so they still agree by construction unless the engine's index/verify diverges.
+fn gen_vocab() -> Normalizer {
+    use reverse_rusty::gen::{BRANDS, BRAND_ALT, CARD_TERMS, GRADERS, PLAYERS};
+    let mut b = NormalizerBuilder::new();
+    for p in PLAYERS {
+        let canon = format!("player:{}", p.replace(' ', "_"));
+        let toks: Vec<&str> = p.split(' ').collect();
+        b.add_phrase(&toks, &canon, FeatureKind::Player);
+    }
+    for brand in BRANDS {
+        let canon = format!("brand:{}", brand.replace(' ', "_"));
+        let toks: Vec<&str> = brand.split(' ').collect();
+        if toks.len() > 1 {
+            b.add_phrase(&toks, &canon, FeatureKind::Brand);
+        } else {
+            b.add_synonym(toks[0], &canon, FeatureKind::Brand);
+        }
+    }
+    // Alternate brand surface forms (e.g. "ud" -> brand:upper_deck) converge onto the
+    // same canonical as the full brand at the matching index.
+    for (alt, brand) in BRAND_ALT.iter().zip(BRANDS.iter()) {
+        let canon = format!("brand:{}", brand.replace(' ', "_"));
+        b.add_synonym(alt, &canon, FeatureKind::Brand);
+    }
+    for ct in CARD_TERMS {
+        b.add_synonym(ct, &format!("card_term:{ct}"), FeatureKind::Category);
+    }
+    for g in GRADERS {
+        b.add_grader(g);
+    }
+    b.add_grade_word("gem");
+    b.add_grade_word("mint");
+    b.build().expect("gen vocab automaton")
+}
+
+/// Same contract as `zero_false_negatives_against_oracle`, but engine AND brute are
+/// built with a POPULATED vocab (`gen_vocab`) instead of the empty `default_vocab`.
+/// This exercises the multiword-phrase / synonym / grader normalization paths the
+/// default oracle never reaches (ADR-050). Still a coherence check (shared front-end),
+/// so it complements — does not replace — the spec-authored golden tests in
+/// `src/{dsl,normalize,compile}.rs`.
+#[test]
+fn zero_false_negatives_with_populated_vocab() {
+    let cfg = GenConfig {
+        num_queries: 40_000,
+        num_titles: 4_000,
+        broad_query_frac: 0.06,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0x1234_5678,
+        num_players: 3_000,
+        num_sets: 1_200,
+    };
+    let data = generate(&cfg);
+
+    let mut eng = Engine::new(gen_vocab());
+    eng.build_from_queries(&data.queries);
+
+    let brute = Brute::build_with(&data.queries, gen_vocab());
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    let mut blc = String::new();
+    let mut bfeats = Vec::new();
+
+    let mut total_truth = 0usize;
+    let mut false_neg = 0usize;
+    let mut false_pos = 0usize;
+
+    for title in &data.titles {
+        eng.match_title(title, &mut s, &mut out, true);
+        let engine_set: HashSet<u64> = out.iter().copied().collect();
+        let truth = brute.matches(title, &mut blc, &mut bfeats);
+        total_truth += truth.len();
+        for t in &truth {
+            if !engine_set.contains(t) {
+                false_neg += 1;
+            }
+        }
+        for e in &engine_set {
+            if !truth.contains(e) {
+                false_pos += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "vocab-rich oracle: truth_matches={total_truth} false_neg={false_neg} false_pos={false_pos}"
+    );
+    assert_eq!(
+        false_neg, 0,
+        "FALSE NEGATIVES with populated vocab — contract violated"
+    );
+    assert_eq!(
+        false_pos, 0,
+        "false positives with populated vocab — exact matcher not exact"
+    );
+    assert!(
+        total_truth > 0,
+        "degenerate test: no matches with populated vocab"
+    );
 }
