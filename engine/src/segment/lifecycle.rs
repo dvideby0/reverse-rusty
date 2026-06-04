@@ -21,7 +21,12 @@ impl Engine {
     /// Create an engine with explicit configuration. If `config.data_dir` is set,
     /// initializes the data directory and WAL.
     pub fn with_config(norm: Normalizer, config: EngineConfig) -> Self {
-        Self::with_shared(Arc::new(norm), Arc::new(Dict::new()), config)
+        Self::with_shared(
+            Arc::new(norm),
+            Arc::new(Dict::new()),
+            Arc::new(TagDict::new()),
+            config,
+        )
     }
 
     /// Create an engine that SHARES a pre-built normalizer and dictionary (by
@@ -31,7 +36,12 @@ impl Engine {
     /// [`crate::cluster`]). The dict must be treated as frozen — shard ingest uses
     /// the read-only `*_extracted` paths so it is never `Arc::make_mut`'d (which
     /// would fork it and break cross-shard agreement).
-    pub fn with_shared(norm: Arc<Normalizer>, dict: Arc<Dict>, config: EngineConfig) -> Self {
+    pub fn with_shared(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+    ) -> Self {
         let mut wal_healthy = true;
         // Diagnostics raised here predate any observer (it is attached after
         // construction via `set_observer`), so they are buffered and replayed on
@@ -67,7 +77,7 @@ impl Engine {
             norm,
             vocab: None,
             dict,
-            tag_dict: Arc::new(TagDict::new()),
+            tag_dict,
             segments: Vec::new(),
             memtable: Arc::new(Segment::new()),
             rejected_parse: 0,
@@ -111,6 +121,7 @@ impl Engine {
     pub fn with_shared_segments_only(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
         config: EngineConfig,
     ) -> std::io::Result<Self> {
         let dir = config.data_dir.as_ref().ok_or_else(|| {
@@ -126,7 +137,7 @@ impl Engine {
             norm,
             vocab: None,
             dict,
-            tag_dict: Arc::new(TagDict::new()),
+            tag_dict,
             segments: Vec::new(),
             memtable: Arc::new(Segment::new()),
             rejected_parse: 0,
@@ -525,6 +536,7 @@ impl Engine {
     pub fn open_shared_segments(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
         config: EngineConfig,
         files: &[String],
         next_seg_id: u64,
@@ -552,10 +564,10 @@ impl Engine {
             norm,
             vocab: None,
             dict,
-            // A cluster shard would share the coordinator's frozen tag space (ADR-049);
-            // threading tags through the cluster is a follow-on, so a shard starts with an
-            // empty tag dict today.
-            tag_dict: Arc::new(TagDict::new()),
+            // The cluster shard shares the coordinator's frozen tag space (ADR-049/055): the
+            // attached segments already carry resolved `TagId`s, and this shared dict resolves any
+            // later live-add / translog-replayed tags consistently. Empty ⇒ untagged cluster.
+            tag_dict,
             segments,
             memtable: Arc::new(Segment::new()),
             rejected_parse: 0,

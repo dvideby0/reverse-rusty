@@ -2,15 +2,15 @@
 //!
 //! [`Shard`] abstracts the OPERATION a coordinator performs on a shard, never the
 //! shard's internal data: a remote shard has no in-process [`EngineSnapshot`], so the
-//! trait exposes [`Shard::percolate`] (the matched ids + stats for one title) rather
+//! trait exposes [`Shard::percolate_filtered`] (the matched ids + stats for one title) rather
 //! than handing back a snapshot. [`LocalShard`] is the in-process impl — an owned
 //! [`Engine`] (writes serialized behind a `std::sync::Mutex`) plus an
 //! `ArcSwap<EngineSnapshot>` for lock-free reads, exactly the per-engine pattern the
-//! HTTP server uses. It does NOT re-implement matching; `percolate` delegates to
-//! [`EngineSnapshot::match_title`]. Every `LocalShard` is constructed with
-//! [`Engine::with_shared`] over the coordinator's frozen normalizer + dict, and all
-//! writes go through the read-only `*_extracted` paths so the shared `Arc<Dict>` is
-//! never forked.
+//! HTTP server uses. It does NOT re-implement matching; `percolate_filtered` delegates to
+//! [`EngineSnapshot::match_title_filtered`]. Every `LocalShard` is constructed with
+//! [`Engine::with_shared`] over the coordinator's frozen normalizer + dict + tag dict, and all
+//! writes go through the read-only `*_extracted` paths so the shared `Arc<Dict>` /
+//! `Arc<TagDict>` is never forked.
 //!
 //! Every operation returns [`Result<_, ShardError>`]: a `LocalShard` is infallible
 //! (it always returns `Ok`), but a remote shard can fail on the wire. Surfacing that
@@ -31,8 +31,10 @@ use crate::compile::{extract_readonly, Extracted};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::events::{DurabilityOp, EngineEvent};
+use crate::exact::TagPredicate;
 use crate::normalize::Normalizer;
-use crate::segment::{Engine, EngineSnapshot, IngestReport, MatchScratch, MatchStats};
+use crate::segment::{Engine, EngineSnapshot, IngestReport, MatchScratch, MatchStats, PlacedQuery};
+use crate::tagdict::TagDict;
 
 use super::clog::{ClusterMutation, LogPos};
 use super::translog;
@@ -145,11 +147,21 @@ pub(crate) type EventSink = Arc<dyn Fn(&crate::events::EngineEvent) + Send + Syn
 /// `assert_send_sync::<ClusterEngine>()` guard in `lib.rs`.
 pub(crate) trait Shard: Send + Sync {
     // ---- reads ----
-    /// Probe this shard for one title; returns matched logical ids + match stats.
-    fn percolate(
+    /// Probe this shard for one title, narrowed by an ALREADY-RESOLVED tag filter (ADR-049/055):
+    /// the coordinator compiles the request's `(key,[values])` groups to `TagId`s once against the
+    /// shared frozen tag space and fans the same `&TagPredicate` to every probed shard, so the shard
+    /// never re-resolves it. An empty predicate (`TagPredicate::empty()`) is an unfiltered probe,
+    /// byte-identical to the pre-tag path (the verify clause is a never-taken branch). Returns the
+    /// matched logical ids + match stats. The coordinator's unfiltered [`percolate`] passes the empty
+    /// predicate; only [`percolate_filtered`] threads a real one.
+    ///
+    /// [`percolate`]: crate::cluster::ClusterEngine::percolate
+    /// [`percolate_filtered`]: crate::cluster::ClusterEngine::percolate_filtered
+    fn percolate_filtered(
         &self,
         title: &str,
         include_broad: bool,
+        pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError>;
     /// Physical query count held by this shard (a replicated/any-of query is counted
     /// once per local entry, so it is counted on each shard holding it).
@@ -187,17 +199,18 @@ pub(crate) trait Shard: Send + Sync {
     /// `ClusterEngine::build` does NOT use this; it ingests via the infallible inherent
     /// [`LocalShard::ingest_local`] so that constructing an in-process cluster stays
     /// infallible. This seam method is what lets the coordinator load a *remote* shard.
-    fn ingest_extracted(
-        &self,
-        items: &[(u64, Extracted, String, u32)],
-    ) -> Result<IngestReport, ShardError>;
-    /// Insert one pre-extracted query into the memtable (live add).
-    fn insert_extracted(
+    fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError>;
+    /// Insert one pre-extracted query into the memtable (live add), carrying the query's raw
+    /// `(key,value)` metadata tags (ADR-049/055), resolved to `TagId`s read-only against the shared
+    /// frozen tag space; an empty `tags` slice is an untagged insert, byte-identical to the pre-tag
+    /// path (the coordinator's untagged adds pass `&[]`).
+    fn insert_extracted_with_tags(
         &self,
         ex: &Extracted,
         logical: u64,
         version: u32,
         text: &str,
+        tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError>;
     /// Tombstone every live entry for `logical` (idempotent; a cheap no-op on a shard
     /// that doesn't hold it).
@@ -266,10 +279,14 @@ pub(crate) trait Shard: Send + Sync {
     /// A retention lease pins the primary's tail across the flow, so a concurrent seal can't strand
     /// it. Default: error — only a replicated position ([`ReplicatedShard`](super::replica::ReplicatedShard))
     /// can grow a local replica here (a bare/remote position has no in-process primary to copy from).
+    // The recovery genuinely needs the feature space (norm/dict/tag_dict), the engine config, both
+    // dirs, and the convergence cap; bundling them would only obscure the call.
+    #[allow(clippy::too_many_arguments)]
     fn add_recovered_replica(
         &self,
         _norm: &Arc<Normalizer>,
         _dict: &Arc<Dict>,
+        _tag_dict: &Arc<TagDict>,
         _config: EngineConfig,
         _primary_dir: &Path,
         _replica_dir: &Path,
@@ -403,9 +420,16 @@ impl LocalShard {
     /// Build a shard sharing the coordinator's frozen normalizer + dict. In-memory ⇒ a
     /// no-op [`NullClusterLog`](super::clog::NullClusterLog) translog (byte-identical to
     /// pre-ADR-039) and no checkpoint sidecar.
-    pub(crate) fn new(norm: Arc<Normalizer>, dict: Arc<Dict>, config: EngineConfig) -> Self {
+    pub(crate) fn new(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+    ) -> Self {
         let retention_lease_ttl = resolve_lease_ttl(&config);
-        let engine = Engine::with_shared(Arc::clone(&norm), Arc::clone(&dict), config);
+        // `tag_dict` is moved into the engine (the shard keeps no separate copy — the engine holds
+        // the shared frozen tag space and does all read-only resolution against it).
+        let engine = Engine::with_shared(Arc::clone(&norm), Arc::clone(&dict), tag_dict, config);
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         LocalShard {
             engine: Mutex::new(engine),
@@ -428,19 +452,24 @@ impl LocalShard {
     pub(crate) fn new_durable(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
         config: EngineConfig,
     ) -> Result<Self, ShardError> {
         let dir = config.data_dir.clone().ok_or_else(|| {
             ShardError::Log("durable shard requires a data_dir for its translog".into())
         })?;
         if let Some(ckpt) = translog::read_sidecar(&dir)? {
-            return Self::open_durable_self(norm, dict, config, &ckpt);
+            return Self::open_durable_self(norm, dict, tag_dict, config, &ckpt);
         }
         let retention_lease_ttl = resolve_lease_ttl(&config);
         let translog = translog::open_fresh(&dir, config.wal_sync_on_write)?;
-        let engine =
-            Engine::with_shared_segments_only(Arc::clone(&norm), Arc::clone(&dict), config)
-                .map_err(|e| ShardError::Log(format!("creating durable shard: {e}")))?;
+        let engine = Engine::with_shared_segments_only(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            tag_dict,
+            config,
+        )
+        .map_err(|e| ShardError::Log(format!("creating durable shard: {e}")))?;
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         Ok(LocalShard {
             engine: Mutex::new(engine),
@@ -464,6 +493,7 @@ impl LocalShard {
     pub(crate) fn open_segments(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
         config: EngineConfig,
         files: &[String],
         next_seg_id: u64,
@@ -477,6 +507,7 @@ impl LocalShard {
         let engine = Engine::open_shared_segments(
             Arc::clone(&norm),
             Arc::clone(&dict),
+            tag_dict,
             config,
             files,
             next_seg_id,
@@ -504,6 +535,7 @@ impl LocalShard {
     fn open_durable_self(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
         config: EngineConfig,
         ckpt: &translog::ShardCheckpoint,
     ) -> Result<Self, ShardError> {
@@ -523,6 +555,7 @@ impl LocalShard {
         let engine = Engine::open_shared_segments(
             Arc::clone(&norm),
             Arc::clone(&dict),
+            tag_dict,
             config,
             &ckpt.segment_files,
             ckpt.next_seg_id,
@@ -561,11 +594,12 @@ impl LocalShard {
                 logical,
                 version,
                 dsl,
+                tags,
             } => {
                 if let Ok(ast) = crate::dsl::parse(dsl) {
                     let mut lc = String::new();
                     let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                    eng.insert_extracted(&ex, *logical, *version, dsl);
+                    eng.insert_extracted(&ex, *logical, *version, dsl, tags);
                 }
             }
             ClusterMutation::Remove { logical } => {
@@ -578,7 +612,7 @@ impl LocalShard {
     /// Bulk-ingest, infallibly — the build path uses this directly on a concrete
     /// `LocalShard` (before boxing) so `ClusterEngine::build` stays infallible. The
     /// trait's `ingest_extracted` is the `Result`-wrapped view of the same work.
-    pub(crate) fn ingest_local(&self, items: &[(u64, Extracted, String, u32)]) -> IngestReport {
+    pub(crate) fn ingest_local(&self, items: &[PlacedQuery]) -> IngestReport {
         let mut eng = self.lock();
         let report = eng.ingest_extracted(items);
         Self::publish(&eng, &self.snapshot);
@@ -609,16 +643,23 @@ impl Shard for LocalShard {
     /// Verbatim the body of the coordinator's old `query_shard`: allocate scratch,
     /// match one title against the lock-free snapshot, return ids + stats. Infallible
     /// — wrapped in `Ok` to satisfy the (remote-capable) trait.
-    fn percolate(
+    fn percolate_filtered(
         &self,
         title: &str,
         include_broad: bool,
+        pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         let mut scratch = MatchScratch::new();
         let mut out = Vec::new();
-        let stats = self
-            .snapshot()
-            .match_title(title, &mut scratch, &mut out, include_broad);
+        // The coordinator already resolved `pred` against the shared frozen tag space; an empty
+        // predicate is byte-identical to the unfiltered `match_title` (snapshot.rs).
+        let stats = self.snapshot().match_title_filtered(
+            title,
+            &mut scratch,
+            &mut out,
+            include_broad,
+            pred,
+        );
         Ok((out, stats))
     }
 
@@ -638,19 +679,17 @@ impl Shard for LocalShard {
         true
     }
 
-    fn ingest_extracted(
-        &self,
-        items: &[(u64, Extracted, String, u32)],
-    ) -> Result<IngestReport, ShardError> {
+    fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         Ok(self.ingest_local(items))
     }
 
-    fn insert_extracted(
+    fn insert_extracted_with_tags(
         &self,
         ex: &Extracted,
         logical: u64,
         version: u32,
         text: &str,
+        tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError> {
         let mut eng = self.lock();
         // Log-first / fail-closed (ADR-039): durably record the mutation in this shard's
@@ -658,13 +697,15 @@ impl Shard for LocalShard {
         // apply order (a re-add then re-remove of one id must replay in the same order it
         // applied). A durable translog is the un-sealed tail a recovering peer replays; the
         // in-memory translog is a no-op. An append failure rejects the write (engine
-        // untouched), mirroring the coordinator's WAL-first add_query.
+        // untouched), mirroring the coordinator's WAL-first add_query. Raw tags ride the log
+        // alongside the DSL (ADR-055) so a replayed insert re-resolves them identically.
         self.translog.append(&ClusterMutation::Add {
             logical,
             version,
             dsl: text.to_string(),
+            tags: tags.to_vec(),
         })?;
-        let out = eng.insert_extracted(ex, logical, version, text);
+        let out = eng.insert_extracted(ex, logical, version, text, tags);
         Self::publish(&eng, &self.snapshot);
         Ok(out)
     }
@@ -877,13 +918,14 @@ pub(crate) fn apply_mutation(
             logical,
             version,
             dsl,
+            tags,
         } => {
             // Only parseable DSL is ever logged, but stay defensive: an unparseable record
             // carries no applicable mutation, so skip it rather than fail the whole replay.
             if let Ok(ast) = crate::dsl::parse(dsl) {
                 let mut lc = String::new();
                 let ex = extract_readonly(&ast, norm, dict, &mut lc);
-                shard.insert_extracted(&ex, *logical, *version, dsl)?;
+                shard.insert_extracted_with_tags(&ex, *logical, *version, dsl, tags)?;
             }
         }
         ClusterMutation::Remove { logical } => {

@@ -47,7 +47,7 @@ mod tests;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use crate::compile::{anchor_plan, CostClass, Extracted};
@@ -56,6 +56,7 @@ use crate::dict::Dict;
 use crate::error::ParseError;
 use crate::events::EngineEvent;
 use crate::normalize::Normalizer;
+use crate::tagdict::TagDict;
 
 use super::clog::{ClusterLog, ClusterMutation, NullClusterLog};
 use super::control::{ControlPlane, InMemoryControlPlane};
@@ -243,6 +244,20 @@ pub struct ClusterEngine {
     /// The one shared feature space (frozen after [`Self::build`]).
     norm: Arc<Normalizer>,
     dict: Arc<Dict>,
+    /// The one shared, frozen per-query tag space (ADR-049/055), the `TagDict` analogue of `dict`:
+    /// shared read-only into every shard so a tagged write and a percolate filter resolve a given
+    /// `(key,value)` to the SAME `TagId` everywhere. Built over the corpus tags at
+    /// [`Self::build_with_tags`], finalized, and persisted in the cluster manifest. Empty +
+    /// finalized for an untagged cluster ⇒ the byte-identical pre-tag path.
+    tag_dict: Arc<TagDict>,
+    /// Latch: has any query EVER been written with a non-empty tag set (ADR-055)? `tag_dict`
+    /// emptiness is NOT a sufficient proxy — a tag added *after* the dict froze resolves to a
+    /// *synthetic* id and is never interned into `tag_dict`, so an untagged-built cluster with live
+    /// tagged adds keeps an empty `tag_dict` yet holds tags. [`Self::set_vocab`] consults this (via
+    /// [`Self::has_tags`]) to refuse a vocab rebuild that would silently drop those tags. Set by every
+    /// tagged write path; restored on `open` from a non-empty `tag_dict`. `Relaxed` suffices — a
+    /// monotonic latch read only on the admin `set_vocab` path, never the hot path.
+    tags_present: AtomicBool,
     /// The vocabulary behind the current normalizer, if one was installed via
     /// [`Self::set_vocab`] (ADR-046). `None` when the cluster was built directly
     /// from a `Normalizer`. Retained so a durable cluster can persist it and a

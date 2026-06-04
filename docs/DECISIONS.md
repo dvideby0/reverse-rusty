@@ -110,6 +110,7 @@ not deleted (the record of *why something was not done* is as load-bearing as th
 | ADR | Decision | Summary | Status |
 |---|---|---|---|
 | [049](decisions/adr-049-percolator-parity-tags.md) | Per-query metadata, filtered percolation, ranking | Per-query integer metadata tags in the SoA + filtered percolation pushed into verify (never gating, mirroring ADR-006) + optional out-of-core ranking. Built single-node + oracle-proven. | Accepted |
+| [055](decisions/adr-055-cluster-tags-filtered-percolation.md) | Tags + filtered percolation through the cluster | Thread tags end-to-end (in-process + gRPC): one shared frozen `TagDict` (like the `Dict`), raw tags in the log + read-only `get_or_synthetic` resolution (never `intern`), filter resolved once + shipped as `TagId` groups, tag-dict shipping + fingerprint handshake. Additive APIs ⇒ untagged path byte-identical. Built + oracle-proven. | Accepted |
 
 ---
 

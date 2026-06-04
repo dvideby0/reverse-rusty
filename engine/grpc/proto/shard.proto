@@ -82,11 +82,30 @@ service ShardService {
 
 message Empty {}
 
+// One per-query metadata tag (ADR-049/055): a raw `(key, value)` pair carried on the wire
+// alongside the DSL, re-resolved to a `TagId` read-only against the server's adopted frozen
+// tag space — the tags-on-wire analogue of raw DSL.
+message TagKv {
+  string key = 1;
+  string value = 2;
+}
+
+// One filter group (ADR-049/055): the ALREADY-RESOLVED `TagId`s the coordinator compiled from
+// one request key's accepted values. `TagId`s are globally consistent (frozen tag dict + the
+// deterministic synthetic hash), so the server reconstructs `TagPredicate::new(groups)` from the
+// raw ids without re-resolving strings. A percolate filter is a conjunction of these groups.
+message TagGroup {
+  repeated uint32 ids = 1;
+}
+
 message PercolateRequest {
   string title = 1;
   // ALREADY-RESOLVED per-shard broad toggle: the coordinator applies the
   // "broad lane only on shard 0" rule (`include_broad && s == 0`) before sending.
   bool include_broad = 2;
+  // ALREADY-RESOLVED tag filter (ADR-049/055): a conjunction of groups of `TagId`s. Empty ⇒ an
+  // unfiltered probe (byte-identical to the pre-tag wire).
+  repeated TagGroup filter = 3;
 }
 message PercolateReply {
   repeated uint64 ids = 1;
@@ -115,6 +134,11 @@ message AddItem {
   uint64 logical_id = 1;
   string dsl = 2;
   uint32 version = 3;
+  // Raw `(key, value)` metadata tags (ADR-049/055), re-resolved read-only against the server's
+  // adopted frozen tag space. Empty ⇒ untagged (byte-identical to the pre-tag wire). Rides into
+  // both the ingest/insert RPCs and the `FetchTranslog` peer-recovery stream, so a recovered
+  // replica keeps its tags.
+  repeated TagKv tags = 4;
 }
 
 message IngestRequest { repeated AddItem items = 1; }
@@ -150,9 +174,19 @@ message DictFingerprintReply { uint64 fingerprint = 1; }
 message AdoptDictRequest {
   bytes dict = 1;
   uint64 fingerprint = 2;
+  // The coordinator's frozen per-query tag space (ADR-049/055), serialized by
+  // `crate::storage::serialize_tagdict`, adopted ATOMICALLY with the dict (one frozen feature +
+  // tag space, never a window where the server has one but not the other). Empty for an untagged
+  // coordinator ⇒ the server adopts an empty tag dict. `tag_dict_fingerprint` is the coordinator's
+  // own `TagDict::fingerprint`; the server recomputes it and rejects a mismatch.
+  bytes tag_dict = 3;
+  uint64 tag_dict_fingerprint = 4;
 }
-// The server's frozen-dict fingerprint AFTER adoption (equals the request's on success).
-message AdoptDictReply { uint64 fingerprint = 1; }
+// The server's frozen-dict + tag-dict fingerprints AFTER adoption (equal the request's on success).
+message AdoptDictReply {
+  uint64 fingerprint = 1;
+  uint64 tag_dict_fingerprint = 2;
+}
 
 // ---- peer recovery (ADR-035/036) ----
 message FetchSegmentsRequest {

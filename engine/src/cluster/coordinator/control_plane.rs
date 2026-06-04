@@ -124,6 +124,7 @@ impl ClusterEngine {
         shard.add_recovered_replica(
             &self.norm,
             &self.dict,
+            &self.tag_dict,
             EngineConfig::default(),
             &primary_dir,
             replica_dir,

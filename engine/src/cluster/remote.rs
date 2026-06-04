@@ -24,7 +24,8 @@ use tokio::runtime::{Handle, RuntimeFlavor};
 use tonic::transport::Channel;
 
 use crate::compile::Extracted;
-use crate::segment::{IngestReport, MatchStats};
+use crate::exact::TagPredicate;
+use crate::segment::{IngestReport, MatchStats, PlacedQuery};
 
 use super::clog::{ClusterMutation, LogPos};
 use super::proto;
@@ -86,17 +87,26 @@ impl RemoteShard {
         handle: Handle,
         dict_bytes: Vec<u8>,
         expected_fp: u64,
+        tag_dict_bytes: Vec<u8>,
+        expected_tag_fp: u64,
     ) -> Result<Self, ShardError> {
         let client = block_on_in_context(&handle, ShardServiceClient::connect(endpoint))
             .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
         let mut shipper = client.clone();
+        // Ship the dict AND the frozen tag space (ADR-049/055) in one atomic adopt — never a window
+        // where the server has the dict but not the tag space.
         let req = proto::AdoptDictRequest {
             dict: dict_bytes,
             fingerprint: expected_fp,
+            tag_dict: tag_dict_bytes,
+            tag_dict_fingerprint: expected_tag_fp,
         };
-        let adopted =
+        let (adopted, adopted_tag) =
             match block_on_in_context(&handle, async move { shipper.adopt_dict(req).await }) {
-                Ok(reply) => reply.into_inner().fingerprint,
+                Ok(reply) => {
+                    let r = reply.into_inner();
+                    (r.fingerprint, r.tag_dict_fingerprint)
+                }
                 // The server holds data under a different dict and refused ours. Read its actual
                 // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
                 Err(status) if status.code() == tonic::Code::FailedPrecondition => {
@@ -112,13 +122,20 @@ impl RemoteShard {
                 }
                 Err(status) => return Err(ShardError::Remote(format!("adopt_dict: {status}"))),
             };
-        // On success the server echoes the fingerprint it now serves — this equality IS the
-        // dict-identity handshake, so no separate `dict_fingerprint` round-trip is needed.
+        // On success the server echoes the fingerprints it now serves — this equality IS the
+        // dict-identity handshake, so no separate round-trip is needed. The tag-dict fingerprint is
+        // checked the same way: a divergent tag space would mis-filter reads (ADR-055).
         if adopted != expected_fp {
             return Err(ShardError::DictMismatch {
                 expected: expected_fp,
                 actual: adopted,
             });
+        }
+        if adopted_tag != expected_tag_fp {
+            return Err(ShardError::Remote(format!(
+                "tag-dict fingerprint mismatch after adopt: coordinator {expected_tag_fp:#018x} != \
+                 server {adopted_tag:#018x} (the shipped tag space did not round-trip)"
+            )));
         }
         Ok(RemoteShard {
             client,
@@ -243,15 +260,18 @@ fn rpc_err<E: std::fmt::Display>(e: E) -> ShardError {
 }
 
 impl Shard for RemoteShard {
-    fn percolate(
+    fn percolate_filtered(
         &self,
         title: &str,
         include_broad: bool,
+        pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         let mut client = self.client.clone();
         let req = proto::PercolateRequest {
             title: title.to_string(),
             include_broad,
+            // Ship the ALREADY-RESOLVED `TagId` groups (ADR-055); empty ⇒ unfiltered.
+            filter: proto::tag_predicate_to_proto(pred),
         };
         let reply = self
             .block_on(async move { client.percolate(req).await })
@@ -286,21 +306,19 @@ impl Shard for RemoteShard {
         Ok([c[0], c[1], c[2], c[3]])
     }
 
-    fn ingest_extracted(
-        &self,
-        items: &[(u64, Extracted, String, u32)],
-    ) -> Result<IngestReport, ShardError> {
+    fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         let mut client = self.client.clone();
-        // Send raw DSL (the `String` in each tuple), NOT the pre-extracted feature ids:
-        // the server re-compiles read-only against its own frozen dict (dict-agnostic
-        // wire). The coordinator's `Extracted` was only needed for placement.
+        // Send raw DSL + raw tags, NOT the pre-extracted feature ids: the server re-compiles
+        // read-only against its own frozen dict + resolves tags against its adopted frozen tag
+        // space (dict-/tag-agnostic wire). The coordinator's `Extracted` was only for placement.
         let req = proto::IngestRequest {
             items: items
                 .iter()
-                .map(|(logical, _ex, dsl, version)| proto::AddItem {
-                    logical_id: *logical,
-                    dsl: dsl.clone(),
-                    version: *version,
+                .map(|q| proto::AddItem {
+                    logical_id: q.logical,
+                    dsl: q.dsl.clone(),
+                    version: q.version,
+                    tags: proto::tags_to_proto(&q.tags),
                 })
                 .collect(),
         };
@@ -315,12 +333,13 @@ impl Shard for RemoteShard {
         })
     }
 
-    fn insert_extracted(
+    fn insert_extracted_with_tags(
         &self,
         _ex: &Extracted,
         logical: u64,
         version: u32,
         text: &str,
+        tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError> {
         let mut client = self.client.clone();
         let req = proto::InsertRequest {
@@ -328,6 +347,7 @@ impl Shard for RemoteShard {
                 logical_id: logical,
                 dsl: text.to_string(),
                 version,
+                tags: proto::tags_to_proto(tags),
             }),
         };
         let reply = self

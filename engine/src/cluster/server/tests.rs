@@ -12,6 +12,7 @@ use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
 use crate::storage::serialize_dict;
+use crate::tagdict::TagDict;
 
 fn norm() -> Arc<Normalizer> {
     Arc::new(Normalizer::default_vocab().expect("built-in vocab"))
@@ -31,9 +32,13 @@ fn frozen_dict(snips: &[&str], norm: &Normalizer) -> Dict {
 }
 
 fn adopt_req(dict: &Dict) -> Request<proto::AdoptDictRequest> {
+    // Untagged: an empty tag-dict blob deserializes to an empty `TagDict`, whose fingerprint the
+    // request must claim (the server's tag-integrity check mirrors the dict one).
     Request::new(proto::AdoptDictRequest {
         dict: serialize_dict(dict),
         fingerprint: dict.fingerprint(),
+        tag_dict: Vec::new(),
+        tag_dict_fingerprint: TagDict::new().fingerprint(),
     })
 }
 
@@ -82,6 +87,8 @@ fn adopt_dict_state_machine() {
     let bad = Request::new(proto::AdoptDictRequest {
         dict: serialize_dict(&d2),
         fingerprint: d1.fingerprint(),
+        tag_dict: Vec::new(),
+        tag_dict_fingerprint: TagDict::new().fingerprint(),
     });
     assert_eq!(
         rt.block_on(srv.adopt_dict(bad))
@@ -133,6 +140,7 @@ fn fence_rejects_writes_but_serves_reads() {
                 logical_id: id,
                 dsl: dsl.to_string(),
                 version: 1,
+                tags: Vec::new(),
             }),
         })
     };
@@ -182,6 +190,7 @@ fn fence_rejects_writes_but_serves_reads() {
     rt.block_on(srv.percolate(Request::new(proto::PercolateRequest {
         title: "1994 upper deck".to_string(),
         include_broad: false,
+        filter: Vec::new(),
     })))
     .expect("percolate after fence");
 

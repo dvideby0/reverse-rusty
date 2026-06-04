@@ -5,8 +5,13 @@ use crate::cluster::clog::ClusterMutation;
 use crate::cluster::shard::ShardError;
 use crate::compile::{extract_readonly, Extracted};
 use crate::events::{DurabilityOp, EngineEvent};
+use crate::segment::PlacedQuery;
 
 use super::{placement_of, AddOutcome, ClusterEngine, PendingRepair, ResyncReport, Target};
+
+/// One bulk-load entry: `(logical, version, dsl, raw tags)` (ADR-055) — the input to
+/// [`ClusterEngine::bucket_and_ingest`], before placement turns it into a [`PlacedQuery`] per shard.
+type TaggedEntry = (u64, u32, String, Vec<(String, String)>);
 
 impl ClusterEngine {
     /// Bulk-load queries into an already-built (frozen-dict) cluster — the load path
@@ -19,6 +24,19 @@ impl ClusterEngine {
     /// queries, rather than silently re-indexing them as duplicates (use
     /// [`Self::add_query`] for incremental adds).
     pub fn ingest(&self, queries: &[(u64, String)]) -> Result<(), ShardError> {
+        self.ingest_with_tags(queries, &[])
+    }
+
+    /// [`ingest`](Self::ingest) carrying per-query metadata tags (ADR-049/055) — the bulk-load
+    /// counterpart to [`build_with_tags`](Self::build_with_tags), for a freshly assembled (e.g.
+    /// remote) cluster. `tags` is parallel to `queries`; an empty slice means no query is tagged
+    /// (byte-identical to `ingest`). Each shard resolves the raw tags read-only against the shared
+    /// frozen tag space, so a later filtered percolate agrees on the `TagId`s.
+    pub fn ingest_with_tags(
+        &self,
+        queries: &[(u64, String)],
+        tags: &[Vec<(String, String)>],
+    ) -> Result<(), ShardError> {
         // ingest re-indexes from scratch; on a populated cluster it would create duplicate
         // entries. Refuse loudly instead (the doc contract: a freshly assembled cluster).
         if self.num_queries()? > 0 {
@@ -28,8 +46,15 @@ impl ClusterEngine {
                     .into(),
             ));
         }
-        let entries: Vec<(u64, u32, String)> =
-            queries.iter().map(|(l, t)| (*l, 1, t.clone())).collect();
+        if tags.iter().any(|t| !t.is_empty()) {
+            self.tags_present
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let entries: Vec<TaggedEntry> = queries
+            .iter()
+            .enumerate()
+            .map(|(i, (l, t))| (*l, 1, t.clone(), tags.get(i).cloned().unwrap_or_default()))
+            .collect();
         self.bucket_and_ingest(&entries)?;
         // These bulk adds bypassed the log (they go straight to base segments), so on a
         // durable cluster a checkpoint commits them into the coordinator manifest's
@@ -40,26 +65,38 @@ impl ClusterEngine {
         Ok(())
     }
 
-    /// Bucket a set of `(logical, version, dsl)` queries by placement and bulk-ingest one
-    /// base segment per shard — the load path for [`Self::ingest`] (a freshly assembled,
+    /// Bucket a set of `(logical, version, dsl, tags)` queries by placement and bulk-ingest one
+    /// base segment per shard — the load path for [`Self::ingest_with_tags`] (a freshly assembled,
     /// e.g. remote, cluster). Compiles read-only against the frozen dict, so placement is
     /// byte-identical to the original build. (Recovery no longer re-ingests; [`Self::open`]
     /// attaches each shard's committed segments instead — ADR-032.)
-    fn bucket_and_ingest(&self, entries: &[(u64, u32, String)]) -> Result<(), ShardError> {
-        let mut buckets: Vec<Vec<(u64, Extracted, String, u32)>> =
+    fn bucket_and_ingest(&self, entries: &[TaggedEntry]) -> Result<(), ShardError> {
+        let mut buckets: Vec<Vec<PlacedQuery>> =
             (0..self.ring.num_shards()).map(|_| Vec::new()).collect();
         let mut lc = String::new();
-        for (logical, version, text) in entries {
+        for (logical, version, text, qtags) in entries {
             let Ok(ast) = crate::dsl::parse(text) else {
                 continue;
             };
             let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
             match self.placement(&ex) {
                 Target::Reject => {}
-                Target::Replicated => buckets[0].push((*logical, ex, text.clone(), *version)),
+                Target::Replicated => buckets[0].push(PlacedQuery {
+                    logical: *logical,
+                    ex,
+                    dsl: text.clone(),
+                    version: *version,
+                    tags: qtags.clone(),
+                }),
                 Target::Selective(shs) => {
                     for &s in &shs {
-                        buckets[s].push((*logical, ex.clone(), text.clone(), *version));
+                        buckets[s].push(PlacedQuery {
+                            logical: *logical,
+                            ex: ex.clone(),
+                            dsl: text.clone(),
+                            version: *version,
+                            tags: qtags.clone(),
+                        });
                     }
                 }
             }
@@ -79,6 +116,23 @@ impl ClusterEngine {
         placement_of(&self.dict, &self.ring, ex)
     }
 
+    /// True if the cluster holds (or has ever held) any tagged query (ADR-055): the `tags_present`
+    /// latch (any tagged write, incl. post-freeze *synthetic* tags never interned into `tag_dict`)
+    /// OR a non-empty `tag_dict` (build-time interned tags). [`Self::set_vocab`] uses this to refuse
+    /// a vocab rebuild that would silently drop tags — `tag_dict` emptiness alone is NOT sufficient.
+    pub(in crate::cluster::coordinator) fn has_tags(&self) -> bool {
+        self.tags_present.load(std::sync::atomic::Ordering::Relaxed) || !self.tag_dict.is_empty()
+    }
+
+    /// Latch [`tags_present`](ClusterEngine::tags_present) when a non-empty tagged write happens.
+    /// Cheap + idempotent; no-op for an untagged write (the byte-identical path).
+    pub(in crate::cluster::coordinator) fn note_tags(&self, tags: &[(String, String)]) {
+        if !tags.is_empty() {
+            self.tags_present
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     /// Add one query incrementally (lands in the target shard's memtable). Uses a
     /// read-only compile against the frozen shared dict: vocabulary not seen at
     /// [`Self::build`] time is **absorbed** into the reserved synthetic-ID range (a
@@ -92,6 +146,20 @@ impl ClusterEngine {
     /// [`DurabilityFailure`](EngineEvent::DurabilityFailure) — the cluster analogue of
     /// the engine's WAL-first write path (ADR-013).
     pub fn add_query(&self, id: u64, dsl: &str) -> Result<AddOutcome, ShardError> {
+        self.add_query_with_tags(id, dsl, &[])
+    }
+
+    /// [`add_query`](Self::add_query) carrying per-query metadata tags (ADR-049/055). The raw tags
+    /// ride the cluster log alongside the DSL (logged BEFORE apply, like the DSL), and are resolved
+    /// read-only against the shared frozen tag space on each target shard, so a tagged add and a
+    /// later filtered percolate agree on the tag's `TagId`. Empty tags ⇒ byte-identical to
+    /// [`add_query`](Self::add_query).
+    pub fn add_query_with_tags(
+        &self,
+        id: u64,
+        dsl: &str,
+        tags: &[(String, String)],
+    ) -> Result<AddOutcome, ShardError> {
         // Reject malformed DSL up front: it carries no replayable mutation, so it must
         // never reach the log (a logged record must parse on replay).
         if let Err(e) = crate::dsl::parse(dsl) {
@@ -101,6 +169,7 @@ impl ClusterEngine {
             logical: id,
             version: 1,
             dsl: dsl.to_string(),
+            tags: tags.to_vec(),
         };
         if let Err(e) = self.log.append(&m) {
             self.emit(EngineEvent::DurabilityFailure {
@@ -110,7 +179,7 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_add(id, 1, dsl)
+        self.apply_add(id, 1, dsl, tags)
     }
 
     /// Remove a query by logical id. Fans the (idempotent) delete out to every
@@ -134,7 +203,16 @@ impl ClusterEngine {
     /// write path ([`Self::add_query`], after logging) and log replay ([`Self::open`]).
     /// Re-deriving placement here from the frozen dict makes live and replayed application
     /// byte-identical.
-    fn apply_add(&self, id: u64, version: u32, dsl: &str) -> Result<AddOutcome, ShardError> {
+    fn apply_add(
+        &self,
+        id: u64,
+        version: u32,
+        dsl: &str,
+        tags: &[(String, String)],
+    ) -> Result<AddOutcome, ShardError> {
+        // Latch tags_present for the set_vocab guard (ADR-055) — covers both the live add
+        // (`add_query_with_tags`) and a tagged log-tail entry replayed on `open`.
+        self.note_tags(tags);
         let ast = match crate::dsl::parse(dsl) {
             Ok(a) => a,
             Err(e) => return Ok(AddOutcome::RejectedParse(e)),
@@ -149,7 +227,7 @@ impl ClusterEngine {
             // applied), so the raw `?` error is honest. The logged mutation still converges on
             // reopen via replay; the live `resync` repair targets the multi-shard PARTIAL case.
             Target::Replicated => {
-                self.shards[0].insert_extracted(&ex, id, version, dsl)?;
+                self.shards[0].insert_extracted_with_tags(&ex, id, version, dsl, tags)?;
                 AddOutcome::Replicated
             }
             Target::Selective(shards) => {
@@ -161,7 +239,7 @@ impl ClusterEngine {
                 let mut failed = Vec::new();
                 let mut first_err: Option<ShardError> = None;
                 for &s in &shards {
-                    match self.shards[s].insert_extracted(&ex, id, version, dsl) {
+                    match self.shards[s].insert_extracted_with_tags(&ex, id, version, dsl, tags) {
                         Ok(_) => applied.push(s),
                         Err(e) => {
                             failed.push(s);
@@ -177,6 +255,7 @@ impl ClusterEngine {
                             logical: id,
                             version,
                             dsl: dsl.to_string(),
+                            tags: tags.to_vec(),
                         },
                         id,
                         applied,
@@ -366,8 +445,9 @@ impl ClusterEngine {
                 logical,
                 version,
                 dsl,
+                tags,
             } => {
-                self.apply_add(logical, version, &dsl)?;
+                self.apply_add(logical, version, &dsl, &tags)?;
             }
             ClusterMutation::Remove { logical } => {
                 self.apply_remove(logical)?;

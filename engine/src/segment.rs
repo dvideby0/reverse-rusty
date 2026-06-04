@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use crate::compile::CostClass;
+use crate::compile::{CostClass, Extracted};
 use crate::config::EngineConfig;
 use crate::dict::{Dict, FeatureId};
 use crate::exact::ExactStore;
@@ -226,6 +226,26 @@ pub struct EngineSnapshot {
     skipped_segments: usize,
     wal_size_bytes: u64,
     wal_pending_entries: u64,
+}
+
+/// One pre-extracted query ready for the cluster bulk-ingest path
+/// ([`Engine::ingest_extracted`]). The coordinator extracts features read-only against the shared
+/// frozen dict, buckets these by placement, and hands a slice to each shard; the shard's engine
+/// resolves `tags` read-only against the shared frozen [`TagDict`](crate::tagdict::TagDict)
+/// (`get_or_synthetic`, never `intern` — dense ids would diverge per shard, ADR-055). Lives in the
+/// engine layer (not `cluster`) because the engine's ingest path consumes it, by reference, with no
+/// conversion. `tags` empty ⇒ untagged ⇒ byte-identical to the pre-tag path.
+pub struct PlacedQuery {
+    /// Stable cross-shard logical id of the query.
+    pub logical: u64,
+    /// Features the coordinator extracted read-only against the shared frozen dict.
+    pub ex: Extracted,
+    /// Raw query DSL / source text (stored in the query store; the replayable source of truth).
+    pub dsl: String,
+    /// Engine version tag (1 for in-process shards).
+    pub version: u32,
+    /// Raw `(key, value)` metadata tags; resolved to `TagId`s read-only at ingest. Empty ⇒ untagged.
+    pub tags: Vec<(String, String)>,
 }
 
 /// Outcome of ingesting a batch of stored queries. Lets callers see how many

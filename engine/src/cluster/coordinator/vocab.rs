@@ -24,6 +24,7 @@ use std::sync::Arc;
 
 use crate::compile::{extract, Extracted};
 use crate::dict::Dict;
+use crate::segment::PlacedQuery;
 use crate::vocab::{CorpusLearnConfig, Vocab};
 
 use super::{into_shard, placement_of, replica_dir, shard_dir, ClusterEngine, Target};
@@ -55,6 +56,23 @@ impl ClusterEngine {
             return Err(ShardError::Config(
                 "set_vocab is in-process only: a handoff-wrapped (movable) shard position is not \
                  supported by a vocabulary change in v1"
+                    .into(),
+            ));
+        }
+        // A vocabulary change rebuilds queries from their live DSL (`live_sources`), which carries
+        // no tags — and per-query tags cannot be reconstructed from a shard's stored `TagId`s (a
+        // synthetic, post-freeze tag has no stored string). Rather than silently drop tags on the
+        // rebuild (ADR-049/055), refuse a vocab change on a tagged cluster; the tag space itself is
+        // orthogonal to vocabulary, so it is otherwise preserved unchanged. Combined tags + live
+        // vocab change is a deferred follow-on. `has_tags` checks the `tags_present` latch (which
+        // also catches POST-FREEZE synthetic tags that never enter `tag_dict`), not just `tag_dict`
+        // emptiness — so an untagged-built cluster with live tagged adds is correctly refused.
+        // Untagged ⇒ `has_tags()` is false ⇒ byte-identical to before tags.
+        if self.has_tags() {
+            return Err(ShardError::Config(
+                "set_vocab is not supported on a cluster with per-query tags yet: the blue/green \
+                 rebuild reconstructs queries from their DSL and would drop tags (a synthetic tag \
+                 has no recoverable string). Deferred follow-on (ADR-055)."
                     .into(),
             ));
         }
@@ -102,15 +120,27 @@ impl ClusterEngine {
 
         // 5. Pass B — re-place each query under the NEW dict and bucket per shard.
         let num_shards = self.ring.num_shards();
-        let mut buckets: Vec<Vec<(u64, Extracted, String, u32)>> =
-            (0..num_shards).map(|_| Vec::new()).collect();
+        let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
+        // The guard above ensures an untagged cluster here, so every rebuilt query has empty tags.
         for (logical, ex, text) in extracted {
             match placement_of(&new_dict, &self.ring, &ex) {
                 Target::Reject => {}
-                Target::Replicated => buckets[0].push((logical, ex, text, 1)),
+                Target::Replicated => buckets[0].push(PlacedQuery {
+                    logical,
+                    ex,
+                    dsl: text,
+                    version: 1,
+                    tags: Vec::new(),
+                }),
                 Target::Selective(shs) => {
                     for &s in &shs {
-                        buckets[s].push((logical, ex.clone(), text.clone(), 1));
+                        buckets[s].push(PlacedQuery {
+                            logical,
+                            ex: ex.clone(),
+                            dsl: text.clone(),
+                            version: 1,
+                            tags: Vec::new(),
+                        });
                     }
                 }
             }
@@ -144,6 +174,9 @@ impl ClusterEngine {
                         LocalShard::open_segments(
                             Arc::clone(&new_norm),
                             Arc::clone(&new_dict),
+                            // The tag space is orthogonal to vocabulary — preserve it unchanged
+                            // (the guard above ensures it is empty here anyway).
+                            Arc::clone(&self.tag_dict),
                             sc,
                             &[],
                             next_seg,
@@ -152,6 +185,7 @@ impl ClusterEngine {
                     None => LocalShard::new(
                         Arc::clone(&new_norm),
                         Arc::clone(&new_dict),
+                        Arc::clone(&self.tag_dict),
                         self.per_shard.clone(),
                     ),
                 };

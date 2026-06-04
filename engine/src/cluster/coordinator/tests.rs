@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::cluster::clog::LogPos;
 use crate::events::DurabilityOp;
-use crate::segment::{IngestReport, MatchStats};
+use crate::exact::TagPredicate;
+use crate::segment::{IngestReport, MatchStats, PlacedQuery};
 
 fn vocab() -> Normalizer {
     Normalizer::default_vocab().expect("built-in vocab")
@@ -111,8 +112,13 @@ impl ToggleFailShard {
 }
 
 impl Shard for ToggleFailShard {
-    fn percolate(&self, t: &str, b: bool) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        self.inner.percolate(t, b)
+    fn percolate_filtered(
+        &self,
+        t: &str,
+        b: bool,
+        pred: &TagPredicate,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        self.inner.percolate_filtered(t, b, pred)
     }
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.inner.num_queries()
@@ -120,25 +126,25 @@ impl Shard for ToggleFailShard {
     fn class_counts(&self) -> Result<[u64; 4], ShardError> {
         self.inner.class_counts()
     }
-    fn ingest_extracted(
-        &self,
-        items: &[(u64, Extracted, String, u32)],
-    ) -> Result<IngestReport, ShardError> {
+    fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         match self.write_err() {
             Some(e) => Err(e),
             None => self.inner.ingest_extracted(items),
         }
     }
-    fn insert_extracted(
+    fn insert_extracted_with_tags(
         &self,
         ex: &Extracted,
         logical: u64,
         version: u32,
         text: &str,
+        tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError> {
         match self.write_err() {
             Some(e) => Err(e),
-            None => self.inner.insert_extracted(ex, logical, version, text),
+            None => self
+                .inner
+                .insert_extracted_with_tags(ex, logical, version, text, tags),
         }
     }
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
@@ -181,12 +187,18 @@ fn partial_apply_is_detected_then_resync_converges() {
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let norm = Arc::clone(&real.norm);
     let dict = Arc::clone(&real.dict);
+    let tag_dict = Arc::clone(&real.tag_dict);
 
     // A from_parts cluster over fault-injectable shards sharing that frozen feature space.
     let fail = Arc::new(AtomicBool::new(false));
     let shards: Vec<Box<dyn Shard>> = (0..cfg.num_shards)
         .map(|_| {
-            let ls = LocalShard::new(Arc::clone(&norm), Arc::clone(&dict), cfg.per_shard.clone());
+            let ls = LocalShard::new(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                Arc::clone(&tag_dict),
+                cfg.per_shard.clone(),
+            );
             Box::new(ToggleFailShard::new(ls, Arc::clone(&fail))) as Box<dyn Shard>
         })
         .collect();
@@ -195,6 +207,7 @@ fn partial_apply_is_detected_then_resync_converges() {
     let cluster = ClusterEngine::from_parts(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         ring,
         shards,
         cfg.include_broad,
@@ -304,11 +317,17 @@ fn resync_requeues_when_shard_still_failing() {
     let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
     let norm = Arc::clone(&real.norm);
     let dict = Arc::clone(&real.dict);
+    let tag_dict = Arc::clone(&real.tag_dict);
 
     let fail = Arc::new(AtomicBool::new(false));
     let shards: Vec<Box<dyn Shard>> = (0..cfg.num_shards)
         .map(|_| {
-            let ls = LocalShard::new(Arc::clone(&norm), Arc::clone(&dict), cfg.per_shard.clone());
+            let ls = LocalShard::new(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                Arc::clone(&tag_dict),
+                cfg.per_shard.clone(),
+            );
             Box::new(ToggleFailShard::new(ls, Arc::clone(&fail))) as Box<dyn Shard>
         })
         .collect();
@@ -317,6 +336,7 @@ fn resync_requeues_when_shard_still_failing() {
     let cluster = ClusterEngine::from_parts(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         ring,
         shards,
         cfg.include_broad,

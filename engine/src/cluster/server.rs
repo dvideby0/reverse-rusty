@@ -19,6 +19,8 @@ use crate::compile::{extract_readonly, Extracted};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
+use crate::segment::PlacedQuery;
+use crate::tagdict::TagDict;
 
 use super::proto::shard_service_server::ShardServiceServer;
 use super::shard::{LocalShard, ShardError};
@@ -30,6 +32,11 @@ mod tests;
 
 struct ServerState {
     dict: Arc<Dict>,
+    /// The frozen per-query tag space (ADR-049/055), shipped by the coordinator via `AdoptDict`
+    /// alongside the dict. Held so the server resolves ingested tags read-only against the same
+    /// space the coordinator's filter `TagId`s came from. Empty until adopted (a pre-built `new`
+    /// server starts empty; the coordinator's adopt installs the real one).
+    tag_dict: Arc<TagDict>,
     shard: LocalShard,
 }
 
@@ -64,8 +71,21 @@ impl ShardServer {
     /// Build a server over a fresh `LocalShard` sharing the given frozen `norm`/`dict` —
     /// the pre-built path (the dict is already arranged to match the coordinator's).
     pub fn new(norm: Arc<Normalizer>, dict: Arc<Dict>, config: EngineConfig) -> Self {
-        let shard = LocalShard::new(Arc::clone(&norm), Arc::clone(&dict), config.clone());
-        let state = ArcSwapOption::from(Some(Arc::new(ServerState { dict, shard })));
+        // Pre-built path: starts with an empty tag space; a tagged deployment ships the real one
+        // via `AdoptDict` (which rebuilds the shard over it). Empty + finalized so the read-only
+        // tag-resolution invariant holds even before an adopt.
+        let tag_dict = Arc::new(finalized_empty_tag_dict());
+        let shard = LocalShard::new(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            config.clone(),
+        );
+        let state = ArcSwapOption::from(Some(Arc::new(ServerState {
+            dict,
+            tag_dict,
+            shard,
+        })));
         ShardServer {
             norm,
             config,
@@ -114,8 +134,18 @@ impl ShardServer {
     ) -> Result<Self, ShardError> {
         let mut sc = config.clone();
         sc.data_dir = Some(data_dir.clone());
-        let shard = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), sc)?;
-        let state = ArcSwapOption::from(Some(Arc::new(ServerState { dict, shard })));
+        let tag_dict = Arc::new(finalized_empty_tag_dict());
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            sc,
+        )?;
+        let state = ArcSwapOption::from(Some(Arc::new(ServerState {
+            dict,
+            tag_dict,
+            shard,
+        })));
         Ok(ShardServer {
             norm,
             config,
@@ -155,12 +185,18 @@ impl ShardServer {
             return;
         };
         let mut lc = String::new();
-        let extracted: Vec<(u64, Extracted, String, u32)> = items
+        let extracted: Vec<PlacedQuery> = items
             .iter()
             .filter_map(|(logical, dsl)| {
                 let ast = crate::dsl::parse(dsl).ok()?;
                 let ex = extract_readonly(&ast, &self.norm, &st.dict, &mut lc);
-                Some((*logical, ex, dsl.clone(), 1))
+                Some(PlacedQuery {
+                    logical: *logical,
+                    ex,
+                    dsl: dsl.clone(),
+                    version: 1,
+                    tags: Vec::new(),
+                })
             })
             .collect();
         st.shard.ingest_local(&extracted);
@@ -209,4 +245,13 @@ impl ShardServer {
 fn compile_item(norm: &Normalizer, dict: &Dict, dsl: &str, lc: &mut String) -> Option<Extracted> {
     let ast = crate::dsl::parse(dsl).ok()?;
     Some(extract_readonly(&ast, norm, dict, lc))
+}
+
+/// An empty but FINALIZED tag space — the placeholder a pre-built / pending server holds until the
+/// coordinator's `AdoptDict` installs the real one (ADR-055). Finalized so the engine's read-only
+/// tag-resolution invariant (`debug_assert!(is_finalized())`) holds even before an adopt.
+fn finalized_empty_tag_dict() -> TagDict {
+    let mut td = TagDict::new();
+    td.mark_finalized();
+    td
 }
