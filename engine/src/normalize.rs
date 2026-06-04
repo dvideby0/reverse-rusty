@@ -32,6 +32,87 @@ struct PhraseEntry {
     additive: bool,
 }
 
+/// How a single non-alphanumeric character is treated during byte-cleaning
+/// (configured via [`NormalizerBuilder::set_punct_class`]). `clean_into` consults the
+/// class for every non-alphanumeric character; alphanumerics always pass through
+/// lowercased.
+///
+/// The same table runs over queries (compile time) and titles (match time), so any
+/// reclassification applies to *both* sides and the feature spaces stay aligned (the
+/// shared-normalizer invariant, normalization.md §2). See docs/DECISIONS.md ADR-058.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PunctClass {
+    /// Map the character to a space — a word boundary. The default for every character
+    /// not otherwise classified (commas, brackets, raw whitespace, …).
+    Split,
+    /// Delete the character so the alphanumerics on either side **join** into one token
+    /// (`O'Brien` -> `obrien`) — the punctuation-equivalence rule (ADR-058). Declaring
+    /// mid-word `'`/`'`/`-` as `Fold` makes `O'Brien`, `O-Brien`, and `OBrien` collapse
+    /// to the same token. Recall note: folding is the operator's informed trade — it
+    /// gains the joined-form match and gives up the split-form one (`brien` alone no
+    /// longer matches `O'Brien`); whichever is chosen, queries and titles fold
+    /// identically, so the lossless cover still holds.
+    Fold,
+    /// Keep the character literally, in place, inside the surrounding token (`9.5`
+    /// stays `9.5`). The default for `.` so half-grades survive byte-cleaning.
+    Keep,
+    /// Emit the character as its own standalone marker token (` c `). The default for
+    /// `#` and `/` so the number logic can tell card-numbers (`#2`) and serials
+    /// (`/199`, `3/10`) apart from grades.
+    Marker,
+}
+
+/// Per-character punctuation classification consulted by byte-cleaning. The [`Default`]
+/// reproduces the historical hardcoded behavior exactly (`.` kept, `#`/`/` markers,
+/// everything else split), so a normalizer built without touching it is **byte-identical
+/// to before ADR-058**.
+///
+/// ASCII characters resolve through a flat 128-entry array (branchless, no hashing on
+/// the per-title hot path); the rare non-ASCII rule (e.g. the curly apostrophe `'`,
+/// U+2019) falls back to a small map that stays empty unless one is registered.
+#[derive(Debug, Clone)]
+struct PunctTable {
+    ascii: [PunctClass; 128],
+    non_ascii: std::collections::HashMap<char, PunctClass>,
+}
+
+impl Default for PunctTable {
+    fn default() -> Self {
+        let mut ascii = [PunctClass::Split; 128];
+        ascii['.' as usize] = PunctClass::Keep;
+        ascii['#' as usize] = PunctClass::Marker;
+        ascii['/' as usize] = PunctClass::Marker;
+        Self {
+            ascii,
+            non_ascii: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl PunctTable {
+    /// The class for `c`. Only ever called for non-alphanumeric characters (the
+    /// alphanumeric fast path never reaches it), so the ASCII index is in range.
+    #[inline]
+    fn class_of(&self, c: char) -> PunctClass {
+        let u = c as u32;
+        if u < 128 {
+            self.ascii[u as usize]
+        } else {
+            self.non_ascii.get(&c).copied().unwrap_or(PunctClass::Split)
+        }
+    }
+
+    /// Override the class for a single character.
+    fn set(&mut self, c: char, class: PunctClass) {
+        let u = c as u32;
+        if u < 128 {
+            self.ascii[u as usize] = class;
+        } else {
+            self.non_ascii.insert(c, class);
+        }
+    }
+}
+
 pub struct Normalizer {
     /// daachorse automaton over space-joined phrase strings. Pattern value indexes
     /// into `phrase_entries`.
@@ -43,6 +124,8 @@ pub struct Normalizer {
     synonyms: Vec<(String, String, FeatureKind)>,
     syn_index: std::collections::HashMap<String, usize>,
     grade_words: Vec<String>,
+    /// Byte-cleaning punctuation classification (ADR-058). Default = historical behavior.
+    punct: PunctTable,
 }
 
 impl std::fmt::Debug for Normalizer {
@@ -75,23 +158,30 @@ impl Normalizer {
         NormalizerBuilder::new().build()
     }
 
-    /// Lowercase + fold diacritics + tokenize punctuation into `out` (reused).
-    /// `#` and `/` are kept as standalone marker tokens so the number logic can
-    /// tell card-numbers (`#2`) and serials (`/199`, `3/10`) apart from grades.
-    fn clean_into(text: &str, out: &mut String) {
+    /// Lowercase + fold diacritics + apply the punctuation table into `out` (reused).
+    /// Alphanumerics pass through lowercased; every other character is handled by its
+    /// [`PunctClass`]. Defaults (ADR-058): `.` is kept in place (half-grades), `#`/`/`
+    /// become standalone marker tokens (so the number logic can tell `#2`/`/199` from
+    /// grades), and everything else becomes a space. A [`PunctClass::Fold`] character is
+    /// deleted, so its neighbors join into one token (`O'Brien` -> `obrien`). The same
+    /// table runs over queries and titles, keeping the feature spaces aligned (§2).
+    fn clean_into(&self, text: &str, out: &mut String) {
         out.clear();
         for ch in text.chars() {
             let c = fold_diacritic(ch);
             if c.is_ascii_alphanumeric() {
                 out.push(c.to_ascii_lowercase());
-            } else if c == '.' {
-                out.push('.'); // keep dots inside numbers (half grades)
-            } else if c == '#' || c == '/' {
-                out.push(' ');
-                out.push(c);
-                out.push(' ');
             } else {
-                out.push(' ');
+                match self.punct.class_of(c) {
+                    PunctClass::Split => out.push(' '),
+                    PunctClass::Fold => {} // delete: neighbors join into one token
+                    PunctClass::Keep => out.push(c),
+                    PunctClass::Marker => {
+                        out.push(' ');
+                        out.push(c);
+                        out.push(' ');
+                    }
+                }
             }
         }
     }
@@ -108,7 +198,7 @@ impl Normalizer {
     ///      skipped (the phrase feature is emitted once). All other tokens go
     ///      through the existing grader/number/synonym/generic pipeline.
     pub fn emit<F: FnMut(&str, FeatureKind)>(&self, text: &str, lc: &mut String, emit: &mut F) {
-        Self::clean_into(text, lc);
+        self.clean_into(text, lc);
 
         // Phase 1: find multiword phrase matches via the automaton.
         // We collect (byte_start, byte_end, pattern_index) for each match.
@@ -431,6 +521,9 @@ pub struct NormalizerBuilder {
     syn_index: std::collections::HashMap<String, usize>,
     graders: Vec<String>,
     grade_words: Vec<String>,
+    /// Byte-cleaning punctuation classification (ADR-058). Defaults to the historical
+    /// behavior, so a builder that never touches it yields a byte-identical normalizer.
+    punct: PunctTable,
 }
 
 impl NormalizerBuilder {
@@ -519,6 +612,38 @@ impl NormalizerBuilder {
         self
     }
 
+    /// Classify a punctuation character for byte-cleaning (ADR-058). By default `.` is
+    /// kept in place, `#`/`/` are standalone markers, and every other non-alphanumeric
+    /// character becomes a word boundary ([`PunctClass::Split`]); override any of them
+    /// here. The same table runs over queries and titles, so a reclassification applies
+    /// to both sides and the feature spaces stay aligned.
+    pub fn set_punct_class(&mut self, c: char, class: PunctClass) {
+        self.punct.set(c, class);
+    }
+
+    /// Mark a character as **folding** — deleted during byte-cleaning so the
+    /// alphanumerics on either side join into one token (`O'Brien` -> `obrien`). The
+    /// punctuation-equivalence rule from ADR-058; shorthand for
+    /// `set_punct_class(c, PunctClass::Fold)`.
+    pub fn fold_punctuation(&mut self, c: char) {
+        self.punct.set(c, PunctClass::Fold);
+    }
+
+    /// Batch form of [`fold_punctuation`](Self::fold_punctuation): mark every character
+    /// in `chars` as folding. Convenient for a corpus's mid-word punctuation set, e.g.
+    /// `&['\'', '\u{2019}', '-']` to collapse `O'Brien`/`O'Brien`/`O-Brien` to `obrien`.
+    pub fn fold_punctuation_chars(&mut self, chars: &[char]) {
+        for &c in chars {
+            self.punct.set(c, PunctClass::Fold);
+        }
+    }
+
+    /// Fluent version of [`set_punct_class`](Self::set_punct_class).
+    pub fn punct(mut self, c: char, class: PunctClass) -> Self {
+        self.set_punct_class(c, class);
+        self
+    }
+
     /// Consume the builder and construct a [`Normalizer`].
     ///
     /// Returns `Err` if the Aho-Corasick automaton cannot be built from the
@@ -537,6 +662,7 @@ impl NormalizerBuilder {
             synonyms: self.synonyms,
             syn_index: self.syn_index,
             grade_words: self.grade_words,
+            punct: self.punct,
         })
     }
 }
@@ -751,5 +877,80 @@ mod golden {
             len_after_first,
             "a repeat interns no new feature"
         );
+    }
+
+    // ---- punctuation-equivalence folding (ADR-058) ----
+
+    #[test]
+    fn default_punctuation_splits_apostrophe_and_hyphen() {
+        // The historical default: `'` and `-` are word boundaries, so the punctuated
+        // forms tokenize apart while the joined form is one token — the false-negative
+        // gap (a query `obrien` misses an `O'Brien` title) that folding closes.
+        let n = Normalizer::default_vocab().unwrap();
+        assert_eq!(names(&n, "O'Brien"), s(&["term:brien", "term:o"]));
+        assert_eq!(names(&n, "O-Brien"), s(&["term:brien", "term:o"]));
+        assert_eq!(names(&n, "OBrien"), s(&["term:obrien"]));
+    }
+
+    #[test]
+    fn folding_collapses_punctuation_variants_to_one_token() {
+        // Declaring apostrophe (ascii + curly U+2019) and mid-word hyphen as Fold makes
+        // all four surface forms land on the SAME single token — so a query and a title
+        // that differ only in punctuation now share a feature and match.
+        let n = NormalizerBuilder::new()
+            .punct('\'', PunctClass::Fold)
+            .punct('\u{2019}', PunctClass::Fold)
+            .punct('-', PunctClass::Fold)
+            .build()
+            .expect("folding normalizer");
+        let expected = s(&["term:obrien"]);
+        assert_eq!(names(&n, "O'Brien"), expected, "ascii apostrophe");
+        assert_eq!(names(&n, "O\u{2019}Brien"), expected, "curly apostrophe");
+        assert_eq!(names(&n, "O-Brien"), expected, "hyphen");
+        assert_eq!(names(&n, "OBrien"), expected, "already joined");
+    }
+
+    #[test]
+    fn builder_batch_and_mut_fold_apis_fold() {
+        // Exercise the `&mut` builder + batch helper (not just the fluent `.punct`).
+        let mut b = NormalizerBuilder::new();
+        b.fold_punctuation_chars(&['\'', '\u{2019}', '-']);
+        let n = b.build().unwrap();
+        assert_eq!(names(&n, "O-Brien"), s(&["term:obrien"]));
+        assert_eq!(names(&n, "O\u{2019}Brien"), s(&["term:obrien"]));
+    }
+
+    #[test]
+    fn fold_merges_only_within_a_word_not_across_spaces() {
+        // A folded character joins only ADJACENT alphanumerics; a hyphen flanked by
+        // spaces still leaves two tokens (the surrounding spaces remain boundaries).
+        let n = NormalizerBuilder::new()
+            .punct('-', PunctClass::Fold)
+            .build()
+            .unwrap();
+        assert_eq!(names(&n, "foo-bar"), s(&["term:foobar"]));
+        assert_eq!(names(&n, "foo - bar"), s(&["term:bar", "term:foo"]));
+    }
+
+    #[test]
+    fn punct_class_keep_default_is_overridable_to_fold() {
+        // `.` defaults to Keep (in place, so half-grades survive); reclassifying it to
+        // Fold deletes it. A pure-letter token keeps clear of the number/grade pipeline.
+        let keep = Normalizer::default_vocab().unwrap();
+        assert_eq!(names(&keep, "a.b.c"), s(&["term:a.b.c"]));
+        let fold = NormalizerBuilder::new()
+            .punct('.', PunctClass::Fold)
+            .build()
+            .unwrap();
+        assert_eq!(names(&fold, "a.b.c"), s(&["term:abc"]));
+    }
+
+    #[test]
+    fn marker_and_keep_defaults_are_unchanged_by_the_table() {
+        // Regression guard: the default table reproduces the historical `#`/`/`/`.`
+        // behaviors exactly (the same cases as `number_disambiguation_matrix`).
+        let n = Normalizer::default_vocab().unwrap();
+        assert_eq!(names(&n, "#2 bulls"), s(&["term:2", "term:bulls"]));
+        assert_eq!(names(&n, "3/10"), s(&["term:10", "term:3"]));
     }
 }

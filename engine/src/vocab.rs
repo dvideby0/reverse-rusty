@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dict::{Dict, EquivMap, FeatureId, FeatureKind};
 use crate::dsl::{self, Atom};
-use crate::normalize::{Normalizer, NormalizerBuilder};
+use crate::normalize::{Normalizer, NormalizerBuilder, PunctClass};
 use crate::util::fast_map;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -32,6 +32,13 @@ pub struct Vocab {
     /// `synonyms` (which collapse a form to a canonical via the normalizer).
     #[serde(default)]
     equivalences: Vec<Vec<String>>,
+    /// Per-character byte-cleaning punctuation rules (ADR-058). Each rule reclassifies one
+    /// character in the shared normalizer's `clean_into` pass — e.g. `{ch: '\'', class: fold}`
+    /// makes `O'Brien` collapse to `obrien`. Empty (the default, and the shape of old vocab
+    /// JSON that predates the field) ⇒ the historical behavior, byte-identical. The same
+    /// table runs over queries and titles, so the feature spaces stay aligned (§2).
+    #[serde(default)]
+    punctuation: Vec<PunctRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +112,47 @@ impl From<FeatureKind> for FeatureKindSer {
             FeatureKind::Generic => FeatureKindSer::Generic,
         }
     }
+}
+
+/// Serializable mirror of [`PunctClass`] (ADR-058). Snake-cased in JSON: `split` / `fold`
+/// / `keep` / `marker`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PunctClassSer {
+    Split,
+    Fold,
+    Keep,
+    Marker,
+}
+
+impl From<PunctClassSer> for PunctClass {
+    fn from(c: PunctClassSer) -> Self {
+        match c {
+            PunctClassSer::Split => PunctClass::Split,
+            PunctClassSer::Fold => PunctClass::Fold,
+            PunctClassSer::Keep => PunctClass::Keep,
+            PunctClassSer::Marker => PunctClass::Marker,
+        }
+    }
+}
+
+impl From<PunctClass> for PunctClassSer {
+    fn from(c: PunctClass) -> Self {
+        match c {
+            PunctClass::Split => PunctClassSer::Split,
+            PunctClass::Fold => PunctClassSer::Fold,
+            PunctClass::Keep => PunctClassSer::Keep,
+            PunctClass::Marker => PunctClassSer::Marker,
+        }
+    }
+}
+
+/// One byte-cleaning punctuation rule (ADR-058): reclassify a single character `ch` to
+/// `class` in the shared normalizer. JSON shape: `{ "ch": "'", "class": "fold" }`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PunctRule {
+    pub ch: char,
+    pub class: PunctClassSer,
 }
 
 // ── Learning ────────────────────────────────────────────────────────────────
@@ -406,6 +454,9 @@ impl Vocab {
         for w in &self.grade_words {
             b.add_grade_word(w);
         }
+        for rule in &self.punctuation {
+            b.set_punct_class(rule.ch, rule.class.into());
+        }
 
         b.build()
     }
@@ -444,6 +495,36 @@ impl Vocab {
                 self.equivalences.push(grp.clone());
             }
         }
+        for rule in &other.punctuation {
+            if !self.punctuation.iter().any(|r| r.ch == rule.ch) {
+                self.punctuation.push(rule.clone());
+            }
+        }
+    }
+
+    // ── Punctuation management (ADR-058) ────────────────────────────────
+
+    /// Reclassify a byte-cleaning punctuation character (a later call for the same `ch`
+    /// replaces the earlier one). See [`PunctClass`] for the behaviors.
+    pub fn set_punct_class(&mut self, ch: char, class: PunctClass) {
+        let class = class.into();
+        if let Some(rule) = self.punctuation.iter_mut().find(|r| r.ch == ch) {
+            rule.class = class;
+        } else {
+            self.punctuation.push(PunctRule { ch, class });
+        }
+    }
+
+    /// Mark `ch` as **folding** — deleted during byte-cleaning so its neighbors join into
+    /// one token (`O'Brien` -> `obrien`, ADR-058). Shorthand for
+    /// `set_punct_class(ch, PunctClass::Fold)`.
+    pub fn fold_punctuation(&mut self, ch: char) {
+        self.set_punct_class(ch, PunctClass::Fold);
+    }
+
+    /// The registered punctuation rules, in declaration order.
+    pub fn punctuation(&self) -> &[PunctRule] {
+        &self.punctuation
     }
 
     // ── Synonym management ──────────────────────────────────────────────
@@ -775,6 +856,69 @@ mod tests {
         assert_eq!(v1.graders().len(), 2); // psa + bgs
                                            // rc should keep original mapping (first wins)
         assert_eq!(v1.get_synonym("rc").unwrap().canonical, "term:rookie");
+    }
+
+    // ---- punctuation rules (ADR-058) ----
+
+    #[test]
+    fn punctuation_rules_round_trip_and_drive_folding() {
+        let mut vocab = Vocab::new();
+        vocab.fold_punctuation('\'');
+        vocab.set_punct_class('\u{2019}', PunctClass::Fold);
+        vocab.fold_punctuation('-');
+
+        // JSON round-trip preserves the rules ...
+        let json = vocab.to_json().unwrap();
+        let restored = Vocab::from_json(&json).unwrap();
+        assert_eq!(restored.punctuation().len(), 3);
+
+        // ... and the restored vocab's normalizer actually folds.
+        let norm = restored.to_normalizer().expect("normalizer");
+        let mut dict = crate::dict::Dict::new();
+        let mut lc = String::new();
+        let feats = norm.compile_features("O'Brien", &mut dict, &mut lc);
+        let names: Vec<String> = feats.iter().map(|&id| dict.name(id).to_string()).collect();
+        assert_eq!(
+            names,
+            vec!["term:obrien".to_string()],
+            "apostrophe should fold"
+        );
+    }
+
+    #[test]
+    fn vocab_without_punctuation_field_is_default_behavior() {
+        // Old vocab JSON predating ADR-058 has no `punctuation` key; it must deserialize
+        // to an empty rule set => the historical (split) behavior, byte-identical.
+        let json = r#"{ "synonyms": [], "phrases": [], "graders": [], "grade_words": [] }"#;
+        let vocab = Vocab::from_json(json).unwrap();
+        assert!(vocab.punctuation().is_empty());
+
+        let norm = vocab.to_normalizer().expect("normalizer");
+        let mut dict = crate::dict::Dict::new();
+        let mut lc = String::new();
+        let feats = norm.compile_features("O'Brien", &mut dict, &mut lc);
+        let mut names: Vec<String> = feats.iter().map(|&id| dict.name(id).to_string()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["term:brien".to_string(), "term:o".to_string()],
+            "default splits the apostrophe"
+        );
+    }
+
+    #[test]
+    fn merge_combines_punctuation_rules_first_wins() {
+        let mut v1 = Vocab::new();
+        v1.set_punct_class('\'', PunctClass::Fold);
+
+        let mut v2 = Vocab::new();
+        v2.set_punct_class('\'', PunctClass::Split); // duplicate char
+        v2.set_punct_class('-', PunctClass::Fold);
+
+        v1.merge(&v2);
+        assert_eq!(v1.punctuation().len(), 2); // ' (kept from v1) + -
+        let apostrophe = v1.punctuation().iter().find(|r| r.ch == '\'').unwrap();
+        assert_eq!(apostrophe.class, PunctClassSer::Fold, "v1's rule wins");
     }
 
     #[test]

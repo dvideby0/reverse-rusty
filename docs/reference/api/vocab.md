@@ -18,7 +18,8 @@ curl localhost:9200/_vocab
   ],
   "graders": ["psa"],
   "grade_words": ["gem"],
-  "equivalences": [["ud", "upper deck"]]
+  "equivalences": [["ud", "upper deck"]],
+  "punctuation": [{"ch": "'", "class": "fold"}, {"ch": "-", "class": "fold"}]
 }
 ```
 
@@ -48,6 +49,15 @@ title bearing any form. Expansion only grows a query's match set, so it is **fal
 a wrong/uncertain equivalence can only add bounded false positives, never drop a true match. Each form
 should resolve to a single entity (glue a multi-token form as a phrase first); a form that doesn't is
 skipped. Applying the change recompiles existing queries through the expansion.
+
+**Declaring punctuation rules (ADR-058).** The optional `punctuation` block reclassifies how individual
+characters are handled in byte-cleaning. Each rule is `{"ch": "<char>", "class": "<fold|split|keep|marker>"}`:
+`fold` deletes the character so its neighbors **join** into one token (so `O'Brien`, `O-Brien`, and
+`OBrien` all become `obrien` — closing a recall gap for punctuation-only spelling differences), `split`
+makes it a word boundary, `keep` leaves it literally in place, and `marker` emits it as its own token. The
+default — `.` is `keep`, `#`/`/` are `marker`, everything else is `split` — is reproduced exactly when the
+block is omitted (so older vocab payloads are unchanged). The same table applies to both queries and
+titles, so the lossless-cover contract is preserved under any configuration.
 
 ## `POST /_vocab/learn` — Learn vocabulary from queries
 

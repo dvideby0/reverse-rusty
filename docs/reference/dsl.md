@@ -90,9 +90,27 @@ phrases, synonyms, grader keywords, and grade words. Vocabulary can come from th
     {"tokens": ["upper", "deck"], "canonical": "term:upper_deck", "kind": "generic"}
   ],
   "graders": ["psa", "bgs", "sgc"],
-  "grade_words": ["gem", "mint", "pristine"]
+  "grade_words": ["gem", "mint", "pristine"],
+  "punctuation": [
+    {"ch": "'", "class": "fold"},
+    {"ch": "-", "class": "fold"}
+  ]
 }
 ```
 
+The optional `punctuation` array (ADR-058) reclassifies how individual characters are handled in
+byte-cleaning, so punctuation-only spelling differences stop dropping candidates:
+
+- `"fold"` — delete the character so its neighbors **join** into one token (`O'Brien`, `O-Brien`, and
+  `OBrien` all become `obrien`). Declare a corpus's mid-word `'` (and the curly apostrophe `'`) and `-`
+  here.
+- `"split"` — make the character a word boundary.
+- `"keep"` — leave it literally in place inside the token (`9.5` stays `9.5`).
+- `"marker"` — emit it as its own standalone token.
+
+By default `.` is `keep`, `#`/`/` are `marker`, and every other non-alphanumeric character is `split`;
+omit the array (as older vocab files do) to get exactly that historical behavior. The same table applies
+to **both** queries and titles, so a query and a title that differ only in punctuation match.
+
 The `NormalizerBuilder` API remains available for programmatic vocabulary construction when you need
-fine-grained control.
+fine-grained control (`fold_punctuation` / `set_punct_class`).
