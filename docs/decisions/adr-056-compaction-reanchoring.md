@@ -69,6 +69,18 @@
     more-selective arity-2 class-B cover (A→B) — which is precisely the repair. This stays lossless
     by the same matched-pair argument above. A query is never re-anchored to class D (a stored query
     always has a required/any-of feature; `debug_assert`'d).
+  - **The one refused transition — main→broad (the demote-guard).** A main-lane (A/B) query is
+    **never** demoted into the broad (C) lane. The main index is probed on every percolate, but the
+    broad lane is opt-in (the default path is `include_broad = false`), so moving a query main→broad
+    would hide it there — a false negative. This crossing happens only when a query's *sole* anchor
+    has become hot — e.g. an entry compiled *before* `finalize_mask` (an `insert_live`-then-`flush`
+    on an empty engine), still sitting in main with `req_mask == 0`, whose lone feature a later
+    `bulk_ingest` makes hot. That is a hotness reclassification, exactly the major-version blue/green
+    case this ADR defers — not a silent compaction change — so such an entry keeps its original
+    cover. (The reverse, broad→main, only adds findability and is kept.) Caught by
+    `tests/oracle.rs::reanchoring_never_demotes_a_main_query_into_the_broad_lane`, which matches with
+    `include_broad = false`. *(Found by the Codex pre-PR review; the initial matched-pair argument
+    implicitly assumed the broad lane was always probed.)*
 
 - **Cluster safety = no-op by construction.** A cluster shard indexes against the ONE frozen shared
   `Dict` and **never bumps frequency** (the `extract_readonly`/`ingest_extracted` path), so

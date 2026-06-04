@@ -867,6 +867,62 @@ fn reanchoring_is_a_noop_under_a_frozen_dict() {
     );
 }
 
+/// Regression (Codex review): re-anchoring must never demote a main-lane query into the broad
+/// lane, which the DEFAULT percolate path (`include_broad = false`) skips. A query compiled
+/// before the mask was finalized (`insert_live` on an empty engine → `flush`) sits in main with
+/// `req_mask == 0`; a later `bulk_ingest` finalizes the mask and can make that query's sole
+/// anchor hot. Re-anchoring it alone would reclassify it class C (broad-only) and hide it on the
+/// default path — a false negative. The demote-guard keeps it in main, so it stays findable.
+#[test]
+fn reanchoring_never_demotes_a_main_query_into_the_broad_lane() {
+    use reverse_rusty::EngineConfig;
+
+    let cfg = EngineConfig {
+        auto_compact_on_flush: false,
+        auto_compact_on_ingest: false,
+        compaction_reanchor: true,
+        ..EngineConfig::default()
+    };
+    let mut eng = Engine::with_config(Normalizer::default_vocab().expect("built-in vocab"), cfg);
+
+    // 1) insert_live on an EMPTY engine: the mask is not finalized yet, so this single-feature
+    //    query is class A in the MAIN index (req_mask == 0).
+    let watched = 1u64;
+    eng.insert_live("rareword", watched, 1);
+    eng.flush(); // seal into base segment 0
+
+    // Baseline: findable on the DEFAULT path (include_broad = false) BEFORE compaction.
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title("rareword title", &mut s, &mut out, false);
+    assert!(
+        out.contains(&watched),
+        "precondition: the query must match on the default path before compaction"
+    );
+
+    // 2) bulk_ingest a batch that makes `rareword` HOT and finalizes the mask.
+    let batch: Vec<(u64, String)> = (0..200u64)
+        .map(|i| (1000 + i, format!("rareword filler{i}")))
+        .collect();
+    eng.bulk_ingest(&batch); // first finalize_mask() — `rareword` is now in the 64-hot set
+    assert!(
+        eng.num_segments() > 2,
+        "need multiple base segments to compact"
+    );
+
+    // 3) Compact with re-anchoring. `rareword` is now hot; re-anchoring the watched query alone
+    //    would make it class C (broad) — the guard must keep it in the main lane instead.
+    let report = eng.compact_all().expect("compaction ran");
+    eprintln!("demote-guard test: reanchored={}", report.reanchored);
+
+    // 4) The watched query is STILL findable on the DEFAULT path (include_broad = false).
+    eng.match_title("rareword title", &mut s, &mut out, false);
+    assert!(
+        out.contains(&watched),
+        "FALSE NEGATIVE: re-anchoring demoted a main query into the broad lane (default path skips it)"
+    );
+}
+
 /// Re-anchoring on a realistic, multi-segment corpus (built across several `bulk_ingest`s,
 /// so global frequencies drift while the mask stays frozen) preserves matches exactly —
 /// per-title AND through the columnar broad-lane batch path over the rebuilt broad index —
