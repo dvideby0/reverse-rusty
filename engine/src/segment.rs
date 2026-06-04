@@ -300,6 +300,10 @@ pub struct CompactionReport {
     pub entries_after: usize,
     /// Number of tombstoned entries reclaimed.
     pub tombstones_reclaimed: usize,
+    /// Number of queries whose signature cover was re-anchored during the merge
+    /// (ADR-056). Always `0` unless `compaction_reanchor` is enabled, and `0` in a
+    /// cluster shard (frozen dict ⇒ no frequency drift ⇒ no anchor change).
+    pub reanchored: usize,
 }
 
 /// Boxed observer callback for engine events.

@@ -222,6 +222,28 @@ impl Dict {
         self.finalized
     }
 
+    /// Inverse of the common mask: for each bit index `0..64`, the feature assigned
+    /// that bit by [`finalize_mask`](Self::finalize_mask), or `None` for an unassigned
+    /// bit. Derived from `mask_bit` on demand (not stored, not serialized, not part of
+    /// [`fingerprint`](Self::fingerprint)). Each of the 64 bits is assigned to at most
+    /// one feature by construction, so the table is well-defined.
+    ///
+    /// Used by the compaction "improve" pass (ADR-056) to reconstruct a stored query's
+    /// masked-required features — which the exact-store SoA keeps only as set bits in
+    /// `req_mask` — back into `FeatureId`s before re-running the anchor optimizer.
+    /// Correct only while the mask is **frozen** (the engine's invariant after the
+    /// first `finalize_mask`): a re-ranked mask would invalidate the `req_mask` bit
+    /// assignments baked into already-built segments.
+    pub fn mask_inverse(&self) -> [Option<FeatureId>; 64] {
+        let mut inv = [None; 64];
+        for (id, &b) in self.mask_bit.iter().enumerate() {
+            if b != NO_MASK_BIT {
+                inv[b as usize] = Some(id as FeatureId);
+            }
+        }
+        inv
+    }
+
     /// Set frequency and mask bit for a feature directly. Used by Dict
     /// deserialization to restore persisted state without re-computing.
     pub fn set_freq_and_mask(&mut self, id: FeatureId, freq: u32, mask_bit: u8) {
@@ -349,5 +371,51 @@ mod tests {
         assert_eq!(d.freq(s), 0);
         assert_eq!(d.kind(s), FeatureKind::Generic);
         assert_eq!(d.name(s), "<oov>");
+    }
+
+    #[test]
+    fn mask_inverse_round_trips_mask_bit() {
+        // >64 features with distinct, descending frequencies so finalize_mask assigns
+        // all 64 bits deterministically. The inverse must map every assigned bit back
+        // to exactly the feature that holds it.
+        let mut d = Dict::new();
+        for i in 0..100u32 {
+            let f = d.intern(&format!("f{i}"), FeatureKind::Generic);
+            for _ in 0..(100 - i) {
+                d.bump_freq(f);
+            }
+        }
+        d.finalize_mask();
+        let inv = d.mask_inverse();
+
+        let mut assigned = 0;
+        for (bit, slot) in inv.iter().enumerate() {
+            if let Some(f) = *slot {
+                assert_eq!(
+                    d.mask_bit(f) as usize,
+                    bit,
+                    "inverse disagrees with mask_bit"
+                );
+                assigned += 1;
+            }
+        }
+        assert_eq!(assigned, 64, "all 64 bits assigned when >64 features exist");
+
+        // Every hot feature appears exactly once at its own bit.
+        for f in 0..d.len() as FeatureId {
+            let b = d.mask_bit(f);
+            if b != NO_MASK_BIT {
+                assert_eq!(inv[b as usize], Some(f));
+            }
+        }
+    }
+
+    #[test]
+    fn mask_inverse_is_all_none_before_finalize() {
+        // No bits assigned until finalize_mask runs ⇒ the inverse is empty, and
+        // un-masking a (zero) req_mask is a natural no-op.
+        let mut d = Dict::new();
+        d.intern("a", FeatureKind::Generic);
+        assert!(d.mask_inverse().iter().all(Option::is_none));
     }
 }

@@ -69,6 +69,29 @@ pub struct EngineConfig {
     /// Default: `true`
     pub auto_compact_on_ingest: bool,
 
+    /// Re-anchor drifted queries during compaction (the "improve" phase,
+    /// [`ingestion-and-updates.md`](../docs/design/ingestion-and-updates.md) §7.3,
+    /// ADR-056). When `true`, a merge re-derives each alive query's signature cover
+    /// with the *current* feature frequencies instead of carrying the old anchors
+    /// forward verbatim, so a query whose anchor drifted to a more-common feature
+    /// moves onto its now-most-selective anchor — shrinking hot postings and
+    /// per-title candidate fan-out. Result-preserving: re-anchoring only changes
+    /// *which* posting list a query lives in (the cover stays lossless because it is
+    /// rebuilt by the same optimizer the title side is matched against), never the
+    /// match set, never the exact-store data — proven zero-false-negative by the
+    /// differential oracle. (The cost class A/B/C *may* change — e.g. a query whose
+    /// anchor drifted to high frequency escalating to a more-selective arity-2 cover —
+    /// which is exactly the repair; it stays lossless by the same matched-pair argument.)
+    ///
+    /// Works *within* the frozen 64-hot common mask (re-ranking the hot set itself is a
+    /// major-version blue/green concern, §8), so it repairs frequency-ordering drift
+    /// rather than re-classifying hotness. A no-op in a cluster shard
+    /// (whose shared dict is frozen, so frequencies never drift) and on a single
+    /// build (no drift yet) — so the default path is byte-identical.
+    ///
+    /// Default: `false`
+    pub compaction_reanchor: bool,
+
     // ---- persistence ----
     /// Directory for persisting segments and WAL. When `Some`, sealed segments
     /// are written to disk and mmap'd back; the WAL records mutations for crash
@@ -202,6 +225,7 @@ impl Default for EngineConfig {
             memtable_flush_threshold: 100_000,
             auto_compact_on_flush: true,
             auto_compact_on_ingest: true,
+            compaction_reanchor: false,
             data_dir: None,
             wal_sync_on_write: false,
             retain_source: true,

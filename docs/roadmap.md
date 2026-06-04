@@ -47,8 +47,10 @@ items from an external review, re-ranked to the top; **all are now done:**
   `tests/cluster_oracle.rs` (absorb-without-broadening, satisfiable all-unknown any-of, **declared alias makes
   both surface forms match**, auto-learn) + `tests/cluster_durability_oracle.rs` (alias survives reopen +
   rebind) + `tests/hardening_fixes.rs`. **Remaining (deferred, not v1-blocking):** the background re-materialize
-  that consolidates hashed terms / learned synonyms on compaction (the "improve" phase), and cross-process
-  normalizer shipping. *(Absorbed the former Tier-3 "normalizer/vocab shipping" residue.)*
+  that consolidates hashed terms / learned synonyms on compaction (the *vocab-consolidation* slice of the
+  "improve" phase — distinct from, and not addressed by, the frequency-drift re-anchoring shipped in
+  ADR-056), and cross-process normalizer shipping. *(Absorbed the former Tier-3 "normalizer/vocab
+  shipping" residue.)*
 - **`block_on` regression guard test — done.** `RemoteShard`'s sync→async bridge is *safe by design*
   (rayon workers aren't tokio runtime threads — `remote.rs:9-14`). A guard test now drives a
   multi-shard (fan-out ≥ 2) `RemoteShard` percolate so the bridge runs `block_on` on rayon workers,
@@ -95,9 +97,22 @@ items from an external review, re-ranked to the top; **all are now done:**
 
 ### Tier 2 — feature-model quality & self-tuning
 
-- **Compaction-that-improves.** The merge mechanic is done; add the "improve" phase — recompute stats
-  and re-anchor queries whose anchor drifted hot, repacking covers during a merge that's already
-  happening. ([`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) §7.)
+- ~~**Compaction-that-improves.**~~ **✅ Shipped (ADR-056).** The "improve" phase: an **opt-in**
+  `compaction_reanchor` makes a merge re-derive each alive query's cover with the *current*
+  frequencies (decoding the stored exact-store SoA, reusing `anchor_plan`/`build_signatures`) instead
+  of carrying old anchors forward — so a query whose anchor drifted to a more-common feature moves
+  onto its now-most-selective anchor, shrinking hot postings and per-title candidate fan-out, all
+  amortized into a merge that was happening anyway. FN-safe by construction (the new cover is built by
+  the same optimizer the title side is matched against; the SoA — masks/forbidden/any-of/tags — is
+  copied verbatim, so only postings + class are re-derived); a **no-op in a cluster** (the shared dict
+  is frozen, so frequencies never drift) and default-off ⇒ byte-identical. Works *within* the frozen
+  64-hot mask (it repairs frequency-ordering drift, incl. A→B arity-2 escalation; **re-ranking the hot
+  set itself stays a major-version blue/green concern**, §8). Oracle-proven: a controlled drift forces
+  a guaranteed flip (pre ≡ post ≡ brute across all shapes), a 30k realistically-drifted corpus
+  re-anchors ~15% of queries with zero FN (per-title + columnar batch), and a frozen-dict no-op test.
+  ([`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) §7.3.) **Deferred (the rest of
+  §7's "improve" menu):** candidate-survival telemetry, `recommended_shard_count`/`recommended_arity`,
+  feature-ID re-ranking for locality, re-running the corpus learner per range.
 - ~~**Wire the NPMI learner as the runtime vocab source.**~~ **✅ Shipped (ADR-053).** The `learn.rs`
   NPMI collocation core is now a library module (`src/corpus.rs::learn_phrases_from_text`) that induces
   multi-token entity **phrases** from the live query text and returns them as a `Vocab`, composed UNDER

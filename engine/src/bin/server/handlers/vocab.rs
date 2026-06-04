@@ -326,6 +326,9 @@ fn apply_settings_patch(
             "auto_compact_on_ingest" => {
                 set_bool(&mut cfg.auto_compact_on_ingest, key, val, &mut errors);
             }
+            "compaction_reanchor" => {
+                set_bool(&mut cfg.compaction_reanchor, key, val, &mut errors);
+            }
             // ---- broad-lane batch knobs (ADR-026) ----
             "broad_batch_size" => set_usize(&mut cfg.broad_batch_size, key, val, &mut errors),
             "max_percolate_batch" => {
@@ -411,6 +414,17 @@ mod settings_tests {
         assert!(!cfg.broad_columnar);
         assert!(!cfg.broad_materialize);
         assert_eq!(cfg.max_percolate_batch, 50_000);
+    }
+
+    #[test]
+    fn applies_compaction_reanchor_setting() {
+        // ADR-056: the re-anchor knob is dynamic (toggleable like the other compaction knobs).
+        let cfg = apply_settings_patch(
+            EngineConfig::default(),
+            &patch(r#"{"compaction_reanchor": true}"#),
+        )
+        .expect("valid compaction_reanchor patch");
+        assert!(cfg.compaction_reanchor);
     }
 
     #[test]

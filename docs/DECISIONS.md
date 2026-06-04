@@ -54,6 +54,7 @@ not deleted (the record of *why something was not done* is as load-bearing as th
 | [018](decisions/adr-018-bulk-ingest-per-item-outcomes.md) | Bulk ingest reports per-item outcomes (ES-style) | `/_bulk` returns per-item statuses (which queries were dropped + why), not just an aggregate count. | Accepted |
 | [020](decisions/adr-020-resident-memory-reduction.md) | Production-scale resident-memory reduction | Lazy on-disk source store + flat logical-index columns cut resident memory ~148 → ~96 B/query (→ ~4.5 with both, opt-in) ahead of sharding. | Accepted |
 | [051](decisions/adr-051-fail-closed-flush-compaction.md) | Fail-closed flush, compaction & reseal | Extend ADR-017's durable-or-rejected discipline to flush/compaction/reseal/recompile: build the replacement durable before destroying what it replaces, gate WAL-advance/file-deletion on the commit point. No silent restart data loss on disk failure. | Accepted |
+| [056](decisions/adr-056-compaction-reanchoring.md) | Compaction-that-improves (re-anchoring drifted queries) | Opt-in `compaction_reanchor`: a merge re-derives each alive query's cover with current frequencies (decoding the stored SoA, reusing `anchor_plan`) so a drifted anchor moves to a more-selective one — shrinking hot postings + fan-out. FN-safe by the `anchor_plan`/`match_into` matched pair (SoA copied verbatim); a no-op in a cluster (frozen dict); default-off ⇒ byte-identical. Closes the Tier-2 item. | Accepted |
 
 ## Engine, errors, dependencies & ops
 
