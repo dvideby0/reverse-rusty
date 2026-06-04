@@ -35,6 +35,7 @@
 pub mod cluster;
 pub mod compile;
 pub mod config;
+pub mod corpus;
 pub mod dict;
 pub mod dsl;
 pub mod error;

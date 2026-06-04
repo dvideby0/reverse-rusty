@@ -44,7 +44,19 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   server logs it (`error!`/`warn!` by severity) and increments an alertable `durability_failures_total{op}`
   counter; recovery-time failures (pre-observer) are buffered and replayed on `set_observer` (ADR-021).
 - **Vocabulary** (`vocab.rs`) — `Vocab` learn-from-any-of-groups + JSON persistence (ADR-015), runtime
-  swap with vocab-epoch staleness tracking, per-segment reverse index for O(segments) delete.
+  swap with vocab-epoch staleness tracking, per-segment reverse index for O(segments) delete. **Corpus
+  self-derivation (ADR-053):** the `learn` binary's NPMI collocation core is now a library module
+  (`corpus.rs`) that induces multi-token entity **phrases** from the live query text; composed UNDER the
+  any-of learner via an opt-in `CorpusLearnConfig` (`Engine`/`ClusterEngine::learn_and_apply_with`,
+  `/_vocab/learn[/_and_apply]?corpus_phrases=true`). Phrases only; applied **additively** (emit the
+  phrase feature + keep the component features) so a component query never loses a candidate
+  (recall-first); engine ≡ brute under the learned normalizer. Residual: a phrase-form query tightens
+  to adjacency (re-tokenization) — opt-in/reviewable. Default-off ⇒ byte-identical. **Equivalence (alias) learning
+  via expansion (ADR-054):** a first-class `Vocab.equivalences` applied by **expansion, not collapse**
+  (`Extracted::expand_equivalences` widens a required feature into an any-of over its group — structurally
+  FN-safe: the match set only grows, a wrong alias degrades to a bounded false positive). Declared
+  (`PUT /_vocab`) + any-of-learned (opt-in `learn_equivalences`) sources; reversible; survives reopen;
+  default-off ⇒ byte-identical. Distributional/match-feedback discovery deferred behind the same seam.
 - **HTTP server** (`bin/server/`) — ES-style REST (`/_doc`, `/_search` with explain/profile,
   `/_bulk` per-item status ADR-018, `/_stats`, `/_cat/stats`, `/_cat/segments` per-segment detail
   (text table + `?format=json`, ADR-023), `/_health`, `/_metrics`, `/_vocab*`,
@@ -385,8 +397,9 @@ Tiers, highest-leverage first:
   reopen + dynamic vocabulary (ADR-046) — built + oracle-proven, the shippable milestone.
 - **Tier 1 — highest-leverage bottlenecks.** Broad-lane batch evaluation (✅ ADR-026) + resident-memory
   reduction (✅ ADR-020) — both shipped.
-- **Tier 2 — feature-model quality & self-tuning.** Compaction-that-improves, wire the NPMI learner,
-  confidence-gated alias learning.
+- **Tier 2 — feature-model quality & self-tuning.** NPMI corpus phrase induction (✅ ADR-053) +
+  equivalence/alias learning via expansion — mechanism + declared/any-of sources (✅ ADR-054); still
+  open: compaction-that-improves, and the deferred alias-discovery sources (distributional, match-feedback).
 - **Tier 3 — scale & production maturity.** Feature-model versioning + blue/green; hardening the
   (experimental) distributed multi-node layers; aspects-first ingestion.
 - **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node,
@@ -424,9 +437,11 @@ backlog, and the Evaluated & declined list.
   *cross-process* to a remote shard's normalizer remains deferred), and the transport is
   unauthenticated/plaintext. Treat the gRPC surface as correctness-safe, not yet a hardened multi-process deployment.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
-  runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving it from the corpus is the
-  NPMI-wiring item in Tier 2. Absorbing vocabulary that first appears *after* the dict is frozen
-  (live writes against a cluster's shared frozen dict) is the **Tier-0 dynamic-vocabulary** item.
+  runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving entity **phrases** from the
+  corpus is now wired (opt-in NPMI induction, ADR-053 — `corpus.rs` + `learn_and_apply_with`); deriving
+  **aliases** (the correctness-sensitive part) remains the confidence-gated Tier-2 item. Absorbing
+  vocabulary that first appears *after* the dict is frozen (live writes against a cluster's shared
+  frozen dict) is the **Tier-0 dynamic-vocabulary** item.
 - **Validated on synthetic data only.** The differential oracle and the benchmarks run against the
   seeded synthetic generator ([`gen.rs`](../engine/src/gen.rs)), which is deliberately adversarial
   (ADR-008); one design-validation pass ran ~20 real eBay titles through the normalizer

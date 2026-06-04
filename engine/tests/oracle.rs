@@ -845,3 +845,384 @@ fn zero_false_negatives_with_populated_vocab() {
         "degenerate test: no matches with populated vocab"
     );
 }
+
+/// The contract under NPMI corpus phrase induction (ADR-053): build with the EMPTY
+/// `default_vocab`, then self-derive entity phrases from the live corpus and apply them
+/// (`learn_and_apply_with(corpus_phrases=true)`). Ground truth uses the engine's OWN
+/// learned normalizer — gluing applies the same normalizer to queries (recompile) and
+/// titles (match), so engine ≡ brute with ZERO false negatives. Proves the induced
+/// phrases flow through `set_vocab` + `recompile_stale_segments` losslessly.
+#[test]
+fn zero_false_negatives_after_corpus_phrase_learn_and_apply() {
+    use reverse_rusty::vocab::CorpusLearnConfig;
+
+    let cfg = GenConfig {
+        num_queries: 8_000,
+        num_titles: 2_000,
+        broad_query_frac: 0.06,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0x0C0F_FEE5,
+        num_players: 600,
+        num_sets: 300,
+    };
+    let data = generate(&cfg);
+
+    // Generator corpus + a guaranteed-strong planted collocation ("zenith zonk"), so the
+    // induction is never vacuous: a block of queries placing the pair adjacently, and
+    // titles containing it.
+    let mut queries = data.queries.clone();
+    let base_id = queries.iter().map(|(l, _)| *l).max().unwrap_or(0) + 1;
+    for i in 0..40u64 {
+        queries.push((base_id + i, format!("zenith zonk plant{i}")));
+    }
+    let mut titles = data.titles.clone();
+    for i in 0..40 {
+        titles.push(format!("zenith zonk extra{i}"));
+    }
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    eng.build_from_queries(&queries);
+    let learn_cfg = CorpusLearnConfig {
+        corpus_phrases: true,
+        npmi_min_count: 3,
+        ..Default::default()
+    };
+    let recompiled = eng
+        .learn_and_apply_with(&learn_cfg)
+        .expect("corpus-phrase learn_and_apply");
+    assert!(recompiled > 0, "learn_and_apply must recompile the corpus");
+
+    // The learned vocab must carry the planted phrase (non-vacuous induction).
+    let learned = eng
+        .vocab()
+        .expect("vocab set after learn_and_apply")
+        .clone();
+    assert!(
+        learned
+            .phrases()
+            .iter()
+            .any(|p| p.tokens == vec!["zenith".to_string(), "zonk".to_string()]),
+        "the planted zenith/zonk collocation must be induced"
+    );
+
+    let brute = Brute::build_with(
+        &queries,
+        learned.to_normalizer().expect("learned normalizer builds"),
+    );
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    let mut blc = String::new();
+    let mut bfeats = Vec::new();
+    let mut total_truth = 0usize;
+    let mut false_neg = 0usize;
+    let mut false_pos = 0usize;
+
+    for title in &titles {
+        eng.match_title(title, &mut s, &mut out, true);
+        let engine_set: HashSet<u64> = out.iter().copied().collect();
+        let truth = brute.matches(title, &mut blc, &mut bfeats);
+        total_truth += truth.len();
+        for t in &truth {
+            if !engine_set.contains(t) {
+                false_neg += 1;
+            }
+        }
+        for e in &engine_set {
+            if !truth.contains(e) {
+                false_pos += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "corpus-phrase oracle: phrases={} truth={total_truth} false_neg={false_neg} false_pos={false_pos}",
+        learned.phrases().len()
+    );
+    assert_eq!(
+        false_neg, 0,
+        "FALSE NEGATIVES after corpus-phrase learn — contract violated"
+    );
+    assert_eq!(
+        false_pos, 0,
+        "false positives after corpus-phrase learn — exact matcher not exact"
+    );
+    assert!(total_truth > 0, "degenerate test: no matches");
+}
+
+/// ADR-053 recall-first: corpus phrase induction is ADDITIVE, so a query referencing a
+/// COMPONENT of an induced phrase keeps matching titles that contain the phrase. (Collapse —
+/// the old behavior — would have dropped this candidate, which is the cardinal sin for a
+/// recall-first stage-one matcher.)
+#[test]
+fn corpus_phrase_induction_preserves_component_query_recall() {
+    use reverse_rusty::vocab::CorpusLearnConfig;
+
+    let mut queries: Vec<(u64, String)> = vec![(1, "deck".into())]; // requires just "deck"
+    for i in 0..40u64 {
+        queries.push((100 + i, format!("upper deck u{i}"))); // plant the "upper deck" phrase
+    }
+    let title = "1994 upper deck rookie"; // contains "upper deck" adjacently
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title(title, &mut s, &mut out, true);
+    let before: HashSet<u64> = out.iter().copied().collect();
+    assert!(
+        before.contains(&1),
+        "before induction, the 'deck' query matches a title containing 'deck'"
+    );
+
+    let cfg = CorpusLearnConfig {
+        corpus_phrases: true,
+        npmi_min_count: 3,
+        ..Default::default()
+    };
+    eng.learn_and_apply_with(&cfg).expect("corpus-phrase learn");
+    // The induced phrase is recorded as ADDITIVE.
+    assert!(
+        eng.vocab()
+            .expect("vocab")
+            .phrases()
+            .iter()
+            .any(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()] && p.additive),
+        "the induced 'upper deck' phrase must be additive"
+    );
+
+    eng.match_title(title, &mut s, &mut out, true);
+    let after: HashSet<u64> = out.iter().copied().collect();
+    assert!(
+        after.contains(&1),
+        "AFTER additive induction, the 'deck' query STILL matches (component recall preserved)"
+    );
+    assert!(
+        before.is_subset(&after),
+        "additive corpus phrases must not drop a prior match"
+    );
+}
+
+/// Characterization (NOT a bug): inducing `upper deck` makes a query *phrased* "upper deck"
+/// require the adjacent phrase, so it no longer matches a title where the two tokens are
+/// NON-adjacent. This is the intended re-tokenization; for genuine entities (which appear
+/// adjacent in real titles) it is negligible. Pinned so the tradeoff is explicit — and
+/// contrasts with ADR-054 alias expansion, which is fully monotonic.
+#[test]
+fn corpus_phrase_induction_tightens_phrase_query_to_adjacency() {
+    use reverse_rusty::vocab::CorpusLearnConfig;
+
+    let mut queries: Vec<(u64, String)> = vec![(1, "upper deck".into())];
+    for i in 0..40u64 {
+        queries.push((100 + i, format!("upper deck u{i}")));
+    }
+    let nonadjacent = "upper blue deck"; // upper and deck present but NOT adjacent
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title(nonadjacent, &mut s, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "before induction, 'upper deck' matches a non-adjacent title (AND of bare terms)"
+    );
+
+    let cfg = CorpusLearnConfig {
+        corpus_phrases: true,
+        npmi_min_count: 3,
+        ..Default::default()
+    };
+    eng.learn_and_apply_with(&cfg).expect("corpus-phrase learn");
+    eng.match_title(nonadjacent, &mut s, &mut out, true);
+    assert!(
+        !out.contains(&1),
+        "after induction, the phrase-form query tightens to adjacency (documented residual)"
+    );
+}
+
+/// Equivalence learning via expansion-not-collapse (ADR-054): declaring `rc ≡ rookie` and
+/// applying it must make a query phrased with one form match a title bearing the other —
+/// while NEVER dropping a prior match (the match set only grows; FN-safe).
+#[test]
+fn equivalence_expansion_grows_matches_and_is_fn_safe() {
+    use reverse_rusty::vocab::Vocab;
+
+    // A corpus where "rc" and "rookie" are distinct features (empty default vocab). Extra
+    // queries ensure both tokens are interned in the dict.
+    let mut queries: Vec<(u64, String)> = vec![
+        (1, "1994 fleer rc".into()),     // requires rc
+        (2, "1994 fleer rookie".into()), // requires rookie
+    ];
+    for i in 0..20u64 {
+        queries.push((100 + i, format!("rc card{i}")));
+        queries.push((200 + i, format!("rookie card{i}")));
+    }
+    let rookie_title = "1994 fleer rookie psa 10"; // has rookie, NOT rc
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title(rookie_title, &mut s, &mut out, true);
+    let before: HashSet<u64> = out.iter().copied().collect();
+    assert!(
+        !before.contains(&1),
+        "before the equivalence, the rc-query must not match a rookie-only title"
+    );
+
+    // Declare rc ≡ rookie and apply via expansion (set_vocab installs it; recompile expands).
+    let mut v = Vocab::new();
+    v.add_equivalence(&["rc", "rookie"]);
+    eng.set_vocab(v).expect("set_vocab");
+    eng.recompile_stale_segments();
+
+    eng.match_title(rookie_title, &mut s, &mut out, true);
+    let after: HashSet<u64> = out.iter().copied().collect();
+    assert!(
+        after.contains(&1),
+        "after rc≡rookie, the rc-query matches a rookie title (expansion grew the match set)"
+    );
+    assert!(
+        before.is_subset(&after),
+        "expansion must never drop a prior match (FN-safe / monotone)"
+    );
+}
+
+/// The structural safety claim for expansion (ADR-054): even a WRONG (nonsense) equivalence
+/// can only add false positives — it must NEVER drop a true match. We apply a garbage
+/// equivalence and assert every match the ORIGINAL (unexpanded) queries had still survives.
+#[test]
+fn wrong_equivalence_never_causes_false_negatives() {
+    use reverse_rusty::vocab::Vocab;
+
+    let cfg = GenConfig {
+        num_queries: 8_000,
+        num_titles: 2_000,
+        broad_query_frac: 0.06,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0x0BAD_0E00,
+        num_players: 600,
+        num_sets: 300,
+    };
+    let data = generate(&cfg);
+
+    // Intern two unrelated nonsense tokens so the bogus equivalence resolves to real ids.
+    let mut queries = data.queries.clone();
+    for i in 0..20u64 {
+        queries.push((9_000_000 + i, format!("wibble u{i}")));
+        queries.push((9_100_000 + i, format!("wobble u{i}")));
+    }
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+
+    // Ground truth under the ORIGINAL semantics (no equivalence).
+    let brute = Brute::build(&queries);
+
+    // Apply a nonsense equivalence and recompile.
+    let mut v = Vocab::new();
+    v.add_equivalence(&["wibble", "wobble"]);
+    eng.set_vocab(v).expect("set_vocab");
+    eng.recompile_stale_segments();
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    let mut blc = String::new();
+    let mut bfeats = Vec::new();
+    let mut false_neg = 0usize;
+    let mut total_truth = 0usize;
+    for title in &data.titles {
+        eng.match_title(title, &mut s, &mut out, true);
+        let engine_set: HashSet<u64> = out.iter().copied().collect();
+        let truth = brute.matches(title, &mut blc, &mut bfeats); // original semantics
+        total_truth += truth.len();
+        for t in &truth {
+            if !engine_set.contains(t) {
+                false_neg += 1;
+            }
+        }
+    }
+    assert_eq!(
+        false_neg, 0,
+        "expansion of a WRONG equivalence must never drop a true match (structural FN-safety)"
+    );
+    assert!(total_truth > 0, "degenerate test: no matches");
+}
+
+/// The learned source end-to-end (ADR-054): `learn_and_apply_with(learn_equivalences=true)`
+/// turns the corpus's any-of groups into an equivalence applied via expansion, so a query
+/// phrased with one form then matches a title bearing the other.
+#[test]
+fn learned_equivalence_via_expansion_matches_both_forms() {
+    use reverse_rusty::vocab::CorpusLearnConfig;
+
+    let mut queries: Vec<(u64, String)> = vec![(1, "1994 fleer rc".into())];
+    for i in 0..6u64 {
+        queries.push((100 + i, "(rc,rookie)".into())); // declare the any-of >= min_count
+    }
+    for i in 0..20u64 {
+        queries.push((200 + i, format!("rookie u{i}")));
+        queries.push((300 + i, format!("rc u{i}")));
+    }
+    let rookie_title = "1994 fleer rookie psa 10";
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title(rookie_title, &mut s, &mut out, true);
+    assert!(
+        !out.contains(&1),
+        "before learning, the rc-query must not match a rookie title"
+    );
+
+    let cfg = CorpusLearnConfig {
+        anyof_min_count: 2,
+        learn_equivalences: true,
+        ..Default::default()
+    };
+    eng.learn_and_apply_with(&cfg)
+        .expect("learn_and_apply equivalences");
+    assert!(
+        !eng.vocab().expect("vocab").equivalences().is_empty(),
+        "an equivalence group must be learned from the any-of corpus"
+    );
+
+    eng.match_title(rookie_title, &mut s, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "after learning rc≡rookie via expansion, the rc-query matches a rookie title"
+    );
+}
+
+/// Equivalences declared on the vocab BEFORE the initial build must be applied during
+/// `build_from_queries` (not only via a later `set_vocab`). Regression for the gap where the
+/// single-engine initial build skipped equivalence resolution.
+#[test]
+fn initial_build_applies_declared_equivalences() {
+    use reverse_rusty::vocab::Vocab;
+    use reverse_rusty::EngineConfig;
+
+    let mut v = Vocab::new();
+    v.add_equivalence(&["rc", "rookie"]);
+    let mut eng = Engine::with_vocab(v, EngineConfig::default()).expect("with_vocab");
+
+    let mut queries: Vec<(u64, String)> = vec![(1, "1994 fleer rc".into())];
+    for i in 0..10u64 {
+        queries.push((100 + i, format!("rc u{i}")));
+        queries.push((200 + i, format!("rookie u{i}")));
+    }
+    eng.build_from_queries(&queries);
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title("1994 fleer rookie psa 10", &mut s, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "initial build must apply declared equivalences: the rc-query matches a rookie title"
+    );
+}

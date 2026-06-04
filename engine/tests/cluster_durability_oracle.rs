@@ -61,6 +61,37 @@ impl Brute {
         }
     }
 
+    /// Like `build_with_vocab` but also applies the vocab's equivalence groups (ADR-054) via
+    /// expansion — independent ground truth that widens each query exactly as the cluster does.
+    fn build_with_equiv(
+        queries: &[(u64, String)],
+        norm: Normalizer,
+        vocab: &reverse_rusty::vocab::Vocab,
+    ) -> Self {
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let mut qs = Vec::new();
+        for (logical, text) in queries {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+                let ex = extract(&ast, &norm, &mut dict, &mut lc);
+                if ex.required.is_empty() && ex.anyof.is_empty() {
+                    continue;
+                }
+                qs.push((*logical, ex));
+            }
+        }
+        dict.finalize_mask();
+        let equiv = vocab.resolve_equivalences(&norm, &dict);
+        for (_, ex) in &mut qs {
+            ex.expand_equivalences(&equiv);
+        }
+        Brute {
+            norm,
+            dict,
+            queries: qs,
+        }
+    }
+
     fn matches(&self, title: &str, lc: &mut String, feats: &mut Vec<u32>) -> HashSet<u64> {
         self.norm.match_features(title, &self.dict, lc, feats);
         let present = |f: u32| feats.binary_search(&f).is_ok();
@@ -861,6 +892,83 @@ fn declared_alias_survives_reopen() {
                 got.contains(&q_abbr) && got.contains(&q_canon),
                 "k={k}: after reopen both forms must still match {t:?}"
             );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn declared_equivalence_survives_reopen() {
+    // ADR-054: a DECLARED equivalence applied via set_vocab on a DURABLE cluster is persisted
+    // in the manifest's serialized vocab + baked into the sealed segments (as expansion). After
+    // a crash + reopen the equivalence is still in effect — both surface forms match, and
+    // reopened ≡ pre-crash ≡ an independent equivalence-aware oracle. Zero FN across the restart.
+    let equiv_vocab = || {
+        let mut v = reverse_rusty::vocab::Vocab::new();
+        v.add_equivalence(&["zzabbr", "zzcanon"]);
+        v
+    };
+    let (mut queries, titles) = build_corpus();
+    let q_abbr = 8_600_001u64;
+    let q_canon = 8_600_002u64;
+    queries.push((q_abbr, "1994 fleer zzabbr".into()));
+    queries.push((q_canon, "1994 fleer zzcanon".into()));
+    for i in 0..30u64 {
+        queries.push((8_600_100 + i, format!("zzabbr u{i}")));
+        queries.push((8_600_200 + i, format!("zzcanon u{i}")));
+    }
+    let title_abbr = "1994 fleer zzabbr psa 10";
+    let title_canon = "1994 fleer zzcanon psa 10";
+    let check: Vec<String> = [title_abbr.to_string(), title_canon.to_string()]
+        .into_iter()
+        .chain(titles.iter().take(80).cloned())
+        .collect();
+
+    for &k in &[1usize, 3, 8] {
+        let dir = unique_dir(&format!("equiv_k{k}"));
+
+        let pre_crash: Vec<HashSet<u64>> = {
+            let mut cluster =
+                ClusterEngine::build(vocab(), &durable_cfg(k, dir.clone(), false), &queries)
+                    .expect("durable cluster builds");
+            cluster
+                .set_vocab(equiv_vocab())
+                .expect("set_vocab equivalence");
+            for t in [title_abbr, title_canon] {
+                let got = cluster.percolate(t).expect("percolate");
+                assert!(
+                    got.contains(&q_abbr) && got.contains(&q_canon),
+                    "k={k}: pre-crash both forms must match {t:?}"
+                );
+            }
+            check
+                .iter()
+                .map(|t| {
+                    cluster
+                        .percolate(t)
+                        .expect("percolate")
+                        .into_iter()
+                        .collect()
+                })
+                .collect()
+        };
+
+        // Reopen from disk alone — `open` restores the vocab (incl. equivalences) from the
+        // manifest and re-installs them on the recovered dict.
+        let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+
+        let brute = Brute::build_with_equiv(&queries, vocab(), &equiv_vocab());
+        let mut lc = String::new();
+        let mut feats: Vec<u32> = Vec::new();
+        for (i, t) in check.iter().enumerate() {
+            let got: HashSet<u64> = reopened
+                .percolate(t)
+                .expect("percolate")
+                .into_iter()
+                .collect();
+            assert_eq!(got, pre_crash[i], "k={k}: reopened≠pre-crash {t:?}");
+            let want = brute.matches(t, &mut lc, &mut feats);
+            assert_eq!(got, want, "k={k}: reopened≠equivalence-aware oracle {t:?}");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

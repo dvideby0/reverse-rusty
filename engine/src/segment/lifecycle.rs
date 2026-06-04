@@ -169,7 +169,14 @@ impl Engine {
         &mut self,
         vocab: crate::vocab::Vocab,
     ) -> Result<usize, crate::error::NormalizerError> {
-        self.norm = Arc::new(vocab.to_normalizer()?);
+        let norm = Arc::new(vocab.to_normalizer()?);
+        // Resolve any declared/learned equivalence groups against the frozen dict under the
+        // new normalizer and install them, so the subsequent recompile (and future inserts)
+        // expand queries through them (ADR-054). No groups ⇒ empty map ⇒ no-op (the dict
+        // clone is dwarfed by the recompile this set_vocab triggers).
+        let equiv = vocab.resolve_equivalences(&norm, &self.dict);
+        Arc::make_mut(&mut self.dict).set_equivalences(equiv);
+        self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
         self.vocab_epoch += 1;
         Ok(self.stale_segment_count())
@@ -210,7 +217,13 @@ impl Engine {
         &mut self,
         vocab: crate::vocab::Vocab,
     ) -> Result<(), crate::error::NormalizerError> {
-        self.norm = Arc::new(vocab.to_normalizer()?);
+        let norm = Arc::new(vocab.to_normalizer()?);
+        // Re-install equivalence groups (ADR-054) so inserts AFTER reopen expand through them.
+        // Already-compiled segments were persisted with their expansion baked in, so matching
+        // recovered queries needs no re-resolution — this only equips the live compile path.
+        let equiv = vocab.resolve_equivalences(&norm, &self.dict);
+        Arc::make_mut(&mut self.dict).set_equivalences(equiv);
+        self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
         Ok(())
     }
@@ -328,12 +341,33 @@ impl Engine {
     /// any-of groups (e.g. `(rookie,rc)` ⇒ `rc → rookie`) is merged UNDER the current
     /// vocabulary (a previously set alias wins) and the index is recompiled so the change
     /// takes effect immediately. Returns the number of queries recompiled.
+    ///
+    /// A thin wrapper over [`learn_and_apply_with`](Self::learn_and_apply_with) with NPMI
+    /// corpus phrase induction disabled — behaviorally unchanged.
     pub fn learn_and_apply(
         &mut self,
         min_count: usize,
     ) -> Result<usize, crate::error::NormalizerError> {
+        self.learn_and_apply_with(&crate::vocab::CorpusLearnConfig {
+            anyof_min_count: min_count,
+            ..Default::default()
+        })
+    }
+
+    /// Like [`learn_and_apply`](Self::learn_and_apply) but also runs opt-in **NPMI corpus
+    /// phrase induction** when `cfg.corpus_phrases` is set (ADR-053): multi-token entities
+    /// induced from the live query text (e.g. `upper deck`) are merged UNDER the current
+    /// vocabulary (a declared alias/phrase wins on a token collision) and the index is
+    /// recompiled. With `corpus_phrases = false` this is identical to
+    /// `learn_and_apply(cfg.anyof_min_count)`. Phrases only — never aliases — so the
+    /// same-normalizer gluing is lossless-cover safe (zero false negatives). Returns the
+    /// number of queries recompiled.
+    pub fn learn_and_apply_with(
+        &mut self,
+        cfg: &crate::vocab::CorpusLearnConfig,
+    ) -> Result<usize, crate::error::NormalizerError> {
         let corpus = self.live_sources();
-        let learned = crate::vocab::learn_from_queries(&corpus, min_count);
+        let learned = crate::vocab::learn_vocab_from_corpus(&corpus, cfg);
         let mut merged = crate::vocab::Vocab::new();
         if let Some(v) = &self.vocab {
             merged.merge(v);

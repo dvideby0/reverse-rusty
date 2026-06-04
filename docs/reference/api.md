@@ -113,7 +113,7 @@ The full method/path matrix is below.
 | `/_metrics` | GET | Prometheus text exposition format |
 | `/_vocab` | GET | Current vocabulary as JSON |
 | `/_vocab` | PUT | Replace vocabulary |
-| `/_vocab/learn` | POST | Learn synonyms from raw query text |
-| `/_vocab/learn_and_apply` | POST | Learn synonyms from stored queries + apply (`?min_count=N`) |
+| `/_vocab/learn` | POST | Learn synonyms (+ opt-in NPMI phrases, `corpus_phrases=true`) from raw query text |
+| `/_vocab/learn_and_apply` | POST | Learn from stored queries + apply (`?min_count=N`; opt-in NPMI phrases `?corpus_phrases=true`) |
 | `/_settings` | GET | Read live engine settings (`?include_defaults`) |
 | `/_settings` | PUT | Update the dynamic settings subset |

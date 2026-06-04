@@ -39,6 +39,16 @@ pub fn synthetic_id(name: &str) -> FeatureId {
     SYNTHETIC_BASE | (folded & (SYNTHETIC_BASE - 1))
 }
 
+/// A resolved equivalence map (ADR-054): each member `FeatureId` maps to the full
+/// equivalence group it belongs to (sorted, deduped, including itself). Built from a
+/// [`crate::vocab::Vocab`]'s equivalence groups when a vocabulary is applied, and consulted
+/// by the compile-time expansion pass ([`crate::compile::Extracted::expand_equivalences`]).
+///
+/// **Transient:** derived from the (persisted) vocab, never serialized into the dict and
+/// never part of [`Dict::fingerprint`], so it does not change the dict's cross-process
+/// identity. Empty by default ⇒ expansion is a no-op ⇒ the default path is byte-identical.
+pub type EquivMap = FastMap<FeatureId, Vec<FeatureId>>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FeatureKind {
     Year,
@@ -82,6 +92,10 @@ pub struct Dict {
     /// feature_id -> common-mask bit index (0..64), or NO_MASK_BIT
     mask_bit: Vec<u8>,
     finalized: bool,
+    /// Resolved equivalence groups for the compile-time expansion pass (ADR-054).
+    /// Transient — re-derived from the vocab when applied; not serialized, not in
+    /// `fingerprint`. Empty by default ⇒ no expansion.
+    equivalences: EquivMap,
 }
 
 impl Dict {
@@ -93,7 +107,21 @@ impl Dict {
             freq: Vec::new(),
             mask_bit: Vec::new(),
             finalized: false,
+            equivalences: fast_map(),
         }
+    }
+
+    /// Install the resolved equivalence groups consulted by the compile-time expansion
+    /// pass (ADR-054). Replaces any previous set. Empty ⇒ expansion is a no-op. Transient:
+    /// not serialized and not part of [`fingerprint`](Self::fingerprint).
+    pub fn set_equivalences(&mut self, equiv: EquivMap) {
+        self.equivalences = equiv;
+    }
+
+    /// The resolved equivalence groups (member `FeatureId` → its full group). Empty by default.
+    #[inline]
+    pub fn equivalences(&self) -> &EquivMap {
+        &self.equivalences
     }
 
     /// Intern a feature, creating it if new. `kind` is recorded on first sight.

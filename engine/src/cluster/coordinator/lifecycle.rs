@@ -305,7 +305,7 @@ impl ClusterEngine {
             .map_err(|e| ShardError::Config(format!("reading cluster manifest: {e}")))?;
         let dict = crate::storage::deserialize_dict(&manifest.dict_data)
             .map_err(|e| ShardError::Config(format!("deserializing cluster dict: {e}")))?;
-        let dict = Arc::new(dict);
+        let mut dict = Arc::new(dict);
         // Fail loud if the restored dict's fingerprint disagrees with the manifest's —
         // the one false-negative path the fallible seam can't otherwise catch.
         let actual_fp = dict.fingerprint();
@@ -348,6 +348,16 @@ impl ClusterEngine {
             None => norm,
         };
         let norm = Arc::new(norm);
+        // Re-install equivalence groups (ADR-054) on the recovered dict so a log-tail replay
+        // and post-reopen incremental adds expand through them. The already-attached segments
+        // carry their expansion baked in, so matching recovered queries needs no re-resolution;
+        // this only re-equips the live compile path. No-op when the restored vocab declared none.
+        if let Some(v) = &restored_vocab {
+            let equiv = v.resolve_equivalences(&norm, &dict);
+            if !equiv.is_empty() {
+                Arc::make_mut(&mut dict).set_equivalences(equiv);
+            }
+        }
         let ring = HashRing::new(num_shards, manifest.vnodes)?;
 
         let per_shard = config.map(|c| c.per_shard.clone()).unwrap_or_default();
