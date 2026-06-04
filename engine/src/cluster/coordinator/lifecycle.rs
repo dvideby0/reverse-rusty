@@ -15,11 +15,17 @@ use crate::compile::{extract, Extracted};
 use crate::dict::Dict;
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
+use crate::segment::PlacedQuery;
+use crate::tagdict::TagDict;
 
 use super::{
     into_shard, placement_of, replica_dir, shard_dir, ClusterConfig, ClusterDurable, ClusterEngine,
     Target, CLUSTER_LOG_FILE, CLUSTER_MANIFEST_FILE,
 };
+
+/// One accepted query carried through pass A → pass B of [`ClusterEngine::build_with_tags`]:
+/// `(logical, extracted features, dsl, raw tags)` (ADR-055).
+type ExtractedTagged = (u64, Extracted, String, Vec<(String, String)>);
 
 impl ClusterEngine {
     /// Build a cluster from an initial corpus. This is the primary constructor:
@@ -36,6 +42,21 @@ impl ClusterEngine {
         config: &ClusterConfig,
         queries: &[(u64, String)],
     ) -> Result<Self, ShardError> {
+        Self::build_with_tags(norm, config, queries, &[])
+    }
+
+    /// [`build`](Self::build) carrying per-query metadata tags (ADR-049/055). `tags` is parallel to
+    /// `queries` (`tags[i]` describes `queries[i]`); an empty slice means no query is tagged. Pass A
+    /// builds the one frozen `TagDict` over the corpus tags alongside the feature `Dict`, then shares
+    /// it read-only into every shard, so a tagged write and a percolate filter resolve a given
+    /// `(key,value)` to the same `TagId` everywhere. With no tags the tag space is empty (still
+    /// finalized) and every path is byte-identical to the pre-tag `build`.
+    pub fn build_with_tags(
+        norm: Normalizer,
+        config: &ClusterConfig,
+        queries: &[(u64, String)],
+        tags: &[Vec<(String, String)>],
+    ) -> Result<Self, ShardError> {
         if config.num_shards == 0 {
             return Err(ShardError::Config(
                 "cluster needs at least one shard".into(),
@@ -48,18 +69,27 @@ impl ClusterEngine {
         }
         let norm = Arc::new(norm);
 
-        // Pass A — build the authoritative dict over the WHOLE corpus, then freeze.
+        // Pass A — build the authoritative dict + tag space over the WHOLE corpus, then freeze both.
+        // Each accepted query carries its raw tags forward so pass B can place them; the tags are
+        // interned now so a corpus tag keeps a dense id (a post-build tag hashes to a synthetic id).
         let mut dict = Dict::new();
+        let mut tag_dict = TagDict::new();
         let mut lc = String::new();
-        let mut extracted: Vec<(u64, Extracted, String)> = Vec::with_capacity(queries.len());
-        for (logical, text) in queries {
+        let mut extracted: Vec<ExtractedTagged> = Vec::with_capacity(queries.len());
+        for (idx, (logical, text)) in queries.iter().enumerate() {
             if let Ok(ast) = crate::dsl::parse(text) {
                 let ex = extract(&ast, &norm, &mut dict, &mut lc);
-                extracted.push((*logical, ex, text.clone()));
+                let qtags = tags.get(idx).cloned().unwrap_or_default();
+                for (k, v) in &qtags {
+                    tag_dict.intern(k, v);
+                }
+                extracted.push((*logical, ex, text.clone(), qtags));
             }
         }
         dict.finalize_mask();
+        tag_dict.mark_finalized();
         let dict = Arc::new(dict);
+        let tag_dict = Arc::new(tag_dict);
 
         let ring = HashRing::new(config.num_shards, config.vnodes)?;
 
@@ -81,11 +111,17 @@ impl ClusterEngine {
                     } else {
                         replica_dir(dir, s, r)
                     });
-                    LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), sc)?
+                    LocalShard::new_durable(
+                        Arc::clone(&norm),
+                        Arc::clone(&dict),
+                        Arc::clone(&tag_dict),
+                        sc,
+                    )?
                 } else {
                     LocalShard::new(
                         Arc::clone(&norm),
                         Arc::clone(&dict),
+                        Arc::clone(&tag_dict),
                         config.per_shard.clone(),
                     )
                 };
@@ -99,15 +135,27 @@ impl ClusterEngine {
         // initial corpus becomes the committed base (the Aurora "segments are the
         // materialized view" base), recorded in the coordinator manifest below rather
         // than as a raw-DSL snapshot.
-        let mut buckets: Vec<Vec<(u64, Extracted, String, u32)>> =
+        let mut buckets: Vec<Vec<PlacedQuery>> =
             (0..config.num_shards).map(|_| Vec::new()).collect();
-        for (logical, ex, text) in extracted {
+        for (logical, ex, text, qtags) in extracted {
             match placement_of(&dict, &ring, &ex) {
                 Target::Reject => {}
-                Target::Replicated => buckets[0].push((logical, ex, text, 1)),
+                Target::Replicated => buckets[0].push(PlacedQuery {
+                    logical,
+                    ex,
+                    dsl: text,
+                    version: 1,
+                    tags: qtags,
+                }),
                 Target::Selective(shs) => {
                     for &s in &shs {
-                        buckets[s].push((logical, ex.clone(), text.clone(), 1));
+                        buckets[s].push(PlacedQuery {
+                            logical,
+                            ex: ex.clone(),
+                            dsl: text.clone(),
+                            version: 1,
+                            tags: qtags.clone(),
+                        });
                     }
                 }
             }
@@ -133,7 +181,7 @@ impl ClusterEngine {
         let durable = match &config.data_dir {
             Some(dir) => {
                 let primaries: Vec<&LocalShard> = groups.iter().map(|g| &g[0]).collect();
-                Self::commit_durable_base(dir, &dict, &ring, config, &primaries)?
+                Self::commit_durable_base(dir, &dict, &tag_dict, &ring, config, &primaries)?
             }
             None => ClusterDurable::in_memory(
                 config.num_shards as u32,
@@ -151,6 +199,7 @@ impl ClusterEngine {
         Self::from_parts(
             norm,
             dict,
+            tag_dict,
             ring,
             shards,
             config.include_broad,
@@ -168,6 +217,7 @@ impl ClusterEngine {
     fn commit_durable_base(
         dir: &Path,
         dict: &Dict,
+        tag_dict: &TagDict,
         ring: &HashRing,
         config: &ClusterConfig,
         primaries: &[&LocalShard],
@@ -195,10 +245,10 @@ impl ClusterEngine {
             // A freshly built cluster has no runtime vocabulary change yet; a
             // declared alias lands here on a later `set_vocab` → `checkpoint`.
             vocab_data: Vec::new(),
-            // Per-query tag space (ADR-049). Filtered percolation is built on the
-            // single-node engine; threading tags through the (experimental) cluster
-            // ingest path is a follow-on, so a cluster persists an empty tag dict for now.
-            tag_dict_data: Vec::new(),
+            // The frozen per-query tag space (ADR-049/055) — persisted so a reopen resolves a
+            // request filter to the SAME `TagId`s the stored segments carry. Empty + finalized for
+            // an untagged cluster ⇒ a byte-identical empty blob (manifest v4 round-trips it).
+            tag_dict_data: crate::storage::serialize_tagdict(tag_dict),
         };
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;
@@ -232,6 +282,7 @@ impl ClusterEngine {
     pub(crate) fn from_parts(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
         ring: HashRing,
         shards: Vec<Box<dyn Shard>>,
         include_broad: bool,
@@ -249,6 +300,7 @@ impl ClusterEngine {
         Ok(ClusterEngine {
             norm,
             dict,
+            tag_dict,
             vocab: None,
             ring,
             shards,
@@ -358,6 +410,13 @@ impl ClusterEngine {
                 Arc::make_mut(&mut dict).set_equivalences(equiv);
             }
         }
+        // Restore the frozen tag space (ADR-049/055) like the dict, so a reopened cluster resolves a
+        // request filter to the SAME `TagId`s its attached segments carry. An empty blob (a pre-v4
+        // manifest / untagged cluster) deserializes to an empty tag dict — the back-compat path.
+        let tag_dict = Arc::new(
+            crate::storage::deserialize_tagdict(&manifest.tag_dict_data)
+                .map_err(|e| ShardError::Config(format!("deserializing cluster tag dict: {e}")))?,
+        );
         let ring = HashRing::new(num_shards, manifest.vnodes)?;
 
         let per_shard = config.map(|c| c.per_shard.clone()).unwrap_or_default();
@@ -375,6 +434,7 @@ impl ClusterEngine {
             let primary = LocalShard::open_segments(
                 Arc::clone(&norm),
                 Arc::clone(&dict),
+                Arc::clone(&tag_dict),
                 sc,
                 &manifest.segment_registry[s],
                 manifest.next_seg_ids[s],
@@ -391,6 +451,7 @@ impl ClusterEngine {
                 let (replica, _hwm) = crate::cluster::replica::peer_recover(
                     &norm,
                     &dict,
+                    &tag_dict,
                     per_shard.clone(),
                     &primary,
                     &primary_dir,
@@ -424,6 +485,7 @@ impl ClusterEngine {
         let mut engine = Self::from_parts(
             norm,
             dict,
+            tag_dict,
             ring,
             shards,
             manifest.include_broad,
@@ -510,9 +572,9 @@ impl ClusterEngine {
             next_seg_ids,
             dict_data: crate::storage::serialize_dict(&self.dict),
             vocab_data,
-            // Per-query tag space (ADR-049); threading tags through the cluster ingest
-            // path is a follow-on (filtered percolation is single-node today).
-            tag_dict_data: Vec::new(),
+            // The frozen per-query tag space (ADR-049/055) — re-persisted so the filter resolves to
+            // the same `TagId`s on the next reopen. Empty + finalized for an untagged cluster.
+            tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),
         };
         crate::storage::write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST_FILE))
             .map_err(|e| ShardError::Log(format!("writing cluster manifest: {e}")))?;

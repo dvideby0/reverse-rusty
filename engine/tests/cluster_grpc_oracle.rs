@@ -30,6 +30,7 @@ use reverse_rusty::events::{DurabilityOp, EngineEvent};
 use reverse_rusty::gen::{generate, GenConfig, BRANDS};
 use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::{Engine, MatchScratch};
+use reverse_rusty::tagdict::TagDict;
 use tonic::transport::server::TcpIncoming;
 
 fn vocab() -> Normalizer {
@@ -145,6 +146,69 @@ fn build_oracle(queries: &[(u64, String)], titles: &[String]) -> Vec<HashSet<u64
         .collect()
 }
 
+/// A finalized, empty tag space (ADR-055) — the untagged-test analogue of the coordinator's frozen
+/// tag dict. These gRPC equivalence tests carry no tags, so an empty (but finalized) tag space ships
+/// to every server and resolves no filter; the dedicated filtered-percolate test builds a real one.
+fn empty_tag_dict() -> Arc<TagDict> {
+    let mut td = TagDict::new();
+    td.mark_finalized();
+    Arc::new(td)
+}
+
+// ---- per-query tags + filtered percolation (ADR-049/055), mirroring `tests/oracle.rs` ----
+const CATEGORIES: [&str; 6] = ["cards", "coins", "stamps", "comics", "toys", "art"];
+const STATUSES: [&str; 3] = ["active", "inactive", "archived"];
+
+fn tags_for(logical: u64) -> Vec<(String, String)> {
+    let cat = CATEGORIES[(logical % CATEGORIES.len() as u64) as usize];
+    let status = STATUSES[((logical / 7) % STATUSES.len() as u64) as usize];
+    vec![
+        ("category".to_string(), cat.to_string()),
+        ("status".to_string(), status.to_string()),
+    ]
+}
+
+fn tags_parallel(queries: &[(u64, String)]) -> Vec<Vec<(String, String)>> {
+    queries.iter().map(|(l, _)| tags_for(*l)).collect()
+}
+
+fn passes_filter(qtags: &[(String, String)], filter: &[(String, Vec<String>)]) -> bool {
+    filter.iter().all(|(k, vals)| {
+        qtags
+            .iter()
+            .any(|(qk, qv)| qk == k && vals.iter().any(|v| v == qv))
+    })
+}
+
+fn filters_for(i: usize) -> Vec<Vec<(String, Vec<String>)>> {
+    let c1 = CATEGORIES[i % CATEGORIES.len()].to_string();
+    let c2 = CATEGORIES[(i + 1) % CATEGORIES.len()].to_string();
+    let st = STATUSES[i % STATUSES.len()].to_string();
+    vec![
+        vec![("category".to_string(), vec![c1.clone()])],
+        vec![("category".to_string(), vec![c1.clone(), c2])],
+        vec![
+            ("category".to_string(), vec![c1]),
+            ("status".to_string(), vec![st]),
+        ],
+        vec![("category".to_string(), vec!["never-ingested".to_string()])],
+    ]
+}
+
+/// The coordinator's frozen tag space: every corpus tag interned, then finalized — mirrors what
+/// `ClusterEngine::build_with_tags` builds, so the shipped tag dict resolves a stored tag and a
+/// request filter to the same `TagId`.
+fn frozen_tag_dict_over(tags: &[Vec<(String, String)>]) -> Arc<TagDict> {
+    let mut td = TagDict::new();
+    for qtags in tags {
+        for (k, v) in qtags {
+            td.intern(k, v);
+        }
+    }
+    td.mark_finalized();
+    Arc::new(td)
+}
+
 /// One authoritative frozen dict interned over `queries` (the coordinator's feature space).
 fn frozen_dict_over(queries: &[(u64, String)], norm: &Normalizer) -> Arc<Dict> {
     let mut d = Dict::new();
@@ -167,6 +231,151 @@ fn wait_until_listening(addr: SocketAddr) {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("shard server at {addr} never started listening");
+}
+
+/// Filtered percolation over gRPC (ADR-049/055): the coordinator ships its frozen tag space via
+/// `AdoptDict` (atomic with the dict, fingerprint-checked), bulk-loads a TAGGED corpus over the wire,
+/// then filtered percolations must agree with BOTH the single-node engine and the brute oracle —
+/// proving the resolved `TagId` filter groups + the per-`AddItem` raw tags survive the round-trip and
+/// the server resolves stored tags against the same shipped tag space.
+#[test]
+fn grpc_filtered_percolation_matches_single_node_and_oracle() {
+    let (queries, titles) = build_corpus();
+    let tags = tags_parallel(&queries);
+
+    // Single-node tagged reference + brute oracle (the expected sets).
+    let brute = Brute::build(&queries);
+    let mut reference = Engine::new(vocab());
+    reference
+        .try_build_from_queries_with_tags(&queries, &tags)
+        .expect("tagged single-node build");
+    let ref_snap = reference.snapshot();
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    let mut blc = String::new();
+    let mut bfeats = Vec::new();
+
+    // ONE frozen feature + tag space, shipped to every server (the cross-process identity).
+    let norm = Arc::new(vocab());
+    let dict = {
+        let mut d = Dict::new();
+        let mut lc = String::new();
+        for (_id, text) in &queries {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+                let _ = extract(&ast, &norm, &mut d, &mut lc);
+            }
+        }
+        d.finalize_mask();
+        Arc::new(d)
+    };
+    let tag_dict = frozen_tag_dict_over(&tags);
+
+    let k = 3usize;
+    let cfg = ClusterConfig {
+        num_shards: k,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+
+    // Stand up K PENDING servers (dict-less); connect_remote ships the dict AND the tag dict.
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut addrs: Vec<SocketAddr> = Vec::with_capacity(k);
+    {
+        let _enter = rt.enter();
+        for _ in 0..k {
+            let incoming =
+                TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind ephemeral port");
+            addrs.push(incoming.local_addr().expect("local_addr"));
+            let server = ShardServer::pending(Arc::clone(&norm), EngineConfig::default());
+            rt.spawn(server.serve_with_incoming(incoming));
+        }
+    }
+    for &addr in &addrs {
+        wait_until_listening(addr);
+    }
+    let endpoints: Vec<String> = addrs.iter().map(|a| format!("http://{a}")).collect();
+
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        &cfg,
+        &endpoints,
+        rt.handle(),
+    )
+    .expect("connect remote cluster (ships dict + tag dict)");
+    cluster
+        .ingest_with_tags(&queries, &tags)
+        .expect("ingest tagged corpus over gRPC");
+
+    let mut nonempty = 0usize;
+    for (ti, title) in titles.iter().enumerate() {
+        let unfiltered: HashSet<u64> = cluster
+            .percolate(title)
+            .expect("percolate over gRPC")
+            .into_iter()
+            .collect();
+        let truth = brute.matches(title, &mut blc, &mut bfeats);
+        for filter in filters_for(ti) {
+            let got: HashSet<u64> = cluster
+                .percolate_filtered(title, &filter)
+                .expect("filtered percolate over gRPC")
+                .into_iter()
+                .collect();
+
+            let pred = ref_snap.compile_tag_predicate(&filter);
+            ref_snap.match_title_filtered(title, &mut s, &mut out, true, &pred);
+            let ref_filtered: HashSet<u64> = out.iter().copied().collect();
+
+            let brute_filtered: HashSet<u64> = truth
+                .iter()
+                .copied()
+                .filter(|l| passes_filter(&tags_for(*l), &filter))
+                .collect();
+
+            assert_eq!(
+                got, brute_filtered,
+                "gRPC filtered vs brute oracle (title {ti}, filter {filter:?})"
+            );
+            assert_eq!(
+                got, ref_filtered,
+                "gRPC filtered vs single-node (title {ti}, filter {filter:?})"
+            );
+            assert!(
+                got.is_subset(&unfiltered),
+                "a filter added a match not in the unfiltered set, over gRPC"
+            );
+            if !got.is_empty() {
+                nonempty += 1;
+            }
+        }
+    }
+    assert!(nonempty > 0, "degenerate: no filter ever matched over gRPC");
+
+    // A tagged add over the gRPC insert RPC is filterable too (raw tags ride the wire).
+    cluster
+        .add_query_with_tags(
+            8_800_001,
+            "zzgrpclivetag",
+            &[("category".to_string(), "cards".to_string())],
+        )
+        .expect("live tagged add over gRPC");
+    let cards = vec![("category".to_string(), vec!["cards".to_string()])];
+    let coins = vec![("category".to_string(), vec!["coins".to_string()])];
+    assert!(
+        cluster
+            .percolate_filtered("zzgrpclivetag", &cards)
+            .unwrap()
+            .contains(&8_800_001),
+        "the live tagged add must pass its own (cards) filter over gRPC"
+    );
+    assert!(
+        !cluster
+            .percolate_filtered("zzgrpclivetag", &coins)
+            .unwrap()
+            .contains(&8_800_001),
+        "the live tagged add must NOT pass a different-category (coins) filter over gRPC"
+    );
 }
 
 #[test]
@@ -251,6 +460,7 @@ fn grpc_cluster_matches_single_node_and_oracle() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         &endpoints,
         rt.handle(),
@@ -386,6 +596,7 @@ fn remote_fanout_block_on_does_not_panic_on_rayon_workers() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         &endpoints,
         rt.handle(),
@@ -466,6 +677,7 @@ fn remote_single_target_percolate_safe_from_tokio_worker() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         &endpoints,
         rt.handle(),
@@ -550,6 +762,7 @@ fn grpc_partial_apply_is_detected_and_queued() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         &endpoints,
         rt.handle(),
@@ -716,6 +929,7 @@ fn grpc_cluster_with_dict_shipping() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         &endpoints,
         rt.handle(),
@@ -818,6 +1032,7 @@ fn grpc_connect_rejects_divergent_dict() {
     match ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict_coord),
+        empty_tag_dict(),
         &cfg,
         &[format!("http://{addr}")],
         rt.handle(),
@@ -941,6 +1156,7 @@ fn grpc_replicated_failover_and_peer_recovery() {
     let cluster = ClusterEngine::connect_replicated(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         &groups,
         rt.handle(),
@@ -1024,6 +1240,7 @@ fn grpc_replicated_failover_and_peer_recovery() {
     let verify = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         &verify_eps,
         rt.handle(),
@@ -1156,6 +1373,7 @@ fn grpc_peer_recovery_without_quiescing() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         std::slice::from_ref(&src_ep),
         rt.handle(),
@@ -1173,6 +1391,7 @@ fn grpc_peer_recovery_without_quiescing() {
     let verify = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         std::slice::from_ref(&tgt_ep),
         rt.handle(),
@@ -1336,6 +1555,7 @@ fn grpc_peer_recovery_converges_under_sustained_writes() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         std::slice::from_ref(&src_ep),
         rt.handle(),
@@ -1378,6 +1598,7 @@ fn grpc_peer_recovery_converges_under_sustained_writes() {
     let verify = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         std::slice::from_ref(&tgt_ep),
         rt.handle(),
@@ -1502,6 +1723,7 @@ fn grpc_live_handoff_under_sustained_writes() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         std::slice::from_ref(&src_ep),
         rt.handle(),
@@ -1645,6 +1867,7 @@ fn grpc_handoff_abort_unfences_source() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         std::slice::from_ref(&src_ep),
         rt.handle(),
@@ -1746,6 +1969,7 @@ fn grpc_autoscaler_tick_drives_handoff_resolution_and_preserves_matching() {
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        empty_tag_dict(),
         &cfg,
         &eps,
         rt.handle(),

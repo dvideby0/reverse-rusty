@@ -16,7 +16,7 @@ use crate::cluster::clog::LogPos;
 use crate::cluster::proto;
 use crate::cluster::proto::shard_service_server::ShardService;
 use crate::cluster::shard::{LocalShard, Shard};
-use crate::compile::Extracted;
+use crate::segment::PlacedQuery;
 
 use super::{compile_item, ServerState, ShardServer};
 
@@ -27,10 +27,14 @@ impl ShardService for ShardServer {
         request: Request<proto::PercolateRequest>,
     ) -> Result<Response<proto::PercolateReply>, Status> {
         let req = request.into_inner();
+        // Rebuild the tag filter from the already-resolved `TagId` groups (ADR-055); empty ⇒
+        // unfiltered. The ids are authoritative-from-coordinator, so the server never re-resolves
+        // strings — immune to any server-side tag-space skew on reads.
+        let pred = proto::tag_predicate_from_proto(req.filter);
         let (ids, stats) = self
             .loaded()?
             .shard
-            .percolate(&req.title, req.include_broad)
+            .percolate_filtered(&req.title, req.include_broad, &pred)
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::PercolateReply {
             ids,
@@ -103,11 +107,25 @@ impl ShardService for ShardServer {
                 req.fingerprint
             )));
         }
+        // The frozen tag space ships ATOMICALLY with the dict (ADR-055). An empty blob ⇒ an empty
+        // (untagged) tag space — back-compatible with a coordinator that ships no tags.
+        let tag_dict = crate::storage::deserialize_tagdict(&req.tag_dict).map_err(|e| {
+            Status::invalid_argument(format!("deserializing shipped tag dict: {e}"))
+        })?;
+        let tag_fp = tag_dict.fingerprint();
+        if tag_fp != req.tag_dict_fingerprint {
+            return Err(Status::invalid_argument(format!(
+                "shipped tag-dict integrity check failed: bytes fingerprint to {tag_fp:#018x} but \
+                 the request claims {:#018x}",
+                req.tag_dict_fingerprint
+            )));
+        }
 
         let adopt = match self.state.load_full().as_deref() {
-            // Already serving this exact dict → nothing to do.
-            Some(st) if st.dict.fingerprint() == fp => false,
-            // A different dict is already in place; only safe to replace if no data depends on it.
+            // Already serving this exact dict AND tag space → nothing to do.
+            Some(st) if st.dict.fingerprint() == fp && st.tag_dict.fingerprint() == tag_fp => false,
+            // A different dict / tag space is already in place; only safe to replace if no data
+            // depends on it (re-basing loaded data onto a divergent feature/tag space is unsafe).
             Some(st) => {
                 let n = st
                     .shard
@@ -116,11 +134,11 @@ impl ShardService for ShardServer {
                 if n > 0 {
                     return Err(Status::failed_precondition(format!(
                         "shard holds {n} queries under dict {:#018x}; refusing to adopt a \
-                         divergent dict {fp:#018x} (re-basing loaded data is unsafe)",
+                         divergent dict {fp:#018x} / tag space (re-basing loaded data is unsafe)",
                         st.dict.fingerprint()
                     )));
                 }
-                true // adopted but empty → safe to re-adopt
+                true // adopted but empty → safe to re-adopt (e.g. a pre-built `new` server gaining tags)
             }
             // Pending → adopt.
             None => true,
@@ -128,6 +146,7 @@ impl ShardService for ShardServer {
 
         if adopt {
             let dict = Arc::new(dict);
+            let tag_dict = Arc::new(tag_dict);
             // A durable node (data_dir set) builds a segments-only durable shard so its writes
             // persist `.seg` files — required to later serve `FetchSegments` or be a recovering
             // replica (ADR-035/036). An in-memory node keeps today's behavior.
@@ -135,20 +154,32 @@ impl ShardService for ShardServer {
                 Some(dir) => {
                     let mut sc = self.config.clone();
                     sc.data_dir = Some(dir.clone());
-                    LocalShard::new_durable(Arc::clone(&self.norm), Arc::clone(&dict), sc)
-                        .map_err(|e| Status::internal(format!("durable adopt: {e}")))?
+                    LocalShard::new_durable(
+                        Arc::clone(&self.norm),
+                        Arc::clone(&dict),
+                        Arc::clone(&tag_dict),
+                        sc,
+                    )
+                    .map_err(|e| Status::internal(format!("durable adopt: {e}")))?
                 }
                 None => LocalShard::new(
                     Arc::clone(&self.norm),
                     Arc::clone(&dict),
+                    Arc::clone(&tag_dict),
                     self.config.clone(),
                 ),
             };
-            self.state
-                .store(Some(Arc::new(ServerState { dict, shard })));
+            self.state.store(Some(Arc::new(ServerState {
+                dict,
+                tag_dict,
+                shard,
+            })));
         }
 
-        Ok(Response::new(proto::AdoptDictReply { fingerprint: fp }))
+        Ok(Response::new(proto::AdoptDictReply {
+            fingerprint: fp,
+            tag_dict_fingerprint: tag_fp,
+        }))
     }
 
     async fn ingest_extracted(
@@ -160,10 +191,18 @@ impl ShardService for ShardServer {
         let items = request.into_inner().items;
         let mut lc = String::new();
         let mut rejected_parse = 0u64;
-        let mut extracted: Vec<(u64, Extracted, String, u32)> = Vec::with_capacity(items.len());
+        let mut extracted: Vec<PlacedQuery> = Vec::with_capacity(items.len());
         for it in items {
             match compile_item(&self.norm, &st.dict, &it.dsl, &mut lc) {
-                Some(ex) => extracted.push((it.logical_id, ex, it.dsl, it.version.max(1))),
+                // Carry the raw tags forward; the shard's engine resolves them read-only against the
+                // adopted frozen tag space (ADR-055).
+                Some(ex) => extracted.push(PlacedQuery {
+                    logical: it.logical_id,
+                    ex,
+                    dsl: it.dsl,
+                    version: it.version.max(1),
+                    tags: proto::tags_from_proto(it.tags),
+                }),
                 None => rejected_parse += 1,
             }
         }
@@ -194,9 +233,10 @@ impl ShardService for ShardServer {
                 local_id: 0,
             }));
         };
+        let tags = proto::tags_from_proto(item.tags);
         let out = st
             .shard
-            .insert_extracted(&ex, item.logical_id, item.version.max(1), &item.dsl)
+            .insert_extracted_with_tags(&ex, item.logical_id, item.version.max(1), &item.dsl, &tags)
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::InsertReply {
             present: out.is_some(),
@@ -356,6 +396,9 @@ impl ShardService for ShardServer {
         let shard = LocalShard::open_segments(
             Arc::clone(&self.norm),
             Arc::clone(&st.dict),
+            // Preserve the node's adopted frozen tag space (ADR-055); the recovered segments already
+            // carry resolved `TagId`s, and the tail catch-up re-resolves its raw tags against it.
+            Arc::clone(&st.tag_dict),
             sc,
             &files,
             next_seg_id,
@@ -367,6 +410,7 @@ impl ShardService for ShardServer {
         let segments_attached = files.len() as u64;
         self.state.store(Some(Arc::new(ServerState {
             dict: Arc::clone(&st.dict),
+            tag_dict: Arc::clone(&st.tag_dict),
             shard,
         })));
         Ok(Response::new(proto::RecoverFromReply {

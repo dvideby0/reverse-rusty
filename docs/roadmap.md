@@ -177,16 +177,19 @@ false-negative / throughput audit — remains the open step in **Current limitat
   block, with ES-style sibling-tag ingest on `PUT /_doc` + `/_bulk`. **Proven:** `tests/oracle.rs`
   (filtered differential — zero false negatives/positives + "filtering only removes" monotonicity),
   `tests/broad_batch.rs` (batch≡scalar under filter, incl. pure-anchor materialization),
-  `tests/persistence.rs` (tagged `.seg`/WAL reopen). **Remaining:** ranking + `/_mpercolate` `from`
-  pagination (decision point 4, below); and **threading tags through the (experimental) cluster path** —
-  the cluster's add path doesn't accept tags today (untagged-but-consistent, no silent loss). That
-  follow-on touches `cluster/clog.rs` (`ClusterMutation::Add` + a versioned `tags` field),
-  `cluster/shard.rs` (`Shard::{insert_extracted, ingest_extracted, percolate}` + every impl — `LocalShard`,
-  `ReplicatedShard`, `HandoffShard`, and the `distributed` `RemoteShard`/`ShardServer` + a gRPC proto field),
-  `cluster/coordinator/{ingest,lifecycle,matching}.rs` (resolve tags → `TagId` via `get_or_synthetic`, the
-  coordinator `TagDict` + `ClusterManifest.tag_dict_data` wiring, and a `TagPredicate` through `percolate`),
-  and extends `tests/cluster_oracle.rs` + `tests/cluster_durability_oracle.rs` (filter sweep + tags survive
-  rebuild-from-log). Full design:
+  `tests/persistence.rs` (tagged `.seg`/WAL reopen). **Cluster follow-on ✅ BUILT + oracle-proven
+  (2026-06-04, [ADR-055](DECISIONS.md)):** tags + filtered percolation now thread end-to-end through the
+  in-process multi-shard core AND the experimental gRPC path — one shared frozen `TagDict` (like the
+  `Dict`), raw tags in the log + read-only `get_or_synthetic` resolution (never `intern`), the filter
+  resolved once at the coordinator + fanned as `TagId` groups, tag-dict shipping via `AdoptDict` +
+  fingerprint handshake; additive APIs (`build_with_tags`/`add_query_with_tags`/`ingest_with_tags`/
+  `percolate_filtered`) keep the untagged path byte-identical. Proven by `tests/cluster_oracle.rs`
+  (filtered ≡ single-node ≡ brute across K×RF + synthetic-tag cross-shard consistency),
+  `tests/cluster_durability_oracle.rs` (tags survive checkpoint/reopen), and `tests/cluster_grpc_oracle.rs`
+  (filtered percolate + tag-dict shipping over the wire). **Remaining:** ranking + `/_mpercolate` `from`
+  pagination (decision point 4, below); a runtime **vocab change on a tagged cluster** is currently
+  refused fail-loud (a deferred follow-on — the blue/green rebuild can't reconstruct a synthetic tag's
+  string). Full design:
   [`design/matching.md`](design/matching.md) §5 and
   [`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) §11.
 - **Match scoring / ranking + `/_mpercolate` pagination — lower priority.** An optional layer *over* the

@@ -240,6 +240,7 @@ mod tests {
             logical,
             version: 1,
             dsl: dsl.to_string(),
+            tags: Vec::new(),
         }
     }
 

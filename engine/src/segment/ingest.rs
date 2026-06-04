@@ -1,7 +1,7 @@
 //! `impl Engine` — the write path: initial build, live insert, tombstone/delete,
 //! bulk ingest, and the WAL-replay helpers used by recovery (`open`).
 
-use super::{Engine, IngestItemStatus, IngestReport, InsertOutcome, Segment};
+use super::{Engine, IngestItemStatus, IngestReport, InsertOutcome, PlacedQuery, Segment};
 use std::sync::Arc;
 
 use crate::compile::{extract, Extracted};
@@ -17,6 +17,30 @@ impl Engine {
         }
         let td = Arc::make_mut(&mut self.tag_dict);
         let mut ids: Vec<TagId> = tags.iter().map(|(k, v)| td.intern(k, v)).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    /// Resolve a query's raw `(key,value)` tags to a sorted + deduped `TagId` slice **read-only**
+    /// against the engine's tag dict — the cluster-shard analogue of [`intern_tags`](Self::intern_tags)
+    /// (ADR-055). Uses `get_or_synthetic` and NEVER `Arc::make_mut`, so the coordinator's frozen,
+    /// shared `TagDict` is never forked: an interned tag keeps its dense id and a post-freeze tag
+    /// resolves to a deterministic *synthetic* id every shard/coordinator agrees on (ADR-046) — the
+    /// cross-shard consistency filtered percolation needs. Forking here would assign inconsistent
+    /// dense ids per shard and silently mis-filter. Empty input ⇒ empty (the untagged path).
+    fn resolve_tags_readonly(&self, tags: &[(String, String)]) -> Vec<TagId> {
+        if tags.is_empty() {
+            return Vec::new();
+        }
+        debug_assert!(
+            self.tag_dict.is_finalized(),
+            "cluster tag resolution must use the coordinator's finalized (frozen) shared tag dict"
+        );
+        let mut ids: Vec<TagId> = tags
+            .iter()
+            .map(|(k, v)| self.tag_dict.get_or_synthetic(k, v))
+            .collect();
         ids.sort_unstable();
         ids.dedup();
         ids
@@ -469,19 +493,21 @@ impl Engine {
     /// `(logical_id, extracted, source_text, version)`; class-D queries are
     /// skipped, as on every other ingest path. In-memory only (the cluster step
     /// keeps shards non-durable); no WAL/manifest involvement.
-    pub fn ingest_extracted(&mut self, items: &[(u64, Extracted, String, u32)]) -> IngestReport {
+    pub fn ingest_extracted(&mut self, items: &[PlacedQuery]) -> IngestReport {
         let mut report = IngestReport::default();
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
-        for (logical, ex, text, version) in items {
-            // The cluster shard ingest path is untagged today (filtered percolation is a
-            // single-node feature; threading tags through the cluster is a follow-on).
+        for item in items {
+            // Resolve the query's tags read-only against the shared frozen tag space (ADR-055) —
+            // never the CoW `intern_tags`, which would fork the shared dict per shard. Empty ⇒
+            // empty slice ⇒ byte-identical to the pre-tag `&[]` path.
+            let tag_ids = self.resolve_tags_readonly(&item.tags);
             if seg
-                .add_compiled(ex, &[], &self.dict, *logical, *version)
+                .add_compiled(&item.ex, &tag_ids, &self.dict, item.logical, item.version)
                 .is_some()
             {
-                accepted.push((*logical, text.clone()));
+                accepted.push((item.logical, item.dsl.clone()));
                 report.ingested += 1;
             } else {
                 self.rejected_class_d += 1;
@@ -506,11 +532,13 @@ impl Engine {
         logical: u64,
         version: u32,
         text: &str,
+        tags: &[(String, String)],
     ) -> Option<u32> {
-        // The cluster shard insert path is untagged today (filtered percolation is a
-        // single-node feature; threading tags through the cluster is a follow-on).
-        let outcome =
-            Arc::make_mut(&mut self.memtable).add_compiled(ex, &[], &self.dict, logical, version);
+        // Resolve tags read-only against the shared frozen tag space (ADR-055); never the CoW
+        // `intern_tags`. Empty ⇒ empty slice ⇒ byte-identical to the pre-tag `&[]` path.
+        let tag_ids = self.resolve_tags_readonly(tags);
+        let outcome = Arc::make_mut(&mut self.memtable)
+            .add_compiled(ex, &tag_ids, &self.dict, logical, version);
         if outcome.is_some() {
             self.query_store.insert(logical, text.to_string());
         } else {

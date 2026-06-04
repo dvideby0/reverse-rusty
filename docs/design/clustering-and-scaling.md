@@ -110,6 +110,16 @@ That is the central idea; everything else is borrowed plumbing.
 > a per-shard-dict design would have needed. The variant comparison (token-vs-id; ring+vnodes vs jump hash /
 > rendezvous / Maglev) and the rationale are in [`../research/clustering-prior-art.md`](../research/clustering-prior-art.md) §1.
 
+> **Per-query tags / filtered percolation ([ADR-055](../DECISIONS.md)).** Tags ride alongside this model
+> without touching it: a **second** frozen dictionary — the `TagDict` — is shared into every shard exactly
+> like the `Dict`, so a stored tag and a request filter resolve a given `(key,value)` to the same `TagId`
+> everywhere (an interned hit keeps its dense id; a post-freeze miss hashes to a consistent synthetic id,
+> ADR-046). Tags **never gate routing** — `route()` keys only on features — so the lossless-cover argument
+> below is unchanged; the filter applies only post-candidate, in verify. The coordinator compiles the filter
+> once (`compile_tag_predicate`) and fans the resolved `TagId` groups to every probed shard; over gRPC the
+> `TagDict` ships with the `Dict` in `AdoptDict` (fingerprint-checked) and the filter ships as raw `TagId`
+> groups. Raw `(key,value)` tags live in the log (re-resolved on replay), the tags-on-wire analogue of raw DSL.
+
 **Placement.** Each compiled query is stored on the shard that owns its **anchor feature**:
 
 ```

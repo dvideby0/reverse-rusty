@@ -11,19 +11,22 @@ use crate::compile::Extracted;
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::events::{DurabilityOp, EngineEvent};
+use crate::exact::TagPredicate;
 use crate::normalize::Normalizer;
-use crate::segment::{IngestReport, MatchStats};
+use crate::segment::{IngestReport, MatchStats, PlacedQuery};
+use crate::tagdict::TagDict;
 
 use super::{catch_up_replica, peer_recover, ReplicatedShard};
 
 impl Shard for ReplicatedShard {
     // ---- reads (primary, with in-sync failover) ----
-    fn percolate(
+    fn percolate_filtered(
         &self,
         title: &str,
         include_broad: bool,
+        pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        self.read(|s| s.percolate(title, include_broad))
+        self.read(|s| s.percolate_filtered(title, include_broad, pred))
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {
@@ -45,26 +48,31 @@ impl Shard for ReplicatedShard {
     }
 
     // ---- writes (primary-authoritative, fan out to replicas) ----
-    fn ingest_extracted(
-        &self,
-        items: &[(u64, Extracted, String, u32)],
-    ) -> Result<IngestReport, ShardError> {
+    fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         let _g = self.lock();
         let report = self.primary.ingest_extracted(items)?;
         self.fan_to_replicas(|s| s.ingest_extracted(items).map(|_| ()));
         Ok(report)
     }
 
-    fn insert_extracted(
+    fn insert_extracted_with_tags(
         &self,
         ex: &Extracted,
         logical: u64,
         version: u32,
         text: &str,
+        tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError> {
         let _g = self.lock();
-        let out = self.primary.insert_extracted(ex, logical, version, text)?;
-        self.fan_to_replicas(|s| s.insert_extracted(ex, logical, version, text).map(|_| ()));
+        // Every copy shares the one frozen tag dict (ADR-055), so each re-resolves these raw tags
+        // to the same `TagId`s — replicas stay set-equal with the primary by construction.
+        let out = self
+            .primary
+            .insert_extracted_with_tags(ex, logical, version, text, tags)?;
+        self.fan_to_replicas(|s| {
+            s.insert_extracted_with_tags(ex, logical, version, text, tags)
+                .map(|_| ())
+        });
         Ok(out)
     }
 
@@ -120,10 +128,12 @@ impl Shard for ReplicatedShard {
     /// on the primary for the whole flow guarantees the tail the recovery still needs is never
     /// trimmed by a concurrent seal — so correctness never depends on the loop converging, only the
     /// final quiesce window's size does (`max_passes` shrinks it toward zero). Durable primary only.
+    #[allow(clippy::too_many_arguments)]
     fn add_recovered_replica(
         &self,
         norm: &Arc<Normalizer>,
         dict: &Arc<Dict>,
+        tag_dict: &Arc<TagDict>,
         config: EngineConfig,
         primary_dir: &Path,
         replica_dir: &Path,
@@ -137,6 +147,7 @@ impl Shard for ReplicatedShard {
             let (replica, mut hwm) = peer_recover(
                 norm,
                 dict,
+                tag_dict,
                 config,
                 self.primary.as_ref(),
                 primary_dir,

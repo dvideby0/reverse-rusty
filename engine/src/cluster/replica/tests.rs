@@ -4,16 +4,19 @@
 use std::time::{Duration, Instant};
 
 use crate::cluster::clog::ClusterMutation;
+use crate::exact::TagPredicate;
 
 use super::test_support::*;
 use super::*;
 
 #[test]
 fn read_fails_over_to_in_sync_replica() {
-    let (norm, dict, corpus) = compile_corpus(&[(1, "alpha bravo"), (2, "charlie delta")]);
+    let (norm, dict, tag_dict, corpus) =
+        compile_corpus(&[(1, "alpha bravo"), (2, "charlie delta")]);
     let replica = LocalShard::new(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         EngineConfig::default(),
     );
     seed(&replica, &corpus);
@@ -24,7 +27,7 @@ fn read_fails_over_to_in_sync_replica() {
 
     // Primary errors on read (transport); the composite fails over to the in-sync replica.
     let (ids, _) = rs
-        .percolate("alpha bravo zulu", false)
+        .percolate_filtered("alpha bravo zulu", false, &TagPredicate::empty())
         .expect("failover read");
     assert!(
         ids.contains(&1),
@@ -38,7 +41,7 @@ fn read_fails_over_to_in_sync_replica() {
         .store(false, Ordering::Release);
     assert!(
         matches!(
-            rs.percolate("alpha bravo zulu", false),
+            rs.percolate_filtered("alpha bravo zulu", false, &TagPredicate::empty()),
             Err(ShardError::Remote(_))
         ),
         "with no in-sync copy the read must surface an error, not an empty set"
@@ -47,10 +50,11 @@ fn read_fails_over_to_in_sync_replica() {
 
 #[test]
 fn read_does_not_fail_over_on_dict_mismatch() {
-    let (norm, dict, corpus) = compile_corpus(&[(1, "alpha bravo")]);
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[(1, "alpha bravo")]);
     let replica = LocalShard::new(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         EngineConfig::default(),
     );
     seed(&replica, &corpus);
@@ -62,7 +66,7 @@ fn read_does_not_fail_over_on_dict_mismatch() {
     // replica — failing over would mask a divergent feature space, itself a silent-FN hazard.
     assert!(
         matches!(
-            rs.percolate("alpha bravo zulu", false),
+            rs.percolate_filtered("alpha bravo zulu", false, &TagPredicate::empty()),
             Err(ShardError::DictMismatch { .. })
         ),
         "DictMismatch must propagate without failover"
@@ -71,10 +75,11 @@ fn read_does_not_fail_over_on_dict_mismatch() {
 
 #[test]
 fn primary_write_failure_propagates() {
-    let (norm, dict, corpus) = compile_corpus(&[(1, "alpha bravo")]);
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[(1, "alpha bravo")]);
     let healthy = LocalShard::new(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         EngineConfig::default(),
     );
     let rs = ReplicatedShard::new(
@@ -83,17 +88,18 @@ fn primary_write_failure_propagates() {
     );
     let (id, ex, dsl) = &corpus[0];
     assert!(
-        rs.insert_extracted(ex, *id, 1, dsl).is_err(),
+        rs.insert_extracted_with_tags(ex, *id, 1, dsl, &[]).is_err(),
         "a primary write failure must fail the op"
     );
 }
 
 #[test]
 fn replica_write_failure_is_tolerated_and_flagged() {
-    let (norm, dict, corpus) = compile_corpus(&[(1, "alpha bravo")]);
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[(1, "alpha bravo")]);
     let primary = LocalShard::new(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         EngineConfig::default(),
     );
     let rs = ReplicatedShard::new(
@@ -117,7 +123,7 @@ fn replica_write_failure_is_tolerated_and_flagged() {
 
     let (id, ex, dsl) = &corpus[0];
     assert!(
-        rs.insert_extracted(ex, *id, 1, dsl).is_ok(),
+        rs.insert_extracted_with_tags(ex, *id, 1, dsl, &[]).is_ok(),
         "a replica write failure must not fail the op (primary is authoritative)"
     );
     assert!(
@@ -129,14 +135,15 @@ fn replica_write_failure_is_tolerated_and_flagged() {
         "a ReplicaDesync event must be surfaced"
     );
     assert!(
-        rs.percolate("alpha bravo zulu", true).is_ok(),
+        rs.percolate_filtered("alpha bravo zulu", true, &TagPredicate::empty())
+            .is_ok(),
         "the primary still serves reads after a replica desyncs"
     );
 }
 
 #[test]
 fn replicas_stay_set_equal_through_op_stream() {
-    let (norm, dict, corpus) = compile_corpus(&[
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[
         (1, "alpha bravo"),
         (2, "charlie delta"),
         (3, "echo foxtrot"),
@@ -144,18 +151,21 @@ fn replicas_stay_set_equal_through_op_stream() {
     let primary = LocalShard::new(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         EngineConfig::default(),
     );
     let replica = LocalShard::new(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         EngineConfig::default(),
     );
     let rs = ReplicatedShard::new(Box::new(primary), vec![Box::new(replica)]);
 
     // Drive a mixed op stream through the composite.
     for (id, ex, dsl) in &corpus {
-        rs.insert_extracted(ex, *id, 1, dsl).expect("insert");
+        rs.insert_extracted_with_tags(ex, *id, 1, dsl, &[])
+            .expect("insert");
     }
     rs.delete_by_logical_id(2).expect("delete");
 
@@ -174,10 +184,13 @@ fn replicas_stay_set_equal_through_op_stream() {
         "echo foxtrot zulu",
         "nothing here",
     ] {
-        let (mut p, _) = rs.primary.percolate(title, true).expect("primary read");
+        let (mut p, _) = rs
+            .primary
+            .percolate_filtered(title, true, &TagPredicate::empty())
+            .expect("primary read");
         let (mut r, _) = rs.replica_handles()[0]
             .shard
-            .percolate(title, true)
+            .percolate_filtered(title, true, &TagPredicate::empty())
             .expect("replica read");
         p.sort_unstable();
         r.sort_unstable();
@@ -186,7 +199,7 @@ fn replicas_stay_set_equal_through_op_stream() {
     // id 2 was deleted on the primary (and, by fan-out, the replica).
     let (deleted_probe, _) = rs
         .primary
-        .percolate("charlie delta zulu", true)
+        .percolate_filtered("charlie delta zulu", true, &TagPredicate::empty())
         .expect("read");
     assert!(
         !deleted_probe.contains(&2),
@@ -198,20 +211,24 @@ fn replicas_stay_set_equal_through_op_stream() {
 fn aggregation_is_primary_only() {
     // num_queries / class_counts reflect ONE copy (not summed across replicas), so the
     // coordinator's cross-position sums stay correct at RF>1.
-    let (norm, dict, corpus) = compile_corpus(&[(1, "alpha bravo"), (2, "charlie delta")]);
+    let (norm, dict, tag_dict, corpus) =
+        compile_corpus(&[(1, "alpha bravo"), (2, "charlie delta")]);
     let primary = LocalShard::new(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         EngineConfig::default(),
     );
     let replica = LocalShard::new(
         Arc::clone(&norm),
         Arc::clone(&dict),
+        Arc::clone(&tag_dict),
         EngineConfig::default(),
     );
     let rs = ReplicatedShard::new(Box::new(primary), vec![Box::new(replica)]);
     for (id, ex, dsl) in &corpus {
-        rs.insert_extracted(ex, *id, 1, dsl).expect("insert");
+        rs.insert_extracted_with_tags(ex, *id, 1, dsl, &[])
+            .expect("insert");
     }
     assert_eq!(
         rs.num_queries().expect("count"),
@@ -232,7 +249,7 @@ fn aggregation_is_primary_only() {
 
 #[test]
 fn peer_recover_reproduces_primary_set_including_tombstone() {
-    let (norm, dict, corpus) = compile_corpus(&[
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[
         (1, "alpha bravo"),
         (2, "charlie delta"),
         (3, "echo foxtrot"),
@@ -247,8 +264,13 @@ fn peer_recover_reproduces_primary_set_including_tombstone() {
         data_dir: Some(primary_dir.clone()),
         ..EngineConfig::default()
     };
-    let primary =
-        LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), pc).expect("durable primary");
+    let primary = LocalShard::new_durable(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        pc,
+    )
+    .expect("durable primary");
     seed(&primary, &corpus);
     primary.flush().expect("flush to base");
     primary.delete_by_logical_id(2).expect("delete id 2");
@@ -256,6 +278,7 @@ fn peer_recover_reproduces_primary_set_including_tombstone() {
     let (replica, _hwm) = peer_recover(
         &norm,
         &dict,
+        &tag_dict,
         EngineConfig::default(),
         &primary,
         &primary_dir,
@@ -268,13 +291,19 @@ fn peer_recover_reproduces_primary_set_including_tombstone() {
         "charlie delta zulu",
         "echo foxtrot zulu",
     ] {
-        let (mut p, _) = primary.percolate(title, true).expect("primary read");
-        let (mut r, _) = replica.percolate(title, true).expect("replica read");
+        let (mut p, _) = primary
+            .percolate_filtered(title, true, &TagPredicate::empty())
+            .expect("primary read");
+        let (mut r, _) = replica
+            .percolate_filtered(title, true, &TagPredicate::empty())
+            .expect("replica read");
         p.sort_unstable();
         r.sort_unstable();
         assert_eq!(p, r, "recovered replica diverged on {title:?}");
     }
-    let (probe, _) = replica.percolate("charlie delta zulu", true).expect("read");
+    let (probe, _) = replica
+        .percolate_filtered("charlie delta zulu", true, &TagPredicate::empty())
+        .expect("read");
     assert!(
         !probe.contains(&2),
         "the baked tombstone must not resurrect on the recovered replica"
@@ -292,7 +321,7 @@ fn peer_recover_replays_tail_without_quiescing() {
     // exercises the exact path a concurrent recovery uses for writes that arrive during the
     // copy window. The pre-catch-up staleness assertion proves the writes truly post-date
     // the snapshot (else the test would pass trivially).
-    let (norm, dict, corpus) = compile_corpus(&[
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[
         (1, "alpha bravo"),
         (2, "charlie delta"),
         (3, "echo foxtrot"),
@@ -306,11 +335,18 @@ fn peer_recover_replays_tail_without_quiescing() {
         data_dir: Some(primary_dir.clone()),
         ..EngineConfig::default()
     };
-    let primary =
-        LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), pc).expect("durable primary");
+    let primary = LocalShard::new_durable(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        pc,
+    )
+    .expect("durable primary");
     // The snapshot corpus = ids 1..3 (id 10 is held back for a post-snapshot add).
     for (id, ex, dsl) in corpus.iter().take(3) {
-        primary.insert_extracted(ex, *id, 1, dsl).expect("seed");
+        primary
+            .insert_extracted_with_tags(ex, *id, 1, dsl, &[])
+            .expect("seed");
     }
 
     // Snapshot: peer_recover seals the primary at P, copies segments, replays the (empty)
@@ -318,6 +354,7 @@ fn peer_recover_replays_tail_without_quiescing() {
     let (replica, hwm) = peer_recover(
         &norm,
         &dict,
+        &tag_dict,
         EngineConfig::default(),
         &primary,
         &primary_dir,
@@ -328,7 +365,7 @@ fn peer_recover_replays_tail_without_quiescing() {
     // Writes that land AFTER the snapshot (into the primary's translog, > hwm).
     let (_, ex10, dsl10) = &corpus[3]; // id 10, "alpha bravo"
     primary
-        .insert_extracted(ex10, 10, 1, dsl10)
+        .insert_extracted_with_tags(ex10, 10, 1, dsl10, &[])
         .expect("post-snapshot add");
     primary
         .delete_by_logical_id(1)
@@ -336,7 +373,9 @@ fn peer_recover_replays_tail_without_quiescing() {
 
     // Pre-catch-up the replica is STALE (still has id 1, lacks id 10): the writes truly
     // post-date the copied snapshot.
-    let (pre, _) = replica.percolate("alpha bravo zulu", true).expect("read");
+    let (pre, _) = replica
+        .percolate_filtered("alpha bravo zulu", true, &TagPredicate::empty())
+        .expect("read");
     assert!(
         pre.contains(&1) && !pre.contains(&10),
         "replica must be stale before catch-up (proving writes post-date the snapshot): {pre:?}"
@@ -351,8 +390,12 @@ fn peer_recover_replays_tail_without_quiescing() {
         "charlie delta zulu",
         "echo foxtrot zulu",
     ] {
-        let (mut p, _) = primary.percolate(title, true).expect("primary");
-        let (mut r, _) = replica.percolate(title, true).expect("replica");
+        let (mut p, _) = primary
+            .percolate_filtered(title, true, &TagPredicate::empty())
+            .expect("primary");
+        let (mut r, _) = replica
+            .percolate_filtered(title, true, &TagPredicate::empty())
+            .expect("replica");
         p.sort_unstable();
         r.sort_unstable();
         assert_eq!(
@@ -360,7 +403,9 @@ fn peer_recover_replays_tail_without_quiescing() {
             "replica diverged from primary on {title:?} after catch-up"
         );
     }
-    let (after, _) = replica.percolate("alpha bravo zulu", true).expect("read");
+    let (after, _) = replica
+        .percolate_filtered("alpha bravo zulu", true, &TagPredicate::empty())
+        .expect("read");
     assert!(
         after.contains(&10) && !after.contains(&1),
         "the translog tail was not applied on catch-up: {after:?}"
@@ -374,7 +419,7 @@ fn durable_shard_self_restarts_from_translog() {
     // restarts from disk — `new_durable` finds the checkpoint sidecar, attaches the committed
     // segments AND replays the translog tail (the ops the last seal had not yet baked). The
     // reopened shard equals the pre-crash live set, with a removed id NOT resurrecting.
-    let (norm, dict, corpus) = compile_corpus(&[
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[
         (1, "alpha bravo"),
         (2, "charlie delta"),
         (3, "echo foxtrot"),
@@ -387,22 +432,27 @@ fn durable_shard_self_restarts_from_translog() {
     };
 
     {
-        let shard = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), cfg.clone())
-            .expect("durable shard");
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            cfg.clone(),
+        )
+        .expect("durable shard");
         // Sealed base: ids 1, 2 (flushed into a segment; the sidecar commits at position P).
         shard
-            .insert_extracted(&corpus[0].1, 1, 1, &corpus[0].2)
+            .insert_extracted_with_tags(&corpus[0].1, 1, 1, &corpus[0].2, &[])
             .expect("ins 1");
         shard
-            .insert_extracted(&corpus[1].1, 2, 1, &corpus[1].2)
+            .insert_extracted_with_tags(&corpus[1].1, 2, 1, &corpus[1].2, &[])
             .expect("ins 2");
         shard.seal_for_checkpoint().expect("seal");
         // Un-sealed translog tail (> P): add 3, add 4, remove 1 — only in the translog.
         shard
-            .insert_extracted(&corpus[2].1, 3, 1, &corpus[2].2)
+            .insert_extracted_with_tags(&corpus[2].1, 3, 1, &corpus[2].2, &[])
             .expect("ins 3");
         shard
-            .insert_extracted(&corpus[3].1, 4, 1, &corpus[3].2)
+            .insert_extracted_with_tags(&corpus[3].1, 4, 1, &corpus[3].2, &[])
             .expect("ins 4");
         shard.delete_by_logical_id(1).expect("del 1");
         // "Crash": drop without another seal — the tail lives only in the translog.
@@ -410,10 +460,17 @@ fn durable_shard_self_restarts_from_translog() {
 
     // Restart from the sidecar: attach segments (1, 2) + replay the tail (add 3, add 4,
     // remove 1) → live set {2, 3, 4}.
-    let reopened =
-        LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), cfg).expect("self-restart");
+    let reopened = LocalShard::new_durable(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        cfg,
+    )
+    .expect("self-restart");
     let probe = |title: &str| -> Vec<u64> {
-        let (mut ids, _) = reopened.percolate(title, true).expect("read");
+        let (mut ids, _) = reopened
+            .percolate_filtered(title, true, &TagPredicate::empty())
+            .expect("read");
         ids.sort_unstable();
         ids
     };
@@ -448,7 +505,7 @@ fn seal_honors_retention_lease_so_concurrent_seal_keeps_the_recovery_tail() {
     // erasing the tail (> at) the in-flight recovery still needs — a silent false negative.
     // With the lease the seal trims only to `at`, so the tail survives; releasing it lets the
     // source GC again. (This is the latent FN ADR-039's no-quiesce path left open.)
-    let (norm, dict, corpus) = compile_corpus(&[
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[
         (1, "alpha bravo"),
         (2, "charlie delta"),
         (3, "echo foxtrot"),
@@ -458,11 +515,16 @@ fn seal_honors_retention_lease_so_concurrent_seal_keeps_the_recovery_tail() {
         data_dir: Some(dir.clone()),
         ..EngineConfig::default()
     };
-    let primary = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), cfg)
-        .expect("durable primary");
+    let primary = LocalShard::new_durable(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        cfg,
+    )
+    .expect("durable primary");
     // Seed id 1 and seal a base — the recovery baseline.
     primary
-        .insert_extracted(&corpus[0].1, 1, 1, &corpus[0].2)
+        .insert_extracted_with_tags(&corpus[0].1, 1, 1, &corpus[0].2, &[])
         .expect("ins 1");
     let at_seal = primary.seal_for_checkpoint().expect("seal 1");
 
@@ -472,10 +534,10 @@ fn seal_honors_retention_lease_so_concurrent_seal_keeps_the_recovery_tail() {
 
     // Writes land AFTER the snapshot (into the translog, > at).
     primary
-        .insert_extracted(&corpus[1].1, 2, 1, &corpus[1].2)
+        .insert_extracted_with_tags(&corpus[1].1, 2, 1, &corpus[1].2, &[])
         .expect("ins 2");
     primary
-        .insert_extracted(&corpus[2].1, 3, 1, &corpus[2].2)
+        .insert_extracted_with_tags(&corpus[2].1, 3, 1, &corpus[2].2, &[])
         .expect("ins 3");
 
     // A concurrent seal: WITHOUT the lease it would trim to its new P and drop (at, P]; the
@@ -518,7 +580,7 @@ fn ttl_reaps_a_stuck_lease_so_the_seal_reclaims_the_tail_and_emits() {
     // heartbeated within the window, so the source reclaims the abandoned tail — and surfaces the
     // reap as an event (the recovery was abandoned, not silently dropped). `renew` is the
     // heartbeat, so a live recovery is never reaped (the unit tests cover the renew case).
-    let (norm, dict, corpus) = compile_corpus(&[
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[
         (1, "alpha bravo"),
         (2, "charlie delta"),
         (3, "echo foxtrot"),
@@ -532,8 +594,13 @@ fn ttl_reaps_a_stuck_lease_so_the_seal_reclaims_the_tail_and_emits() {
         retention_lease_ttl_secs: 100,
         ..EngineConfig::default()
     };
-    let primary = LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), cfg)
-        .expect("durable primary");
+    let primary = LocalShard::new_durable(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        cfg,
+    )
+    .expect("durable primary");
 
     // Capture the reap event (ADR-021/048): a plain LocalShard now honors the coordinator's sink.
     let saw_reap = Arc::new(AtomicBool::new(false));
@@ -551,7 +618,7 @@ fn ttl_reaps_a_stuck_lease_so_the_seal_reclaims_the_tail_and_emits() {
     }));
 
     primary
-        .insert_extracted(&corpus[0].1, 1, 1, &corpus[0].2)
+        .insert_extracted_with_tags(&corpus[0].1, 1, 1, &corpus[0].2, &[])
         .expect("ins 1");
     let at_seal = primary.seal_for_checkpoint().expect("seal 1");
 
@@ -559,10 +626,10 @@ fn ttl_reaps_a_stuck_lease_so_the_seal_reclaims_the_tail_and_emits() {
     let (_lease, at) = primary.acquire_retention_lease().expect("lease");
     assert_eq!(at, at_seal, "lease pins the post-seal high-water");
     primary
-        .insert_extracted(&corpus[1].1, 2, 1, &corpus[1].2)
+        .insert_extracted_with_tags(&corpus[1].1, 2, 1, &corpus[1].2, &[])
         .expect("ins 2");
     primary
-        .insert_extracted(&corpus[2].1, 3, 1, &corpus[2].2)
+        .insert_extracted_with_tags(&corpus[2].1, 3, 1, &corpus[2].2, &[])
         .expect("ins 3");
 
     // Control: a seal while the lease is LIVE (now within the window) keeps the tail (ADR-040)
@@ -608,7 +675,7 @@ fn add_recovered_replica_promotes_an_in_sync_set_equal_replica() {
     // ADR-040 finalize: add a replica to a live position at runtime — peer-recover + converge +
     // promote under a brief quiesce. The promoted replica is in-sync (a later write fans out to
     // it) and set-equal to the primary.
-    let (norm, dict, corpus) = compile_corpus(&[
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[
         (1, "alpha bravo"),
         (2, "charlie delta"),
         (3, "golf hotel"), // written AFTER promotion, so the frozen dict must already know it
@@ -620,13 +687,18 @@ fn add_recovered_replica_promotes_an_in_sync_set_equal_replica() {
         data_dir: Some(primary_dir.clone()),
         ..EngineConfig::default()
     };
-    let primary =
-        LocalShard::new_durable(Arc::clone(&norm), Arc::clone(&dict), pc).expect("durable primary");
+    let primary = LocalShard::new_durable(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        pc,
+    )
+    .expect("durable primary");
     primary
-        .insert_extracted(&corpus[0].1, 1, 1, &corpus[0].2)
+        .insert_extracted_with_tags(&corpus[0].1, 1, 1, &corpus[0].2, &[])
         .expect("ins 1");
     primary
-        .insert_extracted(&corpus[1].1, 2, 1, &corpus[1].2)
+        .insert_extracted_with_tags(&corpus[1].1, 2, 1, &corpus[1].2, &[])
         .expect("ins 2");
 
     // A composite with the durable primary and NO replicas yet; grow one at runtime.
@@ -634,6 +706,7 @@ fn add_recovered_replica_promotes_an_in_sync_set_equal_replica() {
     rs.add_recovered_replica(
         &norm,
         &dict,
+        &tag_dict,
         EngineConfig::default(),
         &primary_dir,
         &replica_dir,
@@ -648,13 +721,19 @@ fn add_recovered_replica_promotes_an_in_sync_set_equal_replica() {
     );
 
     // A write AFTER promotion must fan out to the new replica (proof it is truly in-sync).
-    rs.insert_extracted(&corpus[2].1, 3, 1, &corpus[2].2)
+    rs.insert_extracted_with_tags(&corpus[2].1, 3, 1, &corpus[2].2, &[])
         .expect("post-promotion write");
 
     let replica = rs.replica_handles()[0].clone();
     for title in ["alpha bravo zulu", "charlie delta zulu", "golf hotel zulu"] {
-        let (mut p, _) = rs.primary.percolate(title, true).expect("primary");
-        let (mut r, _) = replica.shard.percolate(title, true).expect("replica");
+        let (mut p, _) = rs
+            .primary
+            .percolate_filtered(title, true, &TagPredicate::empty())
+            .expect("primary");
+        let (mut r, _) = replica
+            .shard
+            .percolate_filtered(title, true, &TagPredicate::empty())
+            .expect("replica");
         p.sort_unstable();
         r.sort_unstable();
         assert_eq!(
@@ -664,7 +743,7 @@ fn add_recovered_replica_promotes_an_in_sync_set_equal_replica() {
     }
     let (probe, _) = replica
         .shard
-        .percolate("golf hotel zulu", true)
+        .percolate_filtered("golf hotel zulu", true, &TagPredicate::empty())
         .expect("read");
     assert!(
         probe.contains(&3),

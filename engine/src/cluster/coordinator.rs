@@ -56,6 +56,7 @@ use crate::dict::Dict;
 use crate::error::ParseError;
 use crate::events::EngineEvent;
 use crate::normalize::Normalizer;
+use crate::tagdict::TagDict;
 
 use super::clog::{ClusterLog, ClusterMutation, NullClusterLog};
 use super::control::{ControlPlane, InMemoryControlPlane};
@@ -243,6 +244,12 @@ pub struct ClusterEngine {
     /// The one shared feature space (frozen after [`Self::build`]).
     norm: Arc<Normalizer>,
     dict: Arc<Dict>,
+    /// The one shared, frozen per-query tag space (ADR-049/055), the `TagDict` analogue of `dict`:
+    /// shared read-only into every shard so a tagged write and a percolate filter resolve a given
+    /// `(key,value)` to the SAME `TagId` everywhere. Built over the corpus tags at
+    /// [`Self::build_with_tags`], finalized, and persisted in the cluster manifest. Empty +
+    /// finalized for an untagged cluster ⇒ the byte-identical pre-tag path.
+    tag_dict: Arc<TagDict>,
     /// The vocabulary behind the current normalizer, if one was installed via
     /// [`Self::set_vocab`] (ADR-046). `None` when the cluster was built directly
     /// from a `Normalizer`. Retained so a durable cluster can persist it and a

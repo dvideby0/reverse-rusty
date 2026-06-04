@@ -177,13 +177,17 @@ intersection for the very broadest postings is a further micro-optimization, not
 ## 5. Per-query metadata, filtered percolation, and ranking
 
 > **Status:** metadata + filtered percolation (§5.1–§5.3) are **built (single-node) + oracle-proven**
-> (2026-06-03, [DECISIONS](../DECISIONS.md) ADR-049, [STATUS](../STATUS.md) Tier 4); **ranking (§5.4) is
-> design-only**. Motivated by the reference workload in
-> [`../research/percolator-workload.md`](../research/percolator-workload.md), whose dominant read
-> pattern is "percolate, then narrow to one category." Code: `src/tagdict.rs` (tag interning), `src/exact.rs`
-> (`TagPredicate` + SoA tag column + verify-stage filter), `src/segment/` (ingest/match threading),
-> `src/storage/segment.rs` + `src/wal.rs` (`.seg` v3 / WAL v2 persistence), `src/bin/server/` (the REST
-> filter surface).
+> (2026-06-03, [DECISIONS](../DECISIONS.md) ADR-049, [STATUS](../STATUS.md) Tier 4), and now thread
+> **end-to-end through the cluster** (in-process + the experimental gRPC path) — one frozen `TagDict`
+> shared into every shard like the `Dict`, raw tags in the log + read-only `get_or_synthetic`
+> resolution, the filter resolved once at the coordinator + shipped as `TagId` groups
+> ([ADR-055](../DECISIONS.md), 2026-06-04); **ranking (§5.4) is design-only**. Motivated by the reference
+> workload in [`../research/percolator-workload.md`](../research/percolator-workload.md), whose dominant
+> read pattern is "percolate, then narrow to one category." Code: `src/tagdict.rs` (tag interning),
+> `src/exact.rs` (`TagPredicate` + SoA tag column + verify-stage filter), `src/segment/` (ingest/match
+> threading), `src/storage/segment.rs` + `src/wal.rs` (`.seg` v3 / WAL v2 persistence), `src/bin/server/`
+> (the REST filter surface), `src/cluster/` (`coordinator/{lifecycle,ingest,matching}` + `clog` + `shard`
+> + the gated `remote`/`server` — ADR-055).
 
 Production percolators store **structured tags** alongside each query (a category, a status, secondary
 keys) and at match time **filter the percolated candidates by those tags** — and sometimes rank them.

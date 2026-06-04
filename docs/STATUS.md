@@ -370,6 +370,24 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   private items widen to `pub(in crate::cluster::<mod>)`, public API + matching are unchanged, proven by the
   full cluster oracle suite + `check.sh` staying green. The per-area router is the module map in
   [`../CLAUDE.md`](../CLAUDE.md).
+- **Per-query tags + filtered percolation through the cluster (ADR-055)** — the single-node feature
+  (ADR-049) now threads end-to-end through the in-process multi-shard core AND the experimental gRPC
+  path. One frozen `Arc<TagDict>` is shared into every shard like the frozen `Dict` (built at
+  `build_with_tags`, persisted in `ClusterManifest.tag_dict_data`, restored on `open`); raw `(key,value)`
+  tags ride the cluster log + per-shard translog (`ClusterMutation::Add.tags`, `CLOG_VERSION` 2 —
+  untagged frames byte-identical) and resolve **read-only** via `get_or_synthetic` (never `intern` — that
+  would fork the shared dict per shard); the request filter is compiled **once** at the coordinator
+  (`compile_tag_predicate`) and fanned as the same `&TagPredicate` to every shard. Over gRPC, `AdoptDict`
+  ships the tag dict atomically with the dict + a `tag_dict_fingerprint` handshake, `AddItem` carries raw
+  tags (into ingest/insert AND the `FetchTranslog` recovery stream), and `PercolateRequest` carries
+  resolved `TagId` filter groups. Additive APIs (`build_with_tags`/`add_query_with_tags`/`ingest_with_tags`/
+  `percolate_filtered`) ⇒ the untagged path is byte-identical; tags never gate, so the lossless-cover
+  contract is untouched. Proven by `tests/cluster_oracle.rs` (filtered ≡ single-node ≡ brute across
+  K∈{1,3,8,16}×RF∈{1,2}, filtered ⊆ unfiltered, + synthetic-tag cross-shard consistency),
+  `tests/cluster_durability_oracle.rs` (tags survive checkpoint/reopen), and `tests/cluster_grpc_oracle.rs`
+  (filtered percolate + tag-dict shipping over the wire). **Honest scope:** a runtime vocabulary change on
+  a tagged cluster (`set_vocab`/`learn_and_apply`) is refused fail-loud (the blue/green rebuild can't
+  reconstruct a synthetic tag's string) — a deferred follow-on.
 
 ## Measured
 

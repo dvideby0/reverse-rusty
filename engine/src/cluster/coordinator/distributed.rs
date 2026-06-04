@@ -10,6 +10,7 @@ use crate::cluster::shard::{Shard, ShardError};
 use crate::dict::Dict;
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
+use crate::tagdict::TagDict;
 
 use super::{ClusterConfig, ClusterDurable, ClusterEngine, ShardGroup};
 
@@ -67,6 +68,7 @@ impl ClusterEngine {
     pub fn connect_remote(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
         config: &ClusterConfig,
         endpoints: &[String],
         handle: &tokio::runtime::Handle,
@@ -94,6 +96,10 @@ impl ClusterEngine {
         // never a silent drop). Servers therefore needn't rebuild the dict from the corpus.
         let expected = dict.fingerprint();
         let dict_bytes = crate::storage::serialize_dict(&dict);
+        // Ship the frozen tag space alongside the dict (ADR-055), so each server resolves ingested
+        // tags against the same space the coordinator's filter `TagId`s came from.
+        let expected_tag = tag_dict.fingerprint();
+        let tag_dict_bytes = crate::storage::serialize_tagdict(&tag_dict);
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(endpoints.len());
         // Wrap each remote position in a `HandoffShard` so it can be re-pointed at a new owner at
         // runtime (ADR-043); the typed handles are installed via `with_handoffs` below.
@@ -104,6 +110,8 @@ impl ClusterEngine {
                 handle.clone(),
                 dict_bytes.clone(),
                 expected,
+                tag_dict_bytes.clone(),
+                expected_tag,
             )?;
             let (boxed, h) = wrap_handoff(Box::new(remote), 0);
             shards.push(boxed);
@@ -117,6 +125,7 @@ impl ClusterEngine {
         Ok(Self::from_parts(
             norm,
             dict,
+            tag_dict,
             ring,
             shards,
             config.include_broad,
@@ -140,6 +149,7 @@ impl ClusterEngine {
     pub fn connect_replicated(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
         config: &ClusterConfig,
         groups: &[ShardGroup],
         handle: &tokio::runtime::Handle,
@@ -154,6 +164,9 @@ impl ClusterEngine {
         let ring = HashRing::new(config.num_shards, config.vnodes)?;
         let expected = dict.fingerprint();
         let dict_bytes = crate::storage::serialize_dict(&dict);
+        // Ship the frozen tag space alongside the dict on every endpoint (ADR-055).
+        let expected_tag = tag_dict.fingerprint();
+        let tag_dict_bytes = crate::storage::serialize_tagdict(&tag_dict);
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(groups.len());
         // Each position (a bare remote or a ReplicatedShard group) is wrapped in a `HandoffShard`
         // so the whole group can be re-pointed at a new owner at runtime (ADR-043).
@@ -164,6 +177,8 @@ impl ClusterEngine {
                 handle.clone(),
                 dict_bytes.clone(),
                 expected,
+                tag_dict_bytes.clone(),
+                expected_tag,
             )?;
             let mut replicas: Vec<Box<dyn Shard>> = Vec::with_capacity(g.replicas.len());
             for ep in &g.replicas {
@@ -172,6 +187,8 @@ impl ClusterEngine {
                     handle.clone(),
                     dict_bytes.clone(),
                     expected,
+                    tag_dict_bytes.clone(),
+                    expected_tag,
                 )?;
                 replicas.push(Box::new(r) as Box<dyn Shard>);
             }
@@ -192,6 +209,7 @@ impl ClusterEngine {
         Ok(Self::from_parts(
             norm,
             dict,
+            tag_dict,
             ring,
             shards,
             config.include_broad,
@@ -236,12 +254,15 @@ impl ClusterEngine {
 
         let recover = || -> Result<(u64, u64), ShardError> {
             let dict_bytes = crate::storage::serialize_dict(&self.dict);
-            // Ship the dict so the fresh node attaches segments against the right feature space.
+            // Ship the dict + frozen tag space so the fresh node attaches segments against the right
+            // feature + tag space (ADR-055).
             let target = crate::cluster::remote::RemoteShard::connect_and_adopt(
                 target_endpoint.to_string(),
                 handle.clone(),
                 dict_bytes,
                 expected,
+                crate::storage::serialize_tagdict(&self.tag_dict),
+                self.tag_dict.fingerprint(),
             )?;
             // Bulk copy: segments at snapshot position P (the source keeps serving + writing).
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
@@ -369,14 +390,16 @@ impl ClusterEngine {
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
         let do_move = || -> Result<u64, ShardError> {
-            // Ship the dict + drive the target to pull the source's segments at snapshot `P` (the
-            // source keeps serving + writing — no quiesce).
+            // Ship the dict + frozen tag space + drive the target to pull the source's segments at
+            // snapshot `P` (the source keeps serving + writing — no quiesce).
             let dict_bytes = crate::storage::serialize_dict(&self.dict);
             let target = crate::cluster::remote::RemoteShard::connect_and_adopt(
                 target_endpoint.to_string(),
                 handle.clone(),
                 dict_bytes,
                 expected,
+                crate::storage::serialize_tagdict(&self.tag_dict),
+                self.tag_dict.fingerprint(),
             )?;
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
             // Drain the tail (writes that landed during the copy), renewing the lease each pass.

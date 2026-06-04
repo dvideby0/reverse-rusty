@@ -55,6 +55,7 @@ use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
+use crate::tagdict::TagDict;
 
 use super::clog::LogPos;
 use super::shard::{apply_mutation, EventSink, LocalShard, Shard, ShardError};
@@ -232,6 +233,7 @@ impl ReplicatedShard {
 pub(crate) fn peer_recover(
     norm: &Arc<Normalizer>,
     dict: &Arc<Dict>,
+    tag_dict: &Arc<TagDict>,
     mut config: EngineConfig,
     primary: &dyn Shard,
     primary_dir: &Path,
@@ -285,6 +287,7 @@ pub(crate) fn peer_recover(
     let replica = LocalShard::open_segments(
         Arc::clone(norm),
         Arc::clone(dict),
+        Arc::clone(tag_dict),
         config,
         &files,
         next_seg_id,

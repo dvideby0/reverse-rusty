@@ -6,17 +6,26 @@ use std::sync::atomic::AtomicU8;
 
 use crate::cluster::clog::ClusterMutation;
 use crate::compile::Extracted;
-use crate::segment::{IngestReport, MatchStats};
+use crate::exact::TagPredicate;
+use crate::segment::{IngestReport, MatchStats, PlacedQuery};
+use crate::tagdict::TagDict;
 
 use super::*;
 
-/// (shared normalizer, frozen dict, per-query `(id, Extracted, dsl)`) — what
-/// [`compile_corpus`] returns.
-pub(super) type CompiledCorpus = (Arc<Normalizer>, Arc<Dict>, Vec<(u64, Extracted, String)>);
+/// (shared normalizer, frozen dict, frozen empty tag dict, per-query `(id, Extracted, dsl)`) —
+/// what [`compile_corpus`] returns. The tag dict mirrors the coordinator's frozen, shared
+/// `Arc<TagDict>` (ADR-055): these untagged unit tests carry an empty, finalized one.
+pub(super) type CompiledCorpus = (
+    Arc<Normalizer>,
+    Arc<Dict>,
+    Arc<TagDict>,
+    Vec<(u64, Extracted, String)>,
+);
 
-/// Compile a list of `(id, DSL)` into a shared frozen dict + the per-query `Extracted`,
-/// mirroring `ClusterEngine::build`'s pass A (extract into the dict, then finalize the
-/// hot mask). Lets a test seed a `LocalShard` at the same low level the coordinator uses.
+/// Compile a list of `(id, DSL)` into a shared frozen dict + a frozen empty tag dict + the
+/// per-query `Extracted`, mirroring `ClusterEngine::build`'s pass A (extract into the dict, then
+/// finalize the hot mask + tag space). Lets a test seed a `LocalShard` at the same low level the
+/// coordinator uses.
 pub(super) fn compile_corpus(dsls: &[(u64, &str)]) -> CompiledCorpus {
     let norm = Arc::new(Normalizer::default_vocab().expect("built-in vocab"));
     let mut dict = Dict::new();
@@ -28,7 +37,9 @@ pub(super) fn compile_corpus(dsls: &[(u64, &str)]) -> CompiledCorpus {
         out.push((*id, ex, (*dsl).to_string()));
     }
     dict.finalize_mask();
-    (norm, Arc::new(dict), out)
+    let mut tag_dict = TagDict::new();
+    tag_dict.mark_finalized();
+    (norm, Arc::new(dict), Arc::new(tag_dict), out)
 }
 
 pub(super) fn scratch_dir(tag: &str) -> std::path::PathBuf {
@@ -89,7 +100,12 @@ impl FailingShard {
 }
 
 impl Shard for FailingShard {
-    fn percolate(&self, _t: &str, _b: bool) -> Result<(Vec<u64>, MatchStats), ShardError> {
+    fn percolate_filtered(
+        &self,
+        _t: &str,
+        _b: bool,
+        _pred: &TagPredicate,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         match self.read_err() {
             Some(e) => Err(e),
             None => Ok((Vec::new(), MatchStats::default())),
@@ -101,18 +117,16 @@ impl Shard for FailingShard {
     fn class_counts(&self) -> Result<[u64; 4], ShardError> {
         self.read_err().map_or(Ok([0; 4]), Err)
     }
-    fn ingest_extracted(
-        &self,
-        _i: &[(u64, Extracted, String, u32)],
-    ) -> Result<IngestReport, ShardError> {
+    fn ingest_extracted(&self, _i: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         self.write_err().map(|()| IngestReport::default())
     }
-    fn insert_extracted(
+    fn insert_extracted_with_tags(
         &self,
         _e: &Extracted,
         _l: u64,
         _v: u32,
         _t: &str,
+        _tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError> {
         self.write_err().map(|()| Some(0))
     }
@@ -139,7 +153,7 @@ impl Shard for FailingShard {
 pub(super) fn seed(shard: &dyn Shard, corpus: &[(u64, Extracted, String)]) {
     for (id, ex, dsl) in corpus {
         shard
-            .insert_extracted(ex, *id, 1, dsl)
+            .insert_extracted_with_tags(ex, *id, 1, dsl, &[])
             .expect("seed insert");
     }
 }

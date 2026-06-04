@@ -55,8 +55,10 @@ use arc_swap::ArcSwap;
 use crate::compile::Extracted;
 use crate::config::EngineConfig;
 use crate::dict::Dict;
+use crate::exact::TagPredicate;
 use crate::normalize::Normalizer;
-use crate::segment::{IngestReport, MatchStats};
+use crate::segment::{IngestReport, MatchStats, PlacedQuery};
+use crate::tagdict::TagDict;
 
 use super::clog::{ClusterMutation, LogPos};
 use super::shard::{EventSink, Shard, ShardError};
@@ -131,12 +133,15 @@ pub(crate) fn wrap_handoff(
 /// trait gains a method, add a forward here (the `forwards_defaulted_methods_to_backing` test is
 /// the regression guard).
 impl Shard for Arc<HandoffShard> {
-    fn percolate(
+    fn percolate_filtered(
         &self,
         title: &str,
         include_broad: bool,
+        pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        self.current.load().percolate(title, include_broad)
+        self.current
+            .load()
+            .percolate_filtered(title, include_broad, pred)
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {
@@ -147,23 +152,21 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().class_counts()
     }
 
-    fn ingest_extracted(
-        &self,
-        items: &[(u64, Extracted, String, u32)],
-    ) -> Result<IngestReport, ShardError> {
+    fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         self.current.load().ingest_extracted(items)
     }
 
-    fn insert_extracted(
+    fn insert_extracted_with_tags(
         &self,
         ex: &Extracted,
         logical: u64,
         version: u32,
         text: &str,
+        tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError> {
         self.current
             .load()
-            .insert_extracted(ex, logical, version, text)
+            .insert_extracted_with_tags(ex, logical, version, text, tags)
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
@@ -202,10 +205,12 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().release_retention_lease(lease)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn add_recovered_replica(
         &self,
         norm: &Arc<Normalizer>,
         dict: &Arc<Dict>,
+        tag_dict: &Arc<TagDict>,
         config: EngineConfig,
         primary_dir: &Path,
         replica_dir: &Path,
@@ -214,6 +219,7 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().add_recovered_replica(
             norm,
             dict,
+            tag_dict,
             config,
             primary_dir,
             replica_dir,
@@ -256,13 +262,20 @@ mod tests {
     }
 
     fn local(norm: &Arc<Normalizer>, dict: &Arc<Dict>) -> LocalShard {
-        LocalShard::new(Arc::clone(norm), Arc::clone(dict), EngineConfig::default())
+        let mut td = TagDict::new();
+        td.mark_finalized();
+        LocalShard::new(
+            Arc::clone(norm),
+            Arc::clone(dict),
+            Arc::new(td),
+            EngineConfig::default(),
+        )
     }
 
     fn seed(shard: &dyn Shard, corpus: &[(u64, Extracted, String)]) {
         for (id, ex, dsl) in corpus {
             shard
-                .insert_extracted(ex, *id, 1, dsl)
+                .insert_extracted_with_tags(ex, *id, 1, dsl, &[])
                 .expect("seed insert");
         }
     }
@@ -281,13 +294,18 @@ mod tests {
         let titles = ["alpha bravo zulu", "charlie delta echo", "nothing here"];
         let before: Vec<_> = titles
             .iter()
-            .map(|t| h.percolate(t, false).expect("probe"))
+            .map(|t| {
+                h.percolate_filtered(t, false, &TagPredicate::empty())
+                    .expect("probe")
+            })
             .collect();
 
         h.swap_backing(Box::new(b) as Box<dyn Shard>, 1);
 
         for (t, exp) in titles.iter().zip(&before) {
-            let got = h.percolate(t, false).expect("probe after swap");
+            let got = h
+                .percolate_filtered(t, false, &TagPredicate::empty())
+                .expect("probe after swap");
             assert_eq!(got.0, exp.0, "ids byte-identical across swap for {t:?}");
             assert_eq!(got.1, exp.1, "stats byte-identical across swap for {t:?}");
         }
@@ -311,7 +329,7 @@ mod tests {
         h.swap_backing(Box::new(b) as Box<dyn Shard>, 1);
         // ...the in-flight probe still completes against A (sees id 1, never B's id 2).
         let (ids, _) = pinned
-            .percolate("alpha bravo zulu", false)
+            .percolate_filtered("alpha bravo zulu", false, &TagPredicate::empty())
             .expect("in-flight probe");
         assert!(
             ids.contains(&1),
@@ -324,14 +342,14 @@ mod tests {
 
         // A fresh load now serves B: id 2 visible, A's id 1 gone.
         let (ids2, _) = h
-            .percolate("charlie delta echo", false)
+            .percolate_filtered("charlie delta echo", false, &TagPredicate::empty())
             .expect("post-swap probe");
         assert!(
             ids2.contains(&2),
             "post-swap read serves the NEW backing: {ids2:?}"
         );
         let (ids3, _) = h
-            .percolate("alpha bravo zulu", false)
+            .percolate_filtered("alpha bravo zulu", false, &TagPredicate::empty())
             .expect("post-swap probe");
         assert!(
             !ids3.contains(&1),
@@ -354,7 +372,9 @@ mod tests {
         h.swap_backing(Box::new(b) as Box<dyn Shard>, 7);
         assert_eq!(h.generation(), 7, "generation reflects the swap");
         // New generation and new backing are co-visible (Release/Acquire pairing).
-        let (ids, _) = h.percolate("charlie delta echo", false).expect("probe");
+        let (ids, _) = h
+            .percolate_filtered("charlie delta echo", false, &TagPredicate::empty())
+            .expect("probe");
         assert!(ids.contains(&2) && h.generation() == 7);
     }
 
@@ -379,7 +399,7 @@ mod tests {
             readers.push(std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     let (ids, _) = h
-                        .percolate("alpha bravo zulu", false)
+                        .percolate_filtered("alpha bravo zulu", false, &TagPredicate::empty())
                         .expect("concurrent probe");
                     assert!(
                         ids.contains(&1),
@@ -411,7 +431,12 @@ mod tests {
     }
 
     impl Shard for RecordingShard {
-        fn percolate(&self, _t: &str, _b: bool) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        fn percolate_filtered(
+            &self,
+            _t: &str,
+            _b: bool,
+            _pred: &TagPredicate,
+        ) -> Result<(Vec<u64>, MatchStats), ShardError> {
             Ok((Vec::new(), MatchStats::default()))
         }
         fn num_queries(&self) -> Result<usize, ShardError> {
@@ -420,18 +445,16 @@ mod tests {
         fn class_counts(&self) -> Result<[u64; 4], ShardError> {
             Ok([0; 4])
         }
-        fn ingest_extracted(
-            &self,
-            _i: &[(u64, Extracted, String, u32)],
-        ) -> Result<IngestReport, ShardError> {
+        fn ingest_extracted(&self, _i: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
             Ok(IngestReport::default())
         }
-        fn insert_extracted(
+        fn insert_extracted_with_tags(
             &self,
             _e: &Extracted,
             _l: u64,
             _v: u32,
             _t: &str,
+            _tags: &[(String, String)],
         ) -> Result<Option<u32>, ShardError> {
             Ok(None)
         }
@@ -498,7 +521,7 @@ mod tests {
         assert_eq!(h.num_queries().expect("count"), 1);
 
         let (_id, ex2, dsl2) = &corpus[1];
-        h.insert_extracted(ex2, 2, 1, dsl2)
+        h.insert_extracted_with_tags(ex2, 2, 1, dsl2, &[])
             .expect("insert via wrapper");
         assert_eq!(
             h.num_queries().expect("count"),
@@ -506,7 +529,7 @@ mod tests {
             "insert forwarded to backing"
         );
         assert!(h
-            .percolate("charlie delta echo", false)
+            .percolate_filtered("charlie delta echo", false, &TagPredicate::empty())
             .expect("probe")
             .0
             .contains(&2));

@@ -8,7 +8,42 @@
 pub(crate) use reverse_rusty_shard_proto::*;
 
 use super::clog::{ClusterMutation, LogPos};
+use crate::exact::TagPredicate;
 use crate::segment::MatchStats as EngineStats;
+use crate::tagdict::TagId;
+
+/// Raw `(key, value)` tags → proto `TagKv`s (ADR-055): the tags-on-wire form, re-resolved
+/// read-only on the server. Empty ⇒ empty (untagged, byte-identical wire).
+pub(crate) fn tags_to_proto(tags: &[(String, String)]) -> Vec<TagKv> {
+    tags.iter()
+        .map(|(k, v)| TagKv {
+            key: k.clone(),
+            value: v.clone(),
+        })
+        .collect()
+}
+
+/// Proto `TagKv`s → raw `(key, value)` tags.
+pub(crate) fn tags_from_proto(tags: Vec<TagKv>) -> Vec<(String, String)> {
+    tags.into_iter().map(|t| (t.key, t.value)).collect()
+}
+
+/// Resolved [`TagPredicate`] → proto `TagGroup`s (ADR-055): the already-resolved `TagId` groups.
+/// They are globally consistent (frozen tag dict + synthetic hash), so the server rebuilds the
+/// predicate from the raw ids without re-resolving strings. Empty ⇒ unfiltered.
+pub(crate) fn tag_predicate_to_proto(pred: &TagPredicate) -> Vec<TagGroup> {
+    pred.groups()
+        .iter()
+        .map(|g| TagGroup { ids: g.clone() })
+        .collect()
+}
+
+/// Proto `TagGroup`s → a [`TagPredicate`] (`TagPredicate::new` re-sorts/dedups each group, so a
+/// malformed/unsorted wire group is still a correct conjunction). Empty ⇒ the empty predicate.
+pub(crate) fn tag_predicate_from_proto(groups: Vec<TagGroup>) -> TagPredicate {
+    let groups: Vec<Vec<TagId>> = groups.into_iter().map(|g| g.ids).collect();
+    TagPredicate::new(groups)
+}
 
 /// Proto wire `MatchStats` → engine [`MatchStats`]. Field order pinned to `segment.rs`.
 pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
@@ -53,6 +88,8 @@ pub(crate) fn translog_entry_to_mutation(e: TranslogEntry) -> Option<(LogPos, Cl
             logical: item.logical_id,
             version: item.version.max(1),
             dsl: item.dsl,
+            // Tags ride the translog entry (ADR-055), so a peer-recovered replica keeps them.
+            tags: tags_from_proto(item.tags),
         },
         translog_entry::Op::RemoveLogical(logical) => ClusterMutation::Remove { logical },
     };
@@ -67,10 +104,12 @@ pub(crate) fn translog_entry_from_mutation(pos: LogPos, m: &ClusterMutation) -> 
             logical,
             version,
             dsl,
+            tags,
         } => translog_entry::Op::Add(AddItem {
             logical_id: *logical,
             dsl: dsl.clone(),
             version: *version,
+            tags: tags_to_proto(tags),
         }),
         ClusterMutation::Remove { logical } => translog_entry::Op::RemoveLogical(*logical),
     };

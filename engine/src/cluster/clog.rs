@@ -26,8 +26,12 @@
 //!   header (once): magic "CMLG" (4) + format_version u32 (4)
 //!   per record:    total_len u32 | crc32 u32 | seq u64 | op u8 | payload
 //!     op ADD    (0): logical u64 | version u32 | dsl_len u32 | dsl [u8]
+//!                    [ tag_count u32 | (klen u32|k|vlen u32|v)* ]   (v2+, ADR-055)
 //!     op REMOVE (1): logical u64
 //! ```
+//! The ADD tag block is written only when a query carries tags, so an untagged record is
+//! byte-identical to a v1 frame; because every record is independently length-framed, an
+//! older (v1) ADD with no trailing tag bytes reads back as empty tags with no version gate.
 //! On recovery we scan forward, stopping at the first bad-CRC / truncated frame (a torn
 //! tail from a crash); the skipped byte count is surfaced as a diagnostic. The
 //! checkpoint *cursor* (which records are already captured by a base snapshot) and the
@@ -44,7 +48,10 @@ use super::shard::ShardError;
 use crate::storage::crc32;
 
 const CLOG_MAGIC: [u8; 4] = *b"CMLG";
-const CLOG_VERSION: u32 = 1;
+// v2 (ADR-055): an ADD record may carry an optional trailing tag block. Records are
+// length-framed, so a v1 file (no tag bytes) still reads back correctly; the bump is a
+// forward-compat signal. Both versions are accepted on read.
+const CLOG_VERSION: u32 = 2;
 const CLOG_HEADER_SIZE: usize = 8; // magic + version
 
 const OP_ADD: u8 = 0;
@@ -67,6 +74,10 @@ pub(crate) enum ClusterMutation {
         logical: u64,
         version: u32,
         dsl: String,
+        /// Raw `(key, value)` metadata tags (ADR-055), re-resolved to `TagId`s against the
+        /// frozen shared tag space on apply/replay (the tags-on-wire analogue of raw DSL).
+        /// Empty for an untagged query — the byte-identical pre-tag path.
+        tags: Vec<(String, String)>,
     },
     /// Remove every live entry for a logical id (idempotent).
     Remove { logical: u64 },
@@ -227,6 +238,7 @@ impl FileClusterLog {
                 logical,
                 version,
                 dsl,
+                tags,
             } => {
                 let dsl_bytes = dsl.as_bytes();
                 body.push(OP_ADD);
@@ -234,6 +246,20 @@ impl FileClusterLog {
                 body.extend_from_slice(&version.to_le_bytes());
                 body.extend_from_slice(&(dsl_bytes.len() as u32).to_le_bytes());
                 body.extend_from_slice(dsl_bytes);
+                // ADR-055: append the tag block ONLY when non-empty, so an untagged ADD frame is
+                // byte-identical to a v1 record (and the durability oracle's two-backend diff stays
+                // exact). Each tag is a length-prefixed key + value.
+                if !tags.is_empty() {
+                    body.extend_from_slice(&(tags.len() as u32).to_le_bytes());
+                    for (k, v) in tags {
+                        let kb = k.as_bytes();
+                        let vb = v.as_bytes();
+                        body.extend_from_slice(&(kb.len() as u32).to_le_bytes());
+                        body.extend_from_slice(kb);
+                        body.extend_from_slice(&(vb.len() as u32).to_le_bytes());
+                        body.extend_from_slice(vb);
+                    }
+                }
             }
             ClusterMutation::Remove { logical } => {
                 body.push(OP_REMOVE);
@@ -266,6 +292,26 @@ impl FileClusterLog {
             buf.get(off..off + 8)
                 .and_then(|s| s.try_into().ok())
                 .map(u64::from_le_bytes)
+        }
+        // ADR-055: decode one length-prefixed `(klen u32|k|vlen u32|v)` tag at `off`, returning the
+        // pair and the next offset, or `None` on any bounds / UTF-8 error (a torn tail).
+        fn parse_tag(buf: &[u8], off: usize) -> Option<(String, String, usize)> {
+            let klen = (buf
+                .get(off..off + 4)?
+                .try_into()
+                .ok()
+                .map(u32::from_le_bytes)?) as usize;
+            let ks = off + 4;
+            let k = std::str::from_utf8(buf.get(ks..ks + klen)?).ok()?;
+            let vlen_off = ks + klen;
+            let vlen = (buf
+                .get(vlen_off..vlen_off + 4)?
+                .try_into()
+                .ok()
+                .map(u32::from_le_bytes)?) as usize;
+            let vs = vlen_off + 4;
+            let v = std::str::from_utf8(buf.get(vs..vs + vlen)?).ok()?;
+            Some((k.to_string(), v.to_string(), vs + vlen))
         }
 
         let mut entries = Vec::new();
@@ -314,10 +360,36 @@ impl FileClusterLog {
                     let Ok(dsl) = std::str::from_utf8(&payload[16..16 + dsl_len]) else {
                         break;
                     };
+                    // ADR-055: optional trailing tag block. A v1 record (or an untagged v2 record)
+                    // ends exactly at the DSL, so `toff == payload.len()` ⇒ empty tags. A malformed
+                    // block is treated as a torn tail (outer `break`), mirroring the rest of the parse.
+                    let mut toff = 16 + dsl_len;
+                    let mut tags: Vec<(String, String)> = Vec::new();
+                    let mut tags_ok = true;
+                    if toff < payload.len() {
+                        match get_u32(payload, toff).map(|v| v as usize) {
+                            Some(tag_count) => {
+                                toff += 4;
+                                for _ in 0..tag_count {
+                                    let Some((k, v, next)) = parse_tag(payload, toff) else {
+                                        tags_ok = false;
+                                        break;
+                                    };
+                                    tags.push((k, v));
+                                    toff = next;
+                                }
+                            }
+                            None => tags_ok = false,
+                        }
+                    }
+                    if !tags_ok {
+                        break;
+                    }
                     ClusterMutation::Add {
                         logical,
                         version,
                         dsl: dsl.to_string(),
+                        tags,
                     }
                 }
                 OP_REMOVE => {
@@ -456,6 +528,7 @@ mod tests {
             logical,
             version: 1,
             dsl: dsl.to_string(),
+            tags: Vec::new(),
         }
     }
 
