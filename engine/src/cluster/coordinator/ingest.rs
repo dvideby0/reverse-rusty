@@ -46,6 +46,10 @@ impl ClusterEngine {
                     .into(),
             ));
         }
+        if tags.iter().any(|t| !t.is_empty()) {
+            self.tags_present
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let entries: Vec<TaggedEntry> = queries
             .iter()
             .enumerate()
@@ -110,6 +114,23 @@ impl ClusterEngine {
     /// the cluster value exists.
     fn placement(&self, ex: &Extracted) -> Target {
         placement_of(&self.dict, &self.ring, ex)
+    }
+
+    /// True if the cluster holds (or has ever held) any tagged query (ADR-055): the `tags_present`
+    /// latch (any tagged write, incl. post-freeze *synthetic* tags never interned into `tag_dict`)
+    /// OR a non-empty `tag_dict` (build-time interned tags). [`Self::set_vocab`] uses this to refuse
+    /// a vocab rebuild that would silently drop tags — `tag_dict` emptiness alone is NOT sufficient.
+    pub(in crate::cluster::coordinator) fn has_tags(&self) -> bool {
+        self.tags_present.load(std::sync::atomic::Ordering::Relaxed) || !self.tag_dict.is_empty()
+    }
+
+    /// Latch [`tags_present`](ClusterEngine::tags_present) when a non-empty tagged write happens.
+    /// Cheap + idempotent; no-op for an untagged write (the byte-identical path).
+    pub(in crate::cluster::coordinator) fn note_tags(&self, tags: &[(String, String)]) {
+        if !tags.is_empty() {
+            self.tags_present
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 
     /// Add one query incrementally (lands in the target shard's memtable). Uses a
@@ -189,6 +210,9 @@ impl ClusterEngine {
         dsl: &str,
         tags: &[(String, String)],
     ) -> Result<AddOutcome, ShardError> {
+        // Latch tags_present for the set_vocab guard (ADR-055) — covers both the live add
+        // (`add_query_with_tags`) and a tagged log-tail entry replayed on `open`.
+        self.note_tags(tags);
         let ast = match crate::dsl::parse(dsl) {
             Ok(a) => a,
             Err(e) => return Ok(AddOutcome::RejectedParse(e)),

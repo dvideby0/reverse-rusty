@@ -64,8 +64,11 @@ impl ClusterEngine {
         // synthetic, post-freeze tag has no stored string). Rather than silently drop tags on the
         // rebuild (ADR-049/055), refuse a vocab change on a tagged cluster; the tag space itself is
         // orthogonal to vocabulary, so it is otherwise preserved unchanged. Combined tags + live
-        // vocab change is a deferred follow-on. Empty (untagged) ⇒ byte-identical to before tags.
-        if !self.tag_dict.is_empty() {
+        // vocab change is a deferred follow-on. `has_tags` checks the `tags_present` latch (which
+        // also catches POST-FREEZE synthetic tags that never enter `tag_dict`), not just `tag_dict`
+        // emptiness — so an untagged-built cluster with live tagged adds is correctly refused.
+        // Untagged ⇒ `has_tags()` is false ⇒ byte-identical to before tags.
+        if self.has_tags() {
             return Err(ShardError::Config(
                 "set_vocab is not supported on a cluster with per-query tags yet: the blue/green \
                  rebuild reconstructs queries from their DSL and would drop tags (a synthetic tag \

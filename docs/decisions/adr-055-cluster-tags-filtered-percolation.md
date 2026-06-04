@@ -67,10 +67,19 @@
 - **Scope / deferred:** A runtime **vocabulary change on a tagged cluster** (`set_vocab` /
   `learn_and_apply`) is **refused** (fail-loud): the blue/green rebuild reconstructs queries from their
   DSL via `live_sources()`, which carries no tags, and a synthetic post-freeze tag has no recoverable
-  string — so a rebuild would silently drop tags. The tag space is orthogonal to vocabulary and is
-  otherwise preserved; combined tags + live vocab change is a follow-on. Ranking + `/_mpercolate`
+  string — so a rebuild would silently drop tags. The refusal is driven by a `tags_present` latch (set
+  by every tagged write, restored on `open`), **not** by `tag_dict` emptiness — because a post-freeze
+  synthetic tag is never interned into `tag_dict`, so an untagged-built cluster with live tagged adds
+  would otherwise have an empty `tag_dict` yet hold tags. The tag space is orthogonal to vocabulary and
+  is otherwise preserved; combined tags + live vocab change is a follow-on. Ranking + `/_mpercolate`
   pagination remain ADR-049 decision-point-4 (design-only). Cross-process normalizer shipping is
-  unchanged (still the experimental-path assumption).
+  unchanged. **Deferred hardening (multi-coordinator):** the peer-recovery (`RecoverFrom`/`FetchSegments`)
+  and durable self-restart (`ShardCheckpoint`) handshakes validate the **feature-dict** fingerprint but
+  not yet the **tag-dict** fingerprint — the symmetric ADR-030 guard for the tag space. In the
+  single-coordinator model this cannot mis-filter (one coordinator ships one tag space to every node via
+  `AdoptDict` + the fingerprint handshake, so a recovery source / re-adopted data-dir already shares it);
+  it is a defensive guard for a future multi-coordinator / mixed-data-dir deployment, tracked as a
+  follow-up.
 - **Proven by:** `tests/cluster_oracle.rs` (`filtered_percolation_matches_single_node_and_oracle` —
   cluster ≡ single-node ≡ brute under a filter sweep, across K∈{1,3,8,16}×RF∈{1,2}, filtered ⊆
   unfiltered; `live_tagged_add_is_filterable_with_post_freeze_tag` — synthetic-tag cross-shard

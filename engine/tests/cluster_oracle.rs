@@ -457,6 +457,44 @@ fn live_tagged_add_is_filterable_with_post_freeze_tag() {
         .contains(&200));
 }
 
+/// A vocab change on a cluster that received tags ONLY via live adds (post-freeze *synthetic* tags,
+/// never interned into `tag_dict`) must still be REFUSED (ADR-055). `tag_dict` emptiness is not a
+/// sufficient proxy — the `tags_present` latch catches it. Otherwise the blue/green rebuild (which
+/// reconstructs queries from DSL alone) would silently drop those tags → a filtered-read recall loss.
+#[test]
+fn set_vocab_refused_after_live_synthetic_tagged_add() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    // Built UNTAGGED ⇒ tag_dict stays empty + frozen.
+    let seed = vec![(1u64, "1994 topps".to_string())];
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
+    // A live tagged add whose tag is post-freeze ⇒ a synthetic TagId, NOT interned into tag_dict.
+    cluster
+        .add_query_with_tags(
+            100,
+            "zzrarelivetag",
+            &[("category".to_string(), "cards".to_string())],
+        )
+        .expect("tagged live add");
+    // The guard must fire even though tag_dict is still empty (the latch saw the tagged write).
+    let res = cluster.set_vocab(reverse_rusty::vocab::Vocab::default());
+    assert!(
+        res.is_err(),
+        "set_vocab must be refused on a cluster holding live synthetic tags, got {res:?}"
+    );
+    // Sanity: an UNTAGGED cluster still allows set_vocab (the latch stays false).
+    let mut plain = ClusterEngine::build(vocab(), &cfg, &seed).expect("build plain");
+    assert!(
+        plain
+            .set_vocab(reverse_rusty::vocab::Vocab::default())
+            .is_ok(),
+        "set_vocab must still work on a genuinely untagged cluster"
+    );
+}
+
 #[test]
 fn single_shard_cluster_equals_single_node_engine() {
     let (queries, titles) = build_corpus();

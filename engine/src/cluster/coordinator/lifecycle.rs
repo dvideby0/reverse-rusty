@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::cluster::clog::{FileClusterLog, LogPos};
@@ -196,7 +196,7 @@ impl ClusterEngine {
         for copies in groups {
             shards.push(into_shard(copies)?);
         }
-        Self::from_parts(
+        let engine = Self::from_parts(
             norm,
             dict,
             tag_dict,
@@ -206,7 +206,14 @@ impl ClusterEngine {
             config.replication_factor,
             config.per_shard.clone(),
             durable,
-        )
+        )?;
+        // Latch tags_present for the set_vocab guard (ADR-055). For a build with interned corpus
+        // tags `tag_dict` is also non-empty, but this also covers a build whose only tags would be
+        // synthetic, keeping `has_tags` correct regardless.
+        if tags.iter().any(|t| !t.is_empty()) {
+            engine.tags_present.store(true, Ordering::Relaxed);
+        }
+        Ok(engine)
     }
 
     /// Commit the initial durable base for a freshly built cluster: collect each shard's
@@ -301,6 +308,8 @@ impl ClusterEngine {
             norm,
             dict,
             tag_dict,
+            // Untagged by default; the tagged write paths + `open` latch it (ADR-055).
+            tags_present: AtomicBool::new(false),
             vocab: None,
             ring,
             shards,
@@ -495,6 +504,11 @@ impl ClusterEngine {
         )?;
         // Retain the vocab restored from the manifest so a later checkpoint re-persists it.
         engine.vocab = restored_vocab;
+        // Latch tags_present (ADR-055) from the restored tag space; the log-tail replay below
+        // (`apply_add` → `note_tags`) additionally latches it for any un-checkpointed tagged add.
+        if !engine.tag_dict.is_empty() {
+            engine.tags_present.store(true, Ordering::Relaxed);
+        }
 
         // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the
         // log tail strictly after snapshot_pos, through the SAME apply funnel as live
