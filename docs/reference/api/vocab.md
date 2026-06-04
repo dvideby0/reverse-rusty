@@ -17,7 +17,8 @@ curl localhost:9200/_vocab
     {"tokens": ["upper", "deck"], "canonical": "term:upper_deck", "kind": "generic"}
   ],
   "graders": ["psa"],
-  "grade_words": ["gem"]
+  "grade_words": ["gem"],
+  "equivalences": [["ud", "upper deck"]]
 }
 ```
 
@@ -38,6 +39,15 @@ curl -X PUT localhost:9200/_vocab \
   "warning": "normalizer changed with existing queries; reingest for consistent matching"
 }
 ```
+
+**Declaring equivalences (ADR-054).** The optional `equivalences` block is a list of groups of
+surface forms treated as the same entity (e.g. `[["ud", "upper deck"], ["rc", "rookie"]]`). Unlike
+`synonyms` (which *collapse* a form to a canonical via the normalizer), equivalences are applied by
+**expansion**: a query requiring one form is widened to an any-of over the group, so it matches a
+title bearing any form. Expansion only grows a query's match set, so it is **false-negative-safe** —
+a wrong/uncertain equivalence can only add bounded false positives, never drop a true match. Each form
+should resolve to a single entity (glue a multi-token form as a phrase first); a form that doesn't is
+skipped. Applying the change recompiles existing queries through the expansion.
 
 ## `POST /_vocab/learn` — Learn vocabulary from queries
 
@@ -74,7 +84,8 @@ collocation mining, on top of the any-of synonyms. Phrases only — never aliase
 lossless-cover safe (the same normalizer glues both queries and titles; zero false negatives). Tunable:
 `npmi_min_count` (min adjacent co-occurrence, default 3), `npmi_tau` (binding-strength threshold,
 default 0.30), `npmi_iterations` (bigram→trigram passes, default 2). Absent ⇒ any-of learning only,
-exactly as before.
+exactly as before. Add `"learn_equivalences": true` to instead learn the any-of groups as
+**equivalence groups** applied via FN-safe expansion (ADR-054) rather than collapse synonyms.
 
 ```bash
 curl -X POST localhost:9200/_vocab/learn \
@@ -108,7 +119,9 @@ learned; `recompiled` is the number of stored queries rebuilt under the new voca
 Add `?corpus_phrases=true` to ALSO self-derive entity **phrases** from the engine's own live query text
 via NPMI corpus phrase induction (ADR-053), applied through the same recompile/blue-green rebuild with
 zero false negatives. Tunable via `npmi_min_count` (default 3), `npmi_tau` (default 0.30), and
-`npmi_iterations` (default 2). Absent ⇒ any-of learning only (byte-identical to before).
+`npmi_iterations` (default 2). Add `?learn_equivalences=true` to learn the any-of groups as
+**equivalence groups** applied via FN-safe expansion (ADR-054) instead of collapse synonyms.
+Absent ⇒ any-of synonym learning only (byte-identical to before).
 
 ```bash
 curl -X POST 'localhost:9200/_vocab/learn_and_apply?corpus_phrases=true&npmi_min_count=3'

@@ -87,6 +87,16 @@ impl ClusterEngine {
             }
         }
         dict.finalize_mask();
+        // Resolve declared/learned equivalence groups (ADR-054) against the freshly-minted
+        // dict and apply them via expansion: widen the already-extracted queries (so THIS
+        // rebuild's re-placement + ingest use the FN-safe widened form — a query whose anchor
+        // is now an any-of fans to every member's shard), then install the map on the dict so
+        // future incremental adds expand through `extract`. No groups ⇒ empty ⇒ byte-identical.
+        let equiv = vocab.resolve_equivalences(&new_norm, &dict);
+        for (_, ex, _) in &mut extracted {
+            ex.expand_equivalences(&equiv);
+        }
+        dict.set_equivalences(equiv);
         let new_dict = Arc::new(dict);
         let rebuilt = extracted.len();
 

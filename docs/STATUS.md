@@ -49,7 +49,12 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   (`corpus.rs`) that induces multi-token entity **phrases** from the live query text; composed UNDER the
   any-of learner via an opt-in `CorpusLearnConfig` (`Engine`/`ClusterEngine::learn_and_apply_with`,
   `/_vocab/learn[/_and_apply]?corpus_phrases=true`). Phrases only ⇒ same-normalizer gluing ⇒
-  oracle-equivalent, zero false negatives; default-off ⇒ byte-identical.
+  oracle-equivalent, zero false negatives; default-off ⇒ byte-identical. **Equivalence (alias) learning
+  via expansion (ADR-054):** a first-class `Vocab.equivalences` applied by **expansion, not collapse**
+  (`Extracted::expand_equivalences` widens a required feature into an any-of over its group — structurally
+  FN-safe: the match set only grows, a wrong alias degrades to a bounded false positive). Declared
+  (`PUT /_vocab`) + any-of-learned (opt-in `learn_equivalences`) sources; reversible; survives reopen;
+  default-off ⇒ byte-identical. Distributional/match-feedback discovery deferred behind the same seam.
 - **HTTP server** (`bin/server/`) — ES-style REST (`/_doc`, `/_search` with explain/profile,
   `/_bulk` per-item status ADR-018, `/_stats`, `/_cat/stats`, `/_cat/segments` per-segment detail
   (text table + `?format=json`, ADR-023), `/_health`, `/_metrics`, `/_vocab*`,
@@ -390,8 +395,9 @@ Tiers, highest-leverage first:
   reopen + dynamic vocabulary (ADR-046) — built + oracle-proven, the shippable milestone.
 - **Tier 1 — highest-leverage bottlenecks.** Broad-lane batch evaluation (✅ ADR-026) + resident-memory
   reduction (✅ ADR-020) — both shipped.
-- **Tier 2 — feature-model quality & self-tuning.** NPMI corpus phrase induction wired as a runtime
-  vocab source (✅ ADR-053); still open: compaction-that-improves, confidence-gated alias learning.
+- **Tier 2 — feature-model quality & self-tuning.** NPMI corpus phrase induction (✅ ADR-053) +
+  equivalence/alias learning via expansion — mechanism + declared/any-of sources (✅ ADR-054); still
+  open: compaction-that-improves, and the deferred alias-discovery sources (distributional, match-feedback).
 - **Tier 3 — scale & production maturity.** Feature-model versioning + blue/green; hardening the
   (experimental) distributed multi-node layers; aspects-first ingestion.
 - **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node,

@@ -10,9 +10,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::dict::FeatureKind;
+use crate::dict::{Dict, EquivMap, FeatureId, FeatureKind};
 use crate::dsl::{self, Atom};
 use crate::normalize::{Normalizer, NormalizerBuilder};
+use crate::util::fast_map;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Vocab {
@@ -24,6 +25,13 @@ pub struct Vocab {
     graders: Vec<String>,
     #[serde(default)]
     grade_words: Vec<String>,
+    /// Learned/declared equivalence groups (ADR-054): each inner vec is a set of surface
+    /// forms treated as the same entity (e.g. `["ud", "upper deck"]`). Applied via
+    /// **expansion, not collapse** — a query requiring one form is widened to an any-of over
+    /// the group's features, so it matches a title bearing any form, FN-safe. Distinct from
+    /// `synonyms` (which collapse a form to a canonical via the normalizer).
+    #[serde(default)]
+    equivalences: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,15 +221,15 @@ fn normalize_token(text: &str) -> String {
 }
 
 /// Configuration for [`learn_vocab_from_corpus`] — composes the ADR-015 any-of
-/// synonym learner with opt-in NPMI corpus phrase induction (ADR-053).
+/// learner with opt-in NPMI corpus phrase induction (ADR-053) and opt-in equivalence
+/// (alias) learning via expansion (ADR-054).
 ///
-/// The default **disables** NPMI (`corpus_phrases = false`), so the result is
-/// byte-identical to [`learn_from_queries`] alone — every existing caller and
-/// oracle is unaffected until corpus phrases are explicitly requested.
+/// The default disables both opt-ins, so the result is byte-identical to
+/// [`learn_from_queries`] alone — every existing caller and oracle is unaffected.
 #[derive(Debug, Clone)]
 pub struct CorpusLearnConfig {
-    /// Minimum any-of occurrences for a synonym to be learned (the bare
-    /// `min_count` of [`learn_from_queries`]).
+    /// Minimum any-of occurrences for a rule to be learned (the bare `min_count` of
+    /// [`learn_from_queries`]).
     pub anyof_min_count: usize,
     /// Enable NPMI corpus phrase induction (off by default).
     pub corpus_phrases: bool,
@@ -233,6 +241,9 @@ pub struct CorpusLearnConfig {
     pub npmi_min_count: usize,
     /// Bigram -> trigram growth passes.
     pub npmi_iterations: usize,
+    /// Learn any-of groups as **equivalence groups** applied via FN-safe expansion
+    /// (ADR-054) instead of collapse synonyms (the default). Off by default.
+    pub learn_equivalences: bool,
 }
 
 impl Default for CorpusLearnConfig {
@@ -243,20 +254,70 @@ impl Default for CorpusLearnConfig {
             npmi_tau: 0.30,
             npmi_min_count: 3,
             npmi_iterations: 2,
+            learn_equivalences: false,
         }
     }
 }
 
-/// Learn a vocabulary from a query corpus: the ADR-015 any-of synonym learner,
-/// plus — when `cfg.corpus_phrases` is set — NPMI-induced entity phrases
-/// ([`crate::corpus::learn_phrases_from_text`], ADR-053) merged on top.
+/// Learn equivalence groups from query any-of co-occurrence (ADR-054): an any-of group
+/// `(a, b, c)` declares its members interchangeable. A group of surface forms appearing in at
+/// least `min_count` distinct queries is emitted as an equivalence group, applied via FN-safe
+/// **expansion** (the expansion-not-collapse counterpart of [`learn_from_queries`], which
+/// emits collapse synonyms). Forms are kept raw — they are resolved through the normalizer at
+/// apply time ([`Vocab::resolve_equivalences`]).
+pub fn learn_equivalences_from_queries(
+    queries: &[(u64, String)],
+    min_count: usize,
+) -> Vec<Vec<String>> {
+    let mut group_counts: HashMap<Vec<String>, usize> = HashMap::new();
+    for (_id, text) in queries {
+        let Ok(ast) = dsl::parse(text) else {
+            continue;
+        };
+        for clause in &ast.clauses {
+            if clause.negated {
+                continue;
+            }
+            if let Atom::AnyOf(members) = &clause.atom {
+                let mut forms: Vec<String> = members.iter().map(|m| m.trim().to_string()).collect();
+                forms.retain(|m| !m.is_empty());
+                forms.sort();
+                forms.dedup();
+                if forms.len() < 2 {
+                    continue;
+                }
+                *group_counts.entry(forms).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut groups: Vec<Vec<String>> = group_counts
+        .into_iter()
+        .filter(|(_, c)| *c >= min_count)
+        .map(|(g, _)| g)
+        .collect();
+    groups.sort();
+    groups
+}
+
+/// Learn a vocabulary from a query corpus. By default this is the ADR-015 any-of synonym
+/// learner; with `cfg.learn_equivalences` the any-of groups are learned as **equivalence
+/// groups** (expansion, ADR-054) instead of collapse synonyms; and with `cfg.corpus_phrases`
+/// NPMI-induced entity phrases ([`crate::corpus::learn_phrases_from_text`], ADR-053) are
+/// merged on top.
 ///
-/// The any-of result is the base and corpus phrases are merged **second**, so on
-/// a token collision the user-declared any-of phrase wins ([`Vocab::merge`] is
-/// first-wins). With `corpus_phrases = false` this returns exactly
-/// `learn_from_queries(corpus, cfg.anyof_min_count)`.
+/// With both opt-ins off this returns exactly `learn_from_queries(corpus, cfg.anyof_min_count)`.
 pub fn learn_vocab_from_corpus(corpus: &[(u64, String)], cfg: &CorpusLearnConfig) -> Vocab {
-    let mut vocab = learn_from_queries(corpus, cfg.anyof_min_count);
+    let mut vocab = if cfg.learn_equivalences {
+        // Expansion mode: any-of co-occurrence becomes equivalence groups, not synonyms.
+        let mut v = Vocab::new();
+        for grp in learn_equivalences_from_queries(corpus, cfg.anyof_min_count) {
+            let refs: Vec<&str> = grp.iter().map(String::as_str).collect();
+            v.add_equivalence(&refs);
+        }
+        v
+    } else {
+        learn_from_queries(corpus, cfg.anyof_min_count)
+    };
     if cfg.corpus_phrases {
         let phrases = crate::corpus::learn_phrases_from_text(
             corpus,
@@ -328,6 +389,11 @@ impl Vocab {
         for w in &other.grade_words {
             if !self.grade_words.contains(w) {
                 self.grade_words.push(w.clone());
+            }
+        }
+        for grp in &other.equivalences {
+            if !self.equivalences.contains(grp) {
+                self.equivalences.push(grp.clone());
             }
         }
     }
@@ -424,6 +490,52 @@ impl Vocab {
 
     pub fn grade_words(&self) -> &[String] {
         &self.grade_words
+    }
+
+    // ── Equivalence management (ADR-054) ────────────────────────────────
+
+    /// Declare an equivalence group: surface forms treated as the same entity, applied
+    /// via FN-safe expansion. A duplicate group (same forms, same order) is skipped.
+    pub fn add_equivalence(&mut self, forms: &[&str]) {
+        let grp: Vec<String> = forms.iter().map(|s| (*s).to_string()).collect();
+        if grp.len() >= 2 && !self.equivalences.contains(&grp) {
+            self.equivalences.push(grp);
+        }
+    }
+
+    pub fn equivalences(&self) -> &[Vec<String>] {
+        &self.equivalences
+    }
+
+    /// Resolve the declared/learned equivalence groups to a compile-time [`EquivMap`]
+    /// (member `FeatureId` → its full group) against a normalizer + dict. Each form is
+    /// resolved to its feature(s) via the read-only compile path (so a form absent from a
+    /// frozen dict still gets a stable synthetic id, ADR-046); a form that does not resolve
+    /// to exactly ONE feature is skipped (an equivalence is entity↔entity, so a multi-token
+    /// form should be a glued phrase first), and a group needs ≥2 distinct features to count.
+    /// The result is installed on the dict ([`Dict::set_equivalences`]) so `extract`/
+    /// `extract_readonly` expand queries through it.
+    pub fn resolve_equivalences(&self, norm: &Normalizer, dict: &Dict) -> EquivMap {
+        let mut map: EquivMap = fast_map();
+        let mut lc = String::new();
+        for group in &self.equivalences {
+            let mut feats: Vec<FeatureId> = Vec::with_capacity(group.len());
+            for form in group {
+                let fs = norm.compile_features_readonly(form, dict, &mut lc);
+                if fs.len() == 1 {
+                    feats.push(fs[0]);
+                }
+            }
+            feats.sort_unstable();
+            feats.dedup();
+            if feats.len() < 2 {
+                continue;
+            }
+            for &f in &feats {
+                map.insert(f, feats.clone());
+            }
+        }
+        map
     }
 
     // ── Serialization ───────────────────────────────────────────────────
@@ -710,6 +822,43 @@ mod tests {
                 .iter()
                 .any(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()]),
             "NPMI on must induce the upper/deck phrase"
+        );
+    }
+
+    #[test]
+    fn learns_equivalences_from_anyof_groups() {
+        let queries: Vec<(u64, String)> = (0..10)
+            .map(|i| (i, format!("(rookie,rc) card{i:03}")))
+            .collect();
+        let groups = learn_equivalences_from_queries(&queries, 2);
+        assert!(
+            groups
+                .iter()
+                .any(|g| g.contains(&"rc".to_string()) && g.contains(&"rookie".to_string())),
+            "an any-of group seen >= min_count must be learned as an equivalence group"
+        );
+        // Below threshold -> nothing learned.
+        assert!(learn_equivalences_from_queries(&queries, 11).is_empty());
+    }
+
+    #[test]
+    fn corpus_learn_equivalences_mode_emits_groups_not_synonyms() {
+        let queries: Vec<(u64, String)> = (0..10)
+            .map(|i| (i, format!("(rookie,rc) card{i:03}")))
+            .collect();
+        let cfg = CorpusLearnConfig {
+            anyof_min_count: 2,
+            learn_equivalences: true,
+            ..Default::default()
+        };
+        let v = learn_vocab_from_corpus(&queries, &cfg);
+        assert!(
+            v.synonyms().is_empty() && v.phrases().is_empty(),
+            "expansion mode must not emit collapse synonyms/phrases"
+        );
+        assert!(
+            !v.equivalences().is_empty(),
+            "expansion mode must emit equivalence groups"
         );
     }
 }

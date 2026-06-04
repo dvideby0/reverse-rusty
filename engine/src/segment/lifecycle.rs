@@ -169,7 +169,14 @@ impl Engine {
         &mut self,
         vocab: crate::vocab::Vocab,
     ) -> Result<usize, crate::error::NormalizerError> {
-        self.norm = Arc::new(vocab.to_normalizer()?);
+        let norm = Arc::new(vocab.to_normalizer()?);
+        // Resolve any declared/learned equivalence groups against the frozen dict under the
+        // new normalizer and install them, so the subsequent recompile (and future inserts)
+        // expand queries through them (ADR-054). No groups ⇒ empty map ⇒ no-op (the dict
+        // clone is dwarfed by the recompile this set_vocab triggers).
+        let equiv = vocab.resolve_equivalences(&norm, &self.dict);
+        Arc::make_mut(&mut self.dict).set_equivalences(equiv);
+        self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
         self.vocab_epoch += 1;
         Ok(self.stale_segment_count())
@@ -210,7 +217,13 @@ impl Engine {
         &mut self,
         vocab: crate::vocab::Vocab,
     ) -> Result<(), crate::error::NormalizerError> {
-        self.norm = Arc::new(vocab.to_normalizer()?);
+        let norm = Arc::new(vocab.to_normalizer()?);
+        // Re-install equivalence groups (ADR-054) so inserts AFTER reopen expand through them.
+        // Already-compiled segments were persisted with their expansion baked in, so matching
+        // recovered queries needs no re-resolution — this only equips the live compile path.
+        let equiv = vocab.resolve_equivalences(&norm, &self.dict);
+        Arc::make_mut(&mut self.dict).set_equivalences(equiv);
+        self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
         Ok(())
     }

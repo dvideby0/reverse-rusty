@@ -64,6 +64,38 @@ impl Brute {
         }
     }
 
+    /// Like `build_with_vocab` but additionally applies the vocab's equivalence groups
+    /// (ADR-054) via expansion — an independent ground truth that widens each query exactly
+    /// as the cluster does, so `cluster ≡ brute` proves the expanded queries match correctly.
+    fn build_with_equiv(
+        queries: &[(u64, String)],
+        norm: Normalizer,
+        vocab: &reverse_rusty::vocab::Vocab,
+    ) -> Self {
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let mut qs = Vec::new();
+        for (logical, text) in queries {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+                let ex = extract(&ast, &norm, &mut dict, &mut lc);
+                if ex.required.is_empty() && ex.anyof.is_empty() {
+                    continue;
+                }
+                qs.push((*logical, ex));
+            }
+        }
+        dict.finalize_mask();
+        let equiv = vocab.resolve_equivalences(&norm, &dict);
+        for (_, ex) in &mut qs {
+            ex.expand_equivalences(&equiv);
+        }
+        Brute {
+            norm,
+            dict,
+            queries: qs,
+        }
+    }
+
     fn matches(&self, title: &str, lc: &mut String, feats: &mut Vec<u32>) -> HashSet<u64> {
         self.norm.match_features(title, &self.dict, lc, feats);
         let present = |f: u32| feats.binary_search(&f).is_ok();
@@ -695,6 +727,86 @@ fn learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives() {
             assert_eq!(
                 got, truth,
                 "K={k}: cluster disagrees with the phrase-aware oracle for {title:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn declared_equivalence_expands_across_shards_with_zero_false_negatives() {
+    // ADR-054: a DECLARED equivalence {zzabbr, zzcanon} applied via set_vocab must make a
+    // query phrased with one form match a title bearing the other, at every K, with zero FN.
+    // Expansion turns the query's anchor into an any-of, so it fans to BOTH forms' shards
+    // (re-placement under expansion) — and the cluster still equals an equivalence-aware brute.
+    let (mut queries, titles) = build_corpus();
+    let q_abbr = 8_500_001u64;
+    let q_canon = 8_500_002u64;
+    queries.push((q_abbr, "1994 fleer zzabbr".into()));
+    queries.push((q_canon, "1994 fleer zzcanon".into()));
+    // Intern both tokens widely so they resolve to real (non-synthetic) feature ids.
+    for i in 0..30u64 {
+        queries.push((8_500_100 + i, format!("zzabbr u{i}")));
+        queries.push((8_500_200 + i, format!("zzcanon u{i}")));
+    }
+
+    let make_vocab = || {
+        let mut v = reverse_rusty::vocab::Vocab::new();
+        v.add_equivalence(&["zzabbr", "zzcanon"]);
+        v
+    };
+    let title_abbr = "1994 fleer zzabbr psa 10";
+    let title_canon = "1994 fleer zzcanon psa 10";
+
+    for &k in &[1usize, 3, 8] {
+        let cfg = ClusterConfig {
+            num_shards: k,
+            include_broad: true,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+
+        // Before the equivalence, the two forms are distinct.
+        assert!(
+            !cluster.percolate(title_canon).unwrap().contains(&q_abbr),
+            "K={k}: before equiv, a canonical title must not match the abbreviation query"
+        );
+
+        let rebuilt = cluster
+            .set_vocab(make_vocab())
+            .expect("set_vocab equivalence");
+        assert!(
+            rebuilt > 100,
+            "K={k}: set_vocab rebuilds the whole corpus (got {rebuilt})"
+        );
+
+        // After: BOTH queries match BOTH surface forms (expansion; zero FN).
+        for title in [title_abbr, title_canon] {
+            let got = cluster.percolate(title).unwrap();
+            assert!(
+                got.contains(&q_abbr),
+                "K={k}: {title:?} must match the abbreviation-form query after the equivalence"
+            );
+            assert!(
+                got.contains(&q_canon),
+                "K={k}: {title:?} must match the canonical-form query after the equivalence"
+            );
+        }
+
+        // Differential: cluster ≡ an independent equivalence-aware brute over the live set.
+        let brute = Brute::build_with_equiv(&queries, vocab(), &make_vocab());
+        let mut lc = String::new();
+        let mut feats = Vec::new();
+        for title in titles
+            .iter()
+            .map(String::as_str)
+            .take(100)
+            .chain([title_abbr, title_canon])
+        {
+            let got: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
+            let truth = brute.matches(title, &mut lc, &mut feats);
+            assert_eq!(
+                got, truth,
+                "K={k}: cluster disagrees with the equivalence-aware oracle for {title:?}"
             );
         }
     }

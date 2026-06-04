@@ -35,6 +35,53 @@ pub struct Extracted {
     pub anyof: Vec<Vec<FeatureId>>, // each group: >=1 member-proxy present
 }
 
+impl Extracted {
+    /// Expand learned equivalence groups (ADR-054) into the query — the FN-safe
+    /// "expansion, not collapse" application of an alias. A required feature in a group
+    /// `G` is moved out of `required` and added as an any-of group `G` (so a title bearing
+    /// ANY member of `G` still retrieves the query), and each existing any-of group is
+    /// widened by its members' groups. `forbidden` is never touched (negation semantics
+    /// must not be widened).
+    ///
+    /// Because this only ever WIDENS the accepted positive feature set, the query's match
+    /// set can only grow — it can never drop a true match, so it **cannot introduce a false
+    /// negative**; a wrong/low-confidence equivalence degrades to a bounded false positive
+    /// (the cardinal-sin-free failure mode this engine is built around). A no-op when
+    /// `equiv` is empty, so the default path is byte-identical. Idempotent.
+    pub fn expand_equivalences(&mut self, equiv: &crate::dict::EquivMap) {
+        if equiv.is_empty() {
+            return;
+        }
+        // A required feature in an equivalence group becomes an any-of over the group.
+        let mut still_required = Vec::with_capacity(self.required.len());
+        for &f in &self.required {
+            match equiv.get(&f) {
+                Some(group) => self.anyof.push(group.clone()),
+                None => still_required.push(f),
+            }
+        }
+        self.required = still_required;
+        // Widen every any-of group (incl. the ones just added) by its members' groups.
+        for g in &mut self.anyof {
+            let mut widened: Vec<FeatureId> = Vec::with_capacity(g.len());
+            for &m in g.iter() {
+                match equiv.get(&m) {
+                    Some(group) => widened.extend_from_slice(group),
+                    None => widened.push(m),
+                }
+            }
+            widened.sort_unstable();
+            widened.dedup();
+            *g = widened;
+        }
+        // Canonicalize for determinism (dedup identical groups + keep required tidy).
+        self.required.sort_unstable();
+        self.required.dedup();
+        self.anyof.sort_unstable();
+        self.anyof.dedup();
+    }
+}
+
 /// Fully compiled query (used for explain/demo; the at-scale path streams into
 /// the segment SoA instead of retaining these).
 #[derive(Clone, Debug)]
@@ -122,7 +169,9 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
     forbidden.sort_unstable();
     forbidden.dedup();
 
-    // bump frequency once per distinct required/anyof feature (gating-relevant)
+    // bump frequency once per distinct required/anyof feature (gating-relevant).
+    // Frequencies reflect the LITERAL query (before equivalence expansion below), so the
+    // hot-mask and anchor selection stay a function of the real corpus distribution.
     for &f in &required {
         dict.bump_freq(f);
     }
@@ -132,11 +181,15 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
         }
     }
 
-    Extracted {
+    let mut out = Extracted {
         required,
         forbidden,
         anyof,
-    }
+    };
+    // Apply learned equivalences (ADR-054). No-op unless a vocabulary installed them on the
+    // dict; FN-safe (the match set only grows). See `Extracted::expand_equivalences`.
+    out.expand_equivalences(dict.equivalences());
+    out
 }
 
 pub struct SigPlan {
@@ -356,11 +409,14 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
     forbidden.sort_unstable();
     forbidden.dedup();
 
-    Extracted {
+    let mut out = Extracted {
         required,
         forbidden,
         anyof,
-    }
+    };
+    // Apply learned equivalences (ADR-054); no-op unless installed on the dict. FN-safe.
+    out.expand_equivalences(dict.equivalences());
+    out
 }
 
 /// Read-only compile: re-derives a CompiledQuery from query text without
@@ -636,5 +692,79 @@ mod golden {
         let plan = anchor_plan(&ex, &dict);
         assert_eq!(plan.class, CostClass::D);
         assert!(plan.main_anchors.is_empty() && plan.broad_anchors.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod equiv_tests {
+    //! Unit tests for the equivalence expansion pass (ADR-054). These exercise the pure
+    //! `Extracted::expand_equivalences` rewrite in isolation; the end-to-end zero-false-
+    //! negative + monotonicity proofs live in tests/oracle.rs and tests/cluster_oracle.rs.
+    use super::*;
+
+    fn equiv(pairs: &[(FeatureId, &[FeatureId])]) -> crate::dict::EquivMap {
+        let mut m = crate::util::fast_map();
+        for &(member, group) in pairs {
+            m.insert(member, group.to_vec());
+        }
+        m
+    }
+
+    #[test]
+    fn moves_required_into_anyof_group() {
+        // 10 belongs to the equivalence group {10,20}; it leaves `required` and becomes an
+        // any-of, so a title with EITHER 10 or 20 still matches. 5 (no group) stays required.
+        let g = equiv(&[(10, &[10, 20]), (20, &[10, 20])]);
+        let mut ex = Extracted {
+            required: vec![5, 10],
+            forbidden: vec![99],
+            anyof: vec![],
+        };
+        ex.expand_equivalences(&g);
+        assert_eq!(ex.required, vec![5]);
+        assert_eq!(ex.anyof, vec![vec![10, 20]]);
+        assert_eq!(ex.forbidden, vec![99], "forbidden is never widened");
+    }
+
+    #[test]
+    fn widens_existing_anyof_group() {
+        let g = equiv(&[(10, &[10, 20]), (20, &[10, 20])]);
+        let mut ex = Extracted {
+            required: vec![],
+            forbidden: vec![],
+            anyof: vec![vec![10, 30]],
+        };
+        ex.expand_equivalences(&g);
+        assert_eq!(ex.anyof, vec![vec![10, 20, 30]]);
+    }
+
+    #[test]
+    fn empty_map_is_a_noop() {
+        let g: crate::dict::EquivMap = crate::util::fast_map();
+        let before = Extracted {
+            required: vec![1, 2],
+            forbidden: vec![3],
+            anyof: vec![vec![4, 5]],
+        };
+        let mut ex = before.clone();
+        ex.expand_equivalences(&g);
+        assert_eq!(ex.required, before.required);
+        assert_eq!(ex.forbidden, before.forbidden);
+        assert_eq!(ex.anyof, before.anyof);
+    }
+
+    #[test]
+    fn is_idempotent() {
+        let g = equiv(&[(10, &[10, 20]), (20, &[10, 20])]);
+        let mut once = Extracted {
+            required: vec![10],
+            forbidden: vec![],
+            anyof: vec![],
+        };
+        once.expand_equivalences(&g);
+        let mut twice = once.clone();
+        twice.expand_equivalences(&g);
+        assert_eq!(once.required, twice.required);
+        assert_eq!(once.anyof, twice.anyof);
     }
 }

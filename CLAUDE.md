@@ -122,9 +122,9 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/lib.rs` | Library root, public API re-exports | — |
 | `src/dsl.rs` | Query DSL parser → AST (compile-time only) | [normalization.md](docs/design/normalization.md) §1 |
 | `src/normalize.rs` | Shared query/title normalizer (daachorse automaton) + `NormalizerBuilder` | [normalization.md](docs/design/normalization.md) §2–4 |
-| `src/dict.rs` | Feature dictionary, frequency tracking, 64-bit common mask, synthetic-ID hashing for out-of-dict terms (dynamic vocab, ADR-046) | [normalization.md](docs/design/normalization.md) §5 |
+| `src/dict.rs` | Feature dictionary, frequency tracking, 64-bit common mask, synthetic-ID hashing for out-of-dict terms (dynamic vocab, ADR-046), transient `EquivMap` for compile-time equivalence expansion (ADR-054) | [normalization.md](docs/design/normalization.md) §5 |
 | `src/tagdict.rs` | Per-query metadata **tag** dictionary — interns `(key,value)` tags to dense `TagId`s (a space disjoint from `FeatureId`), with the same synthetic-ID escape hatch as `dict.rs`. Tag strings die here; the filter is integers-only (filtered percolation, ADR-049) | [matching.md](docs/design/matching.md) §5.1 |
-| `src/compile.rs` | Signature-cover optimizer + cost classes A/B/C/D + read-only compile path for explain + `anchor_plan` (pre-hash anchor groups — the placement SSOT for clustering) | [matching.md](docs/design/matching.md) §1; ADR-027 |
+| `src/compile.rs` | Signature-cover optimizer + cost classes A/B/C/D + read-only compile path for explain + `anchor_plan` (pre-hash anchor groups — the placement SSOT for clustering) + `Extracted::expand_equivalences` (FN-safe alias expansion: required→any-of, ADR-054) | [matching.md](docs/design/matching.md) §1; ADR-027 |
 | `src/config.rs` | `EngineConfig` — runtime-tunable knobs for compaction, flush, merge scoring, and the broad-lane batch evaluator (`Serialize`; dynamic subset updatable at runtime via `/_settings`) | ADR-022, ADR-026 |
 | `src/filter.rs` | Per-segment anchor filter (cache-line blocked bloom, 512-bit blocks) | [ingestion-and-updates.md](docs/design/ingestion-and-updates.md) §6 |
 | `src/index.rs` | Candidate index: sig key → posting list (inline/Vec/Roaring) | [matching.md](docs/design/matching.md) §2 |
@@ -143,7 +143,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `grpc/` (member `reverse-rusty-shard-proto`) | Workspace member holding the generated gRPC `ShardService` (protobuf messages + tonic client/server). Built only under `distributed`; codegen via pure-Rust `protox` in `build.rs` (no system `protoc`), nothing checked in. | ADR-029 |
 | `src/explain.rs` | Debug/explain tooling (first-class, not bolt-on) + structured `ExplainDetail` for API | [matching.md](docs/design/matching.md) §6 |
 | `src/gen.rs` | Synthetic data generator (deterministic, seeded) | — |
-| `src/vocab.rs` | Runtime vocabulary: the any-of synonym learner + `Vocab` struct + JSON persistence (ADR-015); `CorpusLearnConfig`/`learn_vocab_from_corpus` compose the opt-in NPMI phrase learner under it (ADR-053) | ADR-015, ADR-053 |
+| `src/vocab.rs` | Runtime vocabulary: the any-of synonym learner + `Vocab` struct + JSON persistence (ADR-015); `CorpusLearnConfig`/`learn_vocab_from_corpus` compose the opt-in NPMI phrase learner under it (ADR-053); `Vocab.equivalences` + `resolve_equivalences` + `learn_equivalences_from_queries` drive the expansion-not-collapse alias path (ADR-054) | ADR-015, ADR-053, ADR-054 |
 | `src/corpus.rs` | NPMI collocation core (`tokenize`/`learn_phrases`/`apply_phrases`) + `learn_phrases_from_text` → `Vocab` of induced entity phrases; lean-core, shared by `bin/learn.rs` + `vocab.rs` | ADR-053; [corpus-feature-learning.md](docs/research/corpus-feature-learning.md) |
 | `src/error.rs` | Typed `ParseError` with `ParseErrorKind` enum | — |
 | `src/loader.rs` | Query file loader (CSV + JSONL auto-detection) | — |

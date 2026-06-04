@@ -82,6 +82,9 @@ pub(crate) struct LearnRequest {
     npmi_min_count: Option<usize>,
     #[serde(default)]
     npmi_iterations: Option<usize>,
+    /// Opt-in: learn any-of groups as equivalences applied via expansion (ADR-054).
+    #[serde(default)]
+    learn_equivalences: bool,
 }
 
 fn default_min_count() -> usize {
@@ -97,6 +100,7 @@ fn build_corpus_config(
     npmi_tau: Option<f64>,
     npmi_min_count: Option<usize>,
     npmi_iterations: Option<usize>,
+    learn_equivalences: bool,
 ) -> reverse_rusty::vocab::CorpusLearnConfig {
     let d = reverse_rusty::vocab::CorpusLearnConfig::default();
     reverse_rusty::vocab::CorpusLearnConfig {
@@ -105,6 +109,7 @@ fn build_corpus_config(
         npmi_tau: npmi_tau.unwrap_or(d.npmi_tau),
         npmi_min_count: npmi_min_count.unwrap_or(d.npmi_min_count),
         npmi_iterations: npmi_iterations.unwrap_or(d.npmi_iterations),
+        learn_equivalences,
     }
 }
 
@@ -119,6 +124,7 @@ pub(crate) async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoRespo
         req.npmi_tau,
         req.npmi_min_count,
         req.npmi_iterations,
+        req.learn_equivalences,
     );
     let vocab = reverse_rusty::vocab::learn_vocab_from_corpus(&req.queries, &cfg);
     Json(vocab)
@@ -142,6 +148,9 @@ pub(crate) struct LearnApplyQuery {
     /// Bigram -> trigram growth passes.
     #[serde(default)]
     npmi_iterations: Option<usize>,
+    /// Opt-in: learn any-of groups as equivalences applied via expansion (ADR-054).
+    #[serde(default)]
+    learn_equivalences: bool,
 }
 
 #[derive(Serialize)]
@@ -168,6 +177,7 @@ pub(crate) async fn learn_and_apply_vocab(
         q.npmi_tau,
         q.npmi_min_count,
         q.npmi_iterations,
+        q.learn_equivalences,
     );
     let result = {
         let mut engine = state.engine.lock();

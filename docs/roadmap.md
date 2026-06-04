@@ -107,9 +107,16 @@ items from an external review, re-ranked to the top; **all are now done:**
   through the proven `set_vocab`/recompile machinery with **zero false negatives** (oracle-proven,
   single-engine + cluster); default-off ⇒ existing behavior byte-identical.
   ([`research/corpus-feature-learning.md`](research/corpus-feature-learning.md).)
-- **Alias / equivalence learning** (e.g. `UD` ≡ `Upper Deck`) with the precision-first safety rail
-  (expansion-not-collapse, feedback-validated, reversible) — the one feature-learning sub-problem that
-  can affect correctness, so it stays confidence-gated.
+- **Alias / equivalence learning** (e.g. `UD` ≡ `Upper Deck`) — the precision-first safety rail. **The
+  mechanism + high-precision sources are ✅ shipped (ADR-054):** a first-class `Vocab.equivalences`
+  applied via **expansion, not collapse** (`Extracted::expand_equivalences` — a required feature widens
+  to an any-of over its group, structurally FN-safe; a wrong alias degrades to a bounded false positive,
+  never a false negative), sourced from operator-**declared** groups (`PUT /_vocab`) and **any-of-learned**
+  groups (opt-in `learn_equivalences`), reversible + oracle-proven (incl. a wrong-equivalence-never-drops-a-match
+  proof + survives-reopen). **Still deferred behind the same seam (precision order):** **distributional
+  discovery** (context-similarity candidates — noisy, conflates substitutes with co-hyponyms, so
+  review-first) and **match-feedback validation** (the highest-precision *automated* signal, needs an
+  operational title→query loop). Both feed the shipped mechanism when built.
 
 ### Tier 3 — scale & production maturity (larger builds)
 
