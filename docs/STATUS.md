@@ -400,6 +400,19 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   (filtered percolate + tag-dict shipping over the wire). **Honest scope:** a runtime vocabulary change on
   a tagged cluster (`set_vocab`/`learn_and_apply`) is refused fail-loud (the blue/green rebuild can't
   reconstruct a synthetic tag's string) — a deferred follow-on.
+- **Percolate ranking + pagination (ADR-059)** — closes ADR-049's decision point 4 (and the ADR-052 #3
+  pagination tail) on the **single-node** REST surface. A new lean-core `src/rank.rs`
+  (`RankSpec`/`CompiledRankSpec`/`score`) + `EngineSnapshot::{compile_rank_spec, rank}` score the
+  already-final matched id set as `Σ request-boosts + priority-tag value` (additive; priority reuses the
+  tag mechanism), resolving each id to its newest live copy's tags. The `/_search` + `/_mpercolate`
+  handlers sort by `(score desc, _id asc)`, apply `from`/`size`, and emit `_score` — all gated on an
+  opt-in `rank` block, so the no-rank path is byte-identical. Also adds `from` to `/_mpercolate` and
+  per-slot hit truncation to multi-doc `/_search`. Ranking runs after verification and touches neither
+  the candidate index nor the verifier, so it only reorders + paginates (never adds/drops a match) — the
+  zero-false-negative contract is untouched. Proven by `src/rank.rs` units, `tests/ranking.rs`
+  (engine-level scoring + newest-copy precedence + the ranked-set ≡ unranked-set recall guard), and the
+  co-located handler tests (`order`, `_score`, `from`, per-slot truncation). **Scope:** single-node;
+  cluster ranking is deferred behind the same `RankSpec` seam.
 
 ## Measured
 
@@ -436,7 +449,8 @@ Tiers, highest-leverage first:
   (experimental) distributed multi-node layers; aspects-first ingestion.
 - **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node
   ADR-049, ✅ through the cluster ADR-055); byte-cleaning punctuation-equivalence folding (✅ ADR-058);
-  still open: ranking + `/_mpercolate` pagination, bulk-alias registration API.
+  ranking + `/_mpercolate` pagination (✅ built single-node ADR-059 — cluster ranking deferred); still
+  open: bulk-alias registration API.
 
 See **[`roadmap.md`](roadmap.md)** for the per-tier detail, the Nice-to-have / operational-polish
 backlog, and the Evaluated & declined list.

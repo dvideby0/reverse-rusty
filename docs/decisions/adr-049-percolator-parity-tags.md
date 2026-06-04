@@ -11,7 +11,8 @@
   differential oracle (`tests/oracle.rs` — zero false negatives/positives + the "filtering only removes"
   monotonicity property), the batch≡scalar-under-filter matrix (`tests/broad_batch.rs`, incl. the
   pure-anchor materialization path), and tagged `.seg`/WAL reopen (`tests/persistence.rs`). Decision point 4
-  (ranking + `/_mpercolate` `from` pagination) remains design-only. The single-node server is the drop-in
+  (ranking + `/_mpercolate` `from` pagination) is **now also built single-node**
+  ([ADR-059](adr-059-percolate-ranking-pagination.md)); cluster ranking remains deferred. The single-node server is the drop-in
   target and is complete; threading tags through the **cluster** (in-process coordinator + durable log +
   the `distributed` gRPC wire-format) follows the experimental-path cadence. Originally accepted as a
   design-only direction — the framing below preserved the correctness contract *by construction* through

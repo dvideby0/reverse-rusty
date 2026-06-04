@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, warn};
 
 use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy, MatchScratch, MatchStats};
+use reverse_rusty::{CompiledRankSpec, EngineSnapshot, RankSpec};
 
 use crate::dto::{ApiError, HitSource};
 use crate::state::AppState;
@@ -38,6 +39,10 @@ pub(crate) struct SearchBody {
     size: Option<usize>,
     /// Offset into the result set for pagination (default: 0).
     from: Option<usize>,
+    /// Optional ranking (ADR-059): order hits by a numeric priority tag and/or
+    /// request-supplied boosts before applying `from`/`size`. Absent (or empty) ⇒
+    /// hits keep engine order — byte-identical to the pre-ranking response.
+    rank: Option<RankBody>,
     /// Include original query text in each hit (default: true).
     include_source: Option<bool>,
     /// Include per-hit explain detail showing why each query matched (default: false).
@@ -49,6 +54,71 @@ pub(crate) struct SearchBody {
 #[derive(Deserialize)]
 struct DocBody {
     title: String,
+}
+
+/// The optional `rank` block (ADR-059) on a percolate request. Maps to
+/// [`reverse_rusty::RankSpec`]: order matched queries by a numeric priority tag
+/// and/or additive request boosts. Ranking runs AFTER matching, on the final id
+/// set — it only reorders + paginates, never changes which queries match.
+#[derive(Deserialize)]
+struct RankBody {
+    /// Tag key whose numeric value is a query's base priority (e.g. `"priority"`).
+    priority_key: Option<String>,
+    /// Additive boosts applied when a query carries the given `(key, value)` tag.
+    #[serde(default)]
+    boosts: Vec<BoostBody>,
+}
+
+#[derive(Deserialize)]
+struct BoostBody {
+    key: String,
+    value: String,
+    boost: i64,
+}
+
+/// Lower a request `rank` block to an engine [`RankSpec`]. `None` ⇒ no ranking.
+fn to_rank_spec(rank: Option<RankBody>) -> Option<RankSpec> {
+    rank.map(|r| RankSpec {
+        priority_key: r.priority_key,
+        boosts: r
+            .boosts
+            .into_iter()
+            .map(|b| (b.key, b.value, b.boost))
+            .collect(),
+    })
+}
+
+/// Order + paginate one matched-id list for a hit array (ADR-059). With a ranking
+/// spec, score via the snapshot and sort by `(score desc, _id asc)` — a total order,
+/// so pagination is byte-stable — then apply `from`/`size`. Without one, keep the
+/// engine's (ascending) order and slice: the pre-ranking path, byte-identical.
+/// Returns `(id, Option<score>)`; `_score` is `Some` only when ranked.
+fn order_and_page(
+    snap: &EngineSnapshot,
+    ids: &[u64],
+    rank: Option<&CompiledRankSpec>,
+    from: usize,
+    size: usize,
+) -> Vec<(u64, Option<i64>)> {
+    match rank {
+        Some(spec) => {
+            let mut scored = snap.rank(ids, spec);
+            scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            scored
+                .into_iter()
+                .skip(from)
+                .take(size)
+                .map(|(id, s)| (id, Some(s)))
+                .collect()
+        }
+        None => ids
+            .iter()
+            .copied()
+            .skip(from)
+            .take(size)
+            .map(|id| (id, None))
+            .collect(),
+    }
 }
 
 /// A request filter: a conjunction of `(key, [values])` groups (ADR-049).
@@ -221,6 +291,10 @@ struct SearchHits {
 #[derive(Serialize)]
 struct SearchHitItem {
     _id: u64,
+    /// Ranking score (ADR-059) — present only when the request supplied a `rank`
+    /// block; omitted (so the response is byte-identical) on the unranked path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    _score: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     _source: Option<HitSource>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -279,6 +353,12 @@ pub(crate) struct MPercolateBody {
     include_source: Option<bool>,
     /// Maximum hits to return per document (default: 1000).
     size: Option<usize>,
+    /// Per-document offset into each document's hits for pagination (default: 0).
+    from: Option<usize>,
+    /// Optional ranking (ADR-059): order each document's hits by a numeric priority
+    /// tag and/or request boosts before applying `from`/`size`. Absent (or empty) ⇒
+    /// hits keep engine order — byte-identical to the pre-ranking response.
+    rank: Option<RankBody>,
     /// Per-request timeout in milliseconds (default: 30000).
     timeout_ms: Option<u64>,
     /// Include the top-level broad-lane summary in the response (default: false).
@@ -327,6 +407,7 @@ pub(crate) async fn search(
     let timeout = tokio::time::Duration::from_millis(body.timeout_ms.unwrap_or(30_000));
     let page_size = body.size.unwrap_or(1000);
     let page_from = body.from.unwrap_or(0);
+    let rank_raw = to_rank_spec(body.rank);
 
     // Resolve documents + tag filter from EITHER the native shape (document/documents +
     // filter) or the ES bool/terms percolate envelope (query). A malformed/unsupported
@@ -421,11 +502,14 @@ pub(crate) async fn search(
 
             let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             let total = ids.len();
-            let paged_ids: Vec<u64> = ids.into_iter().skip(page_from).take(page_size).collect();
             let snap = state.snapshot.load();
-            let hits = paged_ids
-                .iter()
-                .map(|&id| {
+            let cspec = rank_raw
+                .as_ref()
+                .map(|r| snap.compile_rank_spec(r))
+                .filter(|c| !c.is_noop());
+            let hits = order_and_page(&snap, &ids, cspec.as_ref(), page_from, page_size)
+                .into_iter()
+                .map(|(id, score)| {
                     let source = if include_source {
                         snap.get_query_source(id).map(|q| HitSource { query: q })
                     } else {
@@ -436,6 +520,7 @@ pub(crate) async fn search(
                         .and_then(|t| snap.explain_hit(id, t));
                     SearchHitItem {
                         _id: id,
+                        _score: score,
                         _source: source,
                         _explanation: explanation,
                     }
@@ -537,14 +622,12 @@ pub(crate) async fn search(
             all_ids.dedup();
 
             let total = all_ids.len();
-            let paged_ids: Vec<u64> = all_ids
-                .into_iter()
-                .skip(page_from)
-                .take(page_size)
-                .collect();
-
             let snap = state.snapshot.load();
-            let make_hit = |id: u64| {
+            let cspec = rank_raw
+                .as_ref()
+                .map(|r| snap.compile_rank_spec(r))
+                .filter(|c| !c.is_noop());
+            let make_hit = |id: u64, score: Option<i64>| {
                 let source = if include_source {
                     snap.get_query_source(id).map(|q| HitSource { query: q })
                 } else {
@@ -552,18 +635,30 @@ pub(crate) async fn search(
                 };
                 SearchHitItem {
                     _id: id,
+                    _score: score,
                     _source: source,
                     _explanation: None,
                 }
             };
-            let hits: Vec<_> = paged_ids.iter().map(|&id| make_hit(id)).collect();
+            let hits: Vec<_> =
+                order_and_page(&snap, &all_ids, cspec.as_ref(), page_from, page_size)
+                    .into_iter()
+                    .map(|(id, score)| make_hit(id, score))
+                    .collect();
+            // Per-slot hits get the same rank + `from`/`size` treatment (ADR-059 closes
+            // the ADR-052 #3 tail): `total` still reports the untruncated per-slot count.
             let slots: Vec<_> = slot_data
                 .into_iter()
                 .map(|(slot, ids, stats)| {
-                    let slot_hits = ids.iter().map(|&id| make_hit(id)).collect();
+                    let slot_total = ids.len();
+                    let slot_hits =
+                        order_and_page(&snap, &ids, cspec.as_ref(), page_from, page_size)
+                            .into_iter()
+                            .map(|(id, score)| make_hit(id, score))
+                            .collect();
                     SlotHit {
                         slot,
-                        total: ids.len(),
+                        total: slot_total,
                         hits: slot_hits,
                         stats,
                     }
@@ -663,6 +758,8 @@ pub(crate) async fn mpercolate(
     let include_broad = body.include_broad.unwrap_or(state.include_broad);
     let include_source = body.include_source.unwrap_or(true);
     let page_size = body.size.unwrap_or(1000);
+    let page_from = body.from.unwrap_or(0);
+    let rank_raw = to_rank_spec(body.rank);
     let include_profile = body.profile.unwrap_or(false);
     let timeout = tokio::time::Duration::from_millis(body.timeout_ms.unwrap_or(30_000));
 
@@ -779,14 +876,17 @@ pub(crate) async fn mpercolate(
     }
 
     let snap = state.snapshot.load();
+    let cspec = rank_raw
+        .as_ref()
+        .map(|r| snap.compile_rank_spec(r))
+        .filter(|c| !c.is_noop());
     let responses: Vec<PercolateItem> = per_doc
         .into_iter()
         .map(|ids| {
             let total = ids.len();
-            let hits = ids
+            let hits = order_and_page(&snap, &ids, cspec.as_ref(), page_from, page_size)
                 .into_iter()
-                .take(page_size)
-                .map(|id| {
+                .map(|(id, score)| {
                     let source = if include_source {
                         snap.get_query_source(id).map(|q| HitSource { query: q })
                     } else {
@@ -794,6 +894,7 @@ pub(crate) async fn mpercolate(
                     };
                     SearchHitItem {
                         _id: id,
+                        _score: score,
                         _source: source,
                         _explanation: None,
                     }
@@ -915,6 +1016,8 @@ mod mpercolate_tests {
             include_source: Some(false),
             // Large cap so no per-document truncation can mask a result mismatch.
             size: Some(1_000_000),
+            from: None,
+            rank: None,
             timeout_ms: None,
             profile: Some(profile),
         }
@@ -1035,6 +1138,158 @@ mod mpercolate_tests {
         assert_eq!(
             broad.total_matches, summed,
             "summary total must equal the per-document sum"
+        );
+    }
+
+    // -- Ranking + pagination (ADR-059) ----------------------------------------
+
+    /// A small engine where three queries all match `"2020 topps chrome update"`,
+    /// each carrying distinct `priority`/`tier` tags — the fixture for ranking.
+    fn tagged_state() -> Arc<AppState> {
+        let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+        eng.insert_live_with_tags(
+            "topps chrome",
+            1,
+            1,
+            &[
+                ("priority".to_string(), "10".to_string()),
+                ("tier".to_string(), "gold".to_string()),
+            ],
+        );
+        eng.insert_live_with_tags(
+            "topps chrome",
+            2,
+            1,
+            &[("priority".to_string(), "50".to_string())],
+        );
+        eng.insert_live_with_tags(
+            "topps chrome",
+            3,
+            1,
+            &[("tier".to_string(), "gold".to_string())],
+        );
+        state_with(eng, false)
+    }
+
+    #[allow(clippy::used_underscore_binding)]
+    #[tokio::test]
+    async fn mpercolate_ranks_by_priority_and_truncates_to_size() {
+        let state = tagged_state();
+        let req: MPercolateBody = serde_json::from_value(serde_json::json!({
+            "documents": [{"title": "2020 topps chrome update"}],
+            "rank": {"priority_key": "priority"},
+            "size": 2
+        }))
+        .expect("valid body");
+        let resp = mpercolate(State(state), Json(req)).await.expect("ok").0;
+        let item = &resp.responses[0];
+        assert_eq!(item.hits.total, 3, "total is the untruncated match count");
+        let ids: Vec<u64> = item.hits.hits.iter().map(|h| h._id).collect();
+        assert_eq!(ids, vec![2, 1], "size=2 → top two by priority (50, 10)");
+        assert_eq!(item.hits.hits[0]._score, Some(50));
+        assert_eq!(item.hits.hits[1]._score, Some(10));
+    }
+
+    #[allow(clippy::used_underscore_binding)]
+    #[tokio::test]
+    async fn mpercolate_from_offsets_into_ranked_hits() {
+        let state = tagged_state();
+        let req: MPercolateBody = serde_json::from_value(serde_json::json!({
+            "documents": [{"title": "2020 topps chrome update"}],
+            "rank": {"priority_key": "priority"},
+            "from": 1,
+            "size": 10
+        }))
+        .expect("valid body");
+        let resp = mpercolate(State(state), Json(req)).await.expect("ok").0;
+        let ids: Vec<u64> = resp.responses[0].hits.hits.iter().map(|h| h._id).collect();
+        // ranked order is [2, 1, 3]; from=1 drops the first → [1, 3].
+        assert_eq!(ids, vec![1, 3]);
+    }
+
+    #[allow(clippy::used_underscore_binding)]
+    #[tokio::test]
+    async fn ranking_preserves_the_matched_set_and_score_is_opt_in() {
+        let state = tagged_state();
+        let ranked: MPercolateBody = serde_json::from_value(serde_json::json!({
+            "documents": [{"title": "2020 topps chrome update"}],
+            "rank": {"priority_key": "priority", "boosts": [{"key": "tier", "value": "gold", "boost": 100}]},
+            "size": 100
+        }))
+        .expect("valid body");
+        let unranked: MPercolateBody = serde_json::from_value(serde_json::json!({
+            "documents": [{"title": "2020 topps chrome update"}],
+            "size": 100
+        }))
+        .expect("valid body");
+        let r = mpercolate(State(Arc::clone(&state)), Json(ranked))
+            .await
+            .expect("ok")
+            .0;
+        let u = mpercolate(State(state), Json(unranked))
+            .await
+            .expect("ok")
+            .0;
+
+        let mut rset: Vec<u64> = r.responses[0].hits.hits.iter().map(|h| h._id).collect();
+        let mut uset: Vec<u64> = u.responses[0].hits.hits.iter().map(|h| h._id).collect();
+        rset.sort_unstable();
+        uset.sort_unstable();
+        assert_eq!(
+            rset, uset,
+            "ranking must not add or drop a match (recall guard)"
+        );
+
+        assert!(
+            u.responses[0].hits.hits.iter().all(|h| h._score.is_none()),
+            "unranked hits carry no _score (byte-identical response)"
+        );
+        assert!(
+            r.responses[0].hits.hits.iter().all(|h| h._score.is_some()),
+            "ranked hits all carry a _score"
+        );
+    }
+
+    #[allow(clippy::used_underscore_binding)]
+    #[tokio::test]
+    async fn search_single_doc_ranks_additively_with_boost() {
+        let state = tagged_state();
+        let req: SearchBody = serde_json::from_value(serde_json::json!({
+            "document": {"title": "2020 topps chrome update"},
+            "rank": {"priority_key": "priority", "boosts": [{"key": "tier", "value": "gold", "boost": 100}]}
+        }))
+        .expect("valid body");
+        let resp = search(State(state), Json(req)).await.expect("ok").0;
+        let ids: Vec<u64> = resp.hits.hits.iter().map(|h| h._id).collect();
+        // additive: 1 = 10+100, 3 = 0+100, 2 = 50 → [1, 3, 2].
+        assert_eq!(ids, vec![1, 3, 2]);
+        assert_eq!(resp.hits.hits[0]._score, Some(110));
+    }
+
+    #[allow(clippy::used_underscore_binding)]
+    #[tokio::test]
+    async fn search_multi_doc_truncates_per_slot_by_size() {
+        let state = tagged_state();
+        let req: SearchBody = serde_json::from_value(serde_json::json!({
+            "documents": [{"title": "2020 topps chrome update"}],
+            "size": 1,
+            "rank": {"priority_key": "priority"}
+        }))
+        .expect("valid body");
+        let resp = search(State(state), Json(req)).await.expect("ok").0;
+        let slots = resp.slots.expect("multi-doc response has slots");
+        assert_eq!(
+            slots[0].total, 3,
+            "per-slot total preserves the untruncated count"
+        );
+        assert_eq!(
+            slots[0].hits.len(),
+            1,
+            "per-slot hits truncated to size=1 (ADR-059)"
+        );
+        assert_eq!(
+            slots[0].hits[0]._id, 2,
+            "the surviving hit is the top by priority"
         );
     }
 }

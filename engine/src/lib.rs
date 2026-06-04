@@ -47,6 +47,7 @@ pub mod gen;
 pub mod index;
 pub mod loader;
 pub mod normalize;
+pub mod rank;
 pub mod segment;
 pub mod storage;
 pub mod tagdict;
@@ -63,6 +64,7 @@ pub use events::{
 };
 pub use explain::ExplainDetail;
 pub use normalize::{Normalizer, NormalizerBuilder, PunctClass};
+pub use rank::{CompiledRankSpec, RankSpec};
 pub use segment::{
     CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport, InsertOutcome,
     MatchStats,
