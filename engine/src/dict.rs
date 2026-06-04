@@ -65,10 +65,12 @@ pub enum FeatureKind {
     Generic,
 }
 
-/// Stable byte tag for a [`FeatureKind`], used by [`Dict::fingerprint`]. Explicit (not
-/// `as u8`) so reordering the enum variants can't silently change a fingerprint — this
-/// mapping is part of the cross-process dict-identity contract.
-fn kind_tag(kind: FeatureKind) -> u8 {
+/// Stable byte tag for a [`FeatureKind`], used by [`Dict::fingerprint`] AND the dict
+/// binary serialization ([`crate::storage::serialize_dict`]) — one canonical mapping, so
+/// the fingerprinted kind and the persisted kind can never drift. Explicit (not `as u8`)
+/// so reordering the enum variants can't silently change a fingerprint or an on-disk dict
+/// — this mapping is part of the cross-process dict-identity contract.
+pub(crate) fn kind_tag(kind: FeatureKind) -> u8 {
     match kind {
         FeatureKind::Year => 0,
         FeatureKind::Brand => 1,
@@ -80,6 +82,27 @@ fn kind_tag(kind: FeatureKind) -> u8 {
         FeatureKind::Flag => 7,
         FeatureKind::Generic => 8,
     }
+}
+
+/// Strict inverse of [`kind_tag`] — decodes a stored byte tag back to its [`FeatureKind`].
+/// Returns `None` for an unrecognized tag (e.g. a dict written by a newer build that added
+/// a `FeatureKind` variant), so [`crate::storage::deserialize_dict`] fails loud instead of
+/// silently downgrading the feature to `Generic` (a silent semantic corruption). Keep this
+/// in lockstep with [`kind_tag`]; the exhaustiveness of `kind_tag`'s `match` plus the
+/// round-trip test in this module's `tests` force both sides to be updated together.
+pub(crate) fn kind_from_tag(tag: u8) -> Option<FeatureKind> {
+    Some(match tag {
+        0 => FeatureKind::Year,
+        1 => FeatureKind::Brand,
+        2 => FeatureKind::Player,
+        3 => FeatureKind::Category,
+        4 => FeatureKind::Grader,
+        5 => FeatureKind::Grade,
+        6 => FeatureKind::GraderGrade,
+        7 => FeatureKind::Flag,
+        8 => FeatureKind::Generic,
+        _ => return None,
+    })
 }
 
 #[derive(Clone)]
@@ -417,5 +440,46 @@ mod tests {
         let mut d = Dict::new();
         d.intern("a", FeatureKind::Generic);
         assert!(d.mask_inverse().iter().all(Option::is_none));
+    }
+
+    /// `kind_tag` and `kind_from_tag` must be exact inverses over every `FeatureKind`, and
+    /// every tag must be distinct — this is the contract the dict serialization and the
+    /// cross-process fingerprint both rely on. The in-loop `match` is the exhaustiveness
+    /// guard: adding a `FeatureKind` variant fails to compile here until the variant is added
+    /// (and, by the round-trip assert, given a distinct tag + a matching `kind_from_tag` arm).
+    #[test]
+    fn kind_tag_round_trips_and_is_injective() {
+        use FeatureKind::{
+            Brand, Category, Flag, Generic, Grade, Grader, GraderGrade, Player, Year,
+        };
+        let all = [
+            Year,
+            Brand,
+            Player,
+            Category,
+            Grader,
+            Grade,
+            GraderGrade,
+            Flag,
+            Generic,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for k in all {
+            // Exhaustiveness guard (no `_` arm) — keeps `all` honest when the enum grows.
+            match k {
+                Year | Brand | Player | Category | Grader | Grade | GraderGrade | Flag
+                | Generic => {}
+            }
+            let tag = kind_tag(k);
+            assert!(seen.insert(tag), "duplicate kind tag {tag} for {k:?}");
+            assert_eq!(
+                kind_from_tag(tag),
+                Some(k),
+                "kind_from_tag is not the inverse of kind_tag"
+            );
+        }
+        // An out-of-range tag is rejected (fail-loud), never silently mapped to a variant.
+        assert_eq!(kind_from_tag(all.len() as u8), None);
+        assert_eq!(kind_from_tag(u8::MAX), None);
     }
 }
