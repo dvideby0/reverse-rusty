@@ -385,19 +385,23 @@ impl EngineSnapshot {
     }
 
     /// The live `TagId` slice for a matched logical id, picking the NEWEST live
-    /// copy: the memtable first (all writes land there), then base segments
-    /// newest→oldest (`segments` is oldest-first, so walk it reversed). Mirrors the
-    /// live-copy resolution in
-    /// [`delete_by_logical_id`](super::Engine::delete_by_logical_id). `None` if no
-    /// live copy exists — not expected for a just-matched id, but total for safety.
+    /// copy. Ordering is newest-first at both levels: the memtable before the base
+    /// segments (all writes land in the memtable), base segments newest→oldest
+    /// (`segments` is oldest-first, so walk it reversed), AND **within** each
+    /// container the locals slice reversed — `locals_for_logical` lists a logical
+    /// id's physical copies in ascending (insertion) order, so the LAST live local
+    /// is the newest version. This matters when a logical id has two live copies in
+    /// one container (e.g. a re-`PUT`/`insert_live` that has not yet tombstoned the
+    /// old copy, or a flush of such a memtable). Returns `None` if no live copy
+    /// exists — not expected for a just-matched id, but total for safety.
     fn tags_for_logical(&self, logical_id: u64) -> Option<&[crate::tagdict::TagId]> {
-        for &local in self.memtable.locals_for_logical(logical_id) {
+        for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
             if self.memtable.is_alive(local) {
                 return Some(self.memtable.tags_of(local));
             }
         }
         for seg in self.segments.iter().rev() {
-            for &local in seg.locals_for_logical(logical_id) {
+            for &local in seg.locals_for_logical(logical_id).iter().rev() {
                 if seg.is_alive(local) {
                     return Some(seg.tags_of(local));
                 }

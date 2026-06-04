@@ -136,6 +136,40 @@ fn rank_uses_newest_live_copy_tags() {
 }
 
 #[test]
+fn rank_uses_newest_copy_within_one_container() {
+    // Two live copies of the SAME logical id inside ONE container — as a re-PUT /
+    // re-insert leaves them before the old copy is tombstoned. `locals_for_logical`
+    // lists them oldest-first, so ranking must take the LAST (newest) live local,
+    // not the first. (This is the common server PUT-update path.)
+    let mut eng = Engine::new(norm());
+    eng.insert_live_with_tags("topps chrome", 1, 1, &[tag("priority", "1")]);
+    eng.insert_live_with_tags("topps chrome", 1, 2, &[tag("priority", "9")]);
+    let spec = RankSpec {
+        priority_key: Some("priority".into()),
+        boosts: vec![],
+    };
+
+    // Both copies live in the memtable.
+    let snap = eng.snapshot();
+    let ids = matched(&snap, "2020 topps chrome update");
+    assert_eq!(ids, vec![1], "deduped to a single hit");
+    assert_eq!(
+        ranked_ids(&snap, &ids, &spec),
+        vec![(1, 9)],
+        "newest copy in the same memtable wins, not the oldest"
+    );
+
+    // After a flush both copies live in ONE base segment — same requirement.
+    eng.flush();
+    let snap = eng.snapshot();
+    assert_eq!(
+        ranked_ids(&snap, &matched(&snap, "2020 topps chrome update"), &spec),
+        vec![(1, 9)],
+        "newest copy in the same base segment wins after flush"
+    );
+}
+
+#[test]
 fn rank_scores_unknown_id_zero() {
     let mut eng = Engine::new(norm());
     eng.insert_live_with_tags("topps chrome", 1, 1, &[tag("priority", "5")]);
