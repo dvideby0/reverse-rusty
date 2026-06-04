@@ -34,16 +34,26 @@
     `corpus_phrases` / `npmi_tau` / `npmi_min_count` / `npmi_iterations` params; absent ⇒ today's
     behavior exactly.
 
-- **Why it is correctness-safe (zero false negatives).** NPMI emits **phrases only** (entity gluing),
-  never aliases. A phrase is applied by the **same normalizer** to queries (via
-  `recompile_stale_segments` / the cluster rebuild) and to titles (at match time), so the differential
-  oracle — an independent brute force using that same normalizer — stays equivalent: engine ≡ brute.
-  Gluing only shifts which **anchors / candidates** are selected; it never drops a match
-  ([corpus-feature-learning.md](../research/corpus-feature-learning.md) §3,
-  [design/README.md](../design/README.md) §2). This is the load-bearing distinction from **alias /
-  equivalence learning** — the one feature-learning sub-problem that *can* cause a false negative
-  (destructive canonicalization) and therefore needs the expansion-not-collapse + confidence-gating
-  safety rail — which is deliberately **out of scope** here.
+- **Why it is recall-safe (the priority).** Reverse Rusty is a **recall-first stage-one candidate
+  generator** — a downstream precise matcher filters false positives, so a *dropped candidate* is the
+  cardinal sin and false positives are cheap. NPMI emits **phrases only** (entity gluing), never
+  aliases. Critically, corpus phrases are applied **additively**: a phrase match emits the phrase
+  feature AND keeps the component features, so a query referencing a *component* of an induced phrase
+  never loses a candidate (the original collapse behavior — consume the components — *would* drop it,
+  which is why it was rejected). The same normalizer is applied to queries (recompile / cluster
+  rebuild) and titles (match), so the differential oracle — an independent brute force using that
+  normalizer — stays equivalent (engine ≡ brute), faithful to the model.
+- **Honest scope (the residual).** Phrase induction is still a *re-tokenization*: a query whose text
+  is *phrased* as the entity (e.g. `upper deck`) tightens to require the adjacent phrase, so it no
+  longer matches a title where the two tokens are non-adjacent. For genuine entities (which appear
+  adjacent in real titles) this is negligible, and the feature is **opt-in + reviewable + reversible**;
+  it is *not* a blanket "no prior match ever changes" guarantee. The contract that always holds is the
+  **lossless cover for the active model** ([design/README.md](../design/README.md) §2) — the
+  implementation retrieves everything that matches under the current normalizer. This is the
+  load-bearing distinction from **alias / equivalence learning** ([ADR-054](adr-054-equivalence-expansion.md)),
+  which is applied by **expansion** and is therefore *fully monotonic* (it only ever adds matches).
+  Pinned by `tests/oracle.rs::corpus_phrase_induction_preserves_component_query_recall` (additive
+  recall preservation) and `::corpus_phrase_induction_tightens_phrase_query_to_adjacency` (the residual).
 
 - **Alternatives considered.** (1) *Fold NPMI into `learn_and_apply` on by default* — rejected: it
   would change the existing endpoint's behavior and perturb every oracle. Opt-in keeps the default path
@@ -68,10 +78,13 @@
   (`tests/cluster_oracle.rs::learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives`):
   K∈{1,3,8}, induce a planted phrase, assert `percolate` ≡ the phrase-aware brute over the live set
   (re-placement under an induced feature preserved, zero FN). Composition guards in `vocab.rs` (default-off
-  equals any-of alone; on adds the phrase). The default-off existing oracles are byte-identical by
-  construction.
+  equals any-of alone; on adds the phrase). The recall-first additive behavior + the residual are pinned
+  by `tests/oracle.rs::corpus_phrase_induction_preserves_component_query_recall` and
+  `::corpus_phrase_induction_tightens_phrase_query_to_adjacency`. The default-off existing oracles are
+  byte-identical by construction.
 
 - **Consequences.** The engine can self-derive multi-token entity features from its own live corpus and
-  apply them losslessly through the proven machinery, closing the headline Tier-2 self-tuning item. The
-  feature model can now improve without hand-coded vocabulary or declared any-of groups, while the
-  zero-false-negative contract is preserved and the default behavior is unchanged.
+  apply them through the proven machinery — **additively, so a component query never loses a candidate**
+  (recall-first) — closing the headline Tier-2 self-tuning item. The feature model can improve without
+  hand-coded vocabulary or declared any-of groups; the default behavior is unchanged. The honest caveat
+  (a phrase-form query tightens to adjacency) is documented above and pinned by tests.

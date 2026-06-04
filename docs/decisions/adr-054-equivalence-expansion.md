@@ -22,19 +22,24 @@
     **widens** the accepted positive set, the query's match set can only grow.
   - **`dict::EquivMap`** (member `FeatureId` → its group), carried on the `Dict` as a **transient**
     field (re-derived from the vocab; not serialized, not part of `Dict::fingerprint`, so the
-    dict's cross-process identity is unchanged). `extract`/`extract_readonly` consult it, so the
-    single-engine compile paths (build/recompile/insert) expand uniformly; the cluster `set_vocab`
-    additionally applies the pure pass to its already-extracted vec so re-placement + ingest use
-    the widened form (a query whose anchor is now an any-of fans to every member's shard).
+    dict's cross-process identity is unchanged). `extract`/`extract_readonly` consult it. Every apply
+    path resolves the map against its (built) dict and installs it before expanding: the single-engine
+    **initial build** (after pass A finalizes the dict) and **recompile**, and the cluster `set_vocab`
+    blue/green rebuild, each then apply the pure pass to their already-extracted queries so re-placement
+    + ingest use the widened form (a query whose anchor is now an any-of fans to every member's shard);
+    subsequent live inserts expand via the in-`extract` hook, and reopen re-installs from the persisted vocab.
   - **`Vocab.equivalences: Vec<Vec<String>>`** — the first-class, declarable + learnable + persisted
     representation. Resolved to an `EquivMap` against the normalizer + dict at apply time
-    (`Vocab::resolve_equivalences`; a form is skipped unless it resolves to exactly one feature, and
-    a group needs ≥2 distinct features).
+    (`Vocab::resolve_equivalences`; a form is skipped unless it resolves to exactly one feature, a group
+    needs ≥2 distinct features, and **overlapping groups are unioned transitively** — `[a,b]`+`[b,c]` ⇒
+    `{a,b,c}` — so a shared member is never order-dependently overwritten).
   - **Sources (high-precision first):** *declared* — operators `PUT /_vocab` an `equivalences` block
-    (curated alias lists); *learned* — `learn_equivalences_from_queries` mines any-of co-occurrence
-    and emits equivalence groups, opt-in via `CorpusLearnConfig::learn_equivalences` (expansion mode)
-    instead of collapse synonyms. Threaded through `Engine`/`ClusterEngine::learn_and_apply_with`
-    and the `/_vocab/learn[/_and_apply]?learn_equivalences=true` params.
+    (curated alias lists); *learned* — `learn_equivalences_from_queries` counts the **unordered pairs**
+    within any-of groups (so `(rc,rookie)` and `(rc,rookie,X)` both reinforce `rc≡rookie`, like the
+    pair-level synonym learner) and emits surviving pairs, unioned transitively at resolve time; opt-in
+    via `CorpusLearnConfig::learn_equivalences` (expansion mode) instead of collapse synonyms. Threaded
+    through `Engine`/`ClusterEngine::learn_and_apply_with` and the
+    `/_vocab/learn[/_and_apply]?learn_equivalences=true` params.
   - **Opt-in + reversible + default-off byte-identical.** No declared/learned equivalences ⇒ empty
     `EquivMap` ⇒ expansion is a no-op ⇒ every existing oracle is unaffected. Reversal is dropping the
     group + recompiling.

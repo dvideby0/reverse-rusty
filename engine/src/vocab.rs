@@ -48,6 +48,13 @@ pub struct PhraseEntry {
     pub canonical: String,
     #[serde(default = "default_kind")]
     pub kind: FeatureKindSer,
+    /// When true the phrase is applied **additively** — a match emits the phrase feature
+    /// AND keeps the component features, so a query referencing a component never loses the
+    /// match (the recall-first contract). Corpus-learned phrases (ADR-053) set this; declared
+    /// / any-of-learned phrases default to `false` (collapse). Old vocab JSON without the
+    /// field deserializes to `false`, preserving prior behavior.
+    #[serde(default)]
+    pub additive: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,6 +184,7 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
                         .collect(),
                     canonical: canon_feature.clone(),
                     kind: FeatureKindSer::Generic,
+                    additive: false, // collapse: an any-of-learned alias canonicalizes
                 });
             }
         }
@@ -190,6 +198,7 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
                     .collect(),
                 canonical: canon_feature,
                 kind: FeatureKindSer::Generic,
+                additive: false, // collapse: an any-of-learned alias canonicalizes
             });
         } else {
             vocab.synonyms.push(SynonymEntry {
@@ -259,17 +268,19 @@ impl Default for CorpusLearnConfig {
     }
 }
 
-/// Learn equivalence groups from query any-of co-occurrence (ADR-054): an any-of group
-/// `(a, b, c)` declares its members interchangeable. A group of surface forms appearing in at
-/// least `min_count` distinct queries is emitted as an equivalence group, applied via FN-safe
-/// **expansion** (the expansion-not-collapse counterpart of [`learn_from_queries`], which
-/// emits collapse synonyms). Forms are kept raw — they are resolved through the normalizer at
-/// apply time ([`Vocab::resolve_equivalences`]).
+/// Learn equivalence relationships from query any-of co-occurrence (ADR-054): an any-of group
+/// `(a, b, c)` declares its members interchangeable. Each unordered **pair** within a group is
+/// counted — so `(rc,rookie)` and `(rc,rookie,rookie card)` both reinforce `rc≡rookie`, matching
+/// the pair-level [`learn_from_queries`] synonym learner rather than keying on the exact group.
+/// A pair seen in at least `min_count` any-of groups is emitted as a 2-element equivalence
+/// group; overlapping pairs are unioned transitively at apply time
+/// ([`Vocab::resolve_equivalences`]). Forms are kept raw — resolved through the normalizer when
+/// applied.
 pub fn learn_equivalences_from_queries(
     queries: &[(u64, String)],
     min_count: usize,
 ) -> Vec<Vec<String>> {
-    let mut group_counts: HashMap<Vec<String>, usize> = HashMap::new();
+    let mut pair_counts: HashMap<(String, String), usize> = HashMap::new();
     for (_id, text) in queries {
         let Ok(ast) = dsl::parse(text) else {
             continue;
@@ -283,20 +294,53 @@ pub fn learn_equivalences_from_queries(
                 forms.retain(|m| !m.is_empty());
                 forms.sort();
                 forms.dedup();
-                if forms.len() < 2 {
-                    continue;
+                // Every unordered pair (forms is sorted, so i<j yields a<=b — a stable key).
+                for i in 0..forms.len() {
+                    for j in (i + 1)..forms.len() {
+                        *pair_counts
+                            .entry((forms[i].clone(), forms[j].clone()))
+                            .or_insert(0) += 1;
+                    }
                 }
-                *group_counts.entry(forms).or_insert(0) += 1;
             }
         }
     }
-    let mut groups: Vec<Vec<String>> = group_counts
+    let mut groups: Vec<Vec<String>> = pair_counts
         .into_iter()
         .filter(|(_, c)| *c >= min_count)
-        .map(|(g, _)| g)
+        .map(|((a, b), _)| vec![a, b])
         .collect();
     groups.sort();
     groups
+}
+
+/// Merge groups that share any member into disjoint **transitive** groups (so `[a,b]` + `[b,c]`
+/// become `[a,b,c]`). Each output group is sorted + deduped. Used by
+/// [`Vocab::resolve_equivalences`] so overlapping declared/learned equivalences collapse into one
+/// transitive class instead of order-dependently overwriting a shared member.
+fn merge_overlapping_groups(groups: Vec<Vec<FeatureId>>) -> Vec<Vec<FeatureId>> {
+    let mut result: Vec<Vec<FeatureId>> = Vec::new();
+    for g in groups {
+        let mut overlap: Vec<usize> = Vec::new();
+        for (i, r) in result.iter().enumerate() {
+            if g.iter().any(|f| r.contains(f)) {
+                overlap.push(i);
+            }
+        }
+        if overlap.is_empty() {
+            result.push(g);
+        } else {
+            let mut merged = g;
+            // Remove the highest index first so the remaining indices stay valid.
+            for &i in overlap.iter().rev() {
+                merged.extend(result.remove(i));
+            }
+            merged.sort_unstable();
+            merged.dedup();
+            result.push(merged);
+        }
+    }
+    result
 }
 
 /// Learn a vocabulary from a query corpus. By default this is the ADR-015 any-of synonym
@@ -347,7 +391,11 @@ impl Vocab {
                 .iter()
                 .map(std::string::String::as_str)
                 .collect();
-            b.add_phrase(&toks, &entry.canonical, entry.kind.into());
+            if entry.additive {
+                b.add_phrase_additive(&toks, &entry.canonical, entry.kind.into());
+            } else {
+                b.add_phrase(&toks, &entry.canonical, entry.kind.into());
+            }
         }
         for entry in &self.synonyms {
             b.add_synonym(&entry.token, &entry.canonical, entry.kind.into());
@@ -428,6 +476,23 @@ impl Vocab {
     // ── Phrase management ───────────────────────────────────────────────
 
     pub fn add_phrase(&mut self, tokens: &[&str], canonical: &str, kind: FeatureKind) {
+        self.add_phrase_with(tokens, canonical, kind, false);
+    }
+
+    /// Like [`add_phrase`](Self::add_phrase) but **additive** (ADR-053): a match emits the
+    /// phrase feature AND keeps the component features, so a query referencing a component
+    /// never loses the match (recall-first). Used for corpus-learned phrases.
+    pub fn add_phrase_additive(&mut self, tokens: &[&str], canonical: &str, kind: FeatureKind) {
+        self.add_phrase_with(tokens, canonical, kind, true);
+    }
+
+    fn add_phrase_with(
+        &mut self,
+        tokens: &[&str],
+        canonical: &str,
+        kind: FeatureKind,
+        additive: bool,
+    ) {
         let tok_vec: Vec<String> = tokens
             .iter()
             .map(std::string::ToString::to_string)
@@ -439,6 +504,7 @@ impl Vocab {
             tokens: tok_vec,
             canonical: canonical.to_string(),
             kind: kind.into(),
+            additive,
         });
     }
 
@@ -516,8 +582,9 @@ impl Vocab {
     /// The result is installed on the dict ([`Dict::set_equivalences`]) so `extract`/
     /// `extract_readonly` expand queries through it.
     pub fn resolve_equivalences(&self, norm: &Normalizer, dict: &Dict) -> EquivMap {
-        let mut map: EquivMap = fast_map();
         let mut lc = String::new();
+        // 1. Resolve each declared group's forms to a feature set.
+        let mut groups: Vec<Vec<FeatureId>> = Vec::new();
         for group in &self.equivalences {
             let mut feats: Vec<FeatureId> = Vec::with_capacity(group.len());
             for form in group {
@@ -528,11 +595,19 @@ impl Vocab {
             }
             feats.sort_unstable();
             feats.dedup();
-            if feats.len() < 2 {
-                continue;
+            if feats.len() >= 2 {
+                groups.push(feats);
             }
-            for &f in &feats {
-                map.insert(f, feats.clone());
+        }
+        // 2. Merge groups that share any feature into one transitive group, so overlapping
+        //    declarations `[a,b]` + `[b,c]` become `{a,b,c}` (an equivalence is transitive) —
+        //    otherwise a shared member would be order-dependently overwritten.
+        let merged = merge_overlapping_groups(groups);
+        // 3. Map each member -> its full (merged) group.
+        let mut map: EquivMap = fast_map();
+        for g in &merged {
+            for &f in g {
+                map.insert(f, g.clone());
             }
         }
         map
@@ -859,6 +934,52 @@ mod tests {
         assert!(
             !v.equivalences().is_empty(),
             "expansion mode must emit equivalence groups"
+        );
+    }
+
+    #[test]
+    fn learn_equivalences_reinforces_pairs_across_group_sizes() {
+        // (rc,rookie) once + (rc,rookie,rcfull) once: pair-level counting reinforces rc≡rookie
+        // (count 2), so it survives min_count=2 — exact-group counting would see two distinct
+        // groups (count 1 each) and learn nothing.
+        let queries = vec![
+            (1u64, "(rc,rookie)".to_string()),
+            (2u64, "(rc,rookie,rcfull)".to_string()),
+        ];
+        let groups = learn_equivalences_from_queries(&queries, 2);
+        assert!(
+            groups
+                .iter()
+                .any(|g| g.contains(&"rc".to_string()) && g.contains(&"rookie".to_string())),
+            "rc≡rookie must reinforce across the two differently-sized any-of groups"
+        );
+    }
+
+    #[test]
+    fn resolve_equivalences_unions_overlapping_groups() {
+        // Overlapping declared groups [aaa,bbb] + [bbb,ccc] must resolve to ONE transitive
+        // group {aaa,bbb,ccc}, not order-dependently overwrite the shared member.
+        let mut v = Vocab::new();
+        v.add_equivalence(&["aaa", "bbb"]);
+        v.add_equivalence(&["bbb", "ccc"]);
+        let norm = crate::normalize::Normalizer::default_vocab().expect("vocab");
+        let dict = Dict::new();
+        let map = v.resolve_equivalences(&norm, &dict);
+
+        let mut lc = String::new();
+        let fa = norm.compile_features_readonly("aaa", &dict, &mut lc)[0];
+        let fb = norm.compile_features_readonly("bbb", &dict, &mut lc)[0];
+        let fc = norm.compile_features_readonly("ccc", &dict, &mut lc)[0];
+
+        let ga = map.get(&fa).expect("aaa resolved");
+        assert!(
+            ga.contains(&fa) && ga.contains(&fb) && ga.contains(&fc),
+            "aaa/bbb/ccc must merge into one transitive group"
+        );
+        assert_eq!(
+            map.get(&fa),
+            map.get(&fc),
+            "aaa and ccc share the merged group (transitive via bbb)"
         );
     }
 }

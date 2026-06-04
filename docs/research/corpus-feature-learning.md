@@ -189,10 +189,14 @@ ADR-015 any-of synonym learner via an opt-in `vocab::CorpusLearnConfig` (`corpus
 off), threaded through `Engine::learn_and_apply_with` / `ClusterEngine::learn_and_apply_with` and the
 `POST /_vocab/learn[/_and_apply]?corpus_phrases=true` endpoints. So an operator can self-derive the
 phrase feature model from the live corpus on demand — no offline job, no hand-coded vocabulary — and
-apply it through the proven `set_vocab` + recompile / blue-green machinery (ADR-046) with **zero false
-negatives** (oracle-proven, single-engine + cluster). Phrases only; the **aliasing** safety rail (§5)
-and the **compaction**-driven re-materialize (§6, [`ADR-053`](../decisions/adr-053-corpus-phrase-vocab-source.md)
-scope note) remain future work.
+apply it through the proven `set_vocab` + recompile / blue-green machinery (ADR-046). Because this engine
+is a **recall-first candidate generator**, corpus phrases are applied **additively** (emit the phrase
+feature AND keep the component features), so a query referencing a component never loses a candidate;
+engine ≡ brute under the learned normalizer (oracle-proven, single-engine + cluster). The honest residual
+is that a phrase-*form* query tightens to adjacency (re-tokenization) — negligible for genuine entities,
+and the feature is opt-in/reviewable/reversible. Phrases only; the **aliasing** safety rail (§5) is now
+built via expansion ([ADR-054](../decisions/adr-054-equivalence-expansion.md)), and the
+**compaction**-driven re-materialize (§6) remains future work.
 
 ---
 

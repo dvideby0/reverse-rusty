@@ -94,6 +94,21 @@ impl Engine {
             dict.finalize_mask();
         }
 
+        // ADR-054: if the build vocab declared equivalences, install them on the now-built
+        // dict and expand the extracted queries so the INITIAL build applies them (mirrors
+        // set_vocab + the cluster rebuild). Resolved against the populated dict so each form
+        // maps to its real interned id; no equivalences ⇒ no-op (byte-identical).
+        if let Some(v) = self.vocab.clone() {
+            let equiv = v.resolve_equivalences(&self.norm, &self.dict);
+            if !equiv.is_empty() {
+                Arc::make_mut(&mut self.dict).set_equivalences(equiv);
+                let map = self.dict.equivalences();
+                for (_, _, ex, _) in &mut extracted {
+                    ex.expand_equivalences(map);
+                }
+            }
+        }
+
         // Intern each accepted query's tags (separate pass to avoid borrowing `self`
         // mutably while the dict is read in pass B).
         let mut tag_ids: Vec<Vec<TagId>> = Vec::with_capacity(extracted.len());

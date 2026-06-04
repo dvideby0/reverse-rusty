@@ -951,6 +951,97 @@ fn zero_false_negatives_after_corpus_phrase_learn_and_apply() {
     assert!(total_truth > 0, "degenerate test: no matches");
 }
 
+/// ADR-053 recall-first: corpus phrase induction is ADDITIVE, so a query referencing a
+/// COMPONENT of an induced phrase keeps matching titles that contain the phrase. (Collapse —
+/// the old behavior — would have dropped this candidate, which is the cardinal sin for a
+/// recall-first stage-one matcher.)
+#[test]
+fn corpus_phrase_induction_preserves_component_query_recall() {
+    use reverse_rusty::vocab::CorpusLearnConfig;
+
+    let mut queries: Vec<(u64, String)> = vec![(1, "deck".into())]; // requires just "deck"
+    for i in 0..40u64 {
+        queries.push((100 + i, format!("upper deck u{i}"))); // plant the "upper deck" phrase
+    }
+    let title = "1994 upper deck rookie"; // contains "upper deck" adjacently
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title(title, &mut s, &mut out, true);
+    let before: HashSet<u64> = out.iter().copied().collect();
+    assert!(
+        before.contains(&1),
+        "before induction, the 'deck' query matches a title containing 'deck'"
+    );
+
+    let cfg = CorpusLearnConfig {
+        corpus_phrases: true,
+        npmi_min_count: 3,
+        ..Default::default()
+    };
+    eng.learn_and_apply_with(&cfg).expect("corpus-phrase learn");
+    // The induced phrase is recorded as ADDITIVE.
+    assert!(
+        eng.vocab()
+            .expect("vocab")
+            .phrases()
+            .iter()
+            .any(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()] && p.additive),
+        "the induced 'upper deck' phrase must be additive"
+    );
+
+    eng.match_title(title, &mut s, &mut out, true);
+    let after: HashSet<u64> = out.iter().copied().collect();
+    assert!(
+        after.contains(&1),
+        "AFTER additive induction, the 'deck' query STILL matches (component recall preserved)"
+    );
+    assert!(
+        before.is_subset(&after),
+        "additive corpus phrases must not drop a prior match"
+    );
+}
+
+/// Characterization (NOT a bug): inducing `upper deck` makes a query *phrased* "upper deck"
+/// require the adjacent phrase, so it no longer matches a title where the two tokens are
+/// NON-adjacent. This is the intended re-tokenization; for genuine entities (which appear
+/// adjacent in real titles) it is negligible. Pinned so the tradeoff is explicit — and
+/// contrasts with ADR-054 alias expansion, which is fully monotonic.
+#[test]
+fn corpus_phrase_induction_tightens_phrase_query_to_adjacency() {
+    use reverse_rusty::vocab::CorpusLearnConfig;
+
+    let mut queries: Vec<(u64, String)> = vec![(1, "upper deck".into())];
+    for i in 0..40u64 {
+        queries.push((100 + i, format!("upper deck u{i}")));
+    }
+    let nonadjacent = "upper blue deck"; // upper and deck present but NOT adjacent
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title(nonadjacent, &mut s, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "before induction, 'upper deck' matches a non-adjacent title (AND of bare terms)"
+    );
+
+    let cfg = CorpusLearnConfig {
+        corpus_phrases: true,
+        npmi_min_count: 3,
+        ..Default::default()
+    };
+    eng.learn_and_apply_with(&cfg).expect("corpus-phrase learn");
+    eng.match_title(nonadjacent, &mut s, &mut out, true);
+    assert!(
+        !out.contains(&1),
+        "after induction, the phrase-form query tightens to adjacency (documented residual)"
+    );
+}
+
 /// Equivalence learning via expansion-not-collapse (ADR-054): declaring `rc ≡ rookie` and
 /// applying it must make a query phrased with one form match a title bearing the other —
 /// while NEVER dropping a prior match (the match set only grows; FN-safe).
@@ -1105,5 +1196,33 @@ fn learned_equivalence_via_expansion_matches_both_forms() {
     assert!(
         out.contains(&1),
         "after learning rc≡rookie via expansion, the rc-query matches a rookie title"
+    );
+}
+
+/// Equivalences declared on the vocab BEFORE the initial build must be applied during
+/// `build_from_queries` (not only via a later `set_vocab`). Regression for the gap where the
+/// single-engine initial build skipped equivalence resolution.
+#[test]
+fn initial_build_applies_declared_equivalences() {
+    use reverse_rusty::vocab::Vocab;
+    use reverse_rusty::EngineConfig;
+
+    let mut v = Vocab::new();
+    v.add_equivalence(&["rc", "rookie"]);
+    let mut eng = Engine::with_vocab(v, EngineConfig::default()).expect("with_vocab");
+
+    let mut queries: Vec<(u64, String)> = vec![(1, "1994 fleer rc".into())];
+    for i in 0..10u64 {
+        queries.push((100 + i, format!("rc u{i}")));
+        queries.push((200 + i, format!("rookie u{i}")));
+    }
+    eng.build_from_queries(&queries);
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title("1994 fleer rookie psa 10", &mut s, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "initial build must apply declared equivalences: the rc-query matches a rookie title"
     );
 }

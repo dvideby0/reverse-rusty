@@ -48,8 +48,10 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   self-derivation (ADR-053):** the `learn` binary's NPMI collocation core is now a library module
   (`corpus.rs`) that induces multi-token entity **phrases** from the live query text; composed UNDER the
   any-of learner via an opt-in `CorpusLearnConfig` (`Engine`/`ClusterEngine::learn_and_apply_with`,
-  `/_vocab/learn[/_and_apply]?corpus_phrases=true`). Phrases only ⇒ same-normalizer gluing ⇒
-  oracle-equivalent, zero false negatives; default-off ⇒ byte-identical. **Equivalence (alias) learning
+  `/_vocab/learn[/_and_apply]?corpus_phrases=true`). Phrases only; applied **additively** (emit the
+  phrase feature + keep the component features) so a component query never loses a candidate
+  (recall-first); engine ≡ brute under the learned normalizer. Residual: a phrase-form query tightens
+  to adjacency (re-tokenization) — opt-in/reviewable. Default-off ⇒ byte-identical. **Equivalence (alias) learning
   via expansion (ADR-054):** a first-class `Vocab.equivalences` applied by **expansion, not collapse**
   (`Extracted::expand_equivalences` widens a required feature into an any-of over its group — structurally
   FN-safe: the match set only grows, a wrong alias degrades to a bounded false positive). Declared

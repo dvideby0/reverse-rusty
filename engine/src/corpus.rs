@@ -184,7 +184,9 @@ pub fn learn_phrases_from_text(
             continue;
         }
         let canonical = format!("term:{token}");
-        vocab.add_phrase(&parts, &canonical, FeatureKind::Generic);
+        // Additive: corpus phrases emit the phrase feature AND keep the component features,
+        // so a query referencing a component never loses a candidate (recall-first, ADR-053).
+        vocab.add_phrase_additive(&parts, &canonical, FeatureKind::Generic);
     }
     vocab
 }

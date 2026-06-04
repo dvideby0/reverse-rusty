@@ -103,9 +103,11 @@ items from an external review, re-ranked to the top; **all are now done:**
   multi-token entity **phrases** from the live query text and returns them as a `Vocab`, composed UNDER
   the ADR-015 any-of learner via an **opt-in** `CorpusLearnConfig` threaded through
   `Engine`/`ClusterEngine::learn_and_apply_with` (+ the `corpus_phrases` REST params on
-  `/_vocab/learn[/_and_apply]`). Phrases only — never aliases — so the same-normalizer gluing flows
-  through the proven `set_vocab`/recompile machinery with **zero false negatives** (oracle-proven,
-  single-engine + cluster); default-off ⇒ existing behavior byte-identical.
+  `/_vocab/learn[/_and_apply]`). Phrases only — never aliases. Recall-first: corpus phrases are applied
+  **additively** (emit the phrase feature AND keep the component features), so a query referencing a
+  component never loses a candidate; engine ≡ brute under the learned normalizer (oracle-proven,
+  single-engine + cluster). Honest residual: a phrase-form query tightens to adjacency (re-tokenization)
+  — opt-in/reviewable/reversible, pinned by a characterization test. Default-off ⇒ byte-identical.
   ([`research/corpus-feature-learning.md`](research/corpus-feature-learning.md).)
 - **Alias / equivalence learning** (e.g. `UD` ≡ `Upper Deck`) — the precision-first safety rail. **The
   mechanism + high-precision sources are ✅ shipped (ADR-054):** a first-class `Vocab.equivalences`

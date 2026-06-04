@@ -22,6 +22,14 @@ use daachorse::{DoubleArrayAhoCorasick, DoubleArrayAhoCorasickBuilder, MatchKind
 struct PhraseEntry {
     feature: String,
     kind: FeatureKind,
+    /// When `false` (the default): a phrase match **consumes** its component tokens — only
+    /// the phrase feature is emitted (collapse / entity-disambiguation, used by declared +
+    /// hand-built vocab). When `true`: the phrase feature is emitted **in addition to** the
+    /// component tokens (additive — the component features are still produced), so a query
+    /// referencing a component does not lose the match. Corpus-learned phrases (ADR-053) are
+    /// additive: this engine is a recall-first candidate generator, so a phrase must never
+    /// drop a candidate a component query would have matched.
+    additive: bool,
 }
 
 pub struct Normalizer {
@@ -150,10 +158,15 @@ impl Normalizer {
         for (ti, &toff) in token_offsets.iter().enumerate() {
             for (pi, &(ps, pe, _)) in phrase_matches.iter().enumerate() {
                 if toff >= ps && toff + tokens[ti].len() <= pe {
-                    token_consumed[ti] = true;
+                    let entry = &self.phrase_entries[phrase_matches[pi].2];
+                    // Additive phrases (corpus-learned, ADR-053) emit the phrase feature but
+                    // leave the component tokens for phase 2b, so the component features are
+                    // also produced (recall-preserving). Collapse phrases consume them.
+                    if !entry.additive {
+                        token_consumed[ti] = true;
+                    }
                     if !phrase_emitted[pi] {
                         phrase_emitted[pi] = true;
-                        let entry = &self.phrase_entries[phrase_matches[pi].2];
                         emit(&entry.feature, entry.kind);
                     }
                     break;
@@ -430,10 +443,29 @@ impl NormalizerBuilder {
     /// to match (lowercased, after diacritic folding). `feature` is the canonical
     /// feature name emitted on match. `kind` is the feature kind for the dictionary.
     pub fn add_phrase(&mut self, tokens: &[&str], feature: &str, kind: FeatureKind) {
+        self.add_phrase_inner(tokens, feature, kind, false);
+    }
+
+    /// Like [`add_phrase`](Self::add_phrase) but **additive**: a match emits the phrase
+    /// feature AND leaves the component tokens to also emit their own features, so a query
+    /// referencing a component never loses the match. Used for corpus-learned phrases
+    /// (ADR-053) to keep the recall-first contract.
+    pub fn add_phrase_additive(&mut self, tokens: &[&str], feature: &str, kind: FeatureKind) {
+        self.add_phrase_inner(tokens, feature, kind, true);
+    }
+
+    fn add_phrase_inner(
+        &mut self,
+        tokens: &[&str],
+        feature: &str,
+        kind: FeatureKind,
+        additive: bool,
+    ) {
         self.phrase_patterns.push(tokens.join(" "));
         self.phrase_entries.push(PhraseEntry {
             feature: feature.to_string(),
             kind,
+            additive,
         });
     }
 
