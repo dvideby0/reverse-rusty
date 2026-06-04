@@ -28,7 +28,12 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   the replacement segment durable before destroying what it replaces and gate the WAL-advance /
   old-file deletion on the manifest commit, so a disk-write failure degrades durability
   (`persistence_healthy = false`, `/_flush` + `/_compact` return 503) instead of silently losing
-  acknowledged writes on the next restart.
+  acknowledged writes on the next restart. **All binary formats are now versioned + fail-loud
+  (ADR-057):** the feature-dict and tag-dict serializations — the last two without a `magic + version`
+  header — gained one (`RDCT`/`RTGD`), so a layout change or newer-build blob is rejected with a clear
+  error instead of silently misparsed, an unknown `FeatureKind` tag is rejected instead of downgraded to
+  `Generic`, and a truncated blob errors instead of panicking; legacy header-less blobs still read and the
+  content-based dict fingerprint (the gRPC adoption handshake) is unchanged.
 - **Read concurrency** — snapshot reads via `ArcSwap<EngineSnapshot>` + `parking_lot::Mutex` writer
   (ADR-016): lock-free reads, zero reader/writer contention.
 - **Skip filter** — per-segment cache-line blocked bloom over signature keys (ADR-011), checked before

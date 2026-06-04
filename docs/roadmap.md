@@ -280,7 +280,15 @@ from the audit's former P3 list). Roughly grouped:
   precise op label (unlike a manifest failure, which emits both `manifest_write` + `ingest_rollback`).
   Optional refinement: emit `SegmentWrite`/`SegmentMmap` from inside `build_durable_base` for symmetric
   labeling. Low priority — the underlying error is already visible.
-- **Dict format not versioned** — adding a new `FeatureKind` variant would silently corrupt deserialization.
+- ~~**Dict format not versioned** — adding a new `FeatureKind` variant would silently corrupt deserialization.~~
+  **✅ Shipped (ADR-057).** The feature-dict **and** its tag-dict twin — the last two unversioned binary
+  formats — now carry a `magic + version` header (`RDCT`/`RTGD`), so a layout change or a newer-build blob
+  **fails loud** instead of misparsing; the `FeatureKind` byte decodes through the strict, canonical
+  `dict::kind_from_tag` (an unknown tag is a hard error, never a silent `Generic`); and the body parse is
+  fully fallible (a truncated/corrupt blob errors instead of panicking — closing a latent "no panics in
+  library code" violation). Legacy header-less blobs still read, and the content-based `fingerprint` is
+  untouched ⇒ the gRPC dict/tag-dict adoption handshake is byte-identical. ([`DECISIONS.md`](DECISIONS.md)
+  ADR-057.)
 - **Deferred from the external-review hardening pass (ADR-052):**
   - **Optional bearer-token / API-key auth for mutating endpoints.** The HTTP server now defaults to
     a loopback bind (`--host 127.0.0.1`), but has no built-in auth — exposing it requires a trusted
