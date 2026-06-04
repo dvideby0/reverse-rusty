@@ -212,13 +212,19 @@ false-negative / throughput audit — remains the open step in **Current limitat
   (`size`-only today, unlike `/_search`). Lower priority because in the reference workload only a public
   search surface ranks — the core matching jobs take the tag-filtered set unranked. It never touches the
   candidate index or verifier ([ADR-049](DECISIONS.md); [`design/matching.md`](design/matching.md) §5.4).
-- **Byte-cleaning: punctuation-equivalence rules.** `clean_into` currently maps all
-  non-alphanumeric, non-marker characters to a space. Production title corpora treat
-  mid-word hyphens (`-`), apostrophes (`'`, `'`), slashes (`/`), and periods differently
-  — e.g. `O'Brien`, `O-Brien`, and `OBrien` should all normalize to the same token. Add a
-  configurable punctuation-folding table to the byte-cleaning pass so callers can declare
-  which characters collapse vs. become word boundaries.
-  ([`normalization.md`](design/normalization.md) §2.)
+- ~~**Byte-cleaning: punctuation-equivalence rules.**~~ **✅ Shipped (ADR-058).** `clean_into`'s
+  per-character behavior is now a configurable `PunctClass` table (`Split`/`Fold`/`Keep`/`Marker`) on the
+  shared normalizer — set via `NormalizerBuilder` (`fold_punctuation`/`set_punct_class`), persisted through
+  `Vocab` (so it survives reopen and rides `PUT /_vocab`). Declaring a character as **`Fold`** deletes it
+  so its neighbors join, collapsing `O'Brien`, `O'Brien` (curly U+2019), `O-Brien`, and `OBrien` onto one
+  token — stopping a punctuation-only spelling difference from dropping a candidate (the recall-first win).
+  The same table runs over queries and titles, so the lossless cover holds under any config (oracle-proven:
+  engine ≡ brute, zero FN/FP, under a folding normalizer); the **default reproduces the historical behavior
+  byte-identically** (`.` kept, `#`/`/` markers, everything else split), opt-in / default-off.
+  ([`normalization.md`](design/normalization.md) §2.) **Deferred behind the same `PunctClass` seam:** an
+  *additive* fold (emit the joined form AND the split components — a pure recall gain à la Lucene's
+  `WordDelimiterGraphFilter`), and cross-process shipping of the table to a remote shard's normalizer (the
+  same deferral as cross-process vocab shipping).
 - **`NormalizerBuilder`: bulk synonym / alias registration API.** The builder already
   supports phrases and single-token synonyms, but real deployments need to register
   hundreds of equivalences (abbreviation → canonical, variant spellings, term expansions

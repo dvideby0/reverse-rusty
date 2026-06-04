@@ -62,6 +62,13 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   FN-safe: the match set only grows, a wrong alias degrades to a bounded false positive). Declared
   (`PUT /_vocab`) + any-of-learned (opt-in `learn_equivalences`) sources; reversible; survives reopen;
   default-off ⇒ byte-identical. Distributional/match-feedback discovery deferred behind the same seam.
+  **Punctuation-equivalence folding (ADR-058):** byte-cleaning's per-character behavior is a configurable
+  `PunctClass` table on the shared normalizer (`Split`/`Fold`/`Keep`/`Marker`) — declaring `'`/`-` as
+  `Fold` deletes them so neighbors join, collapsing `O'Brien`/`O-Brien`/`OBrien` to one token and closing
+  a recall gap (a punctuation-only spelling difference no longer drops a candidate). Set via
+  `NormalizerBuilder`, persisted through `Vocab` (+ `PUT /_vocab`); the same table runs over queries and
+  titles, so the lossless cover holds under any config (oracle-proven: engine ≡ brute, zero FN/FP); the
+  default reproduces the historical behavior byte-identically (opt-in / default-off).
 - **HTTP server** (`bin/server/`) — ES-style REST (`/_doc`, `/_search` with explain/profile,
   `/_bulk` per-item status ADR-018, `/_stats`, `/_cat/stats`, `/_cat/segments` per-segment detail
   (text table + `?format=json`, ADR-023), `/_health`, `/_metrics`, `/_vocab*`,
@@ -427,8 +434,9 @@ Tiers, highest-leverage first:
   match-feedback) and the rest of the §7 "improve" menu (survival telemetry, feature-ID re-ranking).
 - **Tier 3 — scale & production maturity.** Feature-model versioning + blue/green; hardening the
   (experimental) distributed multi-node layers; aspects-first ingestion.
-- **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node,
-  ADR-049); ranking + `/_mpercolate` pagination; byte-cleaning + bulk-alias APIs.
+- **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node
+  ADR-049, ✅ through the cluster ADR-055); byte-cleaning punctuation-equivalence folding (✅ ADR-058);
+  still open: ranking + `/_mpercolate` pagination, bulk-alias registration API.
 
 See **[`roadmap.md`](roadmap.md)** for the per-tier detail, the Nice-to-have / operational-polish
 backlog, and the Evaluated & declined list.

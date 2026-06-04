@@ -62,7 +62,7 @@ pub use events::{
     CompactionTrigger, DurabilityOp, EngineEvent, EngineMetrics, SegmentInfo, SegmentKind,
 };
 pub use explain::ExplainDetail;
-pub use normalize::{Normalizer, NormalizerBuilder};
+pub use normalize::{Normalizer, NormalizerBuilder, PunctClass};
 pub use segment::{
     CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport, InsertOutcome,
     MatchStats,
