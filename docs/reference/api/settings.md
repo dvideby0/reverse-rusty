@@ -19,6 +19,7 @@ curl localhost:9200/_settings
     "memtable_flush_threshold": 100000,
     "auto_compact_on_flush": true,
     "auto_compact_on_ingest": true,
+    "compaction_reanchor": false,
     "data_dir": null,
     "wal_sync_on_write": false,
     "retain_source": true,
@@ -56,7 +57,8 @@ curl -X PUT localhost:9200/_settings \
 
 - **Dynamic (runtime-tunable):** `max_segments`, `memtable_flush_threshold`, `max_query_length`,
   `max_query_clauses`, `max_anyof_group_size`, `holes_ratio_threshold`, `compaction_fixed_cost`,
-  `auto_compact_on_flush`, `auto_compact_on_ingest`.
+  `auto_compact_on_flush`, `auto_compact_on_ingest`, `compaction_reanchor` (re-anchor drifted queries
+  on the next merge, ADR-056).
 - **Static (startup only):** `data_dir`, `wal_sync_on_write`, `retain_source`.
 
 The query-complexity limits (`max_query_length`, `max_query_clauses`, `max_anyof_group_size`) are

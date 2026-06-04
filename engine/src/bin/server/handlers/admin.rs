@@ -41,6 +41,10 @@ struct CompactResponse {
     entries_after: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tombstones_reclaimed: Option<usize>,
+    /// Queries re-anchored during the merge (ADR-056); present (and >0) only when
+    /// `compaction_reanchor` is enabled and drift actually moved a query.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reanchored: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'static str>,
 }
@@ -220,6 +224,7 @@ pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResp
                 entries_before: None,
                 entries_after: None,
                 tombstones_reclaimed: None,
+                reanchored: None,
                 message: Some("persistence degraded; compaction not durably acknowledged"),
             },
         )
@@ -229,6 +234,7 @@ pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResp
             entries_before = r.entries_before,
             entries_after = r.entries_after,
             tombstones_reclaimed = r.tombstones_reclaimed,
+            reanchored = r.reanchored,
             "compaction complete"
         );
         (
@@ -241,6 +247,7 @@ pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResp
                 entries_before: Some(r.entries_before),
                 entries_after: Some(r.entries_after),
                 tombstones_reclaimed: Some(r.tombstones_reclaimed),
+                reanchored: Some(r.reanchored),
                 message: None,
             },
         )
@@ -256,6 +263,7 @@ pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResp
                 entries_before: None,
                 entries_after: None,
                 tombstones_reclaimed: None,
+                reanchored: None,
                 message: Some("no compaction needed"),
             },
         )

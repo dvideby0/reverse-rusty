@@ -247,6 +247,7 @@ async fn main() {
                     entries_before = report.entries_before,
                     entries_after = report.entries_after,
                     tombstones_reclaimed = report.tombstones_reclaimed,
+                    reanchored = report.reanchored,
                     trigger = ?trigger,
                     base_segments_after = base_segments_after,
                     "engine.compaction"

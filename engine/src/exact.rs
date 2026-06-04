@@ -635,6 +635,57 @@ impl ExactStore {
         new_id
     }
 
+    /// Reconstruct the *anchor-relevant* inputs for stored query `id` — its `required`
+    /// features and `anyof` groups — from the SoA, for the compaction "improve" pass
+    /// (ADR-056). The masked-required features (kept only as set bits in `req_mask`) are
+    /// recovered via `mask_inverse` (bit → feature, from the frozen [`Dict`] mask); the
+    /// non-masked required tail and the any-of groups are read directly (already feature
+    /// IDs). Forbidden features are deliberately NOT returned: the anchor optimizer never
+    /// reads them (the lossless-cover invariant), and the stored forbidden columns are
+    /// carried forward verbatim by [`copy_entry`](Self::copy_entry), never rebuilt.
+    ///
+    /// The returned pair feeds `build_signatures(&Extracted { required, forbidden: vec![],
+    /// anyof }, dict)` to re-derive the cover. `mask_inverse` MUST come from the same
+    /// frozen dict the segment was built against (the engine's frozen-mask invariant), or
+    /// a set bit could map to the wrong feature. A query built before the mask was
+    /// finalized has `req_mask == 0`, so the un-masking loop is a natural no-op.
+    pub fn anchoring_inputs(
+        &self,
+        id: u32,
+        mask_inverse: &[Option<FeatureId>; 64],
+    ) -> (Vec<FeatureId>, Vec<Vec<FeatureId>>) {
+        let i = id as usize;
+
+        // required = un-masked hot features ++ the non-masked tail. The two sets are
+        // disjoint by construction (`push` routes each feature to mask XOR tail), so no
+        // dedup is needed; `anchor_plan` re-sorts by frequency internally, so order here
+        // is irrelevant.
+        let mut required: Vec<FeatureId> = Vec::new();
+        let mut bits = self.req_mask[i];
+        while bits != 0 {
+            let b = bits.trailing_zeros() as usize;
+            if let Some(f) = mask_inverse[b] {
+                required.push(f);
+            }
+            bits &= bits - 1; // clear the lowest set bit
+        }
+        let ro = self.req_off[i] as usize;
+        let rl = self.req_len[i] as usize;
+        required.extend_from_slice(&self.req_blob[ro..ro + rl]);
+
+        // any-of groups are stored directly as feature IDs.
+        let gs = self.q_group_start[i] as usize;
+        let gc = self.q_group_count[i] as usize;
+        let mut anyof: Vec<Vec<FeatureId>> = Vec::with_capacity(gc);
+        for gi in gs..gs + gc {
+            let go = self.group_off[gi] as usize;
+            let gl = self.group_len[gi] as usize;
+            anyof.push(self.anyof_blob[go..go + gl].to_vec());
+        }
+
+        (required, anyof)
+    }
+
     // ---- slice accessors for serialization (storage.rs) ----
     pub fn req_masks(&self) -> &[u64] {
         &self.req_mask

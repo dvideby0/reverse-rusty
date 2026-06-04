@@ -316,7 +316,14 @@ impl Engine {
             .map(|a| arc_into_memory(Arc::clone(a)))
             .collect();
         let refs: Vec<&Segment> = memory_segs.iter().collect();
-        let merged = Segment::compact_from(&refs);
+        // The "improve" merge (ADR-056) re-anchors drifted queries when enabled; the
+        // default path is the byte-identical mechanical remap. `reanchored` is 0 unless
+        // re-anchoring ran and actually moved a query.
+        let (merged, reanchored) = if self.config.compaction_reanchor {
+            Segment::compact_from_reanchored(&refs, &self.dict)
+        } else {
+            (Segment::compact_from(&refs), 0)
+        };
         let entries_after = merged.len();
 
         // Build the merged segment durably BEFORE any destructive action. On a
@@ -364,6 +371,7 @@ impl Engine {
             entries_before,
             entries_after,
             tombstones_reclaimed: entries_before - entries_after,
+            reanchored,
         };
         self.emit(crate::events::EngineEvent::Compaction {
             report,

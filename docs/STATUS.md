@@ -416,8 +416,10 @@ Tiers, highest-leverage first:
 - **Tier 1 — highest-leverage bottlenecks.** Broad-lane batch evaluation (✅ ADR-026) + resident-memory
   reduction (✅ ADR-020) — both shipped.
 - **Tier 2 — feature-model quality & self-tuning.** NPMI corpus phrase induction (✅ ADR-053) +
-  equivalence/alias learning via expansion — mechanism + declared/any-of sources (✅ ADR-054); still
-  open: compaction-that-improves, and the deferred alias-discovery sources (distributional, match-feedback).
+  equivalence/alias learning via expansion — mechanism + declared/any-of sources (✅ ADR-054) +
+  compaction-that-improves — re-anchoring drifted queries on merge (✅ ADR-056, opt-in, oracle-proven
+  zero-FN, cluster no-op); still open: the deferred alias-discovery sources (distributional,
+  match-feedback) and the rest of the §7 "improve" menu (survival telemetry, feature-ID re-ranking).
 - **Tier 3 — scale & production maturity.** Feature-model versioning + blue/green; hardening the
   (experimental) distributed multi-node layers; aspects-first ingestion.
 - **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node,

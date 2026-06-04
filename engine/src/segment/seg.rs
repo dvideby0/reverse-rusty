@@ -314,6 +314,107 @@ impl Segment {
         dest
     }
 
+    /// Compaction's "improve" variant (ADR-056): merge like [`compact_from`](Self::compact_from)
+    /// but **re-anchor** each alive query — re-derive its signature cover with the *current*
+    /// feature frequencies instead of carrying the old anchors forward. Returns the merged
+    /// segment plus the number of queries whose cover actually changed.
+    ///
+    /// Correctness (zero false negatives): the cover is rebuilt by the SAME
+    /// [`build_signatures`]/`anchor_plan` optimizer the title side is matched against
+    /// ([`match_into`](Self::match_into)), using the same `dict`, so any title that matches a
+    /// query still generates a signature that retrieves it — the anchor choice only governs
+    /// *which* posting list the query lives in. The exact-store data is copied **verbatim**
+    /// (`copy_entry`), so `verify`/`is_pure_anchor` are byte-identical and forbidden features
+    /// are preserved; only the index postings and the per-query cost class are re-derived.
+    ///
+    /// The cost class *can* change (e.g. A→B): with the common mask frozen, a feature's
+    /// frequency and its hotness diverge as the corpus drifts, so a query's rarest-by-current-
+    /// frequency required feature can now be a hot one and escalate to an arity-2 cover. This
+    /// is still lossless because `anchor_plan`'s class-B/C anchors are always hot features, and
+    /// the title side ([`match_into`](Self::match_into)) generates exactly those {hot}×{other}
+    /// and broad signatures — the same matched-pair guarantee. A query is never re-anchored to
+    /// class D (a stored query always has a required/any-of feature).
+    ///
+    /// Invariant preserved: entries are processed in ascending old-local-id order and each
+    /// entry's fresh sigs are inserted at its (ascending) new id immediately, so every posting
+    /// stays sorted by construction (no per-insert sort/dedup needed — same contract as
+    /// `add_compiled`).
+    pub fn compact_from_reanchored(sources: &[&Segment], dict: &Dict) -> (Segment, usize) {
+        let mut dest = Segment::new();
+        let mask_inverse = dict.mask_inverse();
+        let mut reanchored = 0usize;
+
+        for &src in sources {
+            // Invert the indexes once (old_id -> the sig keys it appears under), so we can
+            // tell which entries actually moved. One pass, O(postings) — the same order as
+            // the merge, and it stands in for compact_from's posting-remap passes.
+            let mut old_keys: Vec<Vec<u64>> = vec![Vec::new(); src.len()];
+            src.main.for_each_posting(|key, posting| {
+                posting.for_each(|old_id| old_keys[old_id as usize].push(key));
+            });
+            src.broad.for_each_posting(|key, posting| {
+                posting.for_each(|old_id| old_keys[old_id as usize].push(key));
+            });
+
+            for (old, &is_alive) in src.alive.iter().enumerate() {
+                if !is_alive {
+                    continue; // drop tombstoned entries, reclaiming their space
+                }
+                // Copy the exact-store entry verbatim (masks, forbidden, any-of, tags,
+                // identity) — re-anchoring must not touch the verified semantics.
+                let new_id = src.exact.copy_entry(old as u32, &mut dest.exact);
+                let logical = dest.exact.logical(new_id);
+
+                // Re-derive the cover from the (unchanged) stored required/any-of features
+                // against the current dict. `anchor_plan` reads only required + any-of, so the
+                // empty `forbidden` here is irrelevant to selection.
+                let (required, anyof) = dest.exact.anchoring_inputs(new_id, &mask_inverse);
+                let ex = Extracted {
+                    required,
+                    forbidden: Vec::new(),
+                    anyof,
+                };
+                let plan = build_signatures(&ex, dict);
+                debug_assert_ne!(
+                    plan.class,
+                    CostClass::D,
+                    "a stored (non-D) query must never re-anchor to class D"
+                );
+
+                for &s in &plan.main_sigs {
+                    dest.main.insert(s, new_id);
+                }
+                for &s in &plan.broad_sigs {
+                    dest.broad.insert(s, new_id);
+                }
+                dest.class.push(plan.class);
+                dest.alive.push(true);
+                dest.alive_counter += 1;
+                dest.logical_index.entry(logical).or_default().push(new_id);
+
+                // Did the cover actually change? Compare the new key set to the old one.
+                let mut new_keys: Vec<u64> = plan
+                    .main_sigs
+                    .iter()
+                    .chain(plan.broad_sigs.iter())
+                    .copied()
+                    .collect();
+                new_keys.sort_unstable();
+                let mut prev = std::mem::take(&mut old_keys[old]);
+                prev.sort_unstable();
+                if new_keys != prev {
+                    reanchored += 1;
+                }
+            }
+        }
+
+        // Build anchor filter for the newly compacted (sealed) segment.
+        dest.build_filter();
+        // Merged segment inherits the minimum epoch — still stale if any source was.
+        dest.vocab_epoch = sources.iter().map(|s| s.vocab_epoch).min().unwrap_or(0);
+        (dest, reanchored)
+    }
+
     /// Reconstruct a Segment from pre-built parts. Used by MmapSegment::to_memory_segment
     /// to convert mmap'd data back into an in-memory segment (for compaction).
     pub fn from_parts(
