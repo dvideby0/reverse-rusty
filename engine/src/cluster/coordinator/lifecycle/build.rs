@@ -65,20 +65,8 @@ impl ClusterEngine {
                 "replication_factor must be ≥ 1 (1 = primary only)".into(),
             ));
         }
-        // ADR-061: multi-word aliases are single-node only. Cluster content routing derives target
-        // shards from the canonical leftmost-longest title view (`route` uses `match_features`), so
-        // a nested alias entity that lives only in the positive superset `P(T)` would miss the
-        // shard holding its query — a false negative the shard-local two-view verifier cannot
-        // recover. Refuse a multi-word-alias normalizer here; single-token aliases (`N(T)==P(T)`)
-        // are unaffected. Cluster multi-word (P(T)-aware routing + normalizer shipping) is deferred.
-        if norm.has_multiword_aliases() {
-            return Err(ShardError::Config(
-                "a normalizer with active multi-word aliases is single-node only (ADR-061): \
-                 cluster routing uses the canonical leftmost-longest title view and would miss a \
-                 nested alias entity's shard (a false negative). Single-token aliases are supported."
-                    .into(),
-            ));
-        }
+        // (ADR-061 multi-word-alias refusal is enforced centrally in `from_parts`, the one assembly
+        // seam this path routes through — see the guard there.)
         let norm = Arc::new(norm);
 
         // Pass A — build the authoritative dict + tag space over the WHOLE corpus, then freeze both.

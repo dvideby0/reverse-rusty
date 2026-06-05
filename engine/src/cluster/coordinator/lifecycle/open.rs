@@ -47,6 +47,24 @@ impl ClusterEngine {
                 ring.num_shards()
             )));
         }
+        // ADR-061: multi-word aliases are single-node only, enforced at the ONE shared assembly
+        // seam so every constructor is covered (`build`/`build_with_tags`, `open`, and the
+        // distributed `connect_remote`/`connect_replicated` via this `from_parts`). Cluster content
+        // routing derives a title's target shards from the canonical leftmost-longest view
+        // (`route` uses `match_features`), so a nested alias entity that lives only in the positive
+        // superset `P(T)` would never probe the shard holding a query anchored on it — a false
+        // negative the shard-local two-view verifier cannot recover. Single-token aliases
+        // (`N(T) == P(T)`) are unaffected; cluster multi-word (P(T)-aware routing + cross-process
+        // normalizer shipping) is a deferred follow-on. `set_vocab` guards its in-place swap path
+        // separately (it does not reconstruct through `from_parts`).
+        if norm.has_multiword_aliases() {
+            return Err(ShardError::Config(
+                "a normalizer with active multi-word aliases is single-node only (ADR-061): \
+                 cluster routing uses the canonical leftmost-longest title view and would miss a \
+                 nested alias entity's shard (a false negative). Single-token aliases are supported."
+                    .into(),
+            ));
+        }
         Ok(ClusterEngine {
             norm,
             dict,

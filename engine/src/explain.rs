@@ -69,21 +69,24 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
 /// Explain a single title against a single compiled query.
 pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &Dict) -> String {
     let mut lc = String::new();
-    let mut feats = Vec::new();
-    norm.match_features(title, dict, &mut lc, &mut feats);
+    // Two title views (ADR-061): `pos` (overlapping superset `P(T)`) drives retrieval + required +
+    // any-of; `neg` (canonical `N(T)`) drives forbidden — matching the real verifier so explain
+    // can't disagree with the matcher under an active multi-word alias. No alias ⇒ pos == neg.
+    let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    norm.match_features_dual(title, dict, &mut lc, &mut neg, &mut pos);
 
     let mut s = String::new();
     s.push_str(&format!("title: {title:?}\n"));
-    s.push_str(&format!("  title features: {}\n", names(&feats, dict)));
+    s.push_str(&format!("  title features: {}\n", names(&pos, dict)));
 
-    // would any signature retrieve this query?
+    // would any signature retrieve this query? (retrieval is from the positive superset)
     let mut title_sigs = std::collections::HashSet::new();
-    for &f in &feats {
+    for &f in &pos {
         title_sigs.insert(sig_key(&[f]));
     }
-    for &h in &feats {
+    for &h in &pos {
         if is_hot(dict, h) {
-            for &o in &feats {
+            for &o in &pos {
                 if o != h {
                     let (a, b) = if h < o { (h, o) } else { (o, h) };
                     title_sigs.insert(sig_key(&[a, b]));
@@ -97,21 +100,22 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
         "  candidate? {retrieved} (title generates a signature in this query's cover)\n"
     ));
 
-    // exact reasons
-    let present = |f: u32| feats.binary_search(&f).is_ok();
+    // exact reasons: positive checks vs P(T), forbidden vs N(T) (ADR-061)
+    let in_pos = |f: u32| pos.binary_search(&f).is_ok();
+    let in_neg = |f: u32| neg.binary_search(&f).is_ok();
     let mut fail = Vec::new();
     for &f in &cq.extracted.required {
-        if !present(f) {
+        if !in_pos(f) {
             fail.push(format!("missing required {}", dict.name(f)));
         }
     }
     for &f in &cq.extracted.forbidden {
-        if present(f) {
+        if in_neg(f) {
             fail.push(format!("present forbidden {}", dict.name(f)));
         }
     }
     for (i, g) in cq.extracted.anyof.iter().enumerate() {
-        if !g.iter().any(|&f| present(f)) {
+        if !g.iter().any(|&f| in_pos(f)) {
             fail.push(format!("any_of[{i}] unsatisfied"));
         }
     }
@@ -135,18 +139,20 @@ pub fn explain_match_structured(
     dict: &Dict,
 ) -> ExplainDetail {
     let mut lc = String::new();
-    let mut feats = Vec::new();
-    norm.match_features(title, dict, &mut lc, &mut feats);
+    // Two title views (ADR-061), matching the verifier: positive superset `pos` for retrieval +
+    // required + any-of, canonical `neg` for forbidden. No active multi-word alias ⇒ pos == neg.
+    let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    norm.match_features_dual(title, dict, &mut lc, &mut neg, &mut pos);
 
-    let title_features: Vec<String> = feats.iter().map(|&id| dict.name(id).to_string()).collect();
+    let title_features: Vec<String> = pos.iter().map(|&id| dict.name(id).to_string()).collect();
 
     let mut title_sigs = std::collections::HashSet::new();
-    for &f in &feats {
+    for &f in &pos {
         title_sigs.insert(sig_key(&[f]));
     }
-    for &h in &feats {
+    for &h in &pos {
         if is_hot(dict, h) {
-            for &o in &feats {
+            for &o in &pos {
                 if o != h {
                     let (a, b) = if h < o { (h, o) } else { (o, h) };
                     title_sigs.insert(sig_key(&[a, b]));
@@ -157,20 +163,21 @@ pub fn explain_match_structured(
     let candidate = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
         || cq.broad_sigs.iter().any(|s| title_sigs.contains(s));
 
-    let present = |f: u32| feats.binary_search(&f).is_ok();
+    let in_pos = |f: u32| pos.binary_search(&f).is_ok();
+    let in_neg = |f: u32| neg.binary_search(&f).is_ok();
     let mut failures = Vec::new();
     for &f in &cq.extracted.required {
-        if !present(f) {
+        if !in_pos(f) {
             failures.push(format!("missing required {}", dict.name(f)));
         }
     }
     for &f in &cq.extracted.forbidden {
-        if present(f) {
+        if in_neg(f) {
             failures.push(format!("present forbidden {}", dict.name(f)));
         }
     }
     for (i, g) in cq.extracted.anyof.iter().enumerate() {
-        if !g.iter().any(|&f| present(f)) {
+        if !g.iter().any(|&f| in_pos(f)) {
             failures.push(format!("any_of[{i}] unsatisfied"));
         }
     }
