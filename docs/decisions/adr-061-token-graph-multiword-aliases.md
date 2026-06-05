@@ -114,10 +114,17 @@
   active, the extra cost is one Aho-Corasick pass over the (typically small) alias-phrase set plus a
   second mask/slice — paid only on titles that actually contain an overlapping alias phrase.
 
-- **Scope / what's deferred.** **Single-node first** (like ADR-054 / ADR-059 / ADR-060): the cluster
-  shares one frozen dict but does **not** yet ship the normalizer's alias-phrase table cross-process, so
-  `set_vocab` keeps refusing a non-local cluster; a build-time cluster with multi-word aliases baked into
-  the shared dict + normalizer is a follow-on. Deferred with it: cluster registry governance, and the
+- **Scope / what's deferred.** **Single-node first** (like ADR-054 / ADR-059 / ADR-060). The cluster
+  deferral is now **enforced, not silent**: cluster content routing derives a title's target shards from
+  the canonical leftmost-longest view `N(T)` (the `route` primitive reuses `match_features`), so a nested
+  alias entity that lives only in the positive superset `P(T)` would never probe the shard holding a
+  query anchored on it — a false negative the shard-local two-view verifier cannot recover. Both
+  normalizer-setting cluster paths therefore **refuse a multi-word-alias normalizer** —
+  `ClusterEngine::build` / `build_with_tags` and `set_vocab` check `Normalizer::has_multiword_aliases()`
+  and error (regression-guarded by `cluster_oracle::vocab_learning::{set_vocab_refuses_active_multiword_alias_on_cluster,
+  build_refuses_a_multiword_alias_normalizer}`). Single-token cluster aliases (`N(T) == P(T)`) are
+  unaffected and keep working. Cluster multi-word support — **P(T)-aware routing** + cross-process
+  normalizer shipping — is the follow-on. Deferred with it: cluster registry governance, and the
   lower-precision multi-word discovery sources (distributional / match-feedback). Quoted-phrase *required*
   clauses and overlapping aliases inside a single query clause keep query-side leftmost-longest (the
   author wrote one reading); only the **title** side needs the overlap superset.

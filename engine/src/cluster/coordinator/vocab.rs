@@ -83,6 +83,23 @@ impl ClusterEngine {
                 .to_normalizer()
                 .map_err(|e| ShardError::Config(format!("building normalizer from vocab: {e}")))?,
         );
+        // ADR-061: refuse a vocab that would activate a multi-word alias on a cluster. The new
+        // normalizer's `P(T)` superset is correct shard-locally, but cluster content routing
+        // derives target shards from the canonical `N(T)` (`route` uses `match_features`), so a
+        // nested alias entity that lives only in `P(T)` would never probe the shard holding a
+        // query anchored on it — a false negative routing cannot recover. Single-token aliases
+        // (`N(T)==P(T)`) are unaffected; cluster multi-word (P(T)-aware routing + cross-process
+        // normalizer shipping) is a deferred follow-on. Checked on the rebuilt normalizer so it
+        // catches a multi-word alias from any source (import / manual / merge).
+        if new_norm.has_multiword_aliases() {
+            return Err(ShardError::Config(
+                "set_vocab cannot activate a multi-word alias on a cluster yet (ADR-061): content \
+                 routing uses the canonical leftmost-longest title view, so a nested alias entity \
+                 would miss its shard (a false negative). Single-token aliases are supported; \
+                 cluster multi-word support is a deferred follow-on."
+                    .into(),
+            ));
+        }
 
         // 3. Gather the deduped live `(logical, dsl)` set across shards. A selective /
         //    any-of query lives on several shards but has ONE dsl — dedup by logical id.

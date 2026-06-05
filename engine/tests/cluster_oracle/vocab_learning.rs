@@ -229,6 +229,72 @@ fn learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives() {
     }
 }
 
+/// A multi-word alias form (`new york`) for testing the cluster refusal (ADR-061).
+fn vocab_with_multiword_alias() -> reverse_rusty::vocab::Vocab {
+    let mut v = reverse_rusty::vocab::Vocab::new();
+    let n = reverse_rusty::normalize::Normalizer::default_vocab().unwrap();
+    let d = reverse_rusty::dict::Dict::new();
+    v.aliases_mut().add_classified(
+        &["ny".into(), "new york".into()],
+        reverse_rusty::vocab::AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &d,
+    );
+    v
+}
+
+#[test]
+fn set_vocab_refuses_active_multiword_alias_on_cluster() {
+    // ADR-061: multi-word aliases are single-node only. Cluster content routing derives target
+    // shards from the canonical leftmost-longest title view, so a nested alias entity that lives
+    // only in the positive superset would miss its shard (a false negative the shard-local
+    // two-view verifier cannot recover). `set_vocab` must refuse activating one — enforcing the
+    // documented deferral rather than silently dropping matches. Single-token aliases (N(T)==P(T))
+    // stay supported (see `declared_alias_makes_both_surface_forms_match`).
+    let (queries, _titles) = build_corpus();
+    let cfg = ClusterConfig {
+        num_shards: 8,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+
+    let v = vocab_with_multiword_alias();
+    assert!(
+        !v.aliases().active_multiword_forms().is_empty(),
+        "the declared multi-word alias must be active"
+    );
+    let err = cluster
+        .set_vocab(v)
+        .expect_err("cluster set_vocab must refuse an active multi-word alias");
+    assert!(
+        format!("{err}").contains("multi-word"),
+        "the error must explain the multi-word refusal: {err}"
+    );
+    // The refused change left the cluster intact and usable.
+    assert!(
+        cluster.percolate("1994 fleer psa 10").is_ok(),
+        "the cluster remains usable after the refusal"
+    );
+}
+
+#[test]
+fn build_refuses_a_multiword_alias_normalizer() {
+    // The same single-node restriction at construction: a normalizer carrying multi-word alias
+    // phrases cannot back a cluster (routing would miss nested entities).
+    let norm = vocab_with_multiword_alias().to_normalizer().unwrap();
+    assert!(norm.has_multiword_aliases());
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        ..ClusterConfig::default()
+    };
+    let Err(err) = ClusterEngine::build(norm, &cfg, &[(1, "new york".into())]) else {
+        panic!("build must refuse a multi-word-alias normalizer");
+    };
+    assert!(format!("{err}").contains("multi-word"), "error: {err}");
+}
+
 #[test]
 fn declared_equivalence_expands_across_shards_with_zero_false_negatives() {
     // ADR-054: a DECLARED equivalence {zzabbr, zzcanon} applied via set_vocab must make a
