@@ -1,10 +1,10 @@
 //! `Shard` — the local↔remote seam — and `LocalShard`, its in-process implementation.
 //!
 //! [`Shard`] abstracts the OPERATION a coordinator performs on a shard, never the
-//! shard's internal data: a remote shard has no in-process [`EngineSnapshot`], so the
+//! shard's internal data: a remote shard has no in-process [`EngineSnapshot`](crate::segment::EngineSnapshot), so the
 //! trait exposes [`Shard::percolate_filtered`] (the matched ids + stats for one title) rather
 //! than handing back a snapshot. [`LocalShard`] is the in-process impl — an owned
-//! [`Engine`] (writes serialized behind a `std::sync::Mutex`) plus an
+//! [`Engine`](crate::segment::Engine) (writes serialized behind a `std::sync::Mutex`) plus an
 //! `ArcSwap<EngineSnapshot>` for lock-free reads, exactly the per-engine pattern the
 //! HTTP server uses. It does NOT re-implement matching; `percolate_filtered` delegates to
 //! [`EngineSnapshot::match_title_filtered`]. Every `LocalShard` is constructed with
@@ -19,25 +19,35 @@
 //! not silently shrink the answer. The remote implementation (`RemoteShard`, behind
 //! the `distributed` feature) lives in `super::remote` and satisfies the same trait
 //! by issuing gRPC calls.
-
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
-
-use arc_swap::ArcSwap;
+//!
+//! This file is the module ROOT: it holds the seam *definitions* shared across the
+//! module — [`ShardError`], the [`EventSink`] alias, the [`Shard`] trait, and the
+//! free-standing [`apply_mutation`] replay glue — while the `impl`-heavy concerns live
+//! in focused submodules:
+//!   - [`retention`] — the translog retention-lease bookkeeping ([`RetentionLeases`],
+//!     ADR-040/048) plus the `resolve_lease_ttl` config helper.
+//!   - [`local`]     — [`LocalShard`]: its struct, every constructor, the `Shard` impl,
+//!     and the clock-injectable seal core (`seal_for_checkpoint_at`).
 
 use crate::compile::{extract_readonly, Extracted};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
-use crate::events::{DurabilityOp, EngineEvent};
 use crate::exact::TagPredicate;
 use crate::normalize::Normalizer;
-use crate::segment::{Engine, EngineSnapshot, IngestReport, MatchScratch, MatchStats, PlacedQuery};
+use crate::segment::{IngestReport, MatchStats, PlacedQuery};
 use crate::tagdict::TagDict;
+use std::path::Path;
+use std::sync::Arc;
 
 use super::clog::{ClusterMutation, LogPos};
-use super::translog;
+
+mod local;
+mod retention;
+
+#[cfg(test)]
+mod tests;
+
+pub(crate) use local::LocalShard;
 
 /// An error from cluster construction or a shard operation. In-process
 /// ([`LocalShard`]) *operations* are infallible and never produce this; a `RemoteShard`
@@ -136,7 +146,7 @@ pub(crate) type EventSink = Arc<dyn Fn(&crate::events::EngineEvent) + Send + Syn
 /// in-process and (eventually) networked shards behind one type.
 ///
 /// Abstracts the OPERATION, not the data: there is deliberately no `snapshot()`,
-/// because a remote shard has no local [`EngineSnapshot`]. [`Shard::percolate`] IS
+/// because a remote shard has no local [`EngineSnapshot`](crate::segment::EngineSnapshot). [`Shard::percolate`] IS
 /// the per-shard probe (matched logical ids + [`MatchStats`]); `include_broad` is the
 /// ALREADY-RESOLVED per-shard toggle — the coordinator applies the "broad lane only
 /// on shard 0" rule before calling, and the shard never re-derives it.
@@ -172,7 +182,7 @@ pub(crate) trait Shard: Send + Sync {
     /// This shard's live `(logical_id, dsl)` source set — the corpus the shard's
     /// index is a materialized view of. Used by `ClusterEngine::set_vocab` to
     /// rebuild every shard under a new normalizer (ADR-046). Default: `Err` — only
-    /// a shard backed by an in-process [`Engine`] (`LocalShard`/`ReplicatedShard`)
+    /// a shard backed by an in-process [`Engine`](crate::segment::Engine) (`LocalShard`/`ReplicatedShard`)
     /// can enumerate its sources; a `RemoteShard`'s sources live in another process
     /// (a cross-process vocabulary change is out of scope for v1, and `set_vocab`
     /// refuses a non-local cluster before ever calling this).
@@ -182,7 +192,7 @@ pub(crate) trait Shard: Send + Sync {
         ))
     }
 
-    /// Whether this shard is backed by an in-process [`Engine`], so its normalizer
+    /// Whether this shard is backed by an in-process [`Engine`](crate::segment::Engine), so its normalizer
     /// can be swapped in place by a vocabulary change. `false` for a
     /// `RemoteShard`/`HandoffShard`, whose normalizer lives in another process and
     /// is NOT shipped a vocabulary change in v1 — `ClusterEngine::set_vocab` refuses
@@ -306,600 +316,6 @@ pub(crate) trait Shard: Send + Sync {
     fn set_event_sink(&self, _sink: EventSink) {}
 }
 
-/// One held retention lease: the pinned translog position plus the wall-clock of its last
-/// acquire/renew. `last_renewed` is the heartbeat a TTL reap (ADR-048) measures against.
-struct Lease {
-    /// Ops `> pos` are retained for the recovery holding this lease.
-    pos: u64,
-    /// When this lease was last acquired or renewed — refreshed on every renew so an
-    /// actively-progressing recovery never looks stale.
-    last_renewed: Instant,
-}
-
-/// Translog retention leases (ADR-040): a set of `lease_id → `[`Lease`]. A recovery source
-/// keeps every translog op strictly after `min(retained_pos)`, so an in-flight peer recovery's
-/// tail is never trimmed out from under it by a concurrent seal. With no leases the floor is
-/// absent and a seal trims to its checkpoint `P` — byte-identical to ADR-039.
-///
-/// A lease has no intrinsic expiry; a crashed recovering node would otherwise pin the source's
-/// tail forever. The TTL reap ([`Self::reap_expired`], ADR-048) drops a lease that has not
-/// heartbeated (acquire/renew) within the TTL, so a presumed-dead recovery can no longer hold
-/// the floor. `renew` is the heartbeat, so a live recovery (which renews every catch-up pass) is
-/// never reaped.
-#[derive(Default)]
-struct RetentionLeases {
-    next_id: u64,
-    held: BTreeMap<u64, Lease>,
-}
-
-impl RetentionLeases {
-    /// Register a lease pinning ops `> at`; returns its id. Stamps the heartbeat to `now`.
-    fn acquire(&mut self, at: u64, now: Instant) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.held.insert(
-            id,
-            Lease {
-                pos: at,
-                last_renewed: now,
-            },
-        );
-        id
-    }
-    /// Advance a lease forward (monotonic — a lease never moves a consumer's cursor back) and
-    /// refresh its heartbeat (this is what keeps a live recovery from being reaped).
-    fn renew(&mut self, id: u64, to: u64, now: Instant) {
-        if let Some(l) = self.held.get_mut(&id) {
-            l.pos = l.pos.max(to);
-            l.last_renewed = now;
-        }
-    }
-    fn release(&mut self, id: u64) {
-        self.held.remove(&id);
-    }
-    /// Drop every lease whose last heartbeat is older than `ttl` as of `now`; returns how many
-    /// were reaped. `now` is a parameter (not `Instant::now()`) so the seal path injects the
-    /// real clock while tests inject a synthetic one — fully deterministic, no sleeps.
-    fn reap_expired(&mut self, now: Instant, ttl: Duration) -> usize {
-        let before = self.held.len();
-        self.held
-            .retain(|_, l| now.duration_since(l.last_renewed) < ttl);
-        before - self.held.len()
-    }
-    /// The lowest pinned position across all leases (`None` ⇒ no lease ⇒ trim freely to `P`).
-    fn floor(&self) -> Option<u64> {
-        self.held.values().map(|l| l.pos).min()
-    }
-}
-
-/// Resolve the retention-lease TTL (ADR-048) from config: `0` ⇒ disabled (`None`, no expiry),
-/// else `Some(Duration)`. Centralized so every `LocalShard` constructor derives it identically.
-fn resolve_lease_ttl(config: &EngineConfig) -> Option<Duration> {
-    match config.retention_lease_ttl_secs {
-        0 => None,
-        secs => Some(Duration::from_secs(secs)),
-    }
-}
-
-/// One in-process shard: owned engine for writes + lock-free snapshot for reads, plus a
-/// per-shard durable query log (the translog, ADR-039). The translog is a no-op
-/// [`NullClusterLog`](super::clog::NullClusterLog) for an in-memory shard (byte-identical to
-/// pre-ADR-039) and a CRC-framed [`FileClusterLog`](super::clog::FileClusterLog) for a durable
-/// shard (the un-sealed-write tail a recovering replica replays). Replay re-derives features
-/// from the raw DSL against the frozen dict, so the caller (which always holds the shared
-/// `norm`/`dict`) supplies them to [`apply_mutation`] — the shard need not retain them.
-pub(crate) struct LocalShard {
-    engine: Mutex<Engine>,
-    snapshot: ArcSwap<EngineSnapshot>,
-    translog: Box<translog::ShardLog>,
-    /// Open peer-recovery retention leases (ADR-040): while any is held, `seal_for_checkpoint`
-    /// trims the translog only to `min(P, leases.floor())`, so a concurrent seal can't strand an
-    /// in-flight recovery's tail. A separate `Mutex` from `engine` (lock order is always
-    /// engine→retention; the lease methods take only this one).
-    retention: Mutex<RetentionLeases>,
-    /// Retention-lease TTL (ADR-048): a lease that has not heartbeated within this window is
-    /// reaped at the next `seal_for_checkpoint`, so a crashed recovery can no longer pin the
-    /// tail forever. `None` ⇒ disabled (a lease never expires — byte-identical to ADR-040).
-    /// Derived once at construction from `EngineConfig::retention_lease_ttl_secs`.
-    retention_lease_ttl: Option<Duration>,
-    /// Optional event sink (ADR-021), installed by the coordinator's `set_observer`. A plain
-    /// `LocalShard` emitted nothing before ADR-048; now it surfaces a TTL lease reap so an
-    /// abandoned recovery is observable rather than silent. `None` ⇒ no observer (events
-    /// dropped — byte-identical default path; a reap only fires at checkpoint time, long after
-    /// an observer would have attached at cluster build/open).
-    event_sink: Mutex<Option<EventSink>>,
-    /// Retained for translog replay (re-derive features from raw DSL) on self-restart, and to
-    /// stamp the per-shard checkpoint sidecar's dict fingerprint.
-    norm: Arc<Normalizer>,
-    dict: Arc<Dict>,
-    /// `Some` ⇒ durable (segments + translog + checkpoint sidecar live here); `None` ⇒ in-memory.
-    data_dir: Option<PathBuf>,
-}
-
-impl LocalShard {
-    /// Build a shard sharing the coordinator's frozen normalizer + dict. In-memory ⇒ a
-    /// no-op [`NullClusterLog`](super::clog::NullClusterLog) translog (byte-identical to
-    /// pre-ADR-039) and no checkpoint sidecar.
-    pub(crate) fn new(
-        norm: Arc<Normalizer>,
-        dict: Arc<Dict>,
-        tag_dict: Arc<TagDict>,
-        config: EngineConfig,
-    ) -> Self {
-        let retention_lease_ttl = resolve_lease_ttl(&config);
-        // `tag_dict` is moved into the engine (the shard keeps no separate copy — the engine holds
-        // the shared frozen tag space and does all read-only resolution against it).
-        let engine = Engine::with_shared(Arc::clone(&norm), Arc::clone(&dict), tag_dict, config);
-        let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
-        LocalShard {
-            engine: Mutex::new(engine),
-            snapshot,
-            translog: translog::null(),
-            retention: Mutex::new(RetentionLeases::default()),
-            retention_lease_ttl,
-            event_sink: Mutex::new(None),
-            norm,
-            dict,
-            data_dir: None,
-        }
-    }
-
-    /// Build a DURABLE shard (ADR-032): an engine that persists compiled segments under
-    /// `config.data_dir` with no WAL and no own manifest, plus a durable translog (ADR-039).
-    /// **Self-restart (ADR-039 §6):** if a checkpoint sidecar is already present in the dir, this
-    /// is a node restarting over its own prior data — attach its committed segments and replay the
-    /// translog tail instead of starting fresh. Otherwise a fresh empty durable shard.
-    pub(crate) fn new_durable(
-        norm: Arc<Normalizer>,
-        dict: Arc<Dict>,
-        tag_dict: Arc<TagDict>,
-        config: EngineConfig,
-    ) -> Result<Self, ShardError> {
-        let dir = config.data_dir.clone().ok_or_else(|| {
-            ShardError::Log("durable shard requires a data_dir for its translog".into())
-        })?;
-        if let Some(ckpt) = translog::read_sidecar(&dir)? {
-            return Self::open_durable_self(norm, dict, tag_dict, config, &ckpt);
-        }
-        let retention_lease_ttl = resolve_lease_ttl(&config);
-        let translog = translog::open_fresh(&dir, config.wal_sync_on_write)?;
-        let engine = Engine::with_shared_segments_only(
-            Arc::clone(&norm),
-            Arc::clone(&dict),
-            tag_dict,
-            config,
-        )
-        .map_err(|e| ShardError::Log(format!("creating durable shard: {e}")))?;
-        let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
-        Ok(LocalShard {
-            engine: Mutex::new(engine),
-            snapshot,
-            translog,
-            retention: Mutex::new(RetentionLeases::default()),
-            retention_lease_ttl,
-            event_sink: Mutex::new(None),
-            norm,
-            dict,
-            data_dir: Some(dir),
-        })
-    }
-
-    /// Reopen a durable shard by attaching an EXPLICIT committed segment list (ADR-032) against
-    /// the shared dict — attach-and-mmap, not re-ingest. `files`/`next_seg_id` come from the
-    /// coordinator's `cluster_manifest.bin`; the attached segments are the durable base, and the
-    /// translog starts FRESH (ADR-039) — the coordinator `ClusterLog` (in-process) or the
-    /// peer-recovery tail repopulates it. (Distinct from `new_durable`'s sidecar-driven
-    /// self-restart: this is the coordinator-managed attach.)
-    pub(crate) fn open_segments(
-        norm: Arc<Normalizer>,
-        dict: Arc<Dict>,
-        tag_dict: Arc<TagDict>,
-        config: EngineConfig,
-        files: &[String],
-        next_seg_id: u64,
-    ) -> Result<Self, ShardError> {
-        let dir = config.data_dir.clone();
-        let retention_lease_ttl = resolve_lease_ttl(&config);
-        let translog = match &dir {
-            Some(d) => translog::open_fresh(d, config.wal_sync_on_write)?,
-            None => translog::null(),
-        };
-        let engine = Engine::open_shared_segments(
-            Arc::clone(&norm),
-            Arc::clone(&dict),
-            tag_dict,
-            config,
-            files,
-            next_seg_id,
-        )
-        .map_err(|e| ShardError::Log(format!("attaching shard segments: {e}")))?;
-        let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
-        Ok(LocalShard {
-            engine: Mutex::new(engine),
-            snapshot,
-            translog,
-            retention: Mutex::new(RetentionLeases::default()),
-            retention_lease_ttl,
-            event_sink: Mutex::new(None),
-            norm,
-            dict,
-            data_dir: dir,
-        })
-    }
-
-    /// Self-restart a durable shard from its checkpoint sidecar (ADR-039 §6): attach the committed
-    /// segments (ops ≤ `local_checkpoint`), open the EXISTING translog (the on-disk tail is the
-    /// authority — not reset), and replay the un-sealed tail (ops > `local_checkpoint`) into the
-    /// engine. Fail-loud if the sidecar's dict fingerprint diverges (never attach segments built
-    /// for a different feature space). Replay is engine-only (the ops are already in the translog).
-    fn open_durable_self(
-        norm: Arc<Normalizer>,
-        dict: Arc<Dict>,
-        tag_dict: Arc<TagDict>,
-        config: EngineConfig,
-        ckpt: &translog::ShardCheckpoint,
-    ) -> Result<Self, ShardError> {
-        let dir = config
-            .data_dir
-            .clone()
-            .ok_or_else(|| ShardError::Log("durable self-restart requires a data_dir".into()))?;
-        if ckpt.dict_fingerprint != dict.fingerprint() {
-            return Err(ShardError::DictMismatch {
-                expected: dict.fingerprint(),
-                actual: ckpt.dict_fingerprint,
-            });
-        }
-        let floor = LogPos(ckpt.local_checkpoint);
-        let retention_lease_ttl = resolve_lease_ttl(&config);
-        let translog = translog::open_existing(&dir, config.wal_sync_on_write, floor)?;
-        let engine = Engine::open_shared_segments(
-            Arc::clone(&norm),
-            Arc::clone(&dict),
-            tag_dict,
-            config,
-            &ckpt.segment_files,
-            ckpt.next_seg_id,
-        )
-        .map_err(|e| ShardError::Log(format!("attaching shard segments on self-restart: {e}")))?;
-        let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
-        let shard = LocalShard {
-            engine: Mutex::new(engine),
-            snapshot,
-            translog,
-            retention: Mutex::new(RetentionLeases::default()),
-            retention_lease_ttl,
-            event_sink: Mutex::new(None),
-            norm,
-            dict,
-            data_dir: Some(dir),
-        };
-        // Replay the un-sealed tail (ops > P) into the engine ONLY — the ops are already on disk
-        // in the translog, so re-appending would duplicate them. Position-filtered, so it never
-        // double-applies an op already baked into the attached segments.
-        let tail = shard.translog.replay(floor)?.entries;
-        for (_pos, m) in &tail {
-            shard.apply_to_engine(m);
-        }
-        Ok(shard)
-    }
-
-    /// Apply one logged mutation to the engine WITHOUT re-appending it to the translog — used by
-    /// self-restart replay (ADR-039 §6), where the op is already durable in the translog. The
-    /// translog-appending counterpart is the seam's `insert_extracted`/`delete_by_logical_id`.
-    /// Infallible: a segments-only engine has no WAL, so neither apply can error.
-    fn apply_to_engine(&self, m: &ClusterMutation) {
-        let mut eng = self.lock();
-        match m {
-            ClusterMutation::Add {
-                logical,
-                version,
-                dsl,
-                tags,
-            } => {
-                if let Ok(ast) = crate::dsl::parse(dsl) {
-                    let mut lc = String::new();
-                    let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                    eng.insert_extracted(&ex, *logical, *version, dsl, tags);
-                }
-            }
-            ClusterMutation::Remove { logical } => {
-                eng.delete_by_logical_id(*logical).unwrap_or(0);
-            }
-        }
-        Self::publish(&eng, &self.snapshot);
-    }
-
-    /// Bulk-ingest, infallibly — the build path uses this directly on a concrete
-    /// `LocalShard` (before boxing) so `ClusterEngine::build` stays infallible. The
-    /// trait's `ingest_extracted` is the `Result`-wrapped view of the same work.
-    pub(crate) fn ingest_local(&self, items: &[PlacedQuery]) -> IngestReport {
-        let mut eng = self.lock();
-        let report = eng.ingest_extracted(items);
-        Self::publish(&eng, &self.snapshot);
-        report
-    }
-
-    /// Lock the engine, recovering the guard if a prior writer panicked: a poisoned
-    /// shard mutex must not take down the whole cluster, and the engine state behind
-    /// it is still self-consistent (writes are atomic at this layer).
-    fn lock(&self) -> std::sync::MutexGuard<'_, Engine> {
-        self.engine.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Republish the lock-free read snapshot after a write.
-    fn publish(eng: &Engine, slot: &ArcSwap<EngineSnapshot>) {
-        slot.store(Arc::new(eng.snapshot()));
-    }
-
-    /// The current lock-free read snapshot (an `Arc` clone — no engine lock). Private:
-    /// the seam exposes `percolate`, not the snapshot, so a remote shard need not have
-    /// one.
-    fn snapshot(&self) -> Arc<EngineSnapshot> {
-        self.snapshot.load_full()
-    }
-}
-
-impl Shard for LocalShard {
-    /// Verbatim the body of the coordinator's old `query_shard`: allocate scratch,
-    /// match one title against the lock-free snapshot, return ids + stats. Infallible
-    /// — wrapped in `Ok` to satisfy the (remote-capable) trait.
-    fn percolate_filtered(
-        &self,
-        title: &str,
-        include_broad: bool,
-        pred: &TagPredicate,
-    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        let mut scratch = MatchScratch::new();
-        let mut out = Vec::new();
-        // The coordinator already resolved `pred` against the shared frozen tag space; an empty
-        // predicate is byte-identical to the unfiltered `match_title` (snapshot.rs).
-        let stats = self.snapshot().match_title_filtered(
-            title,
-            &mut scratch,
-            &mut out,
-            include_broad,
-            pred,
-        );
-        Ok((out, stats))
-    }
-
-    fn num_queries(&self) -> Result<usize, ShardError> {
-        Ok(self.snapshot.load().num_queries())
-    }
-
-    fn class_counts(&self) -> Result<[u64; 4], ShardError> {
-        Ok(self.snapshot.load().class_counts())
-    }
-
-    fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
-        Ok(self.lock().live_sources())
-    }
-
-    fn is_local(&self) -> bool {
-        true
-    }
-
-    fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
-        Ok(self.ingest_local(items))
-    }
-
-    fn insert_extracted_with_tags(
-        &self,
-        ex: &Extracted,
-        logical: u64,
-        version: u32,
-        text: &str,
-        tags: &[(String, String)],
-    ) -> Result<Option<u32>, ShardError> {
-        let mut eng = self.lock();
-        // Log-first / fail-closed (ADR-039): durably record the mutation in this shard's
-        // translog BEFORE applying it, under the engine lock so the log order equals the
-        // apply order (a re-add then re-remove of one id must replay in the same order it
-        // applied). A durable translog is the un-sealed tail a recovering peer replays; the
-        // in-memory translog is a no-op. An append failure rejects the write (engine
-        // untouched), mirroring the coordinator's WAL-first add_query. Raw tags ride the log
-        // alongside the DSL (ADR-055) so a replayed insert re-resolves them identically.
-        self.translog.append(&ClusterMutation::Add {
-            logical,
-            version,
-            dsl: text.to_string(),
-            tags: tags.to_vec(),
-        })?;
-        let out = eng.insert_extracted(ex, logical, version, text, tags);
-        Self::publish(&eng, &self.snapshot);
-        Ok(out)
-    }
-
-    fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
-        let mut eng = self.lock();
-        // Log-first (ADR-039): see `insert_extracted`. Idempotent on replay.
-        self.translog.append(&ClusterMutation::Remove { logical })?;
-        // The engine delete itself never errors for a cluster shard (segments-only, no WAL).
-        let n = eng.delete_by_logical_id(logical).unwrap_or(0);
-        Self::publish(&eng, &self.snapshot);
-        Ok(n)
-    }
-
-    fn flush(&self) -> Result<(), ShardError> {
-        let mut eng = self.lock();
-        eng.flush();
-        Self::publish(&eng, &self.snapshot);
-        // NOTE: a bare flush seals the memtable into a segment but does NOT trim the translog
-        // — a `Remove` against a base segment is only baked by `reseal_tombstoned_segments`,
-        // so only `seal_for_checkpoint` (flush + reseal) may advance the checkpoint and trim.
-        Ok(())
-    }
-
-    fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {
-        // Delegate to the clock-injectable core with the real wall clock. The split keeps the
-        // whole seal path (including the ADR-048 lease reap) deterministically testable.
-        self.seal_for_checkpoint_at(Instant::now())
-    }
-
-    fn segment_filenames(&self) -> Result<Vec<String>, ShardError> {
-        self.lock()
-            .segment_filenames()
-            .map_err(|e| ShardError::Log(format!("collecting shard segment filenames: {e}")))
-    }
-
-    fn next_seg_id(&self) -> Result<u64, ShardError> {
-        Ok(self.lock().next_seg_id())
-    }
-
-    fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
-        Ok(self.translog.replay(from)?.entries)
-    }
-
-    fn acquire_retention_lease(&self) -> Result<(u64, LogPos), ShardError> {
-        // Pin at the current high-water so every un-sealed op is retained for the recovery. The
-        // read-then-register is benign under a racing seal: a seal that trims to `L' > at` before
-        // this lease registers also sealed `(at, L']` into segments, so a recovery copying segments
-        // at `P ≥ L'` still has them; once registered, no future seal trims past `at`.
-        let at = self.translog.last_pos()?;
-        let id = self
-            .retention
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .acquire(at.0, Instant::now());
-        Ok((id, at))
-    }
-
-    fn renew_retention_lease(&self, lease: u64, to: LogPos) -> Result<(), ShardError> {
-        self.retention
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .renew(lease, to.0, Instant::now());
-        Ok(())
-    }
-
-    fn release_retention_lease(&self, lease: u64) -> Result<(), ShardError> {
-        self.retention
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .release(lease);
-        Ok(())
-    }
-
-    // ---- observability (ADR-021/048) ----
-    /// Install the coordinator's observer (fanned in by `ClusterEngine::set_observer`). Before
-    /// ADR-048 a plain `LocalShard` ignored this; it now stores the sink so a TTL lease reap is
-    /// observable. No pending-event buffer: a reap only fires at checkpoint time, long after an
-    /// observer attaches at cluster build/open, so there is nothing to replay.
-    fn set_event_sink(&self, sink: EventSink) {
-        *self
-            .event_sink
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(sink);
-    }
-}
-
-impl LocalShard {
-    /// Deliver a degraded-path event to the installed sink, if any (best-effort: dropped when no
-    /// observer is attached — the default, byte-identical path). Library code never writes stderr
-    /// (ADR-021); the observer turns this into logs + metrics.
-    fn emit(&self, ev: &EngineEvent) {
-        let sink = self
-            .event_sink
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(sink) = sink {
-            sink(ev);
-        }
-    }
-
-    /// The clock-injectable core of [`Shard::seal_for_checkpoint`]: flush + reseal + publish, write
-    /// the durable sidecar, reap any stuck retention lease as of `now` (ADR-048), then trim the
-    /// translog to the retention floor (ADR-040). `now` is the wall clock the lease-TTL reap
-    /// measures against; the trait method passes `Instant::now()`, while a test passes a synthetic
-    /// instant to drive expiry deterministically (no sleeps). Visible within the cluster module for
-    /// that test; production code always reaches it through the trait method.
-    pub(in crate::cluster) fn seal_for_checkpoint_at(
-        &self,
-        now: Instant,
-    ) -> Result<LogPos, ShardError> {
-        let mut eng = self.lock();
-        eng.flush(); // seal the memtable into a base segment
-        eng.reseal_tombstoned_segments(); // bake base-segment tombstones onto disk
-                                          // Fail closed (ADR-051): if the flush or reseal could not durably persist,
-                                          // the segments on disk do NOT yet reflect every flushed write / applied
-                                          // delete (a failed reseal keeps the original, un-baked segment). Bail BEFORE
-                                          // reading `p` and trimming the translog, so its tail still carries those ops
-                                          // for the next recovery — advancing the checkpoint now would let a delete
-                                          // resurrect (false positive) or a write vanish on reopen. The caller treats
-                                          // this as a transient failed checkpoint; the data is safe in the translog.
-        if !eng.persistence_healthy {
-            return Err(ShardError::Log(
-                "checkpoint aborted: flush/reseal could not durably persist; translog left intact \
-                 so the un-sealed tail replays on recovery"
-                    .into(),
-            ));
-        }
-        Self::publish(&eng, &self.snapshot);
-        // Everything ≤ `p` is now durably in the sealed/resealed segments; trim the translog
-        // to it so its remaining tail is exactly the un-sealed ops > `p` (ADR-039). Held under
-        // the engine lock, so no concurrent write advances `last_pos` between flush and read.
-        let p = self.translog.last_pos()?;
-        // A durable shard records a checkpoint sidecar so the data node can self-recover after a
-        // crash (ADR-039 §6): write it AFTER the segments are durable and BEFORE trimming the
-        // translog, so a crash in between just replays an already-captured (position-filtered)
-        // prefix — never a loss, never a double-apply.
-        if let Some(dir) = &self.data_dir {
-            let segment_files = eng.segment_filenames().map_err(|e| {
-                ShardError::Log(format!("collecting segment filenames for checkpoint: {e}"))
-            })?;
-            translog::write_sidecar(
-                dir,
-                &translog::ShardCheckpoint {
-                    next_seg_id: eng.next_seg_id(),
-                    local_checkpoint: p.0,
-                    dict_fingerprint: self.dict.fingerprint(),
-                    segment_files,
-                },
-            )?;
-        }
-        // Reap any stuck retention lease (ADR-048) before reading the floor: a lease that has not
-        // heartbeated within the TTL belongs to a crashed/stalled recovery and must no longer pin
-        // the tail (`renew` is the heartbeat, so a live recovery is never reaped). Disabled
-        // (`None`) ⇒ no reap ⇒ byte-identical to ADR-040.
-        //
-        // Then trim the translog only to the retention floor (ADR-040): a live, heartbeating lease
-        // keeps the tail a recovery still needs even though we seal here. With no lease the floor
-        // is absent and this is `p` — byte-identical to ADR-039. The segments still capture every
-        // op ≤ `p` (the sidecar's `local_checkpoint` is `p`); any retained ops in `(trim_to, p]`
-        // are redundant with the segments and position-filtered out on replay (replay is from `p`).
-        let (trim_to, reaped) = {
-            let mut r = self
-                .retention
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let reaped = match self.retention_lease_ttl {
-                Some(ttl) => r.reap_expired(now, ttl),
-                None => 0,
-            };
-            (r.floor().map_or(p.0, |f| p.0.min(f)), reaped)
-        };
-        self.translog.checkpoint(LogPos(trim_to))?;
-        // Release the engine lock before emitting so a slow sink can't block other writers (the
-        // emit also takes the separate event-sink lock; ordering it after the drop avoids any
-        // lock-order question with the engine→retention path above).
-        drop(eng);
-        if reaped > 0 {
-            // A reap means a recovery was abandoned — surface it (ADR-021/048) rather than
-            // silently reclaiming its tail. `ReplicaDesync` (benign housekeeping ⇒ warn) is the
-            // same op the handoff lease-release failure uses.
-            self.emit(&EngineEvent::DurabilityFailure {
-                op: DurabilityOp::ReplicaDesync,
-                detail: "expired stuck peer-recovery retention lease(s) past the TTL; a crashed \
-                         or stalled recovery's translog tail is now reclaimable"
-                    .into(),
-                error: format!("{reaped} lease(s) reaped"),
-            });
-        }
-        Ok(p)
-    }
-}
-
 /// Apply one logged mutation to a shard through its normal write path — so the op is itself
 /// re-logged into that shard's translog (a recovered replica's tail stays consistent) and
 /// applied to its engine. Re-derives features from the raw DSL against the frozen `dict`
@@ -933,62 +349,4 @@ pub(crate) fn apply_mutation(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod retention_lease_tests {
-    use super::RetentionLeases;
-    use std::time::{Duration, Instant};
-
-    // ADR-048: the TTL reap drops a lease that has not heartbeated within the window (a
-    // crashed/stalled recovery) while keeping one that renewed recently (a live recovery).
-    #[test]
-    fn reap_expired_drops_stale_keeps_renewed() {
-        // Synthetic instants are built by ADDING to `t0` (never subtracting) and the offsets are
-        // not whole-minute multiples, so the clock math is panic-free and unit-clean.
-        let ttl = Duration::from_secs(100);
-        let t0 = Instant::now();
-        let mut leases = RetentionLeases::default();
-
-        // Two recoveries each pin a tail position; the floor is the min.
-        let stale = leases.acquire(10, t0);
-        let live = leases.acquire(20, t0);
-        assert_eq!(
-            leases.floor(),
-            Some(10),
-            "floor is the lowest pinned position"
-        );
-
-        // The live recovery heartbeats (renew) well inside the window (80s < ttl); the stale one
-        // never does (last heartbeat stays t0).
-        leases.renew(live, 25, t0 + Duration::from_secs(80));
-
-        // Reap as of t0+150s: the stale lease (idle 150s > ttl) is expired; the live lease (idle
-        // 150-80 = 70s < ttl) survives.
-        let now = t0 + Duration::from_secs(150);
-        let reaped = leases.reap_expired(now, ttl);
-        assert_eq!(reaped, 1, "only the un-renewed lease is reaped");
-        assert_eq!(
-            leases.floor(),
-            Some(25),
-            "the renewed lease survives and still pins its (advanced) tail"
-        );
-
-        // Releasing the survivor clears the floor entirely; the reaped one is already gone.
-        leases.release(live);
-        assert_eq!(leases.floor(), None);
-        let _ = stale;
-    }
-
-    // A reap with nothing past the TTL is a no-op (disabled-equivalent behavior within the window).
-    #[test]
-    fn reap_expired_keeps_everything_within_the_window() {
-        let ttl = Duration::from_secs(100);
-        let t0 = Instant::now();
-        let mut leases = RetentionLeases::default();
-        leases.acquire(5, t0);
-        let reaped = leases.reap_expired(t0 + Duration::from_secs(50), ttl);
-        assert_eq!(reaped, 0);
-        assert_eq!(leases.floor(), Some(5));
-    }
 }

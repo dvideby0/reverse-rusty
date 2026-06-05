@@ -1,0 +1,366 @@
+//! Multi-segment lifecycle + compaction differential oracle.
+
+use crate::harness::*;
+use reverse_rusty::compile::extract;
+use reverse_rusty::dict::Dict;
+use reverse_rusty::gen::{generate, GenConfig};
+use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::segment::{Engine, MatchScratch};
+use std::collections::HashSet;
+
+/// Multi-segment path must produce EXACTLY the same matches as a single
+/// from-scratch build over the final live query set — proving build_from_queries
+/// + bulk_ingest + flush + insert_live/tombstone compose losslessly.
+#[test]
+fn multi_segment_identical_to_single_build() {
+    let cfg = GenConfig {
+        num_queries: 30_000,
+        num_titles: 3_000,
+        broad_query_frac: 0.05,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0x5E6_3A77,
+        num_players: 2_500,
+        num_sets: 1_000,
+    };
+    let data = generate(&cfg);
+    let q = &data.queries;
+    let n = q.len();
+    assert!(n > 5_000, "need a sizeable corpus");
+
+    // Partition: initial build batch, 3 bulk_ingest batches, plus a set of
+    // "updates" (re-add some EXISTING logical ids with new text).
+    let n_init = n / 3;
+    let rest = &q[n_init..];
+    let chunk = rest.len() / 3;
+    let b0 = &rest[..chunk];
+    let b1 = &rest[chunk..2 * chunk];
+    let b2 = &rest[2 * chunk..];
+
+    // pick some logical ids from the initial batch to update with new text
+    let new_text =
+        "1994 upper deck michael jordan sp preview psa 10 -(auto,signed,sgc,bgs)".to_string();
+    let mut updates: Vec<(u64, String)> = Vec::new();
+    let mut i = 7usize;
+    while i < n_init && updates.len() < 200 {
+        let logical = q[i].0;
+        updates.push((logical, new_text.clone()));
+        i += 53;
+    }
+    let updated_ids: HashSet<u64> = updates.iter().map(|(l, _)| *l).collect();
+
+    // ---- multi-segment engine ----
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    eng.build_from_queries(&q[..n_init]); // base segment 0
+    eng.bulk_ingest(b0); // base segment 1
+    eng.bulk_ingest(b1); // base segment 2
+                         // exercise the memtable + flush in the middle of the lifecycle
+    for (logical, text) in &updates {
+        // tombstone the old copy of this logical id (it lives in base segment 0)
+        // by finding its local id is non-trivial across segments, so instead we
+        // insert the new version and tombstone the OLD one we just superseded.
+        let _ = eng.insert_live(text, *logical, 2);
+    }
+    eng.flush(); // seal the updates' memtable into a base segment
+    eng.bulk_ingest(b2); // base segment after flush
+                         // a second round of live updates that stay in the (new) memtable, unflushed
+    let mut mt_old: Vec<u32> = Vec::new();
+    for (logical, text) in updates.iter().take(50) {
+        if let Some(local) = eng.insert_live(text, *logical, 3) {
+            mt_old.push(local);
+        }
+    }
+    // We now need the OLD copies (original text) of every updated id removed.
+    // The originals live in base segment 0; tombstone them there. Find each
+    // updated id's local position in segment 0 by rebuilding the mapping: in
+    // build_from_queries, queries are added in order (skipping class-D), so we
+    // tombstone via logical-id scan using a helper below.
+    tombstone_originals(&mut eng, &q[..n_init], &updated_ids);
+
+    // ---- reference engine: single build over FINAL live set ----
+    // final live set = every original query, but updated ids use the NEW text.
+    let mut final_set: Vec<(u64, String)> = Vec::with_capacity(n);
+    for (logical, text) in q {
+        if updated_ids.contains(logical) {
+            final_set.push((*logical, new_text.clone()));
+        } else {
+            final_set.push((*logical, text.clone()));
+        }
+    }
+    let mut reference = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    reference.build_from_queries(&final_set);
+
+    // brute-force oracle over the same final live set (zero-false-negative check)
+    let brute = Brute::build(&final_set);
+
+    let mut s_eng = MatchScratch::new();
+    let mut s_ref = MatchScratch::new();
+    let mut out_eng = Vec::new();
+    let mut out_ref = Vec::new();
+    let mut blc = String::new();
+    let mut bfeats = Vec::new();
+
+    let mut total_truth = 0usize;
+    let mut mismatches = 0usize;
+    let mut false_neg = 0usize;
+
+    for title in &data.titles {
+        eng.match_title(title, &mut s_eng, &mut out_eng, true);
+        reference.match_title(title, &mut s_ref, &mut out_ref, true);
+        let set_eng: HashSet<u64> = out_eng.iter().copied().collect();
+        let set_ref: HashSet<u64> = out_ref.iter().copied().collect();
+
+        if set_eng != set_ref {
+            mismatches += 1;
+            if mismatches <= 3 {
+                eprintln!(
+                    "MISMATCH on {:?}\n  multi-seg only: {:?}\n  reference only: {:?}",
+                    title,
+                    set_eng.difference(&set_ref).collect::<Vec<_>>(),
+                    set_ref.difference(&set_eng).collect::<Vec<_>>(),
+                );
+            }
+        }
+
+        let truth = brute.matches(title, &mut blc, &mut bfeats);
+        total_truth += truth.len();
+        for t in &truth {
+            if !set_eng.contains(t) {
+                false_neg += 1;
+            }
+        }
+    }
+
+    eprintln!(
+        "multi-seg test: segments={} updates={} truth_matches={} mismatches={} false_neg={}",
+        eng.num_segments(),
+        updated_ids.len(),
+        total_truth,
+        mismatches,
+        false_neg
+    );
+    let _ = mt_old;
+    assert_eq!(
+        mismatches, 0,
+        "multi-segment engine returned a DIFFERENT match set than a single from-scratch build"
+    );
+    assert_eq!(
+        false_neg, 0,
+        "multi-segment engine has FALSE NEGATIVES vs brute-force oracle"
+    );
+    assert!(total_truth > 0, "degenerate test: no matches at all");
+}
+
+/// Tombstone the ORIGINAL (pre-update) copies of `updated_ids` that live in the
+/// first base segment. Reconstructs segment-0 local ids by replaying the build
+/// order (queries added in order, class-D skipped) with an independent matcher.
+fn tombstone_originals(eng: &mut Engine, build_batch: &[(u64, String)], updated: &HashSet<u64>) {
+    let norm = Normalizer::default_vocab().expect("built-in vocab");
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let mut local: u32 = 0;
+    for (logical, text) in build_batch {
+        if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+            let ex = extract(&ast, &norm, &mut dict, &mut lc);
+            // mirror class-D rejection (these are NOT assigned a local id)
+            if ex.required.is_empty() && ex.anyof.is_empty() {
+                continue;
+            }
+            if updated.contains(logical) {
+                eng.tombstone_in(0, local).unwrap();
+            }
+            local += 1;
+        }
+    }
+}
+
+/// Compaction must produce EXACTLY the same matches as the pre-compacted engine.
+/// Builds a multi-segment engine with updates and tombstones, compacts it, and
+/// verifies the compacted engine matches both the pre-compaction engine and the
+/// brute-force oracle. This is the core correctness test for compaction: it
+/// proves that `Segment::compact_from` preserves every alive entry's exact data
+/// and signature postings, drops only tombstoned entries, and introduces no
+/// false negatives or false positives.
+#[test]
+fn compaction_preserves_correctness() {
+    let cfg = GenConfig {
+        num_queries: 30_000,
+        num_titles: 3_000,
+        broad_query_frac: 0.05,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0xC0_AC7,
+        num_players: 2_500,
+        num_sets: 1_000,
+    };
+    let data = generate(&cfg);
+    let q = &data.queries;
+    let n = q.len();
+
+    // Build 5 base segments + some tombstones (simulating update churn)
+    let chunk = n / 5;
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    eng.build_from_queries(&q[..chunk]); // segment 0
+    eng.bulk_ingest(&q[chunk..2 * chunk]); // segment 1
+    eng.bulk_ingest(&q[2 * chunk..3 * chunk]); // segment 2
+    eng.bulk_ingest(&q[3 * chunk..4 * chunk]); // segment 3
+    eng.bulk_ingest(&q[4 * chunk..]); // segment 4
+
+    // Simulate updates: re-insert some queries with new text, tombstone originals
+    let new_text = "1994 upper deck michael jordan sp preview psa 10 -(auto,signed)".to_string();
+    let mut updated_ids: HashSet<u64> = HashSet::new();
+    let mut i = 11usize;
+    while i < chunk && updated_ids.len() < 150 {
+        updated_ids.insert(q[i].0);
+        i += 41;
+    }
+    for &logical in &updated_ids {
+        let _ = eng.insert_live(&new_text, logical, 2);
+    }
+    eng.flush(); // seal updates into a 6th base segment
+    tombstone_originals(&mut eng, &q[..chunk], &updated_ids);
+
+    let pre_compact_segments = eng.num_segments();
+    assert!(
+        pre_compact_segments > 4,
+        "need multiple segments to test compaction"
+    );
+
+    // Snapshot pre-compaction matches
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    let mut pre_matches: Vec<HashSet<u64>> = Vec::with_capacity(data.titles.len());
+    for title in &data.titles {
+        eng.match_title(title, &mut s, &mut out, true);
+        pre_matches.push(out.iter().copied().collect());
+    }
+
+    // COMPACT — merge all base segments into one
+    let report = eng.compact_all();
+    assert!(report.is_some(), "compaction should have run");
+    let report = report.unwrap();
+    eprintln!(
+        "compaction: merged={} segs, before={} entries, after={} entries, reclaimed={} tombstones",
+        report.segments_merged,
+        report.entries_before,
+        report.entries_after,
+        report.tombstones_reclaimed
+    );
+    assert!(
+        report.tombstones_reclaimed > 0,
+        "should have reclaimed some tombstones"
+    );
+    // base segments collapsed to 1 + memtable = 2
+    assert_eq!(
+        eng.num_segments(),
+        2,
+        "post-compact should be 1 base + 1 memtable"
+    );
+
+    // Verify post-compaction matches are identical to pre-compaction
+    let mut post_mismatches = 0usize;
+    for (ti, title) in data.titles.iter().enumerate() {
+        eng.match_title(title, &mut s, &mut out, true);
+        let post_set: HashSet<u64> = out.iter().copied().collect();
+        if post_set != pre_matches[ti] {
+            post_mismatches += 1;
+            if post_mismatches <= 3 {
+                eprintln!(
+                    "MISMATCH on {:?}\n  pre-compact only: {:?}\n  post-compact only: {:?}",
+                    title,
+                    pre_matches[ti].difference(&post_set).collect::<Vec<_>>(),
+                    post_set.difference(&pre_matches[ti]).collect::<Vec<_>>(),
+                );
+            }
+        }
+    }
+    assert_eq!(post_mismatches, 0, "compaction changed match results");
+
+    // Also verify against brute-force oracle (zero false negatives)
+    let mut final_set: Vec<(u64, String)> = Vec::with_capacity(n);
+    for (logical, text) in q {
+        if updated_ids.contains(logical) {
+            final_set.push((*logical, new_text.clone()));
+        } else {
+            final_set.push((*logical, text.clone()));
+        }
+    }
+    let brute = Brute::build(&final_set);
+    let mut blc = String::new();
+    let mut bfeats = Vec::new();
+    let mut false_neg = 0usize;
+    let mut total_truth = 0usize;
+    for title in &data.titles {
+        eng.match_title(title, &mut s, &mut out, true);
+        let eng_set: HashSet<u64> = out.iter().copied().collect();
+        let truth = brute.matches(title, &mut blc, &mut bfeats);
+        total_truth += truth.len();
+        for t in &truth {
+            if !eng_set.contains(t) {
+                false_neg += 1;
+            }
+        }
+    }
+    eprintln!(
+        "compaction oracle: truth={} false_neg={} segments_before={} segments_after={}",
+        total_truth,
+        false_neg,
+        pre_compact_segments,
+        eng.num_segments()
+    );
+    assert_eq!(
+        false_neg, 0,
+        "compaction introduced FALSE NEGATIVES — contract violated"
+    );
+    assert!(total_truth > 0, "degenerate test: no matches");
+}
+
+/// Compact_range merges a subset of segments correctly — the rest are untouched.
+#[test]
+fn compact_range_preserves_correctness() {
+    let cfg = GenConfig {
+        num_queries: 20_000,
+        num_titles: 2_000,
+        broad_query_frac: 0.05,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0xBA_93E,
+        num_players: 2_000,
+        num_sets: 800,
+    };
+    let data = generate(&cfg);
+    let q = &data.queries;
+    let chunk = q.len() / 4;
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    eng.build_from_queries(&q[..chunk]);
+    eng.bulk_ingest(&q[chunk..2 * chunk]);
+    eng.bulk_ingest(&q[2 * chunk..3 * chunk]);
+    eng.bulk_ingest(&q[3 * chunk..]);
+    assert_eq!(eng.num_segments(), 5); // 4 base + 1 memtable
+
+    // Snapshot pre-compaction matches
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    let mut pre_matches: Vec<HashSet<u64>> = Vec::with_capacity(data.titles.len());
+    for title in &data.titles {
+        eng.match_title(title, &mut s, &mut out, true);
+        pre_matches.push(out.iter().copied().collect());
+    }
+
+    // Compact only segments [1..3) — merge segments 1 and 2
+    let report = eng.compact_range(1, 3);
+    assert!(report.is_some());
+    assert_eq!(eng.num_segments(), 4); // 3 base + 1 memtable
+
+    // Verify identical matches
+    let mut mismatches = 0usize;
+    for (ti, title) in data.titles.iter().enumerate() {
+        eng.match_title(title, &mut s, &mut out, true);
+        let post_set: HashSet<u64> = out.iter().copied().collect();
+        if post_set != pre_matches[ti] {
+            mismatches += 1;
+        }
+    }
+    assert_eq!(mismatches, 0, "compact_range changed match results");
+}
