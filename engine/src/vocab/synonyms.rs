@@ -27,10 +27,14 @@
 //! `c -a` becomes the contradiction `term:c -term:c`) — see ADR-060.
 //!
 //! **Multi-token forms** (`upper deck`, `i-pod`) cannot be a single feature on their own, so each
-//! is registered as a gluing **phrase** (`["upper","deck"] -> "term:upper_deck"`) and the glued
-//! feature joins the equivalence group. (A multi-token form therefore tightens to adjacency, the
-//! documented ADR-053 residual — but it is the operator's explicit choice to declare it as a unit,
-//! and the same normalizer runs over titles, so the lossless cover still holds.)
+//! is registered as an **additive** gluing phrase to a single-token canonical
+//! (`["upper","deck"] -> "term:upperdeck"`, ADR-053) and that canonical joins the equivalence group.
+//! *Additive* (not collapse) is load-bearing: a title bearing the form still emits its component
+//! features, so a pre-existing component-token query (e.g. `deck`) never loses a match — loading a
+//! synonym table only ever *grows* recall. The single-token canonical (the tokens joined, so it
+//! survives the normalizer's re-tokenization as ONE feature) is what lets the equivalence resolve.
+//! (Forms whose glued canonical coincides with a sibling form — `ipod, i-pod` — are already
+//! equivalent via the phrase, so the rule adds no equivalence and is a no-op, not an error.)
 //!
 //! Admin/build-time only — never on the match hot path.
 
@@ -97,15 +101,19 @@ impl From<SynonymParseError> for SynonymLoadError {
     }
 }
 
-/// Split a form into normalized tokens the way the default normalizer tokenizes a title: fold
-/// diacritics, lowercase, and break on any run of non-alphanumerics (so `i-pod` -> `["i","pod"]`,
-/// `Upper Deck` -> `["upper","deck"]`). A form yielding `[]` (all punctuation) cannot be a feature.
+/// Split a form into normalized tokens the way the **default** normalizer tokenizes a title
+/// ([`Normalizer::clean_into`](crate::normalize::Normalizer)): fold diacritics, lowercase, **keep
+/// `.` inside the token** (`PunctClass::Keep` — so `st.` and `9.5` stay one token), and break on
+/// every other non-alphanumeric (so `i-pod` -> `["i","pod"]`, `Upper Deck` -> `["upper","deck"]`).
+/// A token with no alphanumeric (e.g. all dots) is dropped — it can't be a feature. (A *custom*
+/// punctuation config — folded `-`, or `#`/`/` markers — can diverge; the common default is
+/// mirrored, and divergence only makes an alias a no-op, never a false negative.)
 fn tokenize_form(form: &str) -> Vec<String> {
-    let mut toks = Vec::new();
+    let mut toks: Vec<String> = Vec::new();
     let mut cur = String::new();
     for ch in form.chars() {
         let c = crate::normalize::fold_diacritic(ch);
-        if c.is_ascii_alphanumeric() {
+        if c.is_ascii_alphanumeric() || c == '.' {
             cur.push(c.to_ascii_lowercase());
         } else if !cur.is_empty() {
             toks.push(std::mem::take(&mut cur));
@@ -114,6 +122,7 @@ fn tokenize_form(form: &str) -> Vec<String> {
     if !cur.is_empty() {
         toks.push(cur);
     }
+    toks.retain(|t| t.bytes().any(|b| b.is_ascii_alphanumeric()));
     toks
 }
 
@@ -148,37 +157,52 @@ pub fn parse_synonyms(text: &str) -> Result<Vocab, SynonymParseError> {
             split_forms(line)
         };
 
-        // Resolve each form to a single feature: a single-token form is used directly; a
-        // multi-token form is glued by a collapse phrase so it becomes one feature.
+        // Resolve each form to a single feature: a single-token form is its own feature; a
+        // multi-token form is glued by an **additive** phrase to a single-token canonical
+        // (`["upper","deck"] -> "upperdeck"`). Additive (not collapse) so a title bearing the form
+        // still emits its component features — a pre-existing component-token query (e.g. `deck`)
+        // never loses a match (recall-first / FN-safe). The single-token canonical (joined, so it
+        // survives re-tokenization as ONE feature) is what makes the equivalence resolve.
         let mut group: Vec<String> = Vec::with_capacity(raw_forms.len());
+        let mut usable_forms = 0usize;
         for form in raw_forms {
             let toks = tokenize_form(form);
-            let member = match toks.len() {
-                0 => continue, // punctuation-only form — cannot be a feature
-                1 => toks[0].clone(),
-                _ => {
-                    let canonical = format!("term:{}", toks.join("_"));
-                    let refs: Vec<&str> = toks.iter().map(String::as_str).collect();
-                    vocab.add_phrase(&refs, &canonical, FeatureKind::Generic);
-                    toks.join(" ") // resolved through the phrase to `canonical` at apply time
-                }
+            if toks.is_empty() {
+                continue; // punctuation-only form — cannot be a feature
+            }
+            usable_forms += 1;
+            let member = if toks.len() == 1 {
+                toks.join("") // the lone token (lowercased, `.` kept) — matches real text 1:1
+            } else {
+                // Glue to a single-token canonical so the equivalence resolves to ONE feature. The
+                // member is the bare joined token (`upperdeck`); a generic token compiles to the
+                // `term:`-prefixed name (`emit_generic`), so the phrase's canonical must carry the
+                // SAME prefix — otherwise the phrase would emit `upperdeck` while the member
+                // resolved to `term:upperdeck`, and the equivalence would never link.
+                let joined = toks.join("");
+                let canonical = format!("term:{joined}");
+                let refs: Vec<&str> = toks.iter().map(String::as_str).collect();
+                vocab.add_phrase_additive(&refs, &canonical, FeatureKind::Generic);
+                joined
             };
             if !group.contains(&member) {
                 group.push(member);
             }
         }
 
-        if group.len() < 2 {
+        // A genuinely under-specified rule (fewer than two usable forms) is an error; a rule whose
+        // forms collapse to the SAME feature (e.g. `ipod, i-pod` — already made equivalent by the
+        // gluing phrase) is redundant, not malformed, so it adds no equivalence and is not an error.
+        if usable_forms < 2 {
             return Err(SynonymParseError {
                 line: line_no,
-                message: format!(
-                    "a synonym rule needs at least two distinct forms (got {})",
-                    group.len()
-                ),
+                message: format!("a synonym rule needs at least two forms (got {usable_forms})"),
             });
         }
-        let refs: Vec<&str> = group.iter().map(String::as_str).collect();
-        vocab.add_equivalence(&refs);
+        if group.len() >= 2 {
+            let refs: Vec<&str> = group.iter().map(String::as_str).collect();
+            vocab.add_equivalence(&refs);
+        }
     }
     Ok(vocab)
 }
@@ -256,34 +280,68 @@ rc, rookie
 
     #[test]
     fn arrow_mapping_unions_both_sides_into_one_group() {
-        let v = parse_synonyms("ud, upperdeck => upper deck").expect("parse");
+        let v = parse_synonyms("ud => upper deck").expect("parse");
         let groups = v.equivalences();
         assert_eq!(groups.len(), 1);
         let g = &groups[0];
+        // The multi-token side resolves to its single-token canonical (`upperdeck`).
         assert!(g.contains(&"ud".to_string()));
         assert!(g.contains(&"upperdeck".to_string()));
-        assert!(g.contains(&"upper deck".to_string()));
-        // The multi-token form `upper deck` is glued by a phrase.
+        // `upper deck` is glued by an ADDITIVE phrase to that canonical.
         assert_eq!(v.phrases().len(), 1);
         let p = &v.phrases()[0];
         assert_eq!(p.tokens, vec!["upper".to_string(), "deck".to_string()]);
-        assert_eq!(p.canonical, "term:upper_deck");
-        assert!(!p.additive, "gluing phrase must collapse (one feature)");
+        assert_eq!(p.canonical, "term:upperdeck");
+        assert!(
+            p.additive,
+            "gluing phrase must be additive so component features survive (recall-first)"
+        );
     }
 
     #[test]
-    fn multi_token_form_via_hyphen_is_glued() {
-        // `i-pod` splits to two tokens by the default normalizer, so it must be glued like a
-        // space-separated phrase for the equivalence to resolve to one feature.
-        let v = parse_synonyms("ipod, i-pod").expect("parse");
+    fn hyphenated_multi_token_form_is_glued_additively() {
+        // `new york` / `new-york` split to two tokens by the default normalizer, so each is glued
+        // (additively) to the single-token canonical `newyork`, which joins the group with `nyc`.
+        let v = parse_synonyms("nyc, new-york").expect("parse");
         assert_eq!(v.phrases().len(), 1);
-        assert_eq!(
-            v.phrases()[0].tokens,
-            vec!["i".to_string(), "pod".to_string()]
-        );
+        let p = &v.phrases()[0];
+        assert_eq!(p.tokens, vec!["new".to_string(), "york".to_string()]);
+        assert_eq!(p.canonical, "term:newyork");
+        assert!(p.additive);
         let g = &v.equivalences()[0];
-        assert!(g.contains(&"ipod".to_string()));
-        assert!(g.contains(&"i pod".to_string())); // normalized, space-joined
+        assert!(g.contains(&"nyc".to_string()) && g.contains(&"newyork".to_string()));
+    }
+
+    #[test]
+    fn glued_form_equal_to_a_sibling_is_redundant_not_an_error() {
+        // `i-pod` glues to `ipod`, which equals the other form — they are already equivalent via
+        // the phrase, so the rule adds the phrase but no (degenerate) equivalence, and is NOT an
+        // error (two usable forms were given).
+        let v = parse_synonyms("ipod, i-pod").expect("parse");
+        assert_eq!(
+            v.phrases().len(),
+            1,
+            "the gluing phrase is still registered"
+        );
+        assert_eq!(v.phrases()[0].canonical, "term:ipod");
+        assert!(
+            v.equivalences().is_empty(),
+            "forms already feature-identical => no equivalence added"
+        );
+    }
+
+    #[test]
+    fn dotted_form_keeps_the_dot_to_match_the_normalizer() {
+        // The default normalizer keeps `.` inside a token (`st.` -> `st.`), so the equivalence
+        // member must too — otherwise the alias would resolve to `st` and never fire on real
+        // `st.` text. (P2 from the ADR-060 Codex review.)
+        let v = parse_synonyms("st., saint").expect("parse");
+        assert!(v.phrases().is_empty(), "`st.` is one token => no phrase");
+        let g = &v.equivalences()[0];
+        assert!(
+            g.contains(&"st.".to_string()) && g.contains(&"saint".to_string()),
+            "dotted form kept verbatim: {g:?}"
+        );
     }
 
     #[test]

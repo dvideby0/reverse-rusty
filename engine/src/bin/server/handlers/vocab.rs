@@ -105,6 +105,21 @@ pub(crate) async fn load_synonyms(
     let groups = parsed.equivalences().len();
     let phrases = parsed.phrases().len();
 
+    // An empty or comment-only table is a documented no-op: don't take the write lock, bump the
+    // vocab epoch, or trigger a full recompile of every live query for nothing.
+    if groups == 0 && phrases == 0 {
+        return (
+            StatusCode::OK,
+            Json(LoadSynonymsResponse {
+                acknowledged: true,
+                groups: 0,
+                phrases: 0,
+                recompiled: 0,
+            }),
+        )
+            .into_response();
+    }
+
     let result = {
         let mut engine = state.engine.lock();
         // Merge into the current vocab (additive — keep existing phrases/synonyms/graders).

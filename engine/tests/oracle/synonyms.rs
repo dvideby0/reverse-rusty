@@ -24,6 +24,7 @@ fn synonym_file_expansion_is_fn_safe_and_recall_grows() {
     let mut queries: Vec<(u64, String)> = vec![
         (1, "auto".into()),      // requires `auto`
         (2, "ud rookie".into()), // requires `ud` + `rookie`
+        (3, "deck".into()),      // a bare COMPONENT token of the multi-token alias `upper deck`
     ];
     for i in 0..20u64 {
         for tok in ["auto", "signature", "autograph", "ud", "rookie"] {
@@ -51,6 +52,10 @@ fn synonym_file_expansion_is_fn_safe_and_recall_grows() {
         !before_ud.contains(&2),
         "before synonyms, `ud rookie` must not match an `upper deck` title"
     );
+    assert!(
+        before_ud.contains(&3),
+        "the bare `deck` query matches `upper deck rookie` before any synonyms are loaded"
+    );
 
     // Load a Solr-format synonym table at runtime (the endpoint's path).
     let mut v = Vocab::new();
@@ -74,6 +79,11 @@ fn synonym_file_expansion_is_fn_safe_and_recall_grows() {
     assert!(
         after_ud.contains(&2),
         "after ud≡`upper deck`, the `ud rookie` query matches an `upper deck rookie` title"
+    );
+    assert!(
+        after_ud.contains(&3),
+        "REGRESSION (ADR-060 P1): gluing `upper deck` must NOT suppress the component `deck` — the \
+         bare `deck` query must still match `upper deck rookie` after loading (additive, FN-safe)"
     );
     assert!(
         before_sig.is_subset(&after_sig) && before_ud.is_subset(&after_ud),
