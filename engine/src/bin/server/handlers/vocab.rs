@@ -36,8 +36,9 @@ pub(crate) async fn get_vocab(State(state): State<Arc<AppState>>) -> impl IntoRe
     Json(vocab)
 }
 
-/// PUT /_vocab — replace the vocabulary. Existing compiled queries become
-/// stale; the caller should reingest for consistent matching.
+/// PUT /_vocab — replace the vocabulary, then recompile every stored query
+/// under the new normalizer (same lock, before the snapshot is published) so
+/// the change takes effect immediately with zero false negatives.
 pub(crate) async fn put_vocab(
     State(state): State<Arc<AppState>>,
     Json(vocab): Json<reverse_rusty::vocab::Vocab>,

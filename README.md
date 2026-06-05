@@ -126,7 +126,8 @@ invariants are in [`docs/performance/`](docs/performance/README.md).
 
 ## Quickstart
 
-Requires Rust 1.70+ (2021 edition). The release profile enables LTO, a single codegen unit, and
+Uses the 2021 edition; the toolchain is pinned in [`engine/rust-toolchain.toml`](engine/rust-toolchain.toml)
+(rustup auto-installs the pinned rustc). The release profile enables LTO, a single codegen unit, and
 `opt-level=3` for maximum match-path throughput.
 
 ```bash

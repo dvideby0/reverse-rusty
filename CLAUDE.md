@@ -28,8 +28,8 @@ with a hard guarantee of **zero false negatives**. (Selective path ≈250× the 
 
 ## The correctness contract (the thing that must never break)
 
-> **Lossless signature cover:** if a title `T` could satisfy query `Q`'s positive semantics,
-> then `T` must generate at least one signature that retrieves `Q` from the candidate index.
+> **Lossless signature cover:** if a title `T` *could* satisfy query `Q`'s positive semantics, then
+> `T` must generate at least one signature that retrieves `Q` from the candidate index.
 
 This guarantees zero false negatives. False-positive *candidates* are allowed (the exact
 matcher rejects them). Verified by a randomized differential oracle in `tests/oracle.rs`; the formal
@@ -71,8 +71,8 @@ history showed that cache-line blocked bloom was a better match for our 1-memory
 
 ## Build, test, run
 
-- **Language:** Rust 2021 edition, std-only core. **17 dependencies** — the lean core
-  (`cargo build --no-default-features`) needs only `daachorse`, `memmap2`, `roaring`, `rayon`,
+- **Language:** Rust 2021 edition, std-only core. **A deliberately lean dependency tree** — the lean core
+  (`cargo build --no-default-features`) needs only seven crates: `daachorse`, `memmap2`, `roaring`, `rayon`,
   `arc-swap` (snapshot reads), `serde`/`serde_json` (vocab/config/loader JSON); the rest are
   server/observability crates behind the default-on `server` feature ([ADR-028](docs/DECISIONS.md);
   lean build enforced by a `check.sh` lane). The optional `distributed` feature adds `tonic`/`prost`
@@ -155,8 +155,10 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `tests/cluster_oracle.rs` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad on/off, all placement classes + fan-out asserted; + **filtered percolation** (ADR-055) — tagged corpus, cluster filtered ≡ single-node ≡ brute across K×RF + filtered ⊆ unfiltered + synthetic-tag cross-shard consistency | ADR-027, ADR-055 |
 | `tests/cluster_grpc_oracle.rs` | gRPC differential oracle (feature `distributed`): K real `ShardServer`s on localhost, cluster-over-gRPC ≡ single-node ≡ brute + live add/percolate/remove RPCs; **dict shipping (ADR-034)** — a dict-less-`pending`-servers variant + the divergent-dict-refused-on-a-populated-server guard; **replication + peer recovery (ADR-035/036)** — K×RF durable servers via `connect_replicated` ≡ brute, primary-stop **failover**, and fresh-node **peer recovery** over `FetchSegments`/`RecoverFrom`; **no-quiesce recovery (ADR-039)** — `grpc_peer_recovery_without_quiescing`: snapshot at `P`, writes land after `P`, the `FetchTranslog` tail catches them up, recovered ≡ live source ≡ brute over the final live set (the in-process + self-restart analogues are `replica.rs` unit tests); **filtered percolation over the wire (ADR-055)** — `grpc_filtered_percolation_matches_single_node_and_oracle`: `AdoptDict` ships the tag dict + fingerprint handshake, tagged bulk load + a live tagged add, filtered percolate ≡ single-node ≡ brute | ADR-029, ADR-034, ADR-036, ADR-039, ADR-055 |
 | `tests/cluster_durability_oracle.rs` | Cluster durability oracle: a `data_dir` cluster rebuilt from manifest + per-shard segments + log ≡ pre-crash ≡ brute, K∈{1,3,8} × broad on/off, + checkpoint, torn-tail recovery, append-fails-closed, two-backend differential, fsync parity, fail-loud guards. Step-3b additions: attach-with-the-log-deleted, the checkpoint-after-removing-a-build-time-query bug-catcher, orphan-segment-ignored-and-GC'd, corrupt-segment-fails-loud | ADR-031, ADR-032 |
+| `tests/cluster_control_plane_oracle.rs` | Control-plane seam oracle (lean core, ADR-037): the default `InMemoryControlPlane` perturbs nothing, a reassignment preserves zero false negatives, and every backend converges to the same committed cluster-state doc — the acceptance gate for the `ControlPlane` seam | ADR-037 |
 | `tests/cluster_control_raft_oracle.rs` | openraft control-plane oracle (feature `distributed`): a 3-node in-process Raft cluster (real elections + replication + quorum commit) converges to the in-memory backend's document (voters/nodes/assignments/model — NOT the epoch, which openraft's Blank/Membership commits perturb); a follower `propose` → `ForwardToLeader`; `change_membership` routes to Raft; and over real gRPC `ControlService` servers on localhost, **survive-the-leader-being-killed** (re-elect from quorum, committed doc persists, fresh write commits) | ADR-038 |
 | `tests/cluster_autoscale_oracle.rs` | Autoscaler oracle (ADR-045): over a real in-process cluster, `tick` commits the same shard→node map a manual `rebalance` does; **`percolate` byte-identical before/after a tick** (zero false negatives); a second tick commits nothing (epoch-invariant); a disabled config is a no-op; a corpus-over-threshold `RecommendSplit` advisory mutates nothing | ADR-045 |
+| `tests/cluster_allocator_oracle.rs` | Allocator oracle (lean core, ADR-042): the rendezvous/HRW shard→node map is balanced + deterministic, `rebalance` is idempotent (minimal movement), and **`percolate` is byte-identical before/after a rebalance** (zero false negatives) | ADR-042 |
 | `tests/error_paths.rs` | API error handling regression tests | — |
 | `tests/persistence.rs` | Persistence tests: segment round-trip, WAL recovery, mmap compaction | — |
 | `tests/hardening_fixes.rs` | Integration tests: vocab epoch, fallible deser, reverse-index delete | — |
@@ -174,7 +176,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `src/bin/snapbench.rs` | Snapshot read/publish concurrency benchmark | ADR-016 |
 | `src/bin/server/` | HTTP server (axum, **module**) — ES-style REST API (incl. batch `/_mpercolate`), snapshot-based concurrency, structured logging, Prometheus metrics, graceful shutdown. `server/main.rs` is the entry point (CLI parse, engine build, router wiring, shutdown); submodules split by concern — `cli` (flags), `metrics` (Prometheus registry + the `EngineEvent`→counter bridge), `state` (`AppState` + request-id/in-flight middleware), `dto` (cross-handler response types — the error envelope + `_source`), and `handlers/` (endpoint handlers grouped by family — `doc`/`search`/`admin`/`vocab`, each owning its endpoint-specific DTOs + co-located tests). Endpoint reference: [`docs/reference/api.md`](docs/reference/api.md) | ADR-014, ADR-016, ADR-021, ADR-022, ADR-023, ADR-026 |
 
-*(All test files above are committed and run by `cargo test --release`. `tests/stress.rs`'s one 10M-query soak is `#[ignore]`d — run it explicitly or via the CI `run_soak` dispatch input. How-we-test guide: [`docs/testing.md`](docs/testing.md).)*
+*(All test suites above are committed and run by `cargo test --release`; suites that outgrew the size limit are now `tests/NAME/` folders, so the `tests/NAME.rs` names here are the cargo `--test NAME` suite names. The stress suite's one 10M-query soak is `#[ignore]`d — run it explicitly or via the CI `run_soak` dispatch input. How-we-test guide: [`docs/testing.md`](docs/testing.md).)*
 
 ## Where to go — find the ONE doc for your task
 

@@ -75,7 +75,7 @@ what makes the feature spaces line up. Pipeline, all over a reusable scratch buf
    table** over a reusable scratch buffer. By default `.` is kept in place (so half-grades like `9.5`
    survive), `#`/`/` become standalone marker tokens (so the number logic tells `#2`/`/199` from grades),
    and every other non-alphanumeric byte becomes a space (a word boundary). The table is **configurable**
-   ([ADR-058](DECISIONS.md)): a character can instead be declared **folding** — deleted, so its neighbors
+   ([ADR-058](../DECISIONS.md)): a character can instead be declared **folding** — deleted, so its neighbors
    join into one token (`O'Brien`/`O-Brien`/`OBrien` → `obrien`), closing a recall gap where a
    punctuation-only spelling difference would drop a candidate. The default is byte-identical to the old
    hardcoded behavior; the same table runs over queries and titles, so any reclassification applies to
