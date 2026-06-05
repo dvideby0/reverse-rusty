@@ -111,6 +111,16 @@ same way at compile time — they are, because the normalizer is shared. Determi
   let the optimizer reason about selectivity per kind.
 - The dictionary is immutable per segment (compaction can re-rank); the hot delta uses an append-only
   overlay so new features get IDs without rewriting segments.
+- **Equivalences (aliases).** The dict carries a transient `EquivMap` (member `FeatureId` → its group)
+  consulted by the compile-time expansion pass (`Extracted::expand_equivalences`): a required feature in
+  an equivalence group widens to an any-of over the group, so a query phrased with one surface form
+  retrieves a title bearing another — applied by **expansion, not collapse**, so it can only widen the
+  match set (structurally FN-safe; [DECISIONS.md](../DECISIONS.md) ADR-054). The map is re-derived from
+  the `Vocab` at apply time, never serialized, and not part of `Dict::fingerprint`. **Governed by the
+  `AliasRegistry`** (provenance / kind / confidence / status; ADR-060): only *active* single-token
+  groups feed the map (`Vocab::effective_equivalence_groups`), and on the mutable single-node dict the
+  active forms are interned **before** resolving (`intern_equivalence_forms`) so a later insert cannot
+  flip a form's synthetic id to a dense one and silently drop the alias (the ID-stability fix).
 
 ---
 

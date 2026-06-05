@@ -16,6 +16,7 @@
 
 mod harness;
 
+mod alias;
 mod batch;
 mod core;
 mod corpus;

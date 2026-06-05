@@ -67,9 +67,10 @@ use reverse_rusty::segment::Engine;
 
 use cli::Cli;
 use handlers::{
-    api_root, bulk_ingest, cat_segments, cat_stats, compact, delete_doc, flush, get_doc,
-    get_settings, get_vocab, health, learn_and_apply_vocab, learn_vocab, mpercolate,
-    prometheus_metrics, put_doc, put_settings, put_vocab, search, stats,
+    api_root, bulk_ingest, cat_segments, cat_stats, compact, delete_doc, flush, get_aliases,
+    get_doc, get_settings, get_vocab, health, import_aliases, learn_and_apply_aliases,
+    learn_and_apply_vocab, learn_vocab, mpercolate, prometheus_metrics, put_doc, put_settings,
+    put_vocab, search, stats,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -351,6 +352,12 @@ async fn main() {
         .route("/_vocab", get(get_vocab).put(put_vocab))
         .route("/_vocab/learn", post(learn_vocab))
         .route("/_vocab/learn_and_apply", post(learn_and_apply_vocab))
+        .route("/_vocab/aliases", get(get_aliases))
+        .route("/_vocab/aliases/import", post(import_aliases))
+        .route(
+            "/_vocab/aliases/learn_and_apply",
+            post(learn_and_apply_aliases),
+        )
         .route("/_settings", get(get_settings).put(put_settings))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
@@ -364,7 +371,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply",
+        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply",
         "server listening"
     );
 

@@ -240,12 +240,14 @@ false-negative / throughput audit — remains the open step in **Current limitat
   apply path. The remaining work is to **govern, persist, and safely activate** aliases — and it splits
   along the exact line that killed the first attempt (PR #37, abandoned): **single-token aliases are a
   vocabulary feature; multi-word aliases are a matching-model feature.** Design learnings:
-  [`research/multiword-synonyms.md`](research/multiword-synonyms.md). (No ADR number is pre-assigned —
-  each phase gets its own ADR when it lands.)
+  [`research/multiword-synonyms.md`](research/multiword-synonyms.md). **Phase 1 is now ✅ BUILT +
+  oracle-proven ([ADR-060](DECISIONS.md));** Phase 2 (the multi-word matcher feature) is still
+  design-only. (No ADR number was pre-assigned — each phase gets its own ADR when it lands.)
 
-  - **Phase 1 — `feat(vocab): learned alias evolution (safe single-token activation)`. The shippable PR;
-    no matcher change.** A *real* vocabulary-evolution PR — not "PR #37 with fewer bugs," not docs-only.
-    Scope: **(1)** a first-class **`AliasRegistry`** (`forms`, `provenance` = declared-file |
+  - **Phase 1 — `feat(vocab): learned alias evolution (safe single-token activation)`. ✅ BUILT +
+    oracle-proven ([ADR-060](DECISIONS.md)), single-node.** A *real* vocabulary-evolution PR — not "PR
+    #37 with fewer bugs," not docs-only — all nine scope items shipped: **(1)** a first-class
+    **`AliasRegistry`** (`forms`, `provenance` = declared-file |
     learned-from-queries, `confidence`, `status` = candidate | active | rejected, `kind`); **(2) learn
     candidates from query any-of groups** with *conservative* rules — auto-activate only repeated
     single-token spelling/abbreviation variants; keep multi-word aliases, broad category alternatives
@@ -262,8 +264,12 @@ false-negative / throughput audit — remains the open step in **Current limitat
     candidates vs active aliases. *(Single-node first, like ADR-054 — `set_vocab` already refuses a
     non-local or tagged cluster, verified.)*
 
-    > **Embedded real bug — alias ID stability across the synthetic/dense boundary (verified against the
-    > code, currently reachable).** Independent of multi-word: equivalences are resolved **once** at
+    > **Embedded real bug — alias ID stability across the synthetic/dense boundary. ✅ FIXED in
+    > [ADR-060](DECISIONS.md)** (`Vocab::intern_equivalence_forms` interns every active form into the
+    > mutable single-node dict *before* resolving, called from `Engine::{with_vocab, set_vocab,
+    > adopt_vocab}`; regression-guarded by
+    > `tests/oracle/alias.rs::alias_ids_are_stable_after_future_insert`, which fails on the pre-fix code).
+    > Independent of multi-word: equivalences are resolved **once** at
     > install / `set_vocab` time, and a form not yet interned resolves to a deterministic **synthetic** id
     > (`dict::get_or_synthetic`, read-only `extract_readonly` / `compile_features_readonly`). A *later*
     > live `PUT /_doc` interns that same form as a **dense** id via the mutating `extract`
