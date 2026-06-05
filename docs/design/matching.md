@@ -16,9 +16,10 @@ correctness contract this section must uphold.*
 > clustered *implicitly* — they share signature anchors in the candidate index, so a single failed
 > anchor probe drops the whole cluster's candidates. An explicit query-family / shared-prefix-DAG
 > structure (subtree pruning) was evaluated and deliberately **not** pursued; see
-> [DECISIONS](../DECISIONS.md) ADR-019 for the reasoning. **Per-query metadata, filtered percolation,
-> and ranking (§5) are design-only** — the percolator-parity work in [STATUS](../STATUS.md) Tier 4 /
-> [DECISIONS](../DECISIONS.md) ADR-049. See [STATUS](../STATUS.md).
+> [DECISIONS](../DECISIONS.md) ADR-019 for the reasoning. **Per-query metadata + filtered percolation
+> (§5.1–§5.3) are built (single-node) and thread end-to-end through the cluster**
+> ([DECISIONS](../DECISIONS.md) ADR-049/055), and **ranking + pagination (§5.4) are built single-node**
+> ([ADR-059](../DECISIONS.md); cluster ranking deferred). See [STATUS](../STATUS.md).
 
 **TL;DR (for agents)**
 - **Owns:** signature optimizer (`compile.rs`), candidate index (`index.rs`), exact matcher (`exact.rs`), explain (`explain.rs`)

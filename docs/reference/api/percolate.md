@@ -76,6 +76,7 @@ curl -X POST localhost:9200/_search \
       "hits": [{"_id": 1, "_source": {"query": "dell laptop"}}],
       "stats": {
         "unique_candidates": 15,
+        "broad_candidates": 0,
         "postings_scanned": 47,
         "matches": 1,
         "probes_attempted": 28,
@@ -88,6 +89,7 @@ curl -X POST localhost:9200/_search \
       "hits": [{"_id": 2, "_source": {"query": "leather jacket"}}],
       "stats": {
         "unique_candidates": 9,
+        "broad_candidates": 0,
         "postings_scanned": 22,
         "matches": 1,
         "probes_attempted": 18,
@@ -99,8 +101,9 @@ curl -X POST localhost:9200/_search \
 ```
 
 The `stats` object per slot shows how much work the engine did: how many candidates were retrieved
-from the index, how many posting lists were scanned, how many bloom-filter probes were skipped, and
-how many candidates survived to become confirmed matches. The search body also accepts `explain` and
+from the index (`broad_candidates` is the subset that came from the quarantined broad lane), how many
+posting lists were scanned, how many bloom-filter probes were skipped, and how many candidates
+survived to become confirmed matches. The search body also accepts `explain` and
 `profile` options for per-query match tracing (see [`../design/matching.md`](../../design/matching.md) §6).
 
 ### Filtered percolation (ADR-049)

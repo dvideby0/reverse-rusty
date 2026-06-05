@@ -25,8 +25,9 @@ curl localhost:9200/_vocab
 
 ## `PUT /_vocab` — Replace vocabulary
 
-Replace the engine's vocabulary. If queries have already been ingested, the response includes a
-warning — you should reingest for consistent matching.
+Replace the engine's vocabulary. Existing stored queries are **automatically recompiled** under the
+new normalizer — under the same lock, before the new snapshot is published — so the change takes
+effect immediately with zero false negatives. `recompiled` reports how many queries were rebuilt.
 
 ```bash
 curl -X PUT localhost:9200/_vocab \
@@ -37,7 +38,7 @@ curl -X PUT localhost:9200/_vocab \
 ```json
 {
   "acknowledged": true,
-  "warning": "normalizer changed with existing queries; reingest for consistent matching"
+  "recompiled": 1280
 }
 ```
 

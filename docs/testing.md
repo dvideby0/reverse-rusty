@@ -39,6 +39,8 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 | Suite | Where | Covers |
 |---|---|---|
 | **Differential oracle** | `tests/oracle.rs` | The **correctness contract** — brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing test; never weaken it. |
+| **Broad-lane batch** | `tests/broad_batch.rs` | Broad-lane **batch ≡ scalar** equivalence matrix — the load-bearing batch-correctness deliverable ([`design/matching.md`](design/matching.md) §4). |
+| Ranking | `tests/ranking.rs` | Engine-level ranking (ADR-059): additive scoring, newest-live-copy tag precedence, and the ranked-set ≡ unranked-set recall guard ([`design/matching.md`](design/matching.md) §5.4). |
 | Unit tests | `src/*.rs` | DSL parsing, vocab, WAL framing, loader, anchor filter (inline `#[cfg(test)]` modules). |
 | Persistence | `tests/persistence.rs` | Segment round-trip, WAL crash-recovery replay, mmap compaction, durability-failure events. |
 | Hardening | `tests/hardening_fixes.rs` | Vocab-epoch staleness, fallible deserialization, reverse-index delete. |
@@ -70,7 +72,11 @@ vocab-driven path is additionally run end-to-end by `zero_false_negatives_with_p
 Cluster v1** (the in-process multi-shard core + durable reopen + dynamic vocabulary): _cluster ≡
 single-node ≡ brute_ and _reopen ≡ pre-crash ≡ brute_, with the dynamic-vocabulary absorb-correctly
 assertions baked in (ADR-046). Both already run on the default `cargo test --release`, so the gate is
-live — naming them here makes the contract explicit: keep them green, never weaken them. The
+live — naming them here makes the contract explicit: keep them green, never weaken them. Two further
+**lean-core** cluster oracles also run on the default `cargo test --release`:
+`tests/cluster_control_plane_oracle.rs` (the `ControlPlane`-seam gate — ADR-037) and
+`tests/cluster_allocator_oracle.rs` (the shard→node allocator gate — ADR-042), each asserting
+`percolate` is byte-identical across a reassignment/rebalance. The
 experimental distributed layers add three more oracles that `check.sh` runs in its
 `--features distributed` lane — `tests/cluster_grpc_oracle.rs` (gRPC transport + dict shipping +
 replication/recovery; the `block_on` **rayon-fanout** and **single-target-from-a-tokio-worker** guards;
@@ -82,13 +88,13 @@ cycle (ADR-047) is proven deterministically in the lean core by `cluster/coordin
 
 ## Pressure & soak tests
 
-[`tests/stress.rs`](../engine/tests/stress.rs) holds the pressure suite. Its 15 normal tests run as
+[`tests/stress/`](../engine/tests/stress/) holds the pressure suite. Its normal tests run as
 part of `cargo test --release` (and therefore on every PR). One large-scale test —
 `ten_million_queries_mixed_ops` — is `#[ignore]`d because it needs ~4+ GiB and minutes; run it
 explicitly:
 
 ```
-cargo test --release --test stress -- --nocapture                          # the 15, with event logs
+cargo test --release --test stress -- --nocapture                          # the normal suite, with event logs
 cargo test --release --test stress ten_million_queries_mixed_ops -- --ignored --nocapture   # the soak
 ```
 

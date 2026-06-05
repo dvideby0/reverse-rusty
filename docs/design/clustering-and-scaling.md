@@ -55,9 +55,10 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > of the above is oracle-proven _in-process / on localhost_, but experimental beyond the in-process v1 core
 > — not yet hardened for real multi-machine deployment.** The **Cluster v1** correctness item is **dynamic
 > vocabulary** (absorbing new terms after the dict is frozen — see
-> [`../research/dynamic-vocabulary.md`](../research/dynamic-vocabulary.md) → ADR-046). Still design-only
-> beyond that: auto-split + `recommended_shard_count`, wiring that advisory handoff to `execute_handoff`,
-> and TLS/auth.
+> [`../research/dynamic-vocabulary.md`](../research/dynamic-vocabulary.md) → ADR-046). Reliability
+> hardening — auto-unfence-on-abort, the translog-lease TTL, and wiring that advisory handoff to
+> `execute_handoff` — landed in ADR-048. Still design-only beyond that: auto-split +
+> `recommended_shard_count`, a clean cross-node load-move (deployment-model maturity), and TLS/auth.
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
@@ -509,10 +510,10 @@ step 3b's per-shard local durable segments, step 4's per-shard replication + pee
 4b over gRPC), the **quorum/Raft control plane** — step 5a's seam AND step 5b's openraft backend + gRPC
 `ControlService` — AND step 5c's **per-shard translog + no-quiesce peer recovery**, step 5d's retention/finalize,
 step 5e's durable Raft log, step 5f's **shard→node allocator**, step 6a's **runtime-swappable shard backing**,
-step 6b's **live data-moving handoff**, and step 6c's **autoscaler** are built; ADR-027 + ADR-029 + ADR-034 +
+step 6b's **live data-moving handoff**, step 6c's **autoscaler**, and the **reliability hardening** layered on top (auto-unfence-on-abort, translog-lease TTL, autoscaler→handoff wiring) are built; ADR-027 + ADR-029 + ADR-034 +
 ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040 + ADR-041 + ADR-042 + ADR-043 +
-ADR-044 + ADR-045. The remaining shared-nothing multi-node work — **auto-split** + `recommended_shard_count`
-and wiring the autoscaler's advisory handoff to `execute_handoff` — is design-only (ADR-033). See
+ADR-044 + ADR-045 + ADR-048. The remaining shared-nothing multi-node work — **auto-split** + `recommended_shard_count`
+and a clean cross-node load-move (deployment-model maturity — multi-shard-per-node endpoints / a spare-node target) — is design-only (ADR-033). See
 [`../STATUS.md`](../STATUS.md).)
 
 ---

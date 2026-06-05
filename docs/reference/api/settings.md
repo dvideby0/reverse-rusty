@@ -58,7 +58,8 @@ curl -X PUT localhost:9200/_settings \
 - **Dynamic (runtime-tunable):** `max_segments`, `memtable_flush_threshold`, `max_query_length`,
   `max_query_clauses`, `max_anyof_group_size`, `holes_ratio_threshold`, `compaction_fixed_cost`,
   `auto_compact_on_flush`, `auto_compact_on_ingest`, `compaction_reanchor` (re-anchor drifted queries
-  on the next merge, ADR-056).
+  on the next merge, ADR-056), and the broad-lane batch knobs `broad_batch_size`, `max_percolate_batch`,
+  `broad_columnar`, `broad_materialize` (ADR-026).
 - **Static (startup only):** `data_dir`, `wal_sync_on_write`, `retain_source`.
 
 The query-complexity limits (`max_query_length`, `max_query_clauses`, `max_anyof_group_size`) are

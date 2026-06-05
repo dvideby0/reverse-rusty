@@ -10,7 +10,7 @@ write path with immutable segments and read-optimized compaction; never rebuild 
 rebuild-from-scratch is reserved for the initial seed and major feature-model changes (and even then
 it's blue/green from the log, not stop-the-world).*
 
-> **Implementation status:** Core LSM engine implemented and tested (segments, memtable, flush, bulk_ingest, tombstones, **compaction**, **mmap'd segments**, **WAL**). Compaction uses a ClickHouse-inspired score-based merge selector (§5–6 below) that directly optimizes for minimum time-integrated segment count — the right objective for a percolator where reads probe every segment. Supports `compact(max_segments)`, `compact_all()`, and `compact_range(lo, hi)`. Verified by oracle tests. Mmap'd segment file format with frozen hash tables (ADR-012) and write-ahead log for crash recovery (ADR-013) are implemented. Compaction-that-improves and feature-model versioning are design-only.
+> **Implementation status:** Core LSM engine implemented and tested (segments, memtable, flush, bulk_ingest, tombstones, **compaction**, **mmap'd segments**, **WAL**). Compaction uses a ClickHouse-inspired score-based merge selector (§5–6 below) that directly optimizes for minimum time-integrated segment count — the right objective for a percolator where reads probe every segment. Supports `compact(max_segments)`, `compact_all()`, and `compact_range(lo, hi)`. Verified by oracle tests. Mmap'd segment file format with frozen hash tables (ADR-012) and write-ahead log for crash recovery (ADR-013) are implemented. Re-anchoring drifted queries during compaction ("compaction-that-improves") is built (opt-in via `compaction_reanchor`, ADR-056, oracle-proven); feature-model versioning is design-only.
 
 **TL;DR (for agents)**
 - **Owns:** LSM engine (`segment.rs`), the write path and storage model
@@ -18,8 +18,8 @@ it's blue/green from the log, not stop-the-world).*
 - **Write path:** `insert_live` → memtable → `flush()` seals to base segment; `bulk_ingest()` compiles a batch directly into a new segment
 - **Update model:** tombstones + re-insert (new PhysicalVersionId); epoch-based atomic visibility
 - **Measured:** ~750k updates/sec/core, ~650k bulk compiles/sec/core (full numbers: [performance/results.md](../performance/results.md))
-- **Design-only:** compaction-that-improves (re-anchoring drift), feature-model versioning, per-query metadata storage (§11)
-- **Recently implemented:** durable mutation log (WAL — ADR-013), mmap'd segments (ADR-012), per-segment anchor filters (cache-line blocked bloom — ADR-011), score-based compaction (ADR-009)
+- **Design-only:** feature-model versioning, stat-driven self-tuning (telemetry-driven cover refresh + `recommended_shard_count`/`recommended_arity`)
+- **Recently implemented:** durable mutation log (WAL — ADR-013), mmap'd segments (ADR-012), per-segment anchor filters (cache-line blocked bloom — ADR-011), score-based compaction (ADR-009), compaction re-anchoring (ADR-056), per-query metadata storage (ADR-049)
 
 Builds on [`../research/corpus-feature-learning.md`](../research/corpus-feature-learning.md) (feature
 learner) and [`clustering-and-scaling.md`](clustering-and-scaling.md) (cluster mutation log). Grounded
@@ -172,9 +172,9 @@ epoch):
 1. **Drop tombstones**, reclaim space, renumber to dense `SegmentLocalQueryId`s for cache locality.
 2. **Recompute statistics** (feature df, per-signature posting length, candidate-survival rate from
    runtime telemetry) for the merged range.
-3. **Re-anchor drifted queries** — a query whose anchor went hot (a player got popular) gets a fresh,
-   more-selective signature cover. This is how frequency drift is repaired **lazily and locally**,
-   never by a global rebuild.
+3. **Re-anchor drifted queries** (built, opt-in via `compaction_reanchor` — ADR-056) — a query whose
+   anchor went hot (a player got popular) gets a fresh, more-selective signature cover. This is how
+   frequency drift is repaired **lazily and locally**, never by a global rebuild.
 4. **Rewrite poor covers / split hot signatures** ([`matching.md`](matching.md) §1, §4), **repack
    postings** into the optimal adaptive representation, re-rank feature IDs for locality, and **rebuild
    per-segment anchor filters**.
@@ -231,9 +231,10 @@ versions interoperate (frozen mask), majors are isolated behind a blue/green swa
   2. ~~Per-segment anchor filters~~ → cache-line blocked bloom filter (ADR-011).
   3. ~~Durable mutation log + mmap'd segments~~ → WAL (ADR-013) + mmap'd segment file format with
      frozen hash tables (ADR-012). `Engine::open()` for manifest + WAL recovery.
-- **Next steps (design-only — see [`../STATUS.md`](../STATUS.md)):**
-  1. **Compaction-that-improves** (re-anchoring drift) and stat-driven self-tuning.
-  2. **Feature-model versioning** + a blue/green re-materialize path from the log.
+- **Next steps (see [`../STATUS.md`](../STATUS.md)):**
+  1. **Stat-driven self-tuning** — re-anchoring on compaction is built (ADR-056, §7.3); the
+     telemetry-driven cover refresh + `recommended_shard_count`/`recommended_arity` remain design-only.
+  2. **Feature-model versioning** + a blue/green re-materialize path from the log (design-only).
 
 ---
 
