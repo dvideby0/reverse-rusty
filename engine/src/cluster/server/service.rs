@@ -2,23 +2,29 @@
 //! dict-fingerprint reads, the adopt-dict + write RPCs (ingest / insert / delete / flush /
 //! fence), and the peer-recovery RPCs (FetchSegments / RecoverFrom / FetchTranslog /
 //! RetentionLease) + their server-streaming helpers.
+//!
+//! This file holds the trait impl itself; the heavier per-RPC bodies live in focused
+//! submodules so each concern is self-contained (the trait impl stays a thin delegator,
+//! since Rust requires every method in ONE `impl` block):
+//!   - [`dict_adopt`] — the `AdoptDict` body (dict + tag-space shipping, ADR-034/055)
+//!   - [`recovery`]   — the peer-recovery RPCs (FetchSegments / RecoverFrom / FetchTranslog) + their server-streaming helpers (ADR-035/036/039)
+//!   - [`leases`]     — translog retention leases + the live-handoff write fence (RetentionLease / Fence / Unfence, ADR-040/044/048)
 
-use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
-use crate::cluster::clog::LogPos;
 use crate::cluster::proto;
 use crate::cluster::proto::shard_service_server::ShardService;
-use crate::cluster::shard::{LocalShard, Shard};
+use crate::cluster::shard::Shard;
 use crate::segment::PlacedQuery;
 
-use super::{compile_item, ServerState, ShardServer};
+use super::{compile_item, ShardServer};
+
+mod dict_adopt;
+mod leases;
+mod recovery;
 
 #[tonic::async_trait]
 impl ShardService for ShardServer {
@@ -96,90 +102,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::AdoptDictRequest>,
     ) -> Result<Response<proto::AdoptDictReply>, Status> {
-        let req = request.into_inner();
-        let dict = crate::storage::deserialize_dict(&req.dict)
-            .map_err(|e| Status::invalid_argument(format!("deserializing shipped dict: {e}")))?;
-        let fp = dict.fingerprint();
-        if fp != req.fingerprint {
-            return Err(Status::invalid_argument(format!(
-                "shipped dict integrity check failed: bytes fingerprint to {fp:#018x} but the \
-                 request claims {:#018x}",
-                req.fingerprint
-            )));
-        }
-        // The frozen tag space ships ATOMICALLY with the dict (ADR-055). An empty blob ⇒ an empty
-        // (untagged) tag space — back-compatible with a coordinator that ships no tags.
-        let tag_dict = crate::storage::deserialize_tagdict(&req.tag_dict).map_err(|e| {
-            Status::invalid_argument(format!("deserializing shipped tag dict: {e}"))
-        })?;
-        let tag_fp = tag_dict.fingerprint();
-        if tag_fp != req.tag_dict_fingerprint {
-            return Err(Status::invalid_argument(format!(
-                "shipped tag-dict integrity check failed: bytes fingerprint to {tag_fp:#018x} but \
-                 the request claims {:#018x}",
-                req.tag_dict_fingerprint
-            )));
-        }
-
-        let adopt = match self.state.load_full().as_deref() {
-            // Already serving this exact dict AND tag space → nothing to do.
-            Some(st) if st.dict.fingerprint() == fp && st.tag_dict.fingerprint() == tag_fp => false,
-            // A different dict / tag space is already in place; only safe to replace if no data
-            // depends on it (re-basing loaded data onto a divergent feature/tag space is unsafe).
-            Some(st) => {
-                let n = st
-                    .shard
-                    .num_queries()
-                    .map_err(|e| Status::internal(e.to_string()))?;
-                if n > 0 {
-                    return Err(Status::failed_precondition(format!(
-                        "shard holds {n} queries under dict {:#018x}; refusing to adopt a \
-                         divergent dict {fp:#018x} / tag space (re-basing loaded data is unsafe)",
-                        st.dict.fingerprint()
-                    )));
-                }
-                true // adopted but empty → safe to re-adopt (e.g. a pre-built `new` server gaining tags)
-            }
-            // Pending → adopt.
-            None => true,
-        };
-
-        if adopt {
-            let dict = Arc::new(dict);
-            let tag_dict = Arc::new(tag_dict);
-            // A durable node (data_dir set) builds a segments-only durable shard so its writes
-            // persist `.seg` files — required to later serve `FetchSegments` or be a recovering
-            // replica (ADR-035/036). An in-memory node keeps today's behavior.
-            let shard = match &self.data_dir {
-                Some(dir) => {
-                    let mut sc = self.config.clone();
-                    sc.data_dir = Some(dir.clone());
-                    LocalShard::new_durable(
-                        Arc::clone(&self.norm),
-                        Arc::clone(&dict),
-                        Arc::clone(&tag_dict),
-                        sc,
-                    )
-                    .map_err(|e| Status::internal(format!("durable adopt: {e}")))?
-                }
-                None => LocalShard::new(
-                    Arc::clone(&self.norm),
-                    Arc::clone(&dict),
-                    Arc::clone(&tag_dict),
-                    self.config.clone(),
-                ),
-            };
-            self.state.store(Some(Arc::new(ServerState {
-                dict,
-                tag_dict,
-                shard,
-            })));
-        }
-
-        Ok(Response::new(proto::AdoptDictReply {
-            fingerprint: fp,
-            tag_dict_fingerprint: tag_fp,
-        }))
+        dict_adopt::adopt_dict(self, request)
     }
 
     async fn ingest_extracted(
@@ -281,66 +204,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::FetchSegmentsRequest>,
     ) -> Result<Response<Self::FetchSegmentsStream>, Status> {
-        let st = self.loaded()?;
-        let Some(dir) = self.data_dir.clone() else {
-            return Err(Status::failed_precondition(
-                "shard is not durable; cannot stream segments for peer recovery",
-            ));
-        };
-        let fp = st.dict.fingerprint();
-        if request.into_inner().dict_fingerprint != fp {
-            return Err(Status::failed_precondition(
-                "FetchSegments dict-fingerprint mismatch (divergent feature space)",
-            ));
-        }
-        // Seal so the on-disk `.seg` set reflects live state (memtable flushed, base tombstones
-        // baked) — else a deleted query could resurrect on the recovered replica. The returned
-        // position `P` is what the sealed segments capture through; the recovering node replays
-        // the translog tail (> P) via FetchTranslog to catch writes that land during the copy
-        // (ADR-039), so the source need NOT quiesce.
-        let up_to_seqno = st
-            .shard
-            .seal_for_checkpoint()
-            .map_err(|e| Status::internal(format!("seal before FetchSegments: {e}")))?
-            .0;
-        let files = st
-            .shard
-            .segment_filenames()
-            .map_err(|e| Status::internal(format!("collecting segment filenames: {e}")))?;
-        let next_seg_id = st
-            .shard
-            .next_seg_id()
-            .map_err(|e| Status::internal(format!("next_seg_id: {e}")))?;
-
-        let (tx, rx) = tokio::sync::mpsc::channel(8);
-        tokio::spawn(async move {
-            let seg_dir = dir.join("segments");
-            let sources = dir.join("sources.dat");
-            let has_sources = sources.exists();
-            let manifest = proto::FetchSegmentsChunk {
-                frame: Some(proto::fetch_segments_chunk::Frame::Manifest(
-                    proto::FetchManifest {
-                        segment_files: files.clone(),
-                        next_seg_id,
-                        dict_fingerprint: fp,
-                        has_sources,
-                        up_to_seqno,
-                    },
-                )),
-            };
-            if tx.send(Ok(manifest)).await.is_err() {
-                return;
-            }
-            for name in &files {
-                if !stream_file(&tx, name, &seg_dir.join(name)).await {
-                    return;
-                }
-            }
-            if has_sources {
-                stream_file(&tx, "sources.dat", &sources).await;
-            }
-        });
-        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+        recovery::fetch_segments(self, request)
     }
 
     /// Accept peer recovery — the recovering node pulls from a peer (the Elasticsearch model):
@@ -355,69 +219,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::RecoverFromRequest>,
     ) -> Result<Response<proto::RecoverFromReply>, Status> {
-        let st = self.loaded()?;
-        let Some(dir) = self.data_dir.clone() else {
-            return Err(Status::failed_precondition(
-                "shard is not durable; cannot accept peer recovery",
-            ));
-        };
-        let req = request.into_inner();
-        let dict_fp = st.dict.fingerprint();
-        if req.dict_fingerprint != dict_fp {
-            return Err(Status::failed_precondition(
-                "RecoverFrom dict-fingerprint mismatch (divergent feature space)",
-            ));
-        }
-        let mut client =
-            proto::shard_service_client::ShardServiceClient::connect(req.source_endpoint.clone())
-                .await
-                .map_err(|e| {
-                    Status::unavailable(format!(
-                        "connecting to recovery source {}: {e}",
-                        req.source_endpoint
-                    ))
-                })?;
-        let mut stream = client
-            .fetch_segments(proto::FetchSegmentsRequest {
-                dict_fingerprint: dict_fp,
-            })
-            .await?
-            .into_inner();
-
-        let seg_dir = dir.join("segments");
-        std::fs::create_dir_all(&seg_dir)
-            .map_err(|e| Status::internal(format!("creating {}: {e}", seg_dir.display())))?;
-        let (files, next_seg_id, up_to_seqno) =
-            drain_recovery_stream(&mut stream, &dir, &seg_dir).await?;
-
-        // Attach the received segments against our adopted dict (fail-loud on missing/corrupt).
-        let mut sc = self.config.clone();
-        sc.data_dir = Some(dir.clone());
-        let shard = LocalShard::open_segments(
-            Arc::clone(&self.norm),
-            Arc::clone(&st.dict),
-            // Preserve the node's adopted frozen tag space (ADR-055); the recovered segments already
-            // carry resolved `TagId`s, and the tail catch-up re-resolves its raw tags against it.
-            Arc::clone(&st.tag_dict),
-            sc,
-            &files,
-            next_seg_id,
-        )
-        .map_err(|e| Status::internal(format!("attaching recovered segments: {e}")))?;
-        let num_queries = shard
-            .num_queries()
-            .map_err(|e| Status::internal(e.to_string()))? as u64;
-        let segments_attached = files.len() as u64;
-        self.state.store(Some(Arc::new(ServerState {
-            dict: Arc::clone(&st.dict),
-            tag_dict: Arc::clone(&st.tag_dict),
-            shard,
-        })));
-        Ok(Response::new(proto::RecoverFromReply {
-            segments_attached,
-            num_queries,
-            up_to_seqno,
-        }))
+        recovery::recover_from(self, request).await
     }
 
     // ---- per-shard translog tail (ADR-039) ----
@@ -433,23 +235,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::FetchTranslogRequest>,
     ) -> Result<Response<Self::FetchTranslogStream>, Status> {
-        let st = self.loaded()?;
-        let req = request.into_inner();
-        let fp = st.dict.fingerprint();
-        if req.dict_fingerprint != fp {
-            return Err(Status::failed_precondition(
-                "FetchTranslog dict-fingerprint mismatch (divergent feature space)",
-            ));
-        }
-        let tail = st
-            .shard
-            .translog_tail(LogPos(req.after_seqno))
-            .map_err(|e| Status::internal(format!("reading translog tail: {e}")))?;
-        let entries: Vec<Result<proto::TranslogEntry, Status>> = tail
-            .into_iter()
-            .map(|(pos, m)| Ok(proto::translog_entry_from_mutation(pos, &m)))
-            .collect();
-        Ok(Response::new(Box::pin(tokio_stream::iter(entries))))
+        recovery::fetch_translog(self, request)
     }
 
     // ---- translog retention leases (ADR-040) ----
@@ -462,40 +248,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::RetentionLeaseRequest>,
     ) -> Result<Response<proto::RetentionLeaseReply>, Status> {
-        let st = self.loaded()?;
-        let req = request.into_inner();
-        if req.dict_fingerprint != st.dict.fingerprint() {
-            return Err(Status::failed_precondition(
-                "RetentionLease dict-fingerprint mismatch (divergent feature space)",
-            ));
-        }
-        match req.op {
-            0 => {
-                let (lease_id, pos) = st
-                    .shard
-                    .acquire_retention_lease()
-                    .map_err(|e| Status::internal(format!("acquire retention lease: {e}")))?;
-                Ok(Response::new(proto::RetentionLeaseReply {
-                    lease_id,
-                    pos: pos.0,
-                }))
-            }
-            1 => {
-                st.shard
-                    .renew_retention_lease(req.lease_id, LogPos(req.pos))
-                    .map_err(|e| Status::internal(format!("renew retention lease: {e}")))?;
-                Ok(Response::new(proto::RetentionLeaseReply::default()))
-            }
-            2 => {
-                st.shard
-                    .release_retention_lease(req.lease_id)
-                    .map_err(|e| Status::internal(format!("release retention lease: {e}")))?;
-                Ok(Response::new(proto::RetentionLeaseReply::default()))
-            }
-            other => Err(Status::invalid_argument(format!(
-                "RetentionLease: unknown op {other} (expected 0=acquire, 1=renew, 2=release)"
-            ))),
-        }
+        leases::retention_lease(self, request)
     }
 
     // ---- live handoff: write fence (ADR-044, clustering step 6b) ----
@@ -509,21 +262,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::FenceRequest>,
     ) -> Result<Response<proto::FenceReply>, Status> {
-        let st = self.loaded()?;
-        let req = request.into_inner();
-        if req.dict_fingerprint != st.dict.fingerprint() {
-            return Err(Status::failed_precondition(
-                "Fence dict-fingerprint mismatch (divergent feature space)",
-            ));
-        }
-        // Monotonic max: a later, lower-generation Fence (a stale/duplicate message) never lowers
-        // the fence. `fetch_max` returns the previous value; the stored value becomes the max.
-        let prev = self
-            .fenced_at_generation
-            .fetch_max(req.generation, Ordering::AcqRel);
-        Ok(Response::new(proto::FenceReply {
-            fenced_at_generation: prev.max(req.generation),
-        }))
+        leases::fence(self, request)
     }
 
     // ---- live handoff: un-fence on abort (ADR-048) ----
@@ -538,137 +277,6 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::UnfenceRequest>,
     ) -> Result<Response<proto::UnfenceReply>, Status> {
-        let st = self.loaded()?;
-        let req = request.into_inner();
-        if req.dict_fingerprint != st.dict.fingerprint() {
-            return Err(Status::failed_precondition(
-                "Unfence dict-fingerprint mismatch (divergent feature space)",
-            ));
-        }
-        // CAS from the exact generation this handoff fenced at. If the node is at 0 (not fenced)
-        // or at a higher generation (a newer handoff re-fenced it), the swap fails and the fence
-        // is left as-is — we report its current value.
-        let now_gen = match self.fenced_at_generation.compare_exchange(
-            req.generation,
-            0,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => 0,
-            Err(actual) => actual,
-        };
-        Ok(Response::new(proto::UnfenceReply {
-            fenced_at_generation: now_gen,
-        }))
+        leases::unfence(self, request)
     }
-}
-
-/// Stream one file as a contiguous run of ≤256 KiB `FileChunk`s ending with `last = true`.
-/// Reads the file into memory once (bounded per-file — fine for a recovery path; a chunked
-/// file read is a future refinement). Returns `false` to abort the stream (read error — the
-/// error is forwarded to the receiver first — or the receiver hung up).
-async fn stream_file(
-    tx: &tokio::sync::mpsc::Sender<Result<proto::FetchSegmentsChunk, Status>>,
-    name: &str,
-    path: &std::path::Path,
-) -> bool {
-    const CHUNK: usize = 256 * 1024;
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            tx.send(Err(Status::internal(format!(
-                "reading {name} for FetchSegments: {e}"
-            ))))
-            .await
-            .ok();
-            return false;
-        }
-    };
-    let mut off = 0usize;
-    loop {
-        let end = (off + CHUNK).min(bytes.len());
-        let last = end == bytes.len();
-        let chunk = proto::FetchSegmentsChunk {
-            frame: Some(proto::fetch_segments_chunk::Frame::File(proto::FileChunk {
-                name: name.to_string(),
-                data: bytes[off..end].to_vec(),
-                last,
-            })),
-        };
-        if tx.send(Ok(chunk)).await.is_err() {
-            return false;
-        }
-        if last {
-            return true;
-        }
-        off = end;
-    }
-}
-
-/// Drain a `FetchSegments` stream into `dir`: the manifest frame first, then per-file runs
-/// written via tmp+rename (so a crash mid-recovery never leaves a half-written `.seg` that a
-/// later attach would CRC-reject). Validates that every manifested segment fully arrived — a
-/// truncated stream errors rather than attaching a subset (a silent shard-sized false
-/// negative). Returns the attach file list + seg-id cursor from the manifest.
-async fn drain_recovery_stream(
-    stream: &mut tonic::Streaming<proto::FetchSegmentsChunk>,
-    dir: &std::path::Path,
-    seg_dir: &std::path::Path,
-) -> Result<(Vec<String>, u64, u64), Status> {
-    use std::io::Write as _;
-    let final_path = |name: &str| -> PathBuf {
-        if name == "sources.dat" {
-            dir.join("sources.dat")
-        } else {
-            seg_dir.join(name)
-        }
-    };
-    let mut manifest: Option<proto::FetchManifest> = None;
-    let mut received: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // The currently-open tmp file: (name, handle, tmp path). Files arrive as contiguous runs.
-    let mut cur: Option<(String, std::fs::File, PathBuf)> = None;
-
-    while let Some(chunk) = stream.message().await? {
-        match chunk.frame {
-            Some(proto::fetch_segments_chunk::Frame::Manifest(m)) => manifest = Some(m),
-            Some(proto::fetch_segments_chunk::Frame::File(fc)) => {
-                if cur.as_ref().is_none_or(|(n, _, _)| *n != fc.name) {
-                    let fin = final_path(&fc.name);
-                    let tmp = PathBuf::from(format!("{}.tmp", fin.display()));
-                    let f = std::fs::File::create(&tmp)
-                        .map_err(|e| Status::internal(format!("create {}: {e}", tmp.display())))?;
-                    cur = Some((fc.name.clone(), f, tmp));
-                }
-                if let Some((_, f, _)) = cur.as_mut() {
-                    f.write_all(&fc.data)
-                        .map_err(|e| Status::internal(format!("writing {}: {e}", fc.name)))?;
-                }
-                if fc.last {
-                    if let Some((name, f, tmp)) = cur.take() {
-                        f.sync_all()
-                            .map_err(|e| Status::internal(format!("sync {name}: {e}")))?;
-                        drop(f);
-                        std::fs::rename(&tmp, final_path(&name))
-                            .map_err(|e| Status::internal(format!("rename {name}: {e}")))?;
-                        received.insert(name);
-                    }
-                }
-            }
-            None => {}
-        }
-    }
-    let manifest =
-        manifest.ok_or_else(|| Status::internal("recovery stream had no manifest frame"))?;
-    for name in &manifest.segment_files {
-        if !received.contains(name) {
-            return Err(Status::internal(format!(
-                "recovery stream truncated: segment {name} did not fully arrive"
-            )));
-        }
-    }
-    Ok((
-        manifest.segment_files,
-        manifest.next_seg_id,
-        manifest.up_to_seqno,
-    ))
 }
