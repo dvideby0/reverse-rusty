@@ -43,9 +43,17 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
     let mut lc = String::new();
     let mut kinds: Vec<FeatureKind> = Vec::with_capacity(forms.len());
     for f in forms {
+        // Check the RAW whitespace token count *before* phrase folding: a multi-word surface form
+        // is a token-graph (Phase 2) case and must stay a candidate even if the current vocab
+        // already has a phrase rule that would fold it into one feature — otherwise importing
+        // `ud => upper deck` while `upper deck` is a declared phrase would silently activate a
+        // multi-word alias (the Phase-1 boundary must not depend on what phrases happen to exist).
+        if f.split_whitespace().count() != 1 {
+            return AliasKind::MultiWord;
+        }
         let feats = norm.compile_features_readonly(f, dict, &mut lc);
-        // A form must normalize to exactly one feature to be a single-token alias; zero
-        // features (all punctuation) or several (a phrase) is a multi-word/token-graph case.
+        // A single-word form must normalize to exactly one feature to be a single-token alias;
+        // zero features (all punctuation) or several (a punctuation-split word) is not.
         if feats.len() != 1 {
             return AliasKind::MultiWord;
         }

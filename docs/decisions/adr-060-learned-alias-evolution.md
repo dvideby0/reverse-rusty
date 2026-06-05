@@ -52,9 +52,15 @@
     reads this union; candidates contribute nothing.
   - **The ID-stability fix.** `Vocab::intern_equivalence_forms` interns every effective form into the
     **mutable** single-node dict *before* resolving, forcing the same interning a future insert would
-    do — so resolve-time and insert-time agree on a dense id. Called from `Engine::{with_vocab,
-    set_vocab, adopt_vocab}`. A no-op without equivalences (byte-identical); never touches the cluster's
-    frozen dict (it is provably immune).
+    do — so resolve-time and insert-time agree on a dense id. Called from the **compile/recompile**
+    paths `Engine::{with_vocab, set_vocab}` (which then compile or recompile queries against the just-
+    interned ids). It is **deliberately NOT** called from `adopt_vocab` (the reopen path): that path
+    does not recompile, and the recovered segments baked their ids against the persisted dict, so a form
+    they resolved to a *synthetic* id must keep resolving synthetic — interning it dense without
+    recompiling would make the title side miss those recovered queries (an FN on upgrade). A new-code
+    index already has its active forms interned dense in the persisted dict, so reopen resolves them
+    dense and stays consistent. A no-op without equivalences (byte-identical); never touches the
+    cluster's frozen dict (it is provably immune).
   - **Live apply + ops.** `Engine::{import_alias_synonyms, learn_aliases_and_apply}` reuse the existing
     `set_vocab` + `recompile_stale_segments` path (no restart, no full rebuild) and return an
     `AliasApplyReport { activated, recompiled, summary }`. REST: `GET /_vocab/aliases` (review),

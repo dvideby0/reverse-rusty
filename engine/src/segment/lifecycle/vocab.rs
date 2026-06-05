@@ -130,15 +130,18 @@ impl Engine {
         vocab: crate::vocab::Vocab,
     ) -> Result<(), crate::error::NormalizerError> {
         let norm = Arc::new(vocab.to_normalizer()?);
-        // Re-install equivalence groups (ADR-054) so inserts AFTER reopen expand through them.
-        // Already-compiled segments were persisted with their expansion baked in, so matching
-        // recovered queries needs no re-resolution — this only equips the live compile path.
-        // Intern the active forms first (ADR-060 ID-stability), so a post-reopen insert of a
-        // never-before-interned alias form can't mint a divergent dense id.
-        let dict = Arc::make_mut(&mut self.dict);
-        vocab.intern_equivalence_forms(&norm, dict);
-        let equiv = vocab.resolve_equivalences(&norm, dict);
-        dict.set_equivalences(equiv);
+        // Re-install equivalence groups (ADR-054/060) so inserts AFTER reopen expand through them.
+        // Resolve against the RECOVERED dict AS-IS — do NOT intern here (unlike `set_vocab`): the
+        // already-compiled segments baked their feature ids against this dict, so a form they
+        // resolved to a *synthetic* id (an old-format index, or any active alias form never
+        // interned) must keep resolving synthetic — otherwise the title side would resolve it
+        // dense and miss those recovered queries, a false negative (ADR-060). A new-code index
+        // already has its active alias forms interned dense in the persisted dict (from
+        // `set_vocab`/`with_vocab`), so they resolve dense here and stay consistent with future
+        // inserts. A genuine runtime vocabulary *change* (intern + recompile) goes through
+        // `set_vocab` + `recompile_stale_segments`, not this adopt path.
+        let equiv = vocab.resolve_equivalences(&norm, &self.dict);
+        Arc::make_mut(&mut self.dict).set_equivalences(equiv);
         self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
         Ok(())
