@@ -78,6 +78,8 @@ Three levels, each giving *just enough* to decide whether to go deeper:
   extractor from the query corpus (NPMI).
 - [`research/real-data-findings.md`](research/real-data-findings.md) — testing the normalizer against
   real eBay titles.
+- [`research/multiword-synonyms.md`](research/multiword-synonyms.md) — design learnings from an
+  abandoned multi-word-alias attempt (the token-graph vs flat-feature-set / forbidden-feature wall).
 
 ---
 
