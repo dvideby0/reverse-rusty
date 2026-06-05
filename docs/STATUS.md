@@ -450,7 +450,9 @@ Tiers, highest-leverage first:
 - **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node
   ADR-049, ✅ through the cluster ADR-055); byte-cleaning punctuation-equivalence folding (✅ ADR-058);
   ranking + `/_mpercolate` pagination (✅ built single-node ADR-059 — cluster ranking deferred); still
-  open: bulk-alias registration API.
+  open: bulk/learned-alias evolution (2 phases — Phase 1 safe single-token activation + ID-stability
+  fix as a vocab feature, Phase 2 a token-graph multi-word matcher with positive/negative title feature
+  views).
 
 See **[`roadmap.md`](roadmap.md)** for the per-tier detail, the Nice-to-have / operational-polish
 backlog, and the Evaluated & declined list.
