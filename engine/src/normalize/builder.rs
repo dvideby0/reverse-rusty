@@ -58,7 +58,7 @@ impl NormalizerBuilder {
     /// to match (lowercased, after diacritic folding). `feature` is the canonical
     /// feature name emitted on match. `kind` is the feature kind for the dictionary.
     pub fn add_phrase(&mut self, tokens: &[&str], feature: &str, kind: FeatureKind) {
-        self.add_phrase_inner(tokens, feature, kind, false);
+        self.add_phrase_inner(tokens, feature, kind, false, false);
     }
 
     /// Like [`add_phrase`](Self::add_phrase) but **additive**: a match emits the phrase
@@ -66,7 +66,19 @@ impl NormalizerBuilder {
     /// referencing a component never loses the match. Used for corpus-learned phrases
     /// (ADR-053) to keep the recall-first contract.
     pub fn add_phrase_additive(&mut self, tokens: &[&str], feature: &str, kind: FeatureKind) {
-        self.add_phrase_inner(tokens, feature, kind, true);
+        self.add_phrase_inner(tokens, feature, kind, true, false);
+    }
+
+    /// Register an **alias entity** phrase (ADR-061) — the Elasticsearch `synonym_graph`
+    /// equivalent for multi-word synonyms. On the **title/match** side it is additive (emits the
+    /// entity `feature` AND keeps the component tokens, so a component query still matches); on the
+    /// **query/compile** side it collapses (emits only the entity `feature`, consuming components),
+    /// so a query phrased with the multi-word form requires just the entity feature — which
+    /// equivalence expansion (ADR-054) then widens to its synonyms. This gives bidirectional
+    /// multi-word aliases while staying false-negative-safe (the title emits a superset of what the
+    /// query requires).
+    pub fn add_phrase_alias(&mut self, tokens: &[&str], feature: &str, kind: FeatureKind) {
+        self.add_phrase_inner(tokens, feature, kind, false, true);
     }
 
     fn add_phrase_inner(
@@ -75,12 +87,14 @@ impl NormalizerBuilder {
         feature: &str,
         kind: FeatureKind,
         additive: bool,
+        alias: bool,
     ) {
         self.phrase_patterns.push(tokens.join(" "));
         self.phrase_entries.push(PhraseEntry {
             feature: feature.to_string(),
             kind,
             additive,
+            alias,
         });
     }
 

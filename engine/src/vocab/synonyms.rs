@@ -157,12 +157,15 @@ pub fn parse_synonyms(text: &str) -> Result<Vocab, SynonymParseError> {
             split_forms(line)
         };
 
-        // Resolve each form to a single feature: a single-token form is its own feature; a
-        // multi-token form is glued by an **additive** phrase to a single-token canonical
-        // (`["upper","deck"] -> "upperdeck"`). Additive (not collapse) so a title bearing the form
-        // still emits its component features — a pre-existing component-token query (e.g. `deck`)
-        // never loses a match (recall-first / FN-safe). The single-token canonical (joined, so it
-        // survives re-tokenization as ONE feature) is what makes the equivalence resolve.
+        // Resolve each form to a single entity feature. A single-token form is its own feature; a
+        // multi-token form is glued by an **alias-entity** phrase (ADR-061, the ES `synonym_graph`
+        // equivalent): additive on the title side (the entity feature AND its components, so a
+        // component query — e.g. `deck` — still matches), collapsed on the query side (only the
+        // entity feature, so a query phrased with the multi-word form requires just the entity,
+        // which the equivalence then widens to its synonyms — bidirectional). The member is the
+        // RAW multi-word form: `resolve_equivalences` runs the query/compile path, so the alias
+        // phrase collapses it to the single entity feature (and, if an existing phrase already
+        // covers those tokens, that phrase's canonical is used instead — no broken link).
         let mut group: Vec<String> = Vec::with_capacity(raw_forms.len());
         let mut usable_forms = 0usize;
         for form in raw_forms {
@@ -174,16 +177,10 @@ pub fn parse_synonyms(text: &str) -> Result<Vocab, SynonymParseError> {
             let member = if toks.len() == 1 {
                 toks.join("") // the lone token (lowercased, `.` kept) — matches real text 1:1
             } else {
-                // Glue to a single-token canonical so the equivalence resolves to ONE feature. The
-                // member is the bare joined token (`upperdeck`); a generic token compiles to the
-                // `term:`-prefixed name (`emit_generic`), so the phrase's canonical must carry the
-                // SAME prefix — otherwise the phrase would emit `upperdeck` while the member
-                // resolved to `term:upperdeck`, and the equivalence would never link.
-                let joined = toks.join("");
-                let canonical = format!("term:{joined}");
+                let canonical = format!("term:{}", toks.join(""));
                 let refs: Vec<&str> = toks.iter().map(String::as_str).collect();
-                vocab.add_phrase_additive(&refs, &canonical, FeatureKind::Generic);
-                joined
+                vocab.add_phrase_alias(&refs, &canonical, FeatureKind::Generic);
+                toks.join(" ") // raw form: collapses through the alias phrase to one entity feature
             };
             if !group.contains(&member) {
                 group.push(member);
@@ -284,50 +281,42 @@ rc, rookie
         let groups = v.equivalences();
         assert_eq!(groups.len(), 1);
         let g = &groups[0];
-        // The multi-token side resolves to its single-token canonical (`upperdeck`).
+        // The member is the RAW multi-word form; it collapses through the alias phrase at resolve.
         assert!(g.contains(&"ud".to_string()));
-        assert!(g.contains(&"upperdeck".to_string()));
-        // `upper deck` is glued by an ADDITIVE phrase to that canonical.
+        assert!(g.contains(&"upper deck".to_string()));
+        // `upper deck` is glued by an ALIAS-ENTITY phrase (ADR-061): collapse-on-query,
+        // additive-on-title.
         assert_eq!(v.phrases().len(), 1);
         let p = &v.phrases()[0];
         assert_eq!(p.tokens, vec!["upper".to_string(), "deck".to_string()]);
         assert_eq!(p.canonical, "term:upperdeck");
-        assert!(
-            p.additive,
-            "gluing phrase must be additive so component features survive (recall-first)"
-        );
+        assert!(p.alias, "multi-word gluing phrase must be an alias entity");
+        assert!(!p.additive, "alias takes precedence; additive stays false");
     }
 
     #[test]
-    fn hyphenated_multi_token_form_is_glued_additively() {
-        // `new york` / `new-york` split to two tokens by the default normalizer, so each is glued
-        // (additively) to the single-token canonical `newyork`, which joins the group with `nyc`.
+    fn hyphenated_multi_token_form_is_glued_as_alias_entity() {
+        // `new-york` splits to two tokens by the default normalizer, so it is glued by an alias
+        // entity phrase to `term:newyork`, joining the group with `nyc` (raw member `new york`).
         let v = parse_synonyms("nyc, new-york").expect("parse");
         assert_eq!(v.phrases().len(), 1);
         let p = &v.phrases()[0];
         assert_eq!(p.tokens, vec!["new".to_string(), "york".to_string()]);
         assert_eq!(p.canonical, "term:newyork");
-        assert!(p.additive);
+        assert!(p.alias);
         let g = &v.equivalences()[0];
-        assert!(g.contains(&"nyc".to_string()) && g.contains(&"newyork".to_string()));
+        assert!(g.contains(&"nyc".to_string()) && g.contains(&"new york".to_string()));
     }
 
     #[test]
-    fn glued_form_equal_to_a_sibling_is_redundant_not_an_error() {
-        // `i-pod` glues to `ipod`, which equals the other form — they are already equivalent via
-        // the phrase, so the rule adds the phrase but no (degenerate) equivalence, and is NOT an
-        // error (two usable forms were given).
+    fn glued_form_equal_to_a_sibling_still_parses() {
+        // `ipod` and `i-pod` both resolve to `term:ipod` (the latter via its alias phrase), so the
+        // stored equivalence is harmless (it dedups to one feature at resolve time). The rule is
+        // valid, not an error; the alias phrase is registered.
         let v = parse_synonyms("ipod, i-pod").expect("parse");
-        assert_eq!(
-            v.phrases().len(),
-            1,
-            "the gluing phrase is still registered"
-        );
+        assert_eq!(v.phrases().len(), 1, "the gluing phrase is registered");
         assert_eq!(v.phrases()[0].canonical, "term:ipod");
-        assert!(
-            v.equivalences().is_empty(),
-            "forms already feature-identical => no equivalence added"
-        );
+        assert!(v.phrases()[0].alias);
     }
 
     #[test]

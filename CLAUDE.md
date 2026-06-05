@@ -44,7 +44,11 @@ statement + construction proof obligation are in [`docs/design/README.md`](docs/
   is pushed into compile time. The hot path is dumb, branch-predictable integer work.
 - **No panicking `unwrap()` in library code.** Errors are typed (`ParseError`, `NormalizerError`).
 - **Same normalizer for queries and titles.** The feature spaces must line up; any normalizer
-  change must apply to both sides or correctness breaks.
+  change must apply to both sides or correctness breaks. *(The one sanctioned exception is an
+  alias-entity phrase ([ADR-061](docs/decisions/adr-061-alias-entity-phrases.md)): it collapses on the
+  query side but stays additive on the title side — allowed ONLY because titles then emit a **superset**
+  of what queries require, so alignment is preserved in the safe direction. Do not add other query/title
+  asymmetries.)*
 - **Signatures are built only from required features and required any-of groups.** This is
   what makes the lossless cover provably correct.
 - **Postings are append-only within a segment.** Local IDs are issued in order, so postings
@@ -121,7 +125,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 |---|---|---|
 | `src/lib.rs` | Library root, public API re-exports | — |
 | `src/dsl.rs` | Query DSL parser → AST (compile-time only) | [normalization.md](docs/design/normalization.md) §1 |
-| `src/normalize.rs` | Shared query/title normalizer (daachorse automaton) + `NormalizerBuilder` + the configurable byte-cleaning `PunctClass` table (`Split`/`Fold`/`Keep`/`Marker`; declare `'`/`-` as `Fold` to collapse `O'Brien`/`O-Brien`/`OBrien`, ADR-058) | [normalization.md](docs/design/normalization.md) §2–4 |
+| `src/normalize.rs` + `normalize/` | Shared query/title normalizer (daachorse automaton) + `NormalizerBuilder` + the configurable byte-cleaning `PunctClass` table (`Split`/`Fold`/`Keep`/`Marker`; declare `'`/`-` as `Fold` to collapse `O'Brien`/`O-Brien`/`OBrien`, ADR-058) + **alias-entity phrases** (`add_phrase_alias`, ADR-061): the one query/title-asymmetric phrase kind — `emit(query_side)` collapses an alias phrase on the query side (entity only) but keeps it additive on the title side (entity + components), the ES `synonym_graph` equivalent for bidirectional multi-word synonyms | [normalization.md](docs/design/normalization.md) §2–4 |
 | `src/dict.rs` | Feature dictionary, frequency tracking, 64-bit common mask, synthetic-ID hashing for out-of-dict terms (dynamic vocab, ADR-046), transient `EquivMap` for compile-time equivalence expansion (ADR-054) | [normalization.md](docs/design/normalization.md) §5 |
 | `src/tagdict.rs` | Per-query metadata **tag** dictionary — interns `(key,value)` tags to dense `TagId`s (a space disjoint from `FeatureId`), with the same synthetic-ID escape hatch as `dict.rs`. Tag strings die here; the filter is integers-only (filtered percolation, ADR-049). In the cluster, ONE frozen `TagDict` is shared into every shard like the frozen `Dict` (`fingerprint`/`mark_finalized`/`get_or_synthetic` for the cross-shard apply path, ADR-055) | [matching.md](docs/design/matching.md) §5.1 |
 | `src/compile.rs` | Signature-cover optimizer + cost classes A/B/C/D + read-only compile path for explain + `anchor_plan` (pre-hash anchor groups — the placement SSOT for clustering) + `Extracted::expand_equivalences` (FN-safe alias expansion: required→any-of, ADR-054) | [matching.md](docs/design/matching.md) §1; ADR-027 |
@@ -144,7 +148,7 @@ MATCH TIME (per incoming title, the hot path — allocation-free)
 | `grpc/` (member `reverse-rusty-shard-proto`) | Workspace member holding the generated gRPC `ShardService` (protobuf messages + tonic client/server). Built only under `distributed`; codegen via pure-Rust `protox` in `build.rs` (no system `protoc`), nothing checked in. | ADR-029 |
 | `src/explain.rs` | Debug/explain tooling (first-class, not bolt-on) + structured `ExplainDetail` for API | [matching.md](docs/design/matching.md) §6 |
 | `src/gen.rs` | Synthetic data generator (deterministic, seeded) | — |
-| `src/vocab.rs` + `vocab/` | Runtime vocabulary (module): the `Vocab` struct + serializable type defs (root), with behavior split into submodules — `learn` (any-of synonym learner ADR-015, `CorpusLearnConfig`/`learn_vocab_from_corpus` opt-in NPMI phrase learner ADR-053, `learn_equivalences_from_queries` ADR-054), `methods` (`to_normalizer`/`merge`/JSON + `resolve_equivalences` → `EquivMap` for the expansion-not-collapse alias path ADR-054 + `Vocab.punctuation` fold table ADR-058), and `synonyms` (bulk alias registration ADR-060 — `parse_synonyms` of the Solr/Lucene synonym-file format → FN-safe equivalence groups + gluing phrases, `extend_from_synonyms[_file]`, bulk `add_equivalences`/`add_synonyms`) | ADR-015, ADR-053, ADR-054, ADR-058, ADR-060 |
+| `src/vocab.rs` + `vocab/` | Runtime vocabulary (module): the `Vocab` struct + serializable type defs (root), with behavior split into submodules — `learn` (any-of synonym learner ADR-015, `CorpusLearnConfig`/`learn_vocab_from_corpus` opt-in NPMI phrase learner ADR-053, `learn_equivalences_from_queries` ADR-054), `methods` (`to_normalizer`/`merge`/JSON + `resolve_equivalences` → `EquivMap` for the expansion-not-collapse alias path ADR-054 + `Vocab.punctuation` fold table ADR-058), and `synonyms` (bulk alias registration ADR-060 — `parse_synonyms` of the Solr/Lucene synonym-file format → FN-safe equivalence groups + multi-word **alias-entity** phrases (`add_phrase_alias`, the ES `synonym_graph` equivalent, ADR-061), `extend_from_synonyms[_file]`, bulk `add_equivalences`/`add_synonyms`) | ADR-015, ADR-053, ADR-054, ADR-058, ADR-060, ADR-061 |
 | `src/corpus.rs` | NPMI collocation core (`tokenize`/`learn_phrases`/`apply_phrases`) + `learn_phrases_from_text` → `Vocab` of induced entity phrases; lean-core, shared by `bin/learn.rs` + `vocab.rs` | ADR-053; [corpus-feature-learning.md](docs/research/corpus-feature-learning.md) |
 | `src/error.rs` | Typed `ParseError` with `ParseErrorKind` enum | — |
 | `src/loader.rs` | Query file loader (CSV + JSONL auto-detection) | — |

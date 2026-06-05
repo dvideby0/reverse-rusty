@@ -95,7 +95,13 @@ impl Normalizer {
     ///   2) Iterate through tokens. Tokens fully inside a phrase match are
     ///      skipped (the phrase feature is emitted once). All other tokens go
     ///      through the existing grader/number/synonym/generic pipeline.
-    pub fn emit<F: FnMut(&str, FeatureKind)>(&self, text: &str, lc: &mut String, emit: &mut F) {
+    pub fn emit<F: FnMut(&str, FeatureKind)>(
+        &self,
+        text: &str,
+        lc: &mut String,
+        query_side: bool,
+        emit: &mut F,
+    ) {
         self.clean_into(text, lc);
 
         // Phase 1: find multiword phrase matches via the automaton.
@@ -147,10 +153,21 @@ impl Normalizer {
             for (pi, &(ps, pe, _)) in phrase_matches.iter().enumerate() {
                 if toff >= ps && toff + tokens[ti].len() <= pe {
                     let entry = &self.phrase_entries[phrase_matches[pi].2];
-                    // Additive phrases (corpus-learned, ADR-053) emit the phrase feature but
-                    // leave the component tokens for phase 2b, so the component features are
-                    // also produced (recall-preserving). Collapse phrases consume them.
-                    if !entry.additive {
+                    // Whether to CONSUME the component tokens (emit only the phrase feature):
+                    //  - collapse phrase (additive=false, alias=false): always consume.
+                    //  - additive phrase (ADR-053): never consume — components are kept on both
+                    //    sides (recall-preserving).
+                    //  - alias entity (ADR-061): consume only on the QUERY side (collapse to the
+                    //    entity feature, which equivalence expansion then widens to its synonyms);
+                    //    keep components on the TITLE side (additive) so a component query still
+                    //    matches. The ES `synonym_graph` asymmetry — safe because the title emits a
+                    //    superset of what the query requires.
+                    let consume = if entry.alias {
+                        query_side
+                    } else {
+                        !entry.additive
+                    };
+                    if consume {
                         token_consumed[ti] = true;
                     }
                     if !phrase_emitted[pi] {
@@ -330,7 +347,7 @@ impl Normalizer {
     pub fn compile_features(&self, text: &str, dict: &mut Dict, lc: &mut String) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
         let mut names: Vec<(String, FeatureKind)> = Vec::new();
-        self.emit(text, lc, &mut |name, kind| {
+        self.emit(text, lc, true, &mut |name, kind| {
             names.push((name.to_string(), kind));
         });
         for (name, kind) in names {
@@ -353,7 +370,7 @@ impl Normalizer {
         lc: &mut String,
     ) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
-        self.emit(text, lc, &mut |name, _kind| {
+        self.emit(text, lc, true, &mut |name, _kind| {
             ids.push(dict.get_or_synthetic(name));
         });
         ids.sort_unstable();
@@ -376,7 +393,7 @@ impl Normalizer {
     ) {
         out.clear();
         let mut tmp: Vec<FeatureId> = Vec::new();
-        self.emit(text, lc, &mut |name, _kind| {
+        self.emit(text, lc, false, &mut |name, _kind| {
             tmp.push(dict.get_or_synthetic(name));
         });
         tmp.sort_unstable();

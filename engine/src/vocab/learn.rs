@@ -86,6 +86,7 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
                     canonical: canon_feature.clone(),
                     kind: FeatureKindSer::Generic,
                     additive: false, // collapse: an any-of-learned alias canonicalizes
+                    alias: false,
                 });
             }
         }
@@ -100,6 +101,7 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
                 canonical: canon_feature,
                 kind: FeatureKindSer::Generic,
                 additive: false, // collapse: an any-of-learned alias canonicalizes
+                alias: false,
             });
         } else {
             vocab.synonyms.push(SynonymEntry {

@@ -74,11 +74,21 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   is parsed (`vocab::parse_synonyms`, `Vocab::extend_from_synonyms[_file]`, bulk `add_equivalences`/
   `add_synonyms`, `NormalizerBuilder::add_synonyms`) and applied entirely through **FN-safe equivalence
   expansion** (ADR-054) — the `=>` arrow's sides are unioned (RR is expansion-based; no directional
-  token-collapse, which has a forbidden-term footgun), and multi-token forms are glued to a single
-  feature as phrases. Exposed as `POST /_vocab/synonyms` (raw text body → merge + recompile live, with a
-  fail-loud 1-based line number on a malformed table). Lets a domain team maintain hundreds of aliases in
-  a plain-text file outside of code; oracle-proven (recall grows, engine ≡ equivalence-aware brute, zero
-  FN/FP).
+  token-collapse, which has a forbidden-term footgun). Exposed as `POST /_vocab/synonyms` (raw text body →
+  merge + recompile live, with a fail-loud 1-based line number on a malformed table). Lets a domain team
+  maintain hundreds of aliases in a plain-text file outside of code; oracle-proven (recall grows, engine ≡
+  equivalence-aware brute, zero FN/FP).
+- **Multi-word aliases — the ES `synonym_graph` equivalent (ADR-061).** A multi-word alias form
+  (`upper deck`, `new york`) is registered as an **alias-entity phrase**: additive on the title side
+  (entity feature + components, so a component query like `deck` still matches) but collapsed on the
+  query side (a query phrased with the multi-word form requires just the entity, which equivalence
+  expansion widens to its synonyms) — so the alias is **bidirectional**, exactly like Elasticsearch's
+  `synonym_graph` (which keeps components at index time and turns the multi-word query into a
+  phrase-or-synonym graph). Plumbed via a `query_side` flag through the shared normalizer's `emit`; the
+  asymmetry is the **one sanctioned exception** to "same normalizer" and is safe-direction (titles emit a
+  superset ⇒ lossless cover holds). A multi-word-form query is phrasal (matches the adjacent phrase or a
+  synonym, like ES). Default path byte-identical (`alias=false` ⇒ unchanged); oracle-proven (bidirectional
+  + phrasal-adjacency + engine ≡ brute zero FN/FP).
 - **HTTP server** (`bin/server/`) — ES-style REST (`/_doc`, `/_search` with explain/profile,
   `/_bulk` per-item status ADR-018, `/_stats`, `/_cat/stats`, `/_cat/segments` per-segment detail
   (text table + `?format=json`, ADR-023), `/_health`, `/_metrics`, `/_vocab*`,

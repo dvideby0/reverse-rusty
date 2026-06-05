@@ -44,6 +44,16 @@ struct PhraseEntry {
     /// additive: this engine is a recall-first candidate generator, so a phrase must never
     /// drop a candidate a component query would have matched.
     additive: bool,
+    /// **Alias entity** (ADR-061), the [`synonym_graph`](https://www.elastic.co/guide/en/elasticsearch/reference/current/analysis-synonym-graph-tokenfilter.html)
+    /// equivalent: emitted **additively on the title/match side** (entity feature + component
+    /// tokens kept — a component query still matches) but **collapsed on the query/compile side**
+    /// (only the entity feature; components consumed). So a query phrased with the multi-word form
+    /// requires just the entity feature, which equivalence expansion (ADR-054) then widens to its
+    /// synonyms — giving bidirectional multi-word aliases. The asymmetry is in the *safe* direction
+    /// (titles emit a superset of what queries require), so the lossless cover still holds; it
+    /// mirrors ES, which applies multi-word synonyms at search time while the index keeps
+    /// components. `alias` takes precedence over `additive`. Default `false`.
+    alias: bool,
 }
 
 /// How a single non-alphanumeric character is treated during byte-cleaning

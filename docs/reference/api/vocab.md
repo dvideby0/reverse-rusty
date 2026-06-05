@@ -181,10 +181,13 @@ vocabulary. Every rule is applied through **FN-safe expansion** (ADR-054): a que
 widened to an any-of over the group, so it matches a title bearing any form — a wrong/uncertain alias can
 only add bounded false positives, never drop a true match. The `=>` arrow's two sides are simply unioned
 into one group (RR is expansion-based, so its direction is immaterial to recall); RR does **not** perform
-Solr's directional token-collapse. A multi-token form (`upper deck`, `i-pod`) is glued by an *additive*
-phrase to a single-token canonical so the equivalence can resolve, while the title still emits its
-component features — so a pre-existing component-token query never loses a match. A malformed table is
-rejected **without changing anything**, with the offending 1-based line number:
+Solr's directional token-collapse. A multi-word form (`upper deck`, `new york`) is registered as an
+**alias entity** — the Elasticsearch [`synonym_graph`](https://www.elastic.co/guide/en/elasticsearch/reference/current/analysis-synonym-graph-tokenfilter.html)
+equivalent (ADR-061): the alias is **bidirectional** (a query phrased with either form matches a title
+bearing the other), a component query (e.g. `deck`) still matches the multi-word title, and — like ES —
+a query phrased with the multi-word form is **phrasal** (it matches the adjacent phrase or a synonym, not
+loose non-adjacent components). A malformed table is rejected **without changing anything**, with the
+offending 1-based line number:
 
 ```json
 {"error": {"type": "synonym_parse_error", "reason": "synonym file line 2: a synonym rule needs at least two distinct forms (got 1)"}, "status": 400}

@@ -23,17 +23,15 @@
      directional token-*collapse*: collapsing interacts badly with forbidden terms (a collapsed `c -a`
      becomes the contradiction `term:c -term:c`, silently killing a query) and expansion is strictly
      recall-safe — a wrong alias can only add a (cheap) false-positive candidate, never drop a match.
-  3. **Multi-token forms are glued *additively*.** A form like `upper deck` / `i-pod` can't be a single
-     feature on its own, so it is registered as an **additive** phrase to a single-token canonical
-     (`["upper","deck"] -> "term:upperdeck"`, ADR-053) and that canonical joins the equivalence group.
-     *Additive* (not collapse) is load-bearing for recall: an additive phrase emits the canonical **and
-     leaves the component tokens**, so a title bearing the form still produces `upper`/`deck` and a
-     pre-existing component-token query (e.g. `deck`) never loses a match — loading a table only *grows*
-     recall. The single-token canonical (the tokens joined, so the normalizer re-tokenizes it as ONE
-     feature) is what lets the equivalence resolve; form tokenization mirrors the default normalizer
-     (`.` kept inside a token, so `st.` stays `st.`). A rule whose glued canonical equals a sibling form
-     (`ipod, i-pod`) is already satisfied by the phrase, so it adds no equivalence and is a no-op, not an
-     error.
+  3. **Multi-token forms are glued as alias entities ([ADR-061](adr-061-alias-entity-phrases.md)).** A
+     form like `upper deck` / `i-pod` can't be a single feature on its own, so it is registered as an
+     **alias-entity phrase** to a `term:`-prefixed entity (`["upper","deck"] -> "term:upperdeck"`) and the
+     **raw multi-word form** joins the equivalence group. The alias-entity is the ES `synonym_graph`
+     equivalent — additive on the title side (entity + components, so a component query like `deck` still
+     matches) but collapse on the query side (a query phrased `upper deck` requires just the entity, which
+     equivalence expansion widens to its synonyms) — so the alias is **bidirectional**, not one-way.
+     `resolve_equivalences` runs the query path, collapsing the raw member to the single entity feature.
+     Form tokenization mirrors the default normalizer (`.` kept inside a token, so `st.` stays `st.`).
   4. **Surfaces.** Lean-core library: `vocab::parse_synonyms(text) -> Result<Vocab, SynonymParseError>`,
      `Vocab::extend_from_synonyms[_file]`, and bulk `Vocab::add_equivalences` / `add_synonyms` /
      `NormalizerBuilder::add_synonyms`. REST: **`POST /_vocab/synonyms`** takes the raw table as the

@@ -77,6 +77,13 @@ pub struct PhraseEntry {
     /// field deserializes to `false`, preserving prior behavior.
     #[serde(default)]
     pub additive: bool,
+    /// When true the phrase is an **alias entity** (ADR-061, the ES `synonym_graph` equivalent):
+    /// additive on the title side but collapsed on the query side, so a multi-word alias form
+    /// resolves to a single entity feature that equivalence expansion can widen to its synonyms.
+    /// Set by the synonym-file loader for multi-token forms. Takes precedence over `additive`.
+    /// Old vocab JSON without the field deserializes to `false`, preserving prior behavior.
+    #[serde(default)]
+    pub alias: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

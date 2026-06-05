@@ -15,79 +15,128 @@ use reverse_rusty::EngineConfig;
 use std::collections::HashSet;
 
 /// The runtime path (`POST /_vocab/synonyms` -> `set_vocab` + `recompile_stale_segments`):
-/// loading a synonym table makes a query phrased with one form match a title bearing another —
-/// including a multi-token form (`upper deck`) glued by a phrase — while NEVER dropping a prior
-/// match (the match set only grows; FN-safe).
+/// loading a multi-word alias (`ud ≡ upper deck`) makes it **bidirectional** — the ES
+/// `synonym_graph` win (ADR-061) — while preserving component-token matches and never dropping a
+/// prior match on the single-token / adjacent paths.
 #[test]
-fn synonym_file_expansion_is_fn_safe_and_recall_grows() {
+fn synonym_file_alias_is_bidirectional_and_recall_safe() {
     // Distinct features under the empty default vocab. Extra queries intern every token.
     let mut queries: Vec<(u64, String)> = vec![
-        (1, "auto".into()),      // requires `auto`
-        (2, "ud rookie".into()), // requires `ud` + `rookie`
-        (3, "deck".into()),      // a bare COMPONENT token of the multi-token alias `upper deck`
+        (1, "ud rookie".into()), // single-token alias form (forward direction)
+        (2, "upper deck rookie".into()), // multi-token alias form (reverse direction)
+        (3, "deck".into()),      // bare COMPONENT of the multi-word alias `upper deck`
+        (4, "auto".into()),      // single-token alias set member
     ];
     for i in 0..20u64 {
-        for tok in ["auto", "signature", "autograph", "ud", "rookie"] {
+        for tok in ["ud", "upper deck", "rookie", "auto", "signature"] {
             queries.push((100 + i * 10 + tok.len() as u64, format!("{tok} u{i}")));
         }
-        queries.push((900 + i, format!("upper deck u{i}")));
     }
-    let sig_title = "2003 signature card psa 10"; // has `signature`, not `auto`
-    let ud_title = "1994 upper deck rookie"; // has `upper deck` + `rookie`, not the token `ud`
+    let updeck_title = "1994 upper deck rookie psa 10"; // `upper deck` (adjacent) + rookie, no `ud`
+    let ud_title = "1994 ud rookie psa 10"; // the token `ud` + rookie, no `upper deck`
+    let sig_title = "2003 signature card"; // `signature`, no `auto`
 
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
     eng.build_from_queries(&queries);
 
     let mut s = MatchScratch::new();
     let mut out = Vec::new();
-    eng.match_title(sig_title, &mut s, &mut out, true);
-    let before_sig: HashSet<u64> = out.iter().copied().collect();
-    eng.match_title(ud_title, &mut s, &mut out, true);
-    let before_ud: HashSet<u64> = out.iter().copied().collect();
+    let snap = |eng: &mut Engine, s: &mut MatchScratch, out: &mut Vec<u64>, t: &str| {
+        eng.match_title(t, s, out, true);
+        out.iter().copied().collect::<HashSet<u64>>()
+    };
+
+    let before_updeck = snap(&mut eng, &mut s, &mut out, updeck_title);
+    let before_ud = snap(&mut eng, &mut s, &mut out, ud_title);
     assert!(
-        !before_sig.contains(&1),
-        "before synonyms, `auto` must not match a signature-only title"
+        !before_updeck.contains(&1),
+        "before: ud-query must not match an upper-deck title"
     );
     assert!(
         !before_ud.contains(&2),
-        "before synonyms, `ud rookie` must not match an `upper deck` title"
+        "before: upper-deck-query must not match a ud title"
     );
     assert!(
-        before_ud.contains(&3),
-        "the bare `deck` query matches `upper deck rookie` before any synonyms are loaded"
+        before_updeck.contains(&3),
+        "before: bare `deck` matches the upper-deck title"
     );
 
-    // Load a Solr-format synonym table at runtime (the endpoint's path).
+    // Load the alias table at runtime (the endpoint's path).
     let mut v = Vocab::new();
     let stats = v
-        .extend_from_synonyms("auto, autograph, autographed, signature, signed\nud, upper deck")
+        .extend_from_synonyms("ud, upper deck\nauto, signature")
         .expect("synonym table parses");
     assert_eq!(stats.groups, 2);
-    assert_eq!(stats.phrases, 1, "`upper deck` glued to one feature");
+    assert_eq!(
+        stats.phrases, 1,
+        "`upper deck` glued by one alias-entity phrase"
+    );
     eng.set_vocab(v).expect("set_vocab");
     eng.recompile_stale_segments();
 
-    eng.match_title(sig_title, &mut s, &mut out, true);
-    let after_sig: HashSet<u64> = out.iter().copied().collect();
-    eng.match_title(ud_title, &mut s, &mut out, true);
-    let after_ud: HashSet<u64> = out.iter().copied().collect();
+    let after_updeck = snap(&mut eng, &mut s, &mut out, updeck_title);
+    let after_ud = snap(&mut eng, &mut s, &mut out, ud_title);
+    let after_sig = snap(&mut eng, &mut s, &mut out, sig_title);
 
+    // Forward: a `ud` query matches an `upper deck` title.
     assert!(
-        after_sig.contains(&1),
-        "after auto≡signature, the `auto` query matches a signature title (recall grew)"
+        after_updeck.contains(&1),
+        "forward: ud-query matches the upper-deck title"
     );
+    // Reverse (the synonym_graph win): an `upper deck` query matches a `ud` title.
     assert!(
         after_ud.contains(&2),
-        "after ud≡`upper deck`, the `ud rookie` query matches an `upper deck rookie` title"
+        "reverse: upper-deck-query matches the ud title (bidirectional)"
     );
+    // Component preserved: the bare `deck` query still matches the upper-deck title (no FN).
     assert!(
-        after_ud.contains(&3),
-        "REGRESSION (ADR-060 P1): gluing `upper deck` must NOT suppress the component `deck` — the \
-         bare `deck` query must still match `upper deck rookie` after loading (additive, FN-safe)"
+        after_updeck.contains(&3),
+        "component `deck` still matches the upper-deck title"
     );
+    // Single-token alias also bidirectional.
     assert!(
-        before_sig.is_subset(&after_sig) && before_ud.is_subset(&after_ud),
-        "loading synonyms must never drop a prior match (FN-safe / monotone)"
+        after_sig.contains(&4),
+        "auto-query matches a signature title"
+    );
+    // Monotonic on the adjacent / single-token paths: no prior match dropped.
+    assert!(before_updeck.is_subset(&after_updeck) && before_ud.is_subset(&after_ud));
+}
+
+/// Adjacency is the ES `synonym_graph` behavior: a query phrased with the multi-word alias form
+/// becomes phrasal, so it does NOT match a title where the components are non-adjacent (just as ES's
+/// graph query for `upper deck` matches the phrase or `ud`, not loose `upper` + `deck`). This is the
+/// documented trade-off of multi-word aliases, asserted so it is intentional, not accidental.
+#[test]
+fn multiword_alias_query_is_phrasal_like_elasticsearch() {
+    let mut queries: Vec<(u64, String)> = vec![(1, "upper deck".into())];
+    for i in 0..10u64 {
+        queries.push((100 + i, format!("ud u{i}")));
+        queries.push((200 + i, format!("upper deck u{i}")));
+    }
+    let mut v = Vocab::new();
+    v.extend_from_synonyms("ud, upper deck").expect("parse");
+    let mut eng = Engine::with_vocab(v, EngineConfig::default()).expect("with_vocab");
+    eng.build_from_queries(&queries);
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    // Adjacent → matches (the phrase path).
+    eng.match_title("a upper deck b", &mut s, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "adjacent `upper deck` matches the alias query"
+    );
+    // The `ud` synonym → matches (the entity path).
+    eng.match_title("a ud b", &mut s, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "the `ud` synonym matches the `upper deck` alias query"
+    );
+    // Non-adjacent components → does NOT match (phrasal, like ES synonym_graph).
+    eng.match_title("upper big deck", &mut s, &mut out, true);
+    assert!(
+        !out.contains(&1),
+        "non-adjacent `upper ... deck` must not match (ES-equivalent phrasal)"
     );
 }
 

@@ -40,6 +40,24 @@ fn merge_overlapping_groups(groups: Vec<Vec<FeatureId>>) -> Vec<Vec<FeatureId>> 
     result
 }
 
+/// For a multi-word form that resolved to MORE than one feature (an additive phrase kept its
+/// component tokens, ADR-053), pick the single **entity** feature of a registered phrase whose
+/// canonical is present in `fs` — so the form participates in an equivalence as one entity
+/// (ADR-061) instead of being dropped. Returns the first such phrase canonical feature, if any.
+fn phrase_entity_in(
+    phrases: &[super::PhraseEntry],
+    fs: &[FeatureId],
+    dict: &Dict,
+) -> Option<FeatureId> {
+    for p in phrases {
+        let pid = dict.get_or_synthetic(&p.canonical);
+        if fs.contains(&pid) {
+            return Some(pid);
+        }
+    }
+    None
+}
+
 // ── Vocab methods ───────────────────────────────────────────────────────────
 
 impl Vocab {
@@ -57,7 +75,9 @@ impl Vocab {
                 .iter()
                 .map(std::string::String::as_str)
                 .collect();
-            if entry.additive {
+            if entry.alias {
+                b.add_phrase_alias(&toks, &entry.canonical, entry.kind.into());
+            } else if entry.additive {
                 b.add_phrase_additive(&toks, &entry.canonical, entry.kind.into());
             } else {
                 b.add_phrase(&toks, &entry.canonical, entry.kind.into());
@@ -175,14 +195,22 @@ impl Vocab {
     // ── Phrase management ───────────────────────────────────────────────
 
     pub fn add_phrase(&mut self, tokens: &[&str], canonical: &str, kind: FeatureKind) {
-        self.add_phrase_with(tokens, canonical, kind, false);
+        self.add_phrase_with(tokens, canonical, kind, false, false);
     }
 
     /// Like [`add_phrase`](Self::add_phrase) but **additive** (ADR-053): a match emits the
     /// phrase feature AND keeps the component features, so a query referencing a component
     /// never loses the match (recall-first). Used for corpus-learned phrases.
     pub fn add_phrase_additive(&mut self, tokens: &[&str], canonical: &str, kind: FeatureKind) {
-        self.add_phrase_with(tokens, canonical, kind, true);
+        self.add_phrase_with(tokens, canonical, kind, true, false);
+    }
+
+    /// Register an **alias entity** phrase (ADR-061, the ES `synonym_graph` equivalent): additive
+    /// on the title side, collapsed on the query side, so a multi-word alias form resolves to one
+    /// entity feature that equivalence expansion (ADR-054) widens to its synonyms — bidirectional
+    /// multi-word aliases, false-negative-safe. Used by the synonym-file loader.
+    pub fn add_phrase_alias(&mut self, tokens: &[&str], canonical: &str, kind: FeatureKind) {
+        self.add_phrase_with(tokens, canonical, kind, false, true);
     }
 
     fn add_phrase_with(
@@ -191,6 +219,7 @@ impl Vocab {
         canonical: &str,
         kind: FeatureKind,
         additive: bool,
+        alias: bool,
     ) {
         let tok_vec: Vec<String> = tokens
             .iter()
@@ -204,6 +233,7 @@ impl Vocab {
             canonical: canonical.to_string(),
             kind: kind.into(),
             additive,
+            alias,
         });
     }
 
@@ -288,8 +318,19 @@ impl Vocab {
             let mut feats: Vec<FeatureId> = Vec::with_capacity(group.len());
             for form in group {
                 let fs = norm.compile_features_readonly(form, dict, &mut lc);
-                if fs.len() == 1 {
-                    feats.push(fs[0]);
+                // A form must resolve to exactly ONE entity feature to join an equivalence. An
+                // alias-entity phrase (ADR-061) collapses a multi-word form to one feature on this
+                // (query/compile) path, so it lands here directly. A multi-word form glued only by
+                // an *additive* phrase (ADR-053) keeps its components and resolves to >1 feature;
+                // use that phrase's single entity feature so the alias still links (rather than
+                // silently dropping it).
+                let resolved = match fs.len() {
+                    1 => Some(fs[0]),
+                    0 => None,
+                    _ => phrase_entity_in(&self.phrases, &fs, dict),
+                };
+                if let Some(f) = resolved {
+                    feats.push(f);
                 }
             }
             feats.sort_unstable();
