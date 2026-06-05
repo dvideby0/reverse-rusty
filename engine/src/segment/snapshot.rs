@@ -369,6 +369,64 @@ impl EngineSnapshot {
         TagPredicate::new(groups)
     }
 
+    /// Compile a [`RankSpec`](crate::rank::RankSpec) against this snapshot's tag
+    /// space (ADR-049 §5.4 / ADR-059). Boost `(key,value)`s resolve via
+    /// [`get_or_synthetic`](crate::tagdict::TagDict::get_or_synthetic) — exactly as
+    /// [`compile_tag_predicate`](Self::compile_tag_predicate) does — so a boost
+    /// value never seen at ingest yields a `TagId` no stored query carries and
+    /// simply never fires (no over-boost), mirroring the safe `terms`-filter semantics.
+    pub fn compile_rank_spec(&self, spec: &crate::rank::RankSpec) -> crate::rank::CompiledRankSpec {
+        let boosts = spec
+            .boosts
+            .iter()
+            .map(|(key, value, weight)| (self.tag_dict.get_or_synthetic(key, value), *weight))
+            .collect();
+        crate::rank::CompiledRankSpec::new(spec.priority_key.clone(), boosts)
+    }
+
+    /// The live `TagId` slice for a matched logical id, picking the NEWEST live
+    /// copy. Ordering is newest-first at both levels: the memtable before the base
+    /// segments (all writes land in the memtable), base segments newest→oldest
+    /// (`segments` is oldest-first, so walk it reversed), AND **within** each
+    /// container the locals slice reversed — `locals_for_logical` lists a logical
+    /// id's physical copies in ascending (insertion) order, so the LAST live local
+    /// is the newest version. This matters when a logical id has two live copies in
+    /// one container (e.g. a re-`PUT`/`insert_live` that has not yet tombstoned the
+    /// old copy, or a flush of such a memtable). Returns `None` if no live copy
+    /// exists — not expected for a just-matched id, but total for safety.
+    fn tags_for_logical(&self, logical_id: u64) -> Option<&[crate::tagdict::TagId]> {
+        for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
+            if self.memtable.is_alive(local) {
+                return Some(self.memtable.tags_of(local));
+            }
+        }
+        for seg in self.segments.iter().rev() {
+            for &local in seg.locals_for_logical(logical_id).iter().rev() {
+                if seg.is_alive(local) {
+                    return Some(seg.tags_of(local));
+                }
+            }
+        }
+        None
+    }
+
+    /// Score matched logical ids for ranking (ADR-049 §5.4 / ADR-059). Returns
+    /// `(id, score)` aligned to `ids`, UNSORTED — the caller owns ordering (score
+    /// desc, then `_id` asc for a total order), `from`/`size` pagination, and
+    /// `_score` emission. A pure post-match step: it touches neither the candidate
+    /// index nor the verifier, so it can only reorder, never add or drop a match.
+    /// An id with no live tags (or no tags) scores 0.
+    pub fn rank(&self, ids: &[u64], spec: &crate::rank::CompiledRankSpec) -> Vec<(u64, i64)> {
+        ids.iter()
+            .map(|&id| {
+                let s = self
+                    .tags_for_logical(id)
+                    .map_or(0, |tags| crate::rank::score(tags, &self.tag_dict, spec));
+                (id, s)
+            })
+            .collect()
+    }
+
     /// Parallel matching on the snapshot.
     pub fn match_titles_par(
         &self,

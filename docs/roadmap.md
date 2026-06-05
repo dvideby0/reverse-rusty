@@ -201,17 +201,23 @@ false-negative / throughput audit — remains the open step in **Current limitat
   `percolate_filtered`) keep the untagged path byte-identical. Proven by `tests/cluster_oracle.rs`
   (filtered ≡ single-node ≡ brute across K×RF + synthetic-tag cross-shard consistency),
   `tests/cluster_durability_oracle.rs` (tags survive checkpoint/reopen), and `tests/cluster_grpc_oracle.rs`
-  (filtered percolate + tag-dict shipping over the wire). **Remaining:** ranking + `/_mpercolate` `from`
-  pagination (decision point 4, below); a runtime **vocab change on a tagged cluster** is currently
-  refused fail-loud (a deferred follow-on — the blue/green rebuild can't reconstruct a synthetic tag's
-  string). Full design:
+  (filtered percolate + tag-dict shipping over the wire). **Remaining:** a runtime **vocab change on a
+  tagged cluster** is currently refused fail-loud (a deferred follow-on — the blue/green rebuild can't
+  reconstruct a synthetic tag's string). (Ranking + `/_mpercolate` `from` pagination — decision point 4,
+  below — is now ✅ shipped single-node, ADR-059.) Full design:
   [`design/matching.md`](design/matching.md) §5 and
   [`design/ingestion-and-updates.md`](design/ingestion-and-updates.md) §11.
-- **Match scoring / ranking + `/_mpercolate` pagination — lower priority.** An optional layer *over* the
-  boolean-correct result set: sort or boost by a priority tag, top-K, and `from`/offset on `/_mpercolate`
-  (`size`-only today, unlike `/_search`). Lower priority because in the reference workload only a public
-  search surface ranks — the core matching jobs take the tag-filtered set unranked. It never touches the
-  candidate index or verifier ([ADR-049](DECISIONS.md); [`design/matching.md`](design/matching.md) §5.4).
+- ~~**Match scoring / ranking + `/_mpercolate` pagination.**~~ **✅ Shipped single-node (ADR-059).** An
+  optional layer *over* the boolean-correct result set: a new lean-core `src/rank.rs` +
+  `EngineSnapshot::rank` score the already-final matched set as `Σ request-boosts + priority-tag value`
+  (additive; priority reuses the tag mechanism, resolved to the newest live copy), and the `/_search` +
+  `/_mpercolate` handlers sort by `(score desc, _id asc)`, apply `from`/`size`, and emit `_score`. Also
+  adds `from` to `/_mpercolate` and per-slot truncation to multi-doc `/_search` (closing the ADR-052 #3
+  tail). Opt-in ⇒ the no-rank path is byte-identical; it runs after verification and never touches the
+  candidate index or verifier, so it only reorders + paginates (zero-FN intact). Oracle-/test-proven
+  (`tests/ranking.rs` + handler tests). **Deferred:** **cluster** (multi-shard) ranking — cross-shard
+  priority fetch at the coordinator merge, behind the same `RankSpec` seam
+  ([ADR-049](DECISIONS.md)/[ADR-059](DECISIONS.md); [`design/matching.md`](design/matching.md) §5.4).
 - ~~**Byte-cleaning: punctuation-equivalence rules.**~~ **✅ Shipped (ADR-058).** `clean_into`'s
   per-character behavior is now a configurable `PunctClass` table (`Split`/`Fold`/`Keep`/`Marker`) on the
   shared normalizer — set via `NormalizerBuilder` (`fold_punctuation`/`set_punct_class`), persisted through
@@ -304,9 +310,10 @@ from the audit's former P3 list). Roughly grouped:
     timed-out `/_search`/`/_mpercolate` returns 408 but its `spawn_blocking`/Rayon work runs to
     completion. A coarse per-segment deadline check could shed abandoned CPU, at the cost of a branch
     on the (deliberately branch-predictable) hot path; weigh against simply bounding concurrency.
-  - **`from`/offset + per-slot hit truncation on the percolate endpoints.** `/_mpercolate` is
-    `size`-only (no `from`), and `/_search`'s per-slot `slots[*].hits` are complete-per-slot
-    (unpaginated). Fine today; revisit if per-slot response size becomes a concern.
+  - ~~**`from`/offset + per-slot hit truncation on the percolate endpoints.**~~ **✅ Shipped (ADR-059,
+    bundled with ranking above).** `/_mpercolate` now takes `from`, and `size`/`from` bound every hits
+    array uniformly — including multi-doc `/_search`'s per-slot `slots[*].hits` (`total` still reports
+    the untruncated count).
 - ~~**`GET /_vocab` acquires the write mutex.**~~ **✅ Fixed.** `EngineSnapshot` now carries the vocab as
   an `Arc<Vocab>` (the `Engine` holds `Option<Arc<Vocab>>`, `Arc::clone`d into each snapshot — O(1) per
   publish), and `get_vocab` reads `state.snapshot.load().vocab()` instead of locking the engine. Vocab

@@ -27,8 +27,9 @@ Optional request fields:
 | Field | Default | Description |
 |---|---|---|
 | `timeout_ms` | 30000 | Per-request **response** timeout in ms; returns 408 on expiry. In-flight matching is not cancelled — see note. |
-| `size` | 1000 | Maximum number of hits to return |
+| `size` | 1000 | Maximum number of hits to return (per slot in multi-doc mode) |
 | `from` | 0 | Offset into the result set for pagination |
+| `rank` | – | Optional ranking block (ADR-059) — order hits by a priority tag and/or request boosts before `from`/`size`. See [Ranking](#ranking-adr-059). |
 | `include_source` | true | Include original query text in each hit |
 
 `total` always reflects the full match count; `hits` is the paginated window. Set
@@ -142,6 +143,55 @@ Only the `percolate` + `bool.filter(terms/term)` subset is supported; any other 
 `match`, `range`) returns **400** rather than silently widening the result set. `/_mpercolate` accepts the
 same `filter` block and ES envelope (applied to every document in the batch).
 
+### Ranking (ADR-059)
+
+By default hits come back in the engine's order (a boolean candidate set — the engine is a recall-first
+matcher, not a ranker). Attach an optional `rank` block to **order** the hits before pagination. Ranking
+is a pure post-match step: it only reorders + paginates the already-final set — it never adds or drops a
+match. A `rank` block has two optional parts:
+
+- **`priority_key`** — the name of a [tag](documents.md#per-query-metadata-tags-adr-049) whose **numeric
+  value** is the query's base priority (a query tagged `priority=50` scores 50; a non-numeric or absent
+  value scores 0).
+- **`boosts`** — a list of `{key, value, boost}` entries; a query scores `+boost` for each `(key, value)`
+  tag it carries.
+
+The score is **additive** — `score = Σ matched boosts + priority` — and hits are ordered by `score`
+descending, ties broken by ascending `_id` (a stable, repeatable order for pagination). Each hit then
+carries a `_score` field (present only when a `rank` block was supplied). Want a boost to always
+outrank priority? Choose boost magnitudes above your priority range.
+
+```bash
+curl -X POST localhost:9200/_search -H 'Content-Type: application/json' -d '{
+  "document": {"title": "2020 Topps Chrome Update"},
+  "filter": {"category": "cards"},
+  "size": 20,
+  "rank": {
+    "priority_key": "priority",
+    "boosts": [{"key": "tier", "value": "gold", "boost": 100}]
+  }
+}'
+```
+
+```json
+{
+  "took_ms": 0.31,
+  "hits": {
+    "total": 3,
+    "hits": [
+      {"_id": 1, "_score": 110, "_source": {"query": "topps chrome"}},
+      {"_id": 3, "_score": 100, "_source": {"query": "topps chrome auto"}},
+      {"_id": 2, "_score": 50,  "_source": {"query": "topps chrome rookie"}}
+    ]
+  }
+}
+```
+
+`rank` works on `/_search` (single + multi-document) and `/_mpercolate` (each document's hits ranked
+independently), composes with `filter`, and is **opt-in**: with no `rank` block the response is
+byte-identical to before — no `_score` field, engine order preserved. Cluster (multi-shard) ranking is
+not yet available; the REST endpoints rank against the single-node engine.
+
 ## `POST /_mpercolate` — Batch percolate (high throughput)
 
 The throughput counterpart to `/_search`. Percolates a **batch** of documents in one request and
@@ -191,19 +241,21 @@ Optional request fields:
 | `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class-C (broad) queries for this batch |
 | `include_source` | true | Include original query text in each hit |
 | `size` | 1000 | Maximum hits per document |
+| `from` | 0 | Per-document offset into each document's hits for pagination |
+| `rank` | – | Optional ranking block (ADR-059), applied per document — see [Ranking](#ranking-adr-059) |
 | `timeout_ms` | 30000 | Per-request **response** timeout in ms; returns 408 on expiry. In-flight matching is not cancelled — see note. |
 | `profile` | false | Include the top-level `broad` summary |
 
-Each per-document result is **byte-identical** to calling `/_search` with that single title — batching
-is a performance change only, never a semantic one (proven by `tests/broad_batch.rs`). The optional
-top-level `broad` summary surfaces the columnar evaluator's amortization: as the batch grows,
-`broad_postings_scanned` rises far slower than `broad_candidates` (each huge posting is consulted once
-per batch). An empty `documents` array is a valid no-op (`200` with `responses: []`); a missing
-`documents` field is a `400`.
+Each per-document result is **byte-identical** to calling `/_search` with that single title (for the
+same `size`/`from`/`rank`) — batching is a performance change only, never a semantic one (proven by
+`tests/broad_batch.rs`). The optional top-level `broad` summary surfaces the columnar evaluator's
+amortization: as the batch grows, `broad_postings_scanned` rises far slower than `broad_candidates`
+(each huge posting is consulted once per batch). An empty `documents` array is a valid no-op (`200` with
+`responses: []`); a missing `documents` field is a `400`.
 
 **When to use which.** Reach for `/_mpercolate` for high-throughput batch/streaming percolation,
-especially with broad queries enabled. Reach for `/_search` when you want the rich, per-document
-observability it alone provides — per-slot `stats`, `explain`, `profile`, and pagination (`from`).
-Because the broad lane is amortized per batch, `/_mpercolate` deliberately does not produce per-document
-candidate/posting stats — only the batch-level `broad` summary.
+especially with broad queries enabled. Both endpoints support `size`/`from` pagination and the `rank`
+block; reach for `/_search` when you want the rich, per-document observability it alone provides —
+per-slot `stats`, `explain`, and `profile`. Because the broad lane is amortized per batch, `/_mpercolate`
+deliberately does not produce per-document candidate/posting stats — only the batch-level `broad` summary.
 

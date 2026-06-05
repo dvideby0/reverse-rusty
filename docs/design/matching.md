@@ -181,13 +181,15 @@ intersection for the very broadest postings is a further micro-optimization, not
 > **end-to-end through the cluster** (in-process + the experimental gRPC path) — one frozen `TagDict`
 > shared into every shard like the `Dict`, raw tags in the log + read-only `get_or_synthetic`
 > resolution, the filter resolved once at the coordinator + shipped as `TagId` groups
-> ([ADR-055](../DECISIONS.md), 2026-06-04); **ranking (§5.4) is design-only**. Motivated by the reference
+> ([ADR-055](../DECISIONS.md), 2026-06-04); **ranking + pagination (§5.4) are now built single-node**
+> ([ADR-059](../DECISIONS.md), 2026-06-04 — cluster ranking still deferred). Motivated by the reference
 > workload in [`../research/percolator-workload.md`](../research/percolator-workload.md), whose dominant
 > read pattern is "percolate, then narrow to one category." Code: `src/tagdict.rs` (tag interning),
-> `src/exact.rs` (`TagPredicate` + SoA tag column + verify-stage filter), `src/segment/` (ingest/match
-> threading), `src/storage/segment.rs` + `src/wal.rs` (`.seg` v3 / WAL v2 persistence), `src/bin/server/`
-> (the REST filter surface), `src/cluster/` (`coordinator/{lifecycle,ingest,matching}` + `clog` + `shard`
-> + the gated `remote`/`server` — ADR-055).
+> `src/exact.rs` (`TagPredicate` + SoA tag column + verify-stage filter), `src/rank.rs` (the post-match
+> scorer — ADR-059), `src/segment/` (ingest/match threading + `EngineSnapshot::rank`),
+> `src/storage/segment.rs` + `src/wal.rs` (`.seg` v3 / WAL v2 persistence), `src/bin/server/`
+> (the REST filter + rank/pagination surface), `src/cluster/` (`coordinator/{lifecycle,ingest,matching}` +
+> `clog` + `shard` + the gated `remote`/`server` — ADR-055).
 
 Production percolators store **structured tags** alongside each query (a category, a status, secondary
 keys) and at match time **filter the percolated candidates by those tags** — and sometimes rank them.
@@ -222,15 +224,23 @@ ask for; it cannot drop a query the caller *did* want, so it introduces **no fal
 requested tag scope. An implementer must not "optimize" by letting a tag influence candidate retrieval —
 that would couple a caller-supplied filter to the cover proof.
 
-### 5.4 Ranking — an optional layer *over* the boolean-correct set
+### 5.4 Ranking — an optional layer *over* the boolean-correct set (built single-node, ADR-059)
 
 Matching stays boolean and complete; ranking is an **optional sort applied to the already-final result
-set**, never a change to which queries match. A query may carry a numeric **priority tag** (reusing 5.1)
-and/or the request may supply a **boost** keyed on a tag value; the engine orders the returned ids by
-`(boost, priority, …)` and applies top-K / `from` (closing the `/_mpercolate` pagination gap). Because it
-runs after verification on a `Vec<u64>`, it touches neither the candidate index nor the verifier —
-consistent with the reference workload, where ranking is a presentation-surface concern, not a
-matching-core one.
+set**, never a change to which queries match. A query may carry a numeric **priority** (the value of a
+designated tag key, default `"priority"`, reusing §5.1) and/or the request may supply additive **boosts**
+keyed on a `(tag key, value)`; `EngineSnapshot::rank` (`src/rank.rs`) scores each matched id as
+`Σ boosts + priority` (**additive**, not strict `(boost, priority)` lexicographic — the simpler
+ES-`function_score`-"sum" model; strict dominance is reachable by choosing boost magnitudes above the
+priority range), and the handler orders by `(score desc, _id asc)` — a total order — then applies
+`from`/`size` and emits `_score`. This also adds `from` to `/_mpercolate` and per-slot hit truncation to
+multi-doc `/_search` (closing the ADR-052 #3 pagination tail). Because it runs after verification on a
+`Vec<u64>`, it touches neither the candidate index nor the verifier — and it is **opt-in**, so with no
+`rank` block the response is byte-identical to the pre-ranking engine. Tags are resolved to the **newest
+live copy** of each id (memtable first, then base segments newest→oldest). **Single-node** (the REST
+surface); cluster ranking is deferred behind the same `RankSpec` seam (cross-shard priority fetch at the
+coordinator merge — [ADR-055](../DECISIONS.md)/[ADR-059](../DECISIONS.md)). Consistent with the reference
+workload, where ranking is a presentation-surface concern, not a matching-core one.
 
 ### 5.5 Alternatives (documented, deferred)
 
