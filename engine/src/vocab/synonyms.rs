@@ -101,13 +101,14 @@ impl From<SynonymParseError> for SynonymLoadError {
     }
 }
 
-/// Split a form into normalized tokens the way the **default** normalizer tokenizes a title
-/// ([`Normalizer::clean_into`](crate::normalize::Normalizer)): fold diacritics, lowercase, **keep
-/// `.` inside the token** (`PunctClass::Keep` — so `st.` and `9.5` stay one token), and break on
-/// every other non-alphanumeric (so `i-pod` -> `["i","pod"]`, `Upper Deck` -> `["upper","deck"]`).
-/// A token with no alphanumeric (e.g. all dots) is dropped — it can't be a feature. (A *custom*
-/// punctuation config — folded `-`, or `#`/`/` markers — can diverge; the common default is
-/// mirrored, and divergence only makes an alias a no-op, never a false negative.)
+/// Split a form into normalized tokens **exactly the way the default normalizer tokenizes a title**
+/// ([`Normalizer::clean_into`](crate::normalize::Normalizer) + `split_whitespace`): fold diacritics,
+/// lowercase, **keep `.` inside the token** (`PunctClass::Keep` — so `st.`/`9.5` stay one token),
+/// emit `#` and `/` as **standalone marker tokens** (`PunctClass::Marker` — so `s/n` -> `["s","/","n"]`
+/// and the phrase pattern matches the cleaned `s / n` text), and break on every other
+/// non-alphanumeric (`PunctClass::Split`; `i-pod` -> `["i","pod"]`). Tokens with no alphanumeric and
+/// no marker (e.g. all dots) are dropped — they can't be features. (A *custom* punctuation config can
+/// diverge; the common default is mirrored, and divergence only makes an alias a no-op, never an FN.)
 fn tokenize_form(form: &str) -> Vec<String> {
     let mut toks: Vec<String> = Vec::new();
     let mut cur = String::new();
@@ -115,14 +116,20 @@ fn tokenize_form(form: &str) -> Vec<String> {
         let c = crate::normalize::fold_diacritic(ch);
         if c.is_ascii_alphanumeric() || c == '.' {
             cur.push(c.to_ascii_lowercase());
-        } else if !cur.is_empty() {
-            toks.push(std::mem::take(&mut cur));
+        } else {
+            if !cur.is_empty() {
+                toks.push(std::mem::take(&mut cur));
+            }
+            if c == '#' || c == '/' {
+                toks.push(c.to_string()); // default Marker: its own token
+            }
         }
     }
     if !cur.is_empty() {
         toks.push(cur);
     }
-    toks.retain(|t| t.bytes().any(|b| b.is_ascii_alphanumeric()));
+    // Keep alphanumeric tokens and the `#`/`/` markers; drop pure-`.` runs (not features).
+    toks.retain(|t| t == "#" || t == "/" || t.bytes().any(|b| b.is_ascii_alphanumeric()));
     toks
 }
 
@@ -248,12 +255,18 @@ impl Vocab {
             groups: parsed.equivalences().len(),
             phrases: parsed.phrases().len(),
         };
-        // If the table declares a multi-word form an alias but this vocab already holds a
-        // (non-alias) phrase for those exact tokens — e.g. a corpus-learned ADDITIVE phrase
-        // (ADR-053) — the first-wins `merge` would keep the old phrase, leaving the query side
-        // additive (not collapsed), so the alias would silently fail in the reverse direction.
-        // UPGRADE the existing phrase to alias semantics (ADR-061 P2) so it collapses on the query
-        // side; the alias entity feature is unchanged, so equivalence resolution still links.
+        self.merge_synonyms(&parsed);
+        Ok(stats)
+    }
+
+    /// Merge a **parsed** synonym vocab into this one, applying alias semantics (ADR-061). If a
+    /// parsed alias phrase's tokens collide with an existing (non-alias) phrase — e.g. a
+    /// corpus-learned ADDITIVE phrase (ADR-053) — the first-wins `merge` would keep the old phrase,
+    /// leaving the query side additive (not collapsed) so the alias would silently fail in the
+    /// reverse direction; this **upgrades** that existing phrase to alias semantics first. Shared by
+    /// [`extend_from_synonyms`](Self::extend_from_synonyms) and the `POST /_vocab/synonyms` handler,
+    /// so both paths get the upgrade.
+    pub fn merge_synonyms(&mut self, parsed: &Vocab) {
         for p in parsed.phrases() {
             if p.alias {
                 if let Some(existing) = self.phrases.iter_mut().find(|e| e.tokens == p.tokens) {
@@ -262,8 +275,7 @@ impl Vocab {
                 }
             }
         }
-        self.merge(&parsed);
-        Ok(stats)
+        self.merge(parsed);
     }
 
     /// Read a Solr/Lucene-format synonym file from `path` and merge it into this vocab
@@ -423,6 +435,21 @@ rc, rookie
         let e = parse_synonyms("rc, rookie\na => b => c").expect_err("double arrow");
         assert_eq!(e.line, 2);
         assert!(e.message.contains("exactly one"), "{}", e.message);
+    }
+
+    #[test]
+    fn marker_punctuation_form_is_tokenized_like_the_normalizer() {
+        // `/` is a default Marker: `clean_into` makes `s/n` -> `s / n`, so the parser must tokenize
+        // it to `["s","/","n"]` (markers as standalone tokens) for the alias phrase to fire on real
+        // text. (ADR-061 P3 from the round-3 Codex review.)
+        let v = parse_synonyms("sn, s/n").expect("parse");
+        assert_eq!(v.phrases().len(), 1);
+        assert_eq!(
+            v.phrases()[0].tokens,
+            vec!["s".to_string(), "/".to_string(), "n".to_string()]
+        );
+        assert_eq!(v.phrases()[0].canonical, "term:s/n");
+        assert!(v.phrases()[0].alias);
     }
 
     #[test]

@@ -186,6 +186,43 @@ fn overlapping_multiword_aliases_have_no_false_negative() {
     assert!(out.contains(&2), "`nyc` ≡ `new york city`");
 }
 
+/// An alias that overlaps an existing **collapse** phrase must not hide it (ADR-061 round-3 P1): with
+/// a declared `upper deck -> brand:upper_deck` collapse phrase, loading the alias `upper deck gold`
+/// makes a title `upper deck gold` win leftmost-longest on the alias — but the title-side overlap pass
+/// (over ALL phrases, not just aliases) must still emit `brand:upper_deck`, so a stored `upper deck`
+/// query keeps matching.
+#[test]
+fn alias_overlapping_a_collapse_phrase_keeps_its_feature() {
+    use reverse_rusty::dict::FeatureKind;
+    let mut v = Vocab::new();
+    v.add_phrase(&["upper", "deck"], "brand:upper_deck", FeatureKind::Brand); // collapse phrase
+    v.extend_from_synonyms("udg, upper deck gold")
+        .expect("parse"); // alias overlapping it
+
+    let mut queries: Vec<(u64, String)> = vec![
+        (1, "upper deck".into()), // compiles via the collapse phrase to brand:upper_deck
+        (2, "upper deck gold".into()), // the alias form
+    ];
+    for i in 0..10u64 {
+        queries.push((100 + i, format!("udg u{i}")));
+        queries.push((200 + i, format!("upper deck gold u{i}")));
+    }
+    let mut eng = Engine::with_vocab(v, EngineConfig::default()).expect("with_vocab");
+    eng.build_from_queries(&queries);
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title("a upper deck gold b", &mut s, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "REGRESSION (ADR-061 P1 r3): collapse-phrase `upper deck` query must still match an `upper deck gold` title"
+    );
+    assert!(
+        out.contains(&2),
+        "the `upper deck gold` query matches its title"
+    );
+}
+
 /// The build-time path against an independent **equivalence-aware** brute oracle: build the engine
 /// `with_vocab(parsed)` and a `Brute::build_with_vocab` under the SAME vocab-normalizer, then assert
 /// the match sets are identical over a large synthetic corpus — zero false negatives AND zero false

@@ -30,24 +30,27 @@
      the query's entity feature to its synonyms. So a query phrased `upper deck` requires
      `any-of(term:upperdeck, term:ud)`, and a title bearing either `upper deck` (adjacent → emits the
      entity additively) or `ud` matches. **Bidirectional.**
-  3. **Overlapping / nested aliases — a title-side overlapping pass.** The main automaton is
-     leftmost-longest (non-overlapping), so a title `new york city` reports only the longest alias and a
-     `new york` query (collapsed to `term:newyork`) would stop matching it — a false negative when two
-     overlapping aliases are loaded (`new york` ⊂ `new york city`, or `new york` / `york city` sharing
-     `york`). To match ES's graph, the normalizer carries a **second, alias-only `MatchKind::Standard`
-     automaton** consulted **on the title side only**: it emits **every** alias entity that occurs
-     (`find_overlapping_iter`, word-boundary checked), so all nested/overlapping entities are produced
-     and the dedup folds the duplicate with the main pass. Built only when alias phrases exist (`None`
-     otherwise ⇒ the match path is byte-identical); the query side is unaffected (a query collapses to its
-     own longest entity).
+  3. **Overlapping / nested phrases — a title-side overlapping pass.** The main automaton is
+     leftmost-longest (non-overlapping), so a title reports only ONE phrase per span — hiding any
+     overlapping shorter/other phrase and making a query that used the hidden phrase a false negative.
+     Examples: a `new york` query vs a `new york city` title (nested aliases, or `new york`/`york city`
+     sharing `york`); a stored `upper deck` *collapse-phrase* query vs an `upper deck gold` *alias* title.
+     To match ES's graph, the normalizer carries a **second `MatchKind::Standard` automaton over ALL
+     phrase patterns** consulted **on the title side only**: it emits **every** phrase entity that occurs
+     (`find_overlapping_iter`, word-boundary checked) — alias, collapse, and additive alike — so none is
+     hidden; the dedup folds duplicates with the main pass. Built only when an alias phrase exists (`None`
+     otherwise ⇒ the no-alias match path is byte-identical, pure leftmost-longest, zero overhead); the
+     query side is unaffected (a query collapses to its own longest entity).
   4. **Loader hardening.** A multi-word form is registered as an alias phrase to a `term:`-prefixed entity;
      the equivalence **member is the raw multi-word form**, which `resolve_equivalences` (query path)
      collapses to the single entity feature. If a multi-word member resolves to >1 feature because an
      *existing additive* phrase (ADR-053) already covers those tokens, `resolve_equivalences` uses that
-     phrase's entity feature (`phrase_entity_in`) and `extend_from_synonyms` **upgrades** that existing
-     phrase to alias semantics — so the query side collapses and the alias is bidirectional rather than
-     silently one-way. Malformed `=>` rules (empty side, more than one arrow) are rejected fail-loud with
-     the line number.
+     phrase's entity feature (`phrase_entity_in`) and the shared **`Vocab::merge_synonyms`** (used by both
+     `extend_from_synonyms` and the `POST /_vocab/synonyms` handler) **upgrades** that existing phrase to
+     alias semantics — so the query side collapses and the alias is bidirectional rather than silently
+     one-way. Form tokenization **mirrors `clean_into`** (keeps `.` inside a token, emits `#`/`/` as
+     standalone marker tokens, so `s/n` glues as `s / n`). Malformed `=>` rules (empty side, more than one
+     arrow) are rejected fail-loud with the line number.
 - **Why this is safe (lossless cover holds; default byte-identical).** The asymmetry is strictly in the
   **safe direction**: the title side emits a **superset** (entity + components) of what the query side
   requires (just the entity, or just a component for a component query). So for any title that *could*

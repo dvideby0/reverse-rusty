@@ -17,17 +17,19 @@ pub struct Normalizer {
     pub(super) automaton: DoubleArrayAhoCorasick<usize>,
     pub(super) phrase_entries: Vec<PhraseEntry>,
 
-    /// **Overlapping** automaton over alias-entity phrase patterns only (`MatchKind::Standard`),
-    /// present iff any alias phrase is registered (ADR-061). On the **title** side the main
-    /// (leftmost-longest) automaton reports only the longest match, so nested/overlapping aliases
-    /// (`new york` inside `new york city`, or `new york` / `york city` sharing `york`) would be
-    /// missed — turning into a false negative for a shorter-alias query against a longer-alias
-    /// title. This second pass emits **every** alias entity that occurs (the ES `synonym_graph`
-    /// graph behavior); `alias_features[value]` is the `(entity, kind)` for each pattern. Query
-    /// side is unaffected (a query collapses to its own longest entity). `None` ⇒ no alias phrases
-    /// ⇒ the match path is byte-identical to before.
-    pub(super) alias_automaton: Option<DoubleArrayAhoCorasick<usize>>,
-    pub(super) alias_features: Vec<(String, FeatureKind)>,
+    /// **Overlapping** automaton over phrase patterns (`MatchKind::Standard`), present iff any alias
+    /// phrase is registered (ADR-061). The main (leftmost-longest) automaton reports only ONE match
+    /// per span, so on the **title** side any phrase hidden by a longer overlapping one is lost —
+    /// a false negative for a query that used the hidden phrase. Examples: a `new york` query vs a
+    /// `new york city` title (nested aliases), or a stored `upper deck` (collapse-phrase) query vs
+    /// an `upper deck gold` (alias) title. This second pass emits **every** phrase entity that
+    /// occurs (the ES `synonym_graph` graph behavior), so none is hidden; `overlap_features[value]`
+    /// is the `(entity, kind)` for each pattern. It indexes the SAME pattern order as the main
+    /// automaton, so it covers alias, collapse, and additive phrases alike. Run on the title side
+    /// only — a query collapses to its own longest entity. `None` ⇒ no alias phrases ⇒ the match
+    /// path is byte-identical to before (the no-alias path is untouched).
+    pub(super) overlap_automaton: Option<DoubleArrayAhoCorasick<usize>>,
+    pub(super) overlap_features: Vec<(String, FeatureKind)>,
 
     pub(super) graders: Vec<String>,
     /// single-token synonyms -> (canonical feature, kind).
@@ -116,22 +118,23 @@ impl Normalizer {
     ) {
         self.clean_into(text, lc);
 
-        // Title-side overlapping alias pass (ADR-061): emit EVERY alias entity that occurs, so
-        // nested/overlapping multi-word aliases (`new york` inside `new york city`; `new york` /
-        // `york city` sharing `york`) are all produced — the leftmost-longest automaton below
-        // reports only one, which would drop a shorter-alias query against a longer-alias title.
-        // This is the ES `synonym_graph` graph behavior. The query side collapses to its own
-        // longest entity (handled by the main pass), so it skips this; `None` ⇒ no alias phrases
-        // ⇒ this is never reached and the match path is byte-identical to before.
+        // Title-side overlapping phrase pass (ADR-061): emit EVERY phrase entity that occurs, so
+        // none is hidden by a longer overlapping match. The leftmost-longest automaton below reports
+        // only one phrase per span, which would drop (a) a shorter-alias query against a longer-alias
+        // title (`new york` vs `new york city`) and (b) a stored collapse-phrase query against a
+        // longer-alias title (`upper deck` vs `upper deck gold`). This is the ES `synonym_graph` graph
+        // behavior; the dedup in match_features folds the duplicate with the main pass. Title side
+        // only — a query collapses to its own longest entity. `None` ⇒ no alias phrases ⇒ never
+        // reached, so the no-alias match path is byte-identical to before.
         if !query_side {
-            if let Some(aa) = &self.alias_automaton {
+            if let Some(aa) = &self.overlap_automaton {
                 let bytes = lc.as_bytes();
                 for m in aa.find_overlapping_iter(&**lc) {
                     let (start, end) = (m.start(), m.end());
                     let ok_start = start == 0 || bytes[start - 1] == b' ';
                     let ok_end = end == bytes.len() || bytes[end] == b' ';
                     if ok_start && ok_end {
-                        let (feat, kind) = &self.alias_features[m.value()];
+                        let (feat, kind) = &self.overlap_features[m.value()];
                         emit(feat, *kind);
                     }
                 }

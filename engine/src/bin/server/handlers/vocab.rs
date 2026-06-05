@@ -122,9 +122,10 @@ pub(crate) async fn load_synonyms(
 
     let result = {
         let mut engine = state.engine.lock();
-        // Merge into the current vocab (additive — keep existing phrases/synonyms/graders).
+        // Merge into the current vocab (additive — keep existing phrases/synonyms/graders), via the
+        // synonym-aware merge so multi-word aliases upgrade a colliding existing phrase (ADR-061).
         let mut vocab = engine.vocab().cloned().unwrap_or_default();
-        vocab.merge(&parsed);
+        vocab.merge_synonyms(&parsed);
         match engine.set_vocab(vocab) {
             Ok(_) => {
                 let recompiled = engine.recompile_stale_segments();
