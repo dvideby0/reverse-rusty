@@ -130,18 +130,28 @@ impl Engine {
         vocab: crate::vocab::Vocab,
     ) -> Result<(), crate::error::NormalizerError> {
         let norm = Arc::new(vocab.to_normalizer()?);
-        // Re-install equivalence groups (ADR-054/060) so inserts AFTER reopen expand through them.
-        // Resolve against the RECOVERED dict AS-IS — do NOT intern here (unlike `set_vocab`): the
-        // already-compiled segments baked their feature ids against this dict, so a form they
-        // resolved to a *synthetic* id (an old-format index, or any active alias form never
-        // interned) must keep resolving synthetic — otherwise the title side would resolve it
-        // dense and miss those recovered queries, a false negative (ADR-060). A new-code index
-        // already has its active alias forms interned dense in the persisted dict (from
-        // `set_vocab`/`with_vocab`), so they resolve dense here and stay consistent with future
-        // inserts. A genuine runtime vocabulary *change* (intern + recompile) goes through
-        // `set_vocab` + `recompile_stale_segments`, not this adopt path.
-        let equiv = vocab.resolve_equivalences(&norm, &self.dict);
-        Arc::make_mut(&mut self.dict).set_equivalences(equiv);
+        // Re-install equivalence groups (ADR-054/060) so inserts after this point expand through
+        // them. The ID-stability question turns on whether any query is already compiled:
+        //
+        //   * **Fresh engine** (no segments, empty memtable — e.g. a persistent server started on a
+        //     new/empty data dir with a vocab file): there is nothing to desync, so intern the
+        //     active forms FIRST, pinning each to a dense id so the first live `PUT /_doc` (mutating
+        //     extract) resolves the SAME id the `EquivMap` is keyed by. Without this the map is
+        //     synthetic-keyed and the alias dies on the first dense insert (ADR-060).
+        //   * **Recovered engine** (segments/memtable present): the already-compiled queries baked
+        //     their ids against the persisted dict, so resolve AS-IS and do NOT intern — a form they
+        //     resolved synthetic must keep resolving synthetic, or the title side would resolve it
+        //     dense and miss those queries (an upgrade FN). A new-code index already has its active
+        //     forms interned dense in the persisted dict, so they resolve dense and stay consistent.
+        //     A genuine runtime vocabulary *change* (intern + recompile) goes through `set_vocab` +
+        //     `recompile_stale_segments`, not this adopt path.
+        let fresh = self.segments.is_empty() && self.memtable.is_empty();
+        let dict = Arc::make_mut(&mut self.dict);
+        if fresh {
+            vocab.intern_equivalence_forms(&norm, dict);
+        }
+        let equiv = vocab.resolve_equivalences(&norm, dict);
+        dict.set_equivalences(equiv);
         self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
         Ok(())

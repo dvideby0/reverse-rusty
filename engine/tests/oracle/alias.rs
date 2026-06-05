@@ -148,6 +148,36 @@ fn alias_ids_are_stable_after_future_insert() {
     );
 }
 
+/// The fresh-persistent-startup variant of the ID-stability fix (Codex review): a server started
+/// on an empty data dir with a `--vocab-file` carrying an active alias lands in `adopt_vocab` with
+/// nothing compiled yet. The alias forms must be interned there too, or the first live insert
+/// (mutating extract → dense id) diverges from the synthetic-keyed equivalence map and the alias
+/// silently dies. `Engine::new` reproduces the "fresh, no queries" precondition.
+#[test]
+fn adopt_vocab_on_fresh_engine_keeps_alias_active_after_insert() {
+    let cls_norm = Normalizer::default_vocab().expect("vocab");
+    let cls_dict = Dict::new();
+    let mut v = Vocab::new();
+    v.aliases_mut().add_classified(
+        &["autograph".into(), "autographs".into()],
+        AliasProvenance::Manual,
+        1.0,
+        &cls_norm,
+        &cls_dict,
+    );
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab")); // fresh: no queries
+    eng.adopt_vocab(v).expect("adopt_vocab");
+    eng.try_insert_live("autograph card9", 1, 1)
+        .expect("insert");
+
+    let mut s = MatchScratch::new();
+    assert!(
+        matched(&mut eng, &mut s, "autographs card9").contains(&1),
+        "adopt on a fresh engine must intern alias forms so the alias survives a future insert"
+    );
+}
+
 /// (4) Applying an alias recompiles already-stored queries in place — no restart, no full
 /// rebuild — so an existing query gains the alias's reach immediately, zero false negatives.
 #[test]
