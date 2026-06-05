@@ -236,7 +236,12 @@ false-negative / throughput audit — remains the open step in **Current limitat
   hundreds of equivalences (abbreviation → canonical, variant spellings, term expansions
   like `auto` ≡ `{autograph, autographed, signature, signed}`). Add a batch registration
   method and/or a file-based vocabulary loader so large synonym tables are easy to maintain
-  outside of code.
+  outside of code. **Split this into two:** (1) **single-token** alias loading (Solr-format file →
+  equivalence expansion) is correct and small — land it independently; (2) **multi-word**
+  aliases (ES `synonym_graph` parity) are a **matching-model** feature, not a loader feature — a
+  first attempt was abandoned after it hit a fundamental flat-feature-set conflict with forbidden
+  features. **Design the token-graph model (and its forbidden-feature oracle) first** — see the
+  learnings in [`research/multiword-synonyms.md`](research/multiword-synonyms.md).
 
 ### Polish / niche
 
