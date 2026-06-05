@@ -20,6 +20,7 @@ use crate::normalize::PunctClass;
 
 mod learn;
 mod methods;
+mod synonyms;
 
 #[cfg(test)]
 mod tests;
@@ -27,6 +28,7 @@ mod tests;
 pub use learn::{
     learn_equivalences_from_queries, learn_from_queries, learn_vocab_from_corpus, CorpusLearnConfig,
 };
+pub use synonyms::{parse_synonyms, SynonymLoadError, SynonymLoadStats, SynonymParseError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Vocab {

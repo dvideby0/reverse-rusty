@@ -23,4 +23,5 @@ mod equivalence;
 mod filtered;
 mod reanchor;
 mod segments;
+mod synonyms;
 mod vocab;

@@ -88,7 +88,7 @@ Endpoints are grouped by concern — open the one you need:
 - **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`, `POST /_mpercolate`), incl. filtered percolation.
 - **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`, `/_flush`, `/_compact`).
 - **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
-- **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`).
+- **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`, `/_vocab/synonyms`).
 - **[Settings](api/settings.md)** — read + runtime-update engine settings (`GET`/`PUT /_settings`).
 
 The full method/path matrix is below.
@@ -115,5 +115,6 @@ The full method/path matrix is below.
 | `/_vocab` | PUT | Replace vocabulary |
 | `/_vocab/learn` | POST | Learn synonyms (+ opt-in NPMI phrases, `corpus_phrases=true`) from raw query text |
 | `/_vocab/learn_and_apply` | POST | Learn from stored queries + apply (`?min_count=N`; opt-in NPMI phrases `?corpus_phrases=true`) |
+| `/_vocab/synonyms` | POST | Load a Solr-format synonym/alias table (raw text body) + apply (ADR-060) |
 | `/_settings` | GET | Read live engine settings (`?include_defaults`) |
 | `/_settings` | PUT | Update the dynamic settings subset |

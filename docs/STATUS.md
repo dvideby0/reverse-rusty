@@ -69,6 +69,16 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   `NormalizerBuilder`, persisted through `Vocab` (+ `PUT /_vocab`); the same table runs over queries and
   titles, so the lossless cover holds under any config (oracle-proven: engine ≡ brute, zero FN/FP); the
   default reproduces the historical behavior byte-identically (opt-in / default-off).
+  **Bulk alias/synonym file loading (ADR-060):** the **Solr/Lucene synonym-file format** (the format
+  ES/OS's `synonyms_path` consumes — `a, b, c` equivalent sets + `a, b => c` mappings + `#` comments)
+  is parsed (`vocab::parse_synonyms`, `Vocab::extend_from_synonyms[_file]`, bulk `add_equivalences`/
+  `add_synonyms`, `NormalizerBuilder::add_synonyms`) and applied entirely through **FN-safe equivalence
+  expansion** (ADR-054) — the `=>` arrow's sides are unioned (RR is expansion-based; no directional
+  token-collapse, which has a forbidden-term footgun), and multi-token forms are glued to a single
+  feature as phrases. Exposed as `POST /_vocab/synonyms` (raw text body → merge + recompile live, with a
+  fail-loud 1-based line number on a malformed table). Lets a domain team maintain hundreds of aliases in
+  a plain-text file outside of code; oracle-proven (recall grows, engine ≡ equivalence-aware brute, zero
+  FN/FP).
 - **HTTP server** (`bin/server/`) — ES-style REST (`/_doc`, `/_search` with explain/profile,
   `/_bulk` per-item status ADR-018, `/_stats`, `/_cat/stats`, `/_cat/segments` per-segment detail
   (text table + `?format=json`, ADR-023), `/_health`, `/_metrics`, `/_vocab*`,
@@ -447,10 +457,11 @@ Tiers, highest-leverage first:
   match-feedback) and the rest of the §7 "improve" menu (survival telemetry, feature-ID re-ranking).
 - **Tier 3 — scale & production maturity.** Feature-model versioning + blue/green; hardening the
   (experimental) distributed multi-node layers; aspects-first ingestion.
-- **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node
-  ADR-049, ✅ through the cluster ADR-055); byte-cleaning punctuation-equivalence folding (✅ ADR-058);
-  ranking + `/_mpercolate` pagination (✅ built single-node ADR-059 — cluster ranking deferred); still
-  open: bulk-alias registration API.
+- **Tier 4 — ES/OS percolator parity (complete).** Per-query metadata + filtered percolation (✅ built
+  single-node ADR-049, ✅ through the cluster ADR-055); byte-cleaning punctuation-equivalence folding
+  (✅ ADR-058); ranking + `/_mpercolate` pagination (✅ built single-node ADR-059 — cluster ranking
+  deferred); bulk synonym/alias file loading (✅ ADR-060). All Tier-4 items shipped; the only deferred
+  sub-item is cluster (multi-shard) ranking.
 
 See **[`roadmap.md`](roadmap.md)** for the per-tier detail, the Nice-to-have / operational-polish
 backlog, and the Evaluated & declined list.

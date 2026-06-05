@@ -54,6 +54,45 @@ impl Brute {
         }
     }
 
+    /// Build the brute reference under a `vocab` whose equivalence groups are resolved and
+    /// applied exactly as the engine does at build time (ADR-054): resolve each form against the
+    /// populated dict, install the map, and expand every extracted query's required features into
+    /// any-of groups. The normalizer must be the vocab's own (`vocab.to_normalizer()`) so the
+    /// gluing phrases for multi-token forms line up. Lets a differential assert engine ≡ brute
+    /// (FN=0 AND FP=0) under declared synonyms/equivalences — not merely FN-safety. See ADR-060.
+    pub(crate) fn build_with_vocab(
+        queries: &[(u64, String)],
+        norm: Normalizer,
+        vocab: &reverse_rusty::vocab::Vocab,
+    ) -> Self {
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let mut qs: Vec<(u64, Extracted)> = Vec::new();
+        for (logical, text) in queries {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+                let ex = extract(&ast, &norm, &mut dict, &mut lc);
+                if ex.required.is_empty() && ex.anyof.is_empty() {
+                    continue;
+                }
+                qs.push((*logical, ex));
+            }
+        }
+        dict.finalize_mask();
+        let equiv = vocab.resolve_equivalences(&norm, &dict);
+        if !equiv.is_empty() {
+            dict.set_equivalences(equiv);
+            let map = dict.equivalences();
+            for (_, ex) in &mut qs {
+                ex.expand_equivalences(map);
+            }
+        }
+        Brute {
+            norm,
+            dict,
+            queries: qs,
+        }
+    }
+
     pub(crate) fn matches(
         &self,
         title: &str,

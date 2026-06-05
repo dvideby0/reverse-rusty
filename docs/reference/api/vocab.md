@@ -142,3 +142,51 @@ Absent ⇒ any-of synonym learning only (byte-identical to before).
 curl -X POST 'localhost:9200/_vocab/learn_and_apply?corpus_phrases=true&npmi_min_count=3'
 ```
 
+## `POST /_vocab/synonyms` — Load a Solr-format synonym/alias table
+
+Bulk-register aliases from a **Solr/Lucene synonym file** — the same format Elasticsearch/OpenSearch's
+`synonyms_path` consumes — maintained by domain operators *outside of code* (ADR-060). The raw table is
+the request body (`Content-Type: text/plain`); it is merged into the live vocabulary and every stored
+query is recompiled, so the change takes effect immediately with **zero false negatives**.
+
+Two line shapes, plus `#` comments and blank lines:
+
+```text
+# equivalent set (comma-separated, no arrow): every form is interchangeable
+auto, autograph, autographed, signature, signed
+rc, rookie, rookie card
+
+# mapping (with =>): accepted for Solr-file compatibility — both sides become one equivalent set
+ud, upperdeck => upper deck
+```
+
+```bash
+curl -X POST localhost:9200/_vocab/synonyms \
+  -H 'Content-Type: text/plain' \
+  --data-binary @synonyms.txt
+```
+
+```json
+{
+  "acknowledged": true,
+  "groups": 3,
+  "phrases": 1,
+  "recompiled": 1280
+}
+```
+
+`groups` is the number of equivalence groups parsed, `phrases` the gluing phrases registered for any
+multi-token forms (e.g. `upper deck`), and `recompiled` the stored queries rebuilt under the new
+vocabulary. Every rule is applied through **FN-safe expansion** (ADR-054): a query requiring one form is
+widened to an any-of over the group, so it matches a title bearing any form — a wrong/uncertain alias can
+only add bounded false positives, never drop a true match. The `=>` arrow's two sides are simply unioned
+into one group (RR is expansion-based, so its direction is immaterial to recall); RR does **not** perform
+Solr's directional token-collapse. A multi-token form (`upper deck`, `i-pod`) is registered as a gluing
+phrase so it resolves to a single feature (it therefore tightens to adjacency — the operator's explicit
+choice to treat the form as a unit). A malformed table is rejected **without changing anything**, with the
+offending 1-based line number:
+
+```json
+{"error": {"type": "synonym_parse_error", "reason": "synonym file line 2: a synonym rule needs at least two distinct forms (got 1)"}, "status": 400}
+```
+

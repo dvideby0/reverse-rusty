@@ -109,6 +109,22 @@ impl NormalizerBuilder {
         self
     }
 
+    /// Register many single-token synonyms at once (bulk [`add_synonym`](Self::add_synonym)).
+    /// For large alias tables maintained outside of code, prefer the Solr/Lucene-format file
+    /// loader on [`Vocab`](crate::vocab::Vocab) (`extend_from_synonyms[_file]`, ADR-060), which
+    /// also handles multi-token forms and FN-safe equivalence expansion.
+    pub fn add_synonyms(&mut self, entries: &[(&str, &str, FeatureKind)]) {
+        for &(token, canon, kind) in entries {
+            self.add_synonym(token, canon, kind);
+        }
+    }
+
+    /// Fluent version of [`add_synonyms`](Self::add_synonyms).
+    pub fn synonyms(mut self, entries: &[(&str, &str, FeatureKind)]) -> Self {
+        self.add_synonyms(entries);
+        self
+    }
+
     /// Register a grader keyword (e.g. `"psa"`, `"bgs"`). Grader tokens trigger
     /// grade detection: adjacent numbers become `grade:N` and `grader_grade:psaN`.
     pub fn add_grader(&mut self, name: &str) {

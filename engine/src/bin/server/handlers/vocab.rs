@@ -69,6 +69,69 @@ pub(crate) async fn put_vocab(
     result
 }
 
+// -- POST /_vocab/synonyms
+#[derive(Serialize)]
+struct LoadSynonymsResponse {
+    acknowledged: bool,
+    /// Equivalence groups parsed from the uploaded table.
+    groups: usize,
+    /// Gluing phrases registered for multi-token forms.
+    phrases: usize,
+    /// Stored queries recompiled so the new aliases take effect immediately (zero FN).
+    recompiled: usize,
+}
+
+/// POST /_vocab/synonyms — load a Solr/Lucene-format synonym table (raw text body, one rule per
+/// line; `a, b, c` equivalence sets and `a, b => c` mappings, ADR-060), merge it into the current
+/// vocabulary, then recompile every stored query so the change takes effect immediately with zero
+/// false negatives. Rules become FN-safe equivalence groups (expansion, ADR-054). A malformed
+/// table is rejected (with the offending line number) without changing anything.
+pub(crate) async fn load_synonyms(
+    State(state): State<Arc<AppState>>,
+    body: String,
+) -> impl IntoResponse {
+    // Parse before taking the lock; surface the line number on a malformed table.
+    let parsed = match reverse_rusty::vocab::parse_synonyms(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return ApiError::response(
+                StatusCode::BAD_REQUEST,
+                "synonym_parse_error",
+                e.to_string(),
+            )
+            .into_response();
+        }
+    };
+    let groups = parsed.equivalences().len();
+    let phrases = parsed.phrases().len();
+
+    let result = {
+        let mut engine = state.engine.lock();
+        // Merge into the current vocab (additive — keep existing phrases/synonyms/graders).
+        let mut vocab = engine.vocab().cloned().unwrap_or_default();
+        vocab.merge(&parsed);
+        match engine.set_vocab(vocab) {
+            Ok(_) => {
+                let recompiled = engine.recompile_stale_segments();
+                (
+                    StatusCode::OK,
+                    Json(LoadSynonymsResponse {
+                        acknowledged: true,
+                        groups,
+                        phrases,
+                        recompiled,
+                    }),
+                )
+                    .into_response()
+            }
+            Err(e) => ApiError::response(StatusCode::BAD_REQUEST, "vocab_error", e.to_string())
+                .into_response(),
+        }
+    };
+    state.publish_snapshot();
+    result
+}
+
 #[derive(Deserialize)]
 pub(crate) struct LearnRequest {
     queries: Vec<(u64, String)>,

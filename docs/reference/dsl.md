@@ -114,3 +114,29 @@ to **both** queries and titles, so a query and a title that differ only in punct
 
 The `NormalizerBuilder` API remains available for programmatic vocabulary construction when you need
 fine-grained control (`fold_punctuation` / `set_punct_class`).
+
+### Bulk alias/synonym files (Solr format)
+
+Real deployments maintain large alias tables — abbreviation→canonical, variant spellings, term
+expansions like `auto ≡ {autograph, autographed, signature, signed}` — in a plain-text file edited
+outside of code. RR loads the **Solr/Lucene synonym-file format** directly (the same format ES/OS's
+`synonyms_path` consumes, ADR-060). Two line shapes, plus `#` comments and blank lines:
+
+```text
+# equivalent set (comma-separated, no arrow): every form is interchangeable
+auto, autograph, autographed, signature, signed
+rc, rookie, rookie card
+
+# mapping (=>): accepted for Solr-file compatibility — both sides become one equivalent set
+ud, upperdeck => upper deck
+```
+
+Every rule is applied as an **equivalence group via FN-safe expansion** (ADR-054, see above): a query
+requiring one form is widened to an any-of over the group, so it matches a title bearing any form, and a
+wrong alias can only add bounded false positives — never drop a match (recall-first). The `=>` arrow's
+sides are unioned into one group (RR is expansion-based; direction is immaterial to recall) — RR does
+**not** perform Solr's directional token-collapse. A multi-token form (`upper deck`) is glued to a single
+feature as a phrase. Load a table over HTTP with [`POST /_vocab/synonyms`](api/vocab.md#post-_vocabsynonyms--load-a-solr-format-synonymalias-table)
+(raw text body — merged + recompiled live, with a line-numbered error on a malformed table), or from the
+library via `Vocab::extend_from_synonyms` / `extend_from_synonyms_file` (plus bulk
+`Vocab::add_equivalences` / `add_synonyms` and `NormalizerBuilder::add_synonyms`).
