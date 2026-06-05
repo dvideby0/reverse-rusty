@@ -11,14 +11,23 @@ use crate::tagdict::TagId;
 
 /// Shared exact-verification logic operating on raw slices. Used by both
 /// in-memory ExactStore::verify and MmapSegment::verify to avoid duplication.
+///
+/// The title is supplied as **two views** (ADR-061): the positive superset
+/// (`pos_mask` / `pos_feats` = `P(T)`) drives the required-mask gate, the required tail, and
+/// any-of; the canonical leftmost-longest negative view (`neg_mask` / `neg_feats` = `N(T)`)
+/// drives ONLY the forbidden-mask gate and the forbidden tail. The caller passes the same
+/// mask + slice for both when there is no active multi-word alias, making this byte-identical
+/// to the pre-ADR-061 single-view path.
 // Args mirror the SoA columns one-to-one; bundling them into a struct would add
 // indirection on the match hot path for no readability gain.
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn verify_slices(
     id: u32,
-    tmask: u64,
-    tfeats: &[FeatureId],
+    pos_mask: u64,
+    pos_feats: &[FeatureId],
+    neg_mask: u64,
+    neg_feats: &[FeatureId],
     req_mask: &[u64],
     forb_mask: &[u64],
     req_off: &[u32],
@@ -39,34 +48,35 @@ pub fn verify_slices(
 ) -> bool {
     let i = id as usize;
 
-    // 1) common-mask gate
+    // 1) common-mask gate — required against the positive view, forbidden against the
+    //    negative (canonical) view so a MUST_NOT cannot trip on an overlap-only entity.
     let rm = req_mask[i];
-    if (rm & tmask) != rm {
+    if (rm & pos_mask) != rm {
         return false;
     }
-    if (forb_mask[i] & tmask) != 0 {
+    if (forb_mask[i] & neg_mask) != 0 {
         return false;
     }
 
-    // 2) required tail
+    // 2) required tail (positive view)
     let ro = req_off[i] as usize;
     let rl = req_len[i] as usize;
     for &f in &req_blob[ro..ro + rl] {
-        if tfeats.binary_search(&f).is_err() {
+        if pos_feats.binary_search(&f).is_err() {
             return false;
         }
     }
 
-    // 3) forbidden tail
+    // 3) forbidden tail (negative / canonical view)
     let fo = forb_off[i] as usize;
     let fl = forb_len[i] as usize;
     for &f in &forb_blob[fo..fo + fl] {
-        if tfeats.binary_search(&f).is_ok() {
+        if neg_feats.binary_search(&f).is_ok() {
             return false;
         }
     }
 
-    // 4) any-of groups
+    // 4) any-of groups (positive view)
     let gs = q_group_start[i] as usize;
     let gc = q_group_count[i] as usize;
     for gi in gs..gs + gc {
@@ -74,7 +84,7 @@ pub fn verify_slices(
         let gl = group_len[gi] as usize;
         let mut hit = false;
         for &f in &anyof_blob[go..go + gl] {
-            if tfeats.binary_search(&f).is_ok() {
+            if pos_feats.binary_search(&f).is_ok() {
                 hit = true;
                 break;
             }
@@ -107,6 +117,12 @@ pub fn verify_slices(
 /// This reproduces [`verify_slices`] clause-for-clause so the batch (broad-lane)
 /// path returns *exactly* the same matches as the scalar per-title path — the
 /// load-bearing correctness obligation (no false negatives, no false positives).
+///
+/// **Single-view (ADR-061):** this columnar kernel takes one `tmask_batch`/`lookup`, i.e. one title
+/// view. That is correct because the broad-lane driver forces the *inline* two-view path
+/// (`verify_slices`, which splits positive/negative) whenever a multi-word alias is active, so this
+/// kernel only ever runs when `P(T) == N(T)` and a single view is exact. A columnar two-view is a
+/// deferred perf follow-on.
 /// Each scalar test becomes a bitwise transpose: the common-mask gate → a
 /// per-title gate bitmap; required-tail present → AND of the feature bitmaps;
 /// forbidden-tail absent → AND-NOT; any-of → AND of (OR over members). Forbidden

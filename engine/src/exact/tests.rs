@@ -64,14 +64,15 @@ fn verify_filters_post_candidate_and_only_removes() {
 
     let tfeats = [7u32]; // a title that satisfies the query's expression
     let tmask = 0u64;
+    let view = crate::exact::TitleView::single(tmask, &tfeats);
 
     // No filter → matches (the query's expression is satisfied).
-    assert!(store.verify(0, tmask, &tfeats, &TagPredicate::empty()));
+    assert!(store.verify(0, &view, &TagPredicate::empty()));
     // A filter the query satisfies (category=A=10) → still matches.
-    assert!(store.verify(0, tmask, &tfeats, &TagPredicate::new(vec![vec![10]])));
+    assert!(store.verify(0, &view, &TagPredicate::new(vec![vec![10]])));
     // A filter the query does NOT satisfy (category=99) → removed, even though the
     // expression matches. Proves filtering happens post-candidate and only removes.
-    assert!(!store.verify(0, tmask, &tfeats, &TagPredicate::new(vec![vec![99]])));
+    assert!(!store.verify(0, &view, &TagPredicate::new(vec![vec![99]])));
 
     // eval_batch (columnar) must agree with verify for the same predicate.
     let mut acc = [0u64; 1];

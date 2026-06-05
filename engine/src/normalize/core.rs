@@ -7,7 +7,7 @@
 //! /generic tokenization), and the small free helpers `emit` relies on
 //! (`fold_diacritic`, number/year/grade parsing, generic emission).
 
-use super::{PhraseEntry, PunctClass, PunctTable};
+use super::{PhraseEntry, PhraseMode, PunctClass, PunctTable, Side};
 use crate::dict::{Dict, FeatureId, FeatureKind};
 use daachorse::DoubleArrayAhoCorasick;
 
@@ -16,6 +16,10 @@ pub struct Normalizer {
     /// into `phrase_entries`.
     pub(super) automaton: DoubleArrayAhoCorasick<usize>,
     pub(super) phrase_entries: Vec<PhraseEntry>,
+    /// ADR-061: overlapping (`MatchKind::Standard`) automaton over the alias phrases, used on
+    /// the title side to build the positive superset `P(T)`. `None` ⇒ no active multi-word
+    /// alias ⇒ the title is single-view (`P(T) == N(T)`) and byte-identical to pre-ADR-061.
+    pub(super) alias_overlap: Option<AliasOverlap>,
 
     pub(super) graders: Vec<String>,
     /// single-token synonyms -> (canonical feature, kind).
@@ -24,6 +28,32 @@ pub struct Normalizer {
     pub(super) grade_words: Vec<String>,
     /// Byte-cleaning punctuation classification (ADR-058). Default = historical behavior.
     pub(super) punct: PunctTable,
+}
+
+/// The overlapping alias automaton + its per-pattern entity features (ADR-061). Built by
+/// [`NormalizerBuilder::build`](super::NormalizerBuilder::build) from the alias-mode phrase
+/// subset; consulted only on the title side by [`Normalizer::match_features_dual`].
+pub(super) struct AliasOverlap {
+    pub(super) automaton: DoubleArrayAhoCorasick<usize>,
+    /// pattern index -> (entity feature name, kind).
+    pub(super) entries: Vec<(String, FeatureKind)>,
+}
+
+impl AliasOverlap {
+    /// Append the entity feature id of every word-boundary-aligned alias-phrase occurrence in
+    /// the already-cleaned text `lc` (overlapping matches included) to `out`. Unknown entities
+    /// hash to a stable synthetic id (ADR-046), exactly as the leftmost-longest pass resolves.
+    fn collect_into(&self, lc: &str, dict: &Dict, out: &mut Vec<FeatureId>) {
+        let bytes = lc.as_bytes();
+        for m in self.automaton.find_overlapping_iter(lc) {
+            let (s, e) = (m.start(), m.end());
+            let ok_start = s == 0 || bytes[s - 1] == b' ';
+            let ok_end = e == lc.len() || bytes[e] == b' ';
+            if ok_start && ok_end {
+                out.push(dict.get_or_synthetic(&self.entries[m.value()].0));
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for Normalizer {
@@ -41,6 +71,16 @@ impl Normalizer {
     /// Create a [`NormalizerBuilder`](super::NormalizerBuilder) for assembling a custom vocabulary.
     pub fn builder() -> super::NormalizerBuilder {
         super::NormalizerBuilder::new()
+    }
+
+    /// True if any **multi-word alias** phrase is registered (ADR-061) — i.e. the title side
+    /// produces a distinct positive superset view via [`match_features_dual`](Self::match_features_dual).
+    /// When `false`, the two title views are always identical and every lane stays byte-identical
+    /// to the pre-ADR-061 single-view path. Used to keep the broad lane on its two-view inline
+    /// path while multi-word aliases are active.
+    #[must_use]
+    pub fn has_multiword_aliases(&self) -> bool {
+        self.alias_overlap.is_some()
     }
 
     /// Build the default trading-card vocabulary. Rich enough to exercise the
@@ -64,24 +104,7 @@ impl Normalizer {
     /// deleted, so its neighbors join into one token (`O'Brien` -> `obrien`). The same
     /// table runs over queries and titles, keeping the feature spaces aligned (§2).
     fn clean_into(&self, text: &str, out: &mut String) {
-        out.clear();
-        for ch in text.chars() {
-            let c = fold_diacritic(ch);
-            if c.is_ascii_alphanumeric() {
-                out.push(c.to_ascii_lowercase());
-            } else {
-                match self.punct.class_of(c) {
-                    PunctClass::Split => out.push(' '),
-                    PunctClass::Fold => {} // delete: neighbors join into one token
-                    PunctClass::Keep => out.push(c),
-                    PunctClass::Marker => {
-                        out.push(' ');
-                        out.push(c);
-                        out.push(' ');
-                    }
-                }
-            }
-        }
+        clean_with(&self.punct, text, out);
     }
 
     /// Core: emit canonical feature names for `text`. Calls `emit(name, kind)`
@@ -95,7 +118,13 @@ impl Normalizer {
     ///   2) Iterate through tokens. Tokens fully inside a phrase match are
     ///      skipped (the phrase feature is emitted once). All other tokens go
     ///      through the existing grader/number/synonym/generic pipeline.
-    pub fn emit<F: FnMut(&str, FeatureKind)>(&self, text: &str, lc: &mut String, emit: &mut F) {
+    pub fn emit<F: FnMut(&str, FeatureKind)>(
+        &self,
+        text: &str,
+        lc: &mut String,
+        side: Side,
+        emit: &mut F,
+    ) {
         self.clean_into(text, lc);
 
         // Phase 1: find multiword phrase matches via the automaton.
@@ -149,8 +178,16 @@ impl Normalizer {
                     let entry = &self.phrase_entries[phrase_matches[pi].2];
                     // Additive phrases (corpus-learned, ADR-053) emit the phrase feature but
                     // leave the component tokens for phase 2b, so the component features are
-                    // also produced (recall-preserving). Collapse phrases consume them.
-                    if !entry.additive {
+                    // also produced (recall-preserving). Collapse phrases consume them. An
+                    // alias phrase (ADR-061) is asymmetric: it collapses on the query side (so
+                    // the form reduces to its single entity for ADR-054 expansion) but stays
+                    // additive on the title side (so a component query still matches).
+                    let consume = match entry.mode {
+                        PhraseMode::Collapse => true,
+                        PhraseMode::Additive => false,
+                        PhraseMode::Alias => side == Side::Query,
+                    };
+                    if consume {
                         token_consumed[ti] = true;
                     }
                     if !phrase_emitted[pi] {
@@ -330,7 +367,7 @@ impl Normalizer {
     pub fn compile_features(&self, text: &str, dict: &mut Dict, lc: &mut String) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
         let mut names: Vec<(String, FeatureKind)> = Vec::new();
-        self.emit(text, lc, &mut |name, kind| {
+        self.emit(text, lc, Side::Query, &mut |name, kind| {
             names.push((name.to_string(), kind));
         });
         for (name, kind) in names {
@@ -353,7 +390,7 @@ impl Normalizer {
         lc: &mut String,
     ) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
-        self.emit(text, lc, &mut |name, _kind| {
+        self.emit(text, lc, Side::Query, &mut |name, _kind| {
             ids.push(dict.get_or_synthetic(name));
         });
         ids.sort_unstable();
@@ -376,13 +413,92 @@ impl Normalizer {
     ) {
         out.clear();
         let mut tmp: Vec<FeatureId> = Vec::new();
-        self.emit(text, lc, &mut |name, _kind| {
+        self.emit(text, lc, Side::Title, &mut |name, _kind| {
             tmp.push(dict.get_or_synthetic(name));
         });
         tmp.sort_unstable();
         tmp.dedup();
         out.extend_from_slice(&tmp);
     }
+
+    /// Match path producing the **two title feature views** of ADR-061:
+    ///
+    /// - `neg` = the canonical leftmost-longest set `N(T)` — the same set
+    ///   [`match_features`](Self::match_features) produces. Used **only** for forbidden
+    ///   (MUST_NOT) checks, so a forbidden clause stays recall-correct (`foo -"new york"`
+    ///   still matches `foo new york city`).
+    /// - `pos` = the overlapping superset `P(T) ⊇ N(T)` — `N(T)` plus every nested/overlapping
+    ///   alias entity. Used for retrieval + required + any-of, so a `new york` query finds a
+    ///   `new york city` title.
+    ///
+    /// With no active multi-word alias (`alias_overlap` is `None`), `P(T) == N(T)` and the two
+    /// outputs are identical — the caller then passes one slice for both views and the
+    /// verifier is byte-identical to the single-view path. Both outputs are sorted + deduped.
+    pub fn match_features_dual(
+        &self,
+        text: &str,
+        dict: &Dict,
+        lc: &mut String,
+        neg: &mut Vec<FeatureId>,
+        pos: &mut Vec<FeatureId>,
+    ) {
+        neg.clear();
+        pos.clear();
+        let mut tmp: Vec<FeatureId> = Vec::new();
+        // `emit` cleans `text` into `lc` first, so after this call `lc` holds the cleaned
+        // text the overlap automaton scans below — no second clean.
+        self.emit(text, lc, Side::Title, &mut |name, _kind| {
+            tmp.push(dict.get_or_synthetic(name));
+        });
+        tmp.sort_unstable();
+        tmp.dedup();
+        neg.extend_from_slice(&tmp);
+
+        match &self.alias_overlap {
+            // No alias phrases: positive view == negative view.
+            None => pos.extend_from_slice(&tmp),
+            Some(ov) => {
+                ov.collect_into(lc, dict, &mut tmp);
+                tmp.sort_unstable();
+                tmp.dedup();
+                pos.extend_from_slice(&tmp);
+            }
+        }
+    }
+}
+
+/// Byte-clean `text` into `out` (reused): lowercase + fold diacritics + apply the punctuation
+/// table. Shared by [`Normalizer::clean_into`] (the hot path) and the builder's alias-phrase
+/// registration (ADR-061), so an alias form is tokenized exactly as a title is — the phrase
+/// pattern then matches the cleaned title text and the form resolves to its single entity.
+pub(super) fn clean_with(punct: &PunctTable, text: &str, out: &mut String) {
+    out.clear();
+    for ch in text.chars() {
+        let c = fold_diacritic(ch);
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else {
+            match punct.class_of(c) {
+                PunctClass::Split => out.push(' '),
+                PunctClass::Fold => {} // delete: neighbors join into one token
+                PunctClass::Keep => out.push(c),
+                PunctClass::Marker => {
+                    out.push(' ');
+                    out.push(c);
+                    out.push(' ');
+                }
+            }
+        }
+    }
+}
+
+/// The cleaned whitespace tokens of an alias `form` under `punct` (ADR-061). Returns the same
+/// token sequence the normalizer's phase-2 tokenizer sees, so a registered alias phrase pattern
+/// aligns with cleaned title text. An empty result (all-punctuation form) registers nothing.
+pub(super) fn alias_form_tokens(punct: &PunctTable, form: &str) -> Vec<String> {
+    let mut buf = String::new();
+    clean_with(punct, form, &mut buf);
+    buf.split_whitespace().map(ToString::to_string).collect()
 }
 
 /// Fold common Latin diacritics to ASCII so "Jokić"->"jokic", "Acuña"->"acuna".

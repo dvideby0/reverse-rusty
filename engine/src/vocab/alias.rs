@@ -74,16 +74,27 @@ pub struct AliasEntry {
 }
 
 impl AliasEntry {
-    /// True if this entry is currently contributing an equivalence group to the matcher —
-    /// an `Active` single-token kind. Multi-word / mixed-kind groups never reach `Active`,
-    /// but the kind guard makes that structural (not just policy).
+    /// True if this entry is currently contributing an equivalence group to the matcher — an
+    /// `Active` single-token **or multi-word** kind (multi-word is expressible since the Phase-2
+    /// matcher, ADR-061). `MixedKind` still never reaches the matcher; the kind guard makes that
+    /// structural (not just policy).
     #[must_use]
     pub fn is_active_for_matching(&self) -> bool {
         self.status == AliasStatus::Active
             && matches!(
                 self.kind,
-                AliasKind::SingleTokenVariant | AliasKind::SingleTokenDistinct
+                AliasKind::SingleTokenVariant
+                    | AliasKind::SingleTokenDistinct
+                    | AliasKind::MultiWord
             )
+    }
+
+    /// True if this entry is an active **multi-word** alias — the subset whose forms must be
+    /// registered as alias phrases in the normalizer (ADR-061), distinct from the single-token
+    /// groups that need only the equivalence map.
+    #[must_use]
+    pub fn is_active_multiword(&self) -> bool {
+        self.status == AliasStatus::Active && self.kind == AliasKind::MultiWord
     }
 }
 
@@ -133,6 +144,22 @@ impl AliasRegistry {
             .filter(|e| e.is_active_for_matching())
             .map(|e| e.forms.clone())
             .collect()
+    }
+
+    /// The raw forms of every **active multi-word** alias group (ADR-061), deduped + sorted.
+    /// `Vocab::to_normalizer` registers each multi-token form among these as an alias phrase so
+    /// it collapses to its entity on the query side and overlaps on the title side.
+    #[must_use]
+    pub fn active_multiword_forms(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| e.is_active_multiword())
+            .flat_map(|e| e.forms.iter().cloned())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Entries awaiting review (status `Candidate`).
@@ -281,9 +308,9 @@ impl AliasRegistry {
     }
 
     /// Promote a candidate to [`Active`](AliasStatus::Active). Refuses (returns `false`) a
-    /// group whose kind cannot be expressed by the Phase-1 matcher (multi-word / mixed-kind),
-    /// so review can never activate something the matcher would silently ignore. `forms` are
-    /// canonicalized before lookup.
+    /// `MixedKind` group — the one kind the matcher still cannot express safely — so review can
+    /// never activate something it would silently ignore. Multi-word groups are now accepted
+    /// (the Phase-2 matcher expresses them, ADR-061). `forms` are canonicalized before lookup.
     pub fn activate(&mut self, forms: &[String]) -> bool {
         let Some(forms) = Self::canonical_forms(forms) else {
             return false;
@@ -292,7 +319,7 @@ impl AliasRegistry {
             return false;
         };
         let e = &mut self.entries[i];
-        if matches!(e.kind, AliasKind::MultiWord | AliasKind::MixedKind) {
+        if e.kind == AliasKind::MixedKind {
             return false;
         }
         e.status = AliasStatus::Active;

@@ -212,34 +212,112 @@ fn vocab_apply_recompiles_existing_queries_without_restart() {
     );
 }
 
-/// (5) A multi-word alias is recorded as a candidate (a token-graph problem deferred to Phase
-/// 2) and is NOT activated — even when declared — so the Phase-1 matcher is untouched.
-#[test]
-fn multiword_alias_candidate_is_recorded_but_not_activated() {
+/// Build an engine over `queries`, then import + apply the given Solr alias lines. A declared
+/// multi-word alias now auto-activates (ADR-061). Returns the engine and the resulting vocab so a
+/// brute reference can be built with the identical alias semantics.
+fn engine_with_aliases(queries: &[(u64, String)], solr: &str) -> (Engine, Vocab) {
     let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
-    // Seed a stored query so the engine has a corpus; `ud` and `upper deck` stay distinct.
-    eng.build_from_queries(&[(1, "ud rare".into()), (2, "upper deck rare".into())]);
+    eng.build_from_queries(queries);
+    eng.import_alias_synonyms(solr)
+        .expect("import + apply aliases");
+    let vocab = eng.vocab().expect("vocab installed").clone();
+    (eng, vocab)
+}
 
-    let report = eng
-        .import_alias_synonyms("ud => upper deck")
-        .expect("import");
-    assert_eq!(
-        report.activated, 0,
-        "a multi-word alias must never auto-activate (Phase 2)"
-    );
-    let entry = find_entry(&eng, &["ud", "upper deck"]).expect("multi-word group recorded");
+/// (5) ADR-061: a **declared** multi-word alias now ACTIVATES (the Phase-2 matcher expresses it),
+/// and it matches **bidirectionally** — a query phrased one way reaches a title phrased the other —
+/// with zero false negatives. (Phase 1 recorded it as an inert candidate; this is the replacement.)
+#[test]
+fn multiword_alias_activates_and_matches_bidirectionally() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "ny mets".into()),          // single-token alias form `ny`
+        (2, "new york yankees".into()), // multi-word alias form `new york`
+    ];
+    let (mut eng, _vocab) = engine_with_aliases(&queries, "ny => new york");
+
+    let entry = find_entry(&eng, &["new york", "ny"]).expect("multi-word group recorded");
     assert_eq!(entry.kind, AliasKind::MultiWord);
-    assert_eq!(entry.status, AliasStatus::Candidate);
-    assert!(
-        eng.aliases().expect("vocab").active_groups().is_empty(),
-        "no multi-word group may be active in Phase 1"
+    assert_eq!(
+        entry.status,
+        AliasStatus::Active,
+        "a declared multi-word alias auto-activates in Phase 2"
     );
 
-    // The matcher is untouched: a `ud` query does NOT reach an `upper deck` title via the alias.
+    let mut s = MatchScratch::new();
+    // Forward: a `ny` query reaches a `new york` title.
+    assert!(
+        matched(&mut eng, &mut s, "new york mets").contains(&1),
+        "ny query must match a new york title (alias forward)"
+    );
+    // Reverse: a `new york` query reaches a `ny` title.
+    assert!(
+        matched(&mut eng, &mut s, "ny yankees").contains(&2),
+        "new york query must match a ny title (alias reverse)"
+    );
+}
+
+/// (6) THE WALL (the case the abandoned flat-set attempt broke): a forbidden multi-word phrase is
+/// checked against the canonical leftmost-longest view `N(T)`, NOT the overlapping superset. So
+/// `foo -"new york"` MATCHES `foo new york city` (the canonical parse reads `new york city`, which
+/// does not contain `new york`) but is correctly rejected on a literal `foo new york` title. A
+/// single-view (or naive-superset) matcher would wrongly reject the city title — a false negative
+/// in the most sacred area.
+#[test]
+fn multiword_alias_forbidden_uses_canonical_view() {
+    let queries: Vec<(u64, String)> = vec![(1, "foo -\"new york\"".into())];
+    let (mut eng, vocab) = engine_with_aliases(&queries, "ny => new york\nnyc => new york city");
+    let brute = Brute::build_with_vocab(&queries, &vocab);
+
+    let mut s = MatchScratch::new();
+    let (mut lc, mut bf) = (String::new(), Vec::new());
+    for (title, want) in [
+        ("foo new york city", true), // canonical = new york city; new york NOT forbidden-present
+        ("foo new york", false),     // literal new york IS forbidden-present
+        ("foo brooklyn", true),      // unrelated → matches
+    ] {
+        let got = matched(&mut eng, &mut s, title).contains(&1);
+        assert_eq!(got, want, "engine `foo -\"new york\"` vs `{title}`");
+        assert_eq!(
+            brute.matches(title, &mut lc, &mut bf).contains(&1),
+            want,
+            "brute `foo -\"new york\"` vs `{title}`"
+        );
+    }
+}
+
+/// (7) Overlapping / nested aliases (`new york` ⊂ `new york city`): the title positive superset
+/// adds the nested entity, so a `new york` query finds a `new york city` title. A leftmost-longest
+/// single view would miss it (it reads only the longer entity) — the retrieval-side FN the two
+/// views fix.
+#[test]
+fn multiword_alias_overlapping_nested_retrieval() {
+    let queries: Vec<(u64, String)> = vec![(1, "new york yankees".into())];
+    let (mut eng, vocab) = engine_with_aliases(&queries, "ny => new york\nnyc => new york city");
+    let brute = Brute::build_with_vocab(&queries, &vocab);
+
+    let mut s = MatchScratch::new();
+    let (mut lc, mut bf) = (String::new(), Vec::new());
+    let title = "new york city yankees";
+    assert!(
+        matched(&mut eng, &mut s, title).contains(&1),
+        "a new york query must match a new york city title (overlap superset)"
+    );
+    assert!(
+        brute.matches(title, &mut lc, &mut bf).contains(&1),
+        "brute agrees the nested alias retrieves"
+    );
+}
+
+/// (8) The title side stays additive: a pre-existing component-token query (`york`) still matches a
+/// `new york` title after the alias activates — the alias must never drop a component match.
+#[test]
+fn multiword_alias_title_is_additive_for_components() {
+    let queries: Vec<(u64, String)> = vec![(1, "york".into())];
+    let (mut eng, _vocab) = engine_with_aliases(&queries, "ny => new york");
     let mut s = MatchScratch::new();
     assert!(
-        !matched(&mut eng, &mut s, "upper deck rare").contains(&1),
-        "the multi-word alias must not silently bridge ud → upper deck"
+        matched(&mut eng, &mut s, "new york mets").contains(&1),
+        "component-token query `york` matches a `new york` title (additive title side)"
     );
 }
 
@@ -292,6 +370,97 @@ fn alias_registry_application_is_fn_safe_at_scale() {
     assert_eq!(
         false_neg, 0,
         "applying a registry alias must never drop a true match (structural FN-safety)"
+    );
+    assert!(total_truth > 0, "degenerate test: no matches");
+}
+
+/// (9) The Phase-2 differential oracle: over a query mix that exercises bidirectional, overlapping,
+/// forbidden-over-multi-word, component-token, and any-of cases, the engine is **exactly** the
+/// alias-aware brute (both no false negatives AND no false positives) for every title.
+#[test]
+fn multiword_alias_differential_matches_brute() {
+    let queries: Vec<(u64, String)> = vec![
+        (1, "ny mets".into()),
+        (2, "new york yankees".into()),
+        (3, "new york -mets".into()),
+        (4, "foo -\"new york\"".into()),
+        (5, "york".into()),
+        (6, "new york city subway".into()),
+        (7, "(ny,boston) finals".into()),
+        (8, "brooklyn".into()),
+    ];
+    let (mut eng, vocab) = engine_with_aliases(&queries, "ny => new york\nnyc => new york city");
+    let brute = Brute::build_with_vocab(&queries, &vocab);
+
+    let titles = [
+        "new york mets opening day",
+        "ny yankees world series",
+        "new york city subway map",
+        "foo new york city skyline",
+        "foo new york state",
+        "boston finals run",
+        "brooklyn bridge",
+        "york peppermint pattie",
+        "ny mets vs boston",
+        "new york city",
+    ];
+    let mut s = MatchScratch::new();
+    let (mut lc, mut bf) = (String::new(), Vec::new());
+    for title in titles {
+        let mut got: Vec<u64> = matched(&mut eng, &mut s, title).into_iter().collect();
+        let mut want: Vec<u64> = brute.matches(title, &mut lc, &mut bf).into_iter().collect();
+        got.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(got, want, "engine must equal brute for title `{title}`");
+    }
+}
+
+/// (10) At scale: activating a multi-word alias is FN-safe. Every match the original (no-alias)
+/// semantics had survives, while the two-view normalization + verify run on every generated title.
+#[test]
+fn multiword_alias_application_is_fn_safe_at_scale() {
+    let cfg = GenConfig {
+        num_queries: 6_000,
+        num_titles: 2_000,
+        broad_query_frac: 0.06,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0x0A11_A5E2,
+        num_players: 500,
+        num_sets: 250,
+    };
+    let data = generate(&cfg);
+
+    let mut queries = data.queries.clone();
+    for i in 0..20u64 {
+        queries.push((9_000_000 + i, format!("new york u{i}"))); // multi-word alias form
+        queries.push((9_100_000 + i, format!("ny u{i}"))); // single-token alias form
+    }
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+    let brute = Brute::build(&queries); // ground truth under ORIGINAL (no-alias) semantics
+
+    let report = eng
+        .import_alias_synonyms("ny => new york")
+        .expect("import + apply");
+    assert!(
+        report.activated >= 1,
+        "a declared multi-word alias must auto-activate"
+    );
+
+    let mut s = MatchScratch::new();
+    let (mut blc, mut bfeats) = (String::new(), Vec::new());
+    let (mut false_neg, mut total_truth) = (0usize, 0usize);
+    for title in &data.titles {
+        let engine_set = matched(&mut eng, &mut s, title);
+        let truth = brute.matches(title, &mut blc, &mut bfeats);
+        total_truth += truth.len();
+        false_neg += truth.iter().filter(|t| !engine_set.contains(t)).count();
+    }
+    assert_eq!(
+        false_neg, 0,
+        "activating a multi-word alias must never drop a true match (FN-safety at scale)"
     );
     assert!(total_truth > 0, "degenerate test: no matches");
 }

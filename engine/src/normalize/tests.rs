@@ -207,3 +207,74 @@ fn marker_and_keep_defaults_are_unchanged_by_the_table() {
     assert_eq!(names(&n, "#2 bulls"), s(&["term:2", "term:bulls"]));
     assert_eq!(names(&n, "3/10"), s(&["term:10", "term:3"]));
 }
+
+// ---- ADR-061: multi-word alias dual title view ----
+
+/// An alias phrase collapses to ONE entity on the query side (so ADR-054 expansion can
+/// widen it), but on the title side it is additive AND the overlap superset adds nested
+/// alias entities — while the canonical (negative) view stays leftmost-longest. This is the
+/// load-bearing normalizer behavior behind Phase 2's two-view matcher.
+#[test]
+fn alias_phrase_collapses_on_query_overlaps_on_title() {
+    let mut b = NormalizerBuilder::new();
+    b.add_phrase_alias(&["new", "york"], "term:new_york", FeatureKind::Generic);
+    b.add_phrase_alias(
+        &["new", "york", "city"],
+        "term:new_york_city",
+        FeatureKind::Generic,
+    );
+    let norm = b.build().expect("alias automaton");
+
+    // Intern the entities (mutating compile of each alias form) so ids are dense + stable.
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let _ = norm.compile_features("new york", &mut dict, &mut lc);
+    let _ = norm.compile_features("new york city", &mut dict, &mut lc);
+    let ny = dict.get_or_synthetic("term:new_york");
+    let nyc = dict.get_or_synthetic("term:new_york_city");
+
+    // Query side: a multi-word alias form collapses to its single entity feature.
+    let q = norm.compile_features_readonly("new york", &dict, &mut lc);
+    assert_eq!(q, vec![ny], "query-side alias must collapse to one entity");
+
+    // Title side: dual view of "new york city yankees".
+    let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    norm.match_features_dual("new york city yankees", &dict, &mut lc, &mut neg, &mut pos);
+
+    // Negative (canonical) view: leftmost-longest reads "new york city", NOT the nested
+    // "new york" — so a forbidden clause stays recall-correct.
+    assert!(neg.contains(&nyc), "neg has the leftmost-longest entity");
+    assert!(
+        !neg.contains(&ny),
+        "neg must be leftmost-longest: no nested new york"
+    );
+    // Positive (superset) view: the overlap pass adds the nested "new york".
+    assert!(
+        pos.contains(&nyc) && pos.contains(&ny),
+        "pos is the superset"
+    );
+    // N(T) ⊆ P(T), and the title side is additive (keeps component tokens, not just entities).
+    for f in &neg {
+        assert!(pos.contains(f), "N(T) must be a subset of P(T)");
+    }
+    assert!(neg.len() > 2, "additive title keeps component tokens");
+}
+
+/// With no alias phrase registered, `match_features_dual` yields identical views and they
+/// equal `match_features` — the default path is byte-identical (the no-overhead guarantee).
+#[test]
+fn dual_view_equals_single_view_without_aliases() {
+    let n = spec_vocab();
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let title = "1994 upper deck michael jordan psa 10 gem mint";
+    // Seed the dict with a mutating compile so ids are dense.
+    let _ = n.compile_features(title, &mut dict, &mut lc);
+
+    let mut single = Vec::new();
+    n.match_features(title, &dict, &mut lc, &mut single);
+    let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    n.match_features_dual(title, &dict, &mut lc, &mut neg, &mut pos);
+    assert_eq!(neg, single, "negative view == single view without aliases");
+    assert_eq!(pos, single, "positive view == single view without aliases");
+}

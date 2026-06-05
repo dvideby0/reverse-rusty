@@ -75,6 +75,12 @@ impl Vocab {
         for rule in &self.punctuation {
             b.set_punct_class(rule.ch, rule.class.into());
         }
+        // ADR-061: register active multi-word alias forms as alias-mode phrases. Each collapses
+        // to a single entity on the query side (so `resolve_equivalences` keeps the group — its
+        // forms now resolve to one feature) and overlaps additively on the title side.
+        for form in self.aliases.active_multiword_forms() {
+            b.add_alias_form(&form);
+        }
 
         b.build()
     }

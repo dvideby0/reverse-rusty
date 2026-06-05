@@ -24,8 +24,10 @@ pub enum AliasKind {
     /// like graders `(psa, bgs, sgc)` (when learned from an any-of disjunction). Active only
     /// when declared / manual; a candidate when learned.
     SingleTokenDistinct,
-    /// At least one form spans multiple tokens — a token-graph (multi-word) alias the Phase-1
-    /// matcher cannot express. **Always** a candidate (Phase 2).
+    /// At least one form spans multiple tokens — a token-graph (multi-word) alias. Expressed
+    /// by the **Phase-2** matcher (ADR-061: query-side collapse + title-side overlap superset +
+    /// the two-view verifier). Active when declared / manual (operator intent); a candidate when
+    /// learned from an any-of disjunction.
     MultiWord,
     /// The forms resolve to more than one known `FeatureKind` (e.g. a Brand and a Player).
     /// **Always** a candidate — expanding across kinds is unsafe.
@@ -87,13 +89,14 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
 pub(super) fn default_status_for(kind: AliasKind, provenance: AliasProvenance) -> AliasStatus {
     use AliasProvenance::{DeclaredFile, LearnedFromQueries, Manual};
     let auto_active = match kind {
-        // The matcher can't express these (Phase 2) / they're unsafe — always review-only.
-        AliasKind::MultiWord | AliasKind::MixedKind => false,
+        // Cross-kind expansion is unsafe — always review-only.
+        AliasKind::MixedKind => false,
         // A clear structural variant is trusted from any source.
         AliasKind::SingleTokenVariant => true,
-        // Distinct single tokens: honor an operator declaration (declared / manual), but treat a
-        // learned any-of disjunction (the `(psa, bgs, sgc)` case) as a review candidate.
-        AliasKind::SingleTokenDistinct => match provenance {
+        // Distinct single tokens, or a multi-word token-graph alias (ADR-061): honor an operator
+        // declaration (declared / manual), but treat a learned any-of disjunction (the
+        // `(psa, bgs, sgc)` case, or a learned multi-word guess) as a review candidate.
+        AliasKind::SingleTokenDistinct | AliasKind::MultiWord => match provenance {
             DeclaredFile | Manual => true,
             LearnedFromQueries => false,
         },

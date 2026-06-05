@@ -6,7 +6,7 @@
 //! [`eval_batch_slices`](super::eval_batch_slices)), the pure-anchor derivation,
 //! the compaction copy/re-anchor helpers, and the serialization slice accessors.
 
-use super::{eval_batch_slices, query_passes_tags, TagPredicate};
+use super::{eval_batch_slices, query_passes_tags, TagPredicate, TitleView};
 use crate::compile::Extracted;
 use crate::dict::{Dict, FeatureId, NO_MASK_BIT};
 use crate::tagdict::TagId;
@@ -150,41 +150,45 @@ impl ExactStore {
         &self.tag_blob[o..o + l]
     }
 
-    /// Verify one candidate against a title. `tmask` is the title's common-mask
-    /// word; `tfeats` is the title's full sorted feature slice (for tail checks); `pred`
-    /// is the request's compiled tag filter (`TagPredicate::empty()` ⇒ no filtering).
+    /// Verify one candidate against a title's two feature views (ADR-061). `view.pos`
+    /// (the overlapping superset `P(T)`) drives the required-mask gate, required tail, and
+    /// any-of; `view.neg` (the canonical leftmost-longest `N(T)`) drives ONLY the forbidden
+    /// checks, so a MUST_NOT clause stays recall-correct. `pred` is the request's compiled tag
+    /// filter (`TagPredicate::empty()` ⇒ no filtering). With a single-view title
+    /// ([`TitleView::single`]) this is byte-identical to the pre-ADR-061 path.
     #[inline]
-    pub fn verify(&self, id: u32, tmask: u64, tfeats: &[FeatureId], pred: &TagPredicate) -> bool {
+    pub fn verify(&self, id: u32, view: &TitleView, pred: &TagPredicate) -> bool {
         let i = id as usize;
 
-        // 1) common-mask gate — the cheap reject (two u64 ops, no memory traffic)
+        // 1) common-mask gate — the cheap reject (two u64 ops, no memory traffic). Required
+        //    against the positive view, forbidden against the negative (canonical) view.
         let rm = self.req_mask[i];
-        if (rm & tmask) != rm {
+        if (rm & view.pos_mask) != rm {
             return false; // missing a masked required feature
         }
-        if (self.forb_mask[i] & tmask) != 0 {
+        if (self.forb_mask[i] & view.neg_mask) != 0 {
             return false; // has a masked forbidden feature
         }
 
-        // 2) required tail: every non-mask required feature must be present
+        // 2) required tail: every non-mask required feature must be present (positive view)
         let ro = self.req_off[i] as usize;
         let rl = self.req_len[i] as usize;
         for &f in &self.req_blob[ro..ro + rl] {
-            if tfeats.binary_search(&f).is_err() {
+            if view.pos.binary_search(&f).is_err() {
                 return false;
             }
         }
 
-        // 3) forbidden tail: no non-mask forbidden feature may be present
+        // 3) forbidden tail: no non-mask forbidden feature may be present (negative view)
         let fo = self.forb_off[i] as usize;
         let fl = self.forb_len[i] as usize;
         for &f in &self.forb_blob[fo..fo + fl] {
-            if tfeats.binary_search(&f).is_ok() {
+            if view.neg.binary_search(&f).is_ok() {
                 return false;
             }
         }
 
-        // 4) any-of groups: each group needs >=1 member present
+        // 4) any-of groups: each group needs >=1 member present (positive view)
         let gs = self.q_group_start[i] as usize;
         let gc = self.q_group_count[i] as usize;
         for gi in gs..gs + gc {
@@ -192,7 +196,7 @@ impl ExactStore {
             let gl = self.group_len[gi] as usize;
             let mut hit = false;
             for &f in &self.anyof_blob[go..go + gl] {
-                if tfeats.binary_search(&f).is_ok() {
+                if view.pos.binary_search(&f).is_ok() {
                     hit = true;
                     break;
                 }

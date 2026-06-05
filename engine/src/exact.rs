@@ -19,6 +19,7 @@
 //!     `eval_batch` / pure-anchor derivation / serialization accessors
 //!   - [`tests`]  — the tag-filter unit tests (`#[cfg(test)]`)
 
+use crate::dict::FeatureId;
 use crate::tagdict::TagId;
 
 mod slices;
@@ -29,6 +30,53 @@ mod tests;
 
 pub use slices::{eval_batch_slices, verify_slices};
 pub use store::ExactStore;
+
+/// The two title feature views threaded through exact verification (ADR-061).
+///
+/// - **Positive** (`pos_mask` / `pos`) is the overlapping superset `P(T)` — used for the
+///   required-mask gate, the required tail, and any-of groups. Built from all overlapping
+///   alias entities so a `new york` query finds a `new york city` title.
+/// - **Negative** (`neg_mask` / `neg`) is the canonical leftmost-longest `N(T) ⊆ P(T)` — used
+///   **only** for the forbidden-mask gate and the forbidden tail, so a MUST_NOT clause stays
+///   recall-correct (`foo -"new york"` still matches `foo new york city`).
+///
+/// With no active multi-word alias the two views are the same slice ([`TitleView::single`]) and
+/// the verifier is byte-for-byte the pre-ADR-061 single-view path. `Copy` (two masks + two fat
+/// pointers); the per-query SoA columns stay raw args in [`verify_slices`] per the hot-path note.
+#[derive(Clone, Copy)]
+pub struct TitleView<'a> {
+    pub pos_mask: u64,
+    pub pos: &'a [FeatureId],
+    pub neg_mask: u64,
+    pub neg: &'a [FeatureId],
+}
+
+impl<'a> TitleView<'a> {
+    /// A single-view title (no multi-word aliases): the positive and negative views are the
+    /// same mask + slice, so verification is identical to the pre-ADR-061 path.
+    #[inline]
+    #[must_use]
+    pub fn single(mask: u64, feats: &'a [FeatureId]) -> Self {
+        Self {
+            pos_mask: mask,
+            pos: feats,
+            neg_mask: mask,
+            neg: feats,
+        }
+    }
+
+    /// Distinct positive (superset `P(T)`) and negative (canonical `N(T)`) views.
+    #[inline]
+    #[must_use]
+    pub fn dual(pos_mask: u64, pos: &'a [FeatureId], neg_mask: u64, neg: &'a [FeatureId]) -> Self {
+        Self {
+            pos_mask,
+            pos,
+            neg_mask,
+            neg,
+        }
+    }
+}
 
 /// A compiled tag filter (ADR-049): a conjunction of per-key value-sets, each value-set a
 /// sorted, deduped list of `TagId`s. A query passes iff EVERY group shares at least one

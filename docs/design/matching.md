@@ -134,6 +134,20 @@ No strings, no regex, no virtual dispatch, no allocation. A "bytecode VM" varian
 alternative (a tiny opcode stream per query) but the SoA mask+slice form is faster for this shape and
 is what the engine implements.
 
+**Two title feature views — multi-word aliases (ADR-061).** The steps above describe one title feature
+set `F`. With a multi-word alias active, the verifier instead receives a **`TitleView`** carrying *two*
+views (built once per title by `Normalizer::match_features_dual`): a **positive** overlapping superset
+`P(T)` and a **negative** canonical leftmost-longest set `N(T) ⊆ P(T)`. The required-mask gate, required
+tail, and any-of (steps 1-required, 2, 4) read `P(T)` — so a `new york` query finds a `new york city`
+title via the nested entity the overlap pass adds. The forbidden-mask gate and forbidden tail (steps
+1-forbidden, 3) read **only** `N(T)` — so `foo -"new york"` still matches `foo new york city` (the
+canonical parse reads `new york city`, which does not forbidden-contain `new york`). This split is what
+lets one verifier serve both polarities without a false negative; the single flat set could not (the
+superset needed for retrieval over-rejects negation — the wall the first attempt hit). With no active
+multi-word alias `P(T) == N(T)` and the verifier is byte-identical to the single-view path. Full design,
+including the FN-safety proof and the query-side collapse / title-side overlap asymmetry: [DECISIONS](../DECISIONS.md)
+ADR-061.
+
 ---
 
 ## 4. Broad-query handling (cost classes)

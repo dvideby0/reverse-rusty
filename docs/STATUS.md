@@ -69,7 +69,17 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   group-level any-of learning + the **alias-ID-stability fix** (`intern_equivalence_forms` before
   resolving, so a later insert can't flip a synthetic→dense id and silently kill the alias — the sacred
   FN case); active groups feed `effective_equivalence_groups`; live apply via `set_vocab` + recompile;
-  REST `GET/POST /_vocab/aliases*`. Single-node + oracle-proven; multi-word activation = Phase 2.
+  REST `GET/POST /_vocab/aliases*`. Single-node + oracle-proven.
+  **Token-graph multi-word aliases — Phase 2 (ADR-061):** activates the multi-word candidates Phase 1
+  recorded. The matcher now carries **two title-side feature views** (a `TitleView`): the positive
+  overlapping superset `P(T)` drives retrieval + required + any-of, while the canonical leftmost-longest
+  `N(T)` drives forbidden checks only — so `foo -"new york"` still matches `foo new york city` (the wall
+  the abandoned flat-set attempt broke). An alias phrase collapses to its entity on the query side
+  (ADR-054 expansion widens it) and is additive + overlap-aware on the title side; the equivalence
+  machinery is reused unchanged. A declared/manual multi-word alias now auto-activates; learned ones stay
+  candidates. Single-node; the broad lane uses the two-view inline path while aliases are active. Zero-FN
+  (oracle covers forbidden-over-multi-word, overlapping/nested, bidirectional, exact engine≡brute);
+  default (no active multi-word alias) byte-identical.
   **Punctuation-equivalence folding (ADR-058):** byte-cleaning's per-character behavior is a configurable
   `PunctClass` table on the shared normalizer (`Split`/`Fold`/`Keep`/`Marker`) — declaring `'`/`-` as
   `Fold` deletes them so neighbors join, collapsing `O'Brien`/`O-Brien`/`OBrien` to one token and closing
@@ -459,9 +469,9 @@ Tiers, highest-leverage first:
   ADR-049, ✅ through the cluster ADR-055); byte-cleaning punctuation-equivalence folding (✅ ADR-058);
   ranking + `/_mpercolate` pagination (✅ built single-node ADR-059 — cluster ranking deferred);
   bulk/learned-alias evolution Phase 1 (✅ built single-node ADR-060 — the `AliasRegistry` governance
-  layer + safe single-token activation + Solr import + the alias-ID-stability fix); still open: Phase 2
-  (the token-graph multi-word matcher with positive/negative title feature views) + cluster alias
-  governance.
+  layer + safe single-token activation + Solr import + the alias-ID-stability fix) + Phase 2 (✅ built
+  single-node ADR-061 — the token-graph multi-word matcher with positive/negative title feature views);
+  still open: cluster alias governance + the deferred multi-word discovery sources.
 
 See **[`roadmap.md`](roadmap.md)** for the per-tier detail, the Nice-to-have / operational-polish
 backlog, and the Evaluated & declined list.

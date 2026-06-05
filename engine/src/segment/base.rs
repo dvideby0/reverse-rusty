@@ -3,7 +3,7 @@
 //! `segment` module root.
 
 use super::{BaseSegment, MatchStats, Segment};
-use crate::dict::{Dict, FeatureId};
+use crate::dict::Dict;
 
 impl BaseSegment {
     /// How this sealed segment's payload is backed — in-memory heap (`Memory`) or
@@ -97,8 +97,7 @@ impl BaseSegment {
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(
         &self,
-        feats: &[FeatureId],
-        tmask: u64,
+        view: &crate::exact::TitleView,
         dict: &Dict,
         epoch: u32,
         seen: &mut [u32],
@@ -109,30 +108,10 @@ impl BaseSegment {
     ) {
         match self {
             BaseSegment::Memory(s) => {
-                s.match_into(
-                    feats,
-                    tmask,
-                    dict,
-                    epoch,
-                    seen,
-                    out,
-                    include_broad,
-                    pred,
-                    stats,
-                );
+                s.match_into(view, dict, epoch, seen, out, include_broad, pred, stats);
             }
             BaseSegment::Mmap(s) => {
-                s.match_into(
-                    feats,
-                    tmask,
-                    dict,
-                    epoch,
-                    seen,
-                    out,
-                    include_broad,
-                    pred,
-                    stats,
-                );
+                s.match_into(view, dict, epoch, seen, out, include_broad, pred, stats);
             }
         }
     }

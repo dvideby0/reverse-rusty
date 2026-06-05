@@ -241,8 +241,8 @@ false-negative / throughput audit — remains the open step in **Current limitat
   along the exact line that killed the first attempt (PR #37, abandoned): **single-token aliases are a
   vocabulary feature; multi-word aliases are a matching-model feature.** Design learnings:
   [`research/multiword-synonyms.md`](research/multiword-synonyms.md). **Phase 1 is now ✅ BUILT +
-  oracle-proven ([ADR-060](DECISIONS.md));** Phase 2 (the multi-word matcher feature) is still
-  design-only. (No ADR number was pre-assigned — each phase gets its own ADR when it lands.)
+  oracle-proven ([ADR-060](DECISIONS.md));** Phase 2 (the multi-word matcher feature) is now **✅ BUILT +
+  oracle-proven ([ADR-061](DECISIONS.md))**, single-node.
 
   - **Phase 1 — `feat(vocab): learned alias evolution (safe single-token activation)`. ✅ BUILT +
     oracle-proven ([ADR-060](DECISIONS.md)), single-node.** A *real* vocabulary-evolution PR — not "PR
@@ -259,8 +259,8 @@ false-negative / throughput audit — remains the open step in **Current limitat
     (see the callout below); **(7) apply live** via `set_vocab` + `recompile_stale_segments` + snapshot
     swap (no restart, no full rebuild); **(8) oracle tests** proving zero false negatives
     (`learns_single_token_alias_from_anyof_group`, `does_not_auto_activate_category_alternatives`,
-    `alias_ids_are_stable_after_future_insert`, `vocab_apply_recompiles_existing_queries_without_restart`,
-    `multiword_alias_candidate_is_recorded_but_not_activated`); **(9) metrics/explain** surfacing learned
+    `alias_ids_are_stable_after_future_insert`, `vocab_apply_recompiles_existing_queries_without_restart`);
+    **(9) metrics/explain** surfacing learned
     candidates vs active aliases. *(Single-node first, like ADR-054 — `set_vocab` already refuses a
     non-local or tagged cluster, verified.)*
 
@@ -280,24 +280,27 @@ false-negative / throughput audit — remains the open step in **Current limitat
     > intern/reserve every active alias form into the dict, *then* resolve the groups, so an active alias
     > form can never later flip to a different id.
 
-  - **Phase 2 — `feat(match): token-graph multi-word aliases (positive/negative title feature views)`. The
-    matcher-level PR; activates the multi-word candidates Phase 1 stored.** Multi-word aliases
-    (`ny ≡ new york`, ES `synonym_graph` parity) are a **token-graph** problem, not a loader feature. The
-    first attempt hit a *fundamental* flat-feature-set conflict, now verified against the code: a title
-    emits **one** feature set used for **both** required and forbidden checks (`exact.rs` /
-    `segment/snapshot.rs`), but the overlapping *superset* of phrase entities needed for positive
-    **retrieval** is **unsafe for negation** (`foo -"new york"` would wrongly reject `foo new york city`).
-    **Design the model — and its forbidden-feature oracle — before writing code.** The promising shape:
-    **two title-side feature views** — `positive` (overlap-aware retrieval set, so nested/overlapping
-    aliases are found) and `negative` (canonical leftmost-longest set, so forbidden checks stay correct);
-    required / any-of / candidate signatures read `positive`, forbidden reads `negative`. Must be decided
-    up front: the chosen **forbidden policy** (surface-span vs entity vs alias-expanded negative — pick
-    intentionally); **overlapping/nested aliases** (`new york` ⊂ `new york city`) as a **first-class**
-    requirement (today's daachorse pass is leftmost-longest / non-overlapping); and the interaction with
-    forbidden verification, the dynamic-vocab synthetic/dense boundary, the broad lane, the cluster's
-    frozen shared dict, and the hot-path budget. The differential **oracle must include forbidden-feature
-    queries over multi-word-alias titles from day one** — that is the exact case the flat-set approach
-    silently broke.
+  - **Phase 2 — `feat(match): token-graph multi-word aliases (positive/negative title feature views)`. ✅
+    BUILT + oracle-proven ([ADR-061](DECISIONS.md)), single-node.** The matcher-level PR; activates the
+    multi-word candidates Phase 1 stored. Multi-word aliases (`ny ≡ new york`, ES `synonym_graph` parity)
+    are a **token-graph** problem, not a loader feature. The first attempt hit a *fundamental*
+    flat-feature-set conflict: a title emitted **one** feature set used for **both** required and forbidden
+    checks, but the overlapping *superset* of phrase entities needed for positive **retrieval** is
+    **unsafe for negation** (`foo -"new york"` would wrongly reject `foo new york city`). **The fix:
+    two title-side feature views** (a `TitleView` threaded through `verify` / `match_into`): the positive
+    overlapping superset `P(T)` drives retrieval + required + any-of; the canonical leftmost-longest
+    `N(T)` drives the forbidden checks only — so `foo -"new york"` matches `foo new york city`. **Forbidden
+    policy** = canonical leftmost-longest (recall-safe). The normalizer gained an asymmetric alias-phrase
+    mode (query-side collapse to the entity so ADR-054 expansion widens it; title-side additive + an
+    overlapping automaton for `P(T)`), so the **equivalence machinery is reused unchanged** — a collapsed
+    multi-word form resolves to one entity, which is the only thing that blocked `resolve_equivalences`.
+    **Overlapping/nested aliases** (`new york` ⊂ `new york city`) are first-class. A declared/manual
+    multi-word alias auto-activates (learned ones stay candidates). The broad lane routes through the
+    two-view inline path while aliases are active (columnar two-view is a perf follow-on); cluster
+    multi-word aliases need cross-process normalizer shipping (deferred). The differential **oracle
+    includes forbidden-feature queries over multi-word-alias titles** (`multiword_alias_forbidden_uses_canonical_view`),
+    overlapping/nested retrieval, bidirectional match, and exact engine≡brute — zero-FN; default
+    byte-identical.
 
 ### Polish / niche
 

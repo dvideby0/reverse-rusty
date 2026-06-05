@@ -121,6 +121,15 @@ same way at compile time — they are, because the normalizer is shared. Determi
   groups feed the map (`Vocab::effective_equivalence_groups`), and on the mutable single-node dict the
   active forms are interned **before** resolving (`intern_equivalence_forms`) so a later insert cannot
   flip a form's synthetic id to a dense one and silently drop the alias (the ID-stability fix).
+- **Multi-word aliases (ADR-061).** An active *multi-word* alias form (`new york`) is registered as an
+  asymmetric **alias-mode phrase** (`PhraseMode::Alias`), so it resolves to a single entity feature
+  (`term:new_york`) and the equivalence map above treats it exactly like a single token. The asymmetry is
+  by [`Side`]: on the **query** side the phrase **collapses** to its entity (so expansion widens it); on
+  the **title** side it is **additive** (entity + components) and a second, *overlapping* automaton emits
+  every nested alias entity. `match_features_dual` thus yields two title views — the canonical
+  leftmost-longest `N(T)` and the overlapping superset `P(T)` — consumed by the two-view verifier
+  ([`matching.md`](matching.md) §3). No active multi-word alias ⇒ the second automaton is absent and the
+  two views are identical (byte-identical to before ADR-061).
 
 ---
 

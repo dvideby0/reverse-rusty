@@ -183,7 +183,12 @@ pub enum BaseSegment {
 #[derive(Debug)]
 pub struct MatchScratch {
     lc: String,
+    /// Negative / canonical leftmost-longest title view `N(T)` (ADR-061). Also the single
+    /// view when no multi-word alias is active.
     feats: Vec<FeatureId>,
+    /// Positive overlapping superset title view `P(T) ⊇ N(T)` (ADR-061). Equal to `feats`
+    /// when no multi-word alias is active.
+    feats_pos: Vec<FeatureId>,
     seen: Vec<Vec<u32>>,
     epoch: u32,
 }

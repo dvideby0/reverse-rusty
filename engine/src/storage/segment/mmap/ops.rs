@@ -273,14 +273,15 @@ impl MmapSegment {
     pub fn verify(
         &self,
         id: u32,
-        tmask: u64,
-        tfeats: &[FeatureId],
+        view: &crate::exact::TitleView,
         pred: &crate::exact::TagPredicate,
     ) -> bool {
         crate::exact::verify_slices(
             id,
-            tmask,
-            tfeats,
+            view.pos_mask,
+            view.pos,
+            view.neg_mask,
+            view.neg,
             self.req_mask(),
             self.forb_mask(),
             self.req_off(),
@@ -410,8 +411,7 @@ impl MmapSegment {
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(
         &self,
-        feats: &[FeatureId],
-        tmask: u64,
+        view: &crate::exact::TitleView,
         dict: &crate::dict::Dict,
         epoch: u32,
         seen: &mut [u32],
@@ -421,6 +421,8 @@ impl MmapSegment {
         stats: &mut MatchStats,
     ) {
         let has_filter = self.filter_num_blocks > 0;
+        // Retrieval uses the positive (superset) view; verify applies both (ADR-061).
+        let feats = view.pos;
 
         // arity-1 signatures
         for &f in feats {
@@ -430,9 +432,7 @@ impl MmapSegment {
                 stats.probes_skipped += 1;
                 continue;
             }
-            self.probe_index(
-                key, true, epoch, tmask, feats, seen, out, pred, stats, false,
-            );
+            self.probe_index(key, true, epoch, view, seen, out, pred, stats, false);
         }
         // arity-2 signatures
         for &h in feats {
@@ -446,9 +446,7 @@ impl MmapSegment {
                             stats.probes_skipped += 1;
                             continue;
                         }
-                        self.probe_index(
-                            key, true, epoch, tmask, feats, seen, out, pred, stats, false,
-                        );
+                        self.probe_index(key, true, epoch, view, seen, out, pred, stats, false);
                     }
                 }
             }
@@ -462,9 +460,7 @@ impl MmapSegment {
                     stats.probes_skipped += 1;
                     continue;
                 }
-                self.probe_index(
-                    key, false, epoch, tmask, feats, seen, out, pred, stats, true,
-                );
+                self.probe_index(key, false, epoch, view, seen, out, pred, stats, true);
             }
         }
     }
@@ -476,8 +472,7 @@ impl MmapSegment {
         key: u64,
         is_main: bool,
         epoch: u32,
-        tmask: u64,
-        feats: &[FeatureId],
+        view: &crate::exact::TitleView,
         seen: &mut [u32],
         out: &mut Vec<u64>,
         pred: &crate::exact::TagPredicate,
@@ -507,7 +502,7 @@ impl MmapSegment {
                     continue;
                 }
                 // Tag filter (ADR-049) — applied post-candidate inside verify.
-                if self.verify(local, tmask, feats, pred) {
+                if self.verify(local, view, pred) {
                     out.push(self.logical(local));
                 }
             }

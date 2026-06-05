@@ -125,9 +125,13 @@ fn policy_activates_variants_and_declared_distincts_only() {
         default_status_for(SingleTokenDistinct, LearnedFromQueries),
         Candidate
     );
-    // Multi-word / mixed: never auto-active.
-    assert_eq!(default_status_for(MultiWord, DeclaredFile), Candidate);
+    // Multi-word (ADR-061): declared/manual active, learned → candidate (like distinct tokens).
+    assert_eq!(default_status_for(MultiWord, DeclaredFile), Active);
+    assert_eq!(default_status_for(MultiWord, Manual), Active);
+    assert_eq!(default_status_for(MultiWord, LearnedFromQueries), Candidate);
+    // Mixed-kind: never auto-active (the matcher still can't express it safely).
     assert_eq!(default_status_for(MixedKind, Manual), Candidate);
+    assert_eq!(default_status_for(MixedKind, DeclaredFile), Candidate);
 }
 
 // ── Solr parsing ──────────────────────────────────────────────────────────────
@@ -172,7 +176,7 @@ fn solr_escaped_comma_is_literal() {
 // ── Registry behavior ──────────────────────────────────────────────────────────
 
 #[test]
-fn registry_active_groups_only_includes_active_single_token() {
+fn registry_active_groups_includes_variants_and_declared_multiword() {
     let mut reg = AliasRegistry::new();
     let n = norm();
     let dict = Dict::new();
@@ -193,7 +197,7 @@ fn registry_active_groups_only_includes_active_single_token() {
         &n,
         &dict,
     );
-    // declared multi-word → candidate (matcher can't express it)
+    // declared multi-word → active (the Phase-2 matcher expresses it, ADR-061)
     reg.add_classified(
         &forms(&["ud", "upper deck"]),
         AliasProvenance::DeclaredFile,
@@ -203,9 +207,17 @@ fn registry_active_groups_only_includes_active_single_token() {
     );
 
     let active = reg.active_groups();
-    assert_eq!(active, vec![forms(&["refractor", "refractors"])]);
+    assert_eq!(
+        active,
+        vec![
+            forms(&["refractor", "refractors"]),
+            forms(&["ud", "upper deck"])
+        ]
+    );
+    // The multi-word group is the one that needs phrase registration.
+    assert_eq!(reg.active_multiword_forms(), forms(&["ud", "upper deck"]));
     let s = reg.summary();
-    assert_eq!((s.active, s.candidate, s.rejected), (1, 2, 0));
+    assert_eq!((s.active, s.candidate, s.rejected), (2, 1, 0));
 }
 
 #[test]
@@ -297,20 +309,42 @@ fn reject_blocks_reactivation_by_relearn() {
 }
 
 #[test]
-fn activate_refuses_multiword() {
+fn activate_accepts_multiword_refuses_mixed_kind() {
     let n = norm();
-    let dict = Dict::new();
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    // Intern two different KNOWN kinds so {topps, jordan} classifies as MixedKind.
+    dict.intern("term:topps", crate::dict::FeatureKind::Brand);
+    dict.intern("term:jordan", crate::dict::FeatureKind::Player);
+    let _ = n.compile_features_readonly("topps", &dict, &mut lc);
     let mut reg = AliasRegistry::new();
+
+    // A learned multi-word group lands as a candidate; explicit activate now succeeds (ADR-061).
     reg.add_classified(
-        &forms(&["ud", "upper deck"]),
+        &forms(&["ny", "new york"]),
+        AliasProvenance::LearnedFromQueries,
+        0.5,
+        &n,
+        &dict,
+    );
+    assert!(
+        reg.activate(&forms(&["ny", "new york"])),
+        "multi-word activates in Phase 2"
+    );
+    assert_eq!(reg.active_multiword_forms(), forms(&["new york", "ny"]));
+
+    // Mixed-kind is still refused — the matcher cannot express a cross-kind expansion.
+    reg.add_classified(
+        &forms(&["topps", "jordan"]),
         AliasProvenance::DeclaredFile,
         1.0,
         &n,
         &dict,
     );
-    // Even an explicit activate can't turn on a kind the Phase-1 matcher can't express.
-    assert!(!reg.activate(&forms(&["ud", "upper deck"])));
-    assert!(reg.active_groups().is_empty());
+    assert!(
+        !reg.activate(&forms(&["jordan", "topps"])),
+        "mixed-kind activation is refused"
+    );
 }
 
 #[test]

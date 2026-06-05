@@ -15,6 +15,7 @@ impl MatchScratch {
         MatchScratch {
             lc: String::with_capacity(256),
             feats: Vec::with_capacity(64),
+            feats_pos: Vec::with_capacity(64),
             seen: Vec::new(),
             epoch: 0,
         }
@@ -100,28 +101,27 @@ impl MatchView<'_> {
         let epoch = s.epoch;
         out.clear();
 
-        // 1) normalize -> dense feature ids (sorted). Take the buffer out so we
-        // can iterate it while mutating `s.seen` (no aliasing, no allocation).
+        // 1) normalize -> the two title feature views (ADR-061): `feats` = canonical
+        // leftmost-longest `N(T)` (forbidden checks); `feats_pos` = overlapping superset
+        // `P(T)` (retrieval + required + any-of). With no active multi-word alias the two are
+        // identical and `TitleView` collapses to the single-view path. Take the buffers out so
+        // we can iterate them while mutating `s.seen` (no aliasing, no allocation).
         self.norm
-            .match_features(title, self.dict, &mut s.lc, &mut s.feats);
+            .match_features_dual(title, self.dict, &mut s.lc, &mut s.feats, &mut s.feats_pos);
         let feats = std::mem::take(&mut s.feats);
+        let feats_pos = std::mem::take(&mut s.feats_pos);
 
-        // 2) title common-mask word
-        let mut tmask = 0u64;
-        for &f in &feats {
-            let b = self.dict.mask_bit(f);
-            if b != crate::dict::NO_MASK_BIT {
-                tmask |= 1u64 << b;
-            }
-        }
+        // 2) title common-mask words, one per view
+        let neg_mask = self.title_mask(&feats);
+        let pos_mask = self.title_mask(&feats_pos);
+        let view = crate::exact::TitleView::dual(pos_mask, &feats_pos, neg_mask, &feats);
 
         let mut stats = MatchStats::default();
 
         // 3) probe every base segment, each with its own seen buffer
         for (i, base) in segments.iter().enumerate() {
             base.match_into(
-                &feats,
-                tmask,
+                &view,
                 self.dict,
                 epoch,
                 &mut s.seen[i],
@@ -132,8 +132,7 @@ impl MatchView<'_> {
             );
         }
         self.memtable.match_into(
-            &feats,
-            tmask,
+            &view,
             self.dict,
             epoch,
             &mut s.seen[n_base],
@@ -148,10 +147,26 @@ impl MatchView<'_> {
         out.sort_unstable();
         out.dedup();
 
-        // restore the reusable buffer
+        // restore the reusable buffers
         s.feats = feats;
+        s.feats_pos = feats_pos;
         stats.matches = out.len() as u32;
         stats
+    }
+
+    /// The title's common-mask word for a feature view: bit `mask_bit(f)` set for each
+    /// feature `f` that has a hot-mask slot. Computed per view (ADR-061); shared with the
+    /// broad-batch driver, which builds the same two views.
+    #[inline]
+    pub(in crate::segment) fn title_mask(&self, feats: &[crate::dict::FeatureId]) -> u64 {
+        let mut m = 0u64;
+        for &f in feats {
+            let b = self.dict.mask_bit(f);
+            if b != crate::dict::NO_MASK_BIT {
+                m |= 1u64 << b;
+            }
+        }
+        m
     }
 }
 

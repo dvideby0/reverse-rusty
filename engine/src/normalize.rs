@@ -36,14 +36,44 @@ pub use core::{fold_diacritic, Normalizer};
 struct PhraseEntry {
     feature: String,
     kind: FeatureKind,
-    /// When `false` (the default): a phrase match **consumes** its component tokens — only
-    /// the phrase feature is emitted (collapse / entity-disambiguation, used by declared +
-    /// hand-built vocab). When `true`: the phrase feature is emitted **in addition to** the
-    /// component tokens (additive — the component features are still produced), so a query
-    /// referencing a component does not lose the match. Corpus-learned phrases (ADR-053) are
-    /// additive: this engine is a recall-first candidate generator, so a phrase must never
-    /// drop a candidate a component query would have matched.
-    additive: bool,
+    mode: PhraseMode,
+}
+
+/// How a phrase match treats its component tokens — and whether it is query/title
+/// **asymmetric** (the multi-word alias case, ADR-061).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PhraseMode {
+    /// A phrase match **consumes** its component tokens on both sides — only the phrase
+    /// feature is emitted (collapse / entity-disambiguation; declared + hand-built vocab).
+    Collapse,
+    /// The phrase feature is emitted **in addition to** the component tokens on both sides
+    /// (additive — the component features are still produced), so a query referencing a
+    /// component never loses the match. Corpus-learned phrases (ADR-053) are additive:
+    /// this engine is a recall-first candidate generator, so a phrase must never drop a
+    /// candidate a component query would have matched.
+    Additive,
+    /// A **multi-word alias** form (ADR-061): asymmetric by [`Side`]. On the query/compile
+    /// side it **collapses** (components consumed) so the form reduces to its single entity
+    /// feature — which ADR-054 equivalence expansion then widens to the alias group. On the
+    /// title/match side it is **additive** (entity + components) so a component query still
+    /// matches, and it additionally participates in the title-side overlap superset (the
+    /// positive view `P(T)`) so nested/overlapping aliases are all found.
+    Alias,
+}
+
+/// Which side of the matcher a normalization pass serves. The feature spaces are shared
+/// (the §2 invariant), but a [`PhraseMode::Alias`] phrase is collapsed on the query side
+/// and additive on the title side — the ES `synonym_graph` asymmetry (ADR-061). Every
+/// other phrase mode is side-independent, so the default (no alias phrases) path is
+/// byte-identical regardless of `Side`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// Query / compile path (`compile_features` / `compile_features_readonly`): alias
+    /// phrases collapse to their entity.
+    Query,
+    /// Title / match path (`match_features` / `match_features_dual`): alias phrases are
+    /// additive.
+    Title,
 }
 
 /// How a single non-alphanumeric character is treated during byte-cleaning
