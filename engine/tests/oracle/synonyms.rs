@@ -140,6 +140,52 @@ fn multiword_alias_query_is_phrasal_like_elasticsearch() {
     );
 }
 
+/// Overlapping / nested multi-word aliases (ADR-061 P1, the ES `synonym_graph` graph behavior):
+/// loading BOTH `ny ≡ new york` and `nyc ≡ new york city` must not create a false negative — a
+/// `new york` query must still match a `new york city` title (the nested alias entity is emitted by
+/// the title-side overlapping pass), and the partial-overlap alias `york city` must fire too.
+#[test]
+fn overlapping_multiword_aliases_have_no_false_negative() {
+    let mut queries: Vec<(u64, String)> = vec![
+        (1, "new york".into()),      // shorter (nested) multi-word alias form
+        (2, "new york city".into()), // longer multi-word alias form
+        (3, "york city".into()),     // partial-overlap multi-word alias form (shares `york`)
+    ];
+    for i in 0..10u64 {
+        for t in ["ny", "new york", "nyc", "new york city", "york city", "yc"] {
+            queries.push((100 + i * 10 + t.len() as u64, format!("{t} u{i}")));
+        }
+    }
+    let mut v = Vocab::new();
+    v.extend_from_synonyms("ny, new york\nnyc, new york city\nyc, york city")
+        .expect("parse");
+    let mut eng = Engine::with_vocab(v, EngineConfig::default()).expect("with_vocab");
+    eng.build_from_queries(&queries);
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    eng.match_title("a new york city b", &mut s, &mut out, true);
+    let hits: std::collections::HashSet<u64> = out.iter().copied().collect();
+    assert!(
+        hits.contains(&1),
+        "REGRESSION (ADR-061 P1): a `new york` query must match a `new york city` title (nested alias)"
+    );
+    assert!(
+        hits.contains(&2),
+        "the `new york city` query matches its title"
+    );
+    assert!(
+        hits.contains(&3),
+        "the partial-overlap `york city` alias fires inside `new york city` (overlapping pass)"
+    );
+
+    // Reverse via the single-token synonyms.
+    eng.match_title("a ny b", &mut s, &mut out, true);
+    assert!(out.contains(&1), "`ny` ≡ `new york`");
+    eng.match_title("a nyc b", &mut s, &mut out, true);
+    assert!(out.contains(&2), "`nyc` ≡ `new york city`");
+}
+
 /// The build-time path against an independent **equivalence-aware** brute oracle: build the engine
 /// `with_vocab(parsed)` and a `Brute::build_with_vocab` under the SAME vocab-normalizer, then assert
 /// the match sets are identical over a large synthetic corpus — zero false negatives AND zero false

@@ -148,10 +148,25 @@ pub fn parse_synonyms(text: &str) -> Result<Vocab, SynonymParseError> {
         }
 
         // Union both sides of a `=>` mapping into one equivalence group (RR is expansion-based,
-        // so the arrow's direction is immaterial — see the module docs).
+        // so the arrow's direction is immaterial — see the module docs). A mapping must have
+        // exactly one `=>` with usable forms on both sides; reject malformed arrows fail-loud.
         let raw_forms: Vec<&str> = if let Some((lhs, rhs)) = line.split_once("=>") {
-            let mut forms = split_forms(lhs);
-            forms.extend(split_forms(rhs));
+            // Exactly one arrow with usable forms on both sides; reject malformed arrows fail-loud.
+            if rhs.contains("=>") {
+                return Err(SynonymParseError {
+                    line: line_no,
+                    message: "a mapping rule must contain exactly one '=>'".to_string(),
+                });
+            }
+            let (lf, rf) = (split_forms(lhs), split_forms(rhs));
+            if lf.is_empty() || rf.is_empty() {
+                return Err(SynonymParseError {
+                    line: line_no,
+                    message: "a '=>' mapping needs at least one form on each side".to_string(),
+                });
+            }
+            let mut forms = lf;
+            forms.extend(rf);
             forms
         } else {
             split_forms(line)
@@ -233,6 +248,20 @@ impl Vocab {
             groups: parsed.equivalences().len(),
             phrases: parsed.phrases().len(),
         };
+        // If the table declares a multi-word form an alias but this vocab already holds a
+        // (non-alias) phrase for those exact tokens — e.g. a corpus-learned ADDITIVE phrase
+        // (ADR-053) — the first-wins `merge` would keep the old phrase, leaving the query side
+        // additive (not collapsed), so the alias would silently fail in the reverse direction.
+        // UPGRADE the existing phrase to alias semantics (ADR-061 P2) so it collapses on the query
+        // side; the alias entity feature is unchanged, so equivalence resolution still links.
+        for p in parsed.phrases() {
+            if p.alias {
+                if let Some(existing) = self.phrases.iter_mut().find(|e| e.tokens == p.tokens) {
+                    existing.alias = true;
+                    existing.additive = false;
+                }
+            }
+        }
         self.merge(&parsed);
         Ok(stats)
     }
@@ -382,5 +411,34 @@ rc, rookie
         let v = parse_synonyms("# just a comment\n\n   \n").expect("parse");
         assert!(v.equivalences().is_empty());
         assert!(v.phrases().is_empty());
+    }
+
+    #[test]
+    fn malformed_arrow_rules_are_rejected() {
+        // empty right side
+        assert_eq!(parse_synonyms("a, b =>").expect_err("empty RHS").line, 1);
+        // empty left side
+        assert_eq!(parse_synonyms("=> c, d").expect_err("empty LHS").line, 1);
+        // two arrows on one line
+        let e = parse_synonyms("rc, rookie\na => b => c").expect_err("double arrow");
+        assert_eq!(e.line, 2);
+        assert!(e.message.contains("exactly one"), "{}", e.message);
+    }
+
+    #[test]
+    fn extend_upgrades_existing_additive_phrase_to_alias() {
+        // A corpus-learned ADDITIVE phrase already covers [upper,deck]; loading `ud, upper deck`
+        // must upgrade it to alias semantics (ADR-061 P2) so the query side collapses.
+        let mut v = Vocab::new();
+        v.add_phrase_additive(&["upper", "deck"], "term:upperdeck", FeatureKind::Generic);
+        assert!(v.phrases()[0].additive && !v.phrases()[0].alias);
+        v.extend_from_synonyms("ud, upper deck").expect("extend");
+        let p = v
+            .phrases()
+            .iter()
+            .find(|p| p.tokens == vec!["upper".to_string(), "deck".to_string()])
+            .expect("phrase for [upper,deck]");
+        assert!(p.alias, "existing additive phrase upgraded to alias");
+        assert!(!p.additive, "additive cleared on upgrade");
     }
 }

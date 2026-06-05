@@ -207,9 +207,34 @@ impl NormalizerBuilder {
             .build(&self.phrase_patterns)
             .map_err(|e| crate::error::NormalizerError::new(e.to_string()))?;
 
+        // Second, OVERLAPPING (Standard-mode) automaton over alias-entity patterns only, so the
+        // title-side match path can emit nested/overlapping alias entities the leftmost-longest
+        // automaton hides (ADR-061). Built only when alias phrases exist (else `None` ⇒ the match
+        // path is byte-identical to before). `alias_features[value]` mirrors each alias pattern.
+        let mut alias_patterns: Vec<String> = Vec::new();
+        let mut alias_features: Vec<(String, FeatureKind)> = Vec::new();
+        for (i, entry) in self.phrase_entries.iter().enumerate() {
+            if entry.alias {
+                alias_patterns.push(self.phrase_patterns[i].clone());
+                alias_features.push((entry.feature.clone(), entry.kind));
+            }
+        }
+        let alias_automaton = if alias_patterns.is_empty() {
+            None
+        } else {
+            Some(
+                DoubleArrayAhoCorasickBuilder::new()
+                    .match_kind(MatchKind::Standard)
+                    .build(&alias_patterns)
+                    .map_err(|e| crate::error::NormalizerError::new(e.to_string()))?,
+            )
+        };
+
         Ok(Normalizer {
             automaton,
             phrase_entries: self.phrase_entries,
+            alias_automaton,
+            alias_features,
             graders: self.graders,
             synonyms: self.synonyms,
             syn_index: self.syn_index,

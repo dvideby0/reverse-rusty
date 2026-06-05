@@ -30,9 +30,24 @@
      the query's entity feature to its synonyms. So a query phrased `upper deck` requires
      `any-of(term:upperdeck, term:ud)`, and a title bearing either `upper deck` (adjacent → emits the
      entity additively) or `ud` matches. **Bidirectional.**
-  3. **Resolver robustness.** If a multi-word member resolves to >1 feature because an *existing additive*
-     phrase (ADR-053) already covers those tokens, `resolve_equivalences` uses that phrase's entity
-     (canonical) feature instead of silently dropping the link (`phrase_entity_in`).
+  3. **Overlapping / nested aliases — a title-side overlapping pass.** The main automaton is
+     leftmost-longest (non-overlapping), so a title `new york city` reports only the longest alias and a
+     `new york` query (collapsed to `term:newyork`) would stop matching it — a false negative when two
+     overlapping aliases are loaded (`new york` ⊂ `new york city`, or `new york` / `york city` sharing
+     `york`). To match ES's graph, the normalizer carries a **second, alias-only `MatchKind::Standard`
+     automaton** consulted **on the title side only**: it emits **every** alias entity that occurs
+     (`find_overlapping_iter`, word-boundary checked), so all nested/overlapping entities are produced
+     and the dedup folds the duplicate with the main pass. Built only when alias phrases exist (`None`
+     otherwise ⇒ the match path is byte-identical); the query side is unaffected (a query collapses to its
+     own longest entity).
+  4. **Loader hardening.** A multi-word form is registered as an alias phrase to a `term:`-prefixed entity;
+     the equivalence **member is the raw multi-word form**, which `resolve_equivalences` (query path)
+     collapses to the single entity feature. If a multi-word member resolves to >1 feature because an
+     *existing additive* phrase (ADR-053) already covers those tokens, `resolve_equivalences` uses that
+     phrase's entity feature (`phrase_entity_in`) and `extend_from_synonyms` **upgrades** that existing
+     phrase to alias semantics — so the query side collapses and the alias is bidirectional rather than
+     silently one-way. Malformed `=>` rules (empty side, more than one arrow) are rejected fail-loud with
+     the line number.
 - **Why this is safe (lossless cover holds; default byte-identical).** The asymmetry is strictly in the
   **safe direction**: the title side emits a **superset** (entity + components) of what the query side
   requires (just the entity, or just a component for a component query). So for any title that *could*
@@ -66,8 +81,10 @@
   [ADR-006](adr-006-forbidden-features-never-gate.md) (the never-gate invariant). ES reference:
   [`synonym_graph` token filter](https://www.elastic.co/guide/en/elasticsearch/reference/current/analysis-synonym-graph-tokenfilter.html),
   [token graphs](https://www.elastic.co/guide/en/elasticsearch/reference/current/token-graphs.html).
-  Code: `src/normalize/core.rs` (`emit` `query_side`), `src/normalize.rs` (`PhraseEntry.alias`),
-  `src/normalize/builder.rs` (`add_phrase_alias`), `src/vocab.rs` + `vocab/methods.rs`
-  (`PhraseEntry.alias`, `add_phrase_alias`, `resolve_equivalences` + `phrase_entity_in`),
-  `src/vocab/synonyms.rs` (the loader). Tests: `src/vocab/synonyms.rs` units,
-  `tests/oracle/synonyms.rs` (bidirectional + phrasal-adjacency + engine ≡ equivalence-aware brute).
+  Code: `src/normalize/core.rs` (`emit` `query_side` + the title-side overlapping alias pass +
+  `alias_automaton`/`alias_features`), `src/normalize.rs` (`PhraseEntry.alias`),
+  `src/normalize/builder.rs` (`add_phrase_alias` + the second `MatchKind::Standard` automaton),
+  `src/vocab.rs` + `vocab/methods.rs` (`PhraseEntry.alias`, `add_phrase_alias`, `resolve_equivalences`
+  + `phrase_entity_in`), `src/vocab/synonyms.rs` (the loader: alias phrases, `=>` validation, additive→
+  alias upgrade on merge). Tests: `src/vocab/synonyms.rs` units, `tests/oracle/synonyms.rs`
+  (bidirectional + phrasal-adjacency + overlapping/nested no-FN + engine ≡ equivalence-aware brute).

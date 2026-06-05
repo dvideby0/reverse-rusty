@@ -17,6 +17,18 @@ pub struct Normalizer {
     pub(super) automaton: DoubleArrayAhoCorasick<usize>,
     pub(super) phrase_entries: Vec<PhraseEntry>,
 
+    /// **Overlapping** automaton over alias-entity phrase patterns only (`MatchKind::Standard`),
+    /// present iff any alias phrase is registered (ADR-061). On the **title** side the main
+    /// (leftmost-longest) automaton reports only the longest match, so nested/overlapping aliases
+    /// (`new york` inside `new york city`, or `new york` / `york city` sharing `york`) would be
+    /// missed — turning into a false negative for a shorter-alias query against a longer-alias
+    /// title. This second pass emits **every** alias entity that occurs (the ES `synonym_graph`
+    /// graph behavior); `alias_features[value]` is the `(entity, kind)` for each pattern. Query
+    /// side is unaffected (a query collapses to its own longest entity). `None` ⇒ no alias phrases
+    /// ⇒ the match path is byte-identical to before.
+    pub(super) alias_automaton: Option<DoubleArrayAhoCorasick<usize>>,
+    pub(super) alias_features: Vec<(String, FeatureKind)>,
+
     pub(super) graders: Vec<String>,
     /// single-token synonyms -> (canonical feature, kind).
     pub(super) synonyms: Vec<(String, String, FeatureKind)>,
@@ -103,6 +115,28 @@ impl Normalizer {
         emit: &mut F,
     ) {
         self.clean_into(text, lc);
+
+        // Title-side overlapping alias pass (ADR-061): emit EVERY alias entity that occurs, so
+        // nested/overlapping multi-word aliases (`new york` inside `new york city`; `new york` /
+        // `york city` sharing `york`) are all produced — the leftmost-longest automaton below
+        // reports only one, which would drop a shorter-alias query against a longer-alias title.
+        // This is the ES `synonym_graph` graph behavior. The query side collapses to its own
+        // longest entity (handled by the main pass), so it skips this; `None` ⇒ no alias phrases
+        // ⇒ this is never reached and the match path is byte-identical to before.
+        if !query_side {
+            if let Some(aa) = &self.alias_automaton {
+                let bytes = lc.as_bytes();
+                for m in aa.find_overlapping_iter(&**lc) {
+                    let (start, end) = (m.start(), m.end());
+                    let ok_start = start == 0 || bytes[start - 1] == b' ';
+                    let ok_end = end == bytes.len() || bytes[end] == b' ';
+                    if ok_start && ok_end {
+                        let (feat, kind) = &self.alias_features[m.value()];
+                        emit(feat, *kind);
+                    }
+                }
+            }
+        }
 
         // Phase 1: find multiword phrase matches via the automaton.
         // We collect (byte_start, byte_end, pattern_index) for each match.
