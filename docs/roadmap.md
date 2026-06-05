@@ -231,17 +231,67 @@ false-negative / throughput audit — remains the open step in **Current limitat
   *additive* fold (emit the joined form AND the split components — a pure recall gain à la Lucene's
   `WordDelimiterGraphFilter`), and cross-process shipping of the table to a remote shard's normalizer (the
   same deferral as cross-process vocab shipping).
-- **`NormalizerBuilder`: bulk synonym / alias registration API.** The builder already
-  supports phrases and single-token synonyms, but real deployments need to register
-  hundreds of equivalences (abbreviation → canonical, variant spellings, term expansions
-  like `auto` ≡ `{autograph, autographed, signature, signed}`). Add a batch registration
-  method and/or a file-based vocabulary loader so large synonym tables are easy to maintain
-  outside of code. **Split this into two:** (1) **single-token** alias loading (Solr-format file →
-  equivalence expansion) is correct and small — land it independently; (2) **multi-word**
-  aliases (ES `synonym_graph` parity) are a **matching-model** feature, not a loader feature — a
-  first attempt was abandoned after it hit a fundamental flat-feature-set conflict with forbidden
-  features. **Design the token-graph model (and its forbidden-feature oracle) first** — see the
-  learnings in [`research/multiword-synonyms.md`](research/multiword-synonyms.md).
+- **Bulk synonym / alias registration → learned alias evolution (2 phases / 2 PRs).** Real
+  deployments need to register hundreds of equivalences (abbreviation → canonical, variant spellings,
+  expansions like `auto` ≡ `{autograph, autographed, signature, signed}`) and have them evolve live. RR
+  already ships the *core* mechanism — equivalence **expansion** (required → any-of, structurally FN-safe;
+  declared via `PUT /_vocab` + any-of-learned, [ADR-054](DECISIONS.md)), the any-of synonym learner
+  (ADR-015), corpus phrase induction (ADR-053), and the live `set_vocab` + `recompile_stale_segments`
+  apply path. The remaining work is to **govern, persist, and safely activate** aliases — and it splits
+  along the exact line that killed the first attempt (PR #37, abandoned): **single-token aliases are a
+  vocabulary feature; multi-word aliases are a matching-model feature.** Design learnings:
+  [`research/multiword-synonyms.md`](research/multiword-synonyms.md). (No ADR number is pre-assigned —
+  each phase gets its own ADR when it lands.)
+
+  - **Phase 1 — `feat(vocab): learned alias evolution (safe single-token activation)`. The shippable PR;
+    no matcher change.** A *real* vocabulary-evolution PR — not "PR #37 with fewer bugs," not docs-only.
+    Scope: **(1)** a first-class **`AliasRegistry`** (`forms`, `provenance` = declared-file |
+    learned-from-queries, `confidence`, `status` = candidate | active | rejected, `kind`); **(2) learn
+    candidates from query any-of groups** with *conservative* rules — auto-activate only repeated
+    single-token spelling/abbreviation variants; keep multi-word aliases, broad category alternatives
+    (`(psa, bgs, sgc)`), and mixed-entity-kind groups as **candidates for review, never silently active**;
+    **(3) import explicit Solr/Lucene synonym files** into the same registry; **(4) auto-activate safe
+    single-token groups** through the existing equivalence-expansion path (required → any-of); **(5)
+    store multi-word groups as candidates only** (explain/review-surfaced, *not* active matcher
+    semantics — this is the half-measure PR #37 must not repeat); **(6) fix the alias-ID-stability bug**
+    (see the callout below); **(7) apply live** via `set_vocab` + `recompile_stale_segments` + snapshot
+    swap (no restart, no full rebuild); **(8) oracle tests** proving zero false negatives
+    (`learns_single_token_alias_from_anyof_group`, `does_not_auto_activate_category_alternatives`,
+    `alias_ids_are_stable_after_future_insert`, `vocab_apply_recompiles_existing_queries_without_restart`,
+    `multiword_alias_candidate_is_recorded_but_not_activated`); **(9) metrics/explain** surfacing learned
+    candidates vs active aliases. *(Single-node first, like ADR-054 — `set_vocab` already refuses a
+    non-local or tagged cluster, verified.)*
+
+    > **Embedded real bug — alias ID stability across the synthetic/dense boundary (verified against the
+    > code, currently reachable).** Independent of multi-word: equivalences are resolved **once** at
+    > install / `set_vocab` time, and a form not yet interned resolves to a deterministic **synthetic** id
+    > (`dict::get_or_synthetic`, read-only `extract_readonly` / `compile_features_readonly`). A *later*
+    > live `PUT /_doc` interns that same form as a **dense** id via the mutating `extract`
+    > (`Arc::make_mut(&mut self.dict)` in `segment/ingest.rs`), but the `EquivMap` (keyed by `FeatureId`)
+    > is never re-resolved — so the installed alias **silently goes inactive** for queries inserted after
+    > the table was loaded on a fresh index (a false negative — the sacred case). **Affects single-token
+    > aliases too**, so it must be fixed in Phase 1. Fix direction: at activation, normalize +
+    > intern/reserve every active alias form into the dict, *then* resolve the groups, so an active alias
+    > form can never later flip to a different id.
+
+  - **Phase 2 — `feat(match): token-graph multi-word aliases (positive/negative title feature views)`. The
+    matcher-level PR; activates the multi-word candidates Phase 1 stored.** Multi-word aliases
+    (`ny ≡ new york`, ES `synonym_graph` parity) are a **token-graph** problem, not a loader feature. The
+    first attempt hit a *fundamental* flat-feature-set conflict, now verified against the code: a title
+    emits **one** feature set used for **both** required and forbidden checks (`exact.rs` /
+    `segment/snapshot.rs`), but the overlapping *superset* of phrase entities needed for positive
+    **retrieval** is **unsafe for negation** (`foo -"new york"` would wrongly reject `foo new york city`).
+    **Design the model — and its forbidden-feature oracle — before writing code.** The promising shape:
+    **two title-side feature views** — `positive` (overlap-aware retrieval set, so nested/overlapping
+    aliases are found) and `negative` (canonical leftmost-longest set, so forbidden checks stay correct);
+    required / any-of / candidate signatures read `positive`, forbidden reads `negative`. Must be decided
+    up front: the chosen **forbidden policy** (surface-span vs entity vs alias-expanded negative — pick
+    intentionally); **overlapping/nested aliases** (`new york` ⊂ `new york city`) as a **first-class**
+    requirement (today's daachorse pass is leftmost-longest / non-overlapping); and the interaction with
+    forbidden verification, the dynamic-vocab synthetic/dense boundary, the broad lane, the cluster's
+    frozen shared dict, and the hot-path budget. The differential **oracle must include forbidden-feature
+    queries over multi-word-alias titles from day one** — that is the exact case the flat-set approach
+    silently broke.
 
 ### Polish / niche
 
