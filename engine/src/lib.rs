@@ -66,11 +66,13 @@ pub use explain::ExplainDetail;
 pub use normalize::{Normalizer, NormalizerBuilder, PunctClass};
 pub use rank::{CompiledRankSpec, RankSpec};
 pub use segment::{
-    CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport, InsertOutcome,
-    MatchStats,
+    AliasApplyReport, CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport,
+    InsertOutcome, MatchStats,
 };
 pub use tagdict::{TagDict, TagId};
-pub use vocab::Vocab;
+pub use vocab::{
+    AliasEntry, AliasKind, AliasProvenance, AliasRegistry, AliasStatus, AliasSummary, Vocab,
+};
 
 // Compile-time trait assertions — these ensure key types are safe for
 // multi-threaded production use (e.g. Engine behind Arc<Mutex<Engine>>,

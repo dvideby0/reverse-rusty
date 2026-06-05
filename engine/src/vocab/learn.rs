@@ -130,6 +130,46 @@ fn normalize_token(text: &str) -> String {
     out.trim_end_matches('_').to_string()
 }
 
+/// Collect positive any-of **groups** (each sorted + deduped) that appear in at least
+/// `min_count` queries, with the count. Group-level, unlike
+/// [`learn_equivalences_from_queries`] (which decomposes a group into pairs): this
+/// preserves `(psa, bgs, sgc)` as ONE 3-form group so the alias registry can classify it
+/// as a multi-form category alternative rather than three variant pairs (ADR-060). Forms
+/// are kept raw — resolved through the normalizer when applied. Negated groups are skipped
+/// (a `-(a,b)` is a forbidden disjunction, never an equivalence assertion). Output is sorted
+/// for determinism.
+pub fn learn_anyof_groups(
+    queries: &[(u64, String)],
+    min_count: usize,
+) -> Vec<(Vec<String>, usize)> {
+    let mut counts: HashMap<Vec<String>, usize> = HashMap::new();
+    for (_id, text) in queries {
+        let Ok(ast) = dsl::parse(text) else {
+            continue;
+        };
+        for clause in &ast.clauses {
+            if clause.negated {
+                continue;
+            }
+            if let Atom::AnyOf(members) = &clause.atom {
+                let mut forms: Vec<String> = members.iter().map(|m| m.trim().to_string()).collect();
+                forms.retain(|m| !m.is_empty());
+                forms.sort();
+                forms.dedup();
+                if forms.len() >= 2 {
+                    *counts.entry(forms).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    let mut groups: Vec<(Vec<String>, usize)> = counts
+        .into_iter()
+        .filter(|(_, c)| *c >= min_count)
+        .collect();
+    groups.sort();
+    groups
+}
+
 /// Configuration for [`learn_vocab_from_corpus`] — composes the ADR-015 any-of
 /// learner with opt-in NPMI corpus phrase induction (ADR-053) and opt-in equivalence
 /// (alias) learning via expansion (ADR-054).

@@ -6,7 +6,7 @@
 use std::io;
 use std::path::Path;
 
-use super::{PhraseEntry, PunctRule, SynonymEntry, Vocab};
+use super::{AliasRegistry, AliasSummary, PhraseEntry, PunctRule, SynonymEntry, Vocab};
 use crate::dict::{Dict, EquivMap, FeatureId, FeatureKind};
 use crate::normalize::{Normalizer, NormalizerBuilder, PunctClass};
 use crate::util::fast_map;
@@ -118,6 +118,9 @@ impl Vocab {
                 self.punctuation.push(rule.clone());
             }
         }
+        // Merge the governed alias registry (ADR-060) — existing entries win, a higher-trust
+        // provenance + max confidence is adopted (see [`AliasRegistry::merge`]).
+        self.aliases.merge(&other.aliases);
     }
 
     // ── Punctuation management (ADR-058) ────────────────────────────────
@@ -272,21 +275,65 @@ impl Vocab {
         &self.equivalences
     }
 
-    /// Resolve the declared/learned equivalence groups to a compile-time [`EquivMap`]
-    /// (member `FeatureId` → its full group) against a normalizer + dict. Each form is
-    /// resolved to its feature(s) via the read-only compile path (so a form absent from a
-    /// frozen dict still gets a stable synthetic id, ADR-046); a form that does not resolve
-    /// to exactly ONE feature is skipped (an equivalence is entity↔entity, so a multi-token
-    /// form should be a glued phrase first), and a group needs ≥2 distinct features to count.
-    /// The result is installed on the dict ([`Dict::set_equivalences`]) so `extract`/
-    /// `extract_readonly` expand queries through it.
+    /// The equivalence groups that actually drive matching: the directly-declared
+    /// [`equivalences`](Self::equivalences) (ADR-054) **plus** the **active** single-token
+    /// groups from the governed alias registry (ADR-060). This is the single source of truth
+    /// for both [`resolve_equivalences`](Self::resolve_equivalences) and
+    /// [`intern_equivalence_forms`](Self::intern_equivalence_forms), so the two cannot drift.
+    /// With an empty registry it is exactly `equivalences` ⇒ byte-identical to before ADR-060.
+    #[must_use]
+    pub fn effective_equivalence_groups(&self) -> Vec<Vec<String>> {
+        let mut groups = self.equivalences.clone();
+        groups.extend(self.aliases.active_groups());
+        groups
+    }
+
+    /// Intern every effective equivalence form into a **mutable** dict under `norm`, BEFORE
+    /// resolving the groups — the alias-ID-stability fix (ADR-060).
+    ///
+    /// Without this, an equivalence installed on a fresh single-node index resolves an
+    /// un-interned form to a deterministic **synthetic** id (read-only `get_or_synthetic`,
+    /// ADR-046), but a *later* `PUT /_doc` interns that same form as a **dense** id via the
+    /// mutating compile path — and the [`EquivMap`] (keyed by `FeatureId`) is never
+    /// re-resolved, so the alias silently goes inactive for queries added after the table was
+    /// loaded: a false negative. Forcing the same interning a future insert would do *here*
+    /// pins each active form to its dense id up front, so resolve-time and insert-time agree.
+    ///
+    /// Single-node only: the cluster shares ONE frozen dict and resolves both the table and
+    /// every incremental add read-only against it, so they cannot disagree — and that dict
+    /// must not be mutated. A no-op when there are no effective groups ⇒ byte-identical.
+    pub fn intern_equivalence_forms(&self, norm: &Normalizer, dict: &mut Dict) {
+        let mut lc = String::new();
+        for group in self.effective_equivalence_groups() {
+            for form in &group {
+                // Mutating compile: interns the form's feature(s) exactly as a query insert
+                // would. Multi-token forms intern their components harmlessly (they are skipped
+                // at resolution); does not bump frequency, so the hot-mask is untouched.
+                let _ = norm.compile_features(form, dict, &mut lc);
+            }
+        }
+    }
+
+    /// Resolve the effective equivalence groups
+    /// ([`effective_equivalence_groups`](Self::effective_equivalence_groups) — declared +
+    /// active learned aliases) to a compile-time [`EquivMap`] (member `FeatureId` → its full
+    /// group) against a normalizer + dict. Each form is resolved to its feature(s) via the
+    /// read-only compile path (so a form absent from a frozen dict still gets a stable
+    /// synthetic id, ADR-046); a form that does not resolve to exactly ONE feature is skipped
+    /// (an equivalence is entity↔entity, so a multi-token form should be a glued phrase first),
+    /// and a group needs ≥2 distinct features to count. The result is installed on the dict
+    /// ([`Dict::set_equivalences`]) so `extract`/`extract_readonly` expand queries through it.
+    ///
+    /// On a **mutable** single-node dict, call [`intern_equivalence_forms`](Self::intern_equivalence_forms)
+    /// first so a later insert can't mint a different (dense) id for a form that resolved to a
+    /// synthetic id here (the ADR-060 ID-stability fix).
     pub fn resolve_equivalences(&self, norm: &Normalizer, dict: &Dict) -> EquivMap {
         let mut lc = String::new();
-        // 1. Resolve each declared group's forms to a feature set.
+        // 1. Resolve each effective group's forms to a feature set.
         let mut groups: Vec<Vec<FeatureId>> = Vec::new();
-        for group in &self.equivalences {
+        for group in self.effective_equivalence_groups() {
             let mut feats: Vec<FeatureId> = Vec::with_capacity(group.len());
-            for form in group {
+            for form in &group {
                 let fs = norm.compile_features_readonly(form, dict, &mut lc);
                 if fs.len() == 1 {
                     feats.push(fs[0]);
@@ -310,6 +357,48 @@ impl Vocab {
             }
         }
         map
+    }
+
+    // ── Alias registry (ADR-060) ────────────────────────────────────────
+
+    /// The governed alias registry (provenance / kind / confidence / status). Active
+    /// single-token groups feed [`effective_equivalence_groups`](Self::effective_equivalence_groups).
+    pub fn aliases(&self) -> &AliasRegistry {
+        &self.aliases
+    }
+
+    /// Mutable access to the alias registry, for review actions (activate / reject) and direct
+    /// edits. After mutating, re-apply the vocabulary (single-node `set_vocab` +
+    /// `recompile_stale_segments`) for the change to take effect on stored queries.
+    pub fn aliases_mut(&mut self) -> &mut AliasRegistry {
+        &mut self.aliases
+    }
+
+    /// Learn alias candidates from query any-of groups into the registry (ADR-060 item 2).
+    /// Conservative: only clear single-token variants auto-activate; everything else is a
+    /// candidate. Returns the number of newly-active groups. See
+    /// [`AliasRegistry::learn_from_queries`].
+    pub fn learn_aliases_from_queries(
+        &mut self,
+        queries: &[(u64, String)],
+        min_count: usize,
+        norm: &Normalizer,
+        dict: &Dict,
+    ) -> usize {
+        self.aliases
+            .learn_from_queries(queries, min_count, norm, dict)
+    }
+
+    /// Import a Solr/Lucene synonym file into the registry as declared groups (ADR-060 item 3).
+    /// Returns the number of newly-active groups. See [`AliasRegistry::import_solr`].
+    pub fn import_solr_aliases(&mut self, text: &str, norm: &Normalizer, dict: &Dict) -> usize {
+        self.aliases.import_solr(text, norm, dict)
+    }
+
+    /// A count of alias entries by status (ADR-060 item 9) — for metrics / review surfaces.
+    #[must_use]
+    pub fn alias_summary(&self) -> AliasSummary {
+        self.aliases.summary()
     }
 
     // ── Serialization ───────────────────────────────────────────────────

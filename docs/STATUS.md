@@ -62,6 +62,14 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   FN-safe: the match set only grows, a wrong alias degrades to a bounded false positive). Declared
   (`PUT /_vocab`) + any-of-learned (opt-in `learn_equivalences`) sources; reversible; survives reopen;
   default-off ⇒ byte-identical. Distributional/match-feedback discovery deferred behind the same seam.
+  **Learned-alias evolution — Phase 1 (ADR-060):** a governing `AliasRegistry` (provenance / kind /
+  confidence / status) over that expansion primitive — a structural classifier auto-activates only
+  single-token spelling/abbreviation variants, while learned category alternatives `(psa,bgs,sgc)`,
+  multi-word, and mixed-kind groups stay review candidates (never silently active); Solr/Lucene import +
+  group-level any-of learning + the **alias-ID-stability fix** (`intern_equivalence_forms` before
+  resolving, so a later insert can't flip a synthetic→dense id and silently kill the alias — the sacred
+  FN case); active groups feed `effective_equivalence_groups`; live apply via `set_vocab` + recompile;
+  REST `GET/POST /_vocab/aliases*`. Single-node + oracle-proven; multi-word activation = Phase 2.
   **Punctuation-equivalence folding (ADR-058):** byte-cleaning's per-character behavior is a configurable
   `PunctClass` table on the shared normalizer (`Split`/`Fold`/`Keep`/`Marker`) — declaring `'`/`-` as
   `Fold` deletes them so neighbors join, collapsing `O'Brien`/`O-Brien`/`OBrien` to one token and closing
@@ -449,10 +457,11 @@ Tiers, highest-leverage first:
   (experimental) distributed multi-node layers; aspects-first ingestion.
 - **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node
   ADR-049, ✅ through the cluster ADR-055); byte-cleaning punctuation-equivalence folding (✅ ADR-058);
-  ranking + `/_mpercolate` pagination (✅ built single-node ADR-059 — cluster ranking deferred); still
-  open: bulk/learned-alias evolution (2 phases — Phase 1 safe single-token activation + ID-stability
-  fix as a vocab feature, Phase 2 a token-graph multi-word matcher with positive/negative title feature
-  views).
+  ranking + `/_mpercolate` pagination (✅ built single-node ADR-059 — cluster ranking deferred);
+  bulk/learned-alias evolution Phase 1 (✅ built single-node ADR-060 — the `AliasRegistry` governance
+  layer + safe single-token activation + Solr import + the alias-ID-stability fix); still open: Phase 2
+  (the token-graph multi-word matcher with positive/negative title feature views) + cluster alias
+  governance.
 
 See **[`roadmap.md`](roadmap.md)** for the per-tier detail, the Nice-to-have / operational-polish
 backlog, and the Evaluated & declined list.

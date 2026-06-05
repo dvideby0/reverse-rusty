@@ -166,6 +166,14 @@ impl Engine {
     ) -> Result<Self, crate::error::NormalizerError> {
         let norm = vocab.to_normalizer()?;
         let mut eng = Self::with_config(norm, config);
+        // Install the vocab's equivalence groups so they apply to inserts from the start
+        // (ADR-054), interning the active forms first for ID stability (ADR-060) — exactly
+        // what `set_vocab` does at runtime. No groups ⇒ a no-op ⇒ byte-identical to before.
+        let norm_arc = Arc::clone(&eng.norm);
+        let dict = Arc::make_mut(&mut eng.dict);
+        vocab.intern_equivalence_forms(&norm_arc, dict);
+        let equiv = vocab.resolve_equivalences(&norm_arc, dict);
+        dict.set_equivalences(equiv);
         eng.vocab = Some(Arc::new(vocab));
         Ok(eng)
     }

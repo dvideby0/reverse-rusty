@@ -142,3 +142,67 @@ Absent ⇒ any-of synonym learning only (byte-identical to before).
 curl -X POST 'localhost:9200/_vocab/learn_and_apply?corpus_phrases=true&npmi_min_count=3'
 ```
 
+
+---
+
+## Learned-alias registry (ADR-060)
+
+A governance layer over equivalence expansion (ADR-054): a registry of alias **candidates** with
+provenance, a structural **kind**, a confidence score, and a lifecycle **status** (`candidate` /
+`active` / `rejected`). Only **active** single-token groups affect matching (via FN-safe expansion);
+candidates are recorded for review and never change results. Conservative by construction —
+single-token spelling/abbreviation variants auto-activate, while learned multi-form category
+alternatives (`(psa, bgs, sgc)`), multi-word aliases (a Phase-2 token-graph feature), and mixed-kind
+groups are recorded as candidates, **never silently active**. Single-node (like ADR-054).
+
+### `GET /_vocab/aliases`
+
+Returns the full registry (for review) plus a status summary. Lock-free (reads the `ArcSwap`
+snapshot, ADR-016).
+
+```bash
+curl 'localhost:9200/_vocab/aliases'
+```
+
+```json
+{
+  "aliases": {
+    "entries": [
+      { "forms": ["autograph", "autographs"], "provenance": "learned_from_queries",
+        "kind": "single_token_variant", "status": "active", "confidence": 0.6 },
+      { "forms": ["bgs", "psa", "sgc"], "provenance": "learned_from_queries",
+        "kind": "single_token_distinct", "status": "candidate", "confidence": 0.5 }
+    ]
+  },
+  "summary": { "active": 1, "candidate": 1, "rejected": 0 }
+}
+```
+
+### `POST /_vocab/aliases/import`
+
+Import a Solr/Lucene synonym file (the format ES's `synonyms_path` consumes) into the registry and
+apply it live. Comma lists are one equivalence group; `a, b => c, d` mappings are unioned into one
+**bidirectional** group (RR equivalences are bidirectional — a recall-safe over-approximation); `#`
+comments and `\,` escapes are honored. Safe single-token groups auto-activate; multi-word groups are
+recorded as candidates.
+
+```bash
+curl -X POST localhost:9200/_vocab/aliases/import \
+  -H 'Content-Type: application/json' \
+  -d '{"synonyms": "autograph, autographs\nrc => rookie card"}'
+```
+
+```json
+{ "acknowledged": true, "activated": 1, "recompiled": 1280,
+  "summary": { "active": 1, "candidate": 1, "rejected": 0 } }
+```
+
+`activated` is the number of groups switched to active; `recompiled` is the number of stored queries
+rebuilt in place so the change takes effect immediately (no restart), with zero false negatives.
+
+### `POST /_vocab/aliases/learn_and_apply`
+
+Learn alias candidates from the engine's OWN stored queries (any-of co-occurrence) into the registry
+and apply. Conservative: only clear single-token variants auto-activate; everything else lands as a
+candidate (inspect via `GET /_vocab/aliases`, then declare via an import to activate). `?min_count=N`
+(default 2). Response shape matches `import`.

@@ -3,13 +3,70 @@
 //! recompile-on-vocabulary-change pass ([`recompile_stale_segments`](Engine::recompile_stale_segments))
 //! plus the corpus learn-and-apply drivers (ADR-046/053/054).
 
-use crate::segment::{Engine, Segment};
+use crate::segment::{AliasApplyReport, Engine, Segment};
+use crate::vocab::AliasSummary;
 use std::sync::Arc;
 
 impl Engine {
     /// The vocabulary used to build this engine's normalizer, if one was set.
     pub fn vocab(&self) -> Option<&crate::vocab::Vocab> {
         self.vocab.as_deref()
+    }
+
+    /// The governed alias registry (ADR-060), if a vocabulary is installed.
+    pub fn aliases(&self) -> Option<&crate::vocab::AliasRegistry> {
+        self.vocab.as_deref().map(crate::vocab::Vocab::aliases)
+    }
+
+    /// Alias status counts (active / candidate / rejected) for metrics / review (ADR-060 item 9).
+    /// `AliasSummary::default()` (all zero) when no vocabulary is installed.
+    pub fn alias_summary(&self) -> AliasSummary {
+        self.vocab
+            .as_deref()
+            .map(crate::vocab::Vocab::alias_summary)
+            .unwrap_or_default()
+    }
+
+    /// Import a Solr/Lucene synonym file into the registry and apply it live (ADR-060): safe
+    /// single-token groups auto-activate (FN-safe expansion), multi-word groups are recorded
+    /// as candidates. Classifies against the engine's CURRENT normalizer + dict, then reuses
+    /// the [`set_vocab`](Self::set_vocab) + [`recompile_stale_segments`](Self::recompile_stale_segments)
+    /// apply path — no restart, no full rebuild. The registry is merged into the engine's
+    /// existing vocabulary (synonyms / phrases / equivalences / punctuation preserved).
+    pub fn import_alias_synonyms(
+        &mut self,
+        solr_text: &str,
+    ) -> Result<AliasApplyReport, crate::error::NormalizerError> {
+        let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
+        let activated = vocab.import_solr_aliases(solr_text, &self.norm, &self.dict);
+        self.set_vocab(vocab)?;
+        let recompiled = self.recompile_stale_segments();
+        Ok(AliasApplyReport {
+            activated,
+            recompiled,
+            summary: self.alias_summary(),
+        })
+    }
+
+    /// Learn alias candidates from the engine's OWN stored queries (any-of co-occurrence) into
+    /// the registry and apply (ADR-060 item 2). Conservative: only clear single-token variants
+    /// auto-activate; multi-word, multi-form category alternatives, and mixed-kind groups land
+    /// as review candidates. Returns the apply report.
+    pub fn learn_aliases_and_apply(
+        &mut self,
+        min_count: usize,
+    ) -> Result<AliasApplyReport, crate::error::NormalizerError> {
+        let corpus = self.live_sources();
+        let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
+        let activated =
+            vocab.learn_aliases_from_queries(&corpus, min_count, &self.norm, &self.dict);
+        self.set_vocab(vocab)?;
+        let recompiled = self.recompile_stale_segments();
+        Ok(AliasApplyReport {
+            activated,
+            recompiled,
+            summary: self.alias_summary(),
+        })
     }
 
     /// Replace the engine's vocabulary and normalizer. Existing compiled
@@ -20,12 +77,17 @@ impl Engine {
         vocab: crate::vocab::Vocab,
     ) -> Result<usize, crate::error::NormalizerError> {
         let norm = Arc::new(vocab.to_normalizer()?);
-        // Resolve any declared/learned equivalence groups against the frozen dict under the
-        // new normalizer and install them, so the subsequent recompile (and future inserts)
-        // expand queries through them (ADR-054). No groups ⇒ empty map ⇒ no-op (the dict
-        // clone is dwarfed by the recompile this set_vocab triggers).
-        let equiv = vocab.resolve_equivalences(&norm, &self.dict);
-        Arc::make_mut(&mut self.dict).set_equivalences(equiv);
+        // Resolve any declared/learned equivalence groups against the dict under the new
+        // normalizer and install them, so the subsequent recompile (and future inserts)
+        // expand queries through them (ADR-054). First intern every active equivalence form
+        // into the (mutable) dict so a later insert can't mint a different dense id for a form
+        // that would otherwise resolve to a synthetic id — the alias-ID-stability fix
+        // (ADR-060). No groups ⇒ both are no-ops (the dict clone is dwarfed by the recompile
+        // this set_vocab triggers).
+        let dict = Arc::make_mut(&mut self.dict);
+        vocab.intern_equivalence_forms(&norm, dict);
+        let equiv = vocab.resolve_equivalences(&norm, dict);
+        dict.set_equivalences(equiv);
         self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
         self.vocab_epoch += 1;
@@ -71,8 +133,12 @@ impl Engine {
         // Re-install equivalence groups (ADR-054) so inserts AFTER reopen expand through them.
         // Already-compiled segments were persisted with their expansion baked in, so matching
         // recovered queries needs no re-resolution — this only equips the live compile path.
-        let equiv = vocab.resolve_equivalences(&norm, &self.dict);
-        Arc::make_mut(&mut self.dict).set_equivalences(equiv);
+        // Intern the active forms first (ADR-060 ID-stability), so a post-reopen insert of a
+        // never-before-interned alias form can't mint a divergent dense id.
+        let dict = Arc::make_mut(&mut self.dict);
+        vocab.intern_equivalence_forms(&norm, dict);
+        let equiv = vocab.resolve_equivalences(&norm, dict);
+        dict.set_equivalences(equiv);
         self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
         Ok(())

@@ -18,14 +18,17 @@ use serde::{Deserialize, Serialize};
 use crate::dict::FeatureKind;
 use crate::normalize::PunctClass;
 
+mod alias;
 mod learn;
 mod methods;
 
 #[cfg(test)]
 mod tests;
 
+pub use alias::{AliasEntry, AliasKind, AliasProvenance, AliasRegistry, AliasStatus, AliasSummary};
 pub use learn::{
-    learn_equivalences_from_queries, learn_from_queries, learn_vocab_from_corpus, CorpusLearnConfig,
+    learn_anyof_groups, learn_equivalences_from_queries, learn_from_queries,
+    learn_vocab_from_corpus, CorpusLearnConfig,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -52,6 +55,14 @@ pub struct Vocab {
     /// table runs over queries and titles, so the feature spaces stay aligned (§2).
     #[serde(default)]
     punctuation: Vec<PunctRule>,
+    /// Governed alias candidates (ADR-060): a registry with provenance / kind / confidence /
+    /// status over the ADR-054 equivalence mechanism. Its **active** single-token groups are
+    /// folded into [`effective_equivalence_groups`](Vocab::effective_equivalence_groups), so
+    /// they widen queries via FN-safe expansion; candidates are recorded for review and do not
+    /// affect matching. Empty (the default, and old vocab JSON predating the field) ⇒ the
+    /// effective groups are exactly `equivalences` ⇒ byte-identical to before the registry.
+    #[serde(default)]
+    aliases: AliasRegistry,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

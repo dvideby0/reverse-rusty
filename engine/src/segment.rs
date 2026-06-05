@@ -261,6 +261,20 @@ pub struct IngestReport {
     pub rejected_class_d: usize,
 }
 
+/// Outcome of an alias import / learn-and-apply (ADR-060): how many groups switched to active,
+/// how many stored queries were recompiled so the change took effect (zero false negatives), and
+/// the registry's resulting status counts. Returned by [`Engine::import_alias_synonyms`] /
+/// [`Engine::learn_aliases_and_apply`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AliasApplyReport {
+    /// Groups newly switched to active by this call.
+    pub activated: usize,
+    /// Stored queries recompiled so the change took effect immediately (zero false negatives).
+    pub recompiled: usize,
+    /// The registry's status counts after applying.
+    pub summary: crate::vocab::AliasSummary,
+}
+
 /// Outcome of a single live insert. Distinguishes a successful insert (with its
 /// memtable-local id) from a class-D rejection. A parse failure is surfaced as
 /// `Err(ParseError)` by [`Engine::try_insert_live`], never folded in here.
