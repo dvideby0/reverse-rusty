@@ -149,22 +149,34 @@ fn match_batch_chunk(
         let out = &mut outs[ti];
         out.clear();
 
-        // normalize once into the two title views (ADR-061); take the buffers out so we can
-        // iterate them while mutating ms.seen (no aliasing, no allocation) — same trick as
-        // match_title. With no active multi-word alias the two views are identical and
-        // `columnar` can stay on (the inverted index below is built from the canonical view).
-        view.norm.match_features_dual(
-            title.as_ref(),
-            view.dict,
-            &mut ms.lc,
-            &mut ms.feats,
-            &mut ms.feats_pos,
-        );
-        let feats = std::mem::take(&mut ms.feats);
-        let feats_pos = std::mem::take(&mut ms.feats_pos);
+        // normalize once. The default (no active multi-word alias) takes the **single-view fast
+        // path** — one feature set + one mask, no second copy (ADR-061: zero-overhead default).
+        // Only with multi-word aliases active (`force_inline`) do we build the canonical `N(T)` +
+        // the overlapping superset `P(T)`. Take the buffers out so we can iterate them while
+        // mutating ms.seen (no aliasing, no allocation) — same trick as match_title.
+        let (feats, feats_pos);
+        if force_inline {
+            view.norm.match_features_dual(
+                title.as_ref(),
+                view.dict,
+                &mut ms.lc,
+                &mut ms.feats,
+                &mut ms.feats_pos,
+            );
+            feats = std::mem::take(&mut ms.feats);
+            feats_pos = std::mem::take(&mut ms.feats_pos);
+        } else {
+            view.norm
+                .match_features(title.as_ref(), view.dict, &mut ms.lc, &mut ms.feats);
+            feats = std::mem::take(&mut ms.feats);
+            feats_pos = Vec::new();
+        }
         let neg_mask = view.title_mask(&feats);
-        let pos_mask = view.title_mask(&feats_pos);
-        let tview = crate::exact::TitleView::dual(pos_mask, &feats_pos, neg_mask, &feats);
+        let tview = if force_inline {
+            crate::exact::TitleView::dual(view.title_mask(&feats_pos), &feats_pos, neg_mask, &feats)
+        } else {
+            crate::exact::TitleView::single(neg_mask, &feats)
+        };
 
         for (i, base) in view.segments.iter().enumerate() {
             base.match_into(
@@ -208,8 +220,10 @@ fn match_batch_chunk(
             }
         }
 
-        ms.feats = feats; // restore the reusable buffers
-        ms.feats_pos = feats_pos;
+        ms.feats = feats; // restore the reusable buffers (positive only when it was used)
+        if force_inline {
+            ms.feats_pos = feats_pos;
+        }
         if !columnar {
             out.sort_unstable();
             out.dedup();

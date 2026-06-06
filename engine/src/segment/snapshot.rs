@@ -101,20 +101,38 @@ impl MatchView<'_> {
         let epoch = s.epoch;
         out.clear();
 
-        // 1) normalize -> the two title feature views (ADR-061): `feats` = canonical
-        // leftmost-longest `N(T)` (forbidden checks); `feats_pos` = overlapping superset
-        // `P(T)` (retrieval + required + any-of). With no active multi-word alias the two are
-        // identical and `TitleView` collapses to the single-view path. Take the buffers out so
-        // we can iterate them while mutating `s.seen` (no aliasing, no allocation).
-        self.norm
-            .match_features_dual(title, self.dict, &mut s.lc, &mut s.feats, &mut s.feats_pos);
-        let feats = std::mem::take(&mut s.feats);
-        let feats_pos = std::mem::take(&mut s.feats_pos);
+        // 1) normalize -> the title feature view(s) (ADR-061). The default (no active multi-word
+        // alias) takes the **single-view fast path** — one feature set, one mask, no second copy —
+        // so it is byte-identical AND zero-overhead vs the pre-ADR path. Only when a multi-word
+        // alias is active does `match_features_dual` produce the canonical `N(T)` (forbidden) +
+        // the overlapping superset `P(T)` (retrieval/required/any-of). Take the buffers out so we
+        // can iterate them while mutating `s.seen` (no aliasing, no allocation).
+        let dual = self.norm.has_multiword_aliases();
+        let (feats, feats_pos);
+        if dual {
+            self.norm.match_features_dual(
+                title,
+                self.dict,
+                &mut s.lc,
+                &mut s.feats,
+                &mut s.feats_pos,
+            );
+            feats = std::mem::take(&mut s.feats);
+            feats_pos = std::mem::take(&mut s.feats_pos);
+        } else {
+            self.norm
+                .match_features(title, self.dict, &mut s.lc, &mut s.feats);
+            feats = std::mem::take(&mut s.feats);
+            feats_pos = Vec::new();
+        }
 
-        // 2) title common-mask words, one per view
+        // 2) title common-mask word(s) + the verifier view.
         let neg_mask = self.title_mask(&feats);
-        let pos_mask = self.title_mask(&feats_pos);
-        let view = crate::exact::TitleView::dual(pos_mask, &feats_pos, neg_mask, &feats);
+        let view = if dual {
+            crate::exact::TitleView::dual(self.title_mask(&feats_pos), &feats_pos, neg_mask, &feats)
+        } else {
+            crate::exact::TitleView::single(neg_mask, &feats)
+        };
 
         let mut stats = MatchStats::default();
 
@@ -147,9 +165,11 @@ impl MatchView<'_> {
         out.sort_unstable();
         out.dedup();
 
-        // restore the reusable buffers
+        // restore the reusable buffers (the positive buffer only when it was used)
         s.feats = feats;
-        s.feats_pos = feats_pos;
+        if dual {
+            s.feats_pos = feats_pos;
+        }
         stats.matches = out.len() as u32;
         stats
     }
