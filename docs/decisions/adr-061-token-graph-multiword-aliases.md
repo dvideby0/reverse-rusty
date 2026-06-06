@@ -31,10 +31,15 @@
 
 - **Decision — two title-side feature views.** Split the title's feature set into two, computed once per
   title and threaded through verification:
-  - **`P(T)` — positive view (overlapping superset).** The leftmost-longest additive features *plus*
-    every alias entity found by an **overlapping** (non-consuming) automaton pass over the active alias
-    phrases. Used for: signature **retrieval**, the required-mask gate, the required tail, and any-of
-    groups. (`N(T) ⊆ P(T)`: the overlap pass only ever **adds** alias entities.)
+  - **`P(T)` — positive view (the maximal parse-union).** Every token feature *plus* every
+    overlapping phrase entity — computed as a **force-additive** emit (all phrases additive, nothing
+    consumed ⇒ every token reaches phase 2b and every leftmost-longest entity is emitted) **∪** an
+    **overlapping** (`MatchKind::Standard`) entity pass over **all** phrases. This is a strict
+    superset of *every* parse, so it never drops a feature a different parse would emit — including
+    the **components of a phrase displaced** from the leftmost-longest parse by an overlapping one
+    (e.g. a collapsing `new york` consuming the `york` of an alias `york city`). Used for: signature
+    **retrieval**, the required-mask gate, the required tail, and any-of groups. (`N(T) ⊆ P(T)`: the
+    positive view only ever **adds**, so it can introduce a bounded false positive, never a negative.)
   - **`N(T)` — negative view (canonical leftmost-longest).** The ordinary leftmost-longest additive
     feature set the engine already produces. Used for: the forbidden-mask gate and the forbidden tail —
     **and nothing else**.

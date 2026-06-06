@@ -340,6 +340,32 @@ fn activating_alias_does_not_drop_an_overlapping_existing_phrase() {
     );
 }
 
+/// (8c) A displaced alias phrase keeps its COMPONENTS in the positive view (codex R7). When an
+/// overlapping COLLAPSING phrase (`new york`) displaces an alias phrase (`york city`) from the
+/// leftmost-longest parse — consuming the shared `york` token — a stored `york` query must still
+/// match: the maximal positive view re-emits every token feature, so `term:york` is present.
+#[test]
+fn displaced_alias_phrase_keeps_its_components() {
+    let mut v = Vocab::new();
+    v.add_phrase(
+        &["new", "york"],
+        "term:new_york",
+        reverse_rusty::dict::FeatureKind::Generic,
+    ); // a COLLAPSING phrase (consumes new + york)
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.set_vocab(v).expect("install the new york phrase");
+    eng.build_from_queries(&[(1, "york".into())]); // a component-token query
+    eng.import_alias_synonyms("yc => york city")
+        .expect("apply the york city alias");
+
+    let mut s = MatchScratch::new();
+    assert!(
+        matched(&mut eng, &mut s, "new york city").contains(&1),
+        "a york query must match new york city even though `new york` collapses `york` and \
+         `york city` is displaced from the leftmost-longest parse"
+    );
+}
+
 /// (8) The title side stays additive: a pre-existing component-token query (`york`) still matches a
 /// `new york` title after the alias activates — the alias must never drop a component match.
 #[test]

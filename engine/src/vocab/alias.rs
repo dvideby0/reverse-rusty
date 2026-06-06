@@ -221,6 +221,10 @@ impl AliasRegistry {
     /// (a re-learn must not resurrect it); otherwise a higher-trust provenance
     /// (declared/manual over learned) re-classifies + may promote, and confidence takes the
     /// max — so importing a declared file over a learned candidate upgrades it deterministically.
+    /// A **same-provenance** re-import re-classifies and adopts a now-active default (so a
+    /// persisted Phase-1 multi-word candidate activates when its synonym file is re-imported under
+    /// the Phase-2 policy) but never *downgrades* an existing status — a re-learn cannot undo a
+    /// manual activation (codex R7).
     pub fn add_classified(
         &mut self,
         forms: &[String],
@@ -239,11 +243,19 @@ impl AliasRegistry {
             if existing.status == AliasStatus::Rejected {
                 return Some(AliasStatus::Rejected);
             }
-            // A more authoritative source re-decides kind/status (declared/manual win).
+            // A more authoritative source re-decides kind/status (declared/manual win over learned).
             if provenance_rank(provenance) > provenance_rank(existing.provenance) {
                 existing.provenance = provenance;
                 existing.kind = kind;
                 existing.status = status;
+            } else if provenance_rank(provenance) == provenance_rank(existing.provenance) {
+                // Same-provenance re-import: re-classify and ADOPT a now-active default (so a
+                // persisted candidate the current policy can express becomes active), but never
+                // DOWNGRADE — a re-import/re-learn must not undo a manual activation (codex R7).
+                existing.kind = kind;
+                if status == AliasStatus::Active {
+                    existing.status = AliasStatus::Active;
+                }
             }
             return Some(existing.status);
         }

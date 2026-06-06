@@ -137,6 +137,7 @@ impl Normalizer {
         text: &str,
         lc: &mut String,
         side: Side,
+        force_additive: bool,
         emit: &mut F,
     ) {
         self.clean_into(text, lc);
@@ -196,11 +197,16 @@ impl Normalizer {
                     // alias phrase (ADR-061) is asymmetric: it collapses on the query side (so
                     // the form reduces to its single entity for ADR-054 expansion) but stays
                     // additive on the title side (so a component query still matches).
-                    let consume = match entry.mode {
-                        PhraseMode::Collapse => true,
-                        PhraseMode::Additive => false,
-                        PhraseMode::Alias => side == Side::Query,
-                    };
+                    // `force_additive` (the positive title view `P(T)`, ADR-061) consumes nothing,
+                    // so EVERY token also reaches phase 2b — the maximal, parse-union feature set
+                    // that keeps a component query matchable even when its phrase is displaced from
+                    // the leftmost-longest parse by an overlapping one (codex R7).
+                    let consume = !force_additive
+                        && match entry.mode {
+                            PhraseMode::Collapse => true,
+                            PhraseMode::Additive => false,
+                            PhraseMode::Alias => side == Side::Query,
+                        };
                     if consume {
                         token_consumed[ti] = true;
                     }
@@ -381,7 +387,7 @@ impl Normalizer {
     pub fn compile_features(&self, text: &str, dict: &mut Dict, lc: &mut String) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
         let mut names: Vec<(String, FeatureKind)> = Vec::new();
-        self.emit(text, lc, Side::Query, &mut |name, kind| {
+        self.emit(text, lc, Side::Query, false, &mut |name, kind| {
             names.push((name.to_string(), kind));
         });
         for (name, kind) in names {
@@ -404,7 +410,7 @@ impl Normalizer {
         lc: &mut String,
     ) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
-        self.emit(text, lc, Side::Query, &mut |name, _kind| {
+        self.emit(text, lc, Side::Query, false, &mut |name, _kind| {
             ids.push(dict.get_or_synthetic(name));
         });
         ids.sort_unstable();
@@ -427,7 +433,7 @@ impl Normalizer {
     ) {
         out.clear();
         let mut tmp: Vec<FeatureId> = Vec::new();
-        self.emit(text, lc, Side::Title, &mut |name, _kind| {
+        self.emit(text, lc, Side::Title, false, &mut |name, _kind| {
             tmp.push(dict.get_or_synthetic(name));
         });
         tmp.sort_unstable();
@@ -441,9 +447,14 @@ impl Normalizer {
     ///   [`match_features`](Self::match_features) produces. Used **only** for forbidden
     ///   (MUST_NOT) checks, so a forbidden clause stays recall-correct (`foo -"new york"`
     ///   still matches `foo new york city`).
-    /// - `pos` = the overlapping superset `P(T) ⊇ N(T)` — `N(T)` plus every nested/overlapping
-    ///   alias entity. Used for retrieval + required + any-of, so a `new york` query finds a
-    ///   `new york city` title.
+    /// - `pos` = the **maximal positive view** `P(T) ⊇ N(T)`. Computed as the parse-union: a second
+    ///   emit with **all phrases forced additive** (nothing consumed ⇒ every token feature plus
+    ///   every leftmost-longest entity) ∪ the **overlapping** entity pass. So `P(T)` contains every
+    ///   feature any parse could emit — every nested/overlapping alias entity AND the component
+    ///   tokens of a phrase displaced from the leftmost-longest parse. Used for retrieval +
+    ///   required + any-of, so a `new york` query finds a `new york city` title and a component
+    ///   query is never dropped. A strict superset of every parse ⇒ FN-safe; it only ever adds to
+    ///   the positive view (a wider positive read is a bounded false positive, never a negative).
     ///
     /// With no active multi-word alias (`alias_overlap` is `None`), `P(T) == N(T)` and the two
     /// outputs are identical — the caller then passes one slice for both views and the
@@ -458,10 +469,10 @@ impl Normalizer {
     ) {
         neg.clear();
         pos.clear();
+        // N(T): the canonical leftmost-longest parse (phrase modes respected). `emit` cleans
+        // `text` into `lc` first.
         let mut tmp: Vec<FeatureId> = Vec::new();
-        // `emit` cleans `text` into `lc` first, so after this call `lc` holds the cleaned
-        // text the overlap automaton scans below — no second clean.
-        self.emit(text, lc, Side::Title, &mut |name, _kind| {
+        self.emit(text, lc, Side::Title, false, &mut |name, _kind| {
             tmp.push(dict.get_or_synthetic(name));
         });
         tmp.sort_unstable();
@@ -469,9 +480,17 @@ impl Normalizer {
         neg.extend_from_slice(&tmp);
 
         match &self.alias_overlap {
-            // No alias phrases: positive view == negative view.
+            // No alias phrases: positive view == negative view (single-view fast path elsewhere).
             None => pos.extend_from_slice(&tmp),
             Some(ov) => {
+                // P(T): re-emit with everything additive (the parse-union of token + entity
+                // features), then add the overlapping (non-leftmost-longest) entities. The second
+                // `emit` re-cleans into `lc`, leaving it holding the cleaned text the overlap pass
+                // scans below.
+                tmp.clear();
+                self.emit(text, lc, Side::Title, true, &mut |name, _kind| {
+                    tmp.push(dict.get_or_synthetic(name));
+                });
                 ov.collect_into(lc, dict, &mut tmp);
                 tmp.sort_unstable();
                 tmp.dedup();

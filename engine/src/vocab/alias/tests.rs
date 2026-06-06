@@ -407,6 +407,62 @@ fn activate_accepts_multiword_refuses_mixed_kind() {
 }
 
 #[test]
+fn reimport_upgrades_a_persisted_candidate_but_never_downgrades() {
+    // ADR-061 (codex R7): a same-provenance re-import re-applies the current policy's default,
+    // adopting a now-active status (so a persisted Phase-1 multi-word candidate activates when its
+    // synonym file is re-imported under the Phase-2 policy) — but never downgrades a status, so a
+    // re-learn cannot undo a manual activation.
+    let n = norm();
+    let dict = Dict::new();
+
+    // (a) Upgrade: model a persisted declared multi-word Candidate, then re-import the same file.
+    let mut reg = AliasRegistry::new();
+    reg.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    reg.entries[0].status = AliasStatus::Candidate; // model the Phase-1 persisted state
+    let status = reg.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    assert_eq!(
+        status,
+        Some(AliasStatus::Active),
+        "re-importing the same declared file activates a persisted multi-word candidate"
+    );
+
+    // (b) No downgrade: a manually-activated learned distinct stays active across a re-learn.
+    let mut reg2 = AliasRegistry::new();
+    reg2.add_classified(
+        &forms(&["psa", "bgs"]),
+        AliasProvenance::LearnedFromQueries,
+        0.5,
+        &n,
+        &dict,
+    );
+    assert!(reg2.activate(&forms(&["psa", "bgs"])), "manual activate");
+    reg2.add_classified(
+        &forms(&["psa", "bgs"]),
+        AliasProvenance::LearnedFromQueries,
+        0.9,
+        &n,
+        &dict,
+    );
+    assert_eq!(
+        reg2.entries[0].status,
+        AliasStatus::Active,
+        "a re-learn must not downgrade a manual activation"
+    );
+}
+
+#[test]
 fn json_round_trips() {
     let n = norm();
     let dict = Dict::new();
