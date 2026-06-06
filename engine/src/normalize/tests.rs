@@ -86,26 +86,23 @@ fn multiword_phrases_collapse_to_one_feature() {
 }
 
 #[test]
-fn phrase_matches_across_repeated_whitespace() {
-    // ADR-061: byte-cleaning collapses whitespace *runs*, so a phrase (registered single-spaced)
-    // still matches a title with repeated spaces or adjacent split punctuation — closing a false
-    // negative the phrase automaton (which scans the cleaned bytes literally) otherwise has. This
-    // fails on the pre-fix cleaner, which preserved the extra spaces so the pattern missed.
+fn whitespace_runs_are_not_collapsed_in_canonical_features() {
+    // ADR-061 (codex R8): `clean_with` does NOT collapse whitespace runs — the canonical / compile
+    // feature output is byte-identical across versions, so a persisted segment never desyncs on a
+    // binary upgrade. A double-spaced phrase therefore tokenizes to its COMPONENTS here. Matching a
+    // whitespace-run TITLE against an alias is handled recall-safely by the positive-view overlap
+    // scan (`tests/oracle/alias.rs::multiword_alias_matches_a_double_space_title`), which never
+    // touches these canonical features.
     let n = spec_vocab();
     assert_eq!(
         names(&n, "upper  deck"),
-        s(&["brand:upper_deck"]),
-        "double space"
+        s(&["term:deck", "term:upper"]),
+        "double space → components (not collapsed)"
     );
     assert_eq!(
-        names(&n, "upper - deck"),
+        names(&n, "upper deck"),
         s(&["brand:upper_deck"]),
-        "split punctuation between tokens"
-    );
-    assert_eq!(
-        names(&n, "michael   jordan"),
-        s(&["player:michael_jordan"]),
-        "triple space"
+        "single space → the phrase entity (unchanged)"
     );
 }
 
@@ -286,6 +283,37 @@ fn alias_phrase_collapses_on_query_overlaps_on_title() {
 
 /// With no alias phrase registered, `match_features_dual` yields identical views and they
 /// equal `match_features` — the default path is byte-identical (the no-overhead guarantee).
+#[test]
+fn positive_view_is_always_a_superset_of_negative() {
+    // ADR-061 (codex R8): P(T) ⊇ N(T) always. The force-additive re-emit for P(T) can change a
+    // STATEFUL token read — a `psa` grader un-consumed from a collapsing `psa foo` phrase turns the
+    // trailing `10` from `term:10` (its `N(T)` reading) into `grade:10` — so P(T) must UNION N(T),
+    // never replace it, or the canonical `term:10` would vanish and a query needing it would FN.
+    let mut b = NormalizerBuilder::new();
+    b.add_phrase(&["psa", "foo"], "term:psa_foo", FeatureKind::Generic); // collapsing
+    b.add_grader("psa");
+    b.add_alias_form("new york"); // ⇒ the dual (P(T)/N(T)) path is active
+    let n = b.build().expect("normalizer");
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let _ = n.compile_features("psa foo 10", &mut dict, &mut lc);
+
+    let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    n.match_features_dual("psa foo 10", &dict, &mut lc, &mut neg, &mut pos);
+    let ten = dict.get_or_synthetic("term:10");
+    assert!(
+        neg.contains(&ten),
+        "N(T) reads the trailing number as term:10"
+    );
+    for f in &neg {
+        assert!(
+            pos.contains(f),
+            "P(T) must contain every N(T) feature (superset) — incl. {}",
+            dict.name(*f)
+        );
+    }
+}
+
 #[test]
 fn dual_view_equals_single_view_without_aliases() {
     let n = spec_vocab();

@@ -366,6 +366,21 @@ fn displaced_alias_phrase_keeps_its_components() {
     );
 }
 
+/// (8d) An alias matches a title with whitespace runs (`new  york`) via the positive-view overlap
+/// scan, which collapses runs — WITHOUT collapsing the canonical/compile features (so persisted
+/// segments stay byte-identical across versions, codex R8). Recall-safe: the overlap pass only
+/// adds to `P(T)`.
+#[test]
+fn multiword_alias_matches_a_double_space_title() {
+    let queries: Vec<(u64, String)> = vec![(1, "ny mets".into())];
+    let (mut eng, _vocab) = engine_with_aliases(&queries, "ny => new york");
+    let mut s = MatchScratch::new();
+    assert!(
+        matched(&mut eng, &mut s, "new  york mets").contains(&1),
+        "the ny alias must match a double-spaced `new  york` title (positive-view overlap scan)"
+    );
+}
+
 /// (8) The title side stays additive: a pre-existing component-token query (`york`) still matches a
 /// `new york` title after the alias activates — the alias must never drop a component match.
 #[test]

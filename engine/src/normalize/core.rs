@@ -43,15 +43,43 @@ pub(super) struct AliasOverlap {
 }
 
 impl AliasOverlap {
-    /// Append the entity feature id of every word-boundary-aligned alias-phrase occurrence in
-    /// the already-cleaned text `lc` (overlapping matches included) to `out`. Unknown entities
-    /// hash to a stable synthetic id (ADR-046), exactly as the leftmost-longest pass resolves.
+    /// Append the entity feature id of every word-boundary-aligned phrase occurrence in the
+    /// already-cleaned text `lc` (overlapping matches included) to `out`. Unknown entities hash to
+    /// a stable synthetic id (ADR-046), exactly as the leftmost-longest pass resolves.
+    ///
+    /// The scan **collapses whitespace runs** so a phrase (registered single-spaced) still matches
+    /// a title with repeated spaces or adjacent split punctuation (`new  york`, `new---york`) —
+    /// codex R8. This is positive-view (`P(T)`) only and only ever ADDS entities (recall-safe); the
+    /// canonical `N(T)` and the compile path keep `lc` verbatim, so persisted segments are NOT
+    /// desynced by a whitespace-cleaning change. No allocation unless a run is actually present.
     fn collect_into(&self, lc: &str, dict: &Dict, out: &mut Vec<FeatureId>) {
-        let bytes = lc.as_bytes();
-        for m in self.automaton.find_overlapping_iter(lc) {
+        if lc.as_bytes().windows(2).any(|w| w == b"  ") {
+            let mut collapsed = String::with_capacity(lc.len());
+            let mut prev_space = true; // suppress a leading space
+            for c in lc.chars() {
+                if c == ' ' {
+                    if !prev_space {
+                        collapsed.push(' ');
+                    }
+                    prev_space = true;
+                } else {
+                    collapsed.push(c);
+                    prev_space = false;
+                }
+            }
+            self.scan_overlapping(&collapsed, dict, out);
+        } else {
+            self.scan_overlapping(lc, dict, out);
+        }
+    }
+
+    /// Emit the entity id of every word-boundary-aligned overlapping phrase match in `text`.
+    fn scan_overlapping(&self, text: &str, dict: &Dict, out: &mut Vec<FeatureId>) {
+        let bytes = text.as_bytes();
+        for m in self.automaton.find_overlapping_iter(text) {
             let (s, e) = (m.start(), m.end());
             let ok_start = s == 0 || bytes[s - 1] == b' ';
-            let ok_end = e == lc.len() || bytes[e] == b' ';
+            let ok_end = e == text.len() || bytes[e] == b' ';
             if ok_start && ok_end {
                 out.push(dict.get_or_synthetic(&self.entries[m.value()].0));
             }
@@ -483,11 +511,13 @@ impl Normalizer {
             // No alias phrases: positive view == negative view (single-view fast path elsewhere).
             None => pos.extend_from_slice(&tmp),
             Some(ov) => {
-                // P(T): re-emit with everything additive (the parse-union of token + entity
-                // features), then add the overlapping (non-leftmost-longest) entities. The second
-                // `emit` re-cleans into `lc`, leaving it holding the cleaned text the overlap pass
+                // P(T) = N(T) ∪ force-additive parse-union ∪ overlapping entities. `tmp` already
+                // holds N(T); ADD (never replace) so P(T) is always a strict superset of N(T) —
+                // re-emitting can change a *stateful* token read (e.g. a grader inside a phrase,
+                // now un-consumed, turns a trailing `10` from `term:10` into `grade:10`), so
+                // keeping N(T) guarantees the canonical feature is never dropped (codex R8). The
+                // second `emit` re-cleans into `lc`, leaving it holding the text the overlap pass
                 // scans below.
-                tmp.clear();
                 self.emit(text, lc, Side::Title, true, &mut |name, _kind| {
                     tmp.push(dict.get_or_synthetic(name));
                 });
@@ -502,8 +532,10 @@ impl Normalizer {
 
 /// Byte-clean `text` into `out` (reused): lowercase + fold diacritics + apply the punctuation
 /// table. Shared by [`Normalizer::clean_into`] (the hot path) and the builder's alias-phrase
-/// registration (ADR-061), so an alias form is tokenized exactly as a title is — the phrase
-/// pattern then matches the cleaned title text and the form resolves to its single entity.
+/// registration (ADR-061). **Whitespace runs are NOT collapsed** — the cleaned text is verbatim,
+/// so this is byte-identical across versions and a persisted segment's features never desync on a
+/// binary upgrade (codex R8). Matching an alias against a title with whitespace runs is instead
+/// handled, recall-safely, by the positive-view overlap scan ([`AliasOverlap::collect_into`]).
 pub(super) fn clean_with(punct: &PunctTable, text: &str, out: &mut String) {
     out.clear();
     for ch in text.chars() {
@@ -512,29 +544,16 @@ pub(super) fn clean_with(punct: &PunctTable, text: &str, out: &mut String) {
             out.push(c.to_ascii_lowercase());
         } else {
             match punct.class_of(c) {
-                PunctClass::Split => push_space(out),
+                PunctClass::Split => out.push(' '),
                 PunctClass::Fold => {} // delete: neighbors join into one token
                 PunctClass::Keep => out.push(c),
                 PunctClass::Marker => {
-                    push_space(out);
+                    out.push(' ');
                     out.push(c);
                     out.push(' ');
                 }
             }
         }
-    }
-}
-
-/// Append a single word-separating space, **collapsing runs** — a no-op if `out` is empty or
-/// already ends in a space. Multiple split characters or repeated whitespace (`new  york`,
-/// `new---york`) therefore clean to a single space, so a registered phrase pattern (joined with
-/// single spaces) matches the cleaned title (ADR-061). Token output is unchanged — the
-/// downstream `split_whitespace` already collapsed runs; this only fixes the phrase automaton,
-/// which scans the cleaned bytes literally.
-#[inline]
-fn push_space(out: &mut String) {
-    if !out.is_empty() && !out.ends_with(' ') {
-        out.push(' ');
     }
 }
 
