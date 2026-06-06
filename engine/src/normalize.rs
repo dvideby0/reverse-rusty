@@ -28,6 +28,13 @@ mod core;
 #[cfg(test)]
 mod tests;
 
+/// Independent parse-union oracle for the ADR-061 positive view `P(T)` (the matcher's
+/// FN-safety crux): exhaustively enumerates every phrase-collapse parse of short titles and
+/// asserts the engine's `P(T)` is a superset — a cross-check the differential oracle cannot
+/// do because it reuses `match_features_dual` itself.
+#[cfg(test)]
+mod parse_union_oracle;
+
 pub use builder::NormalizerBuilder;
 pub use core::{fold_diacritic, Normalizer};
 

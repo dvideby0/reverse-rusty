@@ -37,9 +37,22 @@
     **overlapping** (`MatchKind::Standard`) entity pass over **all** phrases. This is a strict
     superset of *every* parse, so it never drops a feature a different parse would emit — including
     the **components of a phrase displaced** from the leftmost-longest parse by an overlapping one
-    (e.g. a collapsing `new york` consuming the `york` of an alias `york city`). Used for: signature
+    (e.g. a collapsing `new york` consuming the `york` of an alias `york city`). The force-additive
+    pass also tracks **all active graders** (not a single overwritable pending one) so the superset
+    claim holds for *stateful* features (grades): each number grades with **every** grader still in
+    its window. Without this, a number consumed by a phrase in one parse can hide a later grade from
+    `P(T)` — the "Goldilocks parse", with two failure modes both fixed: (1) an intervening number
+    eats the pending grader (`psa 9 lives 8`, overlapping `psa 9` / `9 lives`, reads a genuine
+    `psa 8` only once `9 lives` collapses); (2) a second grader overwrites the pending one
+    (`psa a bgs 8`, overlapping `psa a` / `a bgs`, reads a `psa 8` only once `a bgs` collapses).
+    Neither the leftmost-longest nor the zero-consume extreme emits these; the active-grader set
+    does. (Over-emitting a grade no parse produces is a bounded false positive, recall-safe.) An
+    exhaustive **parse-union oracle** (`normalize/parse_union_oracle.rs`) enumerates every
+    phrase-collapse parse of short titles and asserts `P(T) ⊇` their union — the independent check
+    the differential oracle cannot do (it reuses `match_features_dual` itself). Used for: signature
     **retrieval**, the required-mask gate, the required tail, and any-of groups. (`N(T) ⊆ P(T)`: the
-    positive view only ever **adds**, so it can introduce a bounded false positive, never a negative.)
+    positive view only ever **adds**, so it can introduce a bounded false positive, never a
+    negative.)
   - **`N(T)` — negative view (canonical leftmost-longest).** The ordinary leftmost-longest additive
     feature set the engine already produces. Used for: the forbidden-mask gate and the forbidden tail —
     **and nothing else**.

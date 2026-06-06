@@ -314,6 +314,67 @@ fn positive_view_is_always_a_superset_of_negative() {
     }
 }
 
+/// ADR-061 parse-union refinement: the positive view `P(T)` tracks ALL active graders, so each
+/// number grades with every grader still in window — not just the most-recent pending one. Two
+/// "Goldilocks parse" failure modes, both pinned here (the exhaustive sweep is in
+/// [`super::parse_union_oracle`]): (a) an intervening number EATS the pending grader, and (b) a
+/// second grader OVERWRITES it. In each, a parse that collapses an overlapping phrase reads a
+/// genuine `psa N`, so `P(T)` must carry that grade or a `psa N` query is a false negative. The
+/// grade must also be ABSENT from the canonical `N(T)` (whose leftmost-longest parse binds `psa`
+/// elsewhere), so the forbidden view stays canonical.
+#[test]
+fn positive_view_grades_the_full_parse_union() {
+    // (a) the eat case: `psa 9`/`9 lives` overlap on the gradeable `9`.
+    let mut b = NormalizerBuilder::new();
+    b.add_grader("psa");
+    b.add_phrase(&["psa", "9"], "term:psa_9", FeatureKind::Generic);
+    b.add_phrase(&["9", "lives"], "term:9_lives", FeatureKind::Generic);
+    b.add_alias_form("new york"); // ⇒ the dual (P(T)/N(T)) path is active
+    assert_grades_psa8(&b.build().expect("normalizer"), "psa 9 lives 8");
+
+    // (b) the overwrite case: `psa a`/`a bgs` overlap on `a`; a second grader `bgs` would overwrite
+    // the pending `psa`, but the active-grader set keeps `psa` reaching the trailing `8`.
+    let mut b = NormalizerBuilder::new();
+    b.add_grader("psa");
+    b.add_grader("bgs");
+    b.add_phrase(&["psa", "a"], "term:psa_a", FeatureKind::Generic);
+    b.add_phrase(&["a", "bgs"], "term:a_bgs", FeatureKind::Generic);
+    b.add_alias_form("new york");
+    assert_grades_psa8(&b.build().expect("normalizer"), "psa a bgs 8");
+}
+
+/// `P(T)` of `title` must carry `grade:8`/`grader_grade:psa8` (a `psa 8` query must not FN it),
+/// while `N(T)` (canonical, used for forbidden) must NOT.
+fn assert_grades_psa8(n: &Normalizer, title: &str) {
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let _ = n.compile_features("psa 8", &mut dict, &mut lc); // intern the features we probe
+    let psa8 = dict.get_or_synthetic("grader_grade:psa8");
+    let grade8 = dict.get_or_synthetic("grade:8");
+
+    let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    n.match_features_dual(title, &dict, &mut lc, &mut neg, &mut pos);
+
+    assert!(
+        pos.binary_search(&psa8).is_ok() && pos.binary_search(&grade8).is_ok(),
+        "P(T) of `{title}` must grade the trailing 8 (parse-union): a `psa 8` query must not FN it"
+    );
+    // The psa-8 GRADER-grade is the discriminating feature: it must not be in the canonical N(T)
+    // (the leftmost-longest parse binds psa elsewhere). `grade:8` alone may legitimately be in N(T)
+    // via a *different* grader (e.g. `psa a bgs 8` reads `bgs 8` canonically), so only psa8 is
+    // asserted absent.
+    assert!(
+        neg.binary_search(&psa8).is_err(),
+        "N(T) of `{title}` stays canonical: no psa-8 grader-grade in the forbidden view"
+    );
+    for f in &neg {
+        assert!(
+            pos.binary_search(f).is_ok(),
+            "N(T) ⊆ P(T) still holds for `{title}`"
+        );
+    }
+}
+
 #[test]
 fn dual_view_equals_single_view_without_aliases() {
     let n = spec_vocab();

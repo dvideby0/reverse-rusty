@@ -11,6 +11,12 @@ use super::{PhraseEntry, PhraseMode, PunctClass, PunctTable, Side};
 use crate::dict::{Dict, FeatureId, FeatureKind};
 use daachorse::DoubleArrayAhoCorasick;
 
+mod helpers;
+pub use helpers::fold_diacritic;
+use helpers::{
+    age_active_graders, as_year, canon_grader, emit_generic, is_grade_value, parse_number,
+};
+
 pub struct Normalizer {
     /// daachorse automaton over space-joined phrase strings. Pattern value indexes
     /// into `phrase_entries`.
@@ -254,6 +260,13 @@ impl Normalizer {
         let mut pending_grader_age = 0u8;
         let mut grade_ctx = false;
         let mut grade_ctx_age = 0u8;
+        // ADR-061 positive view (`force_additive` ⇒ P(T)) only: a single `pending_grader` cannot
+        // express the parse-union of grades — a parse that consumes a phrase can FREE an earlier
+        // grader to grade a later number, and a second grader OVERWRITES the pending one. So in the
+        // positive pass we track EVERY grader still in window and grade each number with all of
+        // them. The query/compile and single-view title paths keep the single-pending semantics
+        // (byte-identical) and this Vec stays empty ⇒ `age_active_graders` is a no-op, no alloc.
+        let mut active_graders: Vec<(String, u8)> = Vec::new();
 
         while i < tokens.len() {
             if token_consumed[i] {
@@ -271,6 +284,7 @@ impl Normalizer {
                         grade_ctx = false;
                     }
                 }
+                age_active_graders(&mut active_graders);
                 i += 1;
                 continue;
             }
@@ -290,8 +304,17 @@ impl Normalizer {
                 scratch.push_str("grader:");
                 scratch.push_str(&gcanon);
                 emit(&scratch, FeatureKind::Grader);
+                let fused = rest.is_some();
                 if let Some(num) = rest {
                     Self::emit_grade(&gcanon, &num, &mut scratch, emit);
+                }
+                if force_additive {
+                    // Positive view: keep this grader active (don't overwrite earlier ones), so a
+                    // later number grades with it too — the parse-union over which graders a parse
+                    // frees by consuming the others. A grader token ages nothing (matches the
+                    // single-pending path, where the new grader resets only its own age).
+                    active_graders.push((gcanon, 0));
+                } else if fused {
                     pending_grader = None;
                 } else {
                     pending_grader = Some(gcanon);
@@ -308,6 +331,7 @@ impl Normalizer {
                 if pending_grader.is_some() {
                     pending_grader_age = pending_grader_age.saturating_add(1);
                 }
+                age_active_graders(&mut active_graders);
                 i += 1;
                 continue;
             }
@@ -327,6 +351,31 @@ impl Normalizer {
                     scratch.push_str("year:");
                     scratch.push_str(&y);
                     emit(&scratch, FeatureKind::Year);
+                } else if force_additive {
+                    // Positive view (P(T)) parse-union: grade this number with EVERY active grader
+                    // still in window AND the grade context, all STICKY (never cleared by this
+                    // number). A number consumed by a phrase in some parse frees a grader for a
+                    // later number, and a second grader overwrites the pending one — both readings
+                    // live here, so P(T) keeps every grade any parse could emit. Over-emitting a
+                    // grade no single parse produces is a bounded false positive (recall-safe).
+                    let gradeable = is_grade_value(&numstr);
+                    let mut graded = false;
+                    if gradeable {
+                        for (g, _) in &active_graders {
+                            Self::emit_grade(g, &numstr, &mut scratch, emit);
+                            graded = true;
+                        }
+                        if grade_ctx {
+                            scratch.clear();
+                            scratch.push_str("grade:");
+                            scratch.push_str(&numstr);
+                            emit(&scratch, FeatureKind::Grade);
+                            graded = true;
+                        }
+                    }
+                    if !graded {
+                        emit_generic(&numstr, &mut scratch, emit);
+                    }
                 } else if let Some(g) = pending_grader.clone() {
                     if is_grade_value(&numstr) {
                         Self::emit_grade(&g, &numstr, &mut scratch, emit);
@@ -372,6 +421,7 @@ impl Normalizer {
                     grade_ctx = false;
                 }
             }
+            age_active_graders(&mut active_graders);
         }
     }
 
@@ -518,8 +568,13 @@ impl Normalizer {
                 // can, however, change a *stateful* token read (a grader un-consumed from a phrase
                 // turns a trailing `10` from `term:10` into `grade:10`), so we also add every cleaned
                 // token's RAW `term:<token>` reading below — the generic feature a stateful re-parse
-                // would otherwise drop (codex R7/R8/R9). The second `emit` re-cleans into `lc`,
-                // leaving it holding the text the overlap pass + token scan use.
+                // would otherwise drop (codex R7/R8/R9). The force-additive pass also tracks ALL
+                // active graders (see `emit`'s `active_graders`): each number grades with every
+                // grader still in window, so a number consumed by a phrase in some parse cannot hide
+                // a later grade from P(T) and a second grader does not overwrite the first (the
+                // "Goldilocks parse" — `psa 9 lives 8` reads `psa 8` once `9 lives` collapses;
+                // `psa a bgs 8` reads `psa 8` once `a bgs` collapses). The second `emit` re-cleans
+                // into `lc`, leaving it holding the text the overlap pass + token scan use.
                 self.emit(text, lc, Side::Title, true, &mut |name, _kind| {
                     tmp.push(dict.get_or_synthetic(name));
                 });
@@ -575,80 +630,4 @@ pub(super) fn alias_form_tokens(punct: &PunctTable, form: &str) -> Vec<String> {
     let mut buf = String::new();
     clean_with(punct, form, &mut buf);
     buf.split_whitespace().map(ToString::to_string).collect()
-}
-
-/// Fold common Latin diacritics to ASCII so "Jokić"->"jokic", "Acuña"->"acuna".
-pub fn fold_diacritic(ch: char) -> char {
-    match ch {
-        'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ā' | 'ą' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' => {
-            'a'
-        }
-        'é' | 'è' | 'ê' | 'ë' | 'ē' | 'ė' | 'ę' | 'É' | 'È' | 'Ê' | 'Ë' => 'e',
-        'í' | 'ì' | 'î' | 'ï' | 'ī' | 'į' | 'Í' | 'Ì' | 'Î' | 'Ï' => 'i',
-        'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' | 'ō' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' => 'o',
-        'ú' | 'ù' | 'û' | 'ü' | 'ū' | 'Ú' | 'Ù' | 'Û' | 'Ü' => 'u',
-        'ñ' | 'ń' | 'Ñ' => 'n',
-        'ç' | 'ć' | 'č' | 'Ç' | 'Ć' | 'Č' => 'c',
-        'š' | 'ś' | 'Š' | 'Ś' => 's',
-        'ž' | 'ź' | 'ż' | 'Ž' | 'Ź' | 'Ż' => 'z',
-        'ý' | 'ÿ' | 'Ý' => 'y',
-        'ł' | 'Ł' => 'l',
-        other => other,
-    }
-}
-
-fn canon_grader(g: &str) -> String {
-    match g {
-        "beckett" => "bgs".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn emit_generic<F: FnMut(&str, FeatureKind)>(tok: &str, scratch: &mut String, emit: &mut F) {
-    scratch.clear();
-    scratch.push_str("term:");
-    scratch.push_str(tok);
-    emit(scratch, FeatureKind::Generic);
-}
-
-/// Parse a token into a clean numeric string (digits with optional .5), or None.
-fn parse_number(tok: &str) -> Option<String> {
-    let mut seen_digit = false;
-    let mut seen_dot = false;
-    for ch in tok.chars() {
-        if ch.is_ascii_digit() {
-            seen_digit = true;
-        } else if ch == '.' {
-            if seen_dot {
-                return None;
-            }
-            seen_dot = true;
-        } else {
-            return None;
-        }
-    }
-    if seen_digit {
-        Some(tok.to_string())
-    } else {
-        None
-    }
-}
-
-fn as_year(num: &str) -> Option<String> {
-    if num.len() == 4 && !num.contains('.') {
-        if let Ok(y) = num.parse::<u32>() {
-            if (1900..=2099).contains(&y) {
-                return Some(num.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn is_grade_value(num: &str) -> bool {
-    if let Ok(v) = num.parse::<f32>() {
-        (1.0..=10.0).contains(&v)
-    } else {
-        false
-    }
 }
