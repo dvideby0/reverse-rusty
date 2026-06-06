@@ -511,16 +511,27 @@ impl Normalizer {
             // No alias phrases: positive view == negative view (single-view fast path elsewhere).
             None => pos.extend_from_slice(&tmp),
             Some(ov) => {
-                // P(T) = N(T) ∪ force-additive parse-union ∪ overlapping entities. `tmp` already
-                // holds N(T); ADD (never replace) so P(T) is always a strict superset of N(T) —
-                // re-emitting can change a *stateful* token read (e.g. a grader inside a phrase,
-                // now un-consumed, turns a trailing `10` from `term:10` into `grade:10`), so
-                // keeping N(T) guarantees the canonical feature is never dropped (codex R8). The
-                // second `emit` re-cleans into `lc`, leaving it holding the text the overlap pass
-                // scans below.
+                // P(T) = N(T) ∪ force-additive parse-union ∪ raw token features ∪ overlapping
+                // entities. `tmp` already holds N(T); only ever ADD (never replace), so P(T) is a
+                // strict superset of every parse and activating an alias can never drop a feature.
+                // The force-additive re-emit recovers components of a displaced additive phrase; it
+                // can, however, change a *stateful* token read (a grader un-consumed from a phrase
+                // turns a trailing `10` from `term:10` into `grade:10`), so we also add every cleaned
+                // token's RAW `term:<token>` reading below — the generic feature a stateful re-parse
+                // would otherwise drop (codex R7/R8/R9). The second `emit` re-cleans into `lc`,
+                // leaving it holding the text the overlap pass + token scan use.
                 self.emit(text, lc, Side::Title, true, &mut |name, _kind| {
                     tmp.push(dict.get_or_synthetic(name));
                 });
+                let mut name = String::from("term:");
+                for tok in lc.split_whitespace() {
+                    if tok == "#" || tok == "/" {
+                        continue; // structural markers, never a term feature
+                    }
+                    name.truncate(5); // keep the "term:" prefix
+                    name.push_str(tok);
+                    tmp.push(dict.get_or_synthetic(&name));
+                }
                 ov.collect_into(lc, dict, &mut tmp);
                 tmp.sort_unstable();
                 tmp.dedup();

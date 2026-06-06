@@ -248,14 +248,16 @@ impl AliasRegistry {
                 existing.provenance = provenance;
                 existing.kind = kind;
                 existing.status = status;
-            } else if provenance_rank(provenance) == provenance_rank(existing.provenance) {
-                // Same-provenance re-import: re-classify and ADOPT a now-active default (so a
-                // persisted candidate the current policy can express becomes active), but never
-                // DOWNGRADE — a re-import/re-learn must not undo a manual activation (codex R7).
-                existing.kind = kind;
-                if status == AliasStatus::Active {
-                    existing.status = AliasStatus::Active;
-                }
+            } else if provenance_rank(provenance) == provenance_rank(existing.provenance)
+                && status == AliasStatus::Active
+            {
+                // Same-provenance re-import: ADOPT a now-active default so a persisted candidate the
+                // current policy can express becomes active (codex R7). Only ever UPGRADE the
+                // status — never the `kind` and never a downgrade: a re-import/re-learn must not
+                // undo a manual activation, and re-classifying an already-active alias to a
+                // non-matchable `kind` (e.g. MixedKind) would silently drop it from `active_groups`
+                // (codex R9).
+                existing.status = AliasStatus::Active;
             }
             return Some(existing.status);
         }

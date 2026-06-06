@@ -381,6 +381,38 @@ fn multiword_alias_matches_a_double_space_title() {
     );
 }
 
+/// (8e) Activating an alias that displaces a collapsing phrase containing a grader must not drop a
+/// STATEFUL token feature (codex R9). `psa foo` collapses (consuming the `psa` grader), so `10`
+/// reads as `term:10` and a `10` query matches `psa foo bar 10`. Activating `pfb => psa foo bar`
+/// makes the additive alias un-consume `psa` (→ `grade:10`) in every phrase parse, but P(T)'s raw
+/// token pass keeps `term:10`, so the query still matches.
+#[test]
+fn activating_alias_keeps_a_stateful_component_feature() {
+    let mut v = Vocab::new();
+    v.add_grader("psa");
+    v.add_phrase(
+        &["psa", "foo"],
+        "term:psa_foo",
+        reverse_rusty::dict::FeatureKind::Generic,
+    );
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.set_vocab(v).expect("install grader + phrase");
+    eng.build_from_queries(&[(1, "10".into())]);
+
+    let title = "psa foo bar 10";
+    let mut s = MatchScratch::new();
+    assert!(
+        matched(&mut eng, &mut s, title).contains(&1),
+        "baseline: a `10` query matches `psa foo bar 10` (term:10)"
+    );
+    eng.import_alias_synonyms("pfb => psa foo bar")
+        .expect("apply the alias");
+    assert!(
+        matched(&mut eng, &mut s, title).contains(&1),
+        "the `10` match must survive activating an alias that displaces the `psa foo` phrase"
+    );
+}
+
 /// (8) The title side stays additive: a pre-existing component-token query (`york`) still matches a
 /// `new york` title after the alias activates — the alias must never drop a component match.
 #[test]
