@@ -249,24 +249,32 @@ impl NormalizerBuilder {
     }
 }
 
-/// Build the overlapping (`MatchKind::Standard`) alias automaton from the alias-mode phrase
-/// subset, paired with each pattern's entity feature. Patterns are deduped (a duplicated
-/// alias form would make daachorse reject the build). Returns `None` when no alias phrase is
-/// registered (ADR-061).
+/// Build the overlapping (`MatchKind::Standard`) automaton for the title positive view `P(T)`
+/// (ADR-061). Returns `None` unless ≥1 **alias-mode** phrase is registered (otherwise the title is
+/// single-view and byte-identical to pre-ADR-061).
+///
+/// When alias phrases ARE present, the automaton covers **every** phrase (alias AND non-alias),
+/// not just the alias subset. This is the codex-R6 fix: adding an alias to the shared
+/// leftmost-longest automaton can *displace* an overlapping non-alias phrase from the canonical
+/// `N(T)` parse (e.g. activating `new york` makes `new york city` no longer emit a pre-existing
+/// `york city` entity), so `P(T)` must re-include **every** phrase entity present — alias and
+/// displaced non-alias alike — or a query on the displaced phrase becomes a false negative. The
+/// overlap pass only ever *adds* entities to the positive view, so this is recall-safe.
+/// Patterns are deduped (a duplicate would make daachorse reject the build).
 fn build_alias_overlap(
     patterns: &[String],
     entries: &[PhraseEntry],
 ) -> Result<Option<super::core::AliasOverlap>, crate::error::NormalizerError> {
+    if !entries.iter().any(|e| e.mode == PhraseMode::Alias) {
+        return Ok(None);
+    }
     let mut pats: Vec<String> = Vec::new();
     let mut feats: Vec<(String, FeatureKind)> = Vec::new();
     for (pat, entry) in patterns.iter().zip(entries) {
-        if entry.mode == PhraseMode::Alias && !pats.iter().any(|p| p == pat) {
+        if !pats.iter().any(|p| p == pat) {
             pats.push(pat.clone());
             feats.push((entry.feature.clone(), entry.kind));
         }
-    }
-    if pats.is_empty() {
-        return Ok(None);
     }
     let automaton = DoubleArrayAhoCorasickBuilder::new()
         .match_kind(MatchKind::Standard)

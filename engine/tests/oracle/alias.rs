@@ -308,6 +308,38 @@ fn multiword_alias_overlapping_nested_retrieval() {
     );
 }
 
+/// (8b) Activating a multi-word alias must not DISPLACE a pre-existing overlapping phrase (codex
+/// R6). With a declared `york city` phrase, activating `ny ⇒ new york` adds `new york` to the
+/// leftmost-longest automaton, which would otherwise suppress `york city` on a `new york city`
+/// title — a false negative for a `york city` query. The positive superset must re-include the
+/// displaced phrase entity.
+#[test]
+fn activating_alias_does_not_drop_an_overlapping_existing_phrase() {
+    let mut v = Vocab::new();
+    v.add_phrase(
+        &["york", "city"],
+        "term:york_city",
+        reverse_rusty::dict::FeatureKind::Generic,
+    );
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.set_vocab(v).expect("install the york city phrase");
+    eng.build_from_queries(&[(1, "york city".into())]);
+
+    let title = "new york city yankees";
+    let mut s = MatchScratch::new();
+    assert!(
+        matched(&mut eng, &mut s, title).contains(&1),
+        "baseline: before the alias, a york city query matches a new york city title"
+    );
+
+    eng.import_alias_synonyms("ny => new york")
+        .expect("apply the new york alias");
+    assert!(
+        matched(&mut eng, &mut s, title).contains(&1),
+        "activating the new york alias must not drop the overlapping york city query (FN-safety)"
+    );
+}
+
 /// (8) The title side stays additive: a pre-existing component-token query (`york`) still matches a
 /// `new york` title after the alias activates — the alias must never drop a component match.
 #[test]

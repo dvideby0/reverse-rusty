@@ -30,9 +30,12 @@ pub struct Normalizer {
     pub(super) punct: PunctTable,
 }
 
-/// The overlapping alias automaton + its per-pattern entity features (ADR-061). Built by
-/// [`NormalizerBuilder::build`](super::NormalizerBuilder::build) from the alias-mode phrase
-/// subset; consulted only on the title side by [`Normalizer::match_features_dual`].
+/// The overlapping (`MatchKind::Standard`) phrase automaton + its per-pattern entity features
+/// (ADR-061), used on the title side by [`Normalizer::match_features_dual`] to build the positive
+/// superset `P(T)`. Built by [`NormalizerBuilder::build`](super::NormalizerBuilder::build) only when
+/// ≥1 alias-mode phrase is registered, and then over **every** phrase (alias AND non-alias), so a
+/// non-alias phrase displaced from the leftmost-longest parse by an overlapping alias is still
+/// present in `P(T)` (the codex-R6 FN fix).
 pub(super) struct AliasOverlap {
     pub(super) automaton: DoubleArrayAhoCorasick<usize>,
     /// pattern index -> (entity feature name, kind).
