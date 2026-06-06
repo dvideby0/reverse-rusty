@@ -296,6 +296,37 @@ fn build_refuses_a_multiword_alias_normalizer() {
 }
 
 #[test]
+fn durable_build_with_multiword_alias_leaves_no_recoverable_state() {
+    // ADR-061 (codex review): a `data_dir` build must reject a multi-word-alias normalizer BEFORE
+    // writing any durable state. Otherwise it ingests durable shards + commits the manifest/log,
+    // then returns Err — leaving a reopenable cluster compiled under the unsupported normalizer
+    // that a later `open` (with any normalizer) would silently mis-route (a false negative).
+    let norm = vocab_with_multiword_alias().to_normalizer().unwrap();
+    let dir = std::env::temp_dir().join(format!("rr-adr061-durable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = ClusterConfig {
+        num_shards: 2,
+        data_dir: Some(dir.clone()),
+        ..ClusterConfig::default()
+    };
+    assert!(
+        ClusterEngine::build(norm, &cfg, &[(1, "new york mets".into())]).is_err(),
+        "a durable build must refuse a multi-word-alias normalizer"
+    );
+    // No committed cluster was left behind: a reopen finds nothing to recover.
+    assert!(
+        ClusterEngine::open(
+            &dir,
+            reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+            None,
+        )
+        .is_err(),
+        "the refused build must leave no recoverable durable state"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn declared_equivalence_expands_across_shards_with_zero_false_negatives() {
     // ADR-054: a DECLARED equivalence {zzabbr, zzcanon} applied via set_vocab must make a
     // query phrased with one form match a title bearing the other, at every K, with zero FN.

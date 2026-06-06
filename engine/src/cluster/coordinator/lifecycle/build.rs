@@ -65,8 +65,21 @@ impl ClusterEngine {
                 "replication_factor must be ≥ 1 (1 = primary only)".into(),
             ));
         }
-        // (ADR-061 multi-word-alias refusal is enforced centrally in `from_parts`, the one assembly
-        // seam this path routes through — see the guard there.)
+        // ADR-061: reject a multi-word-alias normalizer **before any durable state is written**.
+        // `from_parts` (called at the end of this fn) is the central backstop for every
+        // constructor, but a `data_dir` build ingests shards + commits the manifest/log *before*
+        // reaching it — so a deferred rejection would leave a reopenable durable cluster compiled
+        // under the unsupported normalizer (a later `open` with a different normalizer would
+        // silently miss queries). Fail here, before `commit_durable_base`. Single-token aliases
+        // (`N(T) == P(T)`) are unaffected; see the routing rationale on the `from_parts` guard.
+        if norm.has_multiword_aliases() {
+            return Err(ShardError::Config(
+                "a normalizer with active multi-word aliases is single-node only (ADR-061): \
+                 cluster routing uses the canonical leftmost-longest title view and would miss a \
+                 nested alias entity's shard (a false negative). Single-token aliases are supported."
+                    .into(),
+            ));
+        }
         let norm = Arc::new(norm);
 
         // Pass A — build the authoritative dict + tag space over the WHOLE corpus, then freeze both.

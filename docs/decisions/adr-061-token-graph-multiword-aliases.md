@@ -118,13 +118,17 @@
   deferral is now **enforced, not silent**: cluster content routing derives a title's target shards from
   the canonical leftmost-longest view `N(T)` (the `route` primitive reuses `match_features`), so a nested
   alias entity that lives only in the positive superset `P(T)` would never probe the shard holding a
-  query anchored on it — a false negative the shard-local two-view verifier cannot recover. Both
-  normalizer-setting cluster paths therefore **refuse a multi-word-alias normalizer** —
-  `ClusterEngine::build` / `build_with_tags` and `set_vocab` check `Normalizer::has_multiword_aliases()`
-  and error (regression-guarded by `cluster_oracle::vocab_learning::{set_vocab_refuses_active_multiword_alias_on_cluster,
-  build_refuses_a_multiword_alias_normalizer}`). Single-token cluster aliases (`N(T) == P(T)`) are
-  unaffected and keep working. Cluster multi-word support — **P(T)-aware routing** + cross-process
-  normalizer shipping — is the follow-on. Deferred with it: cluster registry governance, and the
+  query anchored on it — a false negative the shard-local two-view verifier cannot recover. Every cluster
+  path therefore **refuses a multi-word-alias normalizer** via `Normalizer::has_multiword_aliases()`:
+  `ClusterEngine::from_parts` — the ONE assembly seam every constructor routes through (`build` /
+  `build_with_tags`, `open`, and the distributed `connect_remote` / `connect_replicated`) — is the central
+  backstop; `build_with_tags` *also* checks **early**, before any durable shard ingest or manifest commit,
+  so a `data_dir` build cannot leave a reopenable durable cluster compiled under the unsupported
+  normalizer; and the in-place `set_vocab` swap (which does not reconstruct through `from_parts`) guards
+  its own path. (Regression-guarded by `cluster_oracle::vocab_learning::{set_vocab_refuses_active_multiword_alias_on_cluster,
+  build_refuses_a_multiword_alias_normalizer, durable_build_with_multiword_alias_leaves_no_recoverable_state}`.)
+  Single-token cluster aliases (`N(T) == P(T)`) are unaffected and keep working. Cluster multi-word
+  support — **P(T)-aware routing** + cross-process normalizer shipping — is the follow-on. Deferred with it: cluster registry governance, and the
   lower-precision multi-word discovery sources (distributional / match-feedback). Quoted-phrase *required*
   clauses and overlapping aliases inside a single query clause keep query-side leftmost-longest (the
   author wrote one reading); only the **title** side needs the overlap superset.

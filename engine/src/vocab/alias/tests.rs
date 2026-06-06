@@ -101,6 +101,37 @@ fn mixed_known_kinds_are_mixedkind() {
     );
 }
 
+#[test]
+fn cross_kind_multiword_is_mixedkind_not_multiword() {
+    // ADR-061 (codex review): a multi-word group whose forms resolve to DIFFERENT known kinds (a
+    // Brand phrase ≡ a Player phrase) must classify as MixedKind — a review candidate — NOT
+    // auto-activate as MultiWord. The mixed-kind check runs before the multi-word classification,
+    // and resolves the kinds of multi-word forms too.
+    use crate::normalize::NormalizerBuilder;
+    let mut b = NormalizerBuilder::new();
+    b.add_phrase(
+        &["upper", "deck"],
+        "brand:upper_deck",
+        crate::dict::FeatureKind::Brand,
+    );
+    b.add_phrase(
+        &["michael", "jordan"],
+        "player:mj",
+        crate::dict::FeatureKind::Player,
+    );
+    let n = b.build().expect("normalizer");
+    // Intern each phrase entity with its kind so the forms resolve to KNOWN (non-Generic) kinds.
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let _ = n.compile_features("upper deck", &mut dict, &mut lc);
+    let _ = n.compile_features("michael jordan", &mut dict, &mut lc);
+    assert_eq!(
+        classify_kind(&forms(&["upper deck", "michael jordan"]), &n, &dict),
+        AliasKind::MixedKind,
+        "a cross-kind multi-word group must not bypass the MixedKind refusal"
+    );
+}
+
 // ── Auto-activation policy ─────────────────────────────────────────────────────
 
 #[test]

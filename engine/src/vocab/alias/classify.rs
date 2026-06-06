@@ -43,28 +43,30 @@ pub enum AliasKind {
 /// [`SingleTokenDistinct`](AliasKind::SingleTokenDistinct).
 pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) -> AliasKind {
     let mut lc = String::new();
-    let mut kinds: Vec<FeatureKind> = Vec::with_capacity(forms.len());
+    let mut kinds: Vec<FeatureKind> = Vec::new();
+    let mut multiword = false;
     for f in forms {
-        // Check the RAW whitespace token count *before* phrase folding: a multi-word surface form
-        // is a token-graph (Phase 2) case and must stay a candidate even if the current vocab
-        // already has a phrase rule that would fold it into one feature — otherwise importing
-        // `ud => upper deck` while `upper deck` is a declared phrase would silently activate a
-        // multi-word alias (the Phase-1 boundary must not depend on what phrases happen to exist).
-        if f.split_whitespace().count() != 1 {
-            return AliasKind::MultiWord;
-        }
         let feats = norm.compile_features_readonly(f, dict, &mut lc);
-        // A single-word form must normalize to exactly one feature to be a single-token alias;
-        // zero features (all punctuation) or several (a punctuation-split word) is not.
-        if feats.len() != 1 {
-            return AliasKind::MultiWord;
+        // A multi-word case = a RAW whitespace token count > 1 (checked *before* phrase folding,
+        // so the boundary can't depend on which phrases happen to fold it, e.g. importing
+        // `ud => upper deck` while `upper deck` is a declared phrase) OR a single-word form that
+        // resolves to ≠1 feature (zero = all punctuation; several = a punctuation-split word).
+        if f.split_whitespace().count() != 1 || feats.len() != 1 {
+            multiword = true;
         }
-        kinds.push(dict.kind(feats[0]));
+        // Collect the kinds of EVERY resolved feature — single- AND multi-token — so a cross-kind
+        // group is caught even when a form is multi-word. Without this, a multi-word short-circuit
+        // would let a Brand phrase ≡ Player phrase bypass the MixedKind refusal and auto-activate
+        // an unsafe equivalence (codex review, ADR-061).
+        for &id in &feats {
+            kinds.push(dict.kind(id));
+        }
     }
 
-    // Mixed kind only when ≥2 *different* known (non-Generic) kinds appear: an un-interned form
-    // reads as Generic, so a fresh import (nothing interned yet) never trips this — it is a guard
-    // against merging an already-known Brand with an already-known Player, not a hair-trigger.
+    // Mixed kind — checked BEFORE the multi-word classification — only when ≥2 *different* known
+    // (non-Generic) kinds appear: an un-interned form reads as Generic, so a fresh import (nothing
+    // interned yet) never trips this — it is a guard against merging an already-known Brand with an
+    // already-known Player (in any form, single- or multi-token), not a hair-trigger.
     let known = kinds
         .iter()
         .copied()
@@ -74,6 +76,10 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
         if known.iter().any(|&k| k != first) {
             return AliasKind::MixedKind;
         }
+    }
+
+    if multiword {
+        return AliasKind::MultiWord;
     }
 
     if all_pairwise_variant(forms) {

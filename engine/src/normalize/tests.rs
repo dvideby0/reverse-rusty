@@ -86,6 +86,30 @@ fn multiword_phrases_collapse_to_one_feature() {
 }
 
 #[test]
+fn phrase_matches_across_repeated_whitespace() {
+    // ADR-061: byte-cleaning collapses whitespace *runs*, so a phrase (registered single-spaced)
+    // still matches a title with repeated spaces or adjacent split punctuation — closing a false
+    // negative the phrase automaton (which scans the cleaned bytes literally) otherwise has. This
+    // fails on the pre-fix cleaner, which preserved the extra spaces so the pattern missed.
+    let n = spec_vocab();
+    assert_eq!(
+        names(&n, "upper  deck"),
+        s(&["brand:upper_deck"]),
+        "double space"
+    );
+    assert_eq!(
+        names(&n, "upper - deck"),
+        s(&["brand:upper_deck"]),
+        "split punctuation between tokens"
+    );
+    assert_eq!(
+        names(&n, "michael   jordan"),
+        s(&["player:michael_jordan"]),
+        "triple space"
+    );
+}
+
+#[test]
 fn synonyms_converge_alternate_surface_forms() {
     let n = spec_vocab();
     // normalization.md §2: "ud" and the "upper deck" phrase land on the SAME feature.

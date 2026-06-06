@@ -479,16 +479,29 @@ pub(super) fn clean_with(punct: &PunctTable, text: &str, out: &mut String) {
             out.push(c.to_ascii_lowercase());
         } else {
             match punct.class_of(c) {
-                PunctClass::Split => out.push(' '),
+                PunctClass::Split => push_space(out),
                 PunctClass::Fold => {} // delete: neighbors join into one token
                 PunctClass::Keep => out.push(c),
                 PunctClass::Marker => {
-                    out.push(' ');
+                    push_space(out);
                     out.push(c);
                     out.push(' ');
                 }
             }
         }
+    }
+}
+
+/// Append a single word-separating space, **collapsing runs** — a no-op if `out` is empty or
+/// already ends in a space. Multiple split characters or repeated whitespace (`new  york`,
+/// `new---york`) therefore clean to a single space, so a registered phrase pattern (joined with
+/// single spaces) matches the cleaned title (ADR-061). Token output is unchanged — the
+/// downstream `split_whitespace` already collapsed runs; this only fixes the phrase automaton,
+/// which scans the cleaned bytes literally.
+#[inline]
+fn push_space(out: &mut String) {
+    if !out.is_empty() && !out.ends_with(' ') {
+        out.push(' ');
     }
 }
 
