@@ -29,8 +29,11 @@ pub enum AliasKind {
     /// the two-view verifier). Active when declared / manual (operator intent); a candidate when
     /// learned from an any-of disjunction.
     MultiWord,
-    /// The forms resolve to more than one known `FeatureKind` (e.g. a Brand and a Player).
-    /// **Always** a candidate — expanding across kinds is unsafe.
+    /// The group cannot be auto-activated safely, so it is **always** a review candidate. Either
+    /// the forms resolve to more than one known `FeatureKind` (e.g. a Brand ≡ a Player — expanding
+    /// across kinds is unsafe), or a single-token form does not reduce to exactly one feature (a
+    /// zero-feature grade word, or a fused grader like `psa10`) — it cannot be registered as an
+    /// alias phrase, so activating it would report active yet silently never match (ADR-061).
     MixedKind,
 }
 
@@ -45,14 +48,28 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
     let mut lc = String::new();
     let mut kinds: Vec<FeatureKind> = Vec::new();
     let mut multiword = false;
+    let mut unexpressible = false;
     for f in forms {
+        // CLEANED token count — the same tokenization the phrase automaton is registered against.
+        // A form cleaning to ≥2 tokens is registerable as an alias phrase (collapses to one
+        // entity, so `resolve_equivalences` keeps it). A 1-token form is registerable only if it
+        // already resolves to exactly one feature.
+        let cleaned_tokens = norm.clean_tokens(f).len();
         let feats = norm.compile_features_readonly(f, dict, &mut lc);
-        // A multi-word case = a RAW whitespace token count > 1 (checked *before* phrase folding,
-        // so the boundary can't depend on which phrases happen to fold it, e.g. importing
-        // `ud => upper deck` while `upper deck` is a declared phrase) OR a single-word form that
-        // resolves to ≠1 feature (zero = all punctuation; several = a punctuation-split word).
-        if f.split_whitespace().count() != 1 || feats.len() != 1 {
+        if cleaned_tokens >= 2 {
+            // A genuine multi-word surface form (a token-graph case, Phase 2). Counted on the
+            // CLEANED tokens so the boundary can't depend on which phrases happen to fold it
+            // (importing `ud => upper deck` while `upper deck` is a declared phrase still classifies
+            // multi-word) — but folding punctuation (`a-b` → `a b`) is honored, since that is how
+            // the form will be registered.
             multiword = true;
+        } else if feats.len() != 1 {
+            // A single cleaned token that does NOT reduce to exactly one feature (zero features —
+            // a grade word / all-punctuation form — or several — a fused grader): it cannot be
+            // registered as a phrase (needs ≥2 tokens) and `resolve_equivalences` would drop it,
+            // so the group would be reported active yet silently never match. Mark it unexpressible
+            // so it stays a review candidate, never auto-active (codex review, ADR-061).
+            unexpressible = true;
         }
         // Collect the kinds of EVERY resolved feature — single- AND multi-token — so a cross-kind
         // group is caught even when a form is multi-word. Without this, a multi-word short-circuit
@@ -63,19 +80,21 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
         }
     }
 
-    // Mixed kind — checked BEFORE the multi-word classification — only when ≥2 *different* known
-    // (non-Generic) kinds appear: an un-interned form reads as Generic, so a fresh import (nothing
-    // interned yet) never trips this — it is a guard against merging an already-known Brand with an
-    // already-known Player (in any form, single- or multi-token), not a hair-trigger.
+    // Mixed known kinds OR an unexpressible form → MixedKind (a review candidate the matcher will
+    // not auto-activate), checked BEFORE the multi-word classification. Mixed-kind fires only when
+    // ≥2 *different* known (non-Generic) kinds appear: an un-interned form reads as Generic, so a
+    // fresh import (nothing interned yet) never trips it — it is a guard against merging an
+    // already-known Brand with an already-known Player (in any form), not a hair-trigger.
     let known = kinds
         .iter()
         .copied()
         .filter(|k| *k != FeatureKind::Generic)
         .collect::<Vec<_>>();
-    if let Some(&first) = known.first() {
-        if known.iter().any(|&k| k != first) {
-            return AliasKind::MixedKind;
-        }
+    let mixed = known
+        .first()
+        .is_some_and(|&first| known.iter().any(|&k| k != first));
+    if mixed || unexpressible {
+        return AliasKind::MixedKind;
     }
 
     if multiword {

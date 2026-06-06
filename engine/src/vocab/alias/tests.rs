@@ -132,6 +132,34 @@ fn cross_kind_multiword_is_mixedkind_not_multiword() {
     );
 }
 
+#[test]
+fn unexpressible_single_token_forms_are_candidates_not_active() {
+    // ADR-061 (codex review): a single-token form that does NOT reduce to exactly one feature
+    // cannot be registered as an alias phrase, and `resolve_equivalences` would drop it — so it
+    // must classify as MixedKind (a review candidate), never auto-activate a group that would be
+    // reported active yet silently never match.
+    use crate::normalize::NormalizerBuilder;
+
+    // (a) Zero-feature form: an all-punctuation surface cleans to nothing.
+    let n = norm();
+    let dict = Dict::new();
+    assert_eq!(
+        classify_kind(&forms(&["foo", "@@@"]), &n, &dict),
+        AliasKind::MixedKind,
+        "a zero-feature single-token form must stay a candidate"
+    );
+
+    // (b) Fused grader: `psa10` resolves to grader:psa + grade:10 (one cleaned token, two
+    //     features) — the case codex flagged.
+    let g = NormalizerBuilder::new().grader("psa").build().unwrap();
+    let gdict = Dict::new();
+    assert_eq!(
+        classify_kind(&forms(&["psa10", "card"]), &g, &gdict),
+        AliasKind::MixedKind,
+        "a fused-grader single-token form must stay a candidate"
+    );
+}
+
 // ── Auto-activation policy ─────────────────────────────────────────────────────
 
 #[test]

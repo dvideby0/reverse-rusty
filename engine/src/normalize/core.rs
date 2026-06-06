@@ -73,6 +73,17 @@ impl Normalizer {
         super::NormalizerBuilder::new()
     }
 
+    /// The cleaned whitespace tokens of `text` under this normalizer's punctuation table — the
+    /// same tokenization the phrase automaton is registered against (ADR-061). A form cleans to
+    /// **≥2** tokens iff it can be registered as a multi-word alias phrase (and so reduce to one
+    /// entity); a 1-token form that does not resolve to exactly one feature cannot. Used by the
+    /// alias classifier to keep an unexpressible form a review candidate rather than auto-activate
+    /// a group `resolve_equivalences` would silently drop.
+    #[must_use]
+    pub fn clean_tokens(&self, text: &str) -> Vec<String> {
+        alias_form_tokens(&self.punct, text)
+    }
+
     /// True if any **multi-word alias** phrase is registered (ADR-061) — i.e. the title side
     /// produces a distinct positive superset view via [`match_features_dual`](Self::match_features_dual).
     /// When `false`, the two title views are always identical and every lane stays byte-identical
