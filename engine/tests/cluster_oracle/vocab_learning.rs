@@ -229,6 +229,147 @@ fn learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives() {
     }
 }
 
+/// A multi-word alias form (`new york`) for testing the cluster refusal (ADR-061).
+fn vocab_with_multiword_alias() -> reverse_rusty::vocab::Vocab {
+    let mut v = reverse_rusty::vocab::Vocab::new();
+    let n = reverse_rusty::normalize::Normalizer::default_vocab().unwrap();
+    let d = reverse_rusty::dict::Dict::new();
+    v.aliases_mut().add_classified(
+        &["ny".into(), "new york".into()],
+        reverse_rusty::vocab::AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &d,
+    );
+    v
+}
+
+#[test]
+fn set_vocab_refuses_active_multiword_alias_on_cluster() {
+    // ADR-061: multi-word aliases are single-node only. Cluster content routing derives target
+    // shards from the canonical leftmost-longest title view, so a nested alias entity that lives
+    // only in the positive superset would miss its shard (a false negative the shard-local
+    // two-view verifier cannot recover). `set_vocab` must refuse activating one — enforcing the
+    // documented deferral rather than silently dropping matches. Single-token aliases (N(T)==P(T))
+    // stay supported (see `declared_alias_makes_both_surface_forms_match`).
+    let (queries, _titles) = build_corpus();
+    let cfg = ClusterConfig {
+        num_shards: 8,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+
+    let v = vocab_with_multiword_alias();
+    assert!(
+        !v.aliases().active_alias_forms().is_empty(),
+        "the declared multi-word alias must be active"
+    );
+    let err = cluster
+        .set_vocab(v)
+        .expect_err("cluster set_vocab must refuse an active multi-word alias");
+    assert!(
+        format!("{err}").contains("multi-word"),
+        "the error must explain the multi-word refusal: {err}"
+    );
+    // The refused change left the cluster intact and usable.
+    assert!(
+        cluster.percolate("1994 fleer psa 10").is_ok(),
+        "the cluster remains usable after the refusal"
+    );
+}
+
+#[test]
+fn set_vocab_heals_unexpressible_alias_instead_of_refusing() {
+    // Codex R14: the multi-word refusal must judge the HEALED vocabulary. An active group like
+    // `psa-10 ≡ new york` — classified while '-' split (`psa-10` = 2 tokens) — whose first form
+    // later becomes unexpressible (`psa` grader + '-' fold ⇒ fused `psa10`) is demoted at the
+    // install seam; with the entry demoted nothing registers a multi-word alias phrase, so the
+    // vocabulary is cluster-safe and must be ACCEPTED, not rejected on its pre-heal state.
+    let (queries, _titles) = build_corpus();
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+
+    let mut v = reverse_rusty::vocab::Vocab::new();
+    v.add_grader("psa");
+    let n = reverse_rusty::normalize::Normalizer::default_vocab().unwrap();
+    let d = reverse_rusty::dict::Dict::new();
+    v.aliases_mut().add_classified(
+        &["psa-10".into(), "new york".into()],
+        reverse_rusty::vocab::AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &d,
+    );
+    assert!(!v.aliases().active_alias_forms().is_empty(), "active");
+    v.fold_punctuation('-'); // the mutation that makes `psa-10` unexpressible (fused grader)
+
+    cluster
+        .set_vocab(v)
+        .expect("the healed (no remaining active multi-word) vocabulary must be accepted");
+    let aliases = cluster.vocab().expect("vocab installed").alias_summary();
+    assert_eq!(
+        (aliases.active, aliases.candidate),
+        (0, 1),
+        "the unexpressible group demoted to a review candidate through the cluster seam"
+    );
+    assert!(
+        cluster.percolate("1994 fleer psa 10").is_ok(),
+        "the cluster remains usable after the healed vocabulary change"
+    );
+}
+
+#[test]
+fn build_refuses_a_multiword_alias_normalizer() {
+    // The same single-node restriction at construction: a normalizer carrying multi-word alias
+    // phrases cannot back a cluster (routing would miss nested entities).
+    let norm = vocab_with_multiword_alias().to_normalizer().unwrap();
+    assert!(norm.has_multiword_aliases());
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        ..ClusterConfig::default()
+    };
+    let Err(err) = ClusterEngine::build(norm, &cfg, &[(1, "new york".into())]) else {
+        panic!("build must refuse a multi-word-alias normalizer");
+    };
+    assert!(format!("{err}").contains("multi-word"), "error: {err}");
+}
+
+#[test]
+fn durable_build_with_multiword_alias_leaves_no_recoverable_state() {
+    // ADR-061 (codex review): a `data_dir` build must reject a multi-word-alias normalizer BEFORE
+    // writing any durable state. Otherwise it ingests durable shards + commits the manifest/log,
+    // then returns Err — leaving a reopenable cluster compiled under the unsupported normalizer
+    // that a later `open` (with any normalizer) would silently mis-route (a false negative).
+    let norm = vocab_with_multiword_alias().to_normalizer().unwrap();
+    let dir = std::env::temp_dir().join(format!("rr-adr061-durable-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = ClusterConfig {
+        num_shards: 2,
+        data_dir: Some(dir.clone()),
+        ..ClusterConfig::default()
+    };
+    assert!(
+        ClusterEngine::build(norm, &cfg, &[(1, "new york mets".into())]).is_err(),
+        "a durable build must refuse a multi-word-alias normalizer"
+    );
+    // No committed cluster was left behind: a reopen finds nothing to recover.
+    assert!(
+        ClusterEngine::open(
+            &dir,
+            reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+            None,
+        )
+        .is_err(),
+        "the refused build must leave no recoverable durable state"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn declared_equivalence_expands_across_shards_with_zero_false_negatives() {
     // ADR-054: a DECLARED equivalence {zzabbr, zzcanon} applied via set_vocab must make a

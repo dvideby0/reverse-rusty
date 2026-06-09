@@ -24,11 +24,16 @@ pub enum AliasKind {
     /// like graders `(psa, bgs, sgc)` (when learned from an any-of disjunction). Active only
     /// when declared / manual; a candidate when learned.
     SingleTokenDistinct,
-    /// At least one form spans multiple tokens — a token-graph (multi-word) alias the Phase-1
-    /// matcher cannot express. **Always** a candidate (Phase 2).
+    /// At least one form spans multiple tokens — a token-graph (multi-word) alias. Expressed
+    /// by the **Phase-2** matcher (ADR-061: query-side collapse + title-side overlap superset +
+    /// the two-view verifier). Active when declared / manual (operator intent); a candidate when
+    /// learned from an any-of disjunction.
     MultiWord,
-    /// The forms resolve to more than one known `FeatureKind` (e.g. a Brand and a Player).
-    /// **Always** a candidate — expanding across kinds is unsafe.
+    /// The group cannot be auto-activated safely, so it is **always** a review candidate. Either
+    /// the forms resolve to more than one known `FeatureKind` (e.g. a Brand ≡ a Player — expanding
+    /// across kinds is unsafe), or a single-token form does not reduce to exactly one feature (a
+    /// zero-feature grade word, or a fused grader like `psa10`) — it cannot be registered as an
+    /// alias phrase, so activating it would report active yet silently never match (ADR-061).
     MixedKind,
 }
 
@@ -41,37 +46,59 @@ pub enum AliasKind {
 /// [`SingleTokenDistinct`](AliasKind::SingleTokenDistinct).
 pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) -> AliasKind {
     let mut lc = String::new();
-    let mut kinds: Vec<FeatureKind> = Vec::with_capacity(forms.len());
+    let mut kinds: Vec<FeatureKind> = Vec::new();
+    let mut multiword = false;
+    let mut unexpressible = false;
     for f in forms {
-        // Check the RAW whitespace token count *before* phrase folding: a multi-word surface form
-        // is a token-graph (Phase 2) case and must stay a candidate even if the current vocab
-        // already has a phrase rule that would fold it into one feature — otherwise importing
-        // `ud => upper deck` while `upper deck` is a declared phrase would silently activate a
-        // multi-word alias (the Phase-1 boundary must not depend on what phrases happen to exist).
-        if f.split_whitespace().count() != 1 {
-            return AliasKind::MultiWord;
-        }
+        // CLEANED token count — the same tokenization the phrase automaton is registered against.
+        // A form cleaning to ≥2 tokens is registerable as an alias phrase (collapses to one
+        // entity, so `resolve_equivalences` keeps it). A 1-token form is registerable only if it
+        // already resolves to exactly one feature.
+        let cleaned_tokens = norm.clean_tokens(f).len();
         let feats = norm.compile_features_readonly(f, dict, &mut lc);
-        // A single-word form must normalize to exactly one feature to be a single-token alias;
-        // zero features (all punctuation) or several (a punctuation-split word) is not.
-        if feats.len() != 1 {
-            return AliasKind::MultiWord;
+        if cleaned_tokens >= 2 {
+            // A genuine multi-word surface form (a token-graph case, Phase 2). Counted on the
+            // CLEANED tokens so the boundary can't depend on which phrases happen to fold it
+            // (importing `ud => upper deck` while `upper deck` is a declared phrase still classifies
+            // multi-word) — but folding punctuation (`a-b` → `a b`) is honored, since that is how
+            // the form will be registered.
+            multiword = true;
+        } else if feats.len() != 1 {
+            // A single cleaned token that does NOT reduce to exactly one feature (zero features —
+            // a grade word / all-punctuation form — or several — a fused grader): it cannot be
+            // registered as a phrase (needs ≥2 tokens) and `resolve_equivalences` would drop it,
+            // so the group would be reported active yet silently never match. Mark it unexpressible
+            // so it stays a review candidate, never auto-active (codex review, ADR-061).
+            unexpressible = true;
         }
-        kinds.push(dict.kind(feats[0]));
+        // Collect the kinds of EVERY resolved feature — single- AND multi-token — so a cross-kind
+        // group is caught even when a form is multi-word. Without this, a multi-word short-circuit
+        // would let a Brand phrase ≡ Player phrase bypass the MixedKind refusal and auto-activate
+        // an unsafe equivalence (codex review, ADR-061).
+        for &id in &feats {
+            kinds.push(dict.kind(id));
+        }
     }
 
-    // Mixed kind only when ≥2 *different* known (non-Generic) kinds appear: an un-interned form
-    // reads as Generic, so a fresh import (nothing interned yet) never trips this — it is a guard
-    // against merging an already-known Brand with an already-known Player, not a hair-trigger.
+    // Mixed known kinds OR an unexpressible form → MixedKind (a review candidate the matcher will
+    // not auto-activate), checked BEFORE the multi-word classification. Mixed-kind fires only when
+    // ≥2 *different* known (non-Generic) kinds appear: an un-interned form reads as Generic, so a
+    // fresh import (nothing interned yet) never trips it — it is a guard against merging an
+    // already-known Brand with an already-known Player (in any form), not a hair-trigger.
     let known = kinds
         .iter()
         .copied()
         .filter(|k| *k != FeatureKind::Generic)
         .collect::<Vec<_>>();
-    if let Some(&first) = known.first() {
-        if known.iter().any(|&k| k != first) {
-            return AliasKind::MixedKind;
-        }
+    let mixed = known
+        .first()
+        .is_some_and(|&first| known.iter().any(|&k| k != first));
+    if mixed || unexpressible {
+        return AliasKind::MixedKind;
+    }
+
+    if multiword {
+        return AliasKind::MultiWord;
     }
 
     if all_pairwise_variant(forms) {
@@ -87,13 +114,14 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
 pub(super) fn default_status_for(kind: AliasKind, provenance: AliasProvenance) -> AliasStatus {
     use AliasProvenance::{DeclaredFile, LearnedFromQueries, Manual};
     let auto_active = match kind {
-        // The matcher can't express these (Phase 2) / they're unsafe — always review-only.
-        AliasKind::MultiWord | AliasKind::MixedKind => false,
+        // Cross-kind expansion is unsafe — always review-only.
+        AliasKind::MixedKind => false,
         // A clear structural variant is trusted from any source.
         AliasKind::SingleTokenVariant => true,
-        // Distinct single tokens: honor an operator declaration (declared / manual), but treat a
-        // learned any-of disjunction (the `(psa, bgs, sgc)` case) as a review candidate.
-        AliasKind::SingleTokenDistinct => match provenance {
+        // Distinct single tokens, or a multi-word token-graph alias (ADR-061): honor an operator
+        // declaration (declared / manual), but treat a learned any-of disjunction (the
+        // `(psa, bgs, sgc)` case, or a learned multi-word guess) as a review candidate.
+        AliasKind::SingleTokenDistinct | AliasKind::MultiWord => match provenance {
             DeclaredFile | Manual => true,
             LearnedFromQueries => false,
         },

@@ -5,7 +5,7 @@
 //! words) plus the byte-cleaning punctuation table, then `build()`s the daachorse
 //! automaton and hands the populated fields to the `Normalizer`.
 
-use super::{Normalizer, PhraseEntry, PunctClass, PunctTable};
+use super::{Normalizer, PhraseEntry, PhraseMode, PunctClass, PunctTable};
 use crate::dict::FeatureKind;
 use daachorse::{DoubleArrayAhoCorasickBuilder, MatchKind};
 
@@ -46,6 +46,9 @@ pub struct NormalizerBuilder {
     /// Byte-cleaning punctuation classification (ADR-058). Defaults to the historical
     /// behavior, so a builder that never touches it yields a byte-identical normalizer.
     punct: PunctTable,
+    /// Raw multi-word alias forms (ADR-061), cleaned + registered as alias-mode phrases at
+    /// [`build`](Self::build) (after the punctuation table is final, so cleaning matches titles).
+    alias_forms: Vec<String>,
 }
 
 impl NormalizerBuilder {
@@ -58,7 +61,7 @@ impl NormalizerBuilder {
     /// to match (lowercased, after diacritic folding). `feature` is the canonical
     /// feature name emitted on match. `kind` is the feature kind for the dictionary.
     pub fn add_phrase(&mut self, tokens: &[&str], feature: &str, kind: FeatureKind) {
-        self.add_phrase_inner(tokens, feature, kind, false);
+        self.add_phrase_inner(tokens, feature, kind, PhraseMode::Collapse);
     }
 
     /// Like [`add_phrase`](Self::add_phrase) but **additive**: a match emits the phrase
@@ -66,7 +69,53 @@ impl NormalizerBuilder {
     /// referencing a component never loses the match. Used for corpus-learned phrases
     /// (ADR-053) to keep the recall-first contract.
     pub fn add_phrase_additive(&mut self, tokens: &[&str], feature: &str, kind: FeatureKind) {
-        self.add_phrase_inner(tokens, feature, kind, true);
+        self.add_phrase_inner(tokens, feature, kind, PhraseMode::Additive);
+    }
+
+    /// Register a **multi-word alias** form (ADR-061): asymmetric by [`Side`](super::Side).
+    /// On the query/compile side the phrase **collapses** to its single `feature` entity (so
+    /// ADR-054 expansion can widen it to the alias group); on the title/match side it is
+    /// **additive** (entity + components) and also participates in the title-side overlap
+    /// superset, so nested/overlapping aliases (`new york` ⊂ `new york city`) are all found.
+    pub fn add_phrase_alias(&mut self, tokens: &[&str], feature: &str, kind: FeatureKind) {
+        self.add_phrase_inner(tokens, feature, kind, PhraseMode::Alias);
+    }
+
+    /// Register a multi-word alias by its **raw form string** (ADR-061). Cleaned + tokenized at
+    /// [`build`](Self::build) with the final punctuation table (so it tokenizes exactly as a
+    /// title does), then registered as an alias-mode phrase emitting the derived entity
+    /// `term:<tokens joined by '_'>`. A form that cleans to fewer than two tokens registers no
+    /// phrase (it is a single-token alias, handled by the equivalence map). When the cleaned
+    /// tokens already match a declared/corpus phrase, that entry is upgraded to alias mode and
+    /// keeps its feature, so resolution and emission stay consistent.
+    pub fn add_alias_form(&mut self, form: &str) {
+        self.alias_forms.push(form.to_string());
+    }
+
+    /// Fold the pending raw alias forms into the phrase tables. Called once at the start of
+    /// [`build`](Self::build), after the punctuation table is final.
+    fn register_alias_phrases(&mut self) {
+        let forms = std::mem::take(&mut self.alias_forms);
+        for form in &forms {
+            let toks = super::core::alias_form_tokens(&self.punct, form);
+            if toks.len() < 2 {
+                continue; // single-token / empty: the equivalence map handles it, not a phrase
+            }
+            let pattern = toks.join(" ");
+            if let Some(i) = self.phrase_patterns.iter().position(|p| *p == pattern) {
+                // A declared/corpus phrase over the same tokens already exists: upgrade it to
+                // alias mode (collapse-on-query wins) but keep its feature.
+                self.phrase_entries[i].mode = PhraseMode::Alias;
+            } else {
+                let entity = format!("term:{}", toks.join("_"));
+                self.phrase_patterns.push(pattern);
+                self.phrase_entries.push(PhraseEntry {
+                    feature: entity,
+                    kind: FeatureKind::Generic,
+                    mode: PhraseMode::Alias,
+                });
+            }
+        }
     }
 
     fn add_phrase_inner(
@@ -74,13 +123,13 @@ impl NormalizerBuilder {
         tokens: &[&str],
         feature: &str,
         kind: FeatureKind,
-        additive: bool,
+        mode: PhraseMode,
     ) {
         self.phrase_patterns.push(tokens.join(" "));
         self.phrase_entries.push(PhraseEntry {
             feature: feature.to_string(),
             kind,
-            additive,
+            mode,
         });
     }
 
@@ -171,15 +220,26 @@ impl NormalizerBuilder {
     /// Returns `Err` if the Aho-Corasick automaton cannot be built from the
     /// registered phrase patterns (e.g. degenerate patterns that daachorse
     /// cannot encode).
-    pub fn build(self) -> Result<Normalizer, crate::error::NormalizerError> {
+    pub fn build(mut self) -> Result<Normalizer, crate::error::NormalizerError> {
+        // ADR-061: fold raw alias forms into the phrase tables now that the punctuation table is
+        // final, so they clean/tokenize exactly as a title does.
+        self.register_alias_phrases();
+
         let automaton = DoubleArrayAhoCorasickBuilder::new()
             .match_kind(MatchKind::LeftmostLongest)
             .build(&self.phrase_patterns)
             .map_err(|e| crate::error::NormalizerError::new(e.to_string()))?;
 
+        // ADR-061: a second, **overlapping** automaton over the alias phrases only, used on
+        // the title side to build the positive superset `P(T)` (every nested/overlapping
+        // alias entity, not just leftmost-longest). `None` when there are no alias phrases,
+        // so the default path stays single-view and byte-identical.
+        let alias_overlap = build_alias_overlap(&self.phrase_patterns, &self.phrase_entries)?;
+
         Ok(Normalizer {
             automaton,
             phrase_entries: self.phrase_entries,
+            alias_overlap,
             graders: self.graders,
             synonyms: self.synonyms,
             syn_index: self.syn_index,
@@ -187,4 +247,44 @@ impl NormalizerBuilder {
             punct: self.punct,
         })
     }
+}
+
+/// Build the overlapping (`MatchKind::Standard`) automaton for the title positive view `P(T)`
+/// (ADR-061). Returns `None` unless ≥1 **alias-mode** phrase is registered (otherwise the title is
+/// single-view and byte-identical to pre-ADR-061).
+///
+/// When alias phrases ARE present, the automaton covers **every** phrase (alias AND non-alias),
+/// not just the alias subset. This is the codex-R6 fix: adding an alias to the shared
+/// leftmost-longest automaton can *displace* an overlapping non-alias phrase from the canonical
+/// `N(T)` parse (e.g. activating `new york` makes `new york city` no longer emit a pre-existing
+/// `york city` entity), so `P(T)` must re-include **every** phrase entity present — alias and
+/// displaced non-alias alike — or a query on the displaced phrase becomes a false negative. The
+/// overlap pass only ever *adds* entities to the positive view, so this is recall-safe.
+/// Patterns are deduped (a duplicate would make daachorse reject the build).
+fn build_alias_overlap(
+    patterns: &[String],
+    entries: &[PhraseEntry],
+) -> Result<Option<super::core::AliasOverlap>, crate::error::NormalizerError> {
+    if !entries.iter().any(|e| e.mode == PhraseMode::Alias) {
+        return Ok(None);
+    }
+    let mut pats: Vec<String> = Vec::new();
+    let mut feats: Vec<(String, FeatureKind)> = Vec::new();
+    let mut entry_idx: Vec<usize> = Vec::new();
+    for (i, (pat, entry)) in patterns.iter().zip(entries).enumerate() {
+        if !pats.iter().any(|p| p == pat) {
+            pats.push(pat.clone());
+            feats.push((entry.feature.clone(), entry.kind));
+            entry_idx.push(i);
+        }
+    }
+    let automaton = DoubleArrayAhoCorasickBuilder::new()
+        .match_kind(MatchKind::Standard)
+        .build(&pats)
+        .map_err(|e| crate::error::NormalizerError::new(e.to_string()))?;
+    Ok(Some(super::core::AliasOverlap {
+        automaton,
+        entries: feats,
+        entry_idx,
+    }))
 }

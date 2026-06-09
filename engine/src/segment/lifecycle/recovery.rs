@@ -14,11 +14,47 @@ use crate::storage::{MmapSegment, SourceStore};
 use crate::tagdict::TagDict;
 use crate::wal::{Wal, WalEntry};
 
+/// Map a [`NormalizerError`](crate::error::NormalizerError) into the `io::Result` space of
+/// the open path.
+fn invalid_input(e: &crate::error::NormalizerError) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+}
+
 impl Engine {
     /// Open an engine from an existing data directory, recovering state from
     /// the manifest and WAL. The normalizer must be the same one used when the
     /// engine was originally built (feature spaces must align).
+    ///
+    /// **If the engine was built with a [`Vocab`](crate::vocab::Vocab), prefer
+    /// [`open_with_vocab`](Self::open_with_vocab)**: the equivalence map (ADR-054) is
+    /// transient — never persisted in the dict — and the WAL tail is recompiled HERE,
+    /// so opening with the bare normalizer and adopting the vocab afterwards would
+    /// compile those recovered queries without alias expansion (`adopt_vocab` detects
+    /// that hazard and escalates to a full recompile, codex R13).
     pub fn open(norm: Normalizer, config: EngineConfig) -> std::io::Result<Self> {
+        Self::open_inner(norm, config, None)
+    }
+
+    /// [`open`](Self::open) for a vocab-built engine: rebuilds the normalizer FROM the
+    /// vocab and installs its equivalence groups (ADR-054) on the recovered dict **before**
+    /// the WAL tail is replayed — the same order the cluster's `ClusterEngine::open` uses —
+    /// so queries written after the last flush recover with their alias expansion intact
+    /// (codex R13). Resolution is read-only against the recovered dict (no interning), the
+    /// recovered-engine ID-stability rule of [`adopt_vocab`](Self::adopt_vocab); a missing
+    /// manifest falls back to a fresh [`with_vocab`](Self::with_vocab) build (which interns).
+    pub fn open_with_vocab(
+        vocab: crate::vocab::Vocab,
+        config: EngineConfig,
+    ) -> std::io::Result<Self> {
+        let norm = vocab.to_normalizer().map_err(|e| invalid_input(&e))?;
+        Self::open_inner(norm, config, Some(vocab))
+    }
+
+    fn open_inner(
+        norm: Normalizer,
+        config: EngineConfig,
+        vocab: Option<crate::vocab::Vocab>,
+    ) -> std::io::Result<Self> {
         let dir = config.data_dir.as_ref().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -28,8 +64,12 @@ impl Engine {
 
         let manifest_path = dir.join("manifest.bin");
         if !manifest_path.exists() {
-            // No existing data — return a fresh engine
-            return Ok(Self::with_config(norm, config));
+            // No existing data — return a fresh engine (fresh-dir vocab path interns the
+            // active equivalence forms for ID stability, exactly as `with_vocab` documents).
+            return match vocab {
+                Some(v) => Self::with_vocab(v, config).map_err(|e| invalid_input(&e)),
+                None => Ok(Self::with_config(norm, config)),
+            };
         }
 
         let manifest = crate::storage::read_manifest(&manifest_path)?;
@@ -110,6 +150,22 @@ impl Engine {
             vocab_epoch: 0,
             owns_manifest: true,
         };
+
+        // Install the vocab BEFORE the WAL replay below (codex R13): the replay recompiles the
+        // tail queries from raw text, and without the equivalence map installed they would
+        // compile unexpanded — a recovery false negative. Resolution is read-only against the
+        // recovered dict (no interning — the recovered-engine ID-stability rule, see
+        // `adopt_vocab`); stale-active aliases the live normalizer cannot express are demoted
+        // first, exactly as every other install seam does.
+        if let Some(mut v) = vocab {
+            let dict = Arc::make_mut(&mut engine.dict);
+            if v.aliases_mut().demote_unexpressible(&engine.norm, dict) > 0 {
+                engine.norm = Arc::new(v.to_normalizer().map_err(|e| invalid_input(&e))?);
+            }
+            let equiv = v.resolve_equivalences(&engine.norm, dict);
+            dict.set_equivalences(equiv);
+            engine.vocab = Some(Arc::new(v));
+        }
 
         // Replay WAL entries after last checkpoint
         let recovery = Wal::recover(&wal_path)?;

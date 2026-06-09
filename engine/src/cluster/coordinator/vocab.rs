@@ -83,6 +83,45 @@ impl ClusterEngine {
                 .to_normalizer()
                 .map_err(|e| ShardError::Config(format!("building normalizer from vocab: {e}")))?,
         );
+        // 2b. Self-heal stale-active aliases FIRST (codex R13/R14): a punctuation/grader change
+        //     in this vocab can make an Active alias form unexpressible (e.g. a fused grader);
+        //     demote those to review candidates rather than install an alias that reports
+        //     active and silently never matches. Demotion can only shrink the registered phrase
+        //     set, so rebuild the normalizer when it fires — and run this BEFORE the multi-word
+        //     refusal below, so the refusal judges the HEALED vocabulary (an active group whose
+        //     only multi-word registration came from a now-demoted entry must not be rejected
+        //     on its pre-heal state, codex R14).
+        let mut vocab = vocab;
+        let new_norm =
+            if vocab
+                .aliases_mut()
+                .demote_unexpressible(&new_norm, &self.dict)
+                > 0
+            {
+                Arc::new(vocab.to_normalizer().map_err(|e| {
+                    ShardError::Config(format!("building normalizer from vocab: {e}"))
+                })?)
+            } else {
+                new_norm
+            };
+
+        // ADR-061: refuse a vocab that would activate a multi-word alias on a cluster. The new
+        // normalizer's `P(T)` superset is correct shard-locally, but cluster content routing
+        // derives target shards from the canonical `N(T)` (`route` uses `match_features`), so a
+        // nested alias entity that lives only in `P(T)` would never probe the shard holding a
+        // query anchored on it — a false negative routing cannot recover. Single-token aliases
+        // (`N(T)==P(T)`) are unaffected; cluster multi-word (P(T)-aware routing + cross-process
+        // normalizer shipping) is a deferred follow-on. Checked on the rebuilt (post-heal)
+        // normalizer so it catches a multi-word alias from any source (import / manual / merge).
+        if new_norm.has_multiword_aliases() {
+            return Err(ShardError::Config(
+                "set_vocab cannot activate a multi-word alias on a cluster yet (ADR-061): content \
+                 routing uses the canonical leftmost-longest title view, so a nested alias entity \
+                 would miss its shard (a false negative). Single-token aliases are supported; \
+                 cluster multi-word support is a deferred follow-on."
+                    .into(),
+            ));
+        }
 
         // 3. Gather the deduped live `(logical, dsl)` set across shards. A selective /
         //    any-of query lives on several shards but has ONE dsl — dedup by logical id.

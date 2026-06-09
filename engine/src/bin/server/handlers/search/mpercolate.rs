@@ -272,7 +272,12 @@ pub(crate) async fn mpercolate(
     // even when `profile` is false.
     let broad = if include_profile {
         Some(BroadSummary {
-            strategy: if matches!(opts.broad_strategy, BroadStrategy::Columnar) {
+            // Report the EFFECTIVE strategy: a Columnar request runs inline while multi-word
+            // aliases are active (the columnar kernel is single-view, ADR-061), so the profile
+            // must say `inline` to match what actually ran — not the requested option (codex R9).
+            strategy: if matches!(opts.broad_strategy, BroadStrategy::Columnar)
+                && !snap.normalizer().has_multiword_aliases()
+            {
                 "columnar"
             } else {
                 "inline"

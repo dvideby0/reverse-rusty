@@ -8,7 +8,7 @@
 //! eval itself lives in [`super::kernel`].
 
 use super::kernel::eval_one_segment;
-use crate::dict::{FeatureId, NO_MASK_BIT};
+use crate::dict::FeatureId;
 use crate::segment::snapshot::MatchView;
 use crate::segment::{BaseSegment, BatchMatchOptions, BroadStrategy, MatchScratch, MatchStats};
 use crate::util::{fast_map, FastMap};
@@ -113,8 +113,16 @@ fn match_batch_chunk(
         return;
     }
     let words = b.div_ceil(64);
-    let columnar = opts.include_broad && matches!(opts.broad_strategy, BroadStrategy::Columnar);
-    let inline_broad = opts.include_broad && matches!(opts.broad_strategy, BroadStrategy::Inline);
+    // ADR-061: the columnar broad kernel is single-view, so while multi-word aliases are
+    // active we route the broad lane through the two-view *inline* path (`match_into`) — the
+    // documented kill-switch (matching.md §4) — keeping forbidden checks recall-correct.
+    // Columnar two-view is a perf follow-on; the per-title selective lane is always two-view.
+    let force_inline = view.norm.has_multiword_aliases();
+    let columnar = opts.include_broad
+        && !force_inline
+        && matches!(opts.broad_strategy, BroadStrategy::Columnar);
+    let inline_broad = opts.include_broad
+        && (matches!(opts.broad_strategy, BroadStrategy::Inline) || (force_inline && !columnar));
 
     ms.ensure(view.segments, view.memtable.len());
     bs.ensure(view.segments, view.memtable.len(), words);
@@ -141,23 +149,38 @@ fn match_batch_chunk(
         let out = &mut outs[ti];
         out.clear();
 
-        // normalize once; take the buffer out so we can iterate it while mutating
-        // ms.seen (no aliasing, no allocation) — same trick as match_title.
-        view.norm
-            .match_features(title.as_ref(), view.dict, &mut ms.lc, &mut ms.feats);
-        let feats = std::mem::take(&mut ms.feats);
-        let mut tmask = 0u64;
-        for &f in &feats {
-            let bit = view.dict.mask_bit(f);
-            if bit != NO_MASK_BIT {
-                tmask |= 1u64 << bit;
-            }
+        // normalize once. The default (no active multi-word alias) takes the **single-view fast
+        // path** — one feature set + one mask, no second copy (ADR-061: zero-overhead default).
+        // Only with multi-word aliases active (`force_inline`) do we build the canonical `N(T)` +
+        // the overlapping superset `P(T)`. Take the buffers out so we can iterate them while
+        // mutating ms.seen (no aliasing, no allocation) — same trick as match_title.
+        let (feats, feats_pos);
+        if force_inline {
+            view.norm.match_features_dual(
+                title.as_ref(),
+                view.dict,
+                &mut ms.lc,
+                &mut ms.feats,
+                &mut ms.feats_pos,
+            );
+            feats = std::mem::take(&mut ms.feats);
+            feats_pos = std::mem::take(&mut ms.feats_pos);
+        } else {
+            view.norm
+                .match_features(title.as_ref(), view.dict, &mut ms.lc, &mut ms.feats);
+            feats = std::mem::take(&mut ms.feats);
+            feats_pos = Vec::new();
         }
+        let neg_mask = view.title_mask(&feats);
+        let tview = if force_inline {
+            crate::exact::TitleView::dual(view.title_mask(&feats_pos), &feats_pos, neg_mask, &feats)
+        } else {
+            crate::exact::TitleView::single(neg_mask, &feats)
+        };
 
         for (i, base) in view.segments.iter().enumerate() {
             base.match_into(
-                &feats,
-                tmask,
+                &tview,
                 view.dict,
                 epoch,
                 &mut ms.seen[i],
@@ -168,8 +191,7 @@ fn match_batch_chunk(
             );
         }
         view.memtable.match_into(
-            &feats,
-            tmask,
+            &tview,
             view.dict,
             epoch,
             &mut ms.seen[n_base],
@@ -179,7 +201,10 @@ fn match_batch_chunk(
             stats,
         );
 
-        bs.tmask_batch.push(tmask);
+        // The columnar broad kernel is single-view; it only runs when no multi-word alias is
+        // active (`columnar` is forced off otherwise), so the canonical view == the superset
+        // here and the inverted index + masks are built from `feats`.
+        bs.tmask_batch.push(neg_mask);
         if columnar {
             for &f in &feats {
                 let row = if let Some(&r) = bs.feat_row.get(&f) {
@@ -195,7 +220,10 @@ fn match_batch_chunk(
             }
         }
 
-        ms.feats = feats; // restore the reusable buffer
+        ms.feats = feats; // restore the reusable buffers (positive only when it was used)
+        if force_inline {
+            ms.feats_pos = feats_pos;
+        }
         if !columnar {
             out.sort_unstable();
             out.dedup();

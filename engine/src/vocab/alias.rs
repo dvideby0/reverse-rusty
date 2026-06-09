@@ -74,15 +74,18 @@ pub struct AliasEntry {
 }
 
 impl AliasEntry {
-    /// True if this entry is currently contributing an equivalence group to the matcher —
-    /// an `Active` single-token kind. Multi-word / mixed-kind groups never reach `Active`,
-    /// but the kind guard makes that structural (not just policy).
+    /// True if this entry is currently contributing an equivalence group to the matcher — an
+    /// `Active` single-token **or multi-word** kind (multi-word is expressible since the Phase-2
+    /// matcher, ADR-061). `MixedKind` still never reaches the matcher; the kind guard makes that
+    /// structural (not just policy).
     #[must_use]
     pub fn is_active_for_matching(&self) -> bool {
         self.status == AliasStatus::Active
             && matches!(
                 self.kind,
-                AliasKind::SingleTokenVariant | AliasKind::SingleTokenDistinct
+                AliasKind::SingleTokenVariant
+                    | AliasKind::SingleTokenDistinct
+                    | AliasKind::MultiWord
             )
     }
 }
@@ -133,6 +136,31 @@ impl AliasRegistry {
             .filter(|e| e.is_active_for_matching())
             .map(|e| e.forms.clone())
             .collect()
+    }
+
+    /// The raw forms of every entry active for matching (ADR-061), deduped + sorted. Offered to
+    /// `Vocab::to_normalizer` → `NormalizerBuilder::add_alias_form`, which tokenizes each form
+    /// against the **final** punctuation table and registers only those cleaning to ≥2 tokens as
+    /// alias phrases (single-token forms are the equivalence map's job and register nothing).
+    ///
+    /// Deliberately kind-INDEPENDENT beyond the matchable-kind gate in `is_active_for_matching`:
+    /// the stored `kind` is a classification *snapshot*, and a later punctuation-table change can
+    /// turn a single-token form multi-word (`a-b` under `-`:Fold → `-`:Split). Trusting the
+    /// snapshot would leave the still-Active alias unregistered — it would resolve to several
+    /// features, be dropped from the equivalence map, and silently stop matching (codex R11).
+    /// Letting the builder re-derive multi-wordness from the live table makes registration
+    /// self-healing in both directions; `MixedKind` stays excluded (structurally never matchable).
+    #[must_use]
+    pub fn active_alias_forms(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|e| e.is_active_for_matching())
+            .flat_map(|e| e.forms.iter().cloned())
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Entries awaiting review (status `Candidate`).
@@ -194,6 +222,10 @@ impl AliasRegistry {
     /// (a re-learn must not resurrect it); otherwise a higher-trust provenance
     /// (declared/manual over learned) re-classifies + may promote, and confidence takes the
     /// max — so importing a declared file over a learned candidate upgrades it deterministically.
+    /// A **same-provenance** re-import re-classifies and adopts a now-active default (so a
+    /// persisted Phase-1 multi-word candidate activates when its synonym file is re-imported under
+    /// the Phase-2 policy) but never *downgrades* an existing status — a re-learn cannot undo a
+    /// manual activation (codex R7).
     pub fn add_classified(
         &mut self,
         forms: &[String],
@@ -212,11 +244,27 @@ impl AliasRegistry {
             if existing.status == AliasStatus::Rejected {
                 return Some(AliasStatus::Rejected);
             }
-            // A more authoritative source re-decides kind/status (declared/manual win).
+            // A more authoritative source re-decides kind/status (declared/manual win over learned).
             if provenance_rank(provenance) > provenance_rank(existing.provenance) {
                 existing.provenance = provenance;
                 existing.kind = kind;
                 existing.status = status;
+            } else if provenance_rank(provenance) == provenance_rank(existing.provenance)
+                && status == AliasStatus::Active
+            {
+                // Same-provenance re-import: ADOPT a now-active default so a persisted candidate the
+                // current policy can express becomes active (codex R7). Only ever UPGRADE the
+                // status — never a downgrade: a re-import/re-learn must not undo a manual activation.
+                // When PROMOTING a candidate (it was NOT already active), adopt the fresh `kind` too:
+                // otherwise `is_active_for_matching` keeps seeing the stale classification (e.g. a
+                // `MixedKind` candidate the current policy can now express) and the alias reports
+                // active while installing no equivalence or phrase. For an ALREADY-active entry,
+                // preserve the `kind` — re-classifying it to a non-matchable `kind` would silently
+                // drop it from `active_groups` (codex R9).
+                if existing.status != AliasStatus::Active {
+                    existing.kind = kind;
+                }
+                existing.status = AliasStatus::Active;
             }
             return Some(existing.status);
         }
@@ -281,9 +329,9 @@ impl AliasRegistry {
     }
 
     /// Promote a candidate to [`Active`](AliasStatus::Active). Refuses (returns `false`) a
-    /// group whose kind cannot be expressed by the Phase-1 matcher (multi-word / mixed-kind),
-    /// so review can never activate something the matcher would silently ignore. `forms` are
-    /// canonicalized before lookup.
+    /// `MixedKind` group — the one kind the matcher still cannot express safely — so review can
+    /// never activate something it would silently ignore. Multi-word groups are now accepted
+    /// (the Phase-2 matcher expresses them, ADR-061). `forms` are canonicalized before lookup.
     pub fn activate(&mut self, forms: &[String]) -> bool {
         let Some(forms) = Self::canonical_forms(forms) else {
             return false;
@@ -292,7 +340,7 @@ impl AliasRegistry {
             return false;
         };
         let e = &mut self.entries[i];
-        if matches!(e.kind, AliasKind::MultiWord | AliasKind::MixedKind) {
+        if e.kind == AliasKind::MixedKind {
             return false;
         }
         e.status = AliasStatus::Active;
@@ -310,6 +358,44 @@ impl AliasRegistry {
         };
         self.entries[i].status = AliasStatus::Rejected;
         true
+    }
+
+    /// Demote every ACTIVE entry containing a form the CURRENT normalizer cannot express — a
+    /// form that cleans to fewer than two tokens AND does not resolve to exactly one feature
+    /// (e.g. a fused grader `psa10` after a punctuation refold turned `psa-10` into one token) —
+    /// back to [`Candidate`](AliasStatus::Candidate) (codex R13). Such a form cannot be
+    /// registered as an alias phrase and `resolve_equivalences` drops it, so leaving the entry
+    /// Active would report an alias that silently never matches. Called by every
+    /// equivalence-install seam (engine/cluster `set_vocab`, `adopt_vocab`, `with_vocab`,
+    /// `open_with_vocab`), so Active always reflects what the live normalizer expresses.
+    ///
+    /// The demotion is **status-only** — the stored `kind` is preserved (codex R14): stamping
+    /// `MixedKind` would dead-end the entry, since [`activate`](Self::activate) structurally
+    /// refuses that kind even after the operator repairs the vocabulary. With the kind intact, a
+    /// repaired configuration re-activates via `activate` or a re-import (whose same-provenance
+    /// promotion adopts the fresh kind, codex R10); an activate while still broken simply
+    /// demotes again at the next install seam. Deliberately NOT a full reclassification:
+    /// re-deriving the *kind* (e.g. cross-kind drift as the dict learns) would demote working
+    /// aliases on a precision hunch — equivalence expansion only ever widens any-of groups
+    /// (recall-safe), so kind drift after activation is accepted and corrected on re-import.
+    /// Returns the demoted count.
+    pub fn demote_unexpressible(&mut self, norm: &Normalizer, dict: &Dict) -> usize {
+        let mut lc = String::new();
+        let mut demoted = 0;
+        for e in &mut self.entries {
+            if !e.is_active_for_matching() {
+                continue;
+            }
+            let unexpressible = e.forms.iter().any(|f| {
+                norm.clean_tokens(f).len() < 2
+                    && norm.compile_features_readonly(f, dict, &mut lc).len() != 1
+            });
+            if unexpressible {
+                e.status = AliasStatus::Candidate;
+                demoted += 1;
+            }
+        }
+        demoted
     }
 
     /// Merge another registry into this one (used by [`Vocab::merge`](crate::vocab::Vocab::merge)).

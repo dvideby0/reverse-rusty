@@ -161,10 +161,22 @@ impl Engine {
     /// converted to a Normalizer internally. The vocab is stored so it can
     /// be queried or serialized later.
     pub fn with_vocab(
-        vocab: crate::vocab::Vocab,
+        mut vocab: crate::vocab::Vocab,
         config: EngineConfig,
     ) -> Result<Self, crate::error::NormalizerError> {
-        let norm = vocab.to_normalizer()?;
+        let mut norm = vocab.to_normalizer()?;
+        // Self-heal stale-active aliases (codex R13): a persisted vocab can carry an Active
+        // entry whose form the CURRENT classification can no longer express (e.g. a fused
+        // grader after a punctuation refold) — demote it to a candidate rather than install an
+        // alias that reports active and never matches. Expressibility is dict-independent
+        // (a feature COUNT), so the fresh empty dict is fine here.
+        if vocab
+            .aliases_mut()
+            .demote_unexpressible(&norm, &crate::dict::Dict::new())
+            > 0
+        {
+            norm = vocab.to_normalizer()?;
+        }
         let mut eng = Self::with_config(norm, config);
         // Install the vocab's equivalence groups so they apply to inserts from the start
         // (ADR-054), interning the active forms first for ID stability (ADR-060) — exactly

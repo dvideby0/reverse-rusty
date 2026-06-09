@@ -1,0 +1,232 @@
+# ADR-061: Token-graph multi-word aliases — Phase 2 (positive / negative title feature views)
+
+> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+
+- **Context.** [ADR-060](adr-060-learned-alias-evolution.md) (Phase 1) shipped the alias *governance*
+  layer — the `AliasRegistry` records, classifies, and persists alias groups — but only **single-token**
+  groups auto-activate and reach the matcher (through the unchanged ADR-054 equivalence expansion). A
+  **multi-word** alias (`ny ≡ new york`, `nyc ≡ new york city`) classifies as `AliasKind::MultiWord` and
+  is parked as a *candidate*: `AliasEntry::is_active_for_matching` and `AliasRegistry::activate` both
+  structurally refuse it, "so review can never activate something the matcher would silently ignore."
+  This ADR builds the matcher half that activates those candidates. It is a **matching-model** change,
+  designed up front (with its oracle) per the process lesson from the abandoned first attempt
+  ([`research/multiword-synonyms.md`](../research/multiword-synonyms.md)).
+
+- **The wall (why the flat-set first attempt failed).** A title `T` emits **one** flat feature set,
+  consumed by `exact::verify` for **both** the positive checks (required-mask / required-tail / any-of)
+  and the negative check (forbidden-mask / forbidden-tail) — the forbidden tail binary-searches the
+  *same* `tfeats` slice the required tail does (`exact/store.rs`, clauses 2 and 3). But the two polarities
+  want **different** sets:
+  - **Positive matching wants the overlapping superset.** With nested aliases (`new york` ⊂
+    `new york city`), a title `new york city` must still satisfy a `new york` query — so the title's
+    *positive* view must contain **every** overlapping alias entity, not just the leftmost-longest one.
+  - **Negative matching wants the canonical, non-overlapping set.** A query `foo -"new york"` must still
+    match `foo new york city` (recall-first: a forbidden clause must not over-reject). So the title's
+    *forbidden* view must be the **leftmost-longest** parse, which reads `new york city` as one entity and
+    does **not** contain the hidden `new york`.
+
+  A single feature set cannot be both. The first attempt rescued positive retrieval with a title-side
+  overlap superset, then that superset tripped the forbidden check (`foo -"new york"` wrongly rejected
+  `foo new york city`) — a false negative in the most sacred area. That is not patchable inside one set.
+
+- **Decision — two title-side feature views.** Split the title's feature set into two, computed once per
+  title and threaded through verification:
+  - **`P(T)` — positive view (the maximal parse-union).** Every token feature *plus* every
+    overlapping phrase entity — computed as a **force-additive** emit (all phrases additive, nothing
+    consumed ⇒ every token reaches phase 2b and every leftmost-longest entity is emitted) **∪** an
+    **overlapping** (`MatchKind::Standard`) entity pass over **all** phrases. This is a strict
+    superset of *every* parse, so it never drops a feature a different parse would emit — including
+    the **components of a phrase displaced** from the leftmost-longest parse by an overlapping one
+    (e.g. a collapsing `new york` consuming the `york` of an alias `york city`). The force-additive
+    pass also tracks **all active graders** (not a single overwritable pending one) so the superset
+    claim holds for *stateful* features (grades): each number grades with **every** grader still in
+    its window. Without this, a number consumed by a phrase in one parse can hide a later grade from
+    `P(T)` — the "Goldilocks parse", with two failure modes both fixed: (1) an intervening number
+    eats the pending grader (`psa 9 lives 8`, overlapping `psa 9` / `9 lives`, reads a genuine
+    `psa 8` only once `9 lives` collapses); (2) a second grader overwrites the pending one
+    (`psa a bgs 8`, overlapping `psa a` / `a bgs`, reads a `psa 8` only once `a bgs` collapses).
+    Neither the leftmost-longest nor the zero-consume extreme emits these; the active-grader set
+    does. The set is **deduped per canonical grader** (a repeat refreshes the age — the freshest
+    occurrence outlives any older one, so the superset claim is unaffected), bounding it by the
+    distinct-grader vocabulary; without the dedup a crafted title of N repeated graders + M numbers
+    emits N×M duplicate grades (a quadratic normalization DoS).
+    (Over-emitting a grade no parse produces is a bounded false positive, recall-safe.) An
+    exhaustive **parse-union oracle** (`normalize/parse_union_oracle.rs`) enumerates every
+    phrase-collapse parse of short titles and asserts `P(T) ⊇` their union — the independent check
+    the differential oracle cannot do (it reuses `match_features_dual` itself). Used for: signature
+    **retrieval**, the required-mask gate, the required tail, and any-of groups. (`N(T) ⊆ P(T)`: the
+    positive view only ever **adds**, so it can introduce a bounded false positive, never a
+    negative.)
+  - **`N(T)` — negative view (canonical leftmost-longest).** The ordinary leftmost-longest additive
+    feature set the engine already produces. Used for: the forbidden-mask gate and the forbidden tail —
+    **and nothing else**.
+
+  `verify(id, tmask_pos, tfeats_pos, tmask_neg, tfeats_neg, pred)`: clauses 1-pos/2/4 read the positive
+  pair; clauses 1-neg/3 read the negative pair. The columnar broad-lane transpose (`exact::eval_batch` /
+  `eval_batch_slices`) gets the same split — a positive per-feature title bitmap for required/any-of and a
+  negative one for the forbidden AND-NOT. **When no multi-word alias is active, `P(T) == N(T)`** and both
+  pairs are the same slices ⇒ the verifier is byte-for-byte the pre-ADR path.
+
+- **The query/title asymmetry (the ES `synonym_graph` model, realized in RR).** Multi-word aliases need
+  the index (title) to keep component tokens while the query collapses to the entity. RR already has the
+  two emit families; the asymmetry rides them:
+  - **Query / compile side** (`compile_features`, `compile_features_readonly`): an active alias phrase
+    **collapses** to its single entity feature (components consumed). So a stored query `new york`
+    compiles to required `{term:new_york}`, which ADR-054 expansion widens to any-of
+    `{term:new_york, ny}`. Collapse (not additive) on the query side is **required** — keeping `new`/`york`
+    required would make a `new york` query miss a `ny` title (the one-way-alias failure).
+  - **Title / match side** (`match_features`): the same alias phrase is **additive** (entity *and*
+    components), so a pre-existing component query (`york`) still matches; the overlap pass then adds the
+    nested entities for `P(T)`.
+
+  This maps onto the existing function boundary exactly — `compile_features*` are the query side,
+  `match_features` is the title side — so the asymmetry needs a `Side` discriminant on `emit`, not a new
+  flag at every call. One whitespace wrinkle: alias patterns are registered single-spaced, and the DSL
+  hands a quoted phrase's inner text to the compiler **verbatim** — so a whitespace run (`"new  york"`)
+  would hide the alias from the query-side collapse and the query would silently lose the group (an FN).
+  When multi-word aliases are active, the **query side collapses whitespace runs** before the phrase scan
+  (tokenization is whitespace-agnostic, so only phrase alignment changes); the **title side keeps its
+  cleaned text verbatim** — persisted canonical normalization never changes — with title-side runs
+  handled by the `P(T)` overlap scan, which collapses runs itself. With no active alias, both sides are
+  byte-identical to pre-ADR-061. A second selection wrinkle: the shared leftmost-longest automaton
+  commits to a match **before** the word-boundary check, so a boundary-invalid mid-token occurrence
+  (`a b` found inside `xa b`) can consume its span, suppress a valid overlapping alias (`b c`), and then
+  be dropped by the post-filter — the query compiles to component terms and the alias is silently lost
+  (an FN). With aliases active, phase-1 selection therefore runs over the **overlapping** automaton's
+  word-boundary-**valid** candidates only (then leftmost-longest among them) — identical to the legacy
+  pass whenever no mid-token occurrence exists, and strictly recovering suppressed phrases when one
+  does. The no-alias configuration keeps the legacy pass (its pathological collapse-phrase selection is
+  baked into persisted canonical features).
+
+- **The wiring is small because the equivalence machinery already supports it.**
+  `Vocab::resolve_equivalences` resolves each alias form to features through the read-only compile path
+  and **keeps a form only if it resolves to exactly one feature** (`fs.len() == 1`); a multi-word form
+  resolves to many features today and is silently dropped. Register the active multi-word form as a
+  **collapse phrase** in the normalizer and `compile_features_readonly("new york")` returns
+  `[term:new_york]` (len 1) — so the group `{ny, new york}` resolves to `{id(ny), id(term:new_york)}` and
+  the **unchanged** `resolve_equivalences` / expansion path produces the bidirectional any-of. Concretely:
+  - `AliasRegistry`: a new `active_alias_forms()` (parallel to Phase 1's `active_groups`), and
+    `activate` / `is_active_for_matching` accept `MultiWord` (the Phase-1 refusal is lifted now that the
+    matcher can express it; `MixedKind` stays refused).
+  - `Vocab::to_normalizer`: offer **every** active alias form for phrase registration; the builder
+    tokenizes each against the **final** punctuation table at `build()` and registers the ≥2-token ones
+    as **alias-mode phrases** (`PhraseMode::Alias`) emitting the deterministic entity
+    `term:<tokens.join("_")>` (the corpus `term:` convention, so an alias and a corpus phrase over the
+    same tokens share one entity; alias mode wins the dedup so collapse-on-query is preserved).
+    Multi-wordness is re-derived from the **live** table, not the stored `AliasKind` snapshot — a later
+    punctuation reclassification (`a-b` under `-`:Fold → `-`:Split) would otherwise leave a still-Active
+    alias unregistered, dropped from the equivalence map, and silently dead while reporting active.
+  - `Vocab::effective_equivalence_groups`: already the union point — it now also contributes the
+    multi-word groups, so `resolve_equivalences` + `intern_equivalence_forms` pick them up with no change.
+  - **ID stability** reuses the Phase-1 fix verbatim: `intern_equivalence_forms` calls `compile_features`
+    per form, which now interns the entity dense (the alias phrase is registered), so the
+    synthetic→dense boundary cannot kill a multi-word alias either.
+  - **Recovery ordering + install-seam self-healing (codex R13).** The equivalence map is *transient* —
+    never persisted in the dict — and single-node `Engine::open` recompiles the WAL tail, so an
+    open-then-`adopt_vocab` sequence recompiled tail queries *without* expansion (a recovery FN, for
+    single-token ADR-054 aliases too). `Engine::open_with_vocab` installs the equivalences **before**
+    replay (the order the cluster's `open` already used), the server opens through it, and
+    `adopt_vocab` detects the hazard (non-empty memtable + declared equivalences) and escalates to
+    `set_vocab` + full recompile. Symmetrically, every equivalence-install seam first runs
+    `AliasRegistry::demote_unexpressible`: an Active entry whose form the live normalizer can no longer
+    express (one cleaned token resolving to ≠1 feature, e.g. a fused grader after a punctuation refold)
+    demotes back to a review candidate instead of reporting active while `resolve_equivalences`
+    silently drops it. The demotion is **status-only** (the kind snapshot is preserved, so a repaired
+    vocabulary re-activates via `activate` or re-import — codex R14) and deliberately not a full
+    reclassification (kind drift after activation is precision-only — expansion can only widen
+    any-of groups — and is corrected on re-import). The cluster's `set_vocab` runs the heal **before**
+    its multi-word refusal, so the refusal judges the healed vocabulary.
+
+- **The forbidden policy (decided up front, recall-justified).** A title `T` *forbidden-contains* a
+  phrase iff that phrase is an entity in `T`'s **leftmost-longest canonical parse** `N(T)`. Consequences,
+  all on the recall-safe side (a wrong call here is a bounded false positive the exact/stage-two filters
+  catch, never a false negative):
+  - `foo -"new york"` **matches** `foo new york city` (the canonical parse reads `new york city`, so
+    `term:new_york ∉ N(T)`).
+  - Forbidden clauses **do not expand** through equivalences (unchanged from ADR-054): `foo -ny` does
+    **not** reject `foo new york` (`ny ∉ N(T)`; only the literal token is forbidden). A title that
+    literally contains a forbidden token (`foo -york` over `foo new york`) is still rejected — `york ∈
+    N(T)` via the additive components.
+
+- **Why it is FN-safe (the load-bearing proof).** Let the spec be: `Q` matches `T` iff every
+  expansion-widened required feature and any-of group of `Q` is satisfied by `P(T)`, and no forbidden
+  feature of `Q` is in `N(T)`. The engine computes the **same** `P(T)` and `N(T)` (not an
+  approximation). A false negative needs the engine to drop a spec-match at one of two points:
+  1. **Retrieval.** Signatures are built only from `Q`'s required + any-of (the lossless cover, unchanged)
+     and probed from `P(T)`. `P(T) ⊇ N(T)` only **adds** features, so it generates a **superset** of
+     signatures — retrieval can only widen, never miss. The cover contract holds with `P(T)` as the title
+     feature set (the same set the verifier's positive clauses use, so they are self-consistent).
+  2. **Verification.** Positive clauses test `Q`'s required/any-of against `P(T)`; a spec-match has them
+     all in `P(T)`, so no positive clause false-rejects. The forbidden clause tests against `N(T)`; a
+     spec-match has no forbidden feature in `N(T)`, so it does not false-reject. ∎
+
+  The split is what makes the spec *realizable*: the old single set forced a choice between a positive-FN
+  (if it used `N`) and a forbidden-FN (if it used `P`); two sets pay neither. False positives (the
+  superset retrieving/passing more than a stricter reading would) remain allowed and cheap.
+
+- **Semantics of activation — what a vocabulary change may change (codex R15).** The zero-FN contract is
+  **per-vocabulary**: engine ≡ spec under the *current* vocab, verified by the differential oracle. It is
+  NOT cross-vocab match-set monotonicity — `set_vocab` is a semantics-changing operation by design
+  (recompile applies the new semantics to every query). Three deliberate consequences when a multi-word
+  alias activates:
+  - A query containing the alias text (`new york mets`) reads the phrase as the **entity**: it gains the
+    alias reach (`ny mets` titles) and stops matching the *scattered-components* reading
+    (`new amazing york mets`). This is the same shift a declared collapse phrase has always made (and
+    alternative (3) below rejects keeping components required). Preserving the component conjunction *as
+    an alternative* is expressible in the existing plan structure via CNF distributivity —
+    `(entity ∨ ny ∨ new) ∧ (entity ∨ ny ∨ york)` ≡ `(entity ∨ ny) ∨ (new ∧ york)`, strictly widening —
+    and is a designed follow-on (roadmap), not v1.
+  - The query-side whitespace-run collapse and the boundary-aware phase-1 selection apply to **every**
+    phrase (alias and non-alias) while aliases are active: one automaton scans one string, and a
+    per-mode split would make the same surface text read differently by phrase mode. Both changes make
+    phrase recognition *more* correct (noise/suppression artifacts no longer defeat a declared phrase);
+    the **no-alias configuration is byte-identical**, so no persisted deployment shifts.
+
+- **Hot-path budget / default byte-identical.** The second (overlapping) automaton and the dual view are
+  built **only when ≥1 multi-word alias is active**; otherwise `match_features` stays single-view, the
+  overlap automaton is `None`, `P(T) == N(T)`, and every lane is byte-identical to pre-ADR-061. When
+  active, the extra cost is one Aho-Corasick pass over the (typically small) alias-phrase set plus a
+  second mask/slice — paid only on titles that actually contain an overlapping alias phrase.
+
+- **Scope / what's deferred.** **Single-node first** (like ADR-054 / ADR-059 / ADR-060). The cluster
+  deferral is now **enforced, not silent**: cluster content routing derives a title's target shards from
+  the canonical leftmost-longest view `N(T)` (the `route` primitive reuses `match_features`), so a nested
+  alias entity that lives only in the positive superset `P(T)` would never probe the shard holding a
+  query anchored on it — a false negative the shard-local two-view verifier cannot recover. Every cluster
+  path therefore **refuses a multi-word-alias normalizer** via `Normalizer::has_multiword_aliases()`:
+  `ClusterEngine::from_parts` — the ONE assembly seam every constructor routes through (`build` /
+  `build_with_tags`, `open`, and the distributed `connect_remote` / `connect_replicated`) — is the central
+  backstop; `build_with_tags` *also* checks **early**, before any durable shard ingest or manifest commit,
+  so a `data_dir` build cannot leave a reopenable durable cluster compiled under the unsupported
+  normalizer; and the in-place `set_vocab` swap (which does not reconstruct through `from_parts`) guards
+  its own path. (Regression-guarded by `cluster_oracle::vocab_learning::{set_vocab_refuses_active_multiword_alias_on_cluster,
+  build_refuses_a_multiword_alias_normalizer, durable_build_with_multiword_alias_leaves_no_recoverable_state}`.)
+  Single-token cluster aliases (`N(T) == P(T)`) are unaffected and keep working. Cluster multi-word
+  support — **P(T)-aware routing** + cross-process normalizer shipping — is the follow-on. Deferred with it: cluster registry governance, and the
+  lower-precision multi-word discovery sources (distributional / match-feedback). Quoted-phrase *required*
+  clauses and overlapping aliases inside a single query clause keep query-side leftmost-longest (the
+  author wrote one reading); only the **title** side needs the overlap superset.
+
+- **Alternatives.** (1) *One flat superset set for both polarities* — the first attempt; rejected (the
+  wall: forbidden-FN). (2) *Collapse-only multi-word phrases* (consume components on the title side too) —
+  rejected: a component-token query (`york`) loses the match (positive-FN). (3) *Additive-on-query* (keep
+  components required on the query side) — rejected: one-way alias (`new york` query → `ny` title fails).
+  (4) *A reserved feature-id range that the forbidden check skips* — rejected: forbidden clauses can
+  legitimately name an alias entity (`-"new york"`), so the distinction is "did leftmost-longest pick it,"
+  a per-title parse fact, not a fixed id range. (5) *Mutate the cluster's frozen dict to add entities* —
+  rejected (perturbs the frozen-dict fingerprint handshake); single-node first instead.
+
+- **Testing (oracle designed with the model).** A differential oracle whose brute force encodes the spec
+  above — `P(T)` (overlap superset), `N(T)` (leftmost-longest), query-side collapse + ADR-054 expansion,
+  forbidden-against-`N(T)` — and, **from day one**, includes the cases the flat set silently broke:
+  **forbidden-feature queries over multi-word-alias titles**, **overlapping / nested aliases**
+  (`new york` ⊂ `new york city`) as first-class, the **reverse direction** (multi-word query → single-token
+  title), **component-token** queries over alias titles, and **dynamic-vocab** stability (activate an
+  alias, then `PUT` a query, still matches). At scale, an FN-safety sweep vs the original-semantics oracle.
+  Plus normalizer units (collapse-query / additive-title / overlap emit) and a registry unit (multi-word
+  now activates).
+
+- **Consequences.** Operators can activate multi-word aliases and have them match bidirectionally, with
+  nested/overlapping phrases handled and forbidden clauses staying recall-correct, at zero false
+  negatives. The default (no active multi-word alias) path is byte-identical. The matcher gains a second
+  per-title feature view — a reusable seam for any future "positive superset vs canonical set" need.

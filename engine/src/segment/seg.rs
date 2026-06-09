@@ -4,7 +4,7 @@
 
 use super::{MatchStats, Segment};
 use crate::compile::{build_signatures, is_hot, CostClass, Extracted};
-use crate::dict::{Dict, FeatureId};
+use crate::dict::Dict;
 use crate::exact::ExactStore;
 use crate::filter::SegmentFilter;
 use crate::index::CandidateIndex;
@@ -127,8 +127,7 @@ impl Segment {
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(
         &self,
-        feats: &[FeatureId],
-        tmask: u64,
+        view: &crate::exact::TitleView,
         dict: &Dict,
         epoch: u32,
         seen: &mut [u32],
@@ -138,6 +137,9 @@ impl Segment {
         stats: &mut MatchStats,
     ) {
         let filter = self.filter.as_ref();
+        // Signatures are generated from the POSITIVE (superset) view so an overlapping alias
+        // entity retrieves its candidates (ADR-061); verify then applies both views.
+        let feats = view.pos;
 
         // arity-1 signatures (one per feature)
         for &f in feats {
@@ -149,9 +151,7 @@ impl Segment {
                     continue;
                 }
             }
-            self.probe(
-                key, &self.main, epoch, tmask, feats, seen, out, pred, stats, false,
-            );
+            self.probe(key, &self.main, epoch, view, seen, out, pred, stats, false);
         }
         // arity-2 signatures: {hot feature} x {every other feature}
         for &h in feats {
@@ -167,9 +167,7 @@ impl Segment {
                                 continue;
                             }
                         }
-                        self.probe(
-                            key, &self.main, epoch, tmask, feats, seen, out, pred, stats, false,
-                        );
+                        self.probe(key, &self.main, epoch, view, seen, out, pred, stats, false);
                     }
                 }
             }
@@ -185,18 +183,7 @@ impl Segment {
                         continue;
                     }
                 }
-                self.probe(
-                    key,
-                    &self.broad,
-                    epoch,
-                    tmask,
-                    feats,
-                    seen,
-                    out,
-                    pred,
-                    stats,
-                    true,
-                );
+                self.probe(key, &self.broad, epoch, view, seen, out, pred, stats, true);
             }
         }
     }
@@ -208,8 +195,7 @@ impl Segment {
         key: u64,
         index: &CandidateIndex,
         epoch: u32,
-        tmask: u64,
-        feats: &[FeatureId],
+        view: &crate::exact::TitleView,
         seen: &mut [u32],
         out: &mut Vec<u64>,
         pred: &crate::exact::TagPredicate,
@@ -237,7 +223,7 @@ impl Segment {
                     return; // tombstoned
                 }
                 // Tag filter (ADR-049) — applied post-candidate inside verify.
-                if self.exact.verify(local, tmask, feats, pred) {
+                if self.exact.verify(local, view, pred) {
                     out.push(self.exact.logical(local));
                 }
             });

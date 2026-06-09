@@ -54,19 +54,61 @@ impl Brute {
         }
     }
 
+    /// Build an alias-aware brute reference: the normalizer carries the vocab's alias phrases and
+    /// the dict carries the resolved equivalence map, set up exactly as `Engine::set_vocab` does
+    /// (intern the forms, then resolve), so the ground truth independently applies the ADR-061
+    /// two-view semantics. Used by the multi-word alias oracle.
+    pub(crate) fn build_with_vocab(
+        queries: &[(u64, String)],
+        vocab: &reverse_rusty::vocab::Vocab,
+    ) -> Self {
+        let norm = vocab.to_normalizer().expect("vocab normalizer");
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        // Mirror the engine: pin the alias-form ids, then install the equivalence map so
+        // `extract` expands required→any-of through it.
+        vocab.intern_equivalence_forms(&norm, &mut dict);
+        let equiv = vocab.resolve_equivalences(&norm, &dict);
+        dict.set_equivalences(equiv);
+        let mut qs = Vec::new();
+        for (logical, text) in queries {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+                let ex = extract(&ast, &norm, &mut dict, &mut lc);
+                if ex.required.is_empty() && ex.anyof.is_empty() {
+                    continue;
+                }
+                qs.push((*logical, ex));
+            }
+        }
+        dict.finalize_mask();
+        Brute {
+            norm,
+            dict,
+            queries: qs,
+        }
+    }
+
+    /// Ground-truth match set for `title`, applying the ADR-061 **two-view** semantics: required
+    /// and any-of are checked against the positive overlapping superset `P(T)`; forbidden is
+    /// checked against the canonical leftmost-longest `N(T)`. `feats` is reused as the `N(T)`
+    /// buffer. With no active multi-word alias the two views are identical and this is
+    /// byte-identical to the single-view brute.
     pub(crate) fn matches(
         &self,
         title: &str,
         lc: &mut String,
         feats: &mut Vec<u32>,
     ) -> HashSet<u64> {
-        self.norm.match_features(title, &self.dict, lc, feats);
-        let present = |f: u32| feats.binary_search(&f).is_ok();
+        let mut pos = Vec::new();
+        self.norm
+            .match_features_dual(title, &self.dict, lc, feats, &mut pos);
+        let in_pos = |f: u32| pos.binary_search(&f).is_ok();
+        let in_neg = |f: u32| feats.binary_search(&f).is_ok();
         let mut out = HashSet::new();
         for (logical, ex) in &self.queries {
-            if ex.required.iter().all(|&f| present(f))
-                && !ex.forbidden.iter().any(|&f| present(f))
-                && ex.anyof.iter().all(|g| g.iter().any(|&f| present(f)))
+            if ex.required.iter().all(|&f| in_pos(f))
+                && !ex.forbidden.iter().any(|&f| in_neg(f))
+                && ex.anyof.iter().all(|g| g.iter().any(|&f| in_pos(f)))
             {
                 out.insert(*logical);
             }

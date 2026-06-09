@@ -47,6 +47,24 @@ impl ClusterEngine {
                 ring.num_shards()
             )));
         }
+        // ADR-061: multi-word aliases are single-node only, enforced at the ONE shared assembly
+        // seam so every constructor is covered (`build`/`build_with_tags`, `open`, and the
+        // distributed `connect_remote`/`connect_replicated` via this `from_parts`). Cluster content
+        // routing derives a title's target shards from the canonical leftmost-longest view
+        // (`route` uses `match_features`), so a nested alias entity that lives only in the positive
+        // superset `P(T)` would never probe the shard holding a query anchored on it — a false
+        // negative the shard-local two-view verifier cannot recover. Single-token aliases
+        // (`N(T) == P(T)`) are unaffected; cluster multi-word (P(T)-aware routing + cross-process
+        // normalizer shipping) is a deferred follow-on. `set_vocab` guards its in-place swap path
+        // separately (it does not reconstruct through `from_parts`).
+        if norm.has_multiword_aliases() {
+            return Err(ShardError::Config(
+                "a normalizer with active multi-word aliases is single-node only (ADR-061): \
+                 cluster routing uses the canonical leftmost-longest title view and would miss a \
+                 nested alias entity's shard (a false negative). Single-token aliases are supported."
+                    .into(),
+            ));
+        }
         Ok(ClusterEngine {
             norm,
             dict,
@@ -136,14 +154,14 @@ impl ClusterEngine {
         // the serialized vocab — rebuild the normalizer from IT (authoritative over the
         // caller-supplied one) so a declared alias survives the restart, and retain the
         // vocab so a later checkpoint re-persists it (else the next reopen would lose it).
-        let restored_vocab = if manifest.vocab_data.is_empty() {
+        let mut restored_vocab = if manifest.vocab_data.is_empty() {
             None
         } else {
             let json = std::str::from_utf8(&manifest.vocab_data)
                 .map_err(|e| ShardError::Config(format!("cluster vocab not utf-8: {e}")))?;
             let v = crate::vocab::Vocab::from_json(json)
                 .map_err(|e| ShardError::Config(format!("deserializing cluster vocab: {e}")))?;
-            Some(Arc::new(v))
+            Some(v)
         };
         let norm = match &restored_vocab {
             Some(v) => v.to_normalizer().map_err(|e| {
@@ -151,6 +169,20 @@ impl ClusterEngine {
             })?,
             None => norm,
         };
+        // Self-heal stale-active aliases against the restored normalizer (codex R13, the same
+        // demotion every other equivalence-install seam runs): a persisted vocab can carry an
+        // Active entry the current classification can no longer express. Demotion can only
+        // shrink the registered phrase set, so rebuild the normalizer when it fires (the
+        // demoted state re-persists at the next checkpoint).
+        let mut norm = norm;
+        if let Some(v) = &mut restored_vocab {
+            if v.aliases_mut().demote_unexpressible(&norm, &dict) > 0 {
+                norm = v.to_normalizer().map_err(|e| {
+                    ShardError::Config(format!("building normalizer from cluster vocab: {e}"))
+                })?;
+            }
+        }
+        let restored_vocab = restored_vocab.map(Arc::new);
         let norm = Arc::new(norm);
         // Re-install equivalence groups (ADR-054) on the recovered dict so a log-tail replay
         // and post-reopen incremental adds expand through them. The already-attached segments

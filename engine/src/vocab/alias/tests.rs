@@ -4,7 +4,7 @@ use super::classify::{classify_kind, default_status_for, AliasKind};
 use super::solr::parse_solr_synonyms;
 use super::{AliasProvenance, AliasRegistry, AliasStatus};
 use crate::dict::Dict;
-use crate::normalize::Normalizer;
+use crate::normalize::{Normalizer, NormalizerBuilder};
 
 fn norm() -> Normalizer {
     Normalizer::default_vocab().expect("default normalizer")
@@ -101,6 +101,65 @@ fn mixed_known_kinds_are_mixedkind() {
     );
 }
 
+#[test]
+fn cross_kind_multiword_is_mixedkind_not_multiword() {
+    // ADR-061 (codex review): a multi-word group whose forms resolve to DIFFERENT known kinds (a
+    // Brand phrase ≡ a Player phrase) must classify as MixedKind — a review candidate — NOT
+    // auto-activate as MultiWord. The mixed-kind check runs before the multi-word classification,
+    // and resolves the kinds of multi-word forms too.
+    use crate::normalize::NormalizerBuilder;
+    let mut b = NormalizerBuilder::new();
+    b.add_phrase(
+        &["upper", "deck"],
+        "brand:upper_deck",
+        crate::dict::FeatureKind::Brand,
+    );
+    b.add_phrase(
+        &["michael", "jordan"],
+        "player:mj",
+        crate::dict::FeatureKind::Player,
+    );
+    let n = b.build().expect("normalizer");
+    // Intern each phrase entity with its kind so the forms resolve to KNOWN (non-Generic) kinds.
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let _ = n.compile_features("upper deck", &mut dict, &mut lc);
+    let _ = n.compile_features("michael jordan", &mut dict, &mut lc);
+    assert_eq!(
+        classify_kind(&forms(&["upper deck", "michael jordan"]), &n, &dict),
+        AliasKind::MixedKind,
+        "a cross-kind multi-word group must not bypass the MixedKind refusal"
+    );
+}
+
+#[test]
+fn unexpressible_single_token_forms_are_candidates_not_active() {
+    // ADR-061 (codex review): a single-token form that does NOT reduce to exactly one feature
+    // cannot be registered as an alias phrase, and `resolve_equivalences` would drop it — so it
+    // must classify as MixedKind (a review candidate), never auto-activate a group that would be
+    // reported active yet silently never match.
+    use crate::normalize::NormalizerBuilder;
+
+    // (a) Zero-feature form: an all-punctuation surface cleans to nothing.
+    let n = norm();
+    let dict = Dict::new();
+    assert_eq!(
+        classify_kind(&forms(&["foo", "@@@"]), &n, &dict),
+        AliasKind::MixedKind,
+        "a zero-feature single-token form must stay a candidate"
+    );
+
+    // (b) Fused grader: `psa10` resolves to grader:psa + grade:10 (one cleaned token, two
+    //     features) — the case codex flagged.
+    let g = NormalizerBuilder::new().grader("psa").build().unwrap();
+    let gdict = Dict::new();
+    assert_eq!(
+        classify_kind(&forms(&["psa10", "card"]), &g, &gdict),
+        AliasKind::MixedKind,
+        "a fused-grader single-token form must stay a candidate"
+    );
+}
+
 // ── Auto-activation policy ─────────────────────────────────────────────────────
 
 #[test]
@@ -125,9 +184,13 @@ fn policy_activates_variants_and_declared_distincts_only() {
         default_status_for(SingleTokenDistinct, LearnedFromQueries),
         Candidate
     );
-    // Multi-word / mixed: never auto-active.
-    assert_eq!(default_status_for(MultiWord, DeclaredFile), Candidate);
+    // Multi-word (ADR-061): declared/manual active, learned → candidate (like distinct tokens).
+    assert_eq!(default_status_for(MultiWord, DeclaredFile), Active);
+    assert_eq!(default_status_for(MultiWord, Manual), Active);
+    assert_eq!(default_status_for(MultiWord, LearnedFromQueries), Candidate);
+    // Mixed-kind: never auto-active (the matcher still can't express it safely).
     assert_eq!(default_status_for(MixedKind, Manual), Candidate);
+    assert_eq!(default_status_for(MixedKind, DeclaredFile), Candidate);
 }
 
 // ── Solr parsing ──────────────────────────────────────────────────────────────
@@ -172,7 +235,7 @@ fn solr_escaped_comma_is_literal() {
 // ── Registry behavior ──────────────────────────────────────────────────────────
 
 #[test]
-fn registry_active_groups_only_includes_active_single_token() {
+fn registry_active_groups_includes_variants_and_declared_multiword() {
     let mut reg = AliasRegistry::new();
     let n = norm();
     let dict = Dict::new();
@@ -193,7 +256,7 @@ fn registry_active_groups_only_includes_active_single_token() {
         &n,
         &dict,
     );
-    // declared multi-word → candidate (matcher can't express it)
+    // declared multi-word → active (the Phase-2 matcher expresses it, ADR-061)
     reg.add_classified(
         &forms(&["ud", "upper deck"]),
         AliasProvenance::DeclaredFile,
@@ -203,9 +266,21 @@ fn registry_active_groups_only_includes_active_single_token() {
     );
 
     let active = reg.active_groups();
-    assert_eq!(active, vec![forms(&["refractor", "refractors"])]);
+    assert_eq!(
+        active,
+        vec![
+            forms(&["refractor", "refractors"]),
+            forms(&["ud", "upper deck"])
+        ]
+    );
+    // EVERY active entry's forms are offered for phrase registration (the builder re-derives
+    // multi-wordness from the live punct table and skips the single-token ones, codex R11).
+    assert_eq!(
+        reg.active_alias_forms(),
+        forms(&["refractor", "refractors", "ud", "upper deck"])
+    );
     let s = reg.summary();
-    assert_eq!((s.active, s.candidate, s.rejected), (1, 2, 0));
+    assert_eq!((s.active, s.candidate, s.rejected), (2, 1, 0));
 }
 
 #[test]
@@ -297,20 +372,209 @@ fn reject_blocks_reactivation_by_relearn() {
 }
 
 #[test]
-fn activate_refuses_multiword() {
+fn activate_accepts_multiword_refuses_mixed_kind() {
     let n = norm();
-    let dict = Dict::new();
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    // Intern two different KNOWN kinds so {topps, jordan} classifies as MixedKind.
+    dict.intern("term:topps", crate::dict::FeatureKind::Brand);
+    dict.intern("term:jordan", crate::dict::FeatureKind::Player);
+    let _ = n.compile_features_readonly("topps", &dict, &mut lc);
     let mut reg = AliasRegistry::new();
+
+    // A learned multi-word group lands as a candidate; explicit activate now succeeds (ADR-061).
     reg.add_classified(
-        &forms(&["ud", "upper deck"]),
+        &forms(&["ny", "new york"]),
+        AliasProvenance::LearnedFromQueries,
+        0.5,
+        &n,
+        &dict,
+    );
+    assert!(
+        reg.activate(&forms(&["ny", "new york"])),
+        "multi-word activates in Phase 2"
+    );
+    assert_eq!(reg.active_alias_forms(), forms(&["new york", "ny"]));
+
+    // Mixed-kind is still refused — the matcher cannot express a cross-kind expansion.
+    reg.add_classified(
+        &forms(&["topps", "jordan"]),
         AliasProvenance::DeclaredFile,
         1.0,
         &n,
         &dict,
     );
-    // Even an explicit activate can't turn on a kind the Phase-1 matcher can't express.
-    assert!(!reg.activate(&forms(&["ud", "upper deck"])));
-    assert!(reg.active_groups().is_empty());
+    assert!(
+        !reg.activate(&forms(&["jordan", "topps"])),
+        "mixed-kind activation is refused"
+    );
+}
+
+#[test]
+fn reimport_upgrades_a_persisted_candidate_but_never_downgrades() {
+    // ADR-061 (codex R7): a same-provenance re-import re-applies the current policy's default,
+    // adopting a now-active status (so a persisted Phase-1 multi-word candidate activates when its
+    // synonym file is re-imported under the Phase-2 policy) — but never downgrades a status, so a
+    // re-learn cannot undo a manual activation.
+    let n = norm();
+    let dict = Dict::new();
+
+    // (a) Upgrade: model a persisted declared multi-word Candidate, then re-import the same file.
+    let mut reg = AliasRegistry::new();
+    reg.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    reg.entries[0].status = AliasStatus::Candidate; // model the Phase-1 persisted state
+    let status = reg.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    assert_eq!(
+        status,
+        Some(AliasStatus::Active),
+        "re-importing the same declared file activates a persisted multi-word candidate"
+    );
+
+    // (b) No downgrade: a manually-activated learned distinct stays active across a re-learn.
+    let mut reg2 = AliasRegistry::new();
+    reg2.add_classified(
+        &forms(&["psa", "bgs"]),
+        AliasProvenance::LearnedFromQueries,
+        0.5,
+        &n,
+        &dict,
+    );
+    assert!(reg2.activate(&forms(&["psa", "bgs"])), "manual activate");
+    reg2.add_classified(
+        &forms(&["psa", "bgs"]),
+        AliasProvenance::LearnedFromQueries,
+        0.9,
+        &n,
+        &dict,
+    );
+    assert_eq!(
+        reg2.entries[0].status,
+        AliasStatus::Active,
+        "a re-learn must not downgrade a manual activation"
+    );
+}
+
+#[test]
+fn reimport_promotion_adopts_fresh_kind_but_active_keeps_kind() {
+    // Codex R10: when a same-provenance re-import PROMOTES a candidate, it must adopt the fresh
+    // `kind` too — a persisted entry can carry a stale classification (e.g. MixedKind from an
+    // older classifier / dict state), and promoting the status alone would report Active while
+    // `is_active_for_matching` keeps ignoring it (no equivalence, no phrase, silently dead).
+    let n = norm();
+    let dict = Dict::new();
+
+    // (a) Promotion adopts the fresh kind: model a persisted declared candidate whose stored
+    // kind is a stale MixedKind, then re-import the same declared file.
+    let mut reg = AliasRegistry::new();
+    reg.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    reg.entries[0].status = AliasStatus::Candidate;
+    reg.entries[0].kind = AliasKind::MixedKind; // stale persisted classification
+    let status = reg.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    assert_eq!(status, Some(AliasStatus::Active));
+    assert_eq!(
+        reg.entries[0].kind,
+        AliasKind::MultiWord,
+        "promotion must adopt the fresh kind, or the alias is active-but-unmatchable"
+    );
+    assert!(reg.entries[0].is_active_for_matching());
+    assert_eq!(
+        reg.active_alias_forms(),
+        forms(&["new york", "ny"]),
+        "the promoted multi-word group must reach the normalizer registration list"
+    );
+
+    // (b) An ALREADY-active entry keeps its kind on re-import (codex R9): re-classification must
+    // not perturb a live entry's stored kind.
+    let mut reg2 = AliasRegistry::new();
+    reg2.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    assert_eq!(reg2.entries[0].status, AliasStatus::Active);
+    reg2.entries[0].kind = AliasKind::SingleTokenDistinct; // simulate a divergent stored kind
+    reg2.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    assert_eq!(
+        reg2.entries[0].kind,
+        AliasKind::SingleTokenDistinct,
+        "an already-active entry's kind is preserved across a re-import"
+    );
+}
+
+#[test]
+fn demotion_is_status_only_so_a_repaired_vocab_reactivates() {
+    // Codex R14: `demote_unexpressible` must not stamp `MixedKind` — that would dead-end the
+    // entry, since `activate` structurally refuses that kind even after the operator repairs
+    // the vocabulary. Status-only demotion keeps the path back open.
+    let dict = Dict::new();
+    let plain = norm(); // default punctuation: '-' splits ⇒ "psa-10" is a 2-token form
+    let mut reg = AliasRegistry::new();
+    let st = reg.add_classified(
+        &forms(&["x", "psa-10"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &plain,
+        &dict,
+    );
+    assert_eq!(st, Some(AliasStatus::Active));
+
+    // The vocabulary then mutates: `psa` becomes a grader and `-` folds, so the form cleans
+    // to the fused token `psa10` (several features) — unexpressible.
+    let mut b = NormalizerBuilder::new();
+    b.add_grader("psa");
+    b.fold_punctuation('-');
+    let broken = b.build().expect("broken norm");
+    assert_eq!(reg.demote_unexpressible(&broken, &dict), 1);
+    assert_eq!(reg.entries[0].status, AliasStatus::Candidate);
+    assert_eq!(
+        reg.entries[0].kind,
+        AliasKind::MultiWord,
+        "demotion is status-only: the kind snapshot is preserved"
+    );
+
+    // Repair: with the kind intact, manual activation succeeds again, and the entry is
+    // expressible under the repaired vocabulary (no re-demotion).
+    assert!(
+        reg.activate(&forms(&["x", "psa-10"])),
+        "a repaired candidate must re-activate"
+    );
+    assert_eq!(
+        reg.demote_unexpressible(&plain, &dict),
+        0,
+        "expressible again under the repaired vocabulary"
+    );
 }
 
 #[test]
