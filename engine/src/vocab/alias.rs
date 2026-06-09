@@ -253,10 +253,16 @@ impl AliasRegistry {
             {
                 // Same-provenance re-import: ADOPT a now-active default so a persisted candidate the
                 // current policy can express becomes active (codex R7). Only ever UPGRADE the
-                // status — never the `kind` and never a downgrade: a re-import/re-learn must not
-                // undo a manual activation, and re-classifying an already-active alias to a
-                // non-matchable `kind` (e.g. MixedKind) would silently drop it from `active_groups`
-                // (codex R9).
+                // status — never a downgrade: a re-import/re-learn must not undo a manual activation.
+                // When PROMOTING a candidate (it was NOT already active), adopt the fresh `kind` too:
+                // otherwise `is_active_for_matching` keeps seeing the stale classification (e.g. a
+                // `MixedKind` candidate the current policy can now express) and the alias reports
+                // active while installing no equivalence or phrase. For an ALREADY-active entry,
+                // preserve the `kind` — re-classifying it to a non-matchable `kind` would silently
+                // drop it from `active_groups` (codex R9).
+                if existing.status != AliasStatus::Active {
+                    existing.kind = kind;
+                }
                 existing.status = AliasStatus::Active;
             }
             return Some(existing.status);

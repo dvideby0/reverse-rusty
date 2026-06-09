@@ -463,6 +463,73 @@ fn reimport_upgrades_a_persisted_candidate_but_never_downgrades() {
 }
 
 #[test]
+fn reimport_promotion_adopts_fresh_kind_but_active_keeps_kind() {
+    // Codex R10: when a same-provenance re-import PROMOTES a candidate, it must adopt the fresh
+    // `kind` too — a persisted entry can carry a stale classification (e.g. MixedKind from an
+    // older classifier / dict state), and promoting the status alone would report Active while
+    // `is_active_for_matching` keeps ignoring it (no equivalence, no phrase, silently dead).
+    let n = norm();
+    let dict = Dict::new();
+
+    // (a) Promotion adopts the fresh kind: model a persisted declared candidate whose stored
+    // kind is a stale MixedKind, then re-import the same declared file.
+    let mut reg = AliasRegistry::new();
+    reg.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    reg.entries[0].status = AliasStatus::Candidate;
+    reg.entries[0].kind = AliasKind::MixedKind; // stale persisted classification
+    let status = reg.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    assert_eq!(status, Some(AliasStatus::Active));
+    assert_eq!(
+        reg.entries[0].kind,
+        AliasKind::MultiWord,
+        "promotion must adopt the fresh kind, or the alias is active-but-unmatchable"
+    );
+    assert!(reg.entries[0].is_active_for_matching());
+    assert_eq!(
+        reg.active_multiword_forms(),
+        forms(&["new york", "ny"]),
+        "the promoted multi-word group must reach the normalizer registration list"
+    );
+
+    // (b) An ALREADY-active entry keeps its kind on re-import (codex R9): re-classification must
+    // not perturb a live entry's stored kind.
+    let mut reg2 = AliasRegistry::new();
+    reg2.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    assert_eq!(reg2.entries[0].status, AliasStatus::Active);
+    reg2.entries[0].kind = AliasKind::SingleTokenDistinct; // simulate a divergent stored kind
+    reg2.add_classified(
+        &forms(&["ny", "new york"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &dict,
+    );
+    assert_eq!(
+        reg2.entries[0].kind,
+        AliasKind::SingleTokenDistinct,
+        "an already-active entry's kind is preserved across a re-import"
+    );
+}
+
+#[test]
 fn json_round_trips() {
     let n = norm();
     let dict = Dict::new();

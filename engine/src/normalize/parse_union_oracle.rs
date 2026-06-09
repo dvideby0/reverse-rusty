@@ -256,7 +256,7 @@ fn engine_positive_view_is_a_superset_of_every_parse() {
     let mut pos: Vec<FeatureId> = Vec::new();
     let mut checked = 0usize;
 
-    // All titles of length 1..=4 over the alphabet (7^4 = 2401 of the longest tier).
+    // All titles of length 1..=5 over the alphabet (7^5 = 16807 in the longest tier).
     let mut stack: Vec<Vec<&str>> = alphabet.iter().map(|&t| vec![t]).collect();
     while let Some(title_toks) = stack.pop() {
         // Run the engine's dual view on the space-joined title.
