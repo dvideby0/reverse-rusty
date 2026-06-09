@@ -104,6 +104,36 @@ fn active_alias_survives_punctuation_reclassification() {
     );
 }
 
+/// Codex R12 (P1): a boundary-INVALID automaton match must not suppress a valid overlapping
+/// alias. With `ab => a b` and `bc => b c`, the query `xa b c` contains `a b` mid-token (inside
+/// `xa b`); the legacy leftmost-longest pass selected it, consumed its span (suppressing the
+/// valid `b c`), then dropped it at the boundary post-filter — the query compiled to component
+/// terms, expansion never reached the `bc` group, and an `xa bc` title was missed (an FN).
+#[test]
+fn boundary_overlap_alias_query_still_matches() {
+    let mut v = Vocab::new();
+    let activated = v.import_solr_aliases(
+        "ab => a b\nbc => b c",
+        &Normalizer::default_vocab().expect("vocab"),
+        &Dict::new(),
+    );
+    assert_eq!(activated, 2, "both declared multi-word aliases activate");
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.set_vocab(v).expect("set_vocab");
+    eng.build_from_queries(&[(1, "xa b c".into())]);
+
+    let mut s = MatchScratch::new();
+    assert!(
+        matched(&mut eng, &mut s, "xa bc").contains(&1),
+        "the mid-token `a b` candidate must not suppress the valid `b c` alias"
+    );
+    assert!(
+        matched(&mut eng, &mut s, "xa b c").contains(&1),
+        "the literal title still matches"
+    );
+}
+
 /// The parse-union "Goldilocks" false negative (the stateful refinement of P(T)). The
 /// leftmost-longest `N(T)` binds `psa` away from a trailing `8`, and the force-additive `P(T)`
 /// re-emit, with a single overwritable pending grader, also misses it — yet a parse that collapses

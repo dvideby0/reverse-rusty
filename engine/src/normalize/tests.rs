@@ -145,6 +145,57 @@ fn query_side_collapses_whitespace_runs_only_when_aliases_active() {
 }
 
 #[test]
+fn boundary_invalid_match_cannot_suppress_a_valid_overlapping_alias() {
+    // ADR-061 (codex R12, P1): the shared leftmost-longest automaton commits to a match BEFORE
+    // the word-boundary check. With aliases `a b` and `b c`, the text `xa b c` contains `a b`
+    // mid-token (inside `xa b`) — the legacy pass selects it, consumes its span (suppressing the
+    // genuinely valid `b c`), and then drops it at the boundary post-filter: no phrase at all.
+    // On the query side that compiles an alias query to component terms, so equivalence
+    // expansion never reaches the group (an FN). With aliases active, selection runs over the
+    // boundary-VALID candidates only, so `b c` collapses to its entity.
+    let mut b = NormalizerBuilder::new();
+    b.add_alias_form("a b");
+    b.add_alias_form("b c");
+    let n = b.build().expect("alias normalizer");
+    assert_eq!(
+        names(&n, "xa b c"),
+        s(&["term:b_c", "term:xa"]),
+        "the valid `b c` must be selected despite the mid-token `a b` candidate"
+    );
+    // No mid-token candidate: identical to the legacy leftmost-longest selection.
+    assert_eq!(names(&n, "a b c"), s(&["term:a_b", "term:c"]));
+}
+
+#[test]
+fn repeated_graders_stay_deduped_in_the_positive_view() {
+    // ADR-061 (codex R12, P1): the positive-view active-grader set dedupes per canonical grader
+    // (refreshing the age), so repeated grader tokens cannot grow it without bound — a crafted
+    // title of N graders + M numbers would otherwise emit N×M duplicate grades (a quadratic
+    // normalization DoS). The freshest occurrence outlives any older same-name one, so the
+    // parse-union superset is unaffected.
+    let n = NormalizerBuilder::new().grader("psa").build().expect("n");
+    let mut emitted: Vec<String> = Vec::new();
+    let mut lc = String::new();
+    n.emit(
+        "psa psa psa 10",
+        &mut lc,
+        Side::Title,
+        true,
+        &mut |name, _| {
+            emitted.push(name.to_string());
+        },
+    );
+    assert_eq!(
+        emitted
+            .iter()
+            .filter(|n| n.as_str() == "grader_grade:psa10")
+            .count(),
+        1,
+        "one grade per (distinct grader, number), not one per repeated grader token: {emitted:?}"
+    );
+}
+
+#[test]
 fn synonyms_converge_alternate_surface_forms() {
     let n = spec_vocab();
     // normalization.md §2: "ud" and the "upper deck" phrase land on the SAME feature.

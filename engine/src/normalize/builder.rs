@@ -270,10 +270,12 @@ fn build_alias_overlap(
     }
     let mut pats: Vec<String> = Vec::new();
     let mut feats: Vec<(String, FeatureKind)> = Vec::new();
-    for (pat, entry) in patterns.iter().zip(entries) {
+    let mut entry_idx: Vec<usize> = Vec::new();
+    for (i, (pat, entry)) in patterns.iter().zip(entries).enumerate() {
         if !pats.iter().any(|p| p == pat) {
             pats.push(pat.clone());
             feats.push((entry.feature.clone(), entry.kind));
+            entry_idx.push(i);
         }
     }
     let automaton = DoubleArrayAhoCorasickBuilder::new()
@@ -283,5 +285,6 @@ fn build_alias_overlap(
     Ok(Some(super::core::AliasOverlap {
         automaton,
         entries: feats,
+        entry_idx,
     }))
 }

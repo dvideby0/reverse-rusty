@@ -47,6 +47,9 @@ pub(super) struct AliasOverlap {
     pub(super) automaton: DoubleArrayAhoCorasick<usize>,
     /// pattern index -> (entity feature name, kind).
     pub(super) entries: Vec<(String, FeatureKind)>,
+    /// pattern index -> index into the normalizer's `phrase_entries`, so the boundary-aware
+    /// phase-1 selection (codex R12) can recover each pattern's [`PhraseEntry`] (its mode).
+    pub(super) entry_idx: Vec<usize>,
 }
 
 impl AliasOverlap {
@@ -91,6 +94,41 @@ impl AliasOverlap {
                 out.push(dict.get_or_synthetic(&self.entries[m.value()].0));
             }
         }
+    }
+
+    /// Phase-1 phrase selection with **boundary validity participating in selection** (codex R12):
+    /// collect every word-boundary-aligned occurrence from the overlapping automaton, then apply
+    /// leftmost-longest over the VALID candidates only. The shared leftmost-longest automaton
+    /// commits to a match *before* the boundary check — a boundary-invalid occurrence (a pattern
+    /// found mid-token, e.g. `a b` inside `xa b`) is selected, consumes its span, suppresses a
+    /// valid overlapping pattern (`b c`), and is then dropped by the post-filter, so the valid
+    /// phrase is silently lost — on the query side that compiles an alias query to component
+    /// terms, an FN. Selecting over valid candidates only is identical to the legacy pass whenever
+    /// no mid-token occurrence exists, and strictly recovers suppressed phrases when one does.
+    /// Pushes `(byte_start, byte_end, phrase_entries index)` tuples, non-overlapping, in order.
+    fn select_phrases(&self, lc: &str, out: &mut Vec<(usize, usize, usize)>) {
+        let bytes = lc.as_bytes();
+        for m in self.automaton.find_overlapping_iter(lc) {
+            let (s, e) = (m.start(), m.end());
+            let ok_start = s == 0 || bytes[s - 1] == b' ';
+            let ok_end = e == lc.len() || bytes[e] == b' ';
+            if ok_start && ok_end {
+                out.push((s, e, self.entry_idx[m.value()]));
+            }
+        }
+        // Leftmost-longest over the boundary-valid candidates: smallest start wins, ties prefer
+        // the longest; later candidates overlapping an accepted span are dropped. (Two distinct
+        // patterns can never share a span — same span ⇒ same string ⇒ same automaton pattern.)
+        out.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        let mut end = 0usize;
+        out.retain(|&(s, e, _)| {
+            if s >= end {
+                end = e;
+                true
+            } else {
+                false
+            }
+        });
     }
 }
 
@@ -196,15 +234,25 @@ impl Normalizer {
         // The automaton operates on the cleaned string, matching space-joined
         // token sequences. We need to ensure matches align on word boundaries.
         let mut phrase_matches: Vec<(usize, usize, usize)> = Vec::new();
-        for m in self.automaton.leftmost_find_iter(&**lc) {
-            let start = m.start();
-            let end = m.end();
-            // Word-boundary check: match must start at beginning or after a space,
-            // and end at end-of-string or before a space.
-            let ok_start = start == 0 || lc.as_bytes()[start - 1] == b' ';
-            let ok_end = end == lc.len() || lc.as_bytes()[end] == b' ';
-            if ok_start && ok_end {
-                phrase_matches.push((start, end, m.value()));
+        if let Some(ov) = &self.alias_overlap {
+            // ADR-061 (codex R12): with multi-word aliases active, boundary validity must
+            // participate in match SELECTION — see `AliasOverlap::select_phrases`. The legacy
+            // pass below commits to a boundary-invalid mid-token match and lets it suppress a
+            // valid overlapping phrase (a query-side FN). Gated on `alias_overlap`, so the
+            // no-alias configuration keeps the legacy pass byte-identical (its pathological
+            // collapse-phrase cases are baked into persisted canonical features — codex R8).
+            ov.select_phrases(lc, &mut phrase_matches);
+        } else {
+            for m in self.automaton.leftmost_find_iter(&**lc) {
+                let start = m.start();
+                let end = m.end();
+                // Word-boundary check: match must start at beginning or after a space,
+                // and end at end-of-string or before a space.
+                let ok_start = start == 0 || lc.as_bytes()[start - 1] == b' ';
+                let ok_end = end == lc.len() || lc.as_bytes()[end] == b' ';
+                if ok_start && ok_end {
+                    phrase_matches.push((start, end, m.value()));
+                }
             }
         }
 
@@ -328,7 +376,16 @@ impl Normalizer {
                     // later number grades with it too — the parse-union over which graders a parse
                     // frees by consuming the others. A grader token ages nothing (matches the
                     // single-pending path, where the new grader resets only its own age).
-                    active_graders.push((gcanon, 0));
+                    // Deduped per CANONICAL grader, refreshing the age (codex R12): the freshest
+                    // occurrence outlives any older same-name one, so the parse-union superset is
+                    // strictly preserved, while the set stays bounded by the (small) distinct
+                    // grader vocabulary — repeated grader tokens otherwise grow the set without
+                    // bound and every number then emits per entry (a quadratic crafted-title DoS).
+                    if let Some(entry) = active_graders.iter_mut().find(|(g, _)| *g == gcanon) {
+                        entry.1 = 0;
+                    } else {
+                        active_graders.push((gcanon, 0));
+                    }
                 } else if fused {
                     pending_grader = None;
                 } else {

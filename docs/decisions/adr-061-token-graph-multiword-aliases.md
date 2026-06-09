@@ -46,7 +46,11 @@
     `psa 8` only once `9 lives` collapses); (2) a second grader overwrites the pending one
     (`psa a bgs 8`, overlapping `psa a` / `a bgs`, reads a `psa 8` only once `a bgs` collapses).
     Neither the leftmost-longest nor the zero-consume extreme emits these; the active-grader set
-    does. (Over-emitting a grade no parse produces is a bounded false positive, recall-safe.) An
+    does. The set is **deduped per canonical grader** (a repeat refreshes the age — the freshest
+    occurrence outlives any older one, so the superset claim is unaffected), bounding it by the
+    distinct-grader vocabulary; without the dedup a crafted title of N repeated graders + M numbers
+    emits N×M duplicate grades (a quadratic normalization DoS).
+    (Over-emitting a grade no parse produces is a bounded false positive, recall-safe.) An
     exhaustive **parse-union oracle** (`normalize/parse_union_oracle.rs`) enumerates every
     phrase-collapse parse of short titles and asserts `P(T) ⊇` their union — the independent check
     the differential oracle cannot do (it reuses `match_features_dual` itself). Used for: signature
@@ -84,7 +88,15 @@
   (tokenization is whitespace-agnostic, so only phrase alignment changes); the **title side keeps its
   cleaned text verbatim** — persisted canonical normalization never changes — with title-side runs
   handled by the `P(T)` overlap scan, which collapses runs itself. With no active alias, both sides are
-  byte-identical to pre-ADR-061.
+  byte-identical to pre-ADR-061. A second selection wrinkle: the shared leftmost-longest automaton
+  commits to a match **before** the word-boundary check, so a boundary-invalid mid-token occurrence
+  (`a b` found inside `xa b`) can consume its span, suppress a valid overlapping alias (`b c`), and then
+  be dropped by the post-filter — the query compiles to component terms and the alias is silently lost
+  (an FN). With aliases active, phase-1 selection therefore runs over the **overlapping** automaton's
+  word-boundary-**valid** candidates only (then leftmost-longest among them) — identical to the legacy
+  pass whenever no mid-token occurrence exists, and strictly recovering suppressed phrases when one
+  does. The no-alias configuration keeps the legacy pass (its pathological collapse-phrase selection is
+  baked into persisted canonical features).
 
 - **The wiring is small because the equivalence machinery already supports it.**
   `Vocab::resolve_equivalences` resolves each alias form to features through the read-only compile path
