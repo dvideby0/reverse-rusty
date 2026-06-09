@@ -5,7 +5,7 @@
 
 use crate::harness::*;
 use reverse_rusty::dict::Dict;
-use reverse_rusty::normalize::Normalizer;
+use reverse_rusty::normalize::{Normalizer, PunctClass};
 use reverse_rusty::segment::{Engine, MatchScratch};
 use reverse_rusty::vocab::Vocab;
 use std::collections::HashSet;
@@ -45,6 +45,62 @@ fn multiword_alias_survives_future_insert_on_fresh_index() {
         matched(&mut eng, &mut s, "ny yankees").contains(&1),
         "multi-word alias must survive a future insert on a fresh index (a ny title reaches the \
          new york query)"
+    );
+}
+
+/// Codex R11 (P2): a whitespace RUN inside a query-side alias occurrence — the DSL passes a
+/// quoted phrase's inner text verbatim to `compile_features` — must still collapse to the alias
+/// entity. Without the query-side run collapse the query compiles to component terms, equivalence
+/// expansion never reaches the group, and `"new  york" mets` misses a `ny mets` title (a false
+/// negative of the zero-FN contract).
+#[test]
+fn query_alias_with_whitespace_run_still_reaches_the_group() {
+    let mut v = Vocab::new();
+    let activated = v.import_solr_aliases(
+        "ny => new york",
+        &Normalizer::default_vocab().expect("vocab"),
+        &Dict::new(),
+    );
+    assert_eq!(activated, 1, "the declared multi-word alias must activate");
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.set_vocab(v).expect("set_vocab");
+    // The quoted phrase carries a DOUBLE space; the DSL hands it to the normalizer verbatim.
+    eng.build_from_queries(&[(1, "\"new  york\" mets".into())]);
+
+    let mut s = MatchScratch::new();
+    assert!(
+        matched(&mut eng, &mut s, "ny mets").contains(&1),
+        "a whitespace run inside the quoted alias phrase must not hide the alias"
+    );
+    assert!(
+        matched(&mut eng, &mut s, "new york mets").contains(&1),
+        "the literal form still matches"
+    );
+}
+
+/// Codex R11: an ACTIVE alias must keep matching across a punctuation-table change that alters
+/// its forms' tokenization. `ab => a-b` under `-`:Fold classifies single-token (`a-b` cleans to
+/// `ab`); re-classing `-` to Split makes `a-b` clean to `a b`. Phrase registration re-derives
+/// multi-wordness from the LIVE punctuation table (not the stored kind snapshot), so the form
+/// registers as an alias phrase, still resolves to one feature, and the group survives — instead
+/// of being dropped from the equivalence map and silently dying while still reporting Active.
+#[test]
+fn active_alias_survives_punctuation_reclassification() {
+    let mut v = Vocab::new();
+    v.fold_punctuation('-');
+    let norm = v.to_normalizer().expect("normalizer with - folded");
+    assert_eq!(v.import_solr_aliases("ab => a-b", &norm, &Dict::new()), 1);
+    v.set_punct_class('-', PunctClass::Split);
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.set_vocab(v).expect("set_vocab");
+    eng.build_from_queries(&[(1, "a b foo".into())]);
+
+    let mut s = MatchScratch::new();
+    assert!(
+        matched(&mut eng, &mut s, "ab foo").contains(&1),
+        "an active alias must track a punctuation reclassification of its forms"
     );
 }
 

@@ -107,6 +107,44 @@ fn whitespace_runs_are_not_collapsed_in_canonical_features() {
 }
 
 #[test]
+fn query_side_collapses_whitespace_runs_only_when_aliases_active() {
+    // ADR-061 (codex R11): alias patterns are registered single-spaced, and the DSL hands a
+    // quoted phrase's inner text to `compile_features` verbatim — so a whitespace run inside a
+    // query phrase (`"new  york"`) would hide the alias from the query-side collapse: the query
+    // compiles to component terms, equivalence expansion never reaches the group, and
+    // `"new  york" mets` misses a `ny mets` title (a false negative). With an alias active, the
+    // QUERY side therefore collapses runs before the phrase scan. The title canonical view stays
+    // verbatim (codex R8: persisted normalization never changes), and without an alias the query
+    // side is byte-identical (`whitespace_runs_are_not_collapsed_in_canonical_features` above).
+    let mut b = NormalizerBuilder::new();
+    b.add_alias_form("new york");
+    let n = b.build().expect("alias normalizer");
+
+    assert_eq!(
+        names(&n, "new  york mets"),
+        s(&["term:mets", "term:new_york"]),
+        "query side: a run inside the alias span still collapses to the entity"
+    );
+
+    // Title side under the same normalizer: canonical N(T) keeps the run verbatim (components,
+    // no entity); the P(T) overlap scan — which collapses runs itself — recovers the entity.
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let _ = n.compile_features("new york", &mut dict, &mut lc); // intern the entity dense
+    let entity = dict.get_or_synthetic("term:new_york");
+    let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    n.match_features_dual("new  york mets", &dict, &mut lc, &mut neg, &mut pos);
+    assert!(
+        !neg.contains(&entity),
+        "title canonical N(T) keeps whitespace runs verbatim (codex R8)"
+    );
+    assert!(
+        pos.contains(&entity),
+        "the P(T) overlap scan recovers the entity across the run"
+    );
+}
+
+#[test]
 fn synonyms_converge_alternate_surface_forms() {
     let n = spec_vocab();
     // normalization.md §2: "ud" and the "upper deck" phrase land on the SAME feature.

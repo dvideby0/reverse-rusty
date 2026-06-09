@@ -77,7 +77,14 @@
 
   This maps onto the existing function boundary exactly — `compile_features*` are the query side,
   `match_features` is the title side — so the asymmetry needs a `Side` discriminant on `emit`, not a new
-  flag at every call.
+  flag at every call. One whitespace wrinkle: alias patterns are registered single-spaced, and the DSL
+  hands a quoted phrase's inner text to the compiler **verbatim** — so a whitespace run (`"new  york"`)
+  would hide the alias from the query-side collapse and the query would silently lose the group (an FN).
+  When multi-word aliases are active, the **query side collapses whitespace runs** before the phrase scan
+  (tokenization is whitespace-agnostic, so only phrase alignment changes); the **title side keeps its
+  cleaned text verbatim** — persisted canonical normalization never changes — with title-side runs
+  handled by the `P(T)` overlap scan, which collapses runs itself. With no active alias, both sides are
+  byte-identical to pre-ADR-061.
 
 - **The wiring is small because the equivalence machinery already supports it.**
   `Vocab::resolve_equivalences` resolves each alias form to features through the read-only compile path
@@ -86,13 +93,17 @@
   **collapse phrase** in the normalizer and `compile_features_readonly("new york")` returns
   `[term:new_york]` (len 1) — so the group `{ny, new york}` resolves to `{id(ny), id(term:new_york)}` and
   the **unchanged** `resolve_equivalences` / expansion path produces the bidirectional any-of. Concretely:
-  - `AliasRegistry`: a new `active_multiword_groups()` (parallel to Phase 1's `active_groups`), and
+  - `AliasRegistry`: a new `active_alias_forms()` (parallel to Phase 1's `active_groups`), and
     `activate` / `is_active_for_matching` accept `MultiWord` (the Phase-1 refusal is lifted now that the
     matcher can express it; `MixedKind` stays refused).
-  - `Vocab::to_normalizer`: register each active multi-word alias form as an **alias-mode phrase**
-    (`PhraseMode::Alias`) emitting the deterministic entity `term:<tokens.join("_")>` (the corpus `term:`
-    convention, so an alias and a corpus phrase over the same tokens share one entity; alias mode wins the
-    dedup so collapse-on-query is preserved).
+  - `Vocab::to_normalizer`: offer **every** active alias form for phrase registration; the builder
+    tokenizes each against the **final** punctuation table at `build()` and registers the ≥2-token ones
+    as **alias-mode phrases** (`PhraseMode::Alias`) emitting the deterministic entity
+    `term:<tokens.join("_")>` (the corpus `term:` convention, so an alias and a corpus phrase over the
+    same tokens share one entity; alias mode wins the dedup so collapse-on-query is preserved).
+    Multi-wordness is re-derived from the **live** table, not the stored `AliasKind` snapshot — a later
+    punctuation reclassification (`a-b` under `-`:Fold → `-`:Split) would otherwise leave a still-Active
+    alias unregistered, dropped from the equivalence map, and silently dead while reporting active.
   - `Vocab::effective_equivalence_groups`: already the union point — it now also contributes the
     multi-word groups, so `resolve_equivalences` + `intern_equivalence_forms` pick them up with no change.
   - **ID stability** reuses the Phase-1 fix verbatim: `intern_equivalence_forms` calls `compile_features`

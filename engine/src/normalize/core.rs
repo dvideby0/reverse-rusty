@@ -14,7 +14,8 @@ use daachorse::DoubleArrayAhoCorasick;
 mod helpers;
 pub use helpers::fold_diacritic;
 use helpers::{
-    age_active_graders, as_year, canon_grader, emit_generic, is_grade_value, parse_number,
+    age_active_graders, as_year, canon_grader, collapse_ws_runs_in_place, emit_generic,
+    is_grade_value, parse_number,
 };
 
 pub struct Normalizer {
@@ -175,6 +176,20 @@ impl Normalizer {
         emit: &mut F,
     ) {
         self.clean_into(text, lc);
+
+        // ADR-061 (codex R11): on the QUERY side, when multi-word aliases are active, collapse
+        // whitespace runs before the phrase scan. Alias patterns are registered single-spaced, so
+        // a run inside a quoted phrase (`"new  york"`) or any-of member would hide the alias from
+        // the leftmost-longest automaton: the query compiles to component terms, equivalence
+        // expansion never reaches the group, and `"new  york" mets` misses a `ny mets` title — a
+        // false negative. Tokenization is whitespace-agnostic, so token features are unchanged;
+        // only phrase alignment can differ — and a title-with-runs still matches a collapsed query
+        // entity through the `P(T)` overlap scan, which collapses runs itself. The title side
+        // keeps `lc` VERBATIM (codex R8: persisted canonical normalization must not change), and
+        // the gate on `alias_overlap` keeps the no-alias configuration byte-identical.
+        if side == Side::Query && self.alias_overlap.is_some() {
+            collapse_ws_runs_in_place(lc);
+        }
 
         // Phase 1: find multiword phrase matches via the automaton.
         // We collect (byte_start, byte_end, pattern_index) for each match.

@@ -88,14 +88,6 @@ impl AliasEntry {
                     | AliasKind::MultiWord
             )
     }
-
-    /// True if this entry is an active **multi-word** alias — the subset whose forms must be
-    /// registered as alias phrases in the normalizer (ADR-061), distinct from the single-token
-    /// groups that need only the equivalence map.
-    #[must_use]
-    pub fn is_active_multiword(&self) -> bool {
-        self.status == AliasStatus::Active && self.kind == AliasKind::MultiWord
-    }
 }
 
 /// Count of entries by lifecycle status — surfaced for metrics / review (ADR-060 item 9).
@@ -146,15 +138,24 @@ impl AliasRegistry {
             .collect()
     }
 
-    /// The raw forms of every **active multi-word** alias group (ADR-061), deduped + sorted.
-    /// `Vocab::to_normalizer` registers each multi-token form among these as an alias phrase so
-    /// it collapses to its entity on the query side and overlaps on the title side.
+    /// The raw forms of every entry active for matching (ADR-061), deduped + sorted. Offered to
+    /// `Vocab::to_normalizer` → `NormalizerBuilder::add_alias_form`, which tokenizes each form
+    /// against the **final** punctuation table and registers only those cleaning to ≥2 tokens as
+    /// alias phrases (single-token forms are the equivalence map's job and register nothing).
+    ///
+    /// Deliberately kind-INDEPENDENT beyond the matchable-kind gate in `is_active_for_matching`:
+    /// the stored `kind` is a classification *snapshot*, and a later punctuation-table change can
+    /// turn a single-token form multi-word (`a-b` under `-`:Fold → `-`:Split). Trusting the
+    /// snapshot would leave the still-Active alias unregistered — it would resolve to several
+    /// features, be dropped from the equivalence map, and silently stop matching (codex R11).
+    /// Letting the builder re-derive multi-wordness from the live table makes registration
+    /// self-healing in both directions; `MixedKind` stays excluded (structurally never matchable).
     #[must_use]
-    pub fn active_multiword_forms(&self) -> Vec<String> {
+    pub fn active_alias_forms(&self) -> Vec<String> {
         let mut out: Vec<String> = self
             .entries
             .iter()
-            .filter(|e| e.is_active_multiword())
+            .filter(|e| e.is_active_for_matching())
             .flat_map(|e| e.forms.iter().cloned())
             .collect();
         out.sort();

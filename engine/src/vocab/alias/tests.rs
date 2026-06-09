@@ -273,8 +273,12 @@ fn registry_active_groups_includes_variants_and_declared_multiword() {
             forms(&["ud", "upper deck"])
         ]
     );
-    // The multi-word group is the one that needs phrase registration.
-    assert_eq!(reg.active_multiword_forms(), forms(&["ud", "upper deck"]));
+    // EVERY active entry's forms are offered for phrase registration (the builder re-derives
+    // multi-wordness from the live punct table and skips the single-token ones, codex R11).
+    assert_eq!(
+        reg.active_alias_forms(),
+        forms(&["refractor", "refractors", "ud", "upper deck"])
+    );
     let s = reg.summary();
     assert_eq!((s.active, s.candidate, s.rejected), (2, 1, 0));
 }
@@ -390,7 +394,7 @@ fn activate_accepts_multiword_refuses_mixed_kind() {
         reg.activate(&forms(&["ny", "new york"])),
         "multi-word activates in Phase 2"
     );
-    assert_eq!(reg.active_multiword_forms(), forms(&["new york", "ny"]));
+    assert_eq!(reg.active_alias_forms(), forms(&["new york", "ny"]));
 
     // Mixed-kind is still refused — the matcher cannot express a cross-kind expansion.
     reg.add_classified(
@@ -498,7 +502,7 @@ fn reimport_promotion_adopts_fresh_kind_but_active_keeps_kind() {
     );
     assert!(reg.entries[0].is_active_for_matching());
     assert_eq!(
-        reg.active_multiword_forms(),
+        reg.active_alias_forms(),
         forms(&["new york", "ny"]),
         "the promoted multi-word group must reach the normalizer registration list"
     );

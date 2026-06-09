@@ -262,7 +262,7 @@ fn set_vocab_refuses_active_multiword_alias_on_cluster() {
 
     let v = vocab_with_multiword_alias();
     assert!(
-        !v.aliases().active_multiword_forms().is_empty(),
+        !v.aliases().active_alias_forms().is_empty(),
         "the declared multi-word alias must be active"
     );
     let err = cluster

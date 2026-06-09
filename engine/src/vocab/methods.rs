@@ -75,10 +75,14 @@ impl Vocab {
         for rule in &self.punctuation {
             b.set_punct_class(rule.ch, rule.class.into());
         }
-        // ADR-061: register active multi-word alias forms as alias-mode phrases. Each collapses
-        // to a single entity on the query side (so `resolve_equivalences` keeps the group — its
-        // forms now resolve to one feature) and overlaps additively on the title side.
-        for form in self.aliases.active_multiword_forms() {
+        // ADR-061: offer every active alias form for phrase registration. The builder tokenizes
+        // each against the FINAL punctuation table at build() and registers only the ≥2-token
+        // ones as alias-mode phrases — each collapses to a single entity on the query side (so
+        // `resolve_equivalences` keeps the group — its forms now resolve to one feature) and
+        // overlaps additively on the title side. Multi-wordness is re-derived from the live
+        // table, not the stored kind snapshot, so a punctuation reclassification cannot silently
+        // kill an active alias (codex R11).
+        for form in self.aliases.active_alias_forms() {
             b.add_alias_form(&form);
         }
 

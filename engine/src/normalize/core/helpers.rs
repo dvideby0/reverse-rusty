@@ -57,6 +57,21 @@ pub(super) fn age_active_graders(active: &mut Vec<(String, u8)>) {
     });
 }
 
+/// Collapse whitespace runs in place (and strip a leading space). Phrase patterns are registered
+/// single-spaced, so a run inside the cleaned text hides a phrase from the automaton. Applied on
+/// the QUERY side only, and only when multi-word aliases are active (ADR-061, codex R11) — the
+/// title side keeps its cleaned text verbatim (codex R8: persisted canonical normalization must
+/// not change); title-side runs are handled by the additive overlap scan instead
+/// (`AliasOverlap::collect_into`).
+pub(super) fn collapse_ws_runs_in_place(s: &mut String) {
+    let mut prev_space = true; // initial `true` also strips a leading space
+    s.retain(|c| {
+        let keep = c != ' ' || !prev_space;
+        prev_space = c == ' ';
+        keep
+    });
+}
+
 /// Parse a token into a clean numeric string (digits with optional .5), or None.
 pub(super) fn parse_number(tok: &str) -> Option<String> {
     let mut seen_digit = false;
