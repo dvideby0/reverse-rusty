@@ -363,14 +363,22 @@ impl AliasRegistry {
     /// Demote every ACTIVE entry containing a form the CURRENT normalizer cannot express — a
     /// form that cleans to fewer than two tokens AND does not resolve to exactly one feature
     /// (e.g. a fused grader `psa10` after a punctuation refold turned `psa-10` into one token) —
-    /// back to [`Candidate`](AliasStatus::Candidate), marking it
-    /// [`MixedKind`](AliasKind::MixedKind) exactly as a fresh classification would (codex R13).
-    /// Such a form cannot be registered as an alias phrase and `resolve_equivalences` drops it,
-    /// so leaving the entry Active would report an alias that silently never matches. Called by
-    /// every equivalence-install seam (engine/cluster `set_vocab`, `adopt_vocab`, `with_vocab`,
-    /// `open_with_vocab`), so Active always reflects what the live normalizer expresses. Returns
-    /// the demoted count; a later re-import / manual `activate` re-promotes once expressible
-    /// again (the same-provenance promotion adopts the fresh kind, codex R10).
+    /// back to [`Candidate`](AliasStatus::Candidate) (codex R13). Such a form cannot be
+    /// registered as an alias phrase and `resolve_equivalences` drops it, so leaving the entry
+    /// Active would report an alias that silently never matches. Called by every
+    /// equivalence-install seam (engine/cluster `set_vocab`, `adopt_vocab`, `with_vocab`,
+    /// `open_with_vocab`), so Active always reflects what the live normalizer expresses.
+    ///
+    /// The demotion is **status-only** — the stored `kind` is preserved (codex R14): stamping
+    /// `MixedKind` would dead-end the entry, since [`activate`](Self::activate) structurally
+    /// refuses that kind even after the operator repairs the vocabulary. With the kind intact, a
+    /// repaired configuration re-activates via `activate` or a re-import (whose same-provenance
+    /// promotion adopts the fresh kind, codex R10); an activate while still broken simply
+    /// demotes again at the next install seam. Deliberately NOT a full reclassification:
+    /// re-deriving the *kind* (e.g. cross-kind drift as the dict learns) would demote working
+    /// aliases on a precision hunch — equivalence expansion only ever widens any-of groups
+    /// (recall-safe), so kind drift after activation is accepted and corrected on re-import.
+    /// Returns the demoted count.
     pub fn demote_unexpressible(&mut self, norm: &Normalizer, dict: &Dict) -> usize {
         let mut lc = String::new();
         let mut demoted = 0;
@@ -383,7 +391,6 @@ impl AliasRegistry {
                     && norm.compile_features_readonly(f, dict, &mut lc).len() != 1
             });
             if unexpressible {
-                e.kind = AliasKind::MixedKind;
                 e.status = AliasStatus::Candidate;
                 demoted += 1;
             }

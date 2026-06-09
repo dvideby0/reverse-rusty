@@ -280,6 +280,50 @@ fn set_vocab_refuses_active_multiword_alias_on_cluster() {
 }
 
 #[test]
+fn set_vocab_heals_unexpressible_alias_instead_of_refusing() {
+    // Codex R14: the multi-word refusal must judge the HEALED vocabulary. An active group like
+    // `psa-10 ≡ new york` — classified while '-' split (`psa-10` = 2 tokens) — whose first form
+    // later becomes unexpressible (`psa` grader + '-' fold ⇒ fused `psa10`) is demoted at the
+    // install seam; with the entry demoted nothing registers a multi-word alias phrase, so the
+    // vocabulary is cluster-safe and must be ACCEPTED, not rejected on its pre-heal state.
+    let (queries, _titles) = build_corpus();
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+
+    let mut v = reverse_rusty::vocab::Vocab::new();
+    v.add_grader("psa");
+    let n = reverse_rusty::normalize::Normalizer::default_vocab().unwrap();
+    let d = reverse_rusty::dict::Dict::new();
+    v.aliases_mut().add_classified(
+        &["psa-10".into(), "new york".into()],
+        reverse_rusty::vocab::AliasProvenance::DeclaredFile,
+        1.0,
+        &n,
+        &d,
+    );
+    assert!(!v.aliases().active_alias_forms().is_empty(), "active");
+    v.fold_punctuation('-'); // the mutation that makes `psa-10` unexpressible (fused grader)
+
+    cluster
+        .set_vocab(v)
+        .expect("the healed (no remaining active multi-word) vocabulary must be accepted");
+    let aliases = cluster.vocab().expect("vocab installed").alias_summary();
+    assert_eq!(
+        (aliases.active, aliases.candidate),
+        (0, 1),
+        "the unexpressible group demoted to a review candidate through the cluster seam"
+    );
+    assert!(
+        cluster.percolate("1994 fleer psa 10").is_ok(),
+        "the cluster remains usable after the healed vocabulary change"
+    );
+}
+
+#[test]
 fn build_refuses_a_multiword_alias_normalizer() {
     // The same single-node restriction at construction: a normalizer carrying multi-word alias
     // phrases cannot back a cluster (routing would miss nested entities).

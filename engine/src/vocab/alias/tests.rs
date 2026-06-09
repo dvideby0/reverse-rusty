@@ -4,7 +4,7 @@ use super::classify::{classify_kind, default_status_for, AliasKind};
 use super::solr::parse_solr_synonyms;
 use super::{AliasProvenance, AliasRegistry, AliasStatus};
 use crate::dict::Dict;
-use crate::normalize::Normalizer;
+use crate::normalize::{Normalizer, NormalizerBuilder};
 
 fn norm() -> Normalizer {
     Normalizer::default_vocab().expect("default normalizer")
@@ -530,6 +530,50 @@ fn reimport_promotion_adopts_fresh_kind_but_active_keeps_kind() {
         reg2.entries[0].kind,
         AliasKind::SingleTokenDistinct,
         "an already-active entry's kind is preserved across a re-import"
+    );
+}
+
+#[test]
+fn demotion_is_status_only_so_a_repaired_vocab_reactivates() {
+    // Codex R14: `demote_unexpressible` must not stamp `MixedKind` — that would dead-end the
+    // entry, since `activate` structurally refuses that kind even after the operator repairs
+    // the vocabulary. Status-only demotion keeps the path back open.
+    let dict = Dict::new();
+    let plain = norm(); // default punctuation: '-' splits ⇒ "psa-10" is a 2-token form
+    let mut reg = AliasRegistry::new();
+    let st = reg.add_classified(
+        &forms(&["x", "psa-10"]),
+        AliasProvenance::DeclaredFile,
+        1.0,
+        &plain,
+        &dict,
+    );
+    assert_eq!(st, Some(AliasStatus::Active));
+
+    // The vocabulary then mutates: `psa` becomes a grader and `-` folds, so the form cleans
+    // to the fused token `psa10` (several features) — unexpressible.
+    let mut b = NormalizerBuilder::new();
+    b.add_grader("psa");
+    b.fold_punctuation('-');
+    let broken = b.build().expect("broken norm");
+    assert_eq!(reg.demote_unexpressible(&broken, &dict), 1);
+    assert_eq!(reg.entries[0].status, AliasStatus::Candidate);
+    assert_eq!(
+        reg.entries[0].kind,
+        AliasKind::MultiWord,
+        "demotion is status-only: the kind snapshot is preserved"
+    );
+
+    // Repair: with the kind intact, manual activation succeeds again, and the entry is
+    // expressible under the repaired vocabulary (no re-demotion).
+    assert!(
+        reg.activate(&forms(&["x", "psa-10"])),
+        "a repaired candidate must re-activate"
+    );
+    assert_eq!(
+        reg.demote_unexpressible(&plain, &dict),
+        0,
+        "expressible again under the repaired vocabulary"
     );
 }
 

@@ -131,7 +131,11 @@
     `AliasRegistry::demote_unexpressible`: an Active entry whose form the live normalizer can no longer
     express (one cleaned token resolving to ≠1 feature, e.g. a fused grader after a punctuation refold)
     demotes back to a review candidate instead of reporting active while `resolve_equivalences`
-    silently drops it.
+    silently drops it. The demotion is **status-only** (the kind snapshot is preserved, so a repaired
+    vocabulary re-activates via `activate` or re-import — codex R14) and deliberately not a full
+    reclassification (kind drift after activation is precision-only — expansion can only widen
+    any-of groups — and is corrected on re-import). The cluster's `set_vocab` runs the heal **before**
+    its multi-word refusal, so the refusal judges the healed vocabulary.
 
 - **The forbidden policy (decided up front, recall-justified).** A title `T` *forbidden-contains* a
   phrase iff that phrase is an entity in `T`'s **leftmost-longest canonical parse** `N(T)`. Consequences,
