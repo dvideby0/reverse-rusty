@@ -164,6 +164,24 @@
   (if it used `N`) and a forbidden-FN (if it used `P`); two sets pay neither. False positives (the
   superset retrieving/passing more than a stricter reading would) remain allowed and cheap.
 
+- **Semantics of activation — what a vocabulary change may change (codex R15).** The zero-FN contract is
+  **per-vocabulary**: engine ≡ spec under the *current* vocab, verified by the differential oracle. It is
+  NOT cross-vocab match-set monotonicity — `set_vocab` is a semantics-changing operation by design
+  (recompile applies the new semantics to every query). Three deliberate consequences when a multi-word
+  alias activates:
+  - A query containing the alias text (`new york mets`) reads the phrase as the **entity**: it gains the
+    alias reach (`ny mets` titles) and stops matching the *scattered-components* reading
+    (`new amazing york mets`). This is the same shift a declared collapse phrase has always made (and
+    alternative (3) below rejects keeping components required). Preserving the component conjunction *as
+    an alternative* is expressible in the existing plan structure via CNF distributivity —
+    `(entity ∨ ny ∨ new) ∧ (entity ∨ ny ∨ york)` ≡ `(entity ∨ ny) ∨ (new ∧ york)`, strictly widening —
+    and is a designed follow-on (roadmap), not v1.
+  - The query-side whitespace-run collapse and the boundary-aware phase-1 selection apply to **every**
+    phrase (alias and non-alias) while aliases are active: one automaton scans one string, and a
+    per-mode split would make the same surface text read differently by phrase mode. Both changes make
+    phrase recognition *more* correct (noise/suppression artifacts no longer defeat a declared phrase);
+    the **no-alias configuration is byte-identical**, so no persisted deployment shifts.
+
 - **Hot-path budget / default byte-identical.** The second (overlapping) automaton and the dual view are
   built **only when ≥1 multi-word alias is active**; otherwise `match_features` stays single-view, the
   overlap automaton is `None`, `P(T) == N(T)`, and every lane is byte-identical to pre-ADR-061. When

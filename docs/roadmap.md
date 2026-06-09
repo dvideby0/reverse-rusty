@@ -301,6 +301,14 @@ false-negative / throughput audit — remains the open step in **Current limitat
     includes forbidden-feature queries over multi-word-alias titles** (`multiword_alias_forbidden_uses_canonical_view`),
     overlapping/nested retrieval, bidirectional match, and exact engine≡brute — zero-FN; default
     byte-identical.
+  - **Deferred refinement — component-conjunction alternative on alias activation.** Activating
+    `ny ≡ new york` makes a `new york mets` query read the phrase as the entity, so it stops matching
+    the *scattered-components* reading (`new amazing york mets`) — the same semantic shift a declared
+    collapse phrase has always made (documented in ADR-061 §semantics-of-activation). ES
+    `synonym_graph` keeps the original token path as an alternative; RR can too **without any plan-shape
+    change** via CNF distributivity — rewrite the expanded requirement to per-component any-of groups:
+    `(entity ∨ ny ∨ new) ∧ (entity ∨ ny ∨ york)` ≡ `(entity ∨ ny) ∨ (new ∧ york)`. Strictly widening
+    (recall-only), bounded for typical 2–3-form/2–3-token groups (cap the CNF product and fall back).
 
 ### Polish / niche
 
