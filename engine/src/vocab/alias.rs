@@ -360,6 +360,37 @@ impl AliasRegistry {
         true
     }
 
+    /// Demote every ACTIVE entry containing a form the CURRENT normalizer cannot express — a
+    /// form that cleans to fewer than two tokens AND does not resolve to exactly one feature
+    /// (e.g. a fused grader `psa10` after a punctuation refold turned `psa-10` into one token) —
+    /// back to [`Candidate`](AliasStatus::Candidate), marking it
+    /// [`MixedKind`](AliasKind::MixedKind) exactly as a fresh classification would (codex R13).
+    /// Such a form cannot be registered as an alias phrase and `resolve_equivalences` drops it,
+    /// so leaving the entry Active would report an alias that silently never matches. Called by
+    /// every equivalence-install seam (engine/cluster `set_vocab`, `adopt_vocab`, `with_vocab`,
+    /// `open_with_vocab`), so Active always reflects what the live normalizer expresses. Returns
+    /// the demoted count; a later re-import / manual `activate` re-promotes once expressible
+    /// again (the same-provenance promotion adopts the fresh kind, codex R10).
+    pub fn demote_unexpressible(&mut self, norm: &Normalizer, dict: &Dict) -> usize {
+        let mut lc = String::new();
+        let mut demoted = 0;
+        for e in &mut self.entries {
+            if !e.is_active_for_matching() {
+                continue;
+            }
+            let unexpressible = e.forms.iter().any(|f| {
+                norm.clean_tokens(f).len() < 2
+                    && norm.compile_features_readonly(f, dict, &mut lc).len() != 1
+            });
+            if unexpressible {
+                e.kind = AliasKind::MixedKind;
+                e.status = AliasStatus::Candidate;
+                demoted += 1;
+            }
+        }
+        demoted
+    }
+
     /// Merge another registry into this one (used by [`Vocab::merge`](crate::vocab::Vocab::merge)).
     /// An incoming entry whose forms are new is appended verbatim; a clash keeps the existing
     /// entry (first wins) but adopts a higher-trust provenance + the max confidence, mirroring

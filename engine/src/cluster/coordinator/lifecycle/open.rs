@@ -154,14 +154,14 @@ impl ClusterEngine {
         // the serialized vocab — rebuild the normalizer from IT (authoritative over the
         // caller-supplied one) so a declared alias survives the restart, and retain the
         // vocab so a later checkpoint re-persists it (else the next reopen would lose it).
-        let restored_vocab = if manifest.vocab_data.is_empty() {
+        let mut restored_vocab = if manifest.vocab_data.is_empty() {
             None
         } else {
             let json = std::str::from_utf8(&manifest.vocab_data)
                 .map_err(|e| ShardError::Config(format!("cluster vocab not utf-8: {e}")))?;
             let v = crate::vocab::Vocab::from_json(json)
                 .map_err(|e| ShardError::Config(format!("deserializing cluster vocab: {e}")))?;
-            Some(Arc::new(v))
+            Some(v)
         };
         let norm = match &restored_vocab {
             Some(v) => v.to_normalizer().map_err(|e| {
@@ -169,6 +169,20 @@ impl ClusterEngine {
             })?,
             None => norm,
         };
+        // Self-heal stale-active aliases against the restored normalizer (codex R13, the same
+        // demotion every other equivalence-install seam runs): a persisted vocab can carry an
+        // Active entry the current classification can no longer express. Demotion can only
+        // shrink the registered phrase set, so rebuild the normalizer when it fires (the
+        // demoted state re-persists at the next checkpoint).
+        let mut norm = norm;
+        if let Some(v) = &mut restored_vocab {
+            if v.aliases_mut().demote_unexpressible(&norm, &dict) > 0 {
+                norm = v.to_normalizer().map_err(|e| {
+                    ShardError::Config(format!("building normalizer from cluster vocab: {e}"))
+                })?;
+            }
+        }
+        let restored_vocab = restored_vocab.map(Arc::new);
         let norm = Arc::new(norm);
         // Re-install equivalence groups (ADR-054) on the recovered dict so a log-tail replay
         // and post-reopen incremental adds expand through them. The already-attached segments

@@ -134,6 +134,35 @@ fn boundary_overlap_alias_query_still_matches() {
     );
 }
 
+/// Codex R13 (P2): an Active alias whose form becomes UNEXPRESSIBLE after vocabulary changes —
+/// `psa-10` activated while `-` splits (a registrable multi-word form), then `psa` becomes a
+/// grader and `-` folds, so the form cleans to the fused token `psa10`, which resolves to
+/// several features — must be demoted back to a review candidate at the install seam.
+/// `resolve_equivalences` drops such a form, so leaving the entry Active would report an alias
+/// that silently never matches.
+#[test]
+fn unexpressible_active_alias_demotes_on_install() {
+    let mut v = Vocab::new();
+    let norm0 = v.to_normalizer().expect("norm");
+    assert_eq!(
+        v.import_solr_aliases("x => psa-10", &norm0, &Dict::new()),
+        1,
+        "multi-word under '-':Split ⇒ declared ⇒ active"
+    );
+    // The vocabulary then changes: `psa` becomes a grader and `-` folds.
+    v.add_grader("psa");
+    v.fold_punctuation('-');
+
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.set_vocab(v).expect("set_vocab");
+    let summary = eng.alias_summary();
+    assert_eq!(
+        (summary.active, summary.candidate),
+        (0, 1),
+        "the now-unexpressible alias must demote to a candidate, not report active-but-dead"
+    );
+}
+
 /// The parse-union "Goldilocks" false negative (the stateful refinement of P(T)). The
 /// leftmost-longest `N(T)` binds `psa` away from a trailing `8`, and the force-additive `P(T)`
 /// re-emit, with a single overwritable pending grader, also misses it — yet a parse that collapses

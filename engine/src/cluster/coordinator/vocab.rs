@@ -101,6 +101,25 @@ impl ClusterEngine {
             ));
         }
 
+        // 2b. Self-heal stale-active aliases (codex R13): a punctuation/grader change in this
+        //     vocab can make an Active single-token alias form unexpressible (e.g. a fused
+        //     grader); demote those to review candidates rather than install an alias that
+        //     reports active and silently never matches. Demotion can only shrink the
+        //     registered phrase set, so rebuild the normalizer when it fires.
+        let mut vocab = vocab;
+        let new_norm =
+            if vocab
+                .aliases_mut()
+                .demote_unexpressible(&new_norm, &self.dict)
+                > 0
+            {
+                Arc::new(vocab.to_normalizer().map_err(|e| {
+                    ShardError::Config(format!("building normalizer from vocab: {e}"))
+                })?)
+            } else {
+                new_norm
+            };
+
         // 3. Gather the deduped live `(logical, dsl)` set across shards. A selective /
         //    any-of query lives on several shards but has ONE dsl — dedup by logical id.
         let mut live: BTreeMap<u64, String> = BTreeMap::new();

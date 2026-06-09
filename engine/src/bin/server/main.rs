@@ -163,23 +163,17 @@ async fn main() {
     };
 
     let mut engine = if let Some(data_dir) = cli.data_dir.as_ref() {
-        let norm = build_normalizer(&vocab);
-        match Engine::open(norm, config.clone()) {
-            Ok(mut e) => {
+        // A vocab-built engine opens via open_with_vocab so the vocab's equivalence groups are
+        // installed BEFORE the WAL tail is replayed — the equivalence map is transient, so an
+        // open + adopt_vocab sequence would recompile the recovered tail without alias
+        // expansion, a recovery false negative (codex R13).
+        let opened = match vocab {
+            Some(v) => Engine::open_with_vocab(v, config.clone()),
+            None => Engine::open(build_normalizer(&None), config.clone()),
+        };
+        match opened {
+            Ok(e) => {
                 info!(data_dir = ?data_dir, "recovered engine from persistence");
-                if let Some(v) = vocab {
-                    // The engine was opened with this vocab's normalizer, so its
-                    // segments already align with it — just record the Vocab object
-                    // (for GET /_vocab) without recompiling. A genuine vocabulary
-                    // *change* goes through PUT /_vocab (set_vocab + recompile).
-                    if let Err(err) = e.adopt_vocab(v) {
-                        warn!(
-                            error = %err,
-                            "failed to apply vocab file to recovered engine; \
-                             continuing with the recovered normalizer"
-                        );
-                    }
-                }
                 e
             }
             Err(e) => {

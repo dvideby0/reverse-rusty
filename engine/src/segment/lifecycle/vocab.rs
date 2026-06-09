@@ -74,9 +74,9 @@ impl Engine {
     /// Returns the number of stale segments that need reingestion.
     pub fn set_vocab(
         &mut self,
-        vocab: crate::vocab::Vocab,
+        mut vocab: crate::vocab::Vocab,
     ) -> Result<usize, crate::error::NormalizerError> {
-        let norm = Arc::new(vocab.to_normalizer()?);
+        let mut norm = Arc::new(vocab.to_normalizer()?);
         // Resolve any declared/learned equivalence groups against the dict under the new
         // normalizer and install them, so the subsequent recompile (and future inserts)
         // expand queries through them (ADR-054). First intern every active equivalence form
@@ -85,6 +85,13 @@ impl Engine {
         // (ADR-060). No groups ⇒ both are no-ops (the dict clone is dwarfed by the recompile
         // this set_vocab triggers).
         let dict = Arc::make_mut(&mut self.dict);
+        // Self-heal first (codex R13): a vocabulary mutation (punct refold, new grader, …) can
+        // make an Active alias form unexpressible under the NEW normalizer; demote those back
+        // to review candidates rather than leaving an alias that reports active and silently
+        // never matches. Demotion can shrink the registered phrase set, so rebuild on change.
+        if vocab.aliases_mut().demote_unexpressible(&norm, dict) > 0 {
+            norm = Arc::new(vocab.to_normalizer()?);
+        }
         vocab.intern_equivalence_forms(&norm, dict);
         let equiv = vocab.resolve_equivalences(&norm, dict);
         dict.set_equivalences(equiv);
@@ -127,9 +134,23 @@ impl Engine {
     /// to actually *change* the vocabulary at runtime.
     pub fn adopt_vocab(
         &mut self,
-        vocab: crate::vocab::Vocab,
+        mut vocab: crate::vocab::Vocab,
     ) -> Result<(), crate::error::NormalizerError> {
-        let norm = Arc::new(vocab.to_normalizer()?);
+        // WAL-tail hazard (codex R13): `Engine::open` replays the WAL tail BEFORE any vocab is
+        // installed, and the `EquivMap` is transient (never persisted in the dict) — so a
+        // recovered memtable was recompiled WITHOUT this vocab's equivalence expansion, and a
+        // pure metadata adopt would leave those queries unexpanded (a recovery false negative:
+        // a replayed `new york mets` query no longer reaches a `ny mets` title). When both the
+        // hazard ingredients are present, escalate to the genuine-change path — `set_vocab` +
+        // `recompile_stale_segments` re-extracts every live query under the installed
+        // equivalences. Prefer [`open_with_vocab`](Self::open_with_vocab), which installs the
+        // equivalences BEFORE replay and keeps this adopt a pure metadata record.
+        if !self.memtable.is_empty() && !vocab.effective_equivalence_groups().is_empty() {
+            self.set_vocab(vocab)?;
+            self.recompile_stale_segments();
+            return Ok(());
+        }
+        let mut norm = Arc::new(vocab.to_normalizer()?);
         // Re-install equivalence groups (ADR-054/060) so inserts after this point expand through
         // them. The ID-stability question turns on whether any query is already compiled:
         //
@@ -147,6 +168,10 @@ impl Engine {
         //     `recompile_stale_segments`, not this adopt path.
         let fresh = self.segments.is_empty() && self.memtable.is_empty();
         let dict = Arc::make_mut(&mut self.dict);
+        // Self-heal stale-active aliases against the live normalizer (codex R13, see set_vocab).
+        if vocab.aliases_mut().demote_unexpressible(&norm, dict) > 0 {
+            norm = Arc::new(vocab.to_normalizer()?);
+        }
         if fresh {
             vocab.intern_equivalence_forms(&norm, dict);
         }

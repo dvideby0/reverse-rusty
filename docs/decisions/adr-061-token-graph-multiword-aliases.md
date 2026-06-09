@@ -121,6 +121,17 @@
   - **ID stability** reuses the Phase-1 fix verbatim: `intern_equivalence_forms` calls `compile_features`
     per form, which now interns the entity dense (the alias phrase is registered), so the
     synthetic→dense boundary cannot kill a multi-word alias either.
+  - **Recovery ordering + install-seam self-healing (codex R13).** The equivalence map is *transient* —
+    never persisted in the dict — and single-node `Engine::open` recompiles the WAL tail, so an
+    open-then-`adopt_vocab` sequence recompiled tail queries *without* expansion (a recovery FN, for
+    single-token ADR-054 aliases too). `Engine::open_with_vocab` installs the equivalences **before**
+    replay (the order the cluster's `open` already used), the server opens through it, and
+    `adopt_vocab` detects the hazard (non-empty memtable + declared equivalences) and escalates to
+    `set_vocab` + full recompile. Symmetrically, every equivalence-install seam first runs
+    `AliasRegistry::demote_unexpressible`: an Active entry whose form the live normalizer can no longer
+    express (one cleaned token resolving to ≠1 feature, e.g. a fused grader after a punctuation refold)
+    demotes back to a review candidate instead of reporting active while `resolve_equivalences`
+    silently drops it.
 
 - **The forbidden policy (decided up front, recall-justified).** A title `T` *forbidden-contains* a
   phrase iff that phrase is an entity in `T`'s **leftmost-longest canonical parse** `N(T)`. Consequences,
