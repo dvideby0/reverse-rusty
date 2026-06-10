@@ -420,10 +420,15 @@ pub(crate) async fn cluster_rebalance(State(state): State<Arc<ClusterAppState>>)
     }
 }
 
-/// POST /_cluster/resync — re-drive queued partial-apply repairs (ADR-047).
+/// POST /_cluster/resync — re-drive queued partial-apply repairs (ADR-047). Holds
+/// the writer-serialization mutex so a resync pass cannot interleave with REST
+/// writes for the same ids (the drain → re-drive window; the library-level race
+/// with non-REST writers is the documented ADR-047 last-writer-wins scope, healed
+/// authoritatively by log replay on reopen).
 #[instrument(skip_all)]
 pub(crate) async fn cluster_resync(State(state): State<Arc<ClusterAppState>>) -> Response {
     let report = {
+        let _w = state.write_serial.lock();
         let cluster = state.cluster.read();
         cluster.resync()
     };

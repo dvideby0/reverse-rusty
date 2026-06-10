@@ -456,7 +456,11 @@ pub(crate) async fn cluster_bulk(
             }
             Err(e) => (503, Some(format!("write rejected: {e}"))),
         };
-        if !(200..300).contains(&status) {
+        // Any item carrying an error detail flips the top-level flag — including a
+        // 200 "partial" (durably logged, repair queued): a client checking only
+        // `errors` must see the degraded state (review finding), even though the
+        // right reaction is a resync, not a retry.
+        if !(200..300).contains(&status) || error.is_some() {
             has_errors = true;
         }
         items.push(ClusterBulkItem {

@@ -276,21 +276,26 @@ impl ClusterEngine {
         // Pass 2 — insert the new version on its placement shards. A shard whose delete
         // failed is skipped (its repair re-drives the WHOLE upsert, preserving the
         // per-shard delete-before-insert order).
+        let mut inserted: Vec<usize> = Vec::with_capacity(insert_shards.len());
         for &s in &insert_shards {
             if failed.contains(&s) {
                 continue;
             }
-            if let Err(e) = self.shards[s].insert_extracted_with_tags(&ex, id, version, dsl, tags) {
-                failed.push(s);
-                first_err.get_or_insert(e);
+            match self.shards[s].insert_extracted_with_tags(&ex, id, version, dsl, tags) {
+                Ok(_) => inserted.push(s),
+                Err(e) => {
+                    failed.push(s);
+                    first_err.get_or_insert(e);
+                }
             }
         }
         if !failed.is_empty() {
             failed.sort_unstable();
             failed.dedup();
-            let applied: Vec<usize> = (0..self.shards.len())
-                .filter(|s| !failed.contains(s))
-                .collect();
+            // `applied` reports the shards that now HOLD the new version (the insert
+            // pass succeeded there) — not every shard that merely completed its
+            // tombstone half, which would overstate where the replacement lives
+            // (review finding). Repair targets only `failed`, so this is diagnostic.
             return Err(self.note_partial(
                 ClusterMutation::Upsert {
                     logical: id,
@@ -299,7 +304,7 @@ impl ClusterEngine {
                     tags: tags.to_vec(),
                 },
                 id,
-                applied,
+                inserted,
                 failed,
                 first_err,
             ));

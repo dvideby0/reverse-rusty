@@ -401,10 +401,22 @@ async fn percolate_blocking(
     let fut = tokio::task::spawn_blocking(move || {
         state_inner.pool.install(|| {
             use rayon::prelude::*;
-            let cluster = state_inner.cluster.read();
+            // The read guard is taken PER TITLE, not hoisted over the batch: the
+            // RwLock is fair, so one long-held batch guard would let a queued vocab
+            // writer stall every subsequent read for the whole batch duration
+            // (review finding). Each title still evaluates under one consistent
+            // engine view; a concurrent vocab rebuild may split a batch across
+            // vocab epochs — the same visibility a single-node client gets when a
+            // PUT /_vocab lands between two requests.
             titles
                 .par_iter()
-                .map(|t| cluster.percolate_filtered_with_stats(t, &filter, include_broad))
+                .map(|t| {
+                    state_inner.cluster.read().percolate_filtered_with_stats(
+                        t,
+                        &filter,
+                        include_broad,
+                    )
+                })
                 .collect::<Result<Vec<_>, ShardError>>()
         })
     });
