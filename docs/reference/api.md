@@ -150,3 +150,68 @@ The full method/path matrix is below.
 | `/_vocab/aliases/learn_and_apply` | POST | Learn alias candidates from stored queries + apply (`?min_count=N`) |
 | `/_settings` | GET | Read live engine settings (`?include_defaults`) |
 | `/_settings` | PUT | Update the dynamic settings subset |
+
+---
+
+## Cluster (coordinator) mode — `--cluster` (ADR-070)
+
+The same binary also runs as a **cluster coordinator**: the REST dialect above served over a
+multi-shard [`ClusterEngine`](../design/clustering-and-scaling.md) instead of a single-node engine
+(Distributed-v1 criterion 1, [ADR-065](../DECISIONS.md)). Auth (ADR-062), request-id middleware, and
+Prometheus wiring are identical.
+
+```bash
+# In-process cluster: K shards in this process, durable under --data-dir.
+cargo run --release --bin server -- --cluster --shards 8 --data-dir ./cluster-data \
+  --load-file queries.csv
+
+# Remote cluster (requires --features distributed): one --shard-endpoint per shard
+# position, each "primary[,replica,...]" — the coordinator ships its frozen dict +
+# tag space to every endpoint at connect (ADR-034/055).
+cargo run --release --bin server --features distributed -- --cluster \
+  --shard-endpoint http://10.0.0.1:50051,http://10.0.0.2:50051 \
+  --shard-endpoint http://10.0.0.3:50051,http://10.0.0.4:50051 \
+  --load-file queries.csv
+```
+
+Cluster-mode flags: `--cluster`, `--shards` (in-process K, default 8), `--replication-factor`
+(in-process copies per position), `--shard-endpoint` (repeatable; remote mode). `--data-dir` makes
+an **in-process** cluster durable (build once, reopen on restart — `--load-file` is skipped with a
+warning when the reopened cluster is already populated). A **remote** coordinator is stateless and
+refuses `--data-dir`: durability lives on the shard nodes (`shardserver --data-dir`, the per-shard
+translog — ADR-039); restarting the coordinator reconnects and re-mints the identical frozen dict
+from the same `--load-file`, so the fingerprint handshake holds.
+
+Behavior deltas from single-node mode (all deliberate, none silent):
+
+- **`PUT /_doc/{id}` is a cluster-atomic upsert** — one coordinator log frame replaces every prior
+  live copy (ES `index` semantics, the ADR-067 contract at the cluster). A partial multi-shard apply
+  (remote clusters only) answers 200 with `"result": "partial"`: the write **is** durably logged and
+  queued for repair — do **not** re-PUT (it would double-log); `POST /_cluster/resync` converges it.
+- **Per-request `include_broad`** is honored on both `/_search` and `/_mpercolate`.
+- **`rank` and `explain` are rejected with 400** (cluster ranking is ADR-065 criterion 5) — never
+  silently ignored. `profile` works (merged cross-shard `MatchStats`).
+- **`include_source` defaults to `false`** (`_source` costs a per-hit source probe); explicitly
+  requesting it on a remote cluster answers 501 (remote shards expose no source readback in v1).
+- **Single-node-only surfaces answer 501 naming the alternative:** `/_compact` (per-shard policy;
+  use `POST /_checkpoint` for the durability commit), `PUT /_settings` (cluster settings are fixed
+  at assembly), `/_cat/stats`, `/_cat/segments`.
+- **Vocabulary admin** (`PUT /_vocab`, `/_vocab/learn_and_apply`, `/_vocab/aliases/*`) maps onto the
+  cluster blue/green rebuild (ADR-046); its refusals — non-local (gRPC) shards, tagged clusters,
+  multi-word alias activation (ADR-055/061) — surface as 400s with the engine's message.
+
+Cluster-only endpoints:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/_checkpoint` | POST | The cluster durability commit point (seal shards + commit the coordinator manifest + truncate the log, ADR-031/032); returns the new `epoch` |
+| `/_cat/shards` | GET | Per-shard query counts + node assignments (text table or `?format=json`) |
+| `/_cluster/state` | GET | The committed control-plane document (membership + shard→node map + ring params, ADR-037) |
+| `/_cluster/nodes` | POST | Register a cluster member (`{"id": N, "addr": "...", "role": "data"\|"manager"}`) |
+| `/_cluster/nodes/{id}` | DELETE | Deregister a member (idempotent) |
+| `/_cluster/rebalance` | POST | Recompute + commit the shard→node map from membership (HRW, ADR-042) |
+| `/_cluster/resync` | POST | Re-drive queued partial-apply repairs (ADR-047); returns `{repaired, still_pending}` |
+
+`GET /_stats` in cluster mode reports `{shards, replication_factor, total_queries, shard_queries[],
+class_counts, epoch, pending_repairs, has_tagged_queries, durable}`; `GET /_health` is green/yellow
+(repairs queued)/red (a shard probe failed).

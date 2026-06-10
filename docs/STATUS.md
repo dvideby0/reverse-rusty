@@ -472,6 +472,33 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   (engine-level scoring + newest-copy precedence + the ranked-set ≡ unranked-set recall guard), and the
   co-located handler tests (`order`, `_score`, `from`, per-slot truncation). **Scope:** single-node;
   cluster ranking is deferred behind the same `RankSpec` seam.
+- **Cluster REST surface — the coordinator-mode server (ADR-070, Distributed-v1 criterion 1).** The
+  HTTP server now runs in a **cluster mode** (`--cluster`): the same REST dialect over a
+  `ClusterEngine` instead of a single-node `Engine`, so a cluster is operable end-to-end without
+  embedding Rust — the first ADR-065 graduation criterion, and the surface the multi-machine harness
+  (criterion 3) will drive. In-process clusters (`--shards K`) build/reopen durably on the default
+  feature set; remote clusters (`--shard-endpoint primary[,replica…]`) connect real `shardserver`
+  nodes under `distributed`, minting the frozen dict + tag space over the `--load-file` corpus
+  (`freeze_feature_space`, pass A of `build` extracted) and shipping both at connect (ADR-034/055) —
+  a stateless coordinator whose restart re-mints the identical dict (the fingerprint handshake holds;
+  durability lives in the shard nodes' translogs, ADR-039). `PUT /_doc` is a **cluster-atomic
+  upsert**: ONE `ClusterMutation::Upsert` log frame (clog **v3**) tombstones every prior copy and
+  inserts the new version — placement decided first, so a rejected (parse/class-D) new version never
+  deletes (ADR-067 parity); partial multi-shard failures queue on the ADR-047 repair path and answer
+  an honest `partial` (resync converges; a re-PUT would double-log). `/_search` + `/_mpercolate`
+  resolve the same native/ES envelopes onto `percolate_filtered_with_stats` and take a per-request
+  `include_broad`; `GET /_doc` reads back source via the new `Shard::source_of` (loud-error default —
+  a remote shard can never fake "not found"); vocab/alias admin rides `set_vocab` + new cluster-level
+  `import_alias_synonyms`/`learn_aliases_and_apply`/`learn_vocab` (every ADR-046/055/061 refusal
+  surfaces verbatim as a 400). Honest deltas by design: single-node-only surfaces answer **501
+  naming the alternative** (`/_compact` → `/_checkpoint`, `PUT /_settings`), and unsupported request
+  features (`rank` — criterion 5, `explain`) are **400s, never silently ignored**. New ops
+  endpoints: `POST /_checkpoint` (the durability commit), `GET /_cat/shards`, `GET /_cluster/state`,
+  `POST/DELETE /_cluster/nodes`, `POST /_cluster/rebalance`, `POST /_cluster/resync`. Auth
+  (ADR-062), request-id middleware, and Prometheus wiring are shared with single-node mode through a
+  `RequestCtx` seam. Proven by the durability oracle's new upsert module (log-tail AND checkpoint
+  reopens ≡ pre-crash ≡ brute), coordinator upsert units (incl. WAL-first fail-closed), clog
+  round-trip/torn-tail tests, and cluster handler tests over a real in-process multi-shard cluster.
 
 ## Measured
 
@@ -539,7 +566,8 @@ backlog, and the Evaluated & declined list.
   translog-lease TTL, autoscaler-driven handoff; ADR-048) (ADR-027, 029, 031–048; per-ADR detail
   in [Implemented](#implemented-working-tested) above). But it is exercised **single-process / on localhost** by
   the oracles — not yet deployed and hardened across real machines. **The path out is now programmatized as
-  the Distributed-v1 graduation criteria (ADR-065)** — a 12-item checklist (cluster REST surface, TLS/auth,
+  the Distributed-v1 graduation criteria (ADR-065)** — a 12-item checklist (cluster REST surface — **✅
+  shipped, ADR-070**; TLS/auth,
   a real multi-machine harness, tagged-cluster vocab change, cluster ranking, cross-process vocab shipping,
   auto-split + `recommended_shard_count`, replicate-broad-to-all-or-decide, the tag-dict recovery
   fingerprint, packaging + runbook, backup/restore, a ≥20M multi-shard scale proof) that graduates these
