@@ -30,10 +30,15 @@
   2. **Vocab persistence.** `Vocab.number_context: Option<Vec<String>>` (serde-defaulted): `None` —
      the default, and the shape of every pre-ADR-069 vocab JSON — leaves the builder untouched
      (byte-identical); `Some([])` is the persisted parity knob. It rides everything the punctuation
-     table rides: `PUT /_vocab`, the manifest `vocab_data` blob (survives reopen), and the live apply
-     path — single-node `set_vocab` recompiles stored queries under the new typing
-     (`recompile_stale_segments`, the ADR-046 mech-2 machinery), the in-process cluster `set_vocab`
-     does its blue/green re-place. `Vocab::merge` is first-wins like every other field (an
+     table rides — the serialized vocab JSON, so each established channel carries it: single-node
+     reopen via `--vocab-file` + `Engine::open_with_vocab` (the ADR-015 persistence model), the
+     **cluster** `ClusterManifest.vocab_data` blob (ADR-046), and the live apply path — single-node
+     `set_vocab` recompiles stored queries under the new typing (`recompile_stale_segments`, the
+     ADR-046 mech-2 machinery), the in-process cluster `set_vocab` does its blue/green re-place.
+     (A REST-applied vocab change shares the *pre-existing* single-node caveat — the engine manifest
+     does not embed the vocab, so a `PUT /_vocab` is in-memory until the operator updates
+     `--vocab-file`; that durability-model gap is generic to every vocab field and tracked as its
+     own follow-up, not changed here.) `Vocab::merge` is first-wins like every other field (an
      explicitly-set list survives; an unset vocab adopts the other's). The same list runs over queries
      and titles — the §2 shared-normalizer invariant is what makes the knob *close* the FN class
      rather than move it.

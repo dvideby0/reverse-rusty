@@ -150,9 +150,11 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   is now configuration on the shared normalizer: default `["pop"]` is byte-identical, an **empty
   list disables the rule** (a 4-digit year is `year:N` everywhere — the percolator-parity mode,
   closing the FN class in both directions), and a custom list substitutes other context words.
-  Persisted via `Vocab.number_context` (old JSON untouched); rides `PUT /_vocab`, survives reopen,
-  applies live through the `set_vocab` recompile. Oracle-proven (engine ≡ brute under the knob incl.
-  the forbidden-year and any-of paths; both audit directions asserted closed; live flip + reversal).
+  Persisted via `Vocab.number_context` (old JSON untouched); applies live through the `PUT /_vocab`
+  `set_vocab` recompile and survives reopen through the standard vocab channels (`--vocab-file` +
+  `open_with_vocab` single-node, the `ClusterManifest` vocab blob in a cluster). Oracle-proven
+  (engine ≡ brute under the knob incl. the forbidden-year and any-of paths; both audit directions
+  asserted closed; live flip + reversal).
 - **Cluster scope frame — read before the cluster entries below.** **Cluster v1** (shippable) = the
   in-process multi-shard core + durable local reopen + dynamic vocabulary — **built and oracle-proven,
   zero false negatives (Roadmap Tier 0, now complete)**. The gRPC / replication / control-plane /

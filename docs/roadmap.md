@@ -240,8 +240,9 @@ limitations".)*
      normalizer (the ADR-058 move: hard-coded → configuration). Default `["pop"]` = byte-identical;
      an **empty list disables the rule** — the parity mode, making number typing position-insensitive
      (a 4-digit year is `year:N` everywhere) and closing the audit's one residual FN class in both
-     directions. Vocab-persisted (`Vocab.number_context`, old JSON untouched): rides `PUT /_vocab`,
-     survives reopen, and applies live via the `set_vocab` recompile (flip-proven, reversible). The
+     directions. Vocab-persisted (`Vocab.number_context`, old JSON untouched): applies live via the
+     `PUT /_vocab` `set_vocab` recompile (flip-proven, reversible) and survives reopen through the
+     standard vocab channels (`--vocab-file` single-node, the cluster manifest's vocab blob). The
      "emit both typings title-side" variant was evaluated + declined in the ADR (mixed typing is
      unrepresentable under the shared normalizer + recompile machinery; both-typings isn't FP-only
      in the single-view path). Oracle-proven: engine ≡ brute under the knob, both audit directions

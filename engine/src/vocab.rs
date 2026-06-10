@@ -59,8 +59,10 @@ pub struct Vocab {
     /// to a generic term (never a year/grade). `None` (the default, and old vocab JSON
     /// predating the field) ⇒ the normalizer's built-in `["pop"]` rule, byte-identical.
     /// `Some([])` disables the rule — the percolator-parity mode (ADR-064 item 3), making
-    /// number typing position-insensitive. Persisted so the knob survives reopen and rides
-    /// `PUT /_vocab`; the same list runs over queries and titles (§2).
+    /// number typing position-insensitive. Serialized with the vocab JSON, so it persists
+    /// through every channel a vocab does — `--vocab-file` + `open_with_vocab` single-node,
+    /// the `ClusterManifest` vocab blob in a cluster, and `PUT /_vocab` live (which
+    /// recompiles stored queries); the same list runs over queries and titles (§2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     number_context: Option<Vec<String>>,
     /// Governed alias candidates (ADR-060): a registry with provenance / kind / confidence /

@@ -30,6 +30,14 @@ Replace the engine's vocabulary. Existing stored queries are **automatically rec
 new normalizer — under the same lock, before the new snapshot is published — so the change takes
 effect immediately with zero false negatives. `recompiled` reports how many queries were rebuilt.
 
+> **Durability:** the recompiled queries persist (the recompile commits like a flush), but the
+> vocabulary **object** itself lives in memory — single-node vocab persistence is the `--vocab-file`
+> the server loads at startup (ADR-015). After changing the vocabulary over REST on a durable
+> server, save the same JSON to your `--vocab-file` (e.g. capture `GET /_vocab`) so a restart
+> reopens under the matching normalizer; restarting with a stale/absent vocab file desyncs title
+> normalization from the persisted queries. (A cluster persists its vocab in the coordinator
+> manifest and does not have this caveat.)
+
 ```bash
 curl -X PUT localhost:9200/_vocab \
   -H 'Content-Type: application/json' \
