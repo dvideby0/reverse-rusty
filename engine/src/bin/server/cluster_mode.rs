@@ -85,6 +85,16 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
 
     let remote_groups: Vec<String> = cli.shard_endpoint.clone();
     let in_process = remote_groups.is_empty();
+    if in_process
+        && (cli.grpc_tls_ca.is_some()
+            || cli.grpc_tls_domain.is_some()
+            || cli.cluster_token.is_some())
+    {
+        error!(
+            "--grpc-tls-ca/--grpc-tls-domain/--cluster-token apply to the gRPC mesh links              and require --shard-endpoint (remote mode)"
+        );
+        std::process::exit(1);
+    }
     if !in_process && cli.data_dir.is_some() {
         error!(
             "--data-dir cannot be combined with --shard-endpoint: a remote coordinator \
@@ -114,6 +124,35 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         wal_sync_on_write: cli.wal_sync_on_write,
         ..ClusterConfig::default()
     };
+
+    // Mesh client security for the remote links (ADR-071), resolved fail-loud HERE so a
+    // misconfiguration refuses startup. Kept as plain bytes — the typed ClientSecurity is
+    // built inside the distributed-gated connect path.
+    let mesh = MeshClientParts {
+        ca: cli.grpc_tls_ca.as_ref().map(|p| {
+            std::fs::read(p).unwrap_or_else(|e| {
+                error!(path = ?p, error = %e, "cannot read --grpc-tls-ca");
+                std::process::exit(1);
+            })
+        }),
+        domain: cli.grpc_tls_domain.clone(),
+        token: match crate::auth::AuthConfig::resolve(
+            cli.cluster_token.clone(),
+            std::env::var("RR_CLUSTER_TOKEN"),
+            false,
+        ) {
+            Ok(t) => t.map(|a| a.token_bytes().to_vec()),
+            Err(e) => {
+                error!(error = %e, "invalid mesh cluster token");
+                std::process::exit(1);
+            }
+        },
+    };
+    if mesh.token.is_some() && mesh.ca.is_none() {
+        warn!(
+            "--cluster-token without --grpc-tls-ca: the mesh secret crosses the wire in              cleartext; configure mesh TLS (ADR-071)"
+        );
+    }
 
     // Vocabulary → normalizer (the same vocab-file flow as single-node mode).
     let vocab = cli.vocab_file.as_ref().map(|path| {
@@ -160,6 +199,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             norm,
             &queries,
             &handle,
+            mesh,
         )
     });
     let cluster = match assemble.await.expect("cluster assembly task panicked") {
@@ -317,9 +357,21 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
     info!("shutdown complete");
 }
 
+/// The mesh client-security pieces as plain bytes (ADR-071) — typed
+/// `ClientSecurity` is built inside the distributed-gated connect path, so the
+/// default (non-distributed) build never names the gated types.
+struct MeshClientParts {
+    ca: Option<Vec<u8>>,
+    /// Consumed only by the distributed-gated connect path, hence the gated allowance.
+    #[cfg_attr(not(feature = "distributed"), allow(dead_code))]
+    domain: Option<String>,
+    token: Option<Vec<u8>>,
+}
+
 /// Assemble the `ClusterEngine` for the chosen backend: reopen an existing durable
 /// in-process cluster, build a fresh one, or (under the `distributed` feature)
 /// connect remote shard endpoints, ship the frozen feature space, and bulk-load.
+#[allow(clippy::too_many_arguments)]
 fn assemble_cluster(
     in_process: bool,
     remote_groups: &[String],
@@ -328,9 +380,10 @@ fn assemble_cluster(
     norm: Normalizer,
     queries: &[(u64, String)],
     handle: &tokio::runtime::Handle,
+    mesh: MeshClientParts,
 ) -> Result<ClusterEngine, ShardError> {
     if in_process {
-        let _ = handle; // only the remote path connects on the runtime
+        let _ = (handle, mesh); // only the remote path connects on the runtime
         if let Some(dir) = data_dir.filter(|d| ClusterEngine::cluster_exists(d)) {
             info!(data_dir = ?dir, "reopening durable cluster from manifest");
             let cluster = ClusterEngine::open(dir, norm, Some(cfg))?;
@@ -350,7 +403,16 @@ fn assemble_cluster(
 
     #[cfg(feature = "distributed")]
     {
-        connect_remote_cluster(remote_groups, cfg, norm, queries, handle)
+        let security = reverse_rusty::cluster::ClientSecurity {
+            tls: mesh
+                .ca
+                .map(|ca_pem| reverse_rusty::cluster::TlsClientConfig {
+                    ca_pem,
+                    domain: mesh.domain,
+                }),
+            token: mesh.token,
+        };
+        connect_remote_cluster(remote_groups, cfg, norm, queries, handle, security)
     }
     #[cfg(not(feature = "distributed"))]
     {
@@ -374,6 +436,7 @@ fn connect_remote_cluster(
     norm: Normalizer,
     queries: &[(u64, String)],
     handle: &tokio::runtime::Handle,
+    security: reverse_rusty::cluster::ClientSecurity,
 ) -> Result<ClusterEngine, ShardError> {
     use reverse_rusty::cluster::ShardGroup;
 
@@ -402,9 +465,13 @@ fn connect_remote_cluster(
     let plain = groups.iter().all(|g| g.replicas.is_empty());
     let cluster = if plain && cfg.replication_factor == 1 {
         let endpoints: Vec<String> = groups.into_iter().map(|g| g.primary).collect();
-        ClusterEngine::connect_remote(norm, dict, tag_dict, cfg, &endpoints, handle)?
+        ClusterEngine::connect_remote_with_security(
+            norm, dict, tag_dict, cfg, &endpoints, handle, security,
+        )?
     } else {
-        ClusterEngine::connect_replicated(norm, dict, tag_dict, cfg, &groups, handle)?
+        ClusterEngine::connect_replicated_with_security(
+            norm, dict, tag_dict, cfg, &groups, handle, security,
+        )?
     };
 
     if !queries.is_empty() {

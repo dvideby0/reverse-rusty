@@ -173,8 +173,16 @@ items from an external review, re-ranked to the top; **all are now done:**
      no-analogue surfaces answer 501 with the alternative, unsupported request features (`rank`,
      `explain`) are loud 400s. Oracle-proven (upsert durability: log-tail + checkpoint reopen ≡
      pre-crash ≡ brute) + handler tests over a real in-process cluster.
-  2. **TLS + auth on the gRPC transports** (shard + control plane — both currently plaintext and
-     unauthenticated; reuse the ADR-062 token shape and/or mTLS, fail-loud config).
+  2. ~~**TLS + auth on the gRPC transports**~~ **✅ Shipped ([ADR-071](DECISIONS.md)).** Both gRPC
+     surfaces (shard + control plane) take opt-in **TLS** (tonic `tls-ring`; PEM identity + client
+     CA, `--tls-cert`/`--tls-key`/`--tls-ca`) and an opt-in **mesh token**
+     (`--cluster-token`/`RR_CLUSTER_TOKEN`, ADR-062 rules, constant-time verify before any handler —
+     default-deny over every RPC incl. future ones). One shared `cluster::security` module both
+     sides/planes; additive `_with_security` constructors keep unset paths byte-identical; the
+     coordinator retains its client security for internal connects (peer recovery/handoff).
+     Fail-loud config; documented trust model (token = mesh admission, TLS = server auth + wire
+     privacy; mTLS deferred). Oracle-proven: secured cluster ≡ brute, wrong/missing-token +
+     plaintext-to-TLS fail loud, secured 3-node control plane elects + commits.
   3. **A real multi-machine test harness** — durable multi-node rolling-restart / kill-and-recover /
      handoff-under-load across a real network boundary (containers or hosts), plus a CI-runnable compose
      variant. Every later criterion lands with harness coverage.

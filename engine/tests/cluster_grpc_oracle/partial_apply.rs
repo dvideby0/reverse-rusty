@@ -99,7 +99,7 @@ fn grpc_partial_apply_is_detected_and_queued() {
     // HTTP/2 connection keeps serving.) A separate client flips the server-side fence flag, which
     // every client to that server then observes.
     let fencer = reverse_rusty::cluster::RemoteShard::connect(
-        endpoints[target].clone(),
+        &endpoints[target],
         rt.handle().clone(),
         dict.fingerprint(),
     )

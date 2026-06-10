@@ -16,7 +16,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use reverse_rusty::cluster::{start_grpc_node, ControlServer};
+use reverse_rusty::cluster::{
+    resolve_mesh_token, start_grpc_node_with_security, ClientSecurity, ControlServer,
+    ServerSecurity, TlsClientConfig, TlsServerIdentity,
+};
 
 /// Ring/model params the genesis document is seeded with. A real deployment derives these from the
 /// cluster config; for this building-block bin they are fixed defaults (overridable via flags).
@@ -34,6 +37,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut vnodes = DEFAULT_VNODES;
     let mut fingerprint: u64 = 0;
     let mut data_dir: Option<PathBuf> = None;
+    let mut tls_cert: Option<PathBuf> = None;
+    let mut tls_key: Option<PathBuf> = None;
+    let mut tls_ca: Option<PathBuf> = None;
+    let mut tls_domain: Option<String> = None;
+    let mut token_flag: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -42,6 +50,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(v) = args.get(i + 1) {
                     data_dir = Some(PathBuf::from(v));
                 }
+                i += 1;
+            }
+            "--tls-cert" => {
+                tls_cert = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--tls-key" => {
+                tls_key = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--tls-ca" => {
+                tls_ca = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--tls-domain" => {
+                tls_domain = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--cluster-token" => {
+                token_flag = args.get(i + 1).cloned();
                 i += 1;
             }
             "--peer" => {
@@ -84,19 +112,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: controlserver <NODE_ID> <BIND_ADDR> [--peer ID=URL ...] [--bootstrap]")?;
     let bind = bind.ok_or("missing BIND_ADDR")?;
     let addr: SocketAddr = bind.parse()?;
-    let self_url = format!("http://{bind}");
+
+    // Mesh security (ADR-071). A manager node is BOTH a server (its ControlService) and a
+    // client (the Raft RPCs it sends its peers), so it takes both halves: the identity it
+    // presents (--tls-cert/--tls-key) and the CA it verifies peers against (--tls-ca,
+    // with --tls-domain when peer URLs are raw IPs). One mesh token covers both directions.
+    let token = resolve_mesh_token(token_flag, std::env::var("RR_CLUSTER_TOKEN"))?;
+    let server_tls = match (tls_cert, tls_key) {
+        (None, None) => None,
+        (Some(cert), Some(key)) => Some(TlsServerIdentity {
+            cert_pem: std::fs::read(&cert)
+                .map_err(|e| format!("reading --tls-cert {}: {e}", cert.display()))?,
+            key_pem: std::fs::read(&key)
+                .map_err(|e| format!("reading --tls-key {}: {e}", key.display()))?,
+        }),
+        _ => return Err("--tls-cert and --tls-key must be provided together".into()),
+    };
+    let client_tls = match tls_ca {
+        None => None,
+        Some(ca) => Some(TlsClientConfig {
+            ca_pem: std::fs::read(&ca)
+                .map_err(|e| format!("reading --tls-ca {}: {e}", ca.display()))?,
+            domain: tls_domain,
+        }),
+    };
+    if token.is_some() && server_tls.is_none() {
+        eprintln!(
+            "WARNING: --cluster-token without TLS — the mesh secret crosses the wire in              cleartext; configure --tls-cert/--tls-key (ADR-071)"
+        );
+    }
 
     let rt = tokio::runtime::Runtime::new()?;
     // `--data-dir` makes this manager node DURABLE (ADR-041): it persists its Raft log/vote/
     // committed/snapshot and resumes its committed cluster-state document on restart. Without it the
     // node keeps the in-memory store (ADR-038) and starts fresh each launch.
-    let plane = start_grpc_node(
+    let plane = start_grpc_node_with_security(
         node_id,
         shards,
         vnodes,
         fingerprint,
         rt.handle(),
         data_dir.as_deref(),
+        ClientSecurity {
+            tls: client_tls,
+            token: token.clone(),
+        },
     )?;
     if let Some(dir) = &data_dir {
         println!(
@@ -104,11 +164,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dir.display()
         );
     }
-    let server = ControlServer::new(plane.raft());
+    let serves_tls = server_tls.is_some();
+    let server = ControlServer::new(plane.raft()).with_security(ServerSecurity {
+        tls: server_tls,
+        token,
+    });
     let serve = rt.spawn(server.serve(addr));
 
     if bootstrap {
         // Let the peers' listeners come up, then form the initial cluster from all members.
+        // The self-URL scheme must match the transport peers dial back on: with a TLS
+        // identity configured this node serves https, so registering an http:// URL would
+        // fail every peer→bootstrapper Raft RPC at the handshake (review finding).
+        let scheme = if serves_tls { "https" } else { "http" };
+        let self_url = format!("{scheme}://{bind}");
         std::thread::sleep(Duration::from_secs(2));
         let mut members: Vec<(u64, String)> = vec![(node_id, self_url)];
         members.extend(peers.iter().cloned());

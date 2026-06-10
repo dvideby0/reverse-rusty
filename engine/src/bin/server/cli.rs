@@ -171,4 +171,24 @@ pub(crate) struct Cli {
     /// (ADR-034/055). Requires `--cluster` and a `--features distributed` build.
     #[arg(long)]
     pub(crate) shard_endpoint: Vec<String>,
+
+    /// PEM CA bundle to verify remote shard servers against (mesh TLS, ADR-071).
+    /// With it, `--shard-endpoint` URLs should use `https://`. Requires a
+    /// `--features distributed` build.
+    #[arg(long)]
+    pub(crate) grpc_tls_ca: Option<PathBuf>,
+
+    /// TLS verification/SNI domain override for the mesh links (needed when
+    /// `--shard-endpoint` URLs are raw IPs but the server certificate names a DNS
+    /// SAN). Only meaningful with `--grpc-tls-ca`.
+    #[arg(long)]
+    pub(crate) grpc_tls_domain: Option<String>,
+
+    /// Mesh cluster token (ADR-071) attached to every gRPC RPC the coordinator sends
+    /// its shard servers. Prefer the `RR_CLUSTER_TOKEN` env var in production. This
+    /// is distinct from `--auth-token` (the HTTP bearer gate, ADR-062): client-facing
+    /// REST and the node mesh are different audiences with different rotation
+    /// stories.
+    #[arg(long)]
+    pub(crate) cluster_token: Option<String>,
 }

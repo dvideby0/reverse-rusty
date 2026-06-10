@@ -19,6 +19,9 @@ allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-3-Clause",
+    # ISC: OSI-approved, functionally MIT-equivalent — entered the tree with the mesh
+    # TLS stack (ADR-071: rustls/rustls-webpki/untrusted/ring under tonic `tls-ring`).
+    "ISC",
     "Unlicense",
     "Zlib",
     "BSL-1.0",

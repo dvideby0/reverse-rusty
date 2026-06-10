@@ -37,6 +37,15 @@ pub(crate) struct AuthConfig {
 }
 
 impl AuthConfig {
+    /// The validated raw token bytes — used by cluster mode to resolve the MESH token
+    /// (`--cluster-token`/`RR_CLUSTER_TOKEN`, ADR-071) through this same fail-loud
+    /// validation, so the HTTP and mesh secrets cannot drift in their rules.
+    pub(crate) fn token_bytes(&self) -> &[u8] {
+        &self.token
+    }
+}
+
+impl AuthConfig {
     /// Resolve the auth configuration from the CLI flag and the
     /// `RR_AUTH_TOKEN` environment variable (the flag wins; pass
     /// `std::env::var("RR_AUTH_TOKEN")` raw). `Ok(None)` means auth is

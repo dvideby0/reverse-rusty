@@ -159,8 +159,8 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   in-process multi-shard core + durable local reopen + dynamic vocabulary — **built and oracle-proven,
   zero false negatives (Roadmap Tier 0, now complete)**. The gRPC / replication / control-plane /
   handoff / autoscaler layers in the entries below are **built and oracle-proven _in-process / on
-  localhost_ but experimental** — not yet hardened for real multi-machine deployment (no TLS/auth,
-  write-quiesce windows, advisory-only autoscaler, no auto-split). Each entry's *Honest scope* note
+  localhost_ but experimental** — not yet hardened for real multi-machine deployment (write-quiesce
+  windows, advisory-only autoscaler, no auto-split; mesh TLS/auth is now opt-in, ADR-071). Each entry's *Honest scope* note
   records the per-feature boundary **as of that increment** (some items it flags as design-only were
   built in a later entry below).
 - **In-process multi-shard core (ADR-027)** — the first, dependency-free step of clustering
@@ -499,6 +499,33 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   `RequestCtx` seam. Proven by the durability oracle's new upsert module (log-tail AND checkpoint
   reopens ≡ pre-crash ≡ brute), coordinator upsert units (incl. WAL-first fail-closed), clog
   round-trip/torn-tail tests, and cluster handler tests over a real in-process multi-shard cluster.
+- **TLS + mesh auth on the gRPC transports (ADR-071, Distributed-v1 criterion 2).** Both gRPC
+  surfaces — the shard transport (`ShardService`) and the control plane (`ControlService`) — take
+  two independent, **opt-in** security knobs, byte-identical when unset: **TLS** (tonic
+  `tls-ring`/rustls — the server presents an operator PEM identity, the client verifies against an
+  operator CA with an optional domain override for raw-IP endpoints; mTLS deferred) and a **mesh
+  token** (ONE shared cluster secret, `--cluster-token`/`RR_CLUSTER_TOKEN` with the ADR-062
+  validation rules, attached to every RPC as `authorization: Bearer` metadata and verified
+  **constant-time before any handler runs** — the interceptor wraps the whole service, so the gate
+  is default-deny over every current and future RPC). One `cluster::security` module implements
+  both sides for both planes (client inject / server verify), `RemoteShard` + the Raft network
+  client carry interceptor-wrapped channels (no RPC call-site churn), additive `_with_security`
+  constructors (`connect_remote`/`connect_replicated`/`start_grpc_node`) keep every existing path
+  byte-identical, and the coordinator retains its `ClientSecurity` so internal connections — peer
+  recovery, live handoff — ride the same TLS + token as the initial connects. Config is fail-loud
+  (a malformed cert/key/CA/token refuses startup; a token without TLS warns loud); the bins gain
+  the operator flags (`shardserver`/`controlserver`: `--tls-cert`/`--tls-key`/`--cluster-token`,
+  controlserver also the client half `--tls-ca`/`--tls-domain`; the coordinator-mode server:
+  `--grpc-tls-ca`/`--grpc-tls-domain`/`--cluster-token`). Trust model recorded in the ADR: the
+  token admits a node to the mesh, TLS authenticates servers + protects the wire; the HTTP bearer
+  token (ADR-062) stays a separate secret (different audience + rotation story). The license gate
+  now runs `cargo deny --all-features` (the distributed supply chain is policy-checked; ISC
+  allowed for the rustls/ring chain). Proven by `tests/cluster_grpc_oracle/security.rs` (a secured
+  K=2 cluster — TLS + token, dict shipped over the secured link — ≡ brute incl. live writes;
+  wrong/missing token and plaintext-client-to-TLS-server fail LOUD, never an empty result),
+  `tests/cluster_control_raft_oracle.rs::grpc_secured_control_plane_elects_and_commits` (a secured
+  3-node control plane elects + quorum-commits over TLS+token), and security-module unit tests.
+  In-test certificates come from `rcgen` (dev-dependency) — no key material in the repo.
 
 ## Measured
 
@@ -567,7 +594,7 @@ backlog, and the Evaluated & declined list.
   in [Implemented](#implemented-working-tested) above). But it is exercised **single-process / on localhost** by
   the oracles — not yet deployed and hardened across real machines. **The path out is now programmatized as
   the Distributed-v1 graduation criteria (ADR-065)** — a 12-item checklist (cluster REST surface — **✅
-  shipped, ADR-070**; TLS/auth,
+  shipped, ADR-070**; TLS/auth on the gRPC transports — **✅ shipped, ADR-071**;
   a real multi-machine harness, tagged-cluster vocab change, cluster ranking, cross-process vocab shipping,
   auto-split + `recommended_shard_count`, replicate-broad-to-all-or-decide, the tag-dict recovery
   fingerprint, packaging + runbook, backup/restore, a ≥20M multi-shard scale proof) that graduates these
@@ -579,8 +606,9 @@ backlog, and the Evaluated & declined list.
   (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can never drop
   matches *silently*. The **normalizer** must still match on both sides (`default_vocab()` today — absorbing
   new vocabulary after the dict is frozen is **done in-process (Tier 0, ADR-046)**; shipping learned aliases
-  *cross-process* to a remote shard's normalizer remains deferred), and the transport is
-  unauthenticated/plaintext. Treat the gRPC surface as correctness-safe, not yet a hardened multi-process deployment.
+  *cross-process* to a remote shard's normalizer remains deferred). The transport now takes **opt-in
+  mesh TLS + token auth (ADR-071)** — unset it remains plaintext/open, so enable both outside a
+  trusted network. Treat the gRPC surface as correctness-safe, not yet a hardened multi-process deployment.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary is supplied at
   runtime via the `Vocab` system or `NormalizerBuilder`. Auto-deriving entity **phrases** from the
   corpus is now wired (opt-in NPMI induction, ADR-053 — `corpus.rs` + `learn_and_apply_with`); deriving

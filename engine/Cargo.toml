@@ -59,7 +59,9 @@ prometheus = { version = "0.14", default-features = false, optional = true }
 # Off by default — pulls in the tonic/hyper/tokio-net stack only when enabled, so the
 # lean core and the standard server build never compile it.
 reverse-rusty-shard-proto = { path = "grpc", optional = true }
-tonic = { version = "0.14", optional = true }
+# `tls-ring` (ADR-071): rustls-backed TLS for the mesh transports — the ring crypto
+# provider (pure-library build; aws-lc would add a cmake/C toolchain for nothing here).
+tonic = { version = "0.14", optional = true, features = ["tls-ring"] }
 # Server-streaming peer recovery (ADR-036) wraps an mpsc receiver as a `Stream`
 # (`ReceiverStream`); `sync` is the feature that gates that wrapper. Distributed-only.
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
@@ -145,6 +147,12 @@ path = "src/bin/controlserver.rs"
 # A deployable cluster-manager node: serves the openraft ControlService over gRPC
 # (ADR-038). Builds only with the `distributed` feature (tonic/proto + openraft).
 required-features = ["distributed"]
+
+[dev-dependencies]
+# In-test self-signed certificates for the ADR-071 TLS oracle (`tls-ring` mesh TLS) —
+# test-only, so no key material is checked into the repo and the runtime tree is
+# untouched.
+rcgen = "0.13"
 
 [profile.release]
 opt-level = 3

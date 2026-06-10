@@ -387,3 +387,107 @@ fn durable_node_recovers_committed_document_after_restart() {
     reopened.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// ADR-071: the SECURED control plane — three manager nodes whose `ControlService`s
+/// present a TLS identity and demand the mesh token, whose Raft network clients
+/// verify that identity and attach the token. Real elections + replication + quorum
+/// commit over the secured links: the cluster bootstraps, elects, commits a document
+/// change, and every node converges to it. (The negative paths — wrong token,
+/// plaintext client — are proven on the shard transport in
+/// `cluster_grpc_oracle::security`; the interceptors are the same shared types.)
+#[test]
+fn grpc_secured_control_plane_elects_and_commits() {
+    use reverse_rusty::cluster::{
+        start_grpc_node_with_security, ClientSecurity, ServerSecurity, TlsClientConfig,
+        TlsServerIdentity,
+    };
+
+    let rt = Runtime::new().expect("tokio runtime");
+    let ids = [0u64, 1, 2];
+
+    // One self-signed localhost identity shared by the three nodes (in-test rcgen —
+    // no key material in the repo); self-signed ⇒ the leaf doubles as the CA.
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+        .expect("self-signed cert");
+    let cert_pem = cert.cert.pem().into_bytes();
+    let key_pem = cert.key_pair.serialize_pem().into_bytes();
+    let token = b"control-mesh-secret".to_vec();
+
+    let mut addrs: Vec<SocketAddr> = Vec::new();
+    let mut incomings: Vec<TcpIncoming> = Vec::new();
+    {
+        let _enter = rt.enter();
+        for _ in &ids {
+            let incoming =
+                TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind ephemeral port");
+            addrs.push(incoming.local_addr().expect("local_addr"));
+            incomings.push(incoming);
+        }
+    }
+    // Peer URLs are https://localhost so the certificate SAN matches.
+    let urls: Vec<String> = addrs
+        .iter()
+        .map(|a| format!("https://localhost:{}", a.port()))
+        .collect();
+
+    let client_security = ClientSecurity {
+        tls: Some(TlsClientConfig {
+            ca_pem: cert_pem.clone(),
+            domain: None,
+        }),
+        token: Some(token.clone()),
+    };
+    let mut planes: Vec<RaftControlPlane> = Vec::new();
+    for &id in &ids {
+        planes.push(
+            start_grpc_node_with_security(
+                id,
+                NUM_SHARDS,
+                VNODES,
+                GENESIS_FP,
+                rt.handle(),
+                None,
+                client_security.clone(),
+            )
+            .expect("start secured grpc manager node"),
+        );
+    }
+    let mut servers = Vec::new();
+    for incoming in incomings {
+        let i = servers.len();
+        let server = ControlServer::new(planes[i].raft()).with_security(ServerSecurity {
+            tls: Some(TlsServerIdentity {
+                cert_pem: cert_pem.clone(),
+                key_pem: key_pem.clone(),
+            }),
+            token: Some(token.clone()),
+        });
+        servers.push(rt.spawn(server.serve_with_incoming(incoming)));
+    }
+    for &addr in &addrs {
+        wait_until_listening(addr);
+    }
+
+    let members: Vec<(u64, String)> = ids
+        .iter()
+        .map(|&id| (id, urls[id as usize].clone()))
+        .collect();
+    planes[0]
+        .initialize(&members)
+        .expect("bootstrap the secured cluster");
+    let all: Vec<usize> = (0..ids.len()).collect();
+    let leader = poll_leader(&planes, &all, |_| true) as usize;
+
+    // A document change commits via quorum replication over the secured links.
+    planes[leader]
+        .propose(ClusterStateChange::AddNode(node(7, NodeRole::Data)))
+        .expect("commit over the secured control plane");
+    let doc = planes[leader]
+        .cluster_state()
+        .expect("read the committed document");
+    assert!(
+        doc.nodes.iter().any(|n| n.id == NodeId(7)),
+        "the secured-quorum commit landed: {:?}",
+        doc.nodes
+    );
+}

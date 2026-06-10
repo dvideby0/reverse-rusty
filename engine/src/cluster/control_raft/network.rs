@@ -15,11 +15,13 @@ use openraft::raft::{
 };
 use openraft::{BasicNode, OptionalSend, Raft, Snapshot, SnapshotMeta, Vote};
 use serde::{Deserialize, Serialize};
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 
 use crate::cluster::control::ControlError;
 use crate::cluster::proto;
 use crate::cluster::proto::control_service_client::ControlServiceClient;
+use crate::cluster::security::{configure_endpoint, ClientSecurity, MeshAuthInject};
 
 use super::TypeConfig;
 
@@ -134,19 +136,28 @@ pub(crate) struct SnapshotEnvelope {
 }
 
 /// A [`RaftNetworkFactory`] over the gRPC `ControlService`. `new_client` builds a *lazily*
-/// connecting client per target (the openraft contract: do not connect eagerly).
+/// connecting client per target (the openraft contract: do not connect eagerly). Carries
+/// the mesh security config (ADR-071): TLS + the cluster token applied to every peer link
+/// — manager nodes are clients of each other, so the client half lives here.
 #[derive(Clone, Default)]
-pub(crate) struct GrpcControlNetworkFactory;
+pub(crate) struct GrpcControlNetworkFactory {
+    pub(crate) security: ClientSecurity,
+}
 
-/// A [`RaftNetwork`] to one peer over gRPC. `client` is `None` if the peer address is malformed,
-/// so every RPC reports the peer unreachable instead of panicking at construction.
+/// The mesh-aware control client (ADR-071): every RPC flows through the token-injecting
+/// interceptor (a no-op with no token), so secured and plaintext share one type.
+type ControlMeshClient = ControlServiceClient<InterceptedService<Channel, MeshAuthInject>>;
+
+/// A [`RaftNetwork`] to one peer over gRPC. `client` is `None` if the peer address or the
+/// TLS/token config is malformed, so every RPC reports the peer unreachable instead of
+/// panicking at construction.
 pub(crate) struct GrpcControlNetwork {
     target: u64,
-    client: Option<ControlServiceClient<Channel>>,
+    client: Option<ControlMeshClient>,
 }
 
 impl GrpcControlNetwork {
-    fn client(&self) -> Option<ControlServiceClient<Channel>> {
+    fn client(&self) -> Option<ControlMeshClient> {
         self.client.clone()
     }
 }
@@ -238,9 +249,17 @@ impl RaftNetworkFactory<TypeConfig> for GrpcControlNetworkFactory {
     type Network = GrpcControlNetwork;
 
     async fn new_client(&mut self, target: u64, node: &BasicNode) -> Self::Network {
-        let client = Channel::from_shared(node.addr.clone())
+        // Lazy connect per the openraft contract; the TLS config and token interceptor
+        // are applied here so every peer link is secured identically (ADR-071).
+        let client = configure_endpoint(&node.addr, self.security.tls.as_ref())
             .ok()
-            .map(|ep| ControlServiceClient::new(ep.connect_lazy()));
+            .and_then(|ep| {
+                let inject = MeshAuthInject::new(self.security.token.as_deref()).ok()?;
+                Some(ControlServiceClient::with_interceptor(
+                    ep.connect_lazy(),
+                    inject,
+                ))
+            });
         GrpcControlNetwork { target, client }
     }
 }

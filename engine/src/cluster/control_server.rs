@@ -18,25 +18,52 @@ use tonic::{Request, Response, Status};
 use super::control_raft::{decode, encode, SnapshotEnvelope, TypeConfig};
 use super::proto;
 use super::proto::control_service_server::{ControlService, ControlServiceServer};
+use super::security::{MeshAuthVerify, ServerSecurity};
+use super::server::server_tls_config;
 
 /// Serves `ControlService` over a single manager node's [`Raft`] handle (obtained from
 /// [`RaftControlPlane::raft`](super::control_raft::RaftControlPlane::raft)).
 pub struct ControlServer {
     raft: Raft<TypeConfig>,
+    /// Mesh security (ADR-071): TLS identity + expected cluster token. Default (none)
+    /// ⇒ the historical plaintext/open behavior. The control plane carries the
+    /// cluster-state document and Raft votes — exactly the RPCs a hostile host must
+    /// not reach.
+    security: ServerSecurity,
 }
 
 impl ControlServer {
     /// Wrap a manager node's Raft handle as a gRPC server.
     pub fn new(raft: Raft<TypeConfig>) -> Self {
-        Self { raft }
+        Self {
+            raft,
+            security: ServerSecurity::default(),
+        }
+    }
+
+    /// Install mesh security (ADR-071), applied by every `serve*` method. Unset ⇒
+    /// byte-identical plaintext/open behavior.
+    #[must_use]
+    pub fn with_security(mut self, security: ServerSecurity) -> Self {
+        self.security = security;
+        self
+    }
+
+    /// Build the tonic server (TLS when configured) + token-verified service — one
+    /// assembly shared by every `serve*` flavor (mirrors `ShardServer`).
+    fn secured_router(self) -> Result<tonic::transport::server::Router, tonic::transport::Error> {
+        let security = self.security.clone();
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = &security.tls {
+            builder = builder.tls_config(server_tls_config(tls))?;
+        }
+        let verify = MeshAuthVerify::new(security.token);
+        Ok(builder.add_service(ControlServiceServer::with_interceptor(self, verify)))
     }
 
     /// Serve `ControlService` on `addr` until the returned future completes.
     pub async fn serve(self, addr: SocketAddr) -> Result<(), tonic::transport::Error> {
-        tonic::transport::Server::builder()
-            .add_service(ControlServiceServer::new(self))
-            .serve(addr)
-            .await
+        self.secured_router()?.serve(addr).await
     }
 
     /// Serve with a graceful-shutdown `signal` future — used by tests to stop cleanly.
@@ -48,8 +75,7 @@ impl ControlServer {
     where
         F: std::future::Future<Output = ()>,
     {
-        tonic::transport::Server::builder()
-            .add_service(ControlServiceServer::new(self))
+        self.secured_router()?
             .serve_with_shutdown(addr, signal)
             .await
     }
@@ -61,10 +87,7 @@ impl ControlServer {
         self,
         incoming: tonic::transport::server::TcpIncoming,
     ) -> Result<(), tonic::transport::Error> {
-        tonic::transport::Server::builder()
-            .add_service(ControlServiceServer::new(self))
-            .serve_with_incoming(incoming)
-            .await
+        self.secured_router()?.serve_with_incoming(incoming).await
     }
 }
 

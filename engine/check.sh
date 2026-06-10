@@ -82,7 +82,9 @@ if [ "$fast" -eq 0 ]; then
     run "clippy (distributed)" cargo clippy --features distributed --all-targets --release -- -D warnings
     run "tests (distributed)"  cargo test --features distributed --release
     run "cargo audit"          cargo audit
-    run "cargo deny"           cargo deny check
+    # --all-features so the license/ban policy covers the DISTRIBUTED dependency graph
+    # (the tonic TLS stack, ADR-071) — not just the default-feature tree.
+    run "cargo deny"           cargo deny --all-features check
 fi
 
 # Non-failing refactor nudge. Runs in --fast and full, so it shows on commit,

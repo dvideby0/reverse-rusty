@@ -45,6 +45,8 @@ mod proto;
 #[cfg(feature = "distributed")]
 mod remote;
 #[cfg(feature = "distributed")]
+mod security;
+#[cfg(feature = "distributed")]
 mod server;
 
 pub use autoscale::{evaluate, AutoscaleConfig, AutoscaleDecision, LoadSnapshot, ScalingAction};
@@ -58,7 +60,8 @@ pub use shard::ShardError;
 
 #[cfg(feature = "distributed")]
 pub use control_raft::{
-    durable_single_node, in_process_cluster, start_grpc_node, RaftControlPlane, TypeConfig,
+    durable_single_node, in_process_cluster, start_grpc_node, start_grpc_node_with_security,
+    RaftControlPlane, TypeConfig,
 };
 #[cfg(feature = "distributed")]
 pub use control_server::ControlServer;
@@ -66,5 +69,9 @@ pub use control_server::ControlServer;
 pub use coordinator::ShardGroup;
 #[cfg(feature = "distributed")]
 pub use remote::RemoteShard;
+#[cfg(feature = "distributed")]
+pub use security::{
+    resolve_mesh_token, ClientSecurity, ServerSecurity, TlsClientConfig, TlsServerIdentity,
+};
 #[cfg(feature = "distributed")]
 pub use server::ShardServer;

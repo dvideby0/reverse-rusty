@@ -317,6 +317,12 @@ pub struct ClusterEngine {
     /// `with_handle`.
     #[cfg(feature = "distributed")]
     handle: Option<tokio::runtime::Handle>,
+    /// Mesh client security (ADR-071), retained from the secure gRPC builders so every
+    /// INTERNAL connection the coordinator later makes — peer recovery, live handoff —
+    /// rides the same TLS + token as the initial connects. Default (empty) on the
+    /// in-process path ⇒ byte-identical.
+    #[cfg(feature = "distributed")]
+    client_security: super::security::ClientSecurity,
 }
 
 /// Observer callback for cluster durability events — the `Arc` analogue of the

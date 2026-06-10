@@ -110,8 +110,12 @@ pub(super) async fn recover_from(
             "RecoverFrom dict-fingerprint mismatch (divergent feature space)",
         ));
     }
+    // Dial the peer source through the MESH path (ADR-071): this node's client
+    // security (TLS + token) applies to the outbound pull exactly as it does to a
+    // coordinator connection — a bare connect here would silently bypass the mesh
+    // (and a secured source would reject the unauthenticated FetchSegments anyway).
     let mut client =
-        proto::shard_service_client::ShardServiceClient::connect(req.source_endpoint.clone())
+        crate::cluster::remote::connect_mesh(&req.source_endpoint, &server.client_security)
             .await
             .map_err(|e| {
                 Status::unavailable(format!(

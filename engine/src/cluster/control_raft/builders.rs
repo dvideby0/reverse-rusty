@@ -78,12 +78,37 @@ pub fn start_grpc_node(
     handle: &Handle,
     data_dir: Option<&Path>,
 ) -> Result<RaftControlPlane, ControlError> {
+    start_grpc_node_with_security(
+        node_id,
+        num_shards,
+        vnodes,
+        dict_fingerprint,
+        handle,
+        data_dir,
+        crate::cluster::security::ClientSecurity::default(),
+    )
+}
+
+/// [`start_grpc_node`] with mesh security (ADR-071) on the node's OUTBOUND peer links
+/// (TLS verification + the cluster token on every Raft RPC it sends). The inbound half
+/// is the [`ControlServer`](crate::cluster::control_server::ControlServer)'s
+/// `with_security`. A default config is byte-identical to [`start_grpc_node`].
+#[allow(clippy::too_many_arguments)]
+pub fn start_grpc_node_with_security(
+    node_id: u64,
+    num_shards: u32,
+    vnodes: u32,
+    dict_fingerprint: u64,
+    handle: &Handle,
+    data_dir: Option<&Path>,
+    security: crate::cluster::security::ClientSecurity,
+) -> Result<RaftControlPlane, ControlError> {
     let genesis = single_node_state(num_shards, vnodes, dict_fingerprint);
     // Durable manager nodes fsync their hard state (election safety + no committed-data loss).
     build_node(
         node_id,
         genesis,
-        GrpcControlNetworkFactory,
+        GrpcControlNetworkFactory { security },
         handle,
         data_dir,
         true,
