@@ -12,7 +12,7 @@
 //!   total_len: u32        (bytes of header + payload, excluding this u32 and the CRC)
 //!   crc32:     u32        (of everything after: seq + op + payload)
 //!   seq:       u64        (monotonic sequence number)
-//!   op:        u8         (0=Insert, 1=Tombstone, 2=FlushCheckpoint)
+//!   op:        u8         (0=Insert, 1=Tombstone, 2=FlushCheckpoint, 3=DeleteByLogical)
 //!   payload:   [u8; ...]  (op-specific, variable length)
 //! ```
 //!
@@ -24,6 +24,10 @@
 //!   read back untagged. Tags are not recoverable from `text`, so they must be logged.
 //! Tombstone payload: `seg_idx: u32, local_id: u32`
 //! FlushCheckpoint payload: `segment_file_len: u32, segment_file: [u8; ...]`
+//! DeleteByLogical payload (WAL v3, ADR-066): `logical: u64` — the address-FREE delete.
+//!   Replay re-derives the affected copies from the recovered state ("tombstone every
+//!   live copy of `logical`"), so the frame stays correct across compaction's
+//!   `(seg_idx, local)` renumbering, where a positional Tombstone frame would misfire.
 //!
 //! On recovery, we scan forward from the beginning, skipping entries with bad CRC
 //! (torn writes from a crash). Entries before the last FlushCheckpoint are skipped
@@ -49,13 +53,16 @@ use crate::storage::crc32;
 const WAL_MAGIC: [u8; 4] = *b"PWAL";
 // v1: original layout. v2 (ADR-049): the Insert payload gains an optional trailing tag
 // section. The version is informational — the parser detects per entry whether tags are
-// present (by trailing bytes), so v1 and v2 entries coexist.
-const WAL_VERSION: u32 = 2;
+// present (by trailing bytes), so v1 and v2 entries coexist. v3 (ADR-066): adds the
+// DeleteByLogical op; older entries are unchanged (an old binary reading a v3 tail stops
+// at the first op-3 frame and reports it as skipped bytes, like a torn tail).
+const WAL_VERSION: u32 = 3;
 const WAL_HEADER_SIZE: usize = 8; // magic + version
 
 const OP_INSERT: u8 = 0;
 const OP_TOMBSTONE: u8 = 1;
 const OP_FLUSH_CHECKPOINT: u8 = 2;
+const OP_DELETE_LOGICAL: u8 = 3;
 
 /// A single WAL entry, decoded.
 #[derive(Debug, Clone)]
@@ -78,6 +85,14 @@ pub enum WalEntry {
         seq: u64,
         segment_file: String,
     },
+    /// Address-free delete (WAL v3, ADR-066): tombstone every live copy of `logical`.
+    /// The production delete path logs ONE of these instead of N positional Tombstones,
+    /// so a compaction that renumbers `(seg_idx, local)` can never make the replay
+    /// misfire into a different query (a silent false negative).
+    DeleteByLogical {
+        seq: u64,
+        logical: u64,
+    },
 }
 
 impl WalEntry {
@@ -85,7 +100,8 @@ impl WalEntry {
         match self {
             WalEntry::Insert { seq, .. }
             | WalEntry::Tombstone { seq, .. }
-            | WalEntry::FlushCheckpoint { seq, .. } => *seq,
+            | WalEntry::FlushCheckpoint { seq, .. }
+            | WalEntry::DeleteByLogical { seq, .. } => *seq,
         }
     }
 }
@@ -247,6 +263,30 @@ impl Wal {
         Ok(seq)
     }
 
+    /// Append a DeleteByLogical entry (WAL v3, ADR-066): the address-free
+    /// "tombstone every live copy of `logical`" mutation logged by
+    /// [`Engine::delete_by_logical_id`](crate::segment::Engine::delete_by_logical_id).
+    /// One frame per delete, regardless of how many physical copies it removes.
+    pub fn append_delete_logical(&mut self, logical: u64) -> io::Result<u64> {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+
+        let mut body = Vec::with_capacity(8 + 1 + 8);
+        body.extend_from_slice(&seq.to_le_bytes());
+        body.push(OP_DELETE_LOGICAL);
+        body.extend_from_slice(&logical.to_le_bytes());
+
+        let crc = crc32(&body);
+        self.file.write_all(&(body.len() as u32).to_le_bytes())?;
+        self.file.write_all(&crc.to_le_bytes())?;
+        self.file.write_all(&body)?;
+        self.sync_after_append()?;
+        // Framed on disk as a 4-byte length prefix + 4-byte CRC + body.
+        self.size_bytes += 8 + body.len() as u64;
+        self.pending_entries += 1;
+        Ok(seq)
+    }
+
     /// Append a FlushCheckpoint entry. Indicates that all prior WAL entries
     /// have been materialized into sealed segments.
     pub fn append_flush_checkpoint(&mut self, segment_file: &str) -> io::Result<u64> {
@@ -283,6 +323,26 @@ impl Wal {
     /// Number of un-checkpointed entries (mutations not yet in a sealed segment).
     pub fn pending_entries(&self) -> u64 {
         self.pending_entries
+    }
+
+    /// The sequence number of the last appended entry (0 if none yet). Sequence
+    /// numbers stay monotonic across [`reset`](Self::reset), so this is a valid
+    /// high-water mark for the manifest's `wal_seq_watermark` (ADR-066).
+    pub fn last_seq(&self) -> u64 {
+        self.next_seq - 1
+    }
+
+    /// Pin the next sequence number past `watermark` (ADR-066). `reset` keeps the
+    /// sequence monotonic only in memory: reopening a reset (header-only) WAL file
+    /// rescans it and restarts at 1, while the manifest keeps its old watermark —
+    /// so without this, frames appended after the reopen would sort at or below
+    /// the watermark and be wrongly skipped by the next recovery (a resurrected
+    /// delete). [`Engine::open`](crate::segment::Engine::open) calls this with the
+    /// recovered manifest's watermark.
+    pub fn ensure_seq_after(&mut self, watermark: u64) {
+        if self.next_seq <= watermark {
+            self.next_seq = watermark + 1;
+        }
     }
 
     /// Read all valid entries from a WAL file. Returns entries and the byte
@@ -430,6 +490,15 @@ impl Wal {
                         seg_idx,
                         local_id,
                     });
+                }
+                OP_DELETE_LOGICAL => {
+                    if payload.len() < 8 {
+                        break;
+                    }
+                    let Some(logical) = get_u64(payload, 0) else {
+                        break;
+                    };
+                    entries.push(WalEntry::DeleteByLogical { seq, logical });
                 }
                 OP_FLUSH_CHECKPOINT => {
                     if payload.len() < 4 {
@@ -596,6 +665,50 @@ mod tests {
             }
             other => panic!("expected Insert, got {other:?}"),
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn delete_by_logical_round_trips_through_recovery() {
+        let path = scratch_path("delete_logical_roundtrip");
+        {
+            let mut wal = Wal::open(&path, true).unwrap();
+            wal.append_insert(7, 1, "wander franco", &[]).unwrap();
+            wal.append_delete_logical(7).unwrap();
+            // Old positional frames still coexist in the same file.
+            wal.append_tombstone(u32::MAX, 3).unwrap();
+        }
+        let recovered = Wal::recover(&path).unwrap();
+        assert_eq!(recovered.entries.len(), 3);
+        assert_eq!(recovered.skipped_bytes, 0);
+        match &recovered.entries[1] {
+            WalEntry::DeleteByLogical { logical, .. } => assert_eq!(*logical, 7),
+            other => panic!("expected DeleteByLogical, got {other:?}"),
+        }
+        match &recovered.entries[2] {
+            WalEntry::Tombstone {
+                seg_idx, local_id, ..
+            } => {
+                assert_eq!(*seg_idx, u32::MAX);
+                assert_eq!(*local_id, 3);
+            }
+            other => panic!("expected Tombstone, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn last_seq_is_monotonic_across_reset() {
+        let path = scratch_path("last_seq_monotonic");
+        let mut wal = Wal::open(&path, false).unwrap();
+        assert_eq!(wal.last_seq(), 0, "no entries yet");
+        wal.append_insert(1, 1, "michael jordan", &[]).unwrap();
+        wal.append_delete_logical(1).unwrap();
+        assert_eq!(wal.last_seq(), 2);
+        wal.reset().unwrap();
+        assert_eq!(wal.last_seq(), 2, "reset must not rewind the watermark");
+        wal.append_insert(2, 1, "scottie pippen", &[]).unwrap();
+        assert_eq!(wal.last_seq(), 3);
         let _ = std::fs::remove_file(&path);
     }
 

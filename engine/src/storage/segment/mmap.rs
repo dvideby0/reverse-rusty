@@ -96,6 +96,11 @@ pub struct MmapSegment {
     pub(crate) alive_overlay: Vec<bool>,
     /// O(1) counter of alive (non-tombstoned) entries.
     alive_counter: usize,
+    /// The DEAD locals, maintained incrementally alongside `alive_overlay`
+    /// (seeded from the on-disk flags, one insert per tombstone) so the manifest
+    /// commit can serialize it in O(deletes) instead of rescanning the segment
+    /// (ADR-066). Invariant: `dead_overlay` ≡ the dead set of `alive_overlay`.
+    dead_overlay: roaring::RoaringBitmap,
     // Path for cleanup/identification
     path: std::path::PathBuf,
     /// Vocab epoch at which this segment's queries were compiled.
@@ -161,6 +166,7 @@ impl Clone for MmapSegment {
             class_arr: self.class_arr,
             alive_overlay: self.alive_overlay.clone(),
             alive_counter: self.alive_counter,
+            dead_overlay: self.dead_overlay.clone(),
             path: self.path.clone(),
             vocab_epoch: self.vocab_epoch,
             logical_index: self.logical_index.clone(),
@@ -307,9 +313,16 @@ impl MmapSegment {
         cursor = next;
         let (alive_s, _) = read_u8_slice(data_for_parse, cursor)?;
 
-        // Build alive overlay from on-disk data.
+        // Build alive overlay from on-disk data; seed the dead set from the same
+        // flags so it stays ≡ the overlay's dead entries from the start (ADR-066).
         let alive_overlay: Vec<bool> = alive_s.iter().map(|&b| b != 0).collect();
         let alive_counter = alive_overlay.iter().filter(|&&a| a).count();
+        let dead_overlay: roaring::RoaringBitmap = alive_overlay
+            .iter()
+            .enumerate()
+            .filter(|(_, &a)| !a)
+            .map(|(i, _)| i as u32)
+            .collect();
 
         // Reverse index (ADR-020 Item 2): v2 borrows the sorted columns straight
         // from the mmap (zero resident heap); v1 reconstructs them in RAM from
@@ -425,6 +438,7 @@ impl MmapSegment {
             class_arr: class_s.as_ptr(),
             alive_overlay,
             alive_counter,
+            dead_overlay,
             path: path.to_path_buf(),
             vocab_epoch: 0,
             logical_index,

@@ -217,6 +217,32 @@ impl Engine {
                     }
                 })
                 .collect();
+            // ADR-066: bake each dirty mmap segment's tombstones into the commit point.
+            // The on-disk `.seg` alive flags are frozen at write time and live deletes
+            // mutate only the in-RAM overlay, so without this the flush-time WAL reset
+            // would drop the only durable record of a base-segment delete and the
+            // deleted query would resurrect on reopen. The dead set is maintained
+            // incrementally on the segment, so this is O(deletes), never a rescan.
+            let segment_tombstones: Vec<(String, Vec<u8>)> = self
+                .segments
+                .iter()
+                .filter_map(|s| {
+                    let BaseSegment::Mmap(m) = s.as_ref() else {
+                        return None;
+                    };
+                    let dead = m.dead_overlay();
+                    if dead.is_empty() {
+                        return None; // clean — no bitmap to record
+                    }
+                    let name = m.path().file_name().and_then(|f| f.to_str())?.to_string();
+                    let mut bytes = Vec::with_capacity(dead.serialized_size());
+                    // Serialization into a Vec cannot fail; if it ever did, recording
+                    // no bitmap (resurrect-risk, a bounded false positive) is the
+                    // conservative direction — never a wrong tombstone.
+                    dead.serialize_into(&mut bytes).ok()?;
+                    Some((name, bytes))
+                })
+                .collect();
             let manifest = crate::storage::Manifest {
                 segment_files,
                 next_seg_id: self.next_seg_id,
@@ -224,6 +250,10 @@ impl Engine {
                 tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),
                 rejected_parse: self.rejected_parse,
                 rejected_class_d: self.rejected_class_d,
+                // Everything appended through this seq is captured by this commit
+                // (single-writer: every frame already appended is already applied).
+                wal_seq_watermark: self.wal.as_ref().map_or(0, crate::wal::Wal::last_seq),
+                segment_tombstones,
             };
             let dir = dir.clone();
             if let Err(e) = crate::storage::write_manifest(&manifest, &dir.join("manifest.bin")) {

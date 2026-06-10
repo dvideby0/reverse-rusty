@@ -163,9 +163,19 @@ impl MmapSegment {
         if let Some(slot) = self.alive_overlay.get_mut(local_id as usize) {
             if *slot {
                 self.alive_counter -= 1;
+                // Keep the incremental dead set ≡ the overlay (ADR-066) — the
+                // already-dead branch is covered by the seed at open.
+                self.dead_overlay.insert(local_id);
             }
             *slot = false;
         }
+    }
+
+    /// The DEAD locals as a roaring bitmap, maintained incrementally (≡ the dead
+    /// entries of `alive_overlay`). The manifest commit serializes this in
+    /// O(deletes) — never a full-segment rescan (ADR-066).
+    pub fn dead_overlay(&self) -> &roaring::RoaringBitmap {
+        &self.dead_overlay
     }
 
     /// The sorted `logical_id` column (borrowed from the mmap for v2, owned for v1).

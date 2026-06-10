@@ -87,7 +87,43 @@ impl Engine {
         for name in &manifest.segment_files {
             let seg_path = seg_dir.join(name);
             match MmapSegment::open(&seg_path) {
-                Ok(mmap_seg) => segments.push(Arc::new(BaseSegment::Mmap(mmap_seg))),
+                Ok(mut mmap_seg) => {
+                    // ADR-066: restore the segment's committed tombstone state. The
+                    // on-disk alive flags are frozen at write time; deletes applied
+                    // since live only in this manifest-carried bitmap (their WAL
+                    // frames may have been dropped by a flush-time reset).
+                    if let Some((_, bytes)) = manifest
+                        .segment_tombstones
+                        .iter()
+                        .find(|(file, _)| file == name)
+                    {
+                        match roaring::RoaringBitmap::deserialize_from(&bytes[..]) {
+                            Ok(dead) => {
+                                for local in dead {
+                                    // Out-of-range ids no-op inside `tombstone` —
+                                    // never a wrong tombstone.
+                                    mmap_seg.tombstone(local);
+                                }
+                            }
+                            Err(e) => {
+                                // Apply nothing rather than guess: a resurrected
+                                // delete is a bounded false positive; a wrong
+                                // tombstone would be a false negative.
+                                pending_events.push(
+                                    crate::events::EngineEvent::DurabilityFailure {
+                                        op: crate::events::DurabilityOp::SegmentRecovery,
+                                        detail: format!(
+                                            "corrupt tombstone bitmap for {name}; its baked \
+                                             deletes are not restored (entries may resurrect)"
+                                        ),
+                                        error: e.to_string(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    segments.push(Arc::new(BaseSegment::Mmap(mmap_seg)));
+                }
                 Err(e) => {
                     pending_events.push(crate::events::EngineEvent::DurabilityFailure {
                         op: crate::events::DurabilityOp::SegmentRecovery,
@@ -104,7 +140,13 @@ impl Engine {
 
         // Open WAL and replay
         let wal_path = dir.join("wal.log");
-        let wal = Some(Wal::open(&wal_path, config.wal_sync_on_write)?);
+        let mut wal_file = Wal::open(&wal_path, config.wal_sync_on_write)?;
+        // ADR-066: a reset (header-only) WAL rescans to seq 1, but the manifest
+        // keeps its watermark — pin the sequence past it so frames appended after
+        // this reopen can never sort at/below the watermark and be skipped by the
+        // NEXT recovery (which would resurrect an acknowledged delete).
+        wal_file.ensure_seq_after(manifest.wal_seq_watermark);
+        let wal = Some(wal_file);
 
         // Load persisted query sources — resident, or lazily mmap'd per
         // config.retain_source (ADR-020 Item 1).
@@ -192,9 +234,36 @@ impl Engine {
                     engine.replay_insert(&text, logical, version, &tags);
                 }
                 WalEntry::Tombstone {
-                    seg_idx, local_id, ..
+                    seq,
+                    seg_idx,
+                    local_id,
                 } => {
-                    engine.replay_tombstone(seg_idx, local_id);
+                    // ADR-066: a positional frame targeting a BASE segment is valid
+                    // only against the segment list it was written under. Frames at or
+                    // below the manifest's watermark are already baked into the commit
+                    // (tombstone bitmap, or the entry was dropped by a merge) — and the
+                    // positions they address may have been renumbered since, so
+                    // replaying one could tombstone an unrelated query. Frames above
+                    // the watermark were appended against exactly the committed list
+                    // (every segments-vec mutation commits a manifest), so they replay
+                    // correctly. Memtable frames (the u32::MAX sentinel) always replay:
+                    // the memtable is rebuilt purely from this WAL tail.
+                    if seg_idx == u32::MAX || seq > manifest.wal_seq_watermark {
+                        engine.replay_tombstone(seg_idx, local_id);
+                    }
+                }
+                WalEntry::DeleteByLogical { seq, logical } => {
+                    // Address-free (ADR-066): re-derive the affected copies from the
+                    // recovered state. Frames at/below the watermark are SKIPPED, not
+                    // just for economy: bulk ingest bypasses the WAL (its segment +
+                    // manifest commit IS its durability, ADR-017), so a same-id query
+                    // bulk-ingested AFTER this delete is already in the attached
+                    // segments — replaying the older delete over it would erase the
+                    // newer query (codex P1). The manifest commit that covered this
+                    // frame also baked its tombstones, so skipping loses nothing.
+                    if seq > manifest.wal_seq_watermark {
+                        engine.apply_delete_by_logical(logical);
+                    }
                 }
                 WalEntry::FlushCheckpoint { .. } => {
                     // Skip — already handled by manifest

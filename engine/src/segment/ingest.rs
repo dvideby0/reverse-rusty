@@ -311,15 +311,32 @@ impl Engine {
     /// lookup instead of O(total_entries) full scan. Returns the number of
     /// entries tombstoned.
     ///
-    /// Each tombstone is WAL-logged before it is applied. If a WAL append
-    /// fails, the delete stops and returns `Err`: the tombstones already
-    /// applied are durably logged (and replay correctly), and the failed one
-    /// is not applied. A retried delete is idempotent, so the caller can treat
-    /// the `Err` as "try again" (the server returns HTTP 503).
+    /// Durability (ADR-066): the delete is logged as ONE address-free
+    /// `DeleteByLogical` WAL frame *before* anything is applied — all-or-nothing
+    /// (a WAL failure rejects the whole delete; the server returns HTTP 503 and a
+    /// retry is idempotent). The frame carries the logical id, not `(seg_idx,
+    /// local)` addresses, so a later compaction that renumbers the address space
+    /// can never make a crash-recovery replay tombstone an unrelated query.
     pub fn delete_by_logical_id(&mut self, logical_id: u64) -> std::io::Result<usize> {
-        let mut count = 0usize;
+        if let Some(ref mut wal) = self.wal {
+            if let Err(e) = wal.append_delete_logical(logical_id) {
+                self.wal_healthy = false;
+                return Err(e);
+            }
+        }
+        Ok(self.apply_delete_by_logical(logical_id))
+    }
 
-        for (seg_idx, seg) in self.segments.iter_mut().enumerate() {
+    /// The shared apply funnel behind [`delete_by_logical_id`](Self::delete_by_logical_id)
+    /// and its WAL replay: tombstone every live copy of `logical_id` in the base
+    /// segments and the memtable, then drop the source text. No WAL involvement —
+    /// the caller has already logged (live path) or is replaying (recovery). Live
+    /// and replay running the same funnel is what makes replay deterministic:
+    /// at the frame's position in the log, the recovered live set is exactly the
+    /// live set the original call saw.
+    pub(in crate::segment) fn apply_delete_by_logical(&mut self, logical_id: u64) -> usize {
+        let mut count = 0usize;
+        for seg in &mut self.segments {
             let locals: Vec<u32> = seg
                 .locals_for_logical(logical_id)
                 .iter()
@@ -327,12 +344,6 @@ impl Engine {
                 .filter(|&local| seg.is_alive(local))
                 .collect();
             for local in locals {
-                if let Some(ref mut wal) = self.wal {
-                    if let Err(e) = wal.append_tombstone(seg_idx as u32, local) {
-                        self.wal_healthy = false;
-                        return Err(e);
-                    }
-                }
                 Arc::make_mut(seg).tombstone(local);
                 count += 1;
             }
@@ -352,12 +363,6 @@ impl Engine {
             })
             .collect();
         for local in mem_locals {
-            if let Some(ref mut wal) = self.wal {
-                if let Err(e) = wal.append_tombstone(u32::MAX, local) {
-                    self.wal_healthy = false;
-                    return Err(e);
-                }
-            }
             Arc::make_mut(&mut self.memtable).tombstone(local);
             count += 1;
         }
@@ -365,7 +370,7 @@ impl Engine {
         if count > 0 {
             self.query_store.remove(logical_id);
         }
-        Ok(count)
+        count
     }
 
     /// Compile a batch DIRECTLY into a new immutable base segment and append it.
