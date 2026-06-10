@@ -244,6 +244,32 @@ fn upsert_after_reopen_with_reset_wal_survives_second_crash() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The `rejected_class_d` counter is manifest-persisted, so a replayed upsert frame
+/// must not re-increment it (codex): one rejected request stays ONE across a
+/// manifest commit + restart, not one-per-restart.
+#[test]
+fn rejected_upsert_counter_does_not_double_count_across_restart() {
+    let dir = test_dir("upsert_classd_counter");
+    {
+        let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
+        eng.build_from_queries(&[(1, "michael jordan".to_string())]);
+        let out = eng.try_upsert_live("-graded", 1, 2).expect("upsert");
+        assert!(matches!(out, UpsertOutcome::RejectedClassD));
+        assert_eq!(eng.rejected_class_d(), 1, "counted once, live");
+        // A manifest commit persists the counter while the frame stays in the WAL.
+        eng.bulk_ingest(&[(2, "kobe bryant".to_string())]);
+        assert_eq!(eng.rejected_class_d(), 1);
+        // crash
+    }
+    let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
+    assert_eq!(
+        eng.rejected_class_d(),
+        1,
+        "replaying the rejected frame must not re-count it"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Tags ride the upsert frame: a replacement's tags survive crash recovery, and the
 /// replaced copy's tags die with it (newest-live-copy resolution).
 #[test]

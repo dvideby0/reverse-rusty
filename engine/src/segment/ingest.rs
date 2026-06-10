@@ -314,7 +314,14 @@ impl Engine {
                 return Err(crate::error::WriteError::Wal(e));
             }
         }
-        Ok(self.apply_upsert(&ast, text, logical, version, tags, true))
+        let outcome = self.apply_upsert(&ast, text, logical, version, tags, true);
+        if matches!(outcome, UpsertOutcome::RejectedClassD) {
+            // Counted on the LIVE path only, like every other rejection counter:
+            // the manifest persists the count, so a replayed frame must not
+            // re-increment it (it would double-count across restarts).
+            self.rejected_class_d += 1;
+        }
+        Ok(outcome)
     }
 
     /// The shared apply funnel behind [`try_upsert_live_with_tags`](Self::try_upsert_live_with_tags)
@@ -378,7 +385,8 @@ impl Engine {
         else {
             // The NEW version is class D: reject it and leave the prior copies
             // untouched — a failed replace must never delete (ES `index` parity).
-            self.rejected_class_d += 1;
+            // NOT counted here: the live caller counts it (a replayed frame must
+            // not re-increment the manifest-persisted counter — codex).
             return UpsertOutcome::RejectedClassD;
         };
 
