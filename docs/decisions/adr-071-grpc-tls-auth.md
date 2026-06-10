@@ -55,8 +55,10 @@
     interceptor-generic type churn through the stored client fields).
   - **Builders/bins**: additive `connect_remote_with_security` / `connect_replicated_with_security`
     (the existing constructors delegate with `None` — byte-identical); `shardserver`/`controlserver`
-    gain `--tls-cert`/`--tls-key`/`--cluster-token`; the coordinator-mode server (ADR-070) gains the
-    client half (`--grpc-tls-ca`/`--grpc-tls-domain`/`--cluster-token`).
+    gain `--tls-cert`/`--tls-key`/`--cluster-token` plus the client half (`--tls-ca`/`--tls-domain`)
+    — the controlserver dials its Raft peers, and the shardserver's `RecoverFrom` handler dials the
+    peer SOURCE (an internal outbound that must ride the same mesh path, caught in review); the
+    coordinator-mode server (ADR-070) gains `--grpc-tls-ca`/`--grpc-tls-domain`/`--cluster-token`.
 
 - **Why this is safe.** Security wrapping touches no matching or placement code: the interceptor
   runs before any handler, TLS is below the RPC layer, and every transport-level rejection surfaces

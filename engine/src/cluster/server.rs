@@ -23,7 +23,7 @@ use crate::segment::PlacedQuery;
 use crate::tagdict::TagDict;
 
 use super::proto::shard_service_server::ShardServiceServer;
-use super::security::{MeshAuthVerify, ServerSecurity, TlsServerIdentity};
+use super::security::{ClientSecurity, MeshAuthVerify, ServerSecurity, TlsServerIdentity};
 use super::shard::{LocalShard, ShardError};
 
 mod service;
@@ -69,6 +69,10 @@ pub struct ShardServer {
     /// Mesh security (ADR-071): TLS identity + expected cluster token, applied by the
     /// `serve*` methods. Default (none) ⇒ the historical plaintext/open behavior.
     security: ServerSecurity,
+    /// The CLIENT half of the mesh security (ADR-071) — what THIS node presents when it
+    /// dials OUT (the `RecoverFrom` handler's pull from a peer source). Default (none) ⇒
+    /// plaintext, the historical behavior.
+    client_security: ClientSecurity,
 }
 
 impl ShardServer {
@@ -97,6 +101,7 @@ impl ShardServer {
             state,
             fenced_at_generation: AtomicU64::new(0),
             security: ServerSecurity::default(),
+            client_security: ClientSecurity::default(),
         }
     }
 
@@ -112,6 +117,7 @@ impl ShardServer {
             state: ArcSwapOption::from(None),
             fenced_at_generation: AtomicU64::new(0),
             security: ServerSecurity::default(),
+            client_security: ClientSecurity::default(),
         }
     }
 
@@ -127,6 +133,7 @@ impl ShardServer {
             state: ArcSwapOption::from(None),
             fenced_at_generation: AtomicU64::new(0),
             security: ServerSecurity::default(),
+            client_security: ClientSecurity::default(),
         }
     }
 
@@ -160,6 +167,7 @@ impl ShardServer {
             state,
             fenced_at_generation: AtomicU64::new(0),
             security: ServerSecurity::default(),
+            client_security: ClientSecurity::default(),
         })
     }
 
@@ -216,6 +224,16 @@ impl ShardServer {
     #[must_use]
     pub fn with_security(mut self, security: ServerSecurity) -> Self {
         self.security = security;
+        self
+    }
+
+    /// Install the CLIENT half of the mesh security (ADR-071) — used when this node
+    /// dials OUT (the `RecoverFrom` handler pulls segments + translog from the peer
+    /// source). Without it a secured source would reject this node's pull; with it the
+    /// internal dial rides the same TLS + token as every coordinator connection.
+    #[must_use]
+    pub fn with_client_security(mut self, security: ClientSecurity) -> Self {
+        self.client_security = security;
         self
     }
 

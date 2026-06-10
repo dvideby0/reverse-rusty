@@ -38,7 +38,25 @@ use super::shard::{Shard, ShardError};
 /// [`MeshAuthInject`] interceptor, which attaches the cluster token when one is
 /// configured and is a no-op otherwise — so the secured and plaintext paths share
 /// ONE client type and no RPC call site changes.
-type MeshChannel = InterceptedService<Channel, MeshAuthInject>;
+pub(crate) type MeshChannel = InterceptedService<Channel, MeshAuthInject>;
+
+/// Async mesh connect (ADR-071): configure the endpoint (TLS when the security
+/// config carries it), eagerly connect, wrap with the token interceptor. The
+/// async core under [`connect_channel`], and the dial the server-side `RecoverFrom`
+/// handler uses for its OUTBOUND peer connection — one path, so an internal dial
+/// can never silently skip the mesh security.
+pub(crate) async fn connect_mesh(
+    endpoint: &str,
+    security: &ClientSecurity,
+) -> Result<ShardServiceClient<MeshChannel>, ShardError> {
+    let ep = configure_endpoint(endpoint, security.tls.as_ref())?;
+    let channel = ep
+        .connect()
+        .await
+        .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
+    let inject = MeshAuthInject::new(security.token.as_deref())?;
+    Ok(ShardServiceClient::with_interceptor(channel, inject))
+}
 
 /// One shard living behind a gRPC `ShardService`.
 pub struct RemoteShard {
@@ -57,11 +75,7 @@ fn connect_channel(
     handle: &Handle,
     security: &ClientSecurity,
 ) -> Result<ShardServiceClient<MeshChannel>, ShardError> {
-    let ep = configure_endpoint(endpoint, security.tls.as_ref())?;
-    let channel = block_on_in_context(handle, ep.connect())
-        .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
-    let inject = MeshAuthInject::new(security.token.as_deref())?;
-    Ok(ShardServiceClient::with_interceptor(channel, inject))
+    block_on_in_context(handle, connect_mesh(endpoint, security))
 }
 
 impl RemoteShard {

@@ -112,7 +112,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("usage: controlserver <NODE_ID> <BIND_ADDR> [--peer ID=URL ...] [--bootstrap]")?;
     let bind = bind.ok_or("missing BIND_ADDR")?;
     let addr: SocketAddr = bind.parse()?;
-    let self_url = format!("http://{bind}");
 
     // Mesh security (ADR-071). A manager node is BOTH a server (its ControlService) and a
     // client (the Raft RPCs it sends its peers), so it takes both halves: the identity it
@@ -165,6 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             dir.display()
         );
     }
+    let serves_tls = server_tls.is_some();
     let server = ControlServer::new(plane.raft()).with_security(ServerSecurity {
         tls: server_tls,
         token,
@@ -173,6 +173,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if bootstrap {
         // Let the peers' listeners come up, then form the initial cluster from all members.
+        // The self-URL scheme must match the transport peers dial back on: with a TLS
+        // identity configured this node serves https, so registering an http:// URL would
+        // fail every peer→bootstrapper Raft RPC at the handshake (review finding).
+        let scheme = if serves_tls { "https" } else { "http" };
+        let self_url = format!("{scheme}://{bind}");
         std::thread::sleep(Duration::from_secs(2));
         let mut members: Vec<(u64, String)> = vec![(node_id, self_url)];
         members.extend(peers.iter().cloned());

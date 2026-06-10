@@ -180,8 +180,9 @@ the **mesh security** flags (ADR-071): `--grpc-tls-ca` (PEM CA to verify shard s
 then use `https://`), `--grpc-tls-domain` (SNI/verification override for raw-IP endpoints), and
 `--cluster-token`/`RR_CLUSTER_TOKEN` (the shared mesh secret attached to every gRPC RPC — distinct
 from the HTTP `--auth-token`). The server side of the mesh is configured on
-`shardserver`/`controlserver` (`--tls-cert`/`--tls-key`/`--cluster-token`; the controlserver also
-takes the client half `--tls-ca`/`--tls-domain` for its peer links). `--data-dir` makes
+`shardserver`/`controlserver` (`--tls-cert`/`--tls-key`/`--cluster-token`; both also take the
+client half `--tls-ca`/`--tls-domain` — the controlserver for its peer Raft links, the
+shardserver for the `RecoverFrom` outbound pull from a peer source). `--data-dir` makes
 an **in-process** cluster durable (build once, reopen on restart — `--load-file` is skipped with a
 warning when the reopened cluster is already populated). A **remote** coordinator is stateless and
 refuses `--data-dir`: durability lives on the shard nodes (`shardserver --data-dir`, the per-shard

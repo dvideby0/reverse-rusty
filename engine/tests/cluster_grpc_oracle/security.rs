@@ -225,3 +225,99 @@ fn grpc_plaintext_client_to_tls_server_fails_loud() {
         "a plaintext client against a TLS server must fail loud"
     );
 }
+
+/// The `RecoverFrom` handler's OUTBOUND dial rides the mesh security too (the review
+/// catch): a fully secured source + target pair completes a peer recovery — the
+/// target pulls the source's segments over TLS with the token — and the recovered
+/// target answers percolates ≡ brute. Without the target's client half configured,
+/// the secured source rejects the pull (asserted as the negative leg).
+#[test]
+fn grpc_secured_peer_recovery_pulls_through_the_mesh() {
+    let (queries, titles) = small_corpus();
+    let oracle = build_oracle(&queries, &titles);
+
+    let (cert_pem, key_pem) = test_identity();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+
+    // Durable secured SOURCE + two durable pending TARGETS (one with the client half,
+    // one without). All serve TLS + demand the token.
+    let src_dir = server_dir("sec_src");
+    let tgt_dir = server_dir("sec_tgt");
+    let bad_dir = server_dir("sec_bad");
+    let (src_ep, tgt_ep, bad_ep) = {
+        let _enter = rt.enter();
+        let mut eps = Vec::new();
+        for (dir, with_client) in [(&src_dir, true), (&tgt_dir, true), (&bad_dir, false)] {
+            let incoming =
+                TcpIncoming::bind("127.0.0.1:0".parse::<SocketAddr>().unwrap()).expect("bind");
+            let addr = incoming.local_addr().expect("local_addr");
+            let mut server = reverse_rusty::cluster::ShardServer::pending_durable(
+                Arc::clone(&norm),
+                EngineConfig::default(),
+                (*dir).clone(),
+            )
+            .with_security(server_security(&cert_pem, &key_pem));
+            if with_client {
+                server = server.with_client_security(client_security(&cert_pem, Some(MESH_TOKEN)));
+            }
+            rt.spawn(server.serve_with_incoming(incoming));
+            eps.push(format!("https://localhost:{}", addr.port()));
+        }
+        (eps[0].clone(), eps[1].clone(), eps[2].clone())
+    };
+
+    // Coordinator over the secured source; load the corpus (source segments).
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let cluster = ClusterEngine::connect_remote_with_security(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        empty_tag_dict(),
+        &cfg,
+        std::slice::from_ref(&src_ep),
+        rt.handle(),
+        client_security(&cert_pem, Some(MESH_TOKEN)),
+    )
+    .expect("connect secured source");
+    cluster.ingest(&queries).expect("ingest over the mesh");
+
+    // The target WITHOUT a client half cannot pull from the secured source: the
+    // recovery fails loud (UNAUTHENTICATED at the source), never a silent empty shard.
+    assert!(
+        cluster
+            .peer_recover_replica(&src_ep, &bad_ep, rt.handle())
+            .is_err(),
+        "a target without the mesh client half must fail the pull loudly"
+    );
+
+    // The properly configured target completes the recovery THROUGH the mesh.
+    let (n, _hwm) = cluster
+        .peer_recover_replica(&src_ep, &tgt_ep, rt.handle())
+        .expect("secured peer recovery");
+    assert!(n > 0, "the recovered target holds the corpus");
+
+    // The recovered target answers ≡ brute (read through its own secured cluster).
+    let verify = ClusterEngine::connect_remote_with_security(
+        Arc::clone(&norm),
+        dict,
+        empty_tag_dict(),
+        &cfg,
+        std::slice::from_ref(&tgt_ep),
+        rt.handle(),
+        client_security(&cert_pem, Some(MESH_TOKEN)),
+    )
+    .expect("connect recovered target");
+    for (i, title) in titles.iter().enumerate() {
+        let got: HashSet<u64> = verify
+            .percolate(title)
+            .expect("percolate recovered target")
+            .into_iter()
+            .collect();
+        assert_eq!(got, oracle[i], "recovered-over-mesh ≠ brute on {title:?}");
+    }
+}
