@@ -19,6 +19,12 @@ use reverse_rusty::segment::IngestItemStatus;
 use crate::dto::{ApiError, HitSource};
 use crate::state::AppState;
 
+/// The class-D rejection body, shared by the single-doc and bulk paths. Names the
+/// opt-in lane (ADR-068) so an operator hitting the reject knows the way out.
+const CLASS_D_REJECT_MSG: &str = "query has no anchorable feature (cost class D); \
+     negation-only queries are stored as always-candidates when the accept_class_d \
+     setting is enabled";
+
 #[derive(Deserialize)]
 pub(crate) struct PutDocBody {
     query: String,
@@ -183,7 +189,7 @@ pub(crate) async fn put_doc(
                     Json(PutDocResponse {
                         _id: id,
                         result: "rejected",
-                        error: Some("query has no anchorable feature (cost class D)".into()),
+                        error: Some(CLASS_D_REJECT_MSG.into()),
                     }),
                 )
             }
@@ -546,8 +552,7 @@ pub(crate) async fn bulk_ingest(
                 }
                 IngestItemStatus::RejectedClassD => {
                     items[slot].index.status = 400;
-                    items[slot].index.error =
-                        Some("query has no anchorable feature (cost class D)".into());
+                    items[slot].index.error = Some(CLASS_D_REJECT_MSG.into());
                     has_errors = true;
                 }
             }

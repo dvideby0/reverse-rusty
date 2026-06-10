@@ -337,6 +337,8 @@ fn apply_settings_patch(
             }
             "broad_columnar" => set_bool(&mut cfg.broad_columnar, key, val, &mut errors),
             "broad_materialize" => set_bool(&mut cfg.broad_materialize, key, val, &mut errors),
+            // ---- the class-D always-candidate lane (ADR-068) ----
+            "accept_class_d" => set_bool(&mut cfg.accept_class_d, key, val, &mut errors),
             // ---- static (bound at construction) ----
             "data_dir" | "wal_sync_on_write" | "retain_source" => errors.push(format!(
                 "setting [{key}] is not dynamically updateable; set it at startup"

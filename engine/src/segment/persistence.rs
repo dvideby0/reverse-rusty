@@ -243,8 +243,23 @@ impl Engine {
                     Some((name, bytes))
                 })
                 .collect();
+            // The rollback fence (ADR-068): if ANY registered segment holds class-D
+            // always-candidates, this commit writes manifest v4 so a pre-ADR-068
+            // binary fails `Engine::open` loudly instead of skipping the v4 segment
+            // as corrupt and silently serving without its queries (recovery's
+            // corrupt-segment posture is skip + event, not abort). Registered
+            // segments are mmap'd (flush writes the file, then attaches), so the
+            // file's own version word is the source of truth.
+            let class_d_fence = self.segments.iter().any(|s| match s.as_ref() {
+                BaseSegment::Mmap(m) => m.carries_class_d_fence(),
+                BaseSegment::Memory(seg) => seg
+                    .classes()
+                    .iter()
+                    .any(|c| matches!(c, crate::compile::CostClass::D)),
+            });
             let manifest = crate::storage::Manifest {
                 segment_files,
+                class_d_fence,
                 next_seg_id: self.next_seg_id,
                 dict_data: crate::storage::serialize_dict(&self.dict),
                 tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),

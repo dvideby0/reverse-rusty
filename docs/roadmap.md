@@ -224,12 +224,17 @@ limitations".)*
      splits by state domain over the watermark). Also fixed en route: `Engine::open`'s fresh
      (no-manifest-yet) path now replays the WAL tail, so a start-empty server no longer loses
      acknowledged writes on its first crash. Single-node; cluster upsert rides ADR-065.
-  2. **Class-D always-candidate lane (opt-in)** — ES/OS `query_string` rewrites a pure-negative query to
-     **match-all-except** (`fixNegativeQueryIfNeeded`) and the reference workload contains such queries
-     ("base"/"raw" entities defined by exclusions); RR rejects them at ingest. Accept-and-quarantine:
-     the query is a candidate for *every* title, its forbidden features enforced only in exact
-     verification — never-gate-on-MUST_NOT extends naturally (the cover of an empty positive set is the
-     universal signature); rides the broad-lane batching. Default off (today's loud reject).
+  2. ~~**Class-D always-candidate lane (opt-in)**~~ **✅ Shipped ([ADR-068](DECISIONS.md)).** The
+     `accept_class_d` knob (dynamic, default off = the loud reject) stores a negation-only query as an
+     **always-candidate**: `anchor_plan` derives the cover of an empty positive set as the **universal
+     signature** (one empty broad-anchor group, `sig_key(&[])`), probed once per segment — once per
+     *batch* on the columnar path — in the broad lane; forbidden features enforced only in exact
+     verification (never-gate-on-MUST_NOT extended naturally; `is_pure_anchor` structurally false ⇒
+     verify always runs). Live writes gate before the WAL (the log holds only accepted mutations ⇒
+     replay unconditional, knob-flip-safe), the vocab recompile keeps stored entries (closing a
+     pre-existing silent-drop hazard), the effectively empty query still rejects. Oracle-proven
+     (vacuous-accept differential: per-title + batch + durability + knob-flip replay). Single-node;
+     the cluster lane rides the ADR-065 replicate-broad-to-all criterion.
   3. **Parity-mode normalizer knob** — disable the hard-coded `pop` number-context year demotion
      (position-sensitive number typing; the one residual FN class the audit demonstrated against a
      position-insensitive reference matcher). Vocab-persisted; default = current behavior.

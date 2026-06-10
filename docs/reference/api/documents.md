@@ -29,8 +29,14 @@ If the query fails to parse or has no anchorable features (cost class D), the re
 error — and the **prior version stays live and matchable** (a failed replace never deletes):
 
 ```json
-{"_id": 1, "result": "rejected", "error": "query has no anchorable feature (cost class D)"}
+{"_id": 1, "result": "rejected", "error": "query has no anchorable feature (cost class D); negation-only queries are stored as always-candidates when the accept_class_d setting is enabled"}
 ```
+
+With the [`accept_class_d` setting](settings.md) on (ADR-068), a **negation-only** query (only `-...`
+clauses) is accepted instead and stored as a broad-lane **always-candidate**: it matches every title
+bearing none of its forbidden terms, and — like every broad-lane query — only on requests that include
+the broad lane. A query with no positive *and* no forbidden terms (effectively empty) is rejected
+regardless.
 
 ### Per-query metadata tags (ADR-049)
 

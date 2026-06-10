@@ -61,8 +61,16 @@ const WAL_MAGIC: [u8; 4] = *b"PWAL";
 // present (by trailing bytes), so v1 and v2 entries coexist. v3 (ADR-066): adds the
 // DeleteByLogical op; older entries are unchanged (an old binary reading a v3 tail stops
 // at the first op-3 frame and reports it as skipped bytes, like a torn tail). v4
-// (ADR-067): adds the Upsert op (atomic replace-by-id), same coexistence story.
-const WAL_VERSION: u32 = 4;
+// (ADR-067): adds the Upsert op (atomic replace-by-id), same coexistence story. v5
+// (ADR-068): adds the InsertClassD/UpsertClassD ops — payload-identical to
+// Insert/Upsert, the op code itself marking "accepted under the class-D lane". The
+// marker is load-bearing for UPGRADE correctness: binaries before v5 logged a frame
+// BEFORE classifying, so an old file can hold op-0/op-4 frames whose write was
+// acknowledged as RejectedClassD — replay applies the legacy ops under the old reject
+// gate (reproducing the writer's decision) and only the op-5/6 frames as accepted.
+// Same rollback story as v3/v4: an old binary stops at the first op-5/6 frame and
+// reports skipped bytes.
+const WAL_VERSION: u32 = 5;
 const WAL_HEADER_SIZE: usize = 8; // magic + version
 
 const OP_INSERT: u8 = 0;
@@ -70,6 +78,8 @@ const OP_TOMBSTONE: u8 = 1;
 const OP_FLUSH_CHECKPOINT: u8 = 2;
 const OP_DELETE_LOGICAL: u8 = 3;
 const OP_UPSERT: u8 = 4;
+const OP_INSERT_CLASS_D: u8 = 5;
+const OP_UPSERT_CLASS_D: u8 = 6;
 
 /// A single WAL entry, decoded.
 #[derive(Debug, Clone)]
@@ -82,6 +92,13 @@ pub enum WalEntry {
         /// Per-query metadata tags (ADR-049), `(key, value)` pairs. Empty for a v1 entry
         /// or an untagged insert. Not derivable from `text`, so logged explicitly.
         tags: Vec<(String, String)>,
+        /// `true` ⇔ the frame's op is `OP_INSERT_CLASS_D` (WAL v5, ADR-068): the write
+        /// was accepted under the class-D lane, so replay stores it unconditionally.
+        /// A legacy op-0 frame (`false`) replays under the old reject gate — binaries
+        /// before v5 logged BEFORE classifying, so an old file can hold frames whose
+        /// write was acknowledged as `RejectedClassD`; accepting those on replay would
+        /// resurrect a query the caller was told does not exist.
+        class_d_accepted: bool,
     },
     Tombstone {
         seq: u64,
@@ -110,6 +127,12 @@ pub enum WalEntry {
         text: String,
         /// Per-query metadata tags (ADR-049), `(key, value)` pairs.
         tags: Vec<(String, String)>,
+        /// `true` ⇔ op `OP_UPSERT_CLASS_D` (WAL v5, ADR-068) — see
+        /// [`Insert::class_d_accepted`](WalEntry::Insert). Doubly load-bearing here:
+        /// replaying a legacy logged-but-rejected upsert as accepted would not just
+        /// resurrect the new version, it would TOMBSTONE the acknowledged-live prior
+        /// one — a false negative.
+        class_d_accepted: bool,
     },
 }
 
@@ -223,6 +246,21 @@ impl Wal {
         self.append_insert_like(OP_INSERT, logical, version, text, tags)
     }
 
+    /// Append an Insert accepted under the class-D lane (WAL v5, ADR-068). Same
+    /// payload as [`append_insert`](Self::append_insert); the op code is the
+    /// per-frame accept marker, so replay can store it unconditionally while legacy
+    /// op-0 frames (logged before classification by pre-v5 binaries) still replay
+    /// under the old reject gate.
+    pub fn append_insert_class_d(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+    ) -> io::Result<u64> {
+        self.append_insert_like(OP_INSERT_CLASS_D, logical, version, text, tags)
+    }
+
     /// Append an Upsert entry (WAL v4, ADR-067) — the atomic replace-by-id. Same
     /// payload as Insert; the op code is what tells recovery to tombstone the prior
     /// live copies of `logical` before inserting this version.
@@ -234,6 +272,18 @@ impl Wal {
         tags: &[(String, String)],
     ) -> io::Result<u64> {
         self.append_insert_like(OP_UPSERT, logical, version, text, tags)
+    }
+
+    /// Append an Upsert accepted under the class-D lane (WAL v5, ADR-068) — see
+    /// [`append_insert_class_d`](Self::append_insert_class_d).
+    pub fn append_upsert_class_d(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+    ) -> io::Result<u64> {
+        self.append_insert_like(OP_UPSERT_CLASS_D, logical, version, text, tags)
     }
 
     /// Shared encoder for the two insert-shaped ops (Insert / Upsert): identical
@@ -458,9 +508,10 @@ impl Wal {
             let payload = &body[9..];
 
             match op {
-                // Insert and Upsert (WAL v4, ADR-067) share one payload layout; the
-                // op byte selects the decoded variant.
-                OP_INSERT | OP_UPSERT => {
+                // Insert/Upsert (WAL v4, ADR-067) and their class-D-accepted twins
+                // (WAL v5, ADR-068) share one payload layout; the op byte selects the
+                // decoded variant + the accept marker.
+                OP_INSERT | OP_UPSERT | OP_INSERT_CLASS_D | OP_UPSERT_CLASS_D => {
                     if payload.len() < 16 {
                         break;
                     }
@@ -514,13 +565,14 @@ impl Wal {
                             tags.push((key, value));
                         }
                     }
-                    entries.push(if op == OP_INSERT {
+                    entries.push(if op == OP_INSERT || op == OP_INSERT_CLASS_D {
                         WalEntry::Insert {
                             seq,
                             logical,
                             version,
                             text,
                             tags,
+                            class_d_accepted: op == OP_INSERT_CLASS_D,
                         }
                     } else {
                         WalEntry::Upsert {
@@ -529,6 +581,7 @@ impl Wal {
                             version,
                             text,
                             tags,
+                            class_d_accepted: op == OP_UPSERT_CLASS_D,
                         }
                     });
                 }

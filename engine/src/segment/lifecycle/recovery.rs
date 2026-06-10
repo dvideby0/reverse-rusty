@@ -47,11 +47,17 @@ fn replay_wal_tail(
                 version,
                 text,
                 tags,
+                class_d_accepted,
                 ..
             } => {
                 // Replay without re-writing to WAL — tags included so a recovered
-                // insert keeps its metadata (ADR-049).
-                engine.replay_insert(&text, logical, version, &tags);
+                // insert keeps its metadata (ADR-049). The class-D accept decision
+                // is the FRAME's marker (WAL v5, ADR-068), never the live knob: an
+                // op-5 frame was accepted at its write and must survive a knob
+                // flip; a legacy op-0 frame may have been acknowledged as rejected
+                // (pre-v5 binaries logged before classifying) and must not
+                // resurrect.
+                engine.replay_insert(&text, logical, version, &tags, class_d_accepted);
             }
             WalEntry::Tombstone {
                 seq,
@@ -91,6 +97,7 @@ fn replay_wal_tail(
                 version,
                 text,
                 tags,
+                class_d_accepted,
             } => {
                 // ADR-067: the insert half ALWAYS replays — the new memtable copy
                 // exists only in this frame (a flush would have reset the WAL and
@@ -98,8 +105,18 @@ fn replay_wal_tail(
                 // rule (baked bitmaps below it; and a same-id bulk ingest after
                 // the frame must not be erased), while prior MEMTABLE copies are
                 // always re-tombstoned — they are WAL-truth, recreated by earlier
-                // replayed frames. See `apply_upsert`.
-                engine.replay_upsert(&text, logical, version, &tags, seq > watermark);
+                // replayed frames. See `apply_upsert`. `class_d_accepted` is the
+                // frame's marker (op 6, ADR-068): a legacy op-4 frame replays
+                // under the old reject gate, so a logged-but-rejected class-D
+                // upsert can never tombstone the acknowledged-live prior version.
+                engine.replay_upsert(
+                    &text,
+                    logical,
+                    version,
+                    &tags,
+                    seq > watermark,
+                    class_d_accepted,
+                );
             }
             WalEntry::FlushCheckpoint { .. } => {
                 // Skip — already handled by manifest

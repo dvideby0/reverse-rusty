@@ -201,6 +201,24 @@ pub struct EngineConfig {
     /// Default: `10_000`
     pub max_percolate_batch: usize,
 
+    // ---- the class-D always-candidate lane (ADR-068) ----
+    /// Accept negation-only queries (cost class D: no required feature, no any-of
+    /// group — only forbidden features) as **always-candidates**: stored in the
+    /// broad lane under the universal signature, a member of every title's
+    /// candidate set, forbidden features enforced only in exact verification.
+    /// This is the ES/OS `query_string` match-all-except parity lane; like every
+    /// broad-lane query, an always-candidate matches only when the request
+    /// includes the broad lane. A query with no positives AND no forbidden
+    /// features (an effectively empty query) is rejected regardless.
+    ///
+    /// Dynamic (`PUT /_settings`); gates **acceptance only** — already-stored
+    /// entries stay matchable when toggled off, and WAL replay / the vocab
+    /// recompile deliberately ignore it (an acknowledged or stored query is never
+    /// dropped by a since-flipped knob).
+    ///
+    /// Default: `false` (negation-only queries are loudly rejected)
+    pub accept_class_d: bool,
+
     /// Translog peer-recovery retention-lease TTL, in seconds (ADR-048). A lease pins a
     /// recovery source's un-sealed translog tail so a concurrent seal can't trim it
     /// (ADR-040); a recovery renews its lease every catch-up pass (the heartbeat). If a
@@ -237,6 +255,7 @@ impl Default for EngineConfig {
             broad_columnar: true,
             broad_materialize: true,
             max_percolate_batch: 10_000,
+            accept_class_d: false,
             retention_lease_ttl_secs: 1800,
         }
     }

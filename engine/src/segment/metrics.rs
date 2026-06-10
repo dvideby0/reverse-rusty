@@ -103,11 +103,18 @@ impl Engine {
         for seg in &self.segments {
             match seg.as_ref() {
                 BaseSegment::Memory(s) => s.class_counts(&mut c),
-                BaseSegment::Mmap(_) => {} // mmap segments don't expose class_counts cheaply
+                // O(n) byte scan over the mmap'd class column — fine off the hot
+                // path, and required for an honest count: after a flush/reopen the
+                // stored entries live HERE (mirrors the snapshot path; previously
+                // skipped, which undercounted every sealed segment).
+                BaseSegment::Mmap(m) => m.class_counts(&mut c),
             }
         }
         self.memtable.class_counts(&mut c);
-        c[3] = self.rejected_class_d; // D never enters any segment's `class`
+        // c[3] counts STORED class-D always-candidates (ADR-068), symmetric with
+        // A/B/C — zero unless the accept_class_d lane has stored entries.
+        // Rejections are a separate metric (`rejected_class_d()`), no longer
+        // mirrored into this array.
         c
     }
 

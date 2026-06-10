@@ -157,6 +157,7 @@ async fn main() {
         broad_columnar: cli.broad_columnar,
         broad_materialize: cli.broad_materialize,
         max_percolate_batch: cli.max_percolate_batch,
+        accept_class_d: cli.accept_class_d,
         ..EngineConfig::default()
     };
     let problems = config.validate();

@@ -472,6 +472,17 @@ impl MmapSegment {
                 }
                 self.probe_index(key, false, epoch, view, seen, out, pred, stats, true);
             }
+            // Universal signature: class-D always-candidates (ADR-068). Probed
+            // unconditionally (the accept knob gates ingest, never visibility);
+            // with no class-D entries this is one filter miss. Mirrors
+            // `Segment::match_into` exactly.
+            let key = crate::util::universal_sig();
+            stats.probes_attempted += 1;
+            if has_filter && !self.may_contain(key) {
+                stats.probes_skipped += 1;
+            } else {
+                self.probe_index(key, false, epoch, view, seen, out, pred, stats, true);
+            }
         }
     }
 

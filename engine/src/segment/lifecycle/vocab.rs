@@ -252,8 +252,14 @@ impl Engine {
                 // Carry the query's existing tags forward unchanged — tags are orthogonal
                 // to the normalizer, so a vocabulary change must not drop them (ADR-049).
                 let tags = self.live_tag_ids_for(*logical);
+                // `accept_class_d = true` unconditionally (ADR-068): a STORED query
+                // must survive a vocabulary change. A query whose positives vanish
+                // under the new vocab (re-classifying to D) is kept as an
+                // always-candidate when it still has forbidden features — zero FN,
+                // bounded FP — instead of being silently dropped from the rebuilt
+                // index (the pre-existing hazard); only the all-empty case drops.
                 if seg
-                    .add_compiled(&ex, &tags, &self.dict, *logical, 1)
+                    .add_compiled(&ex, &tags, &self.dict, *logical, 1, true)
                     .is_some()
                 {
                     recompiled += 1;

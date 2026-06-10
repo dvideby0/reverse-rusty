@@ -297,7 +297,8 @@ impl EngineSnapshot {
             }
         }
         self.memtable.class_counts(&mut c);
-        c[3] = self.rejected_class_d;
+        // c[3] = STORED class-D always-candidates (ADR-068), symmetric with A/B/C;
+        // rejections are the separate `rejected_class_d` metric.
         c
     }
 

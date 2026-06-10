@@ -14,7 +14,7 @@ use crate::index::CandidateIndex;
 use crate::segment::Segment;
 
 use super::super::{crc32, durable_rename, write_u32, write_u64};
-use super::{align8, FrozenSlot, FORMAT_VERSION, HEADER_SIZE, MAGIC};
+use super::{align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, HEADER_SIZE, MAGIC};
 
 /// Build a frozen hash table + posting blob from an in-memory CandidateIndex.
 /// Returns (slots, posting_blob).
@@ -159,7 +159,23 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     // ---- Write header ----
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&MAGIC)?;
-    write_u32(&mut f, FORMAT_VERSION)?;
+    // A segment holding ≥1 class-D always-candidate writes v4 (layout-identical to
+    // v3) purely as a rollback fence: a pre-ADR-068 reader never probes the
+    // universal signature, so it must fail loudly on this file rather than serve
+    // it with the class-D queries silently unmatchable. Class-D-free segments keep
+    // v3 byte-identically.
+    let has_class_d = seg
+        .classes()
+        .iter()
+        .any(|c| matches!(c, crate::compile::CostClass::D));
+    write_u32(
+        &mut f,
+        if has_class_d {
+            FORMAT_VERSION_CLASS_D
+        } else {
+            FORMAT_VERSION
+        },
+    )?;
     write_u32(&mut f, seg.len() as u32)?;
     write_u32(&mut f, 0)?; // reserved
     write_u64(&mut f, exact_off)?;

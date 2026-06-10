@@ -13,7 +13,7 @@ use super::super::{crc32, read_u32_at, read_u64_at};
 use super::read::{
     parse_frozen_index, read_u16_slice, read_u32_slice, read_u64_slice, read_u8_slice,
 };
-use super::{FrozenSlot, FORMAT_VERSION, HEADER_SIZE, MAGIC};
+use super::{FrozenSlot, FORMAT_VERSION_CLASS_D, HEADER_SIZE, MAGIC};
 
 mod ops;
 
@@ -47,6 +47,10 @@ enum MmapLogicalIndex {
 pub struct MmapSegment {
     mmap: Arc<memmap2::Mmap>,
     num_queries: u32,
+    /// The file's header format version (1..=4). v4 ⇔ the segment holds class-D
+    /// always-candidates (the ADR-068 rollback fence) — surfaced so the manifest
+    /// commit can propagate the fence to its own version word.
+    format_version: u32,
     // ExactStore slices (offsets into the mmap, cast at load time)
     req_mask: *const u64,
     forb_mask: *const u64,
@@ -126,6 +130,7 @@ impl Clone for MmapSegment {
         MmapSegment {
             mmap: Arc::clone(&self.mmap),
             num_queries: self.num_queries,
+            format_version: self.format_version,
             req_mask: self.req_mask,
             forb_mask: self.forb_mask,
             req_off: self.req_off,
@@ -185,6 +190,13 @@ impl std::fmt::Debug for MmapSegment {
 }
 
 impl MmapSegment {
+    /// Whether this segment's file carries the class-D rollback fence (format v4,
+    /// ADR-068) — i.e. it holds at least one always-candidate. The manifest commit
+    /// ORs this across registered segments to pick its own version word.
+    pub fn carries_class_d_fence(&self) -> bool {
+        self.format_version >= FORMAT_VERSION_CLASS_D
+    }
+
     /// Load a segment from a file, memory-mapping it.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
@@ -223,9 +235,10 @@ impl MmapSegment {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
             }
             let version = read_u32_at(data, 4)?;
-            // v1, v2 and v3 are all supported (v1 reconstructs the reverse index; v1/v2
-            // read back with an empty tag column).
-            if version != 1 && version != 2 && version != FORMAT_VERSION {
+            // v1–v4 are all supported (v1 reconstructs the reverse index; v1/v2 read
+            // back with an empty tag column; v4 is layout-identical to v3 — the bump
+            // is the class-D rollback fence, ADR-068).
+            if !(1..=FORMAT_VERSION_CLASS_D).contains(&version) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("unsupported format version {version}"),
@@ -388,6 +401,7 @@ impl MmapSegment {
             };
 
         Ok(MmapSegment {
+            format_version,
             mmap,
             num_queries,
             req_mask: req_mask_s.as_ptr(),
