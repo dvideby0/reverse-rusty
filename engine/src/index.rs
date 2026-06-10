@@ -190,3 +190,91 @@ impl CandidateIndex {
         self.map.values().filter(|p| p.len() > threshold).count()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ids_of(p: &Posting) -> Vec<u32> {
+        let mut v = Vec::new();
+        p.for_each(|id| v.push(id));
+        v
+    }
+
+    /// The tier ladder at its exact promotion boundaries: 8 ids stay Inline, the 9th
+    /// promotes to Heap, 256 stay Heap, the 257th promotes to Roaring — and the id
+    /// sequence survives every promotion byte-for-byte (order preserved through Heap;
+    /// sorted-set semantics in Roaring, which coincide because ids are appended in
+    /// issue order).
+    #[test]
+    fn tier_promotions_happen_at_exact_boundaries_and_preserve_ids() {
+        let mut idx = CandidateIndex::new();
+        let sig = 0x0051_6709_u64;
+
+        for id in 0..8u32 {
+            idx.insert(sig, id);
+        }
+        let p = idx.get(sig).expect("posting exists");
+        assert!(
+            matches!(p, Posting::Inline { len: 8, .. }),
+            "8 ids must still be Inline, got {p:?}"
+        );
+        assert_eq!(ids_of(p), (0..8).collect::<Vec<_>>());
+
+        idx.insert(sig, 8);
+        let p = idx.get(sig).expect("posting exists");
+        assert!(
+            matches!(p, Posting::Heap(_)),
+            "the 9th id must promote Inline→Heap, got {p:?}"
+        );
+        assert_eq!(
+            ids_of(p),
+            (0..9).collect::<Vec<_>>(),
+            "ids lost in promotion"
+        );
+
+        for id in 9..=255u32 {
+            idx.insert(sig, id);
+        }
+        let p = idx.get(sig).expect("posting exists");
+        assert!(
+            matches!(p, Posting::Heap(_)),
+            "256 ids must still be Heap (threshold is exclusive), got {p:?}"
+        );
+        assert_eq!(p.len(), 256, "len mismatch at the Heap ceiling");
+        assert_eq!(ids_of(p), (0..=255).collect::<Vec<_>>());
+
+        idx.insert(sig, 256);
+        let p = idx.get(sig).expect("posting exists");
+        assert!(
+            matches!(p, Posting::Roaring(_)),
+            "the 257th id (len 257 > threshold 256) must promote Heap→Roaring, got {p:?}"
+        );
+        assert_eq!(
+            ids_of(p),
+            (0..=256).collect::<Vec<_>>(),
+            "ids lost in Heap→Roaring promotion"
+        );
+        assert_eq!(p.len(), 257);
+    }
+
+    /// Non-contiguous, large-valued ids survive both promotions (Roaring containers
+    /// span multiple 64k chunks; nothing about promotion may assume density).
+    #[test]
+    fn sparse_large_ids_survive_promotions() {
+        let mut idx = CandidateIndex::new();
+        let sig = 42u64;
+        let ids: Vec<u32> = (0..300u32).map(|i| i * 70_001).collect(); // sorted, sparse
+        for &id in &ids {
+            idx.insert(sig, id);
+        }
+        let p = idx.get(sig).expect("posting exists");
+        assert!(matches!(p, Posting::Roaring(_)));
+        assert_eq!(
+            ids_of(p),
+            ids,
+            "sparse ids corrupted across the tier ladder"
+        );
+        assert!(p.heap_bytes() > 0, "roaring postings report heap use");
+    }
+}

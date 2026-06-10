@@ -194,6 +194,216 @@ fn gen_queries(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<(u64, Strin
     out
 }
 
+// ---- Adversarial surface noise ("messy mode") ----------------------------------------
+//
+// The clean generator above produces lowercase, single-spaced, punctuation-free ASCII —
+// the *easiest possible* surface for the normalizer. Real listing titles are not like
+// that, and several historical escaped bugs (whitespace runs, boundary-invalid phrase
+// matches, punctuation handling) lived exactly in the gap. These helpers wrap any clean
+// string in deterministic, seeded surface noise so the differential oracle and the
+// metamorphic suites run over adversarial bytes too.
+//
+// Opt-in by construction (separate functions, no `GenConfig` field), so every existing
+// benchmark / oracle corpus stays byte-identical.
+
+/// Foldable diacritic substitutions — each folds back to its base letter in
+/// `normalize::fold_diacritic`, so sprinkling them is surface noise, not a semantic change.
+const DIACRITICS: &[(char, char)] = &[
+    ('a', 'á'),
+    ('e', 'é'),
+    ('i', 'î'),
+    ('o', 'ö'),
+    ('u', 'ü'),
+    ('n', 'ñ'),
+    ('c', 'ç'),
+    ('s', 'š'),
+    ('z', 'ž'),
+];
+
+/// Unicode junk tokens a real marketplace title can carry: trademark signs, emoji, CJK,
+/// soup that should normalize to nothing (or to a synthetic out-of-dict feature) without
+/// panicking or perturbing unrelated matches.
+const UNICODE_JUNK: &[&str] = &["™", "®", "🔥🔥", "カード", "новый", "★★★", "½"];
+
+/// Apply random capitalization: the cleaner lowercases everything, so case is pure noise.
+fn mess_case(rng: &mut Rng, s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphabetic() && rng.frac() < 0.4 {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Replace some foldable base letters with their diacritic forms.
+fn mess_diacritics(rng: &mut Rng, s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if rng.frac() < 0.15 {
+                DIACRITICS
+                    .iter()
+                    .find(|&&(base, _)| base == c)
+                    .map_or(c, |&(_, d)| d)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Widen some inter-token gaps into whitespace runs (spaces/tabs) and pad the ends.
+fn mess_whitespace(rng: &mut Rng, s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    if rng.frac() < 0.3 {
+        out.push_str("  ");
+    }
+    for ch in s.chars() {
+        if ch == ' ' && rng.frac() < 0.4 {
+            out.push_str(if rng.frac() < 0.2 { " \t " } else { "  " });
+        } else {
+            out.push(ch);
+        }
+    }
+    if rng.frac() < 0.3 {
+        out.push(' ');
+    }
+    out
+}
+
+/// Title-only punctuation noise: trailing bangs, commas between tokens, a parenthesized
+/// token, an apostrophe or hyphen spliced *inside* a token (splits it under the default
+/// punctuation table — the ground truth moves with it, consistently on both sides).
+fn mess_punct_title(rng: &mut Rng, s: &str) -> String {
+    let toks: Vec<&str> = s.split_whitespace().collect();
+    let mut out: Vec<String> = Vec::with_capacity(toks.len());
+    for t in toks {
+        let mut t = t.to_string();
+        match rng.below(12) {
+            0 => t.push('!'),
+            1 => t.push_str("!!"),
+            2 => t.push(','),
+            3 => t = format!("({t})"),
+            4 if t.len() > 2 => {
+                let mid = t.len() / 2;
+                if t.is_char_boundary(mid) {
+                    let c = if rng.frac() < 0.5 { '\'' } else { '-' };
+                    t.insert(mid, c);
+                }
+            }
+            _ => {}
+        }
+        out.push(t);
+    }
+    out.join(" ")
+}
+
+/// Append assorted junk tokens: unicode soup, long out-of-dict tokens, a duplicated token.
+fn mess_extra_tokens(rng: &mut Rng, s: &str) -> String {
+    let mut out = s.to_string();
+    if rng.frac() < 0.5 {
+        out.push(' ');
+        out.push_str(UNICODE_JUNK[rng.below(UNICODE_JUNK.len())]);
+    }
+    if rng.frac() < 0.5 {
+        out.push_str(&format!(" zzoov{:016x}", rng.next_u64()));
+    }
+    if rng.frac() < 0.4 {
+        let toks: Vec<&str> = s.split_whitespace().collect();
+        if !toks.is_empty() {
+            out.push(' ');
+            out.push_str(toks[rng.below(toks.len())]);
+        }
+    }
+    out
+}
+
+/// Surface-mess a **title**: any byte sequence is legal on the title side, so this
+/// composes case noise, diacritics, whitespace runs, punctuation, and junk tokens.
+/// Rarely (~1%) it instead pads the title with dozens of distinct out-of-dict tokens —
+/// a >64-distinct-feature title that stresses the verifier's non-mask tail.
+pub fn messify_title(rng: &mut Rng, title: &str) -> String {
+    if rng.frac() < 0.01 {
+        let mut t = title.to_string();
+        for i in 0..80 {
+            t.push_str(&format!(" pad{i}x{:08x}", rng.next_u64() as u32));
+        }
+        return t;
+    }
+    let mut t = title.to_string();
+    if rng.frac() < 0.6 {
+        t = mess_case(rng, &t);
+    }
+    if rng.frac() < 0.4 {
+        t = mess_diacritics(rng, &t);
+    }
+    if rng.frac() < 0.5 {
+        t = mess_punct_title(rng, &t);
+    }
+    if rng.frac() < 0.6 {
+        t = mess_whitespace(rng, &t);
+    }
+    if rng.frac() < 0.4 {
+        t = mess_extra_tokens(rng, &t);
+    }
+    t
+}
+
+/// Surface-mess a **query** while keeping it DSL-parseable and structurally identical:
+/// per-token case/diacritic noise and whitespace runs between clauses. Tokens carrying
+/// DSL structure (a `-` negation prefix, quotes, parens) are left untouched, so the
+/// clause shape — and therefore the query's semantics under the shared normalizer —
+/// is preserved exactly.
+pub fn messify_query(rng: &mut Rng, query: &str) -> String {
+    let toks: Vec<&str> = query.split_whitespace().collect();
+    let mut out: Vec<String> = Vec::with_capacity(toks.len());
+    for t in toks {
+        let structural = t.starts_with('-')
+            || t.contains('"')
+            || t.contains('(')
+            || t.contains(')')
+            || t.contains(',');
+        if structural {
+            out.push(t.to_string());
+            continue;
+        }
+        let mut t = t.to_string();
+        if rng.frac() < 0.5 {
+            t = mess_case(rng, &t);
+        }
+        if rng.frac() < 0.3 {
+            t = mess_diacritics(rng, &t);
+        }
+        out.push(t);
+    }
+    let mut joined = String::with_capacity(query.len() + 8);
+    for (i, t) in out.iter().enumerate() {
+        if i > 0 {
+            joined.push_str(if rng.frac() < 0.25 { "  " } else { " " });
+        }
+        joined.push_str(t);
+    }
+    joined
+}
+
+/// Mess a fraction of an existing clean dataset in place (titles and, more conservatively,
+/// queries). Deterministic for a given `rng` state; `title_frac`/`query_frac` are the
+/// probabilities that any one string is perturbed at all.
+pub fn messify_dataset(rng: &mut Rng, data: &mut Dataset, title_frac: f64, query_frac: f64) {
+    for t in &mut data.titles {
+        if rng.frac() < title_frac {
+            *t = messify_title(rng, t);
+        }
+    }
+    for (_, q) in &mut data.queries {
+        if rng.frac() < query_frac {
+            *q = messify_query(rng, q);
+        }
+    }
+}
+
 fn gen_titles(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<String> {
     let mut out = Vec::with_capacity(cfg.num_titles);
     for _ in 0..cfg.num_titles {

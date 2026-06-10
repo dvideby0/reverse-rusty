@@ -109,6 +109,60 @@ fn wal_recovery_inserts() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A bit flipped INSIDE a CRC-valid frame in the MIDDLE of the log: recovery must stop
+/// at the corrupt frame and surface everything after it as skipped — never resync past
+/// it and replay later entries (which would silently drop one mutation while keeping
+/// its successors, a reordering the WAL contract forbids). The junk-at-tail test above
+/// cannot distinguish stop-at-first-bad from skip-and-continue; this pins it.
+#[test]
+fn wal_recovery_stops_at_a_mid_file_bitflip_and_never_resyncs() {
+    use reverse_rusty::wal::Wal;
+
+    let dir = test_dir("wal_midfile_bitflip");
+    let wal_path = dir.join("wal.log");
+
+    {
+        let mut wal = Wal::open(&wal_path, false).unwrap();
+        wal.append_insert(1, 1, "first record aaa", &[]).unwrap();
+        wal.append_insert(2, 1, "second record bbb", &[]).unwrap();
+        wal.append_insert(3, 1, "third record ccc", &[]).unwrap();
+    }
+
+    // File layout: 8-byte header, then frames of [len:u32][crc:u32][body:len].
+    let mut bytes = std::fs::read(&wal_path).unwrap();
+    let frame1_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let frame2_start = 8 + 8 + frame1_len;
+    let frame2_len =
+        u32::from_le_bytes(bytes[frame2_start..frame2_start + 4].try_into().unwrap()) as usize;
+    assert!(frame2_len > 12, "sanity: frame 2 has a body to corrupt");
+    // Flip one bit in the middle of frame 2's BODY (its CRC no longer matches).
+    let target = frame2_start + 8 + frame2_len / 2;
+    bytes[target] ^= 0x01;
+    let tail_after_frame1 = bytes.len() - frame2_start;
+    std::fs::write(&wal_path, &bytes).unwrap();
+
+    let recovery = Wal::recover(&wal_path).unwrap();
+    assert_eq!(
+        recovery.entries.len(),
+        1,
+        "recovery must stop AT the corrupt frame: only the first record is replayable \
+         (resyncing to record 3 would silently drop record 2 while keeping its successor)"
+    );
+    match &recovery.entries[0] {
+        reverse_rusty::wal::WalEntry::Insert { logical, text, .. } => {
+            assert_eq!(*logical, 1);
+            assert_eq!(text, "first record aaa");
+        }
+        other => panic!("expected the first insert, got {other:?}"),
+    }
+    assert_eq!(
+        recovery.skipped_bytes, tail_after_frame1,
+        "everything from the corrupt frame onward must be reported as skipped"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn wal_recovery_reports_corrupt_tail() {
     use reverse_rusty::wal::Wal;

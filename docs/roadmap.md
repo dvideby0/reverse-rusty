@@ -357,6 +357,23 @@ from the audit's former P3 list). Roughly grouped:
 - **WAL `append_insert` allocates a Vec per write** — production WALs use pre-allocated write buffers.
 - **Byte-at-a-time CRC-32** for manifest writes — table-based would be ~10× faster.
 
+**Test-infrastructure follow-ons (deferred from the ADR-063 audit)**
+- **Extend the parse-union oracle's fuzz alphabet** (`src/normalize/parse_union_oracle.rs`) with the
+  `#`/`/`/`pop` markers, 4-digit years, and fused graders **inside phrase patterns**. Today those are
+  excluded as parse-invariant, which is true for top-level tokens — but a phrase that *consumes a
+  marker* could change a neighbouring number's classification across parses, a state interaction the
+  current alphabet cannot reach. Requires teaching the reference's `emit_parse` the marker/year rules.
+- **A cross-seam integration harness** (recovery×vocab, adopt-on-fresh vs adopt-on-recovered,
+  cluster `set_vocab` guard matrix, durable-build-guard ordering): each historical seam escape got a
+  point regression test with its fix; a parameterized harness would cover the *combinations*
+  systematically. ~22% of historical review-caught escapes were cross-seam.
+- **Targeted `cargo-mutants` runs** on `normalize`/`compile`/`exact` as an occasional (not per-PR)
+  catching-power audit — declined as a gate in ADR-063 for wall-clock cost; still worth a manual run
+  after major matcher changes.
+- **Messy variants of the cluster oracles** — `tests/cluster_oracle` and the durability oracle still
+  run clean corpora only; threading `messify_dataset` through them would extend ADR-063's coverage to
+  placement/routing under adversarial bytes (expected cheap: the harnesses already take a `Dataset`).
+
 **Robustness / build hygiene**
 - **Durable-ingest segment-write failures surface only as `ingest_rollback`, not `segment_write`.** ADR-021
   routes the *flush* path's segment write through a precise `DurabilityOp::SegmentWrite`, but the durable
