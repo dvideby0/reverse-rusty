@@ -29,8 +29,15 @@ const MAGIC: [u8; 4] = *b"PERC";
 // (the reverse index is reconstructed in memory on open). v3 (ADR-049): adds a
 // per-query tag section (tag_section_off at header bytes 64..72) holding the SoA
 // tag column behind filtered percolation; v1/v2 files are still read (their queries
-// read back as untagged — an empty tag column).
+// read back as untagged — an empty tag column). v4 (ADR-068): byte-identical layout
+// to v3 — written ONLY for a segment holding ≥1 class-D always-candidate, as a
+// **rollback fence**: a pre-ADR-068 binary opens v3 fine but never probes the
+// universal signature, so a v4 file's class-D queries would silently stop matching;
+// the version bump makes that reader fail loudly ("unsupported format version")
+// instead. Class-D-free segments keep writing v3, so rollback stays clean for
+// anyone who never enabled the lane.
 const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION_CLASS_D: u32 = 4;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).

@@ -38,7 +38,9 @@ pub enum CostClass {
     B,
     /// broad (only a hot anchor available) — broad lane, not the selective path
     C,
-    /// pathological (no required feature and no any-of) — rejected at compile
+    /// negation-only (no required feature and no any-of) — rejected at ingest by
+    /// default; the opt-in always-candidate lane stores it under the universal
+    /// signature in the broad lane (ADR-068)
     D,
 }
 
@@ -131,8 +133,9 @@ pub struct AnchorPlan {
     /// Each group = one main-index signature's features (arity 1, or 2 for the
     /// escalated class-B pair). Empty for class C and class D.
     pub main_anchors: Vec<Vec<FeatureId>>,
-    /// Each group = one broad-lane signature's features (always arity 1). Non-empty
-    /// only for class C. Empty otherwise.
+    /// Each group = one broad-lane signature's features: arity 1 for class C; for
+    /// class D one **empty** group — the universal signature, the lossless cover of
+    /// an empty positive set (ADR-068). Empty for classes A/B.
     pub broad_anchors: Vec<Vec<FeatureId>>,
     pub class: CostClass,
 }

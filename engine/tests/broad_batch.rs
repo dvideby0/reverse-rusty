@@ -157,6 +157,42 @@ fn batch_equals_scalar_high_broad_fraction() {
 }
 
 #[test]
+fn batch_equals_scalar_with_class_d_lane() {
+    // Class-D always-candidates (ADR-068) ride the broad lane under the
+    // universal signature: the batch kernel probes it ONCE per batch, the scalar
+    // path once per title — the full matrix (columnar/inline × materialize ×
+    // batch sizes × broad on/off) must stay byte-identical with them stored.
+    use reverse_rusty::config::EngineConfig;
+    use reverse_rusty::gen::gen_class_d_queries;
+    let data = gen(0xD1A5, 12_000, 1_200, 0.10);
+    let mut eng = Engine::with_config(
+        Normalizer::default_vocab().expect("vocab"),
+        EngineConfig {
+            accept_class_d: true,
+            ..EngineConfig::default()
+        },
+    );
+    let n = data.queries.len();
+    let c = n / 4;
+    eng.build_from_queries(&data.queries[..c]);
+    eng.bulk_ingest(&data.queries[c..2 * c]);
+    eng.bulk_ingest(&data.queries[2 * c..3 * c]);
+    for (id, text) in &data.queries[3 * c..] {
+        eng.insert_live(text, *id, 1);
+    }
+    // Negation-only queries across every layout: sealed base segments AND the
+    // live memtable tail.
+    for (i, q) in gen_class_d_queries(0xD1A5_D00D, 150).iter().enumerate() {
+        eng.insert_live(q, 2_000_000 + i as u64, 1);
+    }
+    eng.flush();
+    for (i, q) in gen_class_d_queries(0xD1A5_BEEF, 150).iter().enumerate() {
+        eng.insert_live(q, 3_000_000 + i as u64, 1);
+    }
+    run_matrix(&eng, &data.titles);
+}
+
+#[test]
 fn batch_inline_equals_columnar() {
     // Independent of the scalar baseline: the two strategies must agree.
     let data = gen(0xA11CE, 12_000, 1_000, 0.15);

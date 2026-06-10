@@ -148,9 +148,10 @@ impl Engine {
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
+        let accept_class_d = self.config.accept_class_d;
         for (i, (_, logical, ex, text)) in extracted.iter().enumerate() {
             if seg
-                .add_compiled(ex, &tag_ids[i], &self.dict, *logical, 1)
+                .add_compiled(ex, &tag_ids[i], &self.dict, *logical, 1, accept_class_d)
                 .is_none()
             {
                 self.rejected_class_d += 1;
@@ -244,28 +245,50 @@ impl Engine {
         // complexity limits here, at the front door.
         let ast = crate::dsl::parse_with_limits(text, &self.config.parse_limits())
             .map_err(crate::error::WriteError::Parse)?;
-        // WAL FIRST (durability before visibility). If the append fails the
-        // mutation is not durable, so reject it and leave in-memory state
-        // untouched rather than acknowledge a write a crash would lose. Tags are
-        // logged alongside the query so a replayed insert recovers them.
-        if let Some(ref mut wal) = self.wal {
-            if let Err(e) = wal.append_insert(logical, version, text, tags) {
-                self.wal_healthy = false;
-                return Err(crate::error::WriteError::Wal(e));
-            }
-        }
-        let tag_ids = self.intern_tags(tags);
+        // Extract + class-gate BEFORE the WAL (ADR-068): the log records only
+        // ACCEPTED mutations, so replay re-applies unconditionally — live ≡ replay
+        // by construction even if the accept_class_d knob flips between runs.
+        // (The dict mutation moving ahead of a possible WAL failure is benign:
+        // a phantom interned feature / frequency bump is advisory state that
+        // nothing references.)
         let mut lc = String::new();
         let ex = {
             let dict = Arc::make_mut(&mut self.dict);
             extract(&ast, &self.norm, dict, &mut lc)
         };
+        let class = crate::compile::anchor_plan(&ex, &self.dict).class;
+        if super::seg::rejects_class_d(class, &ex, self.config.accept_class_d) {
+            self.rejected_class_d += 1;
+            return Ok(InsertOutcome::RejectedClassD);
+        }
+        // WAL (durability before visibility). If the append fails the mutation
+        // is not durable, so reject it and leave in-memory state untouched
+        // rather than acknowledge a write a crash would lose. Tags are logged
+        // alongside the query so a replayed insert recovers them. An accepted
+        // class-D insert uses its own op code (WAL v5, ADR-068) — the per-frame
+        // marker that lets replay store it unconditionally while legacy frames
+        // (logged before classification by pre-v5 binaries) keep the old gate.
+        if let Some(ref mut wal) = self.wal {
+            let appended = if class == crate::compile::CostClass::D {
+                wal.append_insert_class_d(logical, version, text, tags)
+            } else {
+                wal.append_insert(logical, version, text, tags)
+            };
+            if let Err(e) = appended {
+                self.wal_healthy = false;
+                return Err(crate::error::WriteError::Wal(e));
+            }
+        }
+        let tag_ids = self.intern_tags(tags);
         let outcome = Arc::make_mut(&mut self.memtable)
-            .add_compiled(&ex, &tag_ids, &self.dict, logical, version);
+            .add_compiled(&ex, &tag_ids, &self.dict, logical, version, true);
         if let Some(local) = outcome {
             self.query_store.insert(logical, text.to_string());
             Ok(InsertOutcome::Inserted(local))
         } else {
+            // Unreachable: the pre-WAL gate shares its predicate with
+            // add_compiled, and the dict is unchanged in between. Kept as a
+            // counted reject rather than a panic (no unwrap in library code).
             self.rejected_class_d += 1;
             Ok(InsertOutcome::RejectedClassD)
         }
@@ -307,30 +330,56 @@ impl Engine {
         // the WAL — and must never tombstone the prior version.
         let ast = crate::dsl::parse_with_limits(text, &self.config.parse_limits())
             .map_err(crate::error::WriteError::Parse)?;
-        // WAL FIRST (durability before visibility) — one frame for both halves.
+        // Extract + class-gate BEFORE the WAL (ADR-068): the log records only
+        // ACCEPTED mutations, so replay re-applies unconditionally — live ≡
+        // replay by construction even if the accept_class_d knob flips between
+        // runs. A rejected new version leaves the prior copies untouched (a
+        // failed replace never deletes) and writes no frame. Counted on the LIVE
+        // path only (the manifest persists the counter; a replayed frame must
+        // not re-increment it — codex).
+        let mut lc = String::new();
+        let ex = {
+            let dict = Arc::make_mut(&mut self.dict);
+            extract(&ast, &self.norm, dict, &mut lc)
+        };
+        let class = crate::compile::anchor_plan(&ex, &self.dict).class;
+        if super::seg::rejects_class_d(class, &ex, self.config.accept_class_d) {
+            self.rejected_class_d += 1;
+            return Ok(UpsertOutcome::RejectedClassD);
+        }
+        // WAL (durability before visibility) — one frame for both halves. An
+        // accepted class-D upsert uses its own op code (WAL v5, ADR-068): replaying
+        // a legacy logged-but-rejected op-4 frame as accepted would not just
+        // resurrect the new version, it would tombstone the acknowledged-live prior
+        // one — a false negative.
         if let Some(ref mut wal) = self.wal {
-            if let Err(e) = wal.append_upsert(logical, version, text, tags) {
+            let appended = if class == crate::compile::CostClass::D {
+                wal.append_upsert_class_d(logical, version, text, tags)
+            } else {
+                wal.append_upsert(logical, version, text, tags)
+            };
+            if let Err(e) = appended {
                 self.wal_healthy = false;
                 return Err(crate::error::WriteError::Wal(e));
             }
         }
-        let outcome = self.apply_upsert(&ast, text, logical, version, tags, true);
-        if matches!(outcome, UpsertOutcome::RejectedClassD) {
-            // Counted on the LIVE path only, like every other rejection counter:
-            // the manifest persists the count, so a replayed frame must not
-            // re-increment it (it would double-count across restarts).
-            self.rejected_class_d += 1;
-        }
-        Ok(outcome)
+        Ok(self.apply_upsert(&ex, text, logical, version, tags, true, true))
     }
 
     /// The shared apply funnel behind [`try_upsert_live_with_tags`](Self::try_upsert_live_with_tags)
     /// and its WAL replay: capture the prior live copies of `logical`, insert the
     /// new version, and — only if the insert was accepted — tombstone the
     /// captured copies and publish the new source text. The capture runs BEFORE
-    /// the insert so the just-inserted copy is never tombstoned; the tombstones
-    /// run AFTER the class-D check so a rejected new version leaves the old ones
-    /// live. No WAL involvement (the caller logged or is replaying).
+    /// the insert so the just-inserted copy is never tombstoned.
+    ///
+    /// `accept_class_d` reproduces the WRITER's class-D decision (ADR-068): the
+    /// live path class-gates BEFORE logging, so it passes `true`; replay passes
+    /// the frame's own marker — `true` for an op-6 `UpsertClassD` frame, `false`
+    /// for a legacy op-4 frame, which a pre-v5 binary logged BEFORE classifying
+    /// and may therefore have acknowledged as `RejectedClassD`. Replaying such a
+    /// frame as accepted would tombstone the acknowledged-live prior version — a
+    /// false negative. A rejected new version leaves the old copies live. No WAL
+    /// involvement (the caller logged or is replaying).
     ///
     /// `tombstone_in_segments` separates the two state domains at replay
     /// (ADR-067): the MEMTABLE is WAL-truth — its prior copies are recreated by
@@ -341,14 +390,16 @@ impl Engine {
     /// bypasses the WAL, ADR-017) lives in those segments — tombstoning it would
     /// erase the newer query (the ADR-066 ordering inversion, upsert edition).
     /// The live path always passes `true`.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::segment) fn apply_upsert(
         &mut self,
-        ast: &crate::dsl::Ast,
+        ex: &Extracted,
         text: &str,
         logical: u64,
         version: u32,
         tags: &[(String, String)],
         tombstone_in_segments: bool,
+        accept_class_d: bool,
     ) -> UpsertOutcome {
         // Capture prior live copies: (segment index, local) with usize::MAX as
         // the memtable sentinel. Same reverse-index walk as the delete funnel.
@@ -375,18 +426,19 @@ impl Engine {
         }
 
         let tag_ids = self.intern_tags(tags);
-        let mut lc = String::new();
-        let ex = {
-            let dict = Arc::make_mut(&mut self.dict);
-            extract(ast, &self.norm, dict, &mut lc)
-        };
-        let Some(new_local) = Arc::make_mut(&mut self.memtable)
-            .add_compiled(&ex, &tag_ids, &self.dict, logical, version)
-        else {
-            // The NEW version is class D: reject it and leave the prior copies
-            // untouched — a failed replace must never delete (ES `index` parity).
-            // NOT counted here: the live caller counts it (a replayed frame must
-            // not re-increment the manifest-persisted counter — codex).
+        let Some(new_local) = Arc::make_mut(&mut self.memtable).add_compiled(
+            ex,
+            &tag_ids,
+            &self.dict,
+            logical,
+            version,
+            accept_class_d,
+        ) else {
+            // The new version is class D and not marked accepted (a legacy op-4
+            // frame on replay, or an effectively empty query): leave the prior
+            // copies untouched — a failed replace must never delete (ES `index`
+            // parity). NOT counted: rejection counters are live-path-only
+            // (manifest-persisted — codex).
             return UpsertOutcome::RejectedClassD;
         };
 
@@ -420,9 +472,23 @@ impl Engine {
         version: u32,
         tags: &[(String, String)],
         tombstone_in_segments: bool,
+        class_d_accepted: bool,
     ) {
         if let Ok(ast) = crate::dsl::parse(text) {
-            self.apply_upsert(&ast, text, logical, version, tags, tombstone_in_segments);
+            let mut lc = String::new();
+            let ex = {
+                let dict = Arc::make_mut(&mut self.dict);
+                extract(&ast, &self.norm, dict, &mut lc)
+            };
+            self.apply_upsert(
+                &ex,
+                text,
+                logical,
+                version,
+                tags,
+                tombstone_in_segments,
+                class_d_accepted,
+            );
         }
     }
 
@@ -623,9 +689,10 @@ impl Engine {
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
+        let accept_class_d = self.config.accept_class_d;
         for (i, (idx, logical, ex, text)) in extracted.iter().enumerate() {
             if seg
-                .add_compiled(ex, &tag_ids[i], &self.dict, *logical, 1)
+                .add_compiled(ex, &tag_ids[i], &self.dict, *logical, 1, accept_class_d)
                 .is_none()
             {
                 self.rejected_class_d += 1;
@@ -651,9 +718,11 @@ impl Engine {
     /// the dict). This is the cluster shard's bulk path: every shard shares the
     /// coordinator's one frozen dict, so each query is indexed under exactly the
     /// `sig_key` the coordinator placed it on. `items` is
-    /// `(logical_id, extracted, source_text, version)`; class-D queries are
-    /// skipped, as on every other ingest path. In-memory only (the cluster step
-    /// keeps shards non-durable); no WAL/manifest involvement.
+    /// `(logical_id, extracted, source_text, version)`; class-D queries follow
+    /// the `accept_class_d` knob as on every other ingest path (the cluster
+    /// coordinator rejects them at placement regardless — ADR-068 defers the
+    /// cluster lane, so a knob here is fail-closed defense). In-memory only (the
+    /// cluster step keeps shards non-durable); no WAL/manifest involvement.
     pub fn ingest_extracted(&mut self, items: &[PlacedQuery]) -> IngestReport {
         let mut report = IngestReport::default();
         let mut seg = Segment::new();
@@ -665,7 +734,14 @@ impl Engine {
             // empty slice ⇒ byte-identical to the pre-tag `&[]` path.
             let tag_ids = self.resolve_tags_readonly(&item.tags);
             if seg
-                .add_compiled(&item.ex, &tag_ids, &self.dict, item.logical, item.version)
+                .add_compiled(
+                    &item.ex,
+                    &tag_ids,
+                    &self.dict,
+                    item.logical,
+                    item.version,
+                    self.config.accept_class_d,
+                )
                 .is_some()
             {
                 accepted.push((item.logical, item.dsl.clone()));
@@ -698,8 +774,14 @@ impl Engine {
         // Resolve tags read-only against the shared frozen tag space (ADR-055); never the CoW
         // `intern_tags`. Empty ⇒ empty slice ⇒ byte-identical to the pre-tag `&[]` path.
         let tag_ids = self.resolve_tags_readonly(tags);
-        let outcome = Arc::make_mut(&mut self.memtable)
-            .add_compiled(ex, &tag_ids, &self.dict, logical, version);
+        let outcome = Arc::make_mut(&mut self.memtable).add_compiled(
+            ex,
+            &tag_ids,
+            &self.dict,
+            logical,
+            version,
+            self.config.accept_class_d,
+        );
         if outcome.is_some() {
             self.query_store.insert(logical, text.to_string());
         } else {
@@ -715,12 +797,20 @@ impl Engine {
     /// so re-applying a (possibly since-tightened) limit here could silently drop
     /// an already-acknowledged write and diverge the recovered state from the log.
     /// The compiled-in ceiling still bounds resource use during replay.
+    ///
+    /// `class_d_accepted` is the frame's own marker (WAL v5, ADR-068), NOT the
+    /// engine's knob: an op-5 frame was accepted at its write (the live path gates
+    /// BEFORE logging) and replays stored even if the knob has since flipped off;
+    /// a legacy op-0 frame replays under the old reject gate, because a pre-v5
+    /// binary logged BEFORE classifying and may have acknowledged the write as
+    /// `RejectedClassD`.
     pub(in crate::segment) fn replay_insert(
         &mut self,
         text: &str,
         logical: u64,
         version: u32,
         tags: &[(String, String)],
+        class_d_accepted: bool,
     ) {
         if let Ok(ast) = crate::dsl::parse(text) {
             let tag_ids = self.intern_tags(tags);
@@ -730,7 +820,14 @@ impl Engine {
                 extract(&ast, &self.norm, dict, &mut lc)
             };
             if Arc::make_mut(&mut self.memtable)
-                .add_compiled(&ex, &tag_ids, &self.dict, logical, version)
+                .add_compiled(
+                    &ex,
+                    &tag_ids,
+                    &self.dict,
+                    logical,
+                    version,
+                    class_d_accepted,
+                )
                 .is_some()
             {
                 self.query_store.insert(logical, text.to_string());

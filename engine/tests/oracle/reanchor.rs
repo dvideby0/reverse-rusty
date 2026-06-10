@@ -206,7 +206,7 @@ fn reanchoring_is_a_noop_under_a_frozen_dict() {
     let mut b = Segment::new();
     for (i, ex) in exes.iter().enumerate() {
         let seg = if i < half { &mut a } else { &mut b };
-        seg.add_compiled(ex, &[], &dict, i as u64, 1);
+        seg.add_compiled(ex, &[], &dict, i as u64, 1, false);
     }
     assert!(
         !a.is_empty() && !b.is_empty(),

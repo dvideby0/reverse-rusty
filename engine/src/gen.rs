@@ -194,6 +194,31 @@ fn gen_queries(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<(u64, Strin
     out
 }
 
+/// Generate `n` negation-only (cost class D) query texts — 1–3 forbidden terms,
+/// no positives: the "base/raw card defined entirely by exclusions" shape the
+/// ADR-068 always-candidate lane exists for. Seeded + deterministic.
+///
+/// A SEPARATE function rather than a `GenConfig` field, the same opt-in-by-
+/// construction discipline as messy mode (ADR-063): every existing benchmark /
+/// oracle corpus stays byte-identical. Callers (the class-D differential) assign
+/// logical ids and ingest under `accept_class_d`; a default engine rejects these.
+pub fn gen_class_d_queries(seed: u64, n: usize) -> Vec<String> {
+    let mut rng = Rng::new(seed);
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let nn = 1 + rng.below(3); // 1..=3 forbidden terms
+        let mut q = String::new();
+        for _ in 0..nn {
+            if !q.is_empty() {
+                q.push(' ');
+            }
+            q.push_str(&format!("-{}", NEGATIVES[rng.below(NEGATIVES.len())]));
+        }
+        out.push(q);
+    }
+    out
+}
+
 // ---- Adversarial surface noise ("messy mode") ----------------------------------------
 //
 // The clean generator above produces lowercase, single-spaced, punctuation-free ASCII —

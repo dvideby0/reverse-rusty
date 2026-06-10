@@ -58,6 +58,17 @@ pub fn sig_key(features: &[u32]) -> u64 {
     finalize_sig(h)
 }
 
+/// The **universal signature** — `sig_key` of the empty feature group, the
+/// lossless cover of an empty positive set (ADR-068). Every title generates it
+/// implicitly: the match path probes it once per segment (broad lane), making a
+/// query stored under it an *always-candidate*. A stable non-zero constant (the
+/// FNV basis avalanched); a real feature group colliding with it is FP-only —
+/// both postings sit in one list the universal probe always retrieves.
+#[inline]
+pub fn universal_sig() -> u64 {
+    sig_key(&[])
+}
+
 /// A trivial fast hasher for u64 keys (signature keys are already well-mixed,
 /// so the map hasher can be the identity-with-avalanche). Avoids SipHash cost.
 #[derive(Default)]

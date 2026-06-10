@@ -25,7 +25,7 @@ correctness contract this section must uphold.*
 - **Owns:** signature optimizer (`compile.rs`), candidate index (`index.rs`), exact matcher (`exact.rs`), explain (`explain.rs`)
 - **Key invariant:** Signatures built ONLY from required features / any-of groups, never from forbidden features (lossless cover contract)
 - **Hot path:** title signatures → probe index → union candidate IDs → common-mask gate (2× `u64` ops) → sorted-slice verification → emit matches
-- **Cost classes:** A (selective, realtime) / B (moderate) / C (broad → quarantine lane) / D (reject with rewrite suggestions)
+- **Cost classes:** A (selective, realtime) / B (moderate) / C (broad → quarantine lane) / D (negation-only → reject, or opt-in always-candidate lane, ADR-068)
 - **Measured:** ~54 candidates/title, flat from 1M–5M queries; ≈710k titles/sec/core (full numbers: [performance/results.md](../performance/results.md))
 - **Gotchas:** Adaptive postings (inline ≤8 → Vec ≤256 → Roaring >256); broad lane is ~9× slower than selective path
 
@@ -159,7 +159,7 @@ Every compiled query is classified by the selectivity of its **best achievable s
 | **A** | highly selective (rare multi-feature anchor) | main index, realtime |
 | **B** | acceptable selectivity | main index, realtime |
 | **C** | broad (`PSA 10`, `Michael Jordan`, `rookie`) | **separate broad lane** |
-| **D** | pathological (e.g. only a forbidden clause, or no required feature at all) | **reject at compile**, return rewrite suggestions |
+| **D** | negation-only (only forbidden clauses — no required feature, no any-of) | **reject at ingest** (default); opt-in `accept_class_d` stores it as an **always-candidate** in the broad lane (ADR-068) |
 
 A class-C query's best signature is still too common (posting would be "huge"). Putting it in the main
 index would poison candidate selectivity for *every* title that has that feature. Instead the **broad
@@ -186,6 +186,21 @@ is the direct, structural fix for the percolator "unsupported query becomes an a
 failure mode: we *detect* low selectivity at compile time, quarantine it, and then evaluate it cheaply
 in batch — instead of paying for it silently on every title. (Roaring-bitmap / SIMD posting
 intersection for the very broadest postings is a further micro-optimization, not yet done.)
+
+**Class-D always-candidates (the opt-in lane, ADR-068).** With `accept_class_d` on, a negation-only
+query is the *deliberate* version of that always-candidate: its lossless cover of an empty positive
+set is the **universal signature** (`anchor_plan` returns one empty broad-anchor group, hashed to
+`sig_key(&[])` = `util::universal_sig()`), stored in the same per-segment broad index. The title side
+probes that one constant key per segment (scalar) or **once per batch** (columnar — the amortization
+the lane rides this machinery for); reached entries always take full verification (`is_pure_anchor`
+is structurally false for an empty required mask), where their forbidden features are enforced against
+`N(T)` — the vacuous semantics "matches every title bearing none of my forbidden features", exactly
+ES/OS's `fixNegativeQueryIfNeeded` match-all-except evaluated blindly per document. Because the cover
+is optimizer-derived (not a side table), compaction re-anchoring, the vocab recompile, and explain all
+reproduce it by construction. The probe is unconditional within the broad lane — the knob gates
+*acceptance*, never *visibility* — so a stored entry stays matchable however the knob is later
+toggled; with none stored it costs one bloom miss per sealed segment. Like class C, an
+always-candidate is visible only when the request includes the broad lane.
 
 ---
 

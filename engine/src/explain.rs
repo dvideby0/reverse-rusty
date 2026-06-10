@@ -54,6 +54,12 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
         }
         s.push('\n');
     }
+    if cq.cost_class == crate::compile::CostClass::D {
+        s.push_str(
+            "  class D: negation-only — the broad signature above is the UNIVERSAL key \
+             (always-candidate when stored under the accept_class_d lane, ADR-068)\n",
+        );
+    }
     // anchor commentary
     if let Some(&r1) = cq.extracted.required.iter().min_by_key(|&&f| dict.freq(f)) {
         s.push_str(&format!(
@@ -94,6 +100,11 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
             }
         }
     }
+    // Every title implicitly generates the UNIVERSAL signature (ADR-068) — the broad
+    // matcher probes it once per segment, which is how a stored class-D
+    // always-candidate is retrieved. Mirror it here so explain can't report
+    // `candidate: false` for a query the matcher reaches.
+    title_sigs.insert(crate::util::universal_sig());
     let retrieved = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
         || cq.broad_sigs.iter().any(|s| title_sigs.contains(s));
     s.push_str(&format!(
@@ -160,6 +171,9 @@ pub fn explain_match_structured(
             }
         }
     }
+    // Every title implicitly generates the UNIVERSAL signature (ADR-068) — see
+    // `explain_match`.
+    title_sigs.insert(crate::util::universal_sig());
     let candidate = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
         || cq.broad_sigs.iter().any(|s| title_sigs.contains(s));
 

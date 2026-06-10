@@ -27,7 +27,9 @@ curl localhost:9200/_stats
 }
 ```
 
-- **class_counts** — how many queries fell into each cost class (A is best, D is rejected)
+- **class_counts** — how many **stored** queries fell into each cost class. `d` counts the
+  always-candidates stored under the `accept_class_d` lane (ADR-068) — zero unless the lane has
+  accepted queries; rejected class-D queries are counted only in `rejected_class_d`
 - **segment_holes** — fraction of tombstoned entries per segment (drives compaction decisions)
 - **memory** — breakdown of heap usage across the exact store, candidate index, and bloom filters
 

@@ -10,6 +10,21 @@ use crate::filter::SegmentFilter;
 use crate::index::CandidateIndex;
 use crate::util::sig_key;
 
+/// The single accept/reject predicate for a compiled plan's cost class (ADR-068):
+/// class D is stored only when the lane is on AND the query has forbidden features
+/// (a query with no positives and no negatives would match every title outright —
+/// rejected regardless). Shared by [`Segment::add_compiled`] and the live write
+/// paths' pre-WAL gate (`segment/ingest.rs`) so the two sites cannot drift — the
+/// WAL records only accepted mutations, making replay unconditional.
+pub(in crate::segment) fn rejects_class_d(
+    class: CostClass,
+    ex: &Extracted,
+    accept_class_d: bool,
+) -> bool {
+    // Reject a class-D plan unless the lane is on AND there is something to forbid.
+    class == CostClass::D && (!accept_class_d || ex.forbidden.is_empty())
+}
+
 impl Segment {
     pub fn new() -> Self {
         Segment {
@@ -51,8 +66,17 @@ impl Segment {
     }
 
     /// Append one already-extracted query. Returns the new segment-local id, or
-    /// `None` if the query is class D (rejected, not stored). `tags` are the query's
+    /// `None` if the query is class D and rejected. `tags` are the query's
     /// interned, sorted `TagId`s (ADR-049); pass `&[]` for an untagged query.
+    ///
+    /// `accept_class_d` (ADR-068): when set, a negation-only query (class D with a
+    /// non-empty forbidden set) is stored as an **always-candidate** under the
+    /// universal broad signature its plan carries. A query with no positives AND no
+    /// forbidden features (an effectively empty query — it would match every title
+    /// outright) is rejected regardless. Ingest paths pass the
+    /// `EngineConfig::accept_class_d` knob; WAL replay and the vocab recompile pass
+    /// `true` unconditionally (an acknowledged/stored query must never be dropped
+    /// by a since-flipped knob).
     pub fn add_compiled(
         &mut self,
         ex: &Extracted,
@@ -60,9 +84,10 @@ impl Segment {
         dict: &Dict,
         logical: u64,
         version: u32,
+        accept_class_d: bool,
     ) -> Option<u32> {
         let plan = build_signatures(ex, dict);
-        if plan.class == CostClass::D {
+        if rejects_class_d(plan.class, ex, accept_class_d) {
             return None;
         }
         let local = self.exact.push(ex, tags, dict, version, logical);
@@ -183,6 +208,18 @@ impl Segment {
                         continue;
                     }
                 }
+                self.probe(key, &self.broad, epoch, view, seen, out, pred, stats, true);
+            }
+            // Universal signature: class-D always-candidates (ADR-068). Probed
+            // unconditionally — the accept knob gates ingest, never visibility, so a
+            // stored entry stays reachable however the knob is later toggled. With no
+            // class-D entries this is one filter (or hash) miss per segment.
+            let key = crate::util::universal_sig();
+            stats.probes_attempted += 1;
+            let skip = filter.is_some_and(|flt| !flt.may_contain(key));
+            if skip {
+                stats.probes_skipped += 1;
+            } else {
                 self.probe(key, &self.broad, epoch, view, seen, out, pred, stats, true);
             }
         }
@@ -318,8 +355,9 @@ impl Segment {
     /// frequency required feature can now be a hot one and escalate to an arity-2 cover. This
     /// is still lossless because `anchor_plan`'s class-B/C anchors are always hot features, and
     /// the title side ([`match_into`](Self::match_into)) generates exactly those {hot}×{other}
-    /// and broad signatures — the same matched-pair guarantee. A query is never re-anchored to
-    /// class D (a stored query always has a required/any-of feature).
+    /// and broad signatures — the same matched-pair guarantee. A stored non-D query is never
+    /// re-anchored to class D (it always has a required/any-of feature); a stored class-D
+    /// always-candidate (ADR-068) re-derives its universal broad cover verbatim.
     ///
     /// One transition is **refused**: a main-lane (A/B) query is never demoted into the broad
     /// (C) lane. The main index is always probed, but the broad lane is opt-in (the default
@@ -372,10 +410,9 @@ impl Segment {
                     anyof,
                 };
                 let plan = build_signatures(&ex, dict);
-                debug_assert_ne!(
-                    plan.class,
-                    CostClass::D,
-                    "a stored (non-D) query must never re-anchor to class D"
+                debug_assert!(
+                    old_class == CostClass::D || plan.class != CostClass::D,
+                    "a stored non-D query must never re-anchor to class D"
                 );
 
                 // CORRECTNESS GUARD — never demote a main-lane (A/B) query into the broad

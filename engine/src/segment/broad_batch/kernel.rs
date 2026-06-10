@@ -224,7 +224,27 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
 ) {
     cands.clear();
     non_pure.clear();
-    stats.broad_anchors_scanned += distinct.len() as u32;
+    // +1: the universal probe below is an anchor-table probe too — without it an
+    // empty-feature batch would report zero anchors scanned despite probing.
+    stats.broad_anchors_scanned += distinct.len() as u32 + 1;
+
+    // Universal signature: class-D always-candidates (ADR-068), ONE probe per
+    // batch — the amortization this lane rides the batch path for. Reached
+    // entries go straight to full bitmap verification: they are never
+    // pure-anchor (`is_pure_anchor` is structurally false for an empty required
+    // mask), and `eval_batch_slices` on an empty-positive entry computes exactly
+    // the vacuous semantics (titles bearing no forbidden feature).
+    {
+        let before = cands.len();
+        backend.reach(crate::util::universal_sig(), epoch, seen, cands, stats);
+        for &local in &cands[before..] {
+            stats.unique_candidates += 1;
+            stats.broad_candidates += 1;
+            if backend.alive(local) {
+                non_pure.push(local);
+            }
+        }
+    }
 
     // Reachability + pure-anchor emit, one probe per distinct batch feature.
     for &f in distinct {

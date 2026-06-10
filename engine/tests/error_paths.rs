@@ -36,8 +36,10 @@ fn build_report_splits_parse_and_class_d() {
     assert_eq!(eng.rejected(), 2, "total = parse + class-D");
     assert_eq!(eng.num_queries(), 1);
 
-    // class_counts()[3] is the class-D count only, not parse failures
-    assert_eq!(eng.class_counts()[3], 1);
+    // class_counts()[3] counts STORED class-D always-candidates (ADR-068),
+    // symmetric with A/B/C — a REJECTED class-D query is only in
+    // rejected_class_d(), no longer mirrored into the array.
+    assert_eq!(eng.class_counts()[3], 0);
 }
 
 #[test]

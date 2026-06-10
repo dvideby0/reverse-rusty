@@ -37,6 +37,7 @@ Options:
 | `--max-query-clauses` | 256 | Maximum clauses per query |
 | `--max-anyof-group-size` | 64 | Maximum members in an any-of group |
 | `--retain-source` | true | Keep query source text resident; set `false` to store it on disk and fetch `_source`/explain lazily (large memory saving at scale — ADR-020) |
+| `--accept-class-d` | false | Store negation-only queries as broad-lane always-candidates instead of rejecting them (ADR-068) — needed at startup for a `--load-file` corpus containing such queries; also dynamic via `/_settings` |
 
 Example with persistence, vocabulary, and pre-loaded queries:
 

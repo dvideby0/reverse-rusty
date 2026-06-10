@@ -130,6 +130,21 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   path (`tests/broad_batch.rs` + batch oracle); broad postings scanned amortize ~1/batch_size (29× at
   256). Four dynamic knobs (`broad_batch_size`/`broad_columnar`/`broad_materialize`/`max_percolate_batch`)
   + broad Prometheus counters; `broad_columnar=false` is the inline kill-switch.
+- **Class-D always-candidate lane (ADR-068, opt-in)** — `accept_class_d` (dynamic, default off = the
+  loud reject) stores a **negation-only** query as an always-candidate riding the broad lane: its
+  cover is the **universal signature** (`anchor_plan` derives one empty broad-anchor group for an
+  empty positive set), probed once per segment / once per batch; forbidden features enforced only in
+  exact verification (never-gate-on-MUST_NOT extended; `is_pure_anchor` structurally false ⇒ verify
+  always runs). ES/OS `fixNegativeQueryIfNeeded` match-all-except parity. Live writes gate before the
+  WAL; accepted class-D frames carry their own op codes (WAL **v5**) so replay reproduces each
+  frame's writer decision (legacy logged-before-classifying frames keep the old gate — knob-flip- and
+  upgrade-safe), and a class-D-bearing commit writes segment + **manifest** format **v4** (layout-identical) — the
+  manifest version is the loud rollback gate; the vocab recompile keeps stored entries; the effectively empty query rejects
+  regardless. Oracle-proven
+  (`tests/oracle/class_d.rs` vacuous-accept differential: per-title + batch ≡ brute, tombstone churn,
+  compaction both variants, flush→mmap reopen + WAL replay under a flipped knob, vocab change).
+  Single-node; the cluster keeps rejecting at placement (the cluster lane rides ADR-065
+  replicate-broad-to-all).
 - **Cluster scope frame — read before the cluster entries below.** **Cluster v1** (shippable) = the
   in-process multi-shard core + durable local reopen + dynamic vocabulary — **built and oracle-proven,
   zero false negatives (Roadmap Tier 0, now complete)**. The gRPC / replication / control-plane /
@@ -542,10 +557,10 @@ backlog, and the Evaluated & declined list.
     replace-by-id (ES `index` semantics) — one WAL frame, one snapshot publish, 201-created /
     200-updated, `deleted_count` back to 1; a failed replace never deletes. Crash-atomic on the
     ADR-066 substrate.
-  - **Negation-only queries are rejected (class D)** while ES/OS `query_string` treats them as
-    *match-all-except* (`fixNegativeQueryIfNeeded`) — a silent semantic divergence for exclude-only
-    stored queries until the opt-in always-candidate lane lands (interim: callers side-list class-D
-    rejections as always-candidates).
+  - ~~**Negation-only queries are rejected (class D)**~~ **✅ Fixed (ADR-068):** the opt-in
+    `accept_class_d` lane stores them as broad-lane always-candidates under the universal signature —
+    the ES/OS *match-all-except* (`fixNegativeQueryIfNeeded`) parity; default off keeps the loud
+    reject (whose message now names the knob).
   - **The `pop` number context makes year typing position-sensitive** (a 1900–2099 token right after
     `pop` emits `term:` not `year:`) — the one demonstrated residual FN class against a
     position-insensitive reference matcher.

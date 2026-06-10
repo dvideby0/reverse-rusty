@@ -23,6 +23,14 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
     let mut broad_anchors: Vec<Vec<FeatureId>> = Vec::new();
 
     if ex.required.is_empty() && ex.anyof.is_empty() {
+        // Class D: the cover of an empty positive set is the UNIVERSAL signature
+        // (one empty broad-anchor group, hashed to `util::universal_sig()`), which
+        // the match path probes once per segment — so an accepted class-D query is
+        // an always-candidate (ADR-068). Whether such a query may be *stored* is
+        // gated at ingest (`Segment::add_compiled`), not here; deriving the cover
+        // unconditionally keeps every re-derivation site (compaction re-anchoring,
+        // the vocab recompile, explain) reproducing it by construction.
+        broad_anchors.push(Vec::new());
         return AnchorPlan {
             main_anchors,
             broad_anchors,
@@ -40,6 +48,7 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
             .iter()
             .min_by_key(|g| g.iter().map(|&f| dict.freq(f)).max().unwrap_or(u32::MAX))
         else {
+            broad_anchors.push(Vec::new());
             return AnchorPlan {
                 main_anchors,
                 broad_anchors,

@@ -54,6 +54,36 @@ impl Brute {
         }
     }
 
+    /// Build the brute reference KEEPING negation-only (class D) queries — the
+    /// ground truth for the ADR-068 always-candidate lane. Mirrors the lane's
+    /// accept rule exactly: a query with no positives AND no forbidden features
+    /// (the effectively empty query) is dropped, as the engine drops it even with
+    /// the lane on; a forbidden-only query is kept. [`Self::matches`] needs no
+    /// change — empty required/any-of iterators are vacuously `all()` true, so a
+    /// kept class-D query matches exactly the titles bearing none of its
+    /// forbidden features.
+    pub(crate) fn build_accepting_class_d(queries: &[(u64, String)]) -> Self {
+        let norm = Normalizer::default_vocab().expect("built-in vocab");
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let mut qs = Vec::new();
+        for (logical, text) in queries {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+                let ex = extract(&ast, &norm, &mut dict, &mut lc);
+                if ex.required.is_empty() && ex.anyof.is_empty() && ex.forbidden.is_empty() {
+                    continue;
+                }
+                qs.push((*logical, ex));
+            }
+        }
+        dict.finalize_mask();
+        Brute {
+            norm,
+            dict,
+            queries: qs,
+        }
+    }
+
     /// Build an alias-aware brute reference: the normalizer carries the vocab's alias phrases and
     /// the dict carries the resolved equivalence map, set up exactly as `Engine::set_vocab` does
     /// (intern the forms, then resolve), so the ground truth independently applies the ADR-061

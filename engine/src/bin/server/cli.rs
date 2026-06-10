@@ -105,6 +105,13 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = false)]
     pub(crate) wal_sync_on_write: bool,
 
+    /// Accept negation-only (cost class D) queries as broad-lane
+    /// always-candidates instead of rejecting them (ADR-068). Needed at startup
+    /// for a `--load-file` corpus containing such queries; also runtime-tunable
+    /// via `PUT /_settings {"accept_class_d": true}`.
+    #[arg(long, default_value_t = false)]
+    pub(crate) accept_class_d: bool,
+
     /// Keep every query's source text resident in RAM (default true — instant
     /// `_source`/explain, historical behavior). Set false to store source text on
     /// disk (`sources.dat`, mmap'd) and fetch it lazily — a large resident-memory
