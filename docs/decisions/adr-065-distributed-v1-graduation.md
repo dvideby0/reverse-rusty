@@ -4,7 +4,9 @@
 
 
 - **Status:** **Accepted (2026-06-10) — a program ADR.** Defines the milestone and its acceptance
-  checklist; each criterion ships under its own ADR/PR. Tracked in [`roadmap.md`](../roadmap.md) Tier 3.
+  checklist; each criterion ships under its own ADR/PR. Tracked in [`roadmap.md`](../roadmap.md) Tier 3 —
+  **the roadmap copy is the live tracker** (completion marks land there); this ADR records the
+  decision-time scope.
 - **Context:** **Cluster v1** — the in-process multi-shard core + durable reopen + dynamic vocabulary —
   is built and oracle-proven (Roadmap Tier 0, ADR-046). The **distributed multi-node layers**
   (ADR-027, 029, 031–048: the gRPC transport + dict/tag-dict shipping, replication + no-quiesce peer

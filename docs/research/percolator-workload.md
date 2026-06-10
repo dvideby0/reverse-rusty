@@ -129,23 +129,32 @@ the precision stage re-filters):
    correctness.)
 3. A term with inner `-`/`/`/`'` becomes the space-split quoted phrase of its parts (the only variant
    that is live title-side after the deployment's client normalization).
-4. Strip trailing `*` (the reference precision stage literalizes wildcards, so they never produce final
-   matches anyway).
+4. Trailing `*` needs no text mutation — RR's punctuation table splits it away at compile time
+   (requiring the bare token) while the reference precision stage literalizes it; the stored text keeps
+   the original form.
 5. Translate from the reference grammar's **parsed structure**, not raw text (inheriting its parser's
-   quirky state machine for free), and render the RR query as text that **round-trips**: re-parsing the
-   rendered text under the reference grammar must yield the original parse (property-testable over a
-   corpus) — required because hits return `_source` and the consumer re-parses it.
-6. A repeated-term occurrence-count requirement (a reference-matcher-only feature) is dropped — its
-   stage-one drops it too; the precision stage enforces it.
+   quirky state machine for free), and render the RR query as text valid under **both** grammars.
+   **Round-trip caveat:** hits return `_source` and a consumer's precision stage re-parses it — but
+   rules 2 and 7 deliberately *drop* clauses from the stored text, so re-parsing `_source` yields the
+   widened parse, not the original (the dropped negations/groups would silently vanish from the
+   precision stage too — over-accepting). A consumer that keeps its own precision stage must therefore
+   resolve the **original** expression by id from its own source of truth, or use the opaque
+   original-expression passthrough once [ADR-064](../DECISIONS.md) item 7 lands. The round-trip
+   property (rendered text re-parses to the original) holds — and is property-testable — for every
+   clause the translation *preserves*.
+6. A repeated-term occurrence-count requirement (a reference-matcher-only feature) survives by
+   rendering the repeated terms verbatim — RR dedups them at compile time (set semantics, no widening)
+   while the reference re-parse keeps the counts for its precision stage.
 7. A positive group containing a member that normalizes to **zero features** (non-Latin scripts,
    symbol-only members) drops the *whole group clause* (vacuous = wider = FN-safe).
 8. **Exclude-only queries** (no positive clause after translation) are class-D-rejected — keep their ids
-   in an **always-candidate side list** (they match every title by definition; the precision stage
-   vacuously accepts and applies the excludes) until the ADR-064 item-2 lane lands.
+   in an **always-candidate side list**: their *positive* semantics is satisfied by every title, so every
+   title takes them as **candidates** (never append them to final results directly — the precision stage
+   applies the excludes) — until the ADR-064 item-2 lane lands.
 
 **Known residual FP classes** (all predicted, all re-filtered by a precision stage): phrase-as-bag
-adjacency loss, dropped negations, decimal splits under `.`→split, dropped occurrence counts, and the
-always-candidate side list. **Known residual FN class:** exactly one — the `pop` number-context
+adjacency loss, dropped negations, decimal splits under `.`→split, occurrence counts unenforced at
+stage one (deduped at compile; preserved in the text per rule 6), and the always-candidate side list. **Known residual FN class:** exactly one — the `pop` number-context
 position-sensitivity (ADR-064 item 3) — until its parity knob lands.
 
 > **Validation still owed.** The PoC above verifies the *translation contract* on adversarial pinned

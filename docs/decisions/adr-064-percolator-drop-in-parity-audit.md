@@ -5,7 +5,8 @@
 
 - **Status:** **Accepted (2026-06-10) — a program ADR.** Each numbered item below ships under its own
   ADR/PR; this file records the audit that produced them and the acceptance bar. Tracked in
-  [`roadmap.md`](../roadmap.md) Tier 4 (the work package) + the polish backlog.
+  [`roadmap.md`](../roadmap.md) Tier 4 (the work package) + the polish backlog — **the roadmap copy is
+  the live tracker** (completion marks land there); this ADR records the decision-time scope.
 - **Context:** A deep **drop-in-replacement audit** (2026-06) against the reference percolator
   deployment documented in [`research/percolator-workload.md`](../research/percolator-workload.md) —
   this time a full semantic + operational gap analysis, not the earlier capability mapping. Method:
@@ -62,12 +63,18 @@
      silently absent from hits, which reads as missing data. Decision: accept the per-request override on
      `/_search` (and consider rejecting unknown body fields).
   7. **Smaller items (→ polish backlog):** a *measured* reopen/restart-time number at ≥1M queries
-     (currently inferred, never captured); a documented + tested **backup/restore** procedure (hot-copy
-     after `/_flush` is structurally sound — the manifest is the atomic commit point — but nothing
-     blesses it); optional **tag read-back** (`GET /_doc` returning a query's tags) for metadata audits.
-     A `should`/`must_not` TagPredicate extension is **declined for now**: structurally FN-safe to add
-     later (filters only remove, post-candidate), and the known cross-key-OR pattern is covered by two
-     filtered calls + a client-side union.
+     (currently inferred, never captured); a documented + tested **backup/restore** procedure — a *live*
+     hot-copy is **not** safe as-is (a concurrent flush/compaction can commit a new manifest and delete
+     superseded segments mid-copy, so the copied manifest can reference files the copy missed; the
+     procedure needs write-quiescing, a filesystem snapshot, or a file-pinning protocol — designing and
+     testing that is the item); an opaque **original-expression passthrough** (store a caller-supplied
+     source string verbatim alongside the compiled query and return it with hits, so a consumer whose
+     precision stage re-parses the source gets the *original*, not a widened translation — see the
+     §Drop-in parity round-trip caveat in `percolator-workload.md`); optional **tag read-back**
+     (`GET /_doc` returning a query's tags) for metadata audits. A `should`/`must_not` TagPredicate
+     extension is **declined for now**: structurally FN-safe to add later (filters only remove,
+     post-candidate), and the known cross-key-OR pattern is covered by two filtered calls + a
+     client-side union.
 - **Why this is safe:** items 1–2 change write-path semantics behind an explicit opt-in or toward the
   ES-aligned behavior, and neither touches signature gating; item 3 is opt-in + vocab-persisted; items
   4–6 turn silent behavior loud. Nothing alters the lossless-cover contract — the class-D lane *extends*

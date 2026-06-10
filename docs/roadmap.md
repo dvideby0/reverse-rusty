@@ -198,7 +198,8 @@ These items close the gaps between Reverse Rusty and how production percolator d
 *operated* — now **verified against a documented reference workload**
 ([`research/percolator-workload.md`](research/percolator-workload.md)), not just an initial guess. That
 write-up also records what already **aligns** (entity identity ↔ `logical_id`, the
-include/exclude/OR-group DSL, create/update/delete + bulk) and what RR **subsumes under its own
+include/exclude/OR-group DSL, create/delete + bulk — *update* is the ADR-064 atomic-upsert divergence:
+a re-PUT is additive today, not replace-by-id) and what RR **subsumes under its own
 semantics** (the two-stage recall→verify pattern — RR's integer-exact verifier makes output
 false-positive-free; fronting a deployment that keeps a *foreign* precision stage instead requires the
 verified superset contract, §Drop-in parity in that write-up); the capability-by-capability mapping is
@@ -407,9 +408,10 @@ from the audit's former P3 list). Roughly grouped:
 - **No pre-warming** for mmap'd segments on cold start.
 - **No measured restart/reopen time** at ≥1M queries — the mmap-attach + WAL-tail design implies
   sub-second-to-seconds, but no captured number exists ([ADR-064](DECISIONS.md) item 7).
-- **No documented/tested backup-restore procedure** — hot-copying the data dir after `/_flush` is
-  structurally sound (the manifest is the atomic commit point; segments are fsync+rename) but nothing
-  blesses or tests it ([ADR-064](DECISIONS.md) item 7; cluster version = [ADR-065](DECISIONS.md)
+- **No documented/tested backup-restore procedure** — and a *live* hot-copy is not safe as-is: a
+  concurrent flush/compaction can commit a new manifest and delete superseded segments mid-copy, so the
+  copied manifest can reference files the copy missed. The procedure needs write-quiescing, a filesystem
+  snapshot, or file pinning ([ADR-064](DECISIONS.md) item 7; cluster version = [ADR-065](DECISIONS.md)
   criterion 11).
 - **Tags are write-only over REST** — no endpoint returns a stored query's tags (`GET /_doc` returns only
   `_source.query`, hits carry no tags field); a small read-back addition for metadata audits
