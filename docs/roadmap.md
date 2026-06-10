@@ -162,9 +162,17 @@ items from an external review, re-ranked to the top; **all are now done:**
 
   **The Distributed-v1 checklist ([ADR-065](DECISIONS.md)) — work top-down; items 1–3 unblock testing
   everything else:**
-  1. **Cluster REST surface** — a coordinator-mode server exposing the existing REST API over a
-     `ClusterEngine`. Today REST fronts a single-node `Engine` only (the cluster is a library API + raw
-     gRPC bins) — the single biggest gap to "testing all features" without embedding Rust.
+  1. ~~**Cluster REST surface**~~ **✅ Shipped ([ADR-070](DECISIONS.md)).** A coordinator mode inside
+     the existing `server` binary (`--cluster`): the same REST dialect over a `ClusterEngine` —
+     in-process (`--shards K`, durable build/reopen) on the default build, remote
+     (`--shard-endpoint primary[,replica…]`, dict/tag-space shipped at connect) under `distributed`.
+     `PUT /_doc` is a **cluster-atomic upsert** (a new single-frame `ClusterMutation::Upsert`, clog
+     v3 — closing the "cluster upsert rides ADR-065" deferral from ADR-067); filtered percolation +
+     per-request `include_broad` on `/_search`/`/_mpercolate`; vocab/alias admin over `set_vocab`
+     (refusals surface verbatim); `/_checkpoint` + `_cluster/*` ops (state/nodes/rebalance/resync);
+     no-analogue surfaces answer 501 with the alternative, unsupported request features (`rank`,
+     `explain`) are loud 400s. Oracle-proven (upsert durability: log-tail + checkpoint reopen ≡
+     pre-crash ≡ brute) + handler tests over a real in-process cluster.
   2. **TLS + auth on the gRPC transports** (shard + control plane — both currently plaintext and
      unauthenticated; reuse the ADR-062 token shape and/or mTLS, fail-loud config).
   3. **A real multi-machine test harness** — durable multi-node rolling-restart / kill-and-recover /

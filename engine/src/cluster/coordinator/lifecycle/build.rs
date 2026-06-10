@@ -26,6 +26,36 @@ use crate::tagdict::TagDict;
 type ExtractedTagged = (u64, Extracted, String, Vec<(String, String)>);
 
 impl ClusterEngine {
+    /// Pass A of [`build`](Self::build) as a standalone step: build + freeze the ONE
+    /// authoritative feature dict and tag space over a corpus, WITHOUT constructing
+    /// shards. This is what a remote-cluster assembler needs before
+    /// [`connect_remote`](Self::connect_remote) /
+    /// [`connect_replicated`](Self::connect_replicated) — the coordinator-mode server
+    /// (ADR-070) mints the same frozen space `build` would and ships it at connect
+    /// (ADR-034/055). An empty corpus yields an empty (still finalized) space: every
+    /// later term resolves to a deterministic synthetic id (ADR-046), so a fresh
+    /// remote cluster needs no out-of-band dict at all.
+    pub fn freeze_feature_space(
+        norm: &Normalizer,
+        queries: &[(u64, String)],
+        tags: &[Vec<(String, String)>],
+    ) -> (Dict, TagDict) {
+        let mut dict = Dict::new();
+        let mut tag_dict = TagDict::new();
+        let mut lc = String::new();
+        for (idx, (_logical, text)) in queries.iter().enumerate() {
+            if let Ok(ast) = crate::dsl::parse(text) {
+                let _ = extract(&ast, norm, &mut dict, &mut lc);
+                for (k, v) in tags.get(idx).map_or(&[][..], Vec::as_slice) {
+                    tag_dict.intern(k, v);
+                }
+            }
+        }
+        dict.finalize_mask();
+        tag_dict.mark_finalized();
+        (dict, tag_dict)
+    }
+
     /// Build a cluster from an initial corpus. This is the primary constructor:
     /// it builds the ONE authoritative dict over the whole corpus (pass A), freezes
     /// it, creates `K` shards sharing it, then distributes each query to its

@@ -7,7 +7,7 @@
 use super::DocBody;
 
 /// A request filter: a conjunction of `(key, [values])` groups (ADR-049).
-pub(super) type FilterSpec = Vec<(String, Vec<String>)>;
+pub(crate) type FilterSpec = Vec<(String, Vec<String>)>;
 
 /// Parse the ES `bool.filter` clause list into a [`FilterSpec`]. Each clause is a
 /// `{"terms": {key: [values]}}` or `{"term": {key: value}}`; any other clause type is a
@@ -77,7 +77,7 @@ fn parse_native_filter(filter: &serde_json::Value) -> Result<FilterSpec, String>
 /// envelope (`query.bool.must.percolate` + `query.bool.filter`). Returns the titles, whether
 /// the request was single-document (drives the response shape), and the filter spec. Any
 /// unsupported ES query node is a hard error (never silently ignored).
-pub(super) fn resolve_percolate(
+pub(crate) fn resolve_percolate(
     document: Option<DocBody>,
     documents: Option<Vec<DocBody>>,
     native_filter: Option<serde_json::Value>,

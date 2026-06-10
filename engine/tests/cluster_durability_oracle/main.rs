@@ -22,4 +22,5 @@ mod checkpoint;
 mod core;
 mod replication;
 mod torn_tail;
+mod upsert;
 mod vocab;

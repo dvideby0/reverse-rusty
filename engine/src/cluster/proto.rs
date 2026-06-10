@@ -97,8 +97,15 @@ pub(crate) fn translog_entry_to_mutation(e: TranslogEntry) -> Option<(LogPos, Cl
 }
 
 /// Engine `(LogPos, &ClusterMutation)` → proto `TranslogEntry` — the source side of
-/// `FetchTranslog` (ADR-039).
-pub(crate) fn translog_entry_from_mutation(pos: LogPos, m: &ClusterMutation) -> TranslogEntry {
+/// `FetchTranslog` (ADR-039). `None` for a frame the wire cannot represent: a
+/// per-shard translog never holds a whole `Upsert` (the coordinator decomposes a
+/// cluster upsert into per-shard delete + insert seam calls, each re-logged as its own
+/// Remove/Add record — ADR-070), so shipping one would mean silently dropping half its
+/// semantics; the caller fails the recovery stream loud instead.
+pub(crate) fn translog_entry_from_mutation(
+    pos: LogPos,
+    m: &ClusterMutation,
+) -> Option<TranslogEntry> {
     let op = match m {
         ClusterMutation::Add {
             logical,
@@ -112,11 +119,12 @@ pub(crate) fn translog_entry_from_mutation(pos: LogPos, m: &ClusterMutation) -> 
             tags: tags_to_proto(tags),
         }),
         ClusterMutation::Remove { logical } => translog_entry::Op::RemoveLogical(*logical),
+        ClusterMutation::Upsert { .. } => return None,
     };
-    TranslogEntry {
+    Some(TranslogEntry {
         seqno: pos.0,
         op: Some(op),
-    }
+    })
 }
 
 #[cfg(test)]

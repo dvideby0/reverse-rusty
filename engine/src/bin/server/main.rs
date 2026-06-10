@@ -41,6 +41,7 @@
 
 mod auth;
 mod cli;
+mod cluster_mode;
 mod dto;
 mod handlers;
 mod metrics;
@@ -141,6 +142,17 @@ async fn main() {
                 );
             }
         }
+    }
+
+    // Coordinator (cluster) mode: the same REST dialect over a ClusterEngine
+    // (ADR-070). Everything below this branch is the single-node path.
+    if cli.cluster {
+        cluster_mode::run(cli, auth_config).await;
+        return;
+    }
+    if !cli.shard_endpoint.is_empty() {
+        error!("--shard-endpoint requires --cluster (coordinator mode)");
+        std::process::exit(1);
     }
 
     // Build engine config from CLI flags.
@@ -480,8 +492,8 @@ async fn main() {
     info!("shutdown complete");
 }
 
-/// Wait for SIGINT (ctrl-c) or SIGTERM, then return.
-async fn shutdown_signal() {
+/// Wait for SIGINT (ctrl-c) or SIGTERM, then return. Shared with cluster mode.
+pub(crate) async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
             .await

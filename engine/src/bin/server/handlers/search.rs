@@ -24,10 +24,13 @@ mod tests;
 
 pub(crate) use mpercolate::mpercolate;
 pub(crate) use percolate::search;
+// The request-resolution helper is shared with the coordinator-mode handlers
+// (ADR-070), so both modes parse the identical native + ES envelopes.
+pub(crate) use resolve::resolve_percolate;
 
 #[derive(Deserialize)]
-struct DocBody {
-    title: String,
+pub(crate) struct DocBody {
+    pub(crate) title: String,
 }
 
 #[derive(Serialize)]

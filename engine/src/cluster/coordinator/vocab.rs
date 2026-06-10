@@ -125,12 +125,7 @@ impl ClusterEngine {
 
         // 3. Gather the deduped live `(logical, dsl)` set across shards. A selective /
         //    any-of query lives on several shards but has ONE dsl — dedup by logical id.
-        let mut live: BTreeMap<u64, String> = BTreeMap::new();
-        for s in &self.shards {
-            for (logical, dsl) in s.live_sources()? {
-                live.entry(logical).or_insert(dsl);
-            }
-        }
+        let live = self.live_corpus()?;
 
         // 4. Pass A — re-mint the dict over the live corpus under the new normalizer
         //    (interning + frequencies + hot-mask), exactly as `build`.
@@ -269,6 +264,75 @@ impl ClusterEngine {
         })
     }
 
+    /// The cluster's deduped live `(logical, dsl)` corpus, gathered across shards — the
+    /// source set the index is a materialized view of. Errors on a non-local shard
+    /// (the same boundary [`Self::set_vocab`] enforces).
+    fn live_corpus(&self) -> Result<Vec<(u64, String)>, ShardError> {
+        let mut live: BTreeMap<u64, String> = BTreeMap::new();
+        for s in &self.shards {
+            for (logical, dsl) in s.live_sources()? {
+                live.entry(logical).or_insert(dsl);
+            }
+        }
+        Ok(live.into_iter().collect())
+    }
+
+    /// Learn vocabulary rules from the cluster's own live corpus WITHOUT applying them —
+    /// the dry-run behind the coordinator-mode server's `POST /_vocab/learn` (ADR-070):
+    /// the caller reviews the learned [`Vocab`] and decides whether to `PUT /_vocab` it.
+    /// Compute-only (`&self`); refuses a non-local cluster (the gather boundary).
+    pub fn learn_vocab(&self, cfg: &CorpusLearnConfig) -> Result<Vocab, ShardError> {
+        let corpus = self.live_corpus()?;
+        Ok(crate::vocab::learn_vocab_from_corpus(&corpus, cfg))
+    }
+
+    /// Import a Solr/Lucene synonym file into the governed alias registry and apply it
+    /// (ADR-060 at the cluster, ADR-070): classifies against the cluster's CURRENT
+    /// normalizer + frozen dict, then rebuilds via [`Self::set_vocab`] — whose refusals
+    /// (non-local / tagged / multi-word activation) all hold unchanged. Returns the
+    /// engine-shaped apply report (`recompiled` = queries rebuilt).
+    pub fn import_alias_synonyms(
+        &mut self,
+        solr_text: &str,
+    ) -> Result<crate::segment::AliasApplyReport, ShardError> {
+        let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
+        let activated = vocab.import_solr_aliases(solr_text, &self.norm, &self.dict);
+        let rebuilt = self.set_vocab(vocab)?;
+        Ok(crate::segment::AliasApplyReport {
+            activated,
+            recompiled: rebuilt,
+            summary: self
+                .vocab
+                .as_deref()
+                .map(Vocab::alias_summary)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Learn alias candidates from the cluster's OWN stored queries (any-of
+    /// co-occurrence, ADR-060 item 2) into the registry and apply. Conservative: only
+    /// clear single-token variants auto-activate; everything else stays a review
+    /// candidate. Rebuilds via [`Self::set_vocab`] (all refusals hold).
+    pub fn learn_aliases_and_apply(
+        &mut self,
+        min_count: usize,
+    ) -> Result<crate::segment::AliasApplyReport, ShardError> {
+        let corpus = self.live_corpus()?;
+        let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
+        let activated =
+            vocab.learn_aliases_from_queries(&corpus, min_count, &self.norm, &self.dict);
+        let rebuilt = self.set_vocab(vocab)?;
+        Ok(crate::segment::AliasApplyReport {
+            activated,
+            recompiled: rebuilt,
+            summary: self
+                .vocab
+                .as_deref()
+                .map(Vocab::alias_summary)
+                .unwrap_or_default(),
+        })
+    }
+
     /// Like [`learn_and_apply`](Self::learn_and_apply) but also runs opt-in **NPMI corpus
     /// phrase induction** when `cfg.corpus_phrases` is set (ADR-053): multi-token entities
     /// induced from the cluster's live query text are merged UNDER the current vocabulary
@@ -278,15 +342,7 @@ impl ClusterEngine {
     /// `learn_and_apply(cfg.anyof_min_count)`. Phrases only — never aliases — so the
     /// same-normalizer gluing is lossless-cover safe. Refuses a non-local cluster.
     pub fn learn_and_apply_with(&mut self, cfg: &CorpusLearnConfig) -> Result<usize, ShardError> {
-        // Gather the live corpus to learn from (de-dup by logical id; a non-local shard
-        // errors here — same boundary `set_vocab` enforces).
-        let mut live: BTreeMap<u64, String> = BTreeMap::new();
-        for s in &self.shards {
-            for (logical, dsl) in s.live_sources()? {
-                live.entry(logical).or_insert(dsl);
-            }
-        }
-        let corpus: Vec<(u64, String)> = live.into_iter().collect();
+        let corpus = self.live_corpus()?;
         let learned = crate::vocab::learn_vocab_from_corpus(&corpus, cfg);
         // Merge learned rules UNDER the current vocab (declared aliases win), then rebuild.
         let mut merged = Vocab::new();

@@ -28,6 +28,7 @@
 //!     op ADD    (0): logical u64 | version u32 | dsl_len u32 | dsl [u8]
 //!                    [ tag_count u32 | (klen u32|k|vlen u32|v)* ]   (v2+, ADR-055)
 //!     op REMOVE (1): logical u64
+//!     op UPSERT (2): same payload as ADD (v3+, ADR-070 — atomic replace-by-id)
 //! ```
 //! The ADD tag block is written only when a query carries tags, so an untagged record is
 //! byte-identical to a v1 frame; because every record is independently length-framed, an
@@ -50,12 +51,17 @@ use crate::storage::crc32;
 const CLOG_MAGIC: [u8; 4] = *b"CMLG";
 // v2 (ADR-055): an ADD record may carry an optional trailing tag block. Records are
 // length-framed, so a v1 file (no tag bytes) still reads back correctly; the bump is a
-// forward-compat signal. Both versions are accepted on read.
-const CLOG_VERSION: u32 = 2;
+// forward-compat signal. v3 (ADR-070): the UPSERT op — a single-frame atomic
+// replace-by-id (payload layout identical to ADD), so a crash between a would-be
+// Remove+Add pair can't lose the query. All versions are accepted on read; an OLD
+// binary reading a v3 log stops at the first Upsert frame (the standard
+// unknown-op-is-a-torn-tail posture), which the version bump signals.
+const CLOG_VERSION: u32 = 3;
 const CLOG_HEADER_SIZE: usize = 8; // magic + version
 
 const OP_ADD: u8 = 0;
 const OP_REMOVE: u8 = 1;
+const OP_UPSERT: u8 = 2;
 
 /// Opaque, ordered position in the log — the Raft log index later. New-typed so callers
 /// can't do arithmetic on it; `LogPos(0)` is "before the first record".
@@ -81,6 +87,18 @@ pub(crate) enum ClusterMutation {
     },
     /// Remove every live entry for a logical id (idempotent).
     Remove { logical: u64 },
+    /// Atomically replace a query by logical id (ADR-070): tombstone every prior live
+    /// copy AND insert the new version under ONE frame, so replay reproduces the whole
+    /// replacement or none of it — never a remove without its re-add (the cluster
+    /// analogue of the engine WAL's `Upsert`, ADR-067). Payload layout is identical
+    /// to [`Add`](Self::Add).
+    Upsert {
+        logical: u64,
+        version: u32,
+        dsl: String,
+        /// Raw `(key, value)` metadata tags for the NEW version (ADR-055 semantics).
+        tags: Vec<(String, String)>,
+    },
 }
 
 /// Result of replaying a log from a cursor — mirrors [`WalRecovery`](crate::wal::WalRecovery):
@@ -231,6 +249,36 @@ impl FileClusterLog {
 
     /// Encode one mutation's body: `seq | op | payload` (the CRC'd, length-framed part).
     fn encode_body(seq: u64, m: &ClusterMutation) -> Vec<u8> {
+        // The shared ADD/UPSERT payload: `logical | version | dsl_len | dsl | [tag block]`.
+        // ADR-055: the tag block is appended ONLY when non-empty, so an untagged frame is
+        // byte-identical to a v1 record (and the durability oracle's two-backend diff stays
+        // exact). Each tag is a length-prefixed key + value.
+        fn encode_add_like(
+            body: &mut Vec<u8>,
+            op: u8,
+            logical: u64,
+            version: u32,
+            dsl: &str,
+            tags: &[(String, String)],
+        ) {
+            let dsl_bytes = dsl.as_bytes();
+            body.push(op);
+            body.extend_from_slice(&logical.to_le_bytes());
+            body.extend_from_slice(&version.to_le_bytes());
+            body.extend_from_slice(&(dsl_bytes.len() as u32).to_le_bytes());
+            body.extend_from_slice(dsl_bytes);
+            if !tags.is_empty() {
+                body.extend_from_slice(&(tags.len() as u32).to_le_bytes());
+                for (k, v) in tags {
+                    let kb = k.as_bytes();
+                    let vb = v.as_bytes();
+                    body.extend_from_slice(&(kb.len() as u32).to_le_bytes());
+                    body.extend_from_slice(kb);
+                    body.extend_from_slice(&(vb.len() as u32).to_le_bytes());
+                    body.extend_from_slice(vb);
+                }
+            }
+        }
         let mut body = Vec::new();
         body.extend_from_slice(&seq.to_le_bytes());
         match m {
@@ -239,28 +287,13 @@ impl FileClusterLog {
                 version,
                 dsl,
                 tags,
-            } => {
-                let dsl_bytes = dsl.as_bytes();
-                body.push(OP_ADD);
-                body.extend_from_slice(&logical.to_le_bytes());
-                body.extend_from_slice(&version.to_le_bytes());
-                body.extend_from_slice(&(dsl_bytes.len() as u32).to_le_bytes());
-                body.extend_from_slice(dsl_bytes);
-                // ADR-055: append the tag block ONLY when non-empty, so an untagged ADD frame is
-                // byte-identical to a v1 record (and the durability oracle's two-backend diff stays
-                // exact). Each tag is a length-prefixed key + value.
-                if !tags.is_empty() {
-                    body.extend_from_slice(&(tags.len() as u32).to_le_bytes());
-                    for (k, v) in tags {
-                        let kb = k.as_bytes();
-                        let vb = v.as_bytes();
-                        body.extend_from_slice(&(kb.len() as u32).to_le_bytes());
-                        body.extend_from_slice(kb);
-                        body.extend_from_slice(&(vb.len() as u32).to_le_bytes());
-                        body.extend_from_slice(vb);
-                    }
-                }
-            }
+            } => encode_add_like(&mut body, OP_ADD, *logical, *version, dsl, tags),
+            ClusterMutation::Upsert {
+                logical,
+                version,
+                dsl,
+                tags,
+            } => encode_add_like(&mut body, OP_UPSERT, *logical, *version, dsl, tags),
             ClusterMutation::Remove { logical } => {
                 body.push(OP_REMOVE);
                 body.extend_from_slice(&logical.to_le_bytes());
@@ -313,6 +346,33 @@ impl FileClusterLog {
             let v = std::str::from_utf8(buf.get(vs..vs + vlen)?).ok()?;
             Some((k.to_string(), v.to_string(), vs + vlen))
         }
+        // Decode the shared ADD/UPSERT payload (`logical | version | dsl_len | dsl |
+        // [tag block]`); `None` on any malformed byte (treated as a torn tail by the
+        // caller, mirroring the rest of the parse).
+        #[allow(clippy::type_complexity)]
+        fn parse_add_like(payload: &[u8]) -> Option<(u64, u32, String, Vec<(String, String)>)> {
+            if payload.len() < 16 {
+                return None;
+            }
+            let logical = get_u64(payload, 0)?;
+            let version = get_u32(payload, 8)?;
+            let dsl_len = get_u32(payload, 12)? as usize;
+            let dsl = std::str::from_utf8(payload.get(16..16 + dsl_len)?).ok()?;
+            // ADR-055: optional trailing tag block. An untagged record ends exactly at
+            // the DSL, so `toff == payload.len()` ⇒ empty tags.
+            let mut toff = 16 + dsl_len;
+            let mut tags: Vec<(String, String)> = Vec::new();
+            if toff < payload.len() {
+                let tag_count = get_u32(payload, toff)? as usize;
+                toff += 4;
+                for _ in 0..tag_count {
+                    let (k, v, next) = parse_tag(payload, toff)?;
+                    tags.push((k, v));
+                    toff = next;
+                }
+            }
+            Some((logical, version, dsl.to_string(), tags))
+        }
 
         let mut entries = Vec::new();
         let mut cursor = 0usize;
@@ -341,57 +401,24 @@ impl FileClusterLog {
             let payload = &body[9..];
 
             let mutation = match op {
-                OP_ADD => {
-                    if payload.len() < 16 {
-                        break;
-                    }
-                    let Some(logical) = get_u64(payload, 0) else {
-                        break;
-                    };
-                    let Some(version) = get_u32(payload, 8) else {
-                        break;
-                    };
-                    let Some(dsl_len) = get_u32(payload, 12).map(|v| v as usize) else {
-                        break;
-                    };
-                    if payload.len() < 16 + dsl_len {
-                        break;
-                    }
-                    let Ok(dsl) = std::str::from_utf8(&payload[16..16 + dsl_len]) else {
-                        break;
-                    };
-                    // ADR-055: optional trailing tag block. A v1 record (or an untagged v2 record)
-                    // ends exactly at the DSL, so `toff == payload.len()` ⇒ empty tags. A malformed
-                    // block is treated as a torn tail (outer `break`), mirroring the rest of the parse.
-                    let mut toff = 16 + dsl_len;
-                    let mut tags: Vec<(String, String)> = Vec::new();
-                    let mut tags_ok = true;
-                    if toff < payload.len() {
-                        match get_u32(payload, toff).map(|v| v as usize) {
-                            Some(tag_count) => {
-                                toff += 4;
-                                for _ in 0..tag_count {
-                                    let Some((k, v, next)) = parse_tag(payload, toff) else {
-                                        tags_ok = false;
-                                        break;
-                                    };
-                                    tags.push((k, v));
-                                    toff = next;
-                                }
-                            }
-                            None => tags_ok = false,
-                        }
-                    }
-                    if !tags_ok {
-                        break;
-                    }
-                    ClusterMutation::Add {
+                OP_ADD => match parse_add_like(payload) {
+                    Some((logical, version, dsl, tags)) => ClusterMutation::Add {
                         logical,
                         version,
-                        dsl: dsl.to_string(),
+                        dsl,
                         tags,
-                    }
-                }
+                    },
+                    None => break,
+                },
+                OP_UPSERT => match parse_add_like(payload) {
+                    Some((logical, version, dsl, tags)) => ClusterMutation::Upsert {
+                        logical,
+                        version,
+                        dsl,
+                        tags,
+                    },
+                    None => break,
+                },
                 OP_REMOVE => {
                     if payload.len() < 8 {
                         break;
@@ -510,129 +537,4 @@ impl FileClusterLog {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn scratch_path(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "reverse_rusty_clog_{}_{}.log",
-            name,
-            std::process::id()
-        ));
-        let _ = std::fs::remove_file(&p);
-        p
-    }
-
-    fn add(logical: u64, dsl: &str) -> ClusterMutation {
-        ClusterMutation::Add {
-            logical,
-            version: 1,
-            dsl: dsl.to_string(),
-            tags: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn append_then_replay_round_trips() {
-        let path = scratch_path("roundtrip");
-        {
-            let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
-            assert_eq!(log.append(&add(1, "1994 upper deck")).unwrap(), LogPos(1));
-            assert_eq!(
-                log.append(&ClusterMutation::Remove { logical: 1 }).unwrap(),
-                LogPos(2)
-            );
-            assert_eq!(log.append(&add(2, "topps chrome")).unwrap(), LogPos(3));
-            assert_eq!(log.last_pos().unwrap(), LogPos(3));
-        }
-        // Reopen and replay from the start.
-        let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
-        let replay = log.replay(LogPos(0)).unwrap();
-        assert_eq!(replay.skipped_bytes, 0);
-        assert_eq!(replay.entries.len(), 3);
-        assert_eq!(replay.entries[0], (LogPos(1), add(1, "1994 upper deck")));
-        assert_eq!(
-            replay.entries[1],
-            (LogPos(2), ClusterMutation::Remove { logical: 1 })
-        );
-        // next_seq stays monotonic across reopen.
-        assert_eq!(log.append(&add(3, "x")).unwrap(), LogPos(4));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn replay_from_cursor_skips_captured_prefix() {
-        let path = scratch_path("cursor");
-        let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
-        for i in 1..=5 {
-            log.append(&add(i, "q")).unwrap();
-        }
-        let replay = log.replay(LogPos(3)).unwrap();
-        let positions: Vec<u64> = replay.entries.iter().map(|(p, _)| p.0).collect();
-        assert_eq!(positions, vec![4, 5]);
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn torn_tail_is_dropped_not_fatal() {
-        let path = scratch_path("torn");
-        {
-            let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
-            log.append(&add(1, "alpha")).unwrap();
-            log.append(&add(2, "beta")).unwrap();
-        }
-        // Corrupt the tail by appending junk that can't frame a valid record.
-        {
-            use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap();
-            f.write_all(&[0xFF, 0xFF, 0xFF, 0x7F, 0xAA, 0xBB]).unwrap();
-        }
-        let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
-        let replay = log.replay(LogPos(0)).unwrap();
-        assert_eq!(replay.entries.len(), 2, "the two whole records survive");
-        assert!(replay.skipped_bytes > 0, "torn tail counted");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn checkpoint_truncates_captured_records() {
-        let path = scratch_path("checkpoint");
-        let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
-        for i in 1..=5 {
-            log.append(&add(i, "q")).unwrap();
-        }
-        let size_before = std::fs::metadata(&path).unwrap().len();
-        log.checkpoint(LogPos(3)).unwrap();
-        let size_after = std::fs::metadata(&path).unwrap().len();
-        assert!(size_after < size_before, "captured prefix dropped");
-        // Only records after the cursor remain; new appends stay monotonic.
-        let replay = log.replay(LogPos(0)).unwrap();
-        let positions: Vec<u64> = replay.entries.iter().map(|(p, _)| p.0).collect();
-        assert_eq!(positions, vec![4, 5]);
-        assert_eq!(log.append(&add(6, "q")).unwrap(), LogPos(6));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn append_surfaces_write_errors() {
-        let path = scratch_path("writefault");
-        let log = FileClusterLog::open(&path, false, LogPos(0)).unwrap();
-        assert!(log.append(&add(1, "ok")).is_ok());
-        log.break_writes_for_test();
-        assert!(matches!(log.append(&add(2, "no")), Err(ShardError::Log(_))));
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn null_log_assigns_positions_and_replays_empty() {
-        let log = NullClusterLog::new();
-        assert_eq!(log.append(&add(1, "q")).unwrap(), LogPos(1));
-        assert_eq!(log.append(&add(2, "q")).unwrap(), LogPos(2));
-        assert_eq!(log.last_pos().unwrap(), LogPos(2));
-        assert_eq!(log.replay(LogPos(0)).unwrap().entries.len(), 0);
-        log.checkpoint(LogPos(2)).unwrap();
-    }
-}
+mod tests;

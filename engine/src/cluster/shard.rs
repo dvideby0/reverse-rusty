@@ -203,6 +203,17 @@ pub(crate) trait Shard: Send + Sync {
         false
     }
 
+    /// The live source DSL of `logical` on this shard, if it holds a live copy — the
+    /// point read behind `GET /_doc/{id}` in cluster mode (ADR-070). `Ok(None)` means
+    /// "this shard genuinely does not hold it"; the default is a loud **error**, never
+    /// `Ok(None)`, so a shard type without a source store (a `RemoteShard` in v1) makes
+    /// the coordinator's lookup fail visibly instead of reporting a false "not found".
+    fn source_of(&self, _logical: u64) -> Result<Option<String>, ShardError> {
+        Err(ShardError::Config(
+            "source_of is only supported for in-process shards in v1".into(),
+        ))
+    }
+
     // ---- writes ----
     /// Bulk-ingest a pre-extracted bucket into a new immutable base segment — the
     /// distributed load path ([`crate::cluster::ClusterEngine::ingest`]). NOTE:
@@ -346,6 +357,24 @@ pub(crate) fn apply_mutation(
         }
         ClusterMutation::Remove { logical } => {
             shard.delete_by_logical_id(*logical)?;
+        }
+        ClusterMutation::Upsert {
+            logical,
+            version,
+            dsl,
+            tags,
+        } => {
+            // Replace-by-id ON THIS SHARD: tombstone any prior copy, then insert the new
+            // version. Per-shard replay/repair has no placement context, so a shard whose
+            // only involvement was the delete half gains a (correctness-benign) extra copy —
+            // exact verification still gates it and the coordinator merge dedups; the next
+            // reopen's coordinator-level replay re-derives exact placement and heals it.
+            shard.delete_by_logical_id(*logical)?;
+            if let Ok(ast) = crate::dsl::parse(dsl) {
+                let mut lc = String::new();
+                let ex = extract_readonly(&ast, norm, dict, &mut lc);
+                shard.insert_extracted_with_tags(&ex, *logical, *version, dsl, tags)?;
+            }
         }
     }
     Ok(())
