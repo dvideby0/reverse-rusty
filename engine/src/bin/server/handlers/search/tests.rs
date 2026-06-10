@@ -45,6 +45,7 @@ fn state_with(eng: Engine, include_broad: bool) -> Arc<AppState> {
         include_broad,
         prom: PrometheusMetrics::new(),
         slow_query_threshold_ms: 0,
+        auth: None,
     })
 }
 

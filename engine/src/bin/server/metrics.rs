@@ -43,6 +43,10 @@ pub(crate) struct PrometheusMetrics {
     pub(crate) http_requests_total: IntCounterVec,
     pub(crate) http_request_duration: HistogramVec,
     pub(crate) in_flight_requests: IntGauge,
+    /// Requests rejected by the bearer-token gate (ADR-062), labeled by reason
+    /// (`missing` = no credentials presented, `invalid` = wrong token). A
+    /// sustained rate means a misconfigured client — or someone probing.
+    pub(crate) auth_failures_total: IntCounterVec,
 
     // Match metrics
     pub(crate) match_candidates_per_title: Histogram,
@@ -207,6 +211,15 @@ impl PrometheusMetrics {
         ))
         .unwrap();
 
+        let auth_failures_total = IntCounterVec::new(
+            Opts::new(
+                "auth_failures_total",
+                "Requests rejected by bearer-token auth, by reason (missing/invalid)",
+            ),
+            &["reason"],
+        )
+        .unwrap();
+
         // --- Match metrics ---
 
         let match_candidates_per_title = Histogram::with_opts(
@@ -329,6 +342,9 @@ impl PrometheusMetrics {
         registry
             .register(Box::new(in_flight_requests.clone()))
             .unwrap();
+        registry
+            .register(Box::new(auth_failures_total.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -353,6 +369,7 @@ impl PrometheusMetrics {
             http_requests_total,
             http_request_duration,
             in_flight_requests,
+            auth_failures_total,
             match_candidates_per_title,
             match_results_per_title,
             broad_batches_total,

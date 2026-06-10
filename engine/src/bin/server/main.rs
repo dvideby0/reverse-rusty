@@ -32,12 +32,14 @@
 //! Module layout (this file is the entry point — CLI parse, engine build, router
 //! wiring, graceful shutdown):
 //!   * [`cli`]     — command-line flags ([`cli::Cli`]).
+//!   * [`auth`]    — opt-in bearer-token gate for mutating/admin endpoints (ADR-062).
 //!   * [`metrics`] — Prometheus registry + the `EngineEvent` → counter bridge.
 //!   * [`state`]   — [`state::AppState`] + the request-id / in-flight middleware.
 //!   * [`dto`]     — response types shared across handlers (errors, `_source`).
 //!   * [`handlers`] — the endpoint handlers, grouped by family (doc/search/admin/vocab),
 //!     each owning its endpoint-specific request/response DTOs.
 
+mod auth;
 mod cli;
 mod dto;
 mod handlers;
@@ -109,6 +111,37 @@ async fn main() {
         drain_timeout = cli.drain_timeout,
         "starting reverse-rusty server"
     );
+
+    // Resolve bearer-token auth (ADR-062). Fail loud on an invalid config —
+    // never fall back to silently serving open. The token itself is never
+    // logged.
+    let auth_config = match auth::AuthConfig::resolve(
+        cli.auth_token.clone(),
+        std::env::var("RR_AUTH_TOKEN"),
+        cli.auth_protect_reads,
+    ) {
+        Ok(a) => a,
+        Err(e) => {
+            error!(error = %e, "invalid auth configuration");
+            std::process::exit(1);
+        }
+    };
+    match &auth_config {
+        Some(a) if a.protect_reads => {
+            info!("bearer-token auth enabled (all endpoints except /_health)");
+        }
+        Some(_) => info!("bearer-token auth enabled (mutating/admin endpoints)"),
+        None => {
+            if !cli.host.is_loopback() {
+                warn!(
+                    host = %cli.host,
+                    "binding a non-loopback interface without auth: mutating endpoints are \
+                     open to the network (set RR_AUTH_TOKEN/--auth-token or front with an \
+                     authenticating reverse proxy)"
+                );
+            }
+        }
+    }
 
     // Build engine config from CLI flags.
     let config = EngineConfig {
@@ -327,6 +360,7 @@ async fn main() {
         include_broad: cli.include_broad,
         prom,
         slow_query_threshold_ms: slow_threshold,
+        auth: auth_config,
     });
 
     // Build router.
@@ -355,6 +389,13 @@ async fn main() {
         .route("/_settings", get(get_settings).put(put_settings))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
+        // Auth sits OUTSIDE the concurrency limiter: an unauthenticated flood
+        // is rejected by a cheap header compare without consuming the 256
+        // slots that protect the engine for legitimate traffic.
+        .layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            auth::auth_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             request_id_middleware,

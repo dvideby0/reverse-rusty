@@ -143,6 +143,7 @@ mod tests {
             include_broad: false,
             prom: PrometheusMetrics::new(),
             slow_query_threshold_ms: 0,
+            auth: None,
         })
     }
 

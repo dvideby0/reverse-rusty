@@ -41,7 +41,9 @@ axum = { version = "0.8", features = ["json"], optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"], optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 parking_lot = { version = "0.12", optional = true }
-tower = { version = "0.5", features = ["limit"], optional = true }
+# `util` is for tower::ServiceExt::oneshot in the server's router-level
+# middleware tests (auth gate, ADR-062) — no new crates, already in the tree.
+tower = { version = "0.5", features = ["limit", "util"], optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 tracing = { version = "0.1", optional = true }
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optional = true }

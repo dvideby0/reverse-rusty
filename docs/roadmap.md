@@ -331,7 +331,8 @@ from the audit's former P3 list). Roughly grouped:
 
 **API / ops ergonomics**
 - **No CORS headers** — browser-based tools can't hit the API. Add `tower-http::CorsLayer`.
-- **No `--version` flag** in the CLI.
+- ~~**No `--version` flag** in the CLI.~~ **✅ Shipped for the server bin** (rode along with ADR-062 —
+  a `clap` `version` attribute); the other bins remain without one (low value).
 - **No Dockerfile or k8s manifests.**
 - ~~**No segment detail endpoint** (`/_cat/segments`).~~ **✅ Shipped (ADR-023).** `GET /_cat/segments`
   returns per-segment detail — kind (memory/mmap/memtable), entries/alive/deleted, holes ratio, vocab
@@ -374,10 +375,14 @@ from the audit's former P3 list). Roughly grouped:
   untouched ⇒ the gRPC dict/tag-dict adoption handshake is byte-identical. ([`DECISIONS.md`](DECISIONS.md)
   ADR-057.)
 - **Deferred from the external-review hardening pass (ADR-052):**
-  - **Optional bearer-token / API-key auth for mutating endpoints.** The HTTP server now defaults to
-    a loopback bind (`--host 127.0.0.1`), but has no built-in auth — exposing it requires a trusted
-    network or an authenticating reverse proxy. An opt-in `RR_AUTH_TOKEN`-style gate on
-    `_doc`/`_bulk`/`_flush`/`_compact`/`_vocab`/`_settings` would let it serve a wider network safely.
+  - ~~**Optional bearer-token / API-key auth for mutating endpoints.**~~ **✅ Shipped (ADR-062).**
+    Opt-in `--auth-token`/`RR_AUTH_TOKEN` bearer gate enforced by one middleware
+    (`bin/server/auth.rs`): **default-deny** — every non-GET/HEAD request needs the token except the
+    POST-read percolate endpoints, so a future mutating endpoint fails closed; `--auth-protect-reads`
+    extends to reads (all but `/_health`). Constant-time compare, RFC 6750 401 challenge + ES-style
+    `security_exception` envelope, `auth_failures_total{reason}`, fail-loud config, and a
+    non-loopback-without-auth startup warning. Unset ⇒ byte-identical. TLS (and gRPC-transport auth)
+    remain the Tier-3 items.
   - **Cooperative cancellation on the match path.** `timeout_ms` is a response deadline only — a
     timed-out `/_search`/`/_mpercolate` returns 408 but its `spawn_blocking`/Rayon work runs to
     completion. A coarse per-segment deadline check could shed abandoned CPU, at the cost of a branch

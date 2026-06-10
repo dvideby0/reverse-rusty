@@ -14,6 +14,7 @@ use prometheus::IntGauge;
 
 use reverse_rusty::segment::{Engine, EngineSnapshot};
 
+use crate::auth::AuthConfig;
 use crate::metrics::PrometheusMetrics;
 
 pub(crate) struct AppState {
@@ -23,6 +24,8 @@ pub(crate) struct AppState {
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,
     pub(crate) slow_query_threshold_ms: u64,
+    /// Bearer-token auth (ADR-062). `None` ⇒ the gate is a pass-through.
+    pub(crate) auth: Option<AuthConfig>,
 }
 
 impl AppState {

@@ -8,16 +8,36 @@ use clap::Parser;
 
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Parser, Debug)]
-#[command(name = "reverse-rusty-server", about = "Reverse Rusty HTTP server")]
+#[command(
+    name = "reverse-rusty-server",
+    about = "Reverse Rusty HTTP server",
+    version
+)]
 pub(crate) struct Cli {
     /// IP address to bind. Defaults to `127.0.0.1` (loopback), so the server is NOT
-    /// reachable beyond the local host unless you opt in — the REST API has no
-    /// built-in authentication and exposes mutating/admin endpoints (`_doc`, `_bulk`,
-    /// `_flush`, `_compact`, `_vocab`, `_settings`). Set to `0.0.0.0` to listen on all
-    /// interfaces only behind a trusted network or an authenticating reverse proxy
-    /// (see docs/reference/api.md). Matches the loopback default the gRPC bins use.
+    /// reachable beyond the local host unless you opt in. The REST API exposes
+    /// mutating/admin endpoints (`_doc`, `_bulk`, `_flush`, `_compact`, `_vocab`,
+    /// `_settings`); to listen on `0.0.0.0` safely, gate them with a bearer token
+    /// (`--auth-token`/`RR_AUTH_TOKEN`, ADR-062) or front the server with an
+    /// authenticating reverse proxy (see docs/reference/api.md). Matches the
+    /// loopback default the gRPC bins use.
     #[arg(long, default_value = "127.0.0.1")]
     pub(crate) host: std::net::IpAddr,
+
+    /// Bearer token required on mutating/admin endpoints (ADR-062). When set,
+    /// `_doc` writes, `_bulk`, `_flush`, `_compact`, `_vocab` writes, and
+    /// `_settings` writes demand `Authorization: Bearer <token>`; reads stay
+    /// open. Prefer the `RR_AUTH_TOKEN` environment variable in production —
+    /// a flag value is visible in process listings. Unset ⇒ no auth (the
+    /// historical behavior).
+    #[arg(long)]
+    pub(crate) auth_token: Option<String>,
+
+    /// Extend bearer-token auth to read endpoints too — everything except the
+    /// `GET /_health` liveness probe (so probes keep working without
+    /// credentials). Requires an auth token.
+    #[arg(long, default_value_t = false)]
+    pub(crate) auth_protect_reads: bool,
 
     /// Port to listen on.
     #[arg(long, default_value_t = 9200)]
