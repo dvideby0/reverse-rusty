@@ -38,15 +38,29 @@ pub(crate) struct AuthConfig {
 
 impl AuthConfig {
     /// Resolve the auth configuration from the CLI flag and the
-    /// `RR_AUTH_TOKEN` environment variable (the flag wins). `Ok(None)` means
-    /// auth is disabled. Fails loud — instead of silently serving open — on an
-    /// empty or non-printable token, or on `--auth-protect-reads` without a
-    /// token to enforce it.
+    /// `RR_AUTH_TOKEN` environment variable (the flag wins; pass
+    /// `std::env::var("RR_AUTH_TOKEN")` raw). `Ok(None)` means auth is
+    /// disabled. Fails loud — instead of silently serving open — on an empty,
+    /// non-printable, or set-but-undecodable token, or on
+    /// `--auth-protect-reads` without a token to enforce it.
     pub(crate) fn resolve(
         flag: Option<String>,
-        env: Option<String>,
+        env: Result<String, std::env::VarError>,
         protect_reads: bool,
     ) -> Result<Option<Self>, String> {
+        let env = match env {
+            Ok(t) => Some(t),
+            Err(std::env::VarError::NotPresent) => None,
+            // A set-but-not-UTF-8 token must fail loud: `.ok()` would read it
+            // as "not set" and start the server with auth silently disabled.
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(
+                    "RR_AUTH_TOKEN is set but not valid UTF-8; refusing to start rather than \
+                     silently disabling auth"
+                        .to_string(),
+                );
+            }
+        };
         let Some(token) = flag.or(env) else {
             if protect_reads {
                 return Err(
@@ -238,26 +252,37 @@ mod tests {
 
     #[test]
     fn resolve_flag_wins_over_env_and_validates() {
-        let cfg = AuthConfig::resolve(Some("flag-tok".into()), Some("env-tok".into()), false)
+        use std::env::VarError;
+        let absent = || Err(VarError::NotPresent);
+
+        let cfg = AuthConfig::resolve(Some("flag-tok".into()), Ok("env-tok".into()), false)
             .expect("valid")
             .expect("enabled");
         assert_eq!(cfg.token, b"flag-tok");
 
-        let cfg = AuthConfig::resolve(None, Some("env-tok".into()), true)
+        let cfg = AuthConfig::resolve(None, Ok("env-tok".into()), true)
             .expect("valid")
             .expect("enabled");
         assert_eq!(cfg.token, b"env-tok");
         assert!(cfg.protect_reads);
 
-        assert!(AuthConfig::resolve(None, None, false)
+        assert!(AuthConfig::resolve(None, absent(), false)
             .expect("valid")
             .is_none());
-        // Fail-loud cases: empty token, whitespace/control bytes, and
-        // protect-reads with nothing to enforce it.
-        assert!(AuthConfig::resolve(Some(String::new()), None, false).is_err());
-        assert!(AuthConfig::resolve(Some("has space".into()), None, false).is_err());
-        assert!(AuthConfig::resolve(Some("ctrl\u{7}".into()), None, false).is_err());
-        assert!(AuthConfig::resolve(None, None, true).is_err());
+        // Fail-loud cases: empty token, whitespace/control bytes,
+        // protect-reads with nothing to enforce it, and — the fail-open trap —
+        // RR_AUTH_TOKEN set but not decodable as UTF-8 (must refuse startup,
+        // never silently run with auth off).
+        assert!(AuthConfig::resolve(Some(String::new()), absent(), false).is_err());
+        assert!(AuthConfig::resolve(Some("has space".into()), absent(), false).is_err());
+        assert!(AuthConfig::resolve(Some("ctrl\u{7}".into()), absent(), false).is_err());
+        assert!(AuthConfig::resolve(None, absent(), true).is_err());
+        let not_unicode = Err(VarError::NotUnicode(std::ffi::OsString::from("junk")));
+        assert!(AuthConfig::resolve(None, not_unicode, false).is_err());
+        // ...unless a valid flag token is also present? No — still refuse: a
+        // malformed env var means the operator's intent is ambiguous.
+        let not_unicode = Err(VarError::NotUnicode(std::ffi::OsString::from("junk")));
+        assert!(AuthConfig::resolve(Some("flag-tok".into()), not_unicode, false).is_err());
     }
 
     // -- header parsing + comparison
@@ -357,7 +382,12 @@ mod tests {
 
     #[tokio::test]
     async fn mutating_endpoints_enforce_token() {
-        let auth = AuthConfig::resolve(Some("s3cr3t".into()), None, false).expect("valid");
+        let auth = AuthConfig::resolve(
+            Some("s3cr3t".into()),
+            Err(std::env::VarError::NotPresent),
+            false,
+        )
+        .expect("valid");
         let state = test_state(auth);
 
         // Missing credentials → 401 with the Bearer challenge + error envelope.
@@ -433,7 +463,12 @@ mod tests {
 
     #[tokio::test]
     async fn protect_reads_extends_gate_to_reads() {
-        let auth = AuthConfig::resolve(Some("s3cr3t".into()), None, true).expect("valid");
+        let auth = AuthConfig::resolve(
+            Some("s3cr3t".into()),
+            Err(std::env::VarError::NotPresent),
+            true,
+        )
+        .expect("valid");
         let state = test_state(auth);
 
         assert_eq!(

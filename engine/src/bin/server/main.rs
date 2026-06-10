@@ -117,7 +117,7 @@ async fn main() {
     // logged.
     let auth_config = match auth::AuthConfig::resolve(
         cli.auth_token.clone(),
-        std::env::var("RR_AUTH_TOKEN").ok(),
+        std::env::var("RR_AUTH_TOKEN"),
         cli.auth_protect_reads,
     ) {
         Ok(a) => a,

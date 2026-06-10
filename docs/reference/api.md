@@ -82,9 +82,10 @@ exposed port); only `GET /_health` is always open so liveness probes keep workin
 Failures return **401** with the standard error envelope (`"type": "security_exception"`) and an
 RFC 6750 `WWW-Authenticate: Bearer` challenge (`error="invalid_token"` when a wrong token was
 presented), increment `auth_failures_total{reason="missing"|"invalid"}` in `/_metrics`, and log a
-structured warning. The token comparison is constant-time. An empty/non-printable token, or
-`--auth-protect-reads` without a token, refuses startup (fail-loud); binding a non-loopback
-interface *without* auth logs a startup warning.
+structured warning. The token comparison is constant-time. An empty/non-printable token, a
+set-but-not-UTF-8 `RR_AUTH_TOKEN`, or `--auth-protect-reads` without a token refuses startup
+(fail-loud — a malformed token never silently disables auth); binding a non-loopback interface
+*without* auth logs a startup warning.
 
 With **no token configured the server behaves exactly as before** (no auth — strictly opt-in). The
 transport is plain HTTP either way: a bearer token is only as private as the link it crosses, so on

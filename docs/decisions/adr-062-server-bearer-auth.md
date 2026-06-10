@@ -17,8 +17,10 @@
     wins; the env var is preferred in production since flag values appear in process listings). Unset ⇒
     auth disabled ⇒ the server behaves **byte-identically** to before — strictly opt-in, like every
     other recent knob. Resolution **fails loud at startup** (refuses to boot) on an empty or
-    non-printable token, or on `--auth-protect-reads` without a token — never silently serving open.
-    The token value is never logged.
+    non-printable token, on a **set-but-not-UTF-8 `RR_AUTH_TOKEN`** (an `.ok()` would read it as
+    "not set" and silently start with auth *disabled* — the fail-open trap the codex review caught),
+    or on `--auth-protect-reads` without a token — never silently serving open. The token value is
+    never logged.
   - **Protected set — default-deny.** With a token configured, every request whose method is not
     GET/HEAD requires `Authorization: Bearer <token>`, **except** the read-via-POST percolate
     endpoints (`POST /_search`, `POST /_mpercolate`). The rule is method-shaped rather than an
@@ -61,7 +63,8 @@
 - **Testing.** `auth.rs` unit tests pin the route table (every mutating endpoint requires auth; reads
   and both POST-read percolate endpoints don't; default-deny covers an unknown future endpoint;
   `protect_reads` gates everything but `/_health`), token resolution (flag-over-env precedence, the
-  three fail-loud rejections), RFC 6750 header parsing (case-insensitive scheme, multi-space, wrong
+  fail-loud rejections including the non-UTF-8 env value — with and without a valid flag token),
+  RFC 6750 header parsing (case-insensitive scheme, multi-space, wrong
   scheme, empty token), and the constant-time compare. Router-level tests (`tower::ServiceExt::oneshot`
   through the real middleware) prove: no-token-configured is a pass-through, missing ⇒ 401 +
   `WWW-Authenticate` + the error envelope, wrong ⇒ 401 + `error="invalid_token"`, right ⇒ handler
