@@ -12,7 +12,8 @@
 //!   total_len: u32        (bytes of header + payload, excluding this u32 and the CRC)
 //!   crc32:     u32        (of everything after: seq + op + payload)
 //!   seq:       u64        (monotonic sequence number)
-//!   op:        u8         (0=Insert, 1=Tombstone, 2=FlushCheckpoint, 3=DeleteByLogical)
+//!   op:        u8         (0=Insert, 1=Tombstone, 2=FlushCheckpoint, 3=DeleteByLogical,
+//!                          4=Upsert)
 //!   payload:   [u8; ...]  (op-specific, variable length)
 //! ```
 //!
@@ -28,6 +29,10 @@
 //!   Replay re-derives the affected copies from the recovered state ("tombstone every
 //!   live copy of `logical`"), so the frame stays correct across compaction's
 //!   `(seg_idx, local)` renumbering, where a positional Tombstone frame would misfire.
+//! Upsert payload (WAL v4, ADR-067): byte-identical to Insert — the atomic
+//!   replace-by-id. ONE frame captures "tombstone every prior live copy of `logical`,
+//!   then insert this version", so a crash can never recover the delete half without
+//!   the insert half (the no-match window the DELETE-then-PUT recipe had).
 //!
 //! On recovery, we scan forward from the beginning, skipping entries with bad CRC
 //! (torn writes from a crash). Entries before the last FlushCheckpoint are skipped
@@ -55,14 +60,16 @@ const WAL_MAGIC: [u8; 4] = *b"PWAL";
 // section. The version is informational — the parser detects per entry whether tags are
 // present (by trailing bytes), so v1 and v2 entries coexist. v3 (ADR-066): adds the
 // DeleteByLogical op; older entries are unchanged (an old binary reading a v3 tail stops
-// at the first op-3 frame and reports it as skipped bytes, like a torn tail).
-const WAL_VERSION: u32 = 3;
+// at the first op-3 frame and reports it as skipped bytes, like a torn tail). v4
+// (ADR-067): adds the Upsert op (atomic replace-by-id), same coexistence story.
+const WAL_VERSION: u32 = 4;
 const WAL_HEADER_SIZE: usize = 8; // magic + version
 
 const OP_INSERT: u8 = 0;
 const OP_TOMBSTONE: u8 = 1;
 const OP_FLUSH_CHECKPOINT: u8 = 2;
 const OP_DELETE_LOGICAL: u8 = 3;
+const OP_UPSERT: u8 = 4;
 
 /// A single WAL entry, decoded.
 #[derive(Debug, Clone)]
@@ -93,6 +100,17 @@ pub enum WalEntry {
         seq: u64,
         logical: u64,
     },
+    /// Atomic replace-by-id (WAL v4, ADR-067): tombstone every prior live copy of
+    /// `logical`, then insert this version — ONE frame, so recovery applies both
+    /// halves or neither. Payload is byte-identical to [`Insert`](WalEntry::Insert).
+    Upsert {
+        seq: u64,
+        logical: u64,
+        version: u32,
+        text: String,
+        /// Per-query metadata tags (ADR-049), `(key, value)` pairs.
+        tags: Vec<(String, String)>,
+    },
 }
 
 impl WalEntry {
@@ -101,7 +119,8 @@ impl WalEntry {
             WalEntry::Insert { seq, .. }
             | WalEntry::Tombstone { seq, .. }
             | WalEntry::FlushCheckpoint { seq, .. }
-            | WalEntry::DeleteByLogical { seq, .. } => *seq,
+            | WalEntry::DeleteByLogical { seq, .. }
+            | WalEntry::Upsert { seq, .. } => *seq,
         }
     }
 }
@@ -201,6 +220,32 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
     ) -> io::Result<u64> {
+        self.append_insert_like(OP_INSERT, logical, version, text, tags)
+    }
+
+    /// Append an Upsert entry (WAL v4, ADR-067) — the atomic replace-by-id. Same
+    /// payload as Insert; the op code is what tells recovery to tombstone the prior
+    /// live copies of `logical` before inserting this version.
+    pub fn append_upsert(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+    ) -> io::Result<u64> {
+        self.append_insert_like(OP_UPSERT, logical, version, text, tags)
+    }
+
+    /// Shared encoder for the two insert-shaped ops (Insert / Upsert): identical
+    /// payload layout, different op byte.
+    fn append_insert_like(
+        &mut self,
+        op: u8,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+    ) -> io::Result<u64> {
         let seq = self.next_seq;
         self.next_seq += 1;
 
@@ -223,7 +268,7 @@ impl Wal {
 
         let mut body = Vec::with_capacity(body_len);
         body.extend_from_slice(&seq.to_le_bytes());
-        body.push(OP_INSERT);
+        body.push(op);
         body.extend_from_slice(&logical.to_le_bytes());
         body.extend_from_slice(&version.to_le_bytes());
         body.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
@@ -413,7 +458,9 @@ impl Wal {
             let payload = &body[9..];
 
             match op {
-                OP_INSERT => {
+                // Insert and Upsert (WAL v4, ADR-067) share one payload layout; the
+                // op byte selects the decoded variant.
+                OP_INSERT | OP_UPSERT => {
                     if payload.len() < 16 {
                         break;
                     }
@@ -467,12 +514,22 @@ impl Wal {
                             tags.push((key, value));
                         }
                     }
-                    entries.push(WalEntry::Insert {
-                        seq,
-                        logical,
-                        version,
-                        text,
-                        tags,
+                    entries.push(if op == OP_INSERT {
+                        WalEntry::Insert {
+                            seq,
+                            logical,
+                            version,
+                            text,
+                            tags,
+                        }
+                    } else {
+                        WalEntry::Upsert {
+                            seq,
+                            logical,
+                            version,
+                            text,
+                            tags,
+                        }
                     });
                 }
                 OP_TOMBSTONE => {
@@ -693,6 +750,41 @@ mod tests {
                 assert_eq!(*local_id, 3);
             }
             other => panic!("expected Tombstone, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn upsert_round_trips_with_tags_and_coexists_with_insert() {
+        let path = scratch_path("upsert_roundtrip");
+        {
+            let mut wal = Wal::open(&path, true).unwrap();
+            wal.append_insert(7, 1, "wander franco", &[]).unwrap();
+            wal.append_upsert(
+                7,
+                2,
+                "wander franco psa 10",
+                &[("category".to_string(), "cards".to_string())],
+            )
+            .unwrap();
+        }
+        let recovered = Wal::recover(&path).unwrap();
+        assert_eq!(recovered.entries.len(), 2);
+        assert_eq!(recovered.skipped_bytes, 0);
+        match &recovered.entries[1] {
+            WalEntry::Upsert {
+                logical,
+                version,
+                text,
+                tags,
+                ..
+            } => {
+                assert_eq!(*logical, 7);
+                assert_eq!(*version, 2);
+                assert_eq!(text, "wander franco psa 10");
+                assert_eq!(tags, &vec![("category".to_string(), "cards".to_string())]);
+            }
+            other => panic!("expected Upsert, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);
     }

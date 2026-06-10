@@ -83,6 +83,9 @@ struct BulkItemInner {
     error: Option<String>,
 }
 
+#[cfg(test)]
+mod tests;
+
 /// Reserved top-level fields on an ingest body that are NOT metadata tags.
 const RESERVED_INGEST_FIELDS: [&str; 3] = ["query", "version", "tags"];
 
@@ -119,7 +122,12 @@ fn extract_ingest_tags(obj: &serde_json::Map<String, serde_json::Value>) -> Vec<
     out
 }
 
-/// PUT /_doc/{id} — register a single query.
+/// PUT /_doc/{id} — register or replace a single query. ES `index` semantics
+/// (ADR-067): an atomic upsert — the new version is inserted and every prior
+/// live copy of the id is tombstoned in ONE writer critical section, ONE WAL
+/// frame, and ONE snapshot publish. A fresh id answers 201 `created`; a
+/// replacement answers 200 `updated` (the ES status split). A rejected new
+/// version (parse error or class D) leaves the prior version live and matchable.
 #[instrument(skip(state, body), fields(query_id = id))]
 pub(crate) async fn put_doc(
     State(state): State<Arc<AppState>>,
@@ -130,8 +138,8 @@ pub(crate) async fn put_doc(
     let tags = extract_ingest_tags(&body.rest);
     let result = {
         let mut engine = state.engine.lock();
-        match engine.try_insert_live_with_tags(&body.query, id, body.version, &tags) {
-            Ok(reverse_rusty::segment::InsertOutcome::Inserted(_)) => {
+        match engine.try_upsert_live_with_tags(&body.query, id, body.version, &tags) {
+            Ok(reverse_rusty::segment::UpsertOutcome::Created(_)) => {
                 info!(query_id = id, "query registered");
                 state
                     .prom
@@ -147,7 +155,23 @@ pub(crate) async fn put_doc(
                     }),
                 )
             }
-            Ok(reverse_rusty::segment::InsertOutcome::RejectedClassD) => {
+            Ok(reverse_rusty::segment::UpsertOutcome::Updated { replaced, .. }) => {
+                info!(query_id = id, replaced, "query replaced");
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["put_doc", "200"])
+                    .inc();
+                (
+                    StatusCode::OK,
+                    Json(PutDocResponse {
+                        _id: id,
+                        result: "updated",
+                        error: None,
+                    }),
+                )
+            }
+            Ok(reverse_rusty::segment::UpsertOutcome::RejectedClassD) => {
                 warn!(query_id = id, "query rejected: cost class D");
                 state
                     .prom

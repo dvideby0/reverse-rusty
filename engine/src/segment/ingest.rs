@@ -5,6 +5,7 @@ use super::{Engine, IngestItemStatus, IngestReport, InsertOutcome, PlacedQuery, 
 use std::sync::Arc;
 
 use crate::compile::{extract, Extracted};
+use crate::segment::UpsertOutcome;
 use crate::tagdict::TagId;
 
 impl Engine {
@@ -267,6 +268,153 @@ impl Engine {
         } else {
             self.rejected_class_d += 1;
             Ok(InsertOutcome::RejectedClassD)
+        }
+    }
+
+    /// Atomic upsert — ES `index` semantics, replace-by-id (ADR-067, closing the
+    /// ADR-064 item-1 divergence): insert the new version of `logical` and
+    /// tombstone every prior live copy, in one writer critical section backed by
+    /// ONE WAL frame. Unlike a re-PUT through [`try_insert_live_with_tags`]
+    /// (which leaves the old copy live and *matchable* until an explicit DELETE)
+    /// or the DELETE-then-PUT recipe (whose two steps leave a no-match window —
+    /// in the WAL too, where a crash between the frames recovered the deleted
+    /// state without the insert), the upsert is all-or-nothing: a crash either
+    /// recovers both halves or neither.
+    ///
+    /// Failure modes mirror [`try_insert_live_with_tags`]: `Parse` never reaches
+    /// the WAL; `Wal` rejects the whole upsert (nothing applied, prior copies
+    /// intact); a class-D rejection of the NEW version leaves the prior copies
+    /// untouched (a failed replace never deletes — see [`UpsertOutcome`]).
+    pub fn try_upsert_live(
+        &mut self,
+        text: &str,
+        logical: u64,
+        version: u32,
+    ) -> Result<UpsertOutcome, crate::error::WriteError> {
+        self.try_upsert_live_with_tags(text, logical, version, &[])
+    }
+
+    /// [`try_upsert_live`](Self::try_upsert_live) carrying per-query metadata tags
+    /// (ADR-049). Tags ride the upsert WAL frame exactly as on the insert path.
+    pub fn try_upsert_live_with_tags(
+        &mut self,
+        text: &str,
+        logical: u64,
+        version: u32,
+        tags: &[(String, String)],
+    ) -> Result<UpsertOutcome, crate::error::WriteError> {
+        // Parse first: a malformed query is a caller error and must never reach
+        // the WAL — and must never tombstone the prior version.
+        let ast = crate::dsl::parse_with_limits(text, &self.config.parse_limits())
+            .map_err(crate::error::WriteError::Parse)?;
+        // WAL FIRST (durability before visibility) — one frame for both halves.
+        if let Some(ref mut wal) = self.wal {
+            if let Err(e) = wal.append_upsert(logical, version, text, tags) {
+                self.wal_healthy = false;
+                return Err(crate::error::WriteError::Wal(e));
+            }
+        }
+        Ok(self.apply_upsert(&ast, text, logical, version, tags, true))
+    }
+
+    /// The shared apply funnel behind [`try_upsert_live_with_tags`](Self::try_upsert_live_with_tags)
+    /// and its WAL replay: capture the prior live copies of `logical`, insert the
+    /// new version, and — only if the insert was accepted — tombstone the
+    /// captured copies and publish the new source text. The capture runs BEFORE
+    /// the insert so the just-inserted copy is never tombstoned; the tombstones
+    /// run AFTER the class-D check so a rejected new version leaves the old ones
+    /// live. No WAL involvement (the caller logged or is replaying).
+    ///
+    /// `tombstone_in_segments` separates the two state domains at replay
+    /// (ADR-067): the MEMTABLE is WAL-truth — its prior copies are recreated by
+    /// earlier replayed frames, so this funnel must always re-tombstone them —
+    /// while the SEGMENTS are manifest-truth. A frame at/below the manifest's
+    /// watermark passes `false`: its segment tombstones are already baked in the
+    /// commit's bitmaps, and a same-id query bulk-ingested AFTER the frame (bulk
+    /// bypasses the WAL, ADR-017) lives in those segments — tombstoning it would
+    /// erase the newer query (the ADR-066 ordering inversion, upsert edition).
+    /// The live path always passes `true`.
+    pub(in crate::segment) fn apply_upsert(
+        &mut self,
+        ast: &crate::dsl::Ast,
+        text: &str,
+        logical: u64,
+        version: u32,
+        tags: &[(String, String)],
+        tombstone_in_segments: bool,
+    ) -> UpsertOutcome {
+        // Capture prior live copies: (segment index, local) with usize::MAX as
+        // the memtable sentinel. Same reverse-index walk as the delete funnel.
+        let mut prior: Vec<(usize, u32)> = Vec::new();
+        if tombstone_in_segments {
+            for (seg_idx, seg) in self.segments.iter().enumerate() {
+                for &local in seg.locals_for_logical(logical) {
+                    if seg.is_alive(local) {
+                        prior.push((seg_idx, local));
+                    }
+                }
+            }
+        }
+        for &local in self.memtable.locals_for_logical(logical) {
+            if self
+                .memtable
+                .alive
+                .get(local as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                prior.push((usize::MAX, local));
+            }
+        }
+
+        let tag_ids = self.intern_tags(tags);
+        let mut lc = String::new();
+        let ex = {
+            let dict = Arc::make_mut(&mut self.dict);
+            extract(ast, &self.norm, dict, &mut lc)
+        };
+        let Some(new_local) = Arc::make_mut(&mut self.memtable)
+            .add_compiled(&ex, &tag_ids, &self.dict, logical, version)
+        else {
+            // The NEW version is class D: reject it and leave the prior copies
+            // untouched — a failed replace must never delete (ES `index` parity).
+            self.rejected_class_d += 1;
+            return UpsertOutcome::RejectedClassD;
+        };
+
+        let replaced = prior.len();
+        for (seg_idx, local) in prior {
+            if seg_idx == usize::MAX {
+                Arc::make_mut(&mut self.memtable).tombstone(local);
+            } else if let Some(seg) = self.segments.get_mut(seg_idx) {
+                Arc::make_mut(seg).tombstone(local);
+            }
+        }
+        self.query_store.insert(logical, text.to_string());
+        if replaced == 0 {
+            UpsertOutcome::Created(new_local)
+        } else {
+            UpsertOutcome::Updated {
+                local: new_local,
+                replaced,
+            }
+        }
+    }
+
+    /// Replay an upsert from WAL recovery (does NOT write back to WAL). Same
+    /// default-parse-ceiling rule as [`replay_insert`](Self::replay_insert).
+    /// `tombstone_in_segments` is `seq > wal_seq_watermark` at the dispatch site —
+    /// see [`apply_upsert`](Self::apply_upsert) for the two state domains.
+    pub(in crate::segment) fn replay_upsert(
+        &mut self,
+        text: &str,
+        logical: u64,
+        version: u32,
+        tags: &[(String, String)],
+        tombstone_in_segments: bool,
+    ) {
+        if let Ok(ast) = crate::dsl::parse(text) {
+            self.apply_upsert(&ast, text, logical, version, tags, tombstone_in_segments);
         }
     }
 

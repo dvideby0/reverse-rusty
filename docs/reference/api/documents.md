@@ -2,7 +2,7 @@
 
 > Part of the [REST API reference](../api.md). Query language: [`dsl.md`](../dsl.md).
 
-## `PUT /_doc/{id}` — Register a query
+## `PUT /_doc/{id}` — Register or replace a query
 
 ```bash
 curl -X PUT localhost:9200/_doc/1 \
@@ -14,8 +14,19 @@ curl -X PUT localhost:9200/_doc/1 \
 {"_id": 1, "result": "created", "error": null}
 ```
 
+**Replace-by-id (ES `index` semantics, ADR-067).** A re-PUT of an existing id is an **atomic
+upsert**: the new version is inserted and every prior live copy is tombstoned in one critical section
+and one snapshot publish — the old semantics stop matching exactly when the new ones start (no window
+where the id matches under both, and no no-match window like the old DELETE-then-PUT recipe). A fresh
+id answers **201** with `"result": "created"`; a replacement answers **200** with
+`"result": "updated"`:
+
+```json
+{"_id": 1, "result": "updated", "error": null}
+```
+
 If the query fails to parse or has no anchorable features (cost class D), the response includes the
-error:
+error — and the **prior version stays live and matchable** (a failed replace never deletes):
 
 ```json
 {"_id": 1, "result": "rejected", "error": "query has no anchorable feature (cost class D)"}

@@ -5,6 +5,55 @@ use crate::harness::*;
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::segment::Engine;
 
+/// A crash BEFORE the first manifest commit (no flush/bulk/build yet) leaves
+/// acknowledged writes only in `wal.log`. `Engine::open`'s fresh path used to
+/// construct an empty engine WITHOUT replaying that tail — silently losing every
+/// acknowledged write a start-empty-and-PUT server had taken (the WAL-first
+/// contract of ADR-013 was void until the first flush). The fresh path now runs
+/// the same replay loop as the manifest path.
+#[test]
+fn writes_before_first_manifest_survive_crash() {
+    let dir = test_dir("fresh_path_wal_replay");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        // NO build/bulk/flush — every mutation lives only in the WAL.
+        engine.insert_live("michael jordan", 1, 1);
+        engine.insert_live("lebron james", 2, 1);
+        engine
+            .try_upsert_live("kobe bryant", 2, 2)
+            .expect("upsert (replaces q2)");
+        engine.insert_live("wander franco", 3, 1);
+        assert!(engine.delete_by_logical_id(3).expect("delete") >= 1);
+        assert!(
+            !dir.join("manifest.bin").exists(),
+            "precondition: no manifest commit happened"
+        );
+        // crash
+    }
+    let engine = Engine::open(make_norm(), config).expect("reopen");
+    assert!(
+        match_ids(&engine, "1986 fleer michael jordan rookie").contains(&1),
+        "an acknowledged insert must survive a pre-first-manifest crash"
+    );
+    assert!(
+        match_ids(&engine, "2008 topps kobe bryant").contains(&2),
+        "the upsert's insert half must survive"
+    );
+    assert!(
+        !match_ids(&engine, "2003 topps lebron james rookie").contains(&2),
+        "the upsert's tombstone half must survive"
+    );
+    assert!(
+        !match_ids(&engine, "2021 topps wander franco").contains(&3),
+        "an acknowledged delete must survive"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn tagged_inserts_survive_wal_recovery() {
     // Tags ride the WAL (v2, ADR-049): a live tagged insert that has NOT been flushed is
@@ -17,8 +66,9 @@ fn tagged_inserts_survive_wal_recovery() {
     };
     {
         let mut engine = Engine::with_config(make_norm(), config.clone());
-        // A base build writes the manifest (open replays the WAL only when one exists);
-        // the seed query is unrelated to the title/filters below.
+        // A base build writes the manifest first; the manifest-less replay path has
+        // its own pin below (`writes_before_first_manifest_survive_crash`). The seed
+        // query is unrelated to the title/filters below.
         engine.build_from_queries(&[(99, "zzz placeholder seed".to_string())]);
         engine.insert_live_with_tags(
             "topps chrome",

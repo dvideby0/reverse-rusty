@@ -13,4 +13,5 @@ mod durability;
 mod round_trip;
 mod sources;
 mod tombstone_durability;
+mod upsert;
 mod wal;

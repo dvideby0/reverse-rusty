@@ -41,7 +41,11 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   manifest (**v3**) now bakes per-segment dead-locals roaring bitmaps (the Lucene `.liv` analogue,
   applied on open before WAL replay) + a WAL-seq watermark that skips stale positional frames, and the
   production delete logs ONE address-free `DeleteByLogical` WAL frame (**v3**) replayed through the live
-  path's funnel. v1/v2 manifests + WALs read back unchanged.
+  path's funnel. v1/v2 manifests + WALs read back unchanged. **`PUT /_doc` is an atomic upsert
+  (ADR-067):** replace-by-id under one WAL frame (`Upsert`, WAL **v4**) + one snapshot publish — and
+  `Engine::open`'s fresh (no-manifest-yet) path now replays the WAL tail, closing a gap where a
+  start-empty server silently lost every acknowledged write on its first crash-restart (completes
+  ADR-013's stated contract).
 - **Read concurrency** — snapshot reads via `ArcSwap<EngineSnapshot>` + `parking_lot::Mutex` writer
   (ADR-016): lock-free reads, zero reader/writer contention.
 - **Skip filter** — per-segment cache-line blocked bloom over signature keys (ADR-011), checked before
@@ -534,10 +538,10 @@ backlog, and the Evaluated & declined list.
   percolator-style integration must know — each with a decided fix in the
   [ADR-064](decisions/adr-064-percolator-drop-in-parity-audit.md) work package
   ([`roadmap.md`](roadmap.md) Tier 4):
-  - **`PUT /_doc` re-PUT is additive** — the old copy stays live and *matchable* until an explicit
-    DELETE (the id matches under either version's semantics; `GET /_doc` and hit `_source` resolve the
-    newest copy, so a hit can carry new text for an old-semantics match). True replace today =
-    DELETE-then-PUT, which has a brief no-match window.
+  - ~~**`PUT /_doc` re-PUT is additive**~~ **✅ Fixed (ADR-067):** `PUT /_doc/{id}` is now an atomic
+    replace-by-id (ES `index` semantics) — one WAL frame, one snapshot publish, 201-created /
+    200-updated, `deleted_count` back to 1; a failed replace never deletes. Crash-atomic on the
+    ADR-066 substrate.
   - **Negation-only queries are rejected (class D)** while ES/OS `query_string` treats them as
     *match-all-except* (`fixNegativeQueryIfNeeded`) — a silent semantic divergence for exclude-only
     stored queries until the opt-in always-candidate lane lands (interim: callers side-list class-D

@@ -216,10 +216,14 @@ limitations".)*
 - **Drop-in operational parity — the [ADR-064](DECISIONS.md) work package (next up in this tier).** The
   audit's decided items, each shipping under its own ADR/PR (full detail + today's-behavior citations in
   the program ADR):
-  1. **Atomic-upsert `PUT /_doc`** — today a re-PUT adds a second live copy without tombstoning the old
-     one, so the id matches under *either* version's semantics until an explicit DELETE (and
-     DELETE-then-PUT leaves a brief no-match window). Tombstone prior copies + insert under one
-     writer-lock critical section and one snapshot publish (ES `index` = replace-by-id).
+  1. ~~**Atomic-upsert `PUT /_doc`**~~ **✅ Shipped ([ADR-067](DECISIONS.md)).** `PUT /_doc/{id}` is now
+     replace-by-id (ES `index` semantics): the new version is inserted and every prior live copy
+     tombstoned under one writer critical section, one WAL frame (`Upsert`, WAL v4), and one snapshot
+     publish — 201-created / 200-updated, `deleted_count` back to 1 after a re-PUT, and a failed
+     replace (parse / class-D / WAL) never deletes. Crash-atomic on the ADR-066 substrate (replay
+     splits by state domain over the watermark). Also fixed en route: `Engine::open`'s fresh
+     (no-manifest-yet) path now replays the WAL tail, so a start-empty server no longer loses
+     acknowledged writes on its first crash. Single-node; cluster upsert rides ADR-065.
   2. **Class-D always-candidate lane (opt-in)** — ES/OS `query_string` rewrites a pure-negative query to
      **match-all-except** (`fixNegativeQueryIfNeeded`) and the reference workload contains such queries
      ("base"/"raw" entities defined by exclusions); RR rejects them at ingest. Accept-and-quarantine:
