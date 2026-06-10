@@ -13,7 +13,13 @@ const MANIFEST_MAGIC: [u8; 4] = *b"PMAN";
 // v1: original layout. v2 (ADR-049): appends `tag_dict_data` — the serialized per-query
 // tag space (`TagDict`) behind filtered percolation, so interned tag ids survive reopen.
 // A v1 manifest reads back with an empty `tag_dict_data` (no tags).
-const MANIFEST_VERSION: u32 = 2;
+// v3 (ADR-066): appends `wal_seq_watermark` + `segment_tombstones` — the per-segment
+// dead-locals bitmaps (the Lucene `.liv` analogue), making base-segment tombstone state
+// durable at the manifest commit point. Before v3, a base-segment delete lived ONLY in
+// the in-RAM mmap alive-overlay + its WAL frame, so the flush-time WAL reset silently
+// dropped it (the deleted query resurrected on reopen). A v1/v2 manifest reads back with
+// watermark 0 and no bitmaps.
+const MANIFEST_VERSION: u32 = 3;
 
 /// Engine manifest — records the list of active segment files, dict state,
 /// and counters. Written atomically (tmp + rename) alongside segment files.
@@ -26,6 +32,21 @@ pub struct Manifest {
     pub tag_dict_data: Vec<u8>,
     pub rejected_parse: u64,
     pub rejected_class_d: u64,
+    /// The WAL sequence number of the last entry whose effects this manifest commit
+    /// has captured (ADR-066). On recovery, a positional `Tombstone` frame targeting a
+    /// BASE segment with `seq <= wal_seq_watermark` is skipped: its effect is already
+    /// in `segment_tombstones` (or its entry was dropped by a compaction merge), and
+    /// the segment *positions* it addresses may have been renumbered since — replaying
+    /// it could tombstone an unrelated query. Frames newer than the watermark address
+    /// exactly this manifest's `segment_files` list (every segments-vec mutation
+    /// commits a manifest), so they replay correctly. 0 = nothing captured (v1/v2).
+    pub wal_seq_watermark: u64,
+    /// Per-segment DEAD locals at commit time (ADR-066): `(segment_file_name,
+    /// serialized RoaringBitmap of tombstoned local ids)`, recorded only for segments
+    /// that carry tombstones. Applied on open after the segment is attached, BEFORE the
+    /// WAL tail replays — so a delete against a base segment survives the flush-time
+    /// WAL reset that previously dropped its only durable record.
+    pub segment_tombstones: Vec<(String, Vec<u8>)>,
 }
 
 pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
@@ -49,6 +70,16 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
     // v2: tag-dict blob (ADR-049; empty when no tags).
     write_u32(&mut f, manifest.tag_dict_data.len() as u32)?;
     f.write_all(&manifest.tag_dict_data)?;
+    // v3 (ADR-066): WAL watermark + per-segment dead-locals bitmaps.
+    write_u64(&mut f, manifest.wal_seq_watermark)?;
+    write_u32(&mut f, manifest.segment_tombstones.len() as u32)?;
+    for (name, bitmap) in &manifest.segment_tombstones {
+        let nb = name.as_bytes();
+        write_u32(&mut f, nb.len() as u32)?;
+        f.write_all(nb)?;
+        write_u32(&mut f, bitmap.len() as u32)?;
+        f.write_all(bitmap)?;
+    }
     // CRC of everything written so far
     f.sync_all()?;
     drop(f);
@@ -91,11 +122,13 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         ));
     }
     let version = read_u32_at(&data, 4)?;
-    // v1 and v2 are both accepted; v2 appends `tag_dict_data` (ADR-049), absent in v1.
-    if version != 1 && version != MANIFEST_VERSION {
+    // v1..=v3 are accepted; v2 appends `tag_dict_data` (ADR-049) and v3 appends the WAL
+    // watermark + per-segment dead-locals bitmaps (ADR-066), each absent in earlier
+    // versions.
+    if !(1..=MANIFEST_VERSION).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("unsupported manifest version {version} (expected 1 or {MANIFEST_VERSION})"),
+            format!("unsupported manifest version {version} (expected 1..={MANIFEST_VERSION})"),
         ));
     }
     let mut cursor = 8usize;
@@ -130,11 +163,47 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     let tag_dict_data = if version >= 2 {
         let tlen = read_u32_at(&data, cursor)? as usize;
         cursor += 4;
-        data.get(cursor..cursor + tlen)
+        let t = data
+            .get(cursor..cursor + tlen)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated tag-dict blob"))?
-            .to_vec()
+            .to_vec();
+        cursor += tlen;
+        t
     } else {
         Vec::new()
+    };
+    // v3 appends the WAL watermark + per-segment dead-locals bitmaps (ADR-066); v1/v2
+    // read back with watermark 0 and no bitmaps (their era had no durable record of
+    // base-segment tombstones to restore).
+    let (wal_seq_watermark, segment_tombstones) = if version >= 3 {
+        let watermark = read_u64_at(&data, cursor)?;
+        cursor += 8;
+        let n = read_u32_at(&data, cursor)? as usize;
+        cursor += 4;
+        let mut tombs = Vec::with_capacity(n);
+        for _ in 0..n {
+            let nlen = read_u32_at(&data, cursor)? as usize;
+            cursor += 4;
+            let name = std::str::from_utf8(data.get(cursor..cursor + nlen).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "truncated tombstone filename")
+            })?)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            .to_string();
+            cursor += nlen;
+            let blen = read_u32_at(&data, cursor)? as usize;
+            cursor += 4;
+            let bitmap = data
+                .get(cursor..cursor + blen)
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "truncated tombstone bitmap")
+                })?
+                .to_vec();
+            cursor += blen;
+            tombs.push((name, bitmap));
+        }
+        (watermark, tombs)
+    } else {
+        (0, Vec::new())
     };
 
     Ok(Manifest {
@@ -144,6 +213,8 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         tag_dict_data,
         rejected_parse,
         rejected_class_d,
+        wal_seq_watermark,
+        segment_tombstones,
     })
 }
 
@@ -379,6 +450,73 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The v3 engine manifest round-trips the WAL watermark + per-segment dead-locals
+    /// bitmaps (ADR-066) alongside every earlier field.
+    #[test]
+    fn engine_manifest_v3_round_trips_watermark_and_tombstones() {
+        let dir = std::env::temp_dir().join(format!("rr_manifest_v3_rt_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("manifest.bin");
+
+        let manifest = Manifest {
+            segment_files: vec!["seg_000001.seg".to_string(), "seg_000002.seg".to_string()],
+            next_seg_id: 3,
+            dict_data: vec![1, 2, 3],
+            tag_dict_data: vec![4, 5],
+            rejected_parse: 7,
+            rejected_class_d: 9,
+            wal_seq_watermark: 42,
+            segment_tombstones: vec![("seg_000001.seg".to_string(), vec![10, 20, 30])],
+        };
+        write_manifest(&manifest, &path).expect("write");
+        let got = read_manifest(&path).expect("read");
+        assert_eq!(got.segment_files, manifest.segment_files);
+        assert_eq!(got.next_seg_id, manifest.next_seg_id);
+        assert_eq!(got.dict_data, manifest.dict_data);
+        assert_eq!(got.tag_dict_data, manifest.tag_dict_data);
+        assert_eq!(got.rejected_parse, manifest.rejected_parse);
+        assert_eq!(got.rejected_class_d, manifest.rejected_class_d);
+        assert_eq!(got.wal_seq_watermark, 42);
+        assert_eq!(got.segment_tombstones, manifest.segment_tombstones);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A v2 manifest (written by a pre-ADR-066 binary) reads back with watermark 0 and
+    /// no tombstone bitmaps. Hand-rolled bytes so the pin is at the format level, not
+    /// against our own writer.
+    #[test]
+    fn engine_manifest_v2_reads_back_without_v3_section() {
+        let dir = std::env::temp_dir().join(format!("rr_manifest_v2_bc_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("manifest.bin");
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b"PMAN");
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // version 2
+        bytes.extend_from_slice(&5u64.to_le_bytes()); // next_seg_id
+        bytes.extend_from_slice(&1u64.to_le_bytes()); // rejected_parse
+        bytes.extend_from_slice(&2u64.to_le_bytes()); // rejected_class_d
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // 1 segment file
+        let name = b"seg_000001.seg";
+        bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(name);
+        bytes.extend_from_slice(&3u32.to_le_bytes()); // dict blob
+        bytes.extend_from_slice(&[7, 8, 9]);
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // empty tag-dict blob
+        let crc = crc32(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("write v2 bytes");
+
+        let got = read_manifest(&path).expect("read v2");
+        assert_eq!(got.segment_files, vec!["seg_000001.seg".to_string()]);
+        assert_eq!(got.next_seg_id, 5);
+        assert_eq!(got.dict_data, vec![7, 8, 9]);
+        assert!(got.tag_dict_data.is_empty());
+        assert_eq!(got.wal_seq_watermark, 0, "v2 has no watermark");
+        assert!(got.segment_tombstones.is_empty(), "v2 has no bitmaps");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The v4 cluster manifest's nested per-shard registry + next-seg-id columns + the
     /// appended vocab and tag-dict blobs must round-trip byte-exactly (varied per-shard

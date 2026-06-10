@@ -12,4 +12,5 @@ mod compaction;
 mod durability;
 mod round_trip;
 mod sources;
+mod tombstone_durability;
 mod wal;

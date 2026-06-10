@@ -33,7 +33,15 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   header — gained one (`RDCT`/`RTGD`), so a layout change or newer-build blob is rejected with a clear
   error instead of silently misparsed, an unknown `FeatureKind` tag is rejected instead of downgraded to
   `Generic`, and a truncated blob errors instead of panicking; legacy header-less blobs still read and the
-  content-based dict fingerprint (the gRPC adoption handshake) is unchanged.
+  content-based dict fingerprint (the gRPC adoption handshake) is unchanged. **Tombstones are durable at
+  the commit point (ADR-066):** fixed two pre-existing crash-recovery bugs — a base-segment delete used
+  to live only in the in-RAM mmap overlay + its WAL frames, so a flush (which resets the WAL) silently
+  **resurrected** acknowledged deletes on reopen; and a compaction's address renumbering could make a
+  crash replay of stale positional frames **tombstone the wrong query** (a zero-FN violation). The
+  manifest (**v3**) now bakes per-segment dead-locals roaring bitmaps (the Lucene `.liv` analogue,
+  applied on open before WAL replay) + a WAL-seq watermark that skips stale positional frames, and the
+  production delete logs ONE address-free `DeleteByLogical` WAL frame (**v3**) replayed through the live
+  path's funnel. v1/v2 manifests + WALs read back unchanged.
 - **Read concurrency** — snapshot reads via `ArcSwap<EngineSnapshot>` + `parking_lot::Mutex` writer
   (ADR-016): lock-free reads, zero reader/writer contention.
 - **Skip filter** — per-segment cache-line blocked bloom over signature keys (ADR-011), checked before

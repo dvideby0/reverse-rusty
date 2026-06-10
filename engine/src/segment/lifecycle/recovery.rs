@@ -87,7 +87,43 @@ impl Engine {
         for name in &manifest.segment_files {
             let seg_path = seg_dir.join(name);
             match MmapSegment::open(&seg_path) {
-                Ok(mmap_seg) => segments.push(Arc::new(BaseSegment::Mmap(mmap_seg))),
+                Ok(mut mmap_seg) => {
+                    // ADR-066: restore the segment's committed tombstone state. The
+                    // on-disk alive flags are frozen at write time; deletes applied
+                    // since live only in this manifest-carried bitmap (their WAL
+                    // frames may have been dropped by a flush-time reset).
+                    if let Some((_, bytes)) = manifest
+                        .segment_tombstones
+                        .iter()
+                        .find(|(file, _)| file == name)
+                    {
+                        match roaring::RoaringBitmap::deserialize_from(&bytes[..]) {
+                            Ok(dead) => {
+                                for local in dead {
+                                    // Out-of-range ids no-op inside `tombstone` —
+                                    // never a wrong tombstone.
+                                    mmap_seg.tombstone(local);
+                                }
+                            }
+                            Err(e) => {
+                                // Apply nothing rather than guess: a resurrected
+                                // delete is a bounded false positive; a wrong
+                                // tombstone would be a false negative.
+                                pending_events.push(
+                                    crate::events::EngineEvent::DurabilityFailure {
+                                        op: crate::events::DurabilityOp::SegmentRecovery,
+                                        detail: format!(
+                                            "corrupt tombstone bitmap for {name}; its baked \
+                                             deletes are not restored (entries may resurrect)"
+                                        ),
+                                        error: e.to_string(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    segments.push(Arc::new(BaseSegment::Mmap(mmap_seg)));
+                }
                 Err(e) => {
                     pending_events.push(crate::events::EngineEvent::DurabilityFailure {
                         op: crate::events::DurabilityOp::SegmentRecovery,
@@ -192,9 +228,29 @@ impl Engine {
                     engine.replay_insert(&text, logical, version, &tags);
                 }
                 WalEntry::Tombstone {
-                    seg_idx, local_id, ..
+                    seq,
+                    seg_idx,
+                    local_id,
                 } => {
-                    engine.replay_tombstone(seg_idx, local_id);
+                    // ADR-066: a positional frame targeting a BASE segment is valid
+                    // only against the segment list it was written under. Frames at or
+                    // below the manifest's watermark are already baked into the commit
+                    // (tombstone bitmap, or the entry was dropped by a merge) — and the
+                    // positions they address may have been renumbered since, so
+                    // replaying one could tombstone an unrelated query. Frames above
+                    // the watermark were appended against exactly the committed list
+                    // (every segments-vec mutation commits a manifest), so they replay
+                    // correctly. Memtable frames (the u32::MAX sentinel) always replay:
+                    // the memtable is rebuilt purely from this WAL tail.
+                    if seg_idx == u32::MAX || seq > manifest.wal_seq_watermark {
+                        engine.replay_tombstone(seg_idx, local_id);
+                    }
+                }
+                WalEntry::DeleteByLogical { logical, .. } => {
+                    // Address-free (ADR-066): re-derive the affected copies from the
+                    // recovered state. Idempotent against the manifest's baked
+                    // tombstones (already-dead copies are filtered by the funnel).
+                    engine.apply_delete_by_logical(logical);
                 }
                 WalEntry::FlushCheckpoint { .. } => {
                     // Skip — already handled by manifest
