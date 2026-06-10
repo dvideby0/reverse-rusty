@@ -291,6 +291,23 @@ pub enum InsertOutcome {
     RejectedClassD,
 }
 
+/// Outcome of an atomic upsert (replace-by-id, ADR-067). Distinguishes a fresh
+/// registration from a replacement so the HTTP layer can answer ES-style
+/// (201-created vs 200-updated). A parse failure is surfaced as
+/// `Err(ParseError)` by [`Engine::try_upsert_live`], never folded in here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpsertOutcome {
+    /// No prior live copy existed; inserted fresh. Carries the memtable-local id.
+    Created(u32),
+    /// Inserted the new version and tombstoned `replaced` prior live copies in
+    /// the same critical section (one WAL frame, one snapshot publish).
+    Updated { local: u32, replaced: usize },
+    /// The NEW version compiled to cost-class D and was rejected — the prior
+    /// live copies are left untouched (a failed replace never deletes, matching
+    /// ES `index` semantics where a failed op leaves the old document).
+    RejectedClassD,
+}
+
 /// Per-item outcome for one query in a bulk batch, returned in submission order
 /// by [`Engine::try_bulk_ingest_detailed`]. Lets a caller (e.g. the HTTP
 /// `/_bulk` handler) report exactly which items were rejected and why — ES-style

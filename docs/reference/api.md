@@ -128,7 +128,7 @@ The full method/path matrix is below.
 |---|---|---|
 | `/` | GET | Version info |
 | `/_doc/{id}` | GET | Retrieve a stored query |
-| `/_doc/{id}` | PUT | Register a single query |
+| `/_doc/{id}` | PUT | Register **or atomically replace** a query (201 created / 200 updated, ADR-067) |
 | `/_doc/{id}` | DELETE | Remove a stored query |
 | `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
 | `/_mpercolate` | POST | Batch percolate (high throughput; columnar broad lane; `responses[]` envelope) |

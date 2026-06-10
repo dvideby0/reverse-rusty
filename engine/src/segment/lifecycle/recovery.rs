@@ -20,6 +20,95 @@ fn invalid_input(e: &crate::error::NormalizerError) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
 }
 
+/// Replay the WAL tail (entries after the last flush checkpoint) into a constructed
+/// engine — the ONE recovery loop, shared by the manifest path and the fresh
+/// (no-manifest-yet) path so ADR-013's contract ("every acknowledged mutation
+/// recovers") holds on both. `watermark` is the manifest's `wal_seq_watermark`
+/// (ADR-066) — 0 on the fresh path, where nothing is baked anywhere.
+fn replay_wal_tail(
+    engine: &mut Engine,
+    wal_path: &std::path::Path,
+    watermark: u64,
+) -> std::io::Result<()> {
+    let recovery = Wal::recover(wal_path)?;
+    if recovery.skipped_bytes > 0 {
+        engine
+            .pending_events
+            .push(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::WalTornTail,
+                detail: "WAL recovery skipped corrupt/torn data at tail".to_string(),
+                error: format!("{} bytes", recovery.skipped_bytes),
+            });
+    }
+    for entry in recovery.entries {
+        match entry {
+            WalEntry::Insert {
+                logical,
+                version,
+                text,
+                tags,
+                ..
+            } => {
+                // Replay without re-writing to WAL — tags included so a recovered
+                // insert keeps its metadata (ADR-049).
+                engine.replay_insert(&text, logical, version, &tags);
+            }
+            WalEntry::Tombstone {
+                seq,
+                seg_idx,
+                local_id,
+            } => {
+                // ADR-066: a positional frame targeting a BASE segment is valid
+                // only against the segment list it was written under. Frames at or
+                // below the manifest's watermark are already baked into the commit
+                // (tombstone bitmap, or the entry was dropped by a merge) — and the
+                // positions they address may have been renumbered since, so
+                // replaying one could tombstone an unrelated query. Frames above
+                // the watermark were appended against exactly the committed list
+                // (every segments-vec mutation commits a manifest), so they replay
+                // correctly. Memtable frames (the u32::MAX sentinel) always replay:
+                // the memtable is rebuilt purely from this WAL tail.
+                if seg_idx == u32::MAX || seq > watermark {
+                    engine.replay_tombstone(seg_idx, local_id);
+                }
+            }
+            WalEntry::DeleteByLogical { seq, logical } => {
+                // Address-free (ADR-066): re-derive the affected copies from the
+                // recovered state. Frames at/below the watermark are SKIPPED, not
+                // just for economy: bulk ingest bypasses the WAL (its segment +
+                // manifest commit IS its durability, ADR-017), so a same-id query
+                // bulk-ingested AFTER this delete is already in the attached
+                // segments — replaying the older delete over it would erase the
+                // newer query (codex P1). The manifest commit that covered this
+                // frame also baked its tombstones, so skipping loses nothing.
+                if seq > watermark {
+                    engine.apply_delete_by_logical(logical);
+                }
+            }
+            WalEntry::Upsert {
+                seq,
+                logical,
+                version,
+                text,
+                tags,
+            } => {
+                // ADR-067: the insert half ALWAYS replays — the new memtable copy
+                // exists only in this frame (a flush would have reset the WAL and
+                // dropped it). The segment-tombstone half follows the watermark
+                // rule (baked bitmaps below it; and a same-id bulk ingest after
+                // the frame must not be erased), while prior MEMTABLE copies are
+                // always re-tombstoned — they are WAL-truth, recreated by earlier
+                // replayed frames. See `apply_upsert`.
+                engine.replay_upsert(&text, logical, version, &tags, seq > watermark);
+            }
+            WalEntry::FlushCheckpoint { .. } => {
+                // Skip — already handled by manifest
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Engine {
     /// Open an engine from an existing data directory, recovering state from
     /// the manifest and WAL. The normalizer must be the same one used when the
@@ -64,12 +153,23 @@ impl Engine {
 
         let manifest_path = dir.join("manifest.bin");
         if !manifest_path.exists() {
-            // No existing data — return a fresh engine (fresh-dir vocab path interns the
-            // active equivalence forms for ID stability, exactly as `with_vocab` documents).
-            return match vocab {
-                Some(v) => Self::with_vocab(v, config).map_err(|e| invalid_input(&e)),
-                None => Ok(Self::with_config(norm, config)),
+            // No manifest yet — construct fresh (fresh-dir vocab path interns the
+            // active equivalence forms for ID stability, exactly as `with_vocab`
+            // documents), then REPLAY any existing WAL tail. A crash before the
+            // FIRST manifest commit (no flush/bulk/build yet) leaves acknowledged
+            // writes only in wal.log; skipping the replay here silently lost them
+            // (the engine came up empty) — voiding ADR-013's recovery contract on
+            // exactly the start-empty-and-PUT path a fresh server runs.
+            let fresh_wal_path = dir.join("wal.log");
+            let mut engine = match vocab {
+                Some(v) => Self::with_vocab(v, config).map_err(|e| invalid_input(&e))?,
+                None => Self::with_config(norm, config),
             };
+            if fresh_wal_path.exists() {
+                // Watermark 0: with no manifest, nothing is baked anywhere.
+                replay_wal_tail(&mut engine, &fresh_wal_path, 0)?;
+            }
+            return Ok(engine);
         }
 
         let manifest = crate::storage::read_manifest(&manifest_path)?;
@@ -210,66 +310,7 @@ impl Engine {
         }
 
         // Replay WAL entries after last checkpoint
-        let recovery = Wal::recover(&wal_path)?;
-        if recovery.skipped_bytes > 0 {
-            engine
-                .pending_events
-                .push(crate::events::EngineEvent::DurabilityFailure {
-                    op: crate::events::DurabilityOp::WalTornTail,
-                    detail: "WAL recovery skipped corrupt/torn data at tail".to_string(),
-                    error: format!("{} bytes", recovery.skipped_bytes),
-                });
-        }
-        for entry in recovery.entries {
-            match entry {
-                WalEntry::Insert {
-                    logical,
-                    version,
-                    text,
-                    tags,
-                    ..
-                } => {
-                    // Replay without re-writing to WAL — tags included so a recovered
-                    // insert keeps its metadata (ADR-049).
-                    engine.replay_insert(&text, logical, version, &tags);
-                }
-                WalEntry::Tombstone {
-                    seq,
-                    seg_idx,
-                    local_id,
-                } => {
-                    // ADR-066: a positional frame targeting a BASE segment is valid
-                    // only against the segment list it was written under. Frames at or
-                    // below the manifest's watermark are already baked into the commit
-                    // (tombstone bitmap, or the entry was dropped by a merge) — and the
-                    // positions they address may have been renumbered since, so
-                    // replaying one could tombstone an unrelated query. Frames above
-                    // the watermark were appended against exactly the committed list
-                    // (every segments-vec mutation commits a manifest), so they replay
-                    // correctly. Memtable frames (the u32::MAX sentinel) always replay:
-                    // the memtable is rebuilt purely from this WAL tail.
-                    if seg_idx == u32::MAX || seq > manifest.wal_seq_watermark {
-                        engine.replay_tombstone(seg_idx, local_id);
-                    }
-                }
-                WalEntry::DeleteByLogical { seq, logical } => {
-                    // Address-free (ADR-066): re-derive the affected copies from the
-                    // recovered state. Frames at/below the watermark are SKIPPED, not
-                    // just for economy: bulk ingest bypasses the WAL (its segment +
-                    // manifest commit IS its durability, ADR-017), so a same-id query
-                    // bulk-ingested AFTER this delete is already in the attached
-                    // segments — replaying the older delete over it would erase the
-                    // newer query (codex P1). The manifest commit that covered this
-                    // frame also baked its tombstones, so skipping loses nothing.
-                    if seq > manifest.wal_seq_watermark {
-                        engine.apply_delete_by_logical(logical);
-                    }
-                }
-                WalEntry::FlushCheckpoint { .. } => {
-                    // Skip — already handled by manifest
-                }
-            }
-        }
+        replay_wal_tail(&mut engine, &wal_path, manifest.wal_seq_watermark)?;
 
         Ok(engine)
     }
