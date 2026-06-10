@@ -122,6 +122,7 @@ curl localhost:9200/_metrics
 
 Returns metrics in Prometheus text exposition format for scraping by Prometheus, Grafana Agent, or
 compatible collectors — engine gauges, event counters, per-endpoint HTTP latency, an in-flight-request
-gauge, WAL size/pending gauges, cumulative flush/compaction-time counters, and a
-`durability_failures_total{op}` counter (ADR-021).
+gauge, WAL size/pending gauges, cumulative flush/compaction-time counters, a
+`durability_failures_total{op}` counter (ADR-021), and — when bearer-token auth is enabled — an
+`auth_failures_total{reason="missing"|"invalid"}` counter for rejected requests (ADR-062).
 

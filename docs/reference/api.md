@@ -21,6 +21,8 @@ Options:
 |---|---|---|
 | `--host` | 127.0.0.1 | IP address to bind. Loopback by default; set `0.0.0.0` to listen on all interfaces (see Security below) |
 | `--port` | 9200 | Port to listen on |
+| `--auth-token` | *(none — auth off)* | Bearer token required on mutating/admin endpoints (ADR-062). Prefer the `RR_AUTH_TOKEN` env var in production — flag values appear in process listings (see Security below) |
+| `--auth-protect-reads` | false | Extend bearer-token auth to read endpoints too (everything except `GET /_health`). Requires an auth token |
 | `--data-dir` | *(in-memory)* | Persistence directory for segments and WAL |
 | `--load-file` | — | Pre-load queries from a CSV or JSONL file at startup |
 | `--vocab-file` | — | Load vocabulary from a JSON file at startup |
@@ -56,12 +58,38 @@ Many of these knobs are also tunable at runtime via [`PUT /_settings`](api/setti
 
 ### Security
 
-The REST API has **no built-in authentication** and exposes mutating/admin endpoints
-(`_doc`, `_bulk`, `_flush`, `_compact`, `_vocab`, `_settings`). The server therefore binds
-**`127.0.0.1` (loopback) by default** (ADR-052) — not reachable beyond the local host. To serve
-other hosts, set `--host 0.0.0.0` (or a specific interface) **only** on a trusted network or behind
-a reverse proxy that terminates authentication/TLS; do not expose the port directly to an untrusted
-network. (TLS/auth on the engine itself is a tracked, not-yet-built item — see
+The server binds **`127.0.0.1` (loopback) by default** (ADR-052) — not reachable beyond the local
+host. To serve other hosts, set `--host 0.0.0.0` (or a specific interface) and gate the
+mutating/admin endpoints with **bearer-token auth** (ADR-062):
+
+```bash
+export RR_AUTH_TOKEN=$(openssl rand -hex 32)
+cargo run --release --bin server -- --host 0.0.0.0
+# clients:
+curl -X PUT localhost:9200/_doc/1 -H "Authorization: Bearer $RR_AUTH_TOKEN" \
+  -H 'content-type: application/json' -d '{"query": "michael jordan"}'
+```
+
+With a token configured (`RR_AUTH_TOKEN` env var or `--auth-token`; the env var is preferred — flag
+values appear in process listings), **every non-GET/HEAD request requires
+`Authorization: Bearer <token>`** except the read-via-POST percolate endpoints (`POST /_search`,
+`POST /_mpercolate`). That default-deny rule covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
+`_vocab` writes (including `/_vocab/learn*` and `/_vocab/aliases/*`), `_settings` writes — and any
+future mutating endpoint, which fails closed rather than open. Reads stay open unless
+`--auth-protect-reads` extends the gate to them too (stored queries are data worth protecting on an
+exposed port); only `GET /_health` is always open so liveness probes keep working.
+
+Failures return **401** with the standard error envelope (`"type": "security_exception"`) and an
+RFC 6750 `WWW-Authenticate: Bearer` challenge (`error="invalid_token"` when a wrong token was
+presented), increment `auth_failures_total{reason="missing"|"invalid"}` in `/_metrics`, and log a
+structured warning. The token comparison is constant-time. An empty/non-printable token, or
+`--auth-protect-reads` without a token, refuses startup (fail-loud); binding a non-loopback
+interface *without* auth logs a startup warning.
+
+With **no token configured the server behaves exactly as before** (no auth — strictly opt-in). The
+transport is plain HTTP either way: a bearer token is only as private as the link it crosses, so on
+an untrusted network still front the server with a reverse proxy that terminates TLS. (TLS, and auth
+on the *gRPC* shard/control transports, are the tracked Tier-3 items — see
 [STATUS.md](../STATUS.md).)
 
 ---

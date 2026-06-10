@@ -92,8 +92,12 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   (text table + `?format=json`, ADR-023), `/_health`, `/_metrics`, `/_vocab*`,
   `/_settings` GET/PUT with dynamic-vs-static enforcement + `include_defaults` — ADR-022),
   graceful shutdown, production hardening (body/concurrency limits, request IDs, slow-query log,
-  segment CRC, complexity limits, loopback-by-default bind + `--host` — ADR-052). No built-in
-  auth — bind beyond `127.0.0.1` only on a trusted network / behind an authenticating proxy.
+  segment CRC, complexity limits, loopback-by-default bind + `--host` — ADR-052), and **opt-in
+  bearer-token auth** (ADR-062: `--auth-token`/`RR_AUTH_TOKEN` gates every non-GET/HEAD endpoint
+  except the POST-read percolates, default-deny; `--auth-protect-reads` extends to reads except
+  `/_health`; constant-time compare, RFC 6750 401s, `auth_failures_total{reason}`; unset ⇒
+  byte-identical). The transport is plain HTTP — for an untrusted network still front it with a
+  TLS-terminating proxy.
 - **Error handling** — typed `ParseError` / `NormalizerError`, fallible deserialization, zero
   panicking `unwrap()` in library code.
 - **Tooling** — explain (`explain.rs`), seeded data generator (`gen.rs`), NPMI corpus learner
