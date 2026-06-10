@@ -50,6 +50,52 @@ fn empty_corpus_matches_nothing() {
     assert!(out.is_empty(), "empty corpus should produce no matches");
 }
 
+/// Deleting the same logical id twice is idempotent: the second delete removes zero
+/// copies, the query stays gone (memtable AND flushed-segment copies), match results
+/// are unchanged, and a fresh insert under the same logical id matches again
+/// (delete → delete → reinsert, the full tombstone life cycle at its edge).
+#[test]
+fn delete_same_logical_id_twice_is_idempotent_and_reinsert_revives() {
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    eng.build_from_queries(&[
+        (1, "michael jordan rookie".to_string()),
+        (2, "1994 upper deck".to_string()),
+    ]);
+    // A second live copy of logical 1 in the memtable, so the delete must reach both
+    // a flushed segment and the memtable.
+    eng.insert_live("michael jordan rookie", 1, 2);
+
+    let mut scratch = MatchScratch::new();
+    let mut out = Vec::new();
+    let title = "1996 michael jordan rookie card";
+    eng.match_title(title, &mut scratch, &mut out, true);
+    assert!(out.contains(&1), "precondition: query 1 matches");
+
+    let first = eng.delete_by_logical_id(1).expect("first delete");
+    assert!(first >= 2, "both live copies tombstoned, got {first}");
+    eng.match_title(title, &mut scratch, &mut out, true);
+    assert!(!out.contains(&1), "deleted query must not match");
+
+    let second = eng
+        .delete_by_logical_id(1)
+        .expect("second delete must not error");
+    assert_eq!(second, 0, "second delete of the same id is a no-op");
+    eng.match_title(title, &mut scratch, &mut out, true);
+    assert!(!out.contains(&1), "still deleted after the double delete");
+
+    // Reinsert under the same logical id: the tombstones must not swallow the new copy.
+    eng.insert_live("michael jordan rookie", 1, 3);
+    eng.match_title(title, &mut scratch, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "a fresh insert under a twice-deleted logical id must match again"
+    );
+
+    // And the unrelated query was never disturbed.
+    eng.match_title("1994 upper deck jordan", &mut scratch, &mut out, true);
+    assert!(out.contains(&2), "unrelated query survives the churn");
+}
+
 /// Very long title should not panic or corrupt state.
 #[test]
 fn very_long_title_does_not_panic() {
