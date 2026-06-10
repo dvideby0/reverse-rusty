@@ -235,9 +235,17 @@ limitations".)*
      pre-existing silent-drop hazard), the effectively empty query still rejects. Oracle-proven
      (vacuous-accept differential: per-title + batch + durability + knob-flip replay). Single-node;
      the cluster lane rides the ADR-065 replicate-broad-to-all criterion.
-  3. **Parity-mode normalizer knob** — disable the hard-coded `pop` number-context year demotion
-     (position-sensitive number typing; the one residual FN class the audit demonstrated against a
-     position-insensitive reference matcher). Vocab-persisted; default = current behavior.
+  3. ~~**Parity-mode normalizer knob**~~ **✅ Shipped ([ADR-069](DECISIONS.md)).** The hard-coded
+     `pop` number-context demotion is now a configurable **number-context word list** on the shared
+     normalizer (the ADR-058 move: hard-coded → configuration). Default `["pop"]` = byte-identical;
+     an **empty list disables the rule** — the parity mode, making number typing position-insensitive
+     (a 4-digit year is `year:N` everywhere) and closing the audit's one residual FN class in both
+     directions. Vocab-persisted (`Vocab.number_context`, old JSON untouched): rides `PUT /_vocab`,
+     survives reopen, and applies live via the `set_vocab` recompile (flip-proven, reversible). The
+     "emit both typings title-side" variant was evaluated + declined in the ADR (mixed typing is
+     unrepresentable under the shared normalizer + recompile machinery; both-typings isn't FP-only
+     in the single-view path). Oracle-proven: engine ≡ brute under the knob, both audit directions
+     asserted closed.
   4. **Loud non-string tag values** — ingest silently drops a non-string tag value and filter arrays
      silently drop non-string elements (while scalar filter values 400) — the silent half corrupts
      filtering invisibly. Reject (or canonically coerce — pick one, document it) on both paths.

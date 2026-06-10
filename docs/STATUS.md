@@ -145,6 +145,14 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   compaction both variants, flush→mmap reopen + WAL replay under a flipped knob, vocab change).
   Single-node; the cluster keeps rejecting at placement (the cluster lane rides ADR-065
   replicate-broad-to-all).
+- **Number-context word list (ADR-069, parity mode)** — the hard-coded `pop` number demotion
+  (`pop 1995` → `term:1995`, position-sensitive typing — the ADR-064 audit's one residual FN class)
+  is now configuration on the shared normalizer: default `["pop"]` is byte-identical, an **empty
+  list disables the rule** (a 4-digit year is `year:N` everywhere — the percolator-parity mode,
+  closing the FN class in both directions), and a custom list substitutes other context words.
+  Persisted via `Vocab.number_context` (old JSON untouched); rides `PUT /_vocab`, survives reopen,
+  applies live through the `set_vocab` recompile. Oracle-proven (engine ≡ brute under the knob incl.
+  the forbidden-year and any-of paths; both audit directions asserted closed; live flip + reversal).
 - **Cluster scope frame — read before the cluster entries below.** **Cluster v1** (shippable) = the
   in-process multi-shard core + durable local reopen + dynamic vocabulary — **built and oracle-proven,
   zero false negatives (Roadmap Tier 0, now complete)**. The gRPC / replication / control-plane /
@@ -561,9 +569,10 @@ backlog, and the Evaluated & declined list.
     `accept_class_d` lane stores them as broad-lane always-candidates under the universal signature —
     the ES/OS *match-all-except* (`fixNegativeQueryIfNeeded`) parity; default off keeps the loud
     reject (whose message now names the knob).
-  - **The `pop` number context makes year typing position-sensitive** (a 1900–2099 token right after
-    `pop` emits `term:` not `year:`) — the one demonstrated residual FN class against a
-    position-insensitive reference matcher.
+  - ~~**The `pop` number context makes year typing position-sensitive**~~ **✅ Fixed (ADR-069):** the
+    demotion is now a configurable number-context word list — an empty list (part of the documented
+    parity configuration) makes number typing position-insensitive, closing the audit's last
+    residual FN class in both directions; the default keeps the historical rule byte-identically.
   - **Non-string tag values are silently dropped at ingest** (and non-string elements inside filter
     arrays silently narrow the filter, while scalar non-string filter values 400) — stringify
     everything until the loud-failure fix lands.

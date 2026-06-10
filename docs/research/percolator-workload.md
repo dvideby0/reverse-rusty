@@ -111,7 +111,9 @@ exclude-only side-list case below), with every false positive predicted in advan
 **The parity configuration.** Run RR with an **empty vocabulary** (no graders, grade words, phrases,
 synonyms, or equivalences — the reference deployment canonicalizes titles client-side before percolating,
 so RR's vocab machinery is a *later recall upgrade*, not a migration requirement) plus punctuation
-overrides **`.` `#` `/` → `split`** (defaults already split the rest). `.`→split is load-bearing: the
+overrides **`.` `#` `/` → `split`** (defaults already split the rest) plus an **empty number-context
+word list** (`Vocab::set_number_context_words(&[])`, [ADR-069](../DECISIONS.md)) — disabling the `pop`
+year-demotion so number typing is position-insensitive end to end. `.`→split is load-bearing: the
 reference matcher tolerates trailing `.`/`,` on a token, so keeping `.` would turn `card.`-style title
 tokens into distinct features — a real FN; splitting makes decimals like `9.5` ≈ `{9, 5}` instead, an
 FP-only loosening the precision stage re-filters. Run with the **broad lane enabled** (`--include-broad`
@@ -147,15 +149,19 @@ the precision stage re-filters):
    while the reference re-parse keeps the counts for its precision stage.
 7. A positive group containing a member that normalizes to **zero features** (non-Latin scripts,
    symbol-only members) drops the *whole group clause* (vacuous = wider = FN-safe).
-8. **Exclude-only queries** (no positive clause after translation) are class-D-rejected — keep their ids
-   in an **always-candidate side list**: their *positive* semantics is satisfied by every title, so every
-   title takes them as **candidates** (never append them to final results directly — the precision stage
-   applies the excludes) — until the ADR-064 item-2 lane lands.
+8. **Exclude-only queries** (no positive clause after translation): enable the
+   [ADR-068](../DECISIONS.md) class-D always-candidate lane (`accept_class_d`) and ingest them
+   normally — RR stores each as an **always-candidate** (a member of every title's candidate set,
+   excludes enforced in exact verification), the engine-native form of the interim client-side
+   side list the PoC used.
 
 **Known residual FP classes** (all predicted, all re-filtered by a precision stage): phrase-as-bag
 adjacency loss, dropped negations, decimal splits under `.`→split, occurrence counts unenforced at
-stage one (deduped at compile; preserved in the text per rule 6), and the always-candidate side list. **Known residual FN class:** exactly one — the `pop` number-context
-position-sensitivity (ADR-064 item 3) — until its parity knob lands.
+stage one (deduped at compile; preserved in the text per rule 6), and the class-D always-candidates
+(rule 8).
+**Known residual FN classes: none.** The last one — the `pop` number-context position-sensitivity
+(ADR-064 item 3) — is closed by the [ADR-069](../DECISIONS.md) number-context knob, now part of the
+parity configuration above.
 
 > **Validation still owed.** The PoC above verifies the *translation contract* on adversarial pinned
 > pairs; it is not the full-corpus audit. Running RR against this workload's **real corpus at scale** (a

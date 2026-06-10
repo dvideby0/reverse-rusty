@@ -55,6 +55,14 @@ pub struct Vocab {
     /// table runs over queries and titles, so the feature spaces stay aligned (§2).
     #[serde(default)]
     punctuation: Vec<PunctRule>,
+    /// Number-context words (ADR-069): tokens that demote an immediately-following number
+    /// to a generic term (never a year/grade). `None` (the default, and old vocab JSON
+    /// predating the field) ⇒ the normalizer's built-in `["pop"]` rule, byte-identical.
+    /// `Some([])` disables the rule — the percolator-parity mode (ADR-064 item 3), making
+    /// number typing position-insensitive. Persisted so the knob survives reopen and rides
+    /// `PUT /_vocab`; the same list runs over queries and titles (§2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    number_context: Option<Vec<String>>,
     /// Governed alias candidates (ADR-060): a registry with provenance / kind / confidence /
     /// status over the ADR-054 equivalence mechanism. Its **active** single-token groups are
     /// folded into [`effective_equivalence_groups`](Vocab::effective_equivalence_groups), so

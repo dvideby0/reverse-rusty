@@ -75,6 +75,71 @@ fn generic_fallback_term() {
     assert_eq!(names(&n, "unknownword"), s(&["term:unknownword"]));
 }
 
+// ---- number-context words (ADR-069) ----
+
+#[test]
+fn number_context_default_demotes_pop_adjacent_year() {
+    // The historical hard-coded rule, pinned (ADR-064 item 3's "today's behavior"):
+    // a 4-digit year immediately after `pop` is a generic term, not a year — number
+    // typing is position-SENSITIVE by default.
+    let n = Normalizer::default_vocab().unwrap();
+    assert_eq!(names(&n, "pop 1995"), s(&["term:1995", "term:pop"]));
+    assert_eq!(names(&n, "1995 pop"), s(&["term:pop", "year:1995"]));
+}
+
+#[test]
+fn number_context_empty_list_is_position_insensitive() {
+    // Parity mode (ADR-069): an EMPTY list disables the demotion, so a 4-digit year
+    // types as `year:N` in every position — the same feature set either side of `pop`.
+    let p = NormalizerBuilder::new()
+        .number_context_words(&[])
+        .build()
+        .unwrap();
+    assert_eq!(names(&p, "pop 1995"), s(&["term:pop", "year:1995"]));
+    assert_eq!(names(&p, "1995 pop"), s(&["term:pop", "year:1995"]));
+    // Non-year numbers are untouched (no grader/grade context in this vocab).
+    assert_eq!(names(&p, "pop 7"), s(&["term:7", "term:pop"]));
+    // Marker-driven typing (`#`/`/`) is punctuation-table territory (ADR-058), not this knob.
+    assert_eq!(names(&p, "#1995"), s(&["term:1995"]));
+}
+
+#[test]
+fn number_context_is_a_word_list_not_a_pop_flag() {
+    // The rule generalizes (ADR-069): the list REPLACES the default, so `qty` demotes
+    // and `pop` — no longer in the list — does not.
+    let q = NormalizerBuilder::new()
+        .number_context_words(&["qty"])
+        .build()
+        .unwrap();
+    assert_eq!(names(&q, "qty 1995"), s(&["term:1995", "term:qty"]));
+    assert_eq!(names(&q, "pop 1995"), s(&["term:pop", "year:1995"]));
+}
+
+#[test]
+fn number_context_disabled_changes_pop_count_reading_under_graders() {
+    // Characterization (ADR-069): the knob removes `pop`'s number-context role ENTIRELY.
+    // In a graders-on vocabulary that also changes population counts — `psa pop 7` reads
+    // as a psa grade once the rule is off. The parity knob targets the domain-agnostic
+    // parity configuration (no graders); this pins the trade so it stays a visible,
+    // documented consequence rather than a surprise.
+    let n = spec_vocab();
+    assert_eq!(
+        names(&n, "psa pop 7"),
+        s(&["grader:psa", "term:7", "term:pop"]),
+        "default: pop shields the count from the pending grader"
+    );
+    let p = NormalizerBuilder::new()
+        .grader("psa")
+        .number_context_words(&[])
+        .build()
+        .unwrap();
+    assert_eq!(
+        names(&p, "psa pop 7"),
+        s(&["grade:7", "grader:psa", "grader_grade:psa7", "term:pop"]),
+        "knob off: the pending grader grades the count"
+    );
+}
+
 // ---- vocab-driven pipeline (spec vocab) — never reached by the oracle ----
 
 #[test]

@@ -19,7 +19,8 @@ curl localhost:9200/_vocab
   "graders": ["psa"],
   "grade_words": ["gem"],
   "equivalences": [["ud", "upper deck"]],
-  "punctuation": [{"ch": "'", "class": "fold"}, {"ch": "-", "class": "fold"}]
+  "punctuation": [{"ch": "'", "class": "fold"}, {"ch": "-", "class": "fold"}],
+  "number_context": []
 }
 ```
 
@@ -59,6 +60,14 @@ makes it a word boundary, `keep` leaves it literally in place, and `marker` emit
 default — `.` is `keep`, `#`/`/` are `marker`, everything else is `split` — is reproduced exactly when the
 block is omitted (so older vocab payloads are unchanged). The same table applies to both queries and
 titles, so the lossless-cover contract is preserved under any configuration.
+
+**Number-context words (ADR-069).** The optional `number_context` array lists tokens that demote an
+immediately-following number to a generic term (`pop 1995` → `term:1995`, never `year:1995`). When the
+field is **omitted** the built-in default `["pop"]` applies — the historical population rule,
+byte-identical for older payloads. An explicit **empty array disables the rule** — the
+percolator-parity mode: number typing becomes position-insensitive, so a 4-digit year is `year:N` in
+every position. A custom list substitutes other context words. Like every vocab change, applying it
+recompiles stored queries under the new typing; the same list runs over queries and titles.
 
 ## `POST /_vocab/learn` — Learn vocabulary from queries
 

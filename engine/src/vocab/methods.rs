@@ -1,7 +1,8 @@
 //! `impl Vocab` — building a [`Normalizer`], merging vocabs, the management
 //! accessors (synonyms / phrases / graders / grade words / punctuation /
-//! equivalences), equivalence resolution to an [`EquivMap`], and JSON
-//! (de)serialization. Admin/build-time only — off the match hot path.
+//! number-context words / equivalences), equivalence resolution to an
+//! [`EquivMap`], and JSON (de)serialization. Admin/build-time only — off the
+//! match hot path.
 
 use std::io;
 use std::path::Path;
@@ -75,6 +76,13 @@ impl Vocab {
         for rule in &self.punctuation {
             b.set_punct_class(rule.ch, rule.class.into());
         }
+        // ADR-069: an explicit number-context word list overrides the normalizer's built-in
+        // `["pop"]` default (an empty list disables the demotion — the parity mode); `None`
+        // leaves the builder untouched ⇒ byte-identical.
+        if let Some(words) = &self.number_context {
+            let refs: Vec<&str> = words.iter().map(String::as_str).collect();
+            b.set_number_context_words(&refs);
+        }
         // ADR-061: offer every active alias form for phrase registration. The builder tokenizes
         // each against the FINAL punctuation table at build() and registers only the ≥2-token
         // ones as alias-mode phrases — each collapses to a single entity on the query side (so
@@ -128,6 +136,11 @@ impl Vocab {
                 self.punctuation.push(rule.clone());
             }
         }
+        // ADR-069: an explicitly-set number-context list wins; adopt the other's only when
+        // this vocab never set one (first-wins, like synonyms).
+        if self.number_context.is_none() {
+            self.number_context.clone_from(&other.number_context);
+        }
         // Merge the governed alias registry (ADR-060) — existing entries win, a higher-trust
         // provenance + max confidence is adopted (see [`AliasRegistry::merge`]).
         self.aliases.merge(&other.aliases);
@@ -156,6 +169,24 @@ impl Vocab {
     /// The registered punctuation rules, in declaration order.
     pub fn punctuation(&self) -> &[PunctRule] {
         &self.punctuation
+    }
+
+    // ── Number-context words (ADR-069) ──────────────────────────────────
+
+    /// Replace the **number-context word list** — tokens that demote an immediately-following
+    /// number to a generic term (`pop 1995` -> `term:1995`). Setting an **empty** list
+    /// disables the rule (the percolator-parity mode, ADR-064 item 3): number typing becomes
+    /// position-insensitive, so a 4-digit year is `year:N` everywhere. Until this is called,
+    /// the normalizer keeps its built-in `["pop"]` default, byte-identical.
+    pub fn set_number_context_words(&mut self, words: &[&str]) {
+        self.number_context = Some(words.iter().map(|w| (*w).to_string()).collect());
+    }
+
+    /// The explicit number-context word list, if one was set. `None` ⇒ the normalizer's
+    /// built-in `["pop"]` default applies.
+    #[must_use]
+    pub fn number_context_words(&self) -> Option<&[String]> {
+        self.number_context.as_deref()
     }
 
     // ── Synonym management ──────────────────────────────────────────────
