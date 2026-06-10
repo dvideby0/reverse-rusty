@@ -149,20 +149,46 @@ items from an external review, re-ranked to the top; **all are now done:**
   (the live-handoff routing-flip mechanism), the **live data-moving handoff** (peer-recover → fence →
   drain-to-convergence → flip, under concurrent writes), and the **autoscaler** — are **built and
   oracle-proven _in-process / on localhost_, but experimental: not yet hardened for real multi-machine
-  deployment** (ADR-027, 029, 031–045). **Tier 0 (the v1 acceptance gate) is complete**; this
-  distributed buildout resumes next.
+  deployment** (ADR-027, 029, 031–045). **Tier 0 (the v1 acceptance gate) is complete**; the buildout now
+  targets **Distributed v1 ([ADR-065](DECISIONS.md)) — graduating these layers from experimental to
+  release-candidate**: feature-complete and hardened enough to *test every feature on real machines* — not
+  yet production-proven (that takes mileage), but with no known untested feature seam.
   **Per-ADR detail is
   in [Implemented](#implemented-working-tested) above**; the build path + cross-shard correctness argument are
   in [`design/clustering-and-scaling.md`](design/clustering-and-scaling.md) §10 (hashing-variant survey:
   [`research/clustering-prior-art.md`](research/clustering-prior-art.md)). *(Reliability hardening —
   auto-unfence-on-abort, the translog-lease TTL, and wiring the autoscaler's handoff to `execute_handoff` —
-  **landed in ADR-048**; see Implemented above.)* **Still design-only** — the production multi-node residue:
-  **auto-split** + `recommended_shard_count` (the autoscaler's split recommendation needs a real split
-  mechanism + the clean node→endpoint move it implies); **replicate-broad-to-all** (in-process uses the
-  shard-0 lane only); **TLS/auth** on the gRPC + control transports; and an
-  end-to-end durable-multi-node rolling-restart harness. *(**Dynamic vocabulary / normalizer shipping moved
-  up to Tier 0** — it is a v1 correctness item now, not Tier-3 residue; the cross-process phasing of it may
-  remain here per the [research spike](research/dynamic-vocabulary.md).)*
+  **landed in ADR-048**; see Implemented above.)*
+
+  **The Distributed-v1 checklist ([ADR-065](DECISIONS.md)) — work top-down; items 1–3 unblock testing
+  everything else:**
+  1. **Cluster REST surface** — a coordinator-mode server exposing the existing REST API over a
+     `ClusterEngine`. Today REST fronts a single-node `Engine` only (the cluster is a library API + raw
+     gRPC bins) — the single biggest gap to "testing all features" without embedding Rust.
+  2. **TLS + auth on the gRPC transports** (shard + control plane — both currently plaintext and
+     unauthenticated; reuse the ADR-062 token shape and/or mTLS, fail-loud config).
+  3. **A real multi-machine test harness** — durable multi-node rolling-restart / kill-and-recover /
+     handoff-under-load across a real network boundary (containers or hosts), plus a CI-runnable compose
+     variant. Every later criterion lands with harness coverage.
+  4. **Tagged-cluster vocabulary change** (the ADR-055 deferral) — persist raw tag strings so the
+     blue/green rebuild can reconstruct synthetic tags instead of refusing fail-loud.
+  5. **Cluster ranking** (the ADR-059 deferral) — the `RankSpec` seam at the coordinator merge.
+  6. **Cross-process vocab/normalizer shipping** + multi-word aliases on a cluster (the ADR-046/061
+     deferrals; per the [research spike](research/dynamic-vocabulary.md)) — ship it, or record the
+     decided refusal story.
+  7. **Auto-split + `recommended_shard_count`** — ring re-keying + the data move via the existing live
+     handoff (the autoscaler's split advisory gains a real mechanism).
+  8. **Replicate-broad-to-all** — or the explicit ADR for why the RF-replicated shard-0 lane suffices
+     at v1.
+  9. **Tag-dict fingerprint in the recovery handshakes** (the deferred ADR-055 hardening — the
+     feature-dict fingerprint is already validated).
+  10. **Deployment packaging + runbook** — Dockerfile/compose for a K-shard + control-plane cluster +
+      an ops doc (closes the backlog "no Dockerfile" line).
+  11. **Backup/restore documented + tested** (coordinates with ADR-064 item 7; the cluster version must
+      cover coordinator manifest + per-shard segments + logs).
+  12. **Scale proof at target** — a multi-shard load test at ≥20M stored queries on real hardware (the
+      largest soak to date is 10M, single-node) + the real-corpus FN/throughput audit owed in STATUS
+      "Current limitations".
 - **Aspects-first ingestion.** Use eBay structured item-specifics as features instead of relying only
   on title parsing — higher feature quality, but a larger domain integration.
 
@@ -172,14 +198,43 @@ These items close the gaps between Reverse Rusty and how production percolator d
 *operated* — now **verified against a documented reference workload**
 ([`research/percolator-workload.md`](research/percolator-workload.md)), not just an initial guess. That
 write-up also records what already **aligns** (entity identity ↔ `logical_id`, the
-include/exclude/OR-group DSL, create/update/delete + bulk) and what RR **subsumes** (the two-stage
-recall→verify pattern — RR's integer-exact verifier makes output false-positive-free, so there is no
-app-side re-test); the capability-by-capability mapping is
+include/exclude/OR-group DSL, create/update/delete + bulk) and what RR **subsumes under its own
+semantics** (the two-stage recall→verify pattern — RR's integer-exact verifier makes output
+false-positive-free; fronting a deployment that keeps a *foreign* precision stage instead requires the
+verified superset contract, §Drop-in parity in that write-up); the capability-by-capability mapping is
 [`research/prior-art.md`](research/prior-art.md) §2. The **dominant read pattern** — *"percolate, then
 narrow to one category"* — makes the **metadata + filtering pair the high-value work**; scoring and batch
-pagination are smaller, lower-priority items. *(Validating RR against this workload's **real corpus** — a
-false-negative / throughput audit — remains the open step in **Current limitations** below.)*
+pagination are smaller, lower-priority items. *(A 2026-06 **drop-in parity audit** —
+[ADR-064](DECISIONS.md) — re-verified this workload at the semantic level, including an empirical
+pinned-pair PoC against the reference deployment's own precision matcher: **zero false negatives** under
+the documented parity configuration, now recorded in
+[`research/percolator-workload.md`](research/percolator-workload.md) §Drop-in parity. The full
+**real-corpus** false-negative / throughput audit remains the open validation step in STATUS "Current
+limitations".)*
 
+- **Drop-in operational parity — the [ADR-064](DECISIONS.md) work package (next up in this tier).** The
+  audit's decided items, each shipping under its own ADR/PR (full detail + today's-behavior citations in
+  the program ADR):
+  1. **Atomic-upsert `PUT /_doc`** — today a re-PUT adds a second live copy without tombstoning the old
+     one, so the id matches under *either* version's semantics until an explicit DELETE (and
+     DELETE-then-PUT leaves a brief no-match window). Tombstone prior copies + insert under one
+     writer-lock critical section and one snapshot publish (ES `index` = replace-by-id).
+  2. **Class-D always-candidate lane (opt-in)** — ES/OS `query_string` rewrites a pure-negative query to
+     **match-all-except** (`fixNegativeQueryIfNeeded`) and the reference workload contains such queries
+     ("base"/"raw" entities defined by exclusions); RR rejects them at ingest. Accept-and-quarantine:
+     the query is a candidate for *every* title, its forbidden features enforced only in exact
+     verification — never-gate-on-MUST_NOT extends naturally (the cover of an empty positive set is the
+     universal signature); rides the broad-lane batching. Default off (today's loud reject).
+  3. **Parity-mode normalizer knob** — disable the hard-coded `pop` number-context year demotion
+     (position-sensitive number typing; the one residual FN class the audit demonstrated against a
+     position-insensitive reference matcher). Vocab-persisted; default = current behavior.
+  4. **Loud non-string tag values** — ingest silently drops a non-string tag value and filter arrays
+     silently drop non-string elements (while scalar filter values 400) — the silent half corrupts
+     filtering invisibly. Reject (or canonically coerce — pick one, document it) on both paths.
+  5. **Wire `maybe_flush` into the REST PUT path** — `memtable_flush_threshold` is currently inert for
+     single-doc HTTP writes (`put_doc` bypasses the only call site); WAL-durable but the knob lies.
+  6. **Per-request `include_broad` on `/_search`** — today server-flag-only, and an `include_broad`
+     body field is *silently ignored*; `/_mpercolate` already has the per-request override.
 - **Per-query metadata + filtered percolation — the lead item. ✅ BUILT (single-node) + oracle-proven
   (2026-06-03, [ADR-049](DECISIONS.md)).** The dominant read pattern: stored queries carry structured tags
   (a category, a status, secondary keys) and callers percolate, then **narrow the candidates by those
@@ -350,6 +405,15 @@ from the audit's former P3 list). Roughly grouped:
   selection, and a help listing. Low-value polish, listed for completeness.
 - **`took_ms` uses raw f64** — yields values like `0.003284000000000001`. Use integer ms or round to 2 dp.
 - **No pre-warming** for mmap'd segments on cold start.
+- **No measured restart/reopen time** at ≥1M queries — the mmap-attach + WAL-tail design implies
+  sub-second-to-seconds, but no captured number exists ([ADR-064](DECISIONS.md) item 7).
+- **No documented/tested backup-restore procedure** — hot-copying the data dir after `/_flush` is
+  structurally sound (the manifest is the atomic commit point; segments are fsync+rename) but nothing
+  blesses or tests it ([ADR-064](DECISIONS.md) item 7; cluster version = [ADR-065](DECISIONS.md)
+  criterion 11).
+- **Tags are write-only over REST** — no endpoint returns a stored query's tags (`GET /_doc` returns only
+  `_source.query`, hits carry no tags field); a small read-back addition for metadata audits
+  ([ADR-064](DECISIONS.md) item 7).
 
 **Memory / hot-path micro-optimizations**
 - **`alive: Vec<bool>`** uses 8× the memory of a bitvec (1 byte vs 1 bit per entry).
