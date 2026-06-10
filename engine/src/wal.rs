@@ -317,6 +317,11 @@ impl Wal {
 
         let mut entries = Vec::new();
         let mut cursor = 0usize;
+        // End of the last FULLY-validated frame. `cursor` advances past a frame's
+        // len+CRC header before the body is validated, so on a corrupt frame it sits 8
+        // bytes into unparseable data — reporting `skipped_bytes` from `cursor` would
+        // silently under-count the corrupt frame's own header.
+        let mut consumed = 0usize;
 
         while cursor + 8 <= data.len() {
             let total_len = match get_u32(data, cursor) {
@@ -446,9 +451,10 @@ impl Wal {
             }
 
             cursor += total_len;
+            consumed = cursor;
         }
 
-        let skipped_bytes = data.len() - cursor;
+        let skipped_bytes = data.len() - consumed;
         Ok((entries, skipped_bytes))
     }
 
