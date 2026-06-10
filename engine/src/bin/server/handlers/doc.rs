@@ -21,20 +21,20 @@ use crate::state::AppState;
 
 /// The class-D rejection body, shared by the single-doc and bulk paths. Names the
 /// opt-in lane (ADR-068) so an operator hitting the reject knows the way out.
-const CLASS_D_REJECT_MSG: &str = "query has no anchorable feature (cost class D); \
+pub(crate) const CLASS_D_REJECT_MSG: &str = "query has no anchorable feature (cost class D); \
      negation-only queries are stored as always-candidates when the accept_class_d \
      setting is enabled";
 
 #[derive(Deserialize)]
 pub(crate) struct PutDocBody {
-    query: String,
+    pub(crate) query: String,
     #[serde(default = "default_version")]
-    version: u32,
+    pub(crate) version: u32,
     /// Per-query metadata tags (ADR-049): a canonical `tags` object plus any ES-style
     /// sibling fields (everything not named `query`/`version`/`tags`). See
     /// [`extract_ingest_tags`].
     #[serde(flatten)]
-    rest: serde_json::Map<String, serde_json::Value>,
+    pub(crate) rest: serde_json::Map<String, serde_json::Value>,
 }
 fn default_version() -> u32 {
     1
@@ -100,7 +100,9 @@ const RESERVED_INGEST_FIELDS: [&str; 3] = ["query", "version", "tags"];
 /// **and** any other non-reserved top-level scalar/array field (ES stores percolator
 /// metadata as siblings of `query`). A value that is neither a string nor an array of
 /// strings is ignored.
-fn extract_ingest_tags(obj: &serde_json::Map<String, serde_json::Value>) -> Vec<(String, String)> {
+pub(crate) fn extract_ingest_tags(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut push_kv = |key: &str, v: &serde_json::Value| match v {
         serde_json::Value::String(s) => out.push((key.to_string(), s.clone())),
@@ -587,7 +589,7 @@ pub(crate) async fn bulk_ingest(
 
 /// Extract _id from ES-style action line.
 /// Accepts: {"index": {"_id": 123}} or {"_id": 123}
-fn extract_bulk_id(action: &serde_json::Value) -> Option<u64> {
+pub(crate) fn extract_bulk_id(action: &serde_json::Value) -> Option<u64> {
     // ES style: {"index": {"_id": N}}
     if let Some(inner) = action.get("index") {
         if let Some(id) = inner.get("_id").and_then(serde_json::Value::as_u64) {

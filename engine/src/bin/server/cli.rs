@@ -143,4 +143,32 @@ pub(crate) struct Cli {
     /// requests are rejected with 400. Dynamic via `PUT /_settings`.
     #[arg(long, default_value_t = 10_000)]
     pub(crate) max_percolate_batch: usize,
+
+    // ---- coordinator (cluster) mode, ADR-070 ----
+    /// Run as a CLUSTER coordinator: the same REST API served over a multi-shard
+    /// `ClusterEngine` instead of a single-node `Engine` (ADR-070). In-process by
+    /// default (`--shards` K in this process, durable with `--data-dir`); with
+    /// repeatable `--shard-endpoint` flags the shards are remote `shardserver`
+    /// nodes (requires a `--features distributed` build).
+    #[arg(long, default_value_t = false)]
+    pub(crate) cluster: bool,
+
+    /// Number of shards for an in-process cluster (`--cluster`). Ignored when
+    /// `--shard-endpoint`s are given — the endpoint count defines K.
+    #[arg(long, default_value_t = 8)]
+    pub(crate) shards: usize,
+
+    /// Copies per shard position in cluster mode (1 = primary only). For an
+    /// in-process cluster replicas are in-process copies; for a remote cluster
+    /// list replicas inside each `--shard-endpoint` group instead.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) replication_factor: usize,
+
+    /// Remote shard endpoint group for coordinator mode — repeatable, one flag per
+    /// shard position, each `primary[,replica,...]` (e.g.
+    /// `--shard-endpoint http://10.0.0.1:50051,http://10.0.0.2:50051`). The
+    /// coordinator ships its frozen dict + tag space to every endpoint at connect
+    /// (ADR-034/055). Requires `--cluster` and a `--features distributed` build.
+    #[arg(long)]
+    pub(crate) shard_endpoint: Vec<String>,
 }

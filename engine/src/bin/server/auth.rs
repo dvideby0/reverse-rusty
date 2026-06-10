@@ -24,7 +24,7 @@ use axum::{
 use tracing::warn;
 
 use crate::dto::ApiError;
-use crate::state::AppState;
+use crate::state::RequestCtx;
 
 /// Resolved auth configuration held in [`AppState`]. Built once at startup by
 /// [`AuthConfig::resolve`]; absent (`None` in `AppState.auth`) means the gate
@@ -134,12 +134,12 @@ fn bearer_token(headers: &HeaderMap) -> Option<&[u8]> {
 /// Pass-through when no token is configured or the route is open; otherwise
 /// 401 with an RFC 6750 `WWW-Authenticate` challenge and the standard error
 /// envelope (ES-style `security_exception`).
-pub(crate) async fn auth_middleware(
-    State(state): State<Arc<AppState>>,
+pub(crate) async fn auth_middleware<S: RequestCtx>(
+    State(state): State<Arc<S>>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    let Some(auth) = &state.auth else {
+    let Some(auth) = state.auth() else {
         return next.run(request).await;
     };
     if !requires_auth(request.method(), request.uri().path(), auth.protect_reads) {
@@ -151,7 +151,7 @@ pub(crate) async fn auth_middleware(
         None => "missing",
     };
     state
-        .prom
+        .prom()
         .auth_failures_total
         .with_label_values(&[reason])
         .inc();
@@ -185,6 +185,7 @@ pub(crate) async fn auth_middleware(
 mod tests {
     use super::*;
     use crate::metrics::PrometheusMetrics;
+    use crate::state::AppState;
     use axum::routing::{get, post};
     use axum::Router;
     use reverse_rusty::segment::Engine;

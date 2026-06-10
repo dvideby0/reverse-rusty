@@ -88,14 +88,14 @@ pub(crate) struct LearnRequest {
     learn_equivalences: bool,
 }
 
-fn default_min_count() -> usize {
+pub(crate) fn default_min_count() -> usize {
     2
 }
 
 /// Build a [`CorpusLearnConfig`](reverse_rusty::vocab::CorpusLearnConfig) from the
 /// shared learn-endpoint params, falling back to the engine defaults for any absent
 /// NPMI knob (so `CorpusLearnConfig::default()` stays the single source of truth).
-fn build_corpus_config(
+pub(crate) fn build_corpus_config(
     min_count: usize,
     corpus_phrases: bool,
     npmi_tau: Option<f64>,
@@ -135,23 +135,23 @@ pub(crate) async fn learn_vocab(Json(req): Json<LearnRequest>) -> impl IntoRespo
 pub(crate) struct LearnApplyQuery {
     /// Minimum any-of occurrences for a synonym to be learned (ES-style query param).
     #[serde(default = "default_min_count")]
-    min_count: usize,
+    pub(crate) min_count: usize,
     /// Opt-in NPMI corpus phrase induction (ADR-053); off by default — when absent the
     /// endpoint is byte-identical to before (any-of learning only).
     #[serde(default)]
-    corpus_phrases: bool,
+    pub(crate) corpus_phrases: bool,
     /// NPMI binding-strength threshold (defaults to the engine default).
     #[serde(default)]
-    npmi_tau: Option<f64>,
+    pub(crate) npmi_tau: Option<f64>,
     /// Minimum adjacent co-occurrence count for an induced phrase.
     #[serde(default)]
-    npmi_min_count: Option<usize>,
+    pub(crate) npmi_min_count: Option<usize>,
     /// Bigram -> trigram growth passes.
     #[serde(default)]
-    npmi_iterations: Option<usize>,
+    pub(crate) npmi_iterations: Option<usize>,
     /// Opt-in: learn any-of groups as equivalences applied via expansion (ADR-054).
     #[serde(default)]
-    learn_equivalences: bool,
+    pub(crate) learn_equivalences: bool,
 }
 
 #[derive(Serialize)]
