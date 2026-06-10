@@ -250,6 +250,24 @@ impl LocalShard {
             ClusterMutation::Remove { logical } => {
                 eng.delete_by_logical_id(*logical).unwrap_or(0);
             }
+            // Defensive: a per-shard translog never holds an Upsert frame today — the
+            // coordinator decomposes a cluster upsert into per-shard delete + insert seam
+            // calls, each re-logged as its own Remove/Add record (ADR-070). Replay one
+            // anyway (same delete-then-insert semantics) rather than panic on a future
+            // writer that logs it whole.
+            ClusterMutation::Upsert {
+                logical,
+                version,
+                dsl,
+                tags,
+            } => {
+                eng.delete_by_logical_id(*logical).unwrap_or(0);
+                if let Ok(ast) = crate::dsl::parse(dsl) {
+                    let mut lc = String::new();
+                    let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+                    eng.insert_extracted(&ex, *logical, *version, dsl, tags);
+                }
+            }
         }
         Self::publish(&eng, &self.snapshot);
     }
@@ -322,6 +340,11 @@ impl Shard for LocalShard {
 
     fn is_local(&self) -> bool {
         true
+    }
+
+    fn source_of(&self, logical: u64) -> Result<Option<String>, ShardError> {
+        // Lock-free: the snapshot's query store carries the live source set (ADR-014).
+        Ok(self.snapshot().get_query_source(logical))
     }
 
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {

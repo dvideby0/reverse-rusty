@@ -64,7 +64,9 @@ fn seal_honors_retention_lease_so_concurrent_seal_keeps_the_recovery_tail() {
     let ids: Vec<u64> = tail
         .iter()
         .map(|(_, m)| match m {
-            ClusterMutation::Add { logical, .. } | ClusterMutation::Remove { logical } => *logical,
+            ClusterMutation::Add { logical, .. }
+            | ClusterMutation::Remove { logical }
+            | ClusterMutation::Upsert { logical, .. } => *logical,
         })
         .collect();
     assert_eq!(

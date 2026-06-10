@@ -172,4 +172,67 @@ impl ClusterEngine {
         }
         Ok(total)
     }
+
+    /// [`Self::percolate_filtered_with_broad`] also returning the merged [`MatchStats`]
+    /// across the probed shards — the coordinator-mode server's `/_search` profile path
+    /// (ADR-070). An empty filter + the cluster default broad toggle is byte-identical
+    /// to [`Self::percolate_with_stats`].
+    pub fn percolate_filtered_with_stats(
+        &self,
+        title: &str,
+        filter: &[(String, Vec<String>)],
+        include_broad: bool,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        let pred = self.compile_tag_predicate(filter);
+        self.percolate_inner(title, include_broad, &pred)
+    }
+
+    /// The live source DSL stored for `logical`, probing each shard's source store
+    /// (first live copy wins — every copy of one logical id is identical). `Ok(None)`
+    /// only when EVERY shard answered "not held"; a shard that cannot answer (a
+    /// `RemoteShard` in v1) fails the lookup loud rather than letting the coordinator
+    /// report a false "not found" (ADR-070).
+    pub fn get_source(&self, logical: u64) -> Result<Option<String>, ShardError> {
+        let mut first_err: Option<ShardError> = None;
+        for s in &self.shards {
+            match s.source_of(logical) {
+                Ok(Some(dsl)) => return Ok(Some(dsl)),
+                Ok(None) => {}
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(None),
+        }
+    }
+
+    /// The cluster's default broad-lane toggle (what [`Self::percolate`] uses).
+    pub fn include_broad(&self) -> bool {
+        self.include_broad
+    }
+
+    /// Replication factor (copies per shard position).
+    pub fn replication_factor(&self) -> usize {
+        self.replication_factor
+    }
+
+    /// Whether this cluster persists durable artifacts (built/opened with a `data_dir`).
+    pub fn is_durable(&self) -> bool {
+        self.data_dir.is_some()
+    }
+
+    /// The per-shard engine configuration the cluster was assembled with.
+    pub fn per_shard_config(&self) -> &crate::config::EngineConfig {
+        &self.per_shard
+    }
+
+    /// True if the cluster holds (or has ever held) any tagged query (ADR-055) — the
+    /// condition under which a vocabulary change is refused. Introspection for
+    /// operators (cluster-mode `/_stats`, ADR-070).
+    pub fn has_tagged_queries(&self) -> bool {
+        self.has_tags()
+    }
 }

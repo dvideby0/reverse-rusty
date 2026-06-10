@@ -47,6 +47,11 @@ impl Shard for ReplicatedShard {
         true
     }
 
+    fn source_of(&self, logical: u64) -> Result<Option<String>, ShardError> {
+        // Set-equal copies ⇒ any in-sync copy answers; same failover as the other reads.
+        self.read(|s| s.source_of(logical))
+    }
+
     // ---- writes (primary-authoritative, fan out to replicas) ----
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         let _g = self.lock();

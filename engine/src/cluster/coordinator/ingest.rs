@@ -182,6 +182,132 @@ impl ClusterEngine {
         self.apply_add(id, 1, dsl, tags)
     }
 
+    /// Atomically replace a query by logical id — ES `index` semantics at the cluster
+    /// (ADR-070, the coordinator analogue of the engine's ADR-067 upsert): every prior
+    /// live copy is tombstoned and the new version inserted under ONE log frame
+    /// ([`ClusterMutation::Upsert`]), so a crash replays the whole replacement or none
+    /// of it — never a remove that lost its re-add. Returns the number of prior entries
+    /// removed (0 ⇒ created, >0 ⇒ updated) plus where the new version landed. A
+    /// rejected new version (parse / class D) **never deletes** — the prior version
+    /// stays live and matchable.
+    pub fn upsert_query(&self, id: u64, dsl: &str) -> Result<(usize, AddOutcome), ShardError> {
+        self.upsert_query_with_tags(id, dsl, &[])
+    }
+
+    /// [`upsert_query`](Self::upsert_query) carrying per-query metadata tags for the NEW
+    /// version (ADR-055 semantics: raw tags ride the log frame and resolve read-only
+    /// against the shared frozen tag space on each target shard).
+    pub fn upsert_query_with_tags(
+        &self,
+        id: u64,
+        dsl: &str,
+        tags: &[(String, String)],
+    ) -> Result<(usize, AddOutcome), ShardError> {
+        // Reject malformed DSL up front: it carries no replayable mutation, so it must
+        // never reach the log (a logged record must parse on replay) — and a failed
+        // replace never deletes.
+        if let Err(e) = crate::dsl::parse(dsl) {
+            return Ok((0, AddOutcome::RejectedParse(e)));
+        }
+        let m = ClusterMutation::Upsert {
+            logical: id,
+            version: 1,
+            dsl: dsl.to_string(),
+            tags: tags.to_vec(),
+        };
+        if let Err(e) = self.log.append(&m) {
+            self.emit(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::WalAppend,
+                detail: format!("cluster upsert_query(id={id}) not durably logged; rejected"),
+                error: e.to_string(),
+            });
+            return Err(e);
+        }
+        self.apply_upsert(id, 1, dsl, tags)
+    }
+
+    /// Apply an UPSERT to the shards — the state-machine `apply` for replace-by-id,
+    /// shared by the live write path (after logging) and log replay, so live and
+    /// replayed application are byte-identical. Placement is decided FIRST: a class-D /
+    /// parse rejection returns before any tombstone (a failed replace never deletes,
+    /// ADR-067 parity). Then pass 1 tombstones the id on every shard (a re-placed query
+    /// may live anywhere) and pass 2 inserts the new version on its placement shards —
+    /// the two-pass order guarantees delete-before-insert on every shard that keeps the
+    /// query. Partial failures ride the ADR-047 machinery with the `Upsert` itself as
+    /// the queued repair mutation (re-driving it per shard is an idempotent
+    /// delete + insert).
+    fn apply_upsert(
+        &self,
+        id: u64,
+        version: u32,
+        dsl: &str,
+        tags: &[(String, String)],
+    ) -> Result<(usize, AddOutcome), ShardError> {
+        self.note_tags(tags);
+        let ast = match crate::dsl::parse(dsl) {
+            Ok(a) => a,
+            Err(e) => return Ok((0, AddOutcome::RejectedParse(e))),
+        };
+        let mut lc = String::new();
+        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        let (insert_shards, outcome) = match self.placement(&ex) {
+            Target::Reject => return Ok((0, AddOutcome::RejectedClassD)),
+            Target::Replicated => (vec![0usize], AddOutcome::Replicated),
+            Target::Selective(shards) => (
+                shards.clone(),
+                AddOutcome::Placed {
+                    shards: shards.clone(),
+                },
+            ),
+        };
+        // Pass 1 — tombstone every prior copy, everywhere (idempotent on non-holders).
+        let mut removed = 0usize;
+        let mut failed: Vec<usize> = Vec::new();
+        let mut first_err: Option<ShardError> = None;
+        for (s, shard) in self.shards.iter().enumerate() {
+            match shard.delete_by_logical_id(id) {
+                Ok(n) => removed += n,
+                Err(e) => {
+                    failed.push(s);
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        // Pass 2 — insert the new version on its placement shards. A shard whose delete
+        // failed is skipped (its repair re-drives the WHOLE upsert, preserving the
+        // per-shard delete-before-insert order).
+        for &s in &insert_shards {
+            if failed.contains(&s) {
+                continue;
+            }
+            if let Err(e) = self.shards[s].insert_extracted_with_tags(&ex, id, version, dsl, tags) {
+                failed.push(s);
+                first_err.get_or_insert(e);
+            }
+        }
+        if !failed.is_empty() {
+            failed.sort_unstable();
+            failed.dedup();
+            let applied: Vec<usize> = (0..self.shards.len())
+                .filter(|s| !failed.contains(s))
+                .collect();
+            return Err(self.note_partial(
+                ClusterMutation::Upsert {
+                    logical: id,
+                    version,
+                    dsl: dsl.to_string(),
+                    tags: tags.to_vec(),
+                },
+                id,
+                applied,
+                failed,
+                first_err,
+            ));
+        }
+        self.clear_pending(id);
+        Ok((removed, outcome))
+    }
+
     /// Remove a query by logical id. Fans the (idempotent) delete out to every
     /// shard and sums the count — sidestepping any placement journal (a replicated
     /// or any-of query may live on several shards; a re-add may have moved it).
@@ -451,6 +577,14 @@ impl ClusterEngine {
             }
             ClusterMutation::Remove { logical } => {
                 self.apply_remove(logical)?;
+            }
+            ClusterMutation::Upsert {
+                logical,
+                version,
+                dsl,
+                tags,
+            } => {
+                self.apply_upsert(logical, version, &dsl, &tags)?;
             }
         }
         Ok(())

@@ -373,3 +373,123 @@ fn resync_requeues_when_shard_still_failing() {
         .expect("percolate")
         .contains(&7));
 }
+
+/// Cluster upsert (ADR-070): a fresh id creates (`removed == 0`), a re-upsert replaces —
+/// the OLD version stops matching, the NEW one matches, and exactly one live physical
+/// copy remains (no additive duplicate, the pre-ADR-067 hazard at the cluster).
+#[test]
+fn upsert_creates_then_replaces_by_logical_id() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![
+        (1u64, "1994 topps".to_string()),
+        (2u64, "1995 fleer".to_string()),
+    ];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster builds");
+
+    // Create: a fresh id reports zero prior copies removed.
+    let (removed, outcome) = cluster.upsert_query(3, "1996 skybox").expect("upsert");
+    assert_eq!(removed, 0, "fresh id ⇒ created");
+    assert!(matches!(
+        outcome,
+        AddOutcome::Placed { .. } | AddOutcome::Replicated
+    ));
+    assert!(cluster.percolate("1996 skybox").expect("p").contains(&3));
+
+    // Replace: the new version matches, the old does not — old-stops-matching IS the
+    // no-additive-duplicate proof (the pre-ADR-067 hazard was both versions live at
+    // once). Entry counts grow by design (tombstone + insert), so they are not asserted.
+    let (removed, _) = cluster
+        .upsert_query(3, "1997 metal universe")
+        .expect("upsert");
+    assert!(removed > 0, "prior copy tombstoned ⇒ updated");
+    assert!(
+        !cluster.percolate("1996 skybox").expect("p").contains(&3),
+        "old version must stop matching after replace"
+    );
+    assert!(
+        cluster
+            .percolate("1997 metal universe")
+            .expect("p")
+            .contains(&3),
+        "new version must match after replace"
+    );
+
+    // Replace back: repeated upserts keep converging (no stale copy resurfaces).
+    let (removed, _) = cluster.upsert_query(3, "1996 skybox").expect("upsert");
+    assert!(removed > 0);
+    assert!(cluster.percolate("1996 skybox").expect("p").contains(&3));
+    assert!(
+        !cluster
+            .percolate("1997 metal universe")
+            .expect("p")
+            .contains(&3),
+        "replaced-away version must not resurface"
+    );
+}
+
+/// A rejected NEW version never deletes the prior one (ADR-067 parity at the cluster):
+/// a class-D (negation-only) upsert and a parse-error upsert both leave the stored
+/// version live and matchable.
+#[test]
+fn upsert_rejection_keeps_prior_version_live() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![(1u64, "1994 topps".to_string())];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster builds");
+    assert!(cluster.percolate("1994 topps").expect("p").contains(&1));
+
+    // Class D: negation-only — rejected at placement, stored nowhere, deletes nothing.
+    let (removed, outcome) = cluster.upsert_query(1, "-junk").expect("upsert");
+    assert_eq!(removed, 0, "a failed replace never deletes");
+    assert!(matches!(outcome, AddOutcome::RejectedClassD));
+    assert!(
+        cluster.percolate("1994 topps").expect("p").contains(&1),
+        "prior version stays matchable after a class-D upsert"
+    );
+
+    // Parse error: rejected before logging, deletes nothing.
+    let (removed, outcome) = cluster.upsert_query(1, "(((").expect("upsert");
+    assert_eq!(removed, 0);
+    assert!(matches!(outcome, AddOutcome::RejectedParse(_)));
+    assert!(
+        cluster.percolate("1994 topps").expect("p").contains(&1),
+        "prior version stays matchable after a parse-error upsert"
+    );
+}
+
+/// WAL-first fail-closed for upsert, mirroring `add_query_is_fail_closed_when_log_append_fails`:
+/// when the durable log append fails the upsert is rejected whole — the prior version
+/// remains live and matchable (the replace never half-applies).
+#[test]
+fn upsert_is_fail_closed_when_log_append_fails() {
+    let dir = scratch_dir("upsert_failclosed");
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let seed = vec![(7u64, "1994 topps".to_string())];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
+
+    cluster.log.break_writes_for_test();
+    let res = cluster.upsert_query(7, "1995 fleer");
+    assert!(
+        matches!(res, Err(ShardError::Log(_))),
+        "expected Log error, got {res:?}"
+    );
+    assert!(
+        cluster.percolate("1994 topps").expect("p").contains(&7),
+        "prior version must remain matchable after a rejected upsert"
+    );
+    assert!(
+        !cluster.percolate("1995 fleer").expect("p").contains(&7),
+        "the rejected new version must not be matchable"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

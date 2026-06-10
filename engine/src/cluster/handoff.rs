@@ -152,6 +152,10 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().class_counts()
     }
 
+    fn source_of(&self, logical: u64) -> Result<Option<String>, ShardError> {
+        self.current.load().source_of(logical)
+    }
+
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         self.current.load().ingest_extracted(items)
     }

@@ -181,7 +181,17 @@ pub(super) fn fetch_translog(
         .map_err(|e| Status::internal(format!("reading translog tail: {e}")))?;
     let entries: Vec<Result<proto::TranslogEntry, Status>> = tail
         .into_iter()
-        .map(|(pos, m)| Ok(proto::translog_entry_from_mutation(pos, &m)))
+        .map(|(pos, m)| {
+            // An unrepresentable frame (a whole Upsert — see the mapper) fails the
+            // stream LOUD: a recovery built on a half-shipped frame would diverge
+            // silently from its source.
+            proto::translog_entry_from_mutation(pos, &m).ok_or_else(|| {
+                Status::internal(
+                    "translog holds a frame FetchTranslog cannot represent (whole Upsert); \
+                     per-shard translogs must carry decomposed ops (ADR-070)",
+                )
+            })
+        })
         .collect();
     Ok(Response::new(Box::pin(tokio_stream::iter(entries))))
 }

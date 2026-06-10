@@ -3,7 +3,7 @@
 //! parts, used by both `build` and the distributed/gRPC builders) and `open`
 //! (reattach a durable cluster's committed segments + replay the log tail).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -101,6 +101,14 @@ impl ClusterEngine {
             handle: None,
         })
     }
+    /// True if `data_dir` holds a committed cluster manifest — i.e. [`Self::open`]
+    /// will reopen an existing durable cluster there; otherwise [`Self::build`] is the
+    /// constructor. The boot-time predicate the coordinator-mode server branches on
+    /// (ADR-070), exposed so callers need not string-match `open`'s error.
+    pub fn cluster_exists(data_dir: &Path) -> bool {
+        data_dir.join(CLUSTER_MANIFEST_FILE).exists()
+    }
+
     /// Reopen a durable cluster from `data_dir` (built earlier with a `data_dir` set).
     /// Each shard **attaches-and-mmaps** its committed compiled segments (the
     /// `cluster_manifest.bin` registry) — NOT re-ingest — then the log tail strictly
