@@ -21,6 +21,7 @@
 use std::future::Future;
 
 use tokio::runtime::{Handle, RuntimeFlavor};
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
 
 use crate::compile::Extracted;
@@ -30,15 +31,37 @@ use crate::segment::{IngestReport, MatchStats, PlacedQuery};
 use super::clog::{ClusterMutation, LogPos};
 use super::proto;
 use super::proto::shard_service_client::ShardServiceClient;
+use super::security::{configure_endpoint, ClientSecurity, MeshAuthInject};
 use super::shard::{Shard, ShardError};
+
+/// The mesh-aware client channel (ADR-071): every RPC flows through the
+/// [`MeshAuthInject`] interceptor, which attaches the cluster token when one is
+/// configured and is a no-op otherwise — so the secured and plaintext paths share
+/// ONE client type and no RPC call site changes.
+type MeshChannel = InterceptedService<Channel, MeshAuthInject>;
 
 /// One shard living behind a gRPC `ShardService`.
 pub struct RemoteShard {
-    client: ShardServiceClient<Channel>,
+    client: ShardServiceClient<MeshChannel>,
     handle: Handle,
     /// The coordinator's frozen-dict fingerprint (verified equal to the server's at connect).
     /// Carried so dict-guarded RPCs (e.g. `FetchTranslog`) can present it.
     dict_fp: u64,
+}
+
+/// Connect the mesh channel: configure the endpoint (TLS when the security config
+/// carries it), eagerly connect on `handle` (a bad endpoint/handshake fails here,
+/// not on the first RPC), and wrap it with the token-injecting interceptor.
+fn connect_channel(
+    endpoint: &str,
+    handle: &Handle,
+    security: &ClientSecurity,
+) -> Result<ShardServiceClient<MeshChannel>, ShardError> {
+    let ep = configure_endpoint(endpoint, security.tls.as_ref())?;
+    let channel = block_on_in_context(handle, ep.connect())
+        .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
+    let inject = MeshAuthInject::new(security.token.as_deref())?;
+    Ok(ShardServiceClient::with_interceptor(channel, inject))
 }
 
 impl RemoteShard {
@@ -47,9 +70,20 @@ impl RemoteShard {
     /// fingerprint equals `expected_fp` (the coordinator's
     /// [`crate::dict::Dict::fingerprint`]). A mismatch returns [`ShardError::DictMismatch`]
     /// — a divergent dict would otherwise drop matches silently across the wire (ADR-029).
-    pub fn connect(endpoint: String, handle: Handle, expected_fp: u64) -> Result<Self, ShardError> {
-        let client = block_on_in_context(&handle, ShardServiceClient::connect(endpoint))
-            .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
+    pub fn connect(endpoint: &str, handle: Handle, expected_fp: u64) -> Result<Self, ShardError> {
+        Self::connect_with_security(endpoint, handle, expected_fp, &ClientSecurity::default())
+    }
+
+    /// [`connect`](Self::connect) over a secured mesh link (ADR-071): TLS per the
+    /// client config, the mesh token attached to every RPC. A default (empty)
+    /// security config is byte-identical to the plaintext path.
+    pub fn connect_with_security(
+        endpoint: &str,
+        handle: Handle,
+        expected_fp: u64,
+        security: &ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        let client = connect_channel(endpoint, &handle, security)?;
         // Handshake before trusting the shard: clone the client for the probe RPC (a cheap
         // Channel bump, mirroring the per-call pattern below).
         let mut probe = client.clone();
@@ -83,15 +117,37 @@ impl RemoteShard {
     /// we surface as [`ShardError::DictMismatch`] (reading back its actual fingerprint) — a
     /// divergent populated server fails loud instead of dropping matches silently.
     pub fn connect_and_adopt(
-        endpoint: String,
+        endpoint: &str,
         handle: Handle,
         dict_bytes: Vec<u8>,
         expected_fp: u64,
         tag_dict_bytes: Vec<u8>,
         expected_tag_fp: u64,
     ) -> Result<Self, ShardError> {
-        let client = block_on_in_context(&handle, ShardServiceClient::connect(endpoint))
-            .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
+        Self::connect_and_adopt_with_security(
+            endpoint,
+            handle,
+            dict_bytes,
+            expected_fp,
+            tag_dict_bytes,
+            expected_tag_fp,
+            &ClientSecurity::default(),
+        )
+    }
+
+    /// [`connect_and_adopt`](Self::connect_and_adopt) over a secured mesh link
+    /// (ADR-071). A default (empty) security config is byte-identical.
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_and_adopt_with_security(
+        endpoint: &str,
+        handle: Handle,
+        dict_bytes: Vec<u8>,
+        expected_fp: u64,
+        tag_dict_bytes: Vec<u8>,
+        expected_tag_fp: u64,
+        security: &ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        let client = connect_channel(endpoint, &handle, security)?;
         let mut shipper = client.clone();
         // Ship the dict AND the frozen tag space (ADR-049/055) in one atomic adopt — never a window
         // where the server has the dict but not the tag space.

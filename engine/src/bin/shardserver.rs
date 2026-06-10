@@ -16,7 +16,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use reverse_rusty::cluster::ShardServer;
+use reverse_rusty::cluster::{resolve_mesh_token, ServerSecurity, ShardServer, TlsServerIdentity};
 use reverse_rusty::compile::extract;
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::Dict;
@@ -31,11 +31,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // value is not mistaken for the positional ADDR.
     let mut data_dir: Option<PathBuf> = None;
     let mut addr_arg: Option<String> = None;
+    let mut tls_cert: Option<PathBuf> = None;
+    let mut tls_key: Option<PathBuf> = None;
+    let mut token_flag: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--data-dir" => {
                 data_dir = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--tls-cert" => {
+                tls_cert = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--tls-key" => {
+                tls_key = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--cluster-token" => {
+                token_flag = args.get(i + 1).cloned();
                 i += 1;
             }
             // First positional arg = ADDR; later positionals are ignored.
@@ -47,6 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
     let addr: SocketAddr = addr_arg.as_deref().unwrap_or("127.0.0.1:50051").parse()?;
+    let security = resolve_server_security(tls_cert, tls_key, token_flag)?;
 
     let norm = Arc::new(Normalizer::default_vocab()?);
     let rt = tokio::runtime::Runtime::new()?;
@@ -63,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "shardserver: serving ShardService on {addr} (PENDING{durable} — awaiting AdoptDict)"
         );
-        rt.block_on(server.serve(addr))?;
+        rt.block_on(server.with_security(security).serve(addr))?;
         return Ok(());
     }
 
@@ -105,6 +121,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "shardserver: serving ShardService on {addr} ({} queries loaded)",
         queries.len()
     );
-    rt.block_on(server.serve(addr))?;
+    rt.block_on(server.with_security(security).serve(addr))?;
     Ok(())
+}
+
+/// Resolve the node's mesh security (ADR-071) from `--tls-cert`/`--tls-key` +
+/// `--cluster-token`/`RR_CLUSTER_TOKEN` — fail-loud on a half-configured TLS identity
+/// or a malformed token; warn loud when a token is configured without TLS (the secret
+/// would cross the wire in cleartext).
+fn resolve_server_security(
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
+    token_flag: Option<String>,
+) -> Result<ServerSecurity, Box<dyn std::error::Error>> {
+    let tls = match (tls_cert, tls_key) {
+        (None, None) => None,
+        (Some(cert), Some(key)) => Some(TlsServerIdentity {
+            cert_pem: std::fs::read(&cert)
+                .map_err(|e| format!("reading --tls-cert {}: {e}", cert.display()))?,
+            key_pem: std::fs::read(&key)
+                .map_err(|e| format!("reading --tls-key {}: {e}", key.display()))?,
+        }),
+        _ => return Err("--tls-cert and --tls-key must be provided together".into()),
+    };
+    let token = resolve_mesh_token(token_flag, std::env::var("RR_CLUSTER_TOKEN"))?;
+    if token.is_some() && tls.is_none() {
+        eprintln!(
+            "WARNING: --cluster-token without TLS — the mesh secret crosses the wire in              cleartext; configure --tls-cert/--tls-key (ADR-071)"
+        );
+    }
+    Ok(ServerSecurity { tls, token })
 }

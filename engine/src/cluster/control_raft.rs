@@ -71,7 +71,9 @@ mod state_machine;
 // sibling `control_server` re-uses live in `network`. Re-export both at the module root so the
 // external paths (`cluster::control_raft::{start_grpc_node, …, decode, encode, SnapshotEnvelope}`)
 // are unchanged by the split.
-pub use builders::{durable_single_node, in_process_cluster, start_grpc_node};
+pub use builders::{
+    durable_single_node, in_process_cluster, start_grpc_node, start_grpc_node_with_security,
+};
 pub(crate) use network::{decode, encode, SnapshotEnvelope};
 use state_machine::StateMachine;
 

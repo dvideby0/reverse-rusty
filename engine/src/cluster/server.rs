@@ -23,6 +23,7 @@ use crate::segment::PlacedQuery;
 use crate::tagdict::TagDict;
 
 use super::proto::shard_service_server::ShardServiceServer;
+use super::security::{MeshAuthVerify, ServerSecurity, TlsServerIdentity};
 use super::shard::{LocalShard, ShardError};
 
 mod service;
@@ -65,6 +66,9 @@ pub struct ShardServer {
     /// never un-fences). A live handoff fences the old owner, drains its tail to the new owner, then
     /// flips routing — the fence holds a brief write-quiesce across that flip.
     fenced_at_generation: AtomicU64,
+    /// Mesh security (ADR-071): TLS identity + expected cluster token, applied by the
+    /// `serve*` methods. Default (none) ⇒ the historical plaintext/open behavior.
+    security: ServerSecurity,
 }
 
 impl ShardServer {
@@ -92,6 +96,7 @@ impl ShardServer {
             data_dir: None,
             state,
             fenced_at_generation: AtomicU64::new(0),
+            security: ServerSecurity::default(),
         }
     }
 
@@ -106,6 +111,7 @@ impl ShardServer {
             data_dir: None,
             state: ArcSwapOption::from(None),
             fenced_at_generation: AtomicU64::new(0),
+            security: ServerSecurity::default(),
         }
     }
 
@@ -120,6 +126,7 @@ impl ShardServer {
             data_dir: Some(data_dir),
             state: ArcSwapOption::from(None),
             fenced_at_generation: AtomicU64::new(0),
+            security: ServerSecurity::default(),
         }
     }
 
@@ -152,6 +159,7 @@ impl ShardServer {
             data_dir: Some(data_dir),
             state,
             fenced_at_generation: AtomicU64::new(0),
+            security: ServerSecurity::default(),
         })
     }
 
@@ -202,12 +210,33 @@ impl ShardServer {
         st.shard.ingest_local(&extracted);
     }
 
+    /// Install mesh security (ADR-071): a TLS identity to present and/or the
+    /// expected cluster token, applied by every `serve*` method. Unset ⇒ the
+    /// historical plaintext/open behavior, byte-identical.
+    #[must_use]
+    pub fn with_security(mut self, security: ServerSecurity) -> Self {
+        self.security = security;
+        self
+    }
+
+    /// Build the tonic server (TLS applied when configured) + the token-verified
+    /// service — one assembly shared by every `serve*` flavor so they cannot drift.
+    #[allow(clippy::type_complexity)]
+    fn secured_router(self) -> Result<tonic::transport::server::Router, tonic::transport::Error> {
+        let security = self.security.clone();
+        let mut builder = tonic::transport::Server::builder();
+        if let Some(tls) = &security.tls {
+            builder = builder.tls_config(server_tls_config(tls))?;
+        }
+        // The verifier wraps the WHOLE service (pass-through with no token), so every
+        // RPC — including a future one — is covered before its handler runs.
+        let verify = MeshAuthVerify::new(security.token);
+        Ok(builder.add_service(ShardServiceServer::with_interceptor(self, verify)))
+    }
+
     /// Serve `ShardService` on `addr` until the returned future completes.
     pub async fn serve(self, addr: SocketAddr) -> Result<(), tonic::transport::Error> {
-        tonic::transport::Server::builder()
-            .add_service(ShardServiceServer::new(self))
-            .serve(addr)
-            .await
+        self.secured_router()?.serve(addr).await
     }
 
     /// Serve with a graceful-shutdown `signal` future — used by tests to stop cleanly.
@@ -219,8 +248,7 @@ impl ShardServer {
     where
         F: std::future::Future<Output = ()>,
     {
-        tonic::transport::Server::builder()
-            .add_service(ShardServiceServer::new(self))
+        self.secured_router()?
             .serve_with_shutdown(addr, signal)
             .await
     }
@@ -233,11 +261,17 @@ impl ShardServer {
         self,
         incoming: tonic::transport::server::TcpIncoming,
     ) -> Result<(), tonic::transport::Error> {
-        tonic::transport::Server::builder()
-            .add_service(ShardServiceServer::new(self))
-            .serve_with_incoming(incoming)
-            .await
+        self.secured_router()?.serve_with_incoming(incoming).await
     }
+}
+
+/// Build the tonic `ServerTlsConfig` from an operator identity — shared with
+/// [`ControlServer`](super::control_server::ControlServer) via the same shapes.
+pub(crate) fn server_tls_config(tls: &TlsServerIdentity) -> tonic::transport::ServerTlsConfig {
+    tonic::transport::ServerTlsConfig::new().identity(tonic::transport::Identity::from_pem(
+        &tls.cert_pem,
+        &tls.key_pem,
+    ))
 }
 
 /// Compile one raw query read-only against the shared frozen dict (parse failure →

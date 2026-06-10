@@ -99,6 +99,10 @@ impl ClusterEngine {
             // it via `with_handle` so the autoscaler can drive `execute_handoff` (ADR-048).
             #[cfg(feature = "distributed")]
             handle: None,
+            // No mesh security on the in-process path; the secure gRPC builders set it via
+            // `with_client_security` (ADR-071).
+            #[cfg(feature = "distributed")]
+            client_security: crate::cluster::security::ClientSecurity::default(),
         })
     }
     /// True if `data_dir` holds a committed cluster manifest — i.e. [`Self::open`]

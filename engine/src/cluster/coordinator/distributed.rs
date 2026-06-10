@@ -12,6 +12,8 @@ use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
 use crate::tagdict::TagDict;
 
+use crate::cluster::security::ClientSecurity;
+
 use super::{ClusterConfig, ClusterDurable, ClusterEngine, ShardGroup};
 
 impl ClusterEngine {
@@ -40,6 +42,14 @@ impl ClusterEngine {
     /// bridge). Only the gRPC builders call this; the in-process path leaves it `None`.
     fn with_handle(mut self, handle: tokio::runtime::Handle) -> Self {
         self.handle = Some(handle);
+        self
+    }
+
+    /// Retain the mesh client security (ADR-071) the cluster was connected with, so every
+    /// LATER internal connection (peer recovery, live handoff) rides the same TLS + token.
+    /// Only the secure gRPC builders set it; the default stays empty (plaintext).
+    fn with_client_security(mut self, security: ClientSecurity) -> Self {
+        self.client_security = security;
         self
     }
 
@@ -73,6 +83,30 @@ impl ClusterEngine {
         endpoints: &[String],
         handle: &tokio::runtime::Handle,
     ) -> Result<Self, ShardError> {
+        Self::connect_remote_with_security(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            endpoints,
+            handle,
+            ClientSecurity::default(),
+        )
+    }
+
+    /// [`connect_remote`](Self::connect_remote) over a secured mesh (ADR-071): TLS per the
+    /// client config + the cluster token on every RPC, including the connect-time
+    /// `AdoptDict` handshake and every LATER internal connection (peer recovery, handoff —
+    /// the config is retained). A default (empty) config is byte-identical.
+    pub fn connect_remote_with_security(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: &ClusterConfig,
+        endpoints: &[String],
+        handle: &tokio::runtime::Handle,
+        security: ClientSecurity,
+    ) -> Result<Self, ShardError> {
         if endpoints.len() != config.num_shards {
             return Err(ShardError::Config(format!(
                 "connect_remote needs exactly one endpoint per shard: got {} endpoints \
@@ -105,13 +139,14 @@ impl ClusterEngine {
         // runtime (ADR-043); the typed handles are installed via `with_handoffs` below.
         let mut handoffs: Vec<Arc<HandoffShard>> = Vec::with_capacity(endpoints.len());
         for ep in endpoints {
-            let remote = crate::cluster::remote::RemoteShard::connect_and_adopt(
-                ep.clone(),
+            let remote = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                ep,
                 handle.clone(),
                 dict_bytes.clone(),
                 expected,
                 tag_dict_bytes.clone(),
                 expected_tag,
+                &security,
             )?;
             let (boxed, h) = wrap_handoff(Box::new(remote), 0);
             shards.push(boxed);
@@ -135,7 +170,8 @@ impl ClusterEngine {
         )?
         .with_handoffs(handoffs)
         .with_handoff_caps(config.handoff_drain_passes, config.handoff_final_drain_cap)
-        .with_handle(handle.clone()))
+        .with_handle(handle.clone())
+        .with_client_security(security))
     }
 
     /// Assemble a cluster whose K shard POSITIONS are each a [`ReplicatedShard`](crate::cluster::replica::ReplicatedShard)
@@ -153,6 +189,30 @@ impl ClusterEngine {
         config: &ClusterConfig,
         groups: &[ShardGroup],
         handle: &tokio::runtime::Handle,
+    ) -> Result<Self, ShardError> {
+        Self::connect_replicated_with_security(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            groups,
+            handle,
+            ClientSecurity::default(),
+        )
+    }
+
+    /// [`connect_replicated`](Self::connect_replicated) over a secured mesh (ADR-071) —
+    /// the replicated analogue of
+    /// [`connect_remote_with_security`](Self::connect_remote_with_security); the config is
+    /// retained for later internal connections. A default (empty) config is byte-identical.
+    pub fn connect_replicated_with_security(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: &ClusterConfig,
+        groups: &[ShardGroup],
+        handle: &tokio::runtime::Handle,
+        security: ClientSecurity,
     ) -> Result<Self, ShardError> {
         if groups.len() != config.num_shards {
             return Err(ShardError::Config(format!(
@@ -172,23 +232,25 @@ impl ClusterEngine {
         // so the whole group can be re-pointed at a new owner at runtime (ADR-043).
         let mut handoffs: Vec<Arc<HandoffShard>> = Vec::with_capacity(groups.len());
         for g in groups {
-            let primary = crate::cluster::remote::RemoteShard::connect_and_adopt(
-                g.primary.clone(),
+            let primary = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                &g.primary,
                 handle.clone(),
                 dict_bytes.clone(),
                 expected,
                 tag_dict_bytes.clone(),
                 expected_tag,
+                &security,
             )?;
             let mut replicas: Vec<Box<dyn Shard>> = Vec::with_capacity(g.replicas.len());
             for ep in &g.replicas {
-                let r = crate::cluster::remote::RemoteShard::connect_and_adopt(
-                    ep.clone(),
+                let r = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                    ep,
                     handle.clone(),
                     dict_bytes.clone(),
                     expected,
                     tag_dict_bytes.clone(),
                     expected_tag,
+                    &security,
                 )?;
                 replicas.push(Box::new(r) as Box<dyn Shard>);
             }
@@ -219,7 +281,8 @@ impl ClusterEngine {
         )?
         .with_handoffs(handoffs)
         .with_handoff_caps(config.handoff_drain_passes, config.handoff_final_drain_cap)
-        .with_handle(handle.clone()))
+        .with_handle(handle.clone())
+        .with_client_security(security))
     }
 
     /// Cross-node peer recovery (ADR-036 + ADR-039 + ADR-040): bring a fresh, durable, **pending**
@@ -245,10 +308,11 @@ impl ClusterEngine {
         let expected = self.dict.fingerprint();
         // Pin the source's tail BEFORE the segment-copy seal trims it (ADR-040). Held across the
         // whole recovery; released below whether it converges or errors.
-        let source = crate::cluster::remote::RemoteShard::connect(
-            source_endpoint.to_string(),
+        let source = crate::cluster::remote::RemoteShard::connect_with_security(
+            source_endpoint,
             handle.clone(),
             expected,
+            &self.client_security,
         )?;
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
@@ -256,13 +320,14 @@ impl ClusterEngine {
             let dict_bytes = crate::storage::serialize_dict(&self.dict);
             // Ship the dict + frozen tag space so the fresh node attaches segments against the right
             // feature + tag space (ADR-055).
-            let target = crate::cluster::remote::RemoteShard::connect_and_adopt(
-                target_endpoint.to_string(),
+            let target = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                target_endpoint,
                 handle.clone(),
                 dict_bytes,
                 expected,
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
+                &self.client_security,
             )?;
             // Bulk copy: segments at snapshot position P (the source keeps serving + writing).
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
@@ -312,15 +377,17 @@ impl ClusterEngine {
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
         let expected = self.dict.fingerprint();
-        let source = crate::cluster::remote::RemoteShard::connect(
-            source_endpoint.to_string(),
+        let source = crate::cluster::remote::RemoteShard::connect_with_security(
+            source_endpoint,
             handle.clone(),
             expected,
+            &self.client_security,
         )?;
-        let target = crate::cluster::remote::RemoteShard::connect(
-            target_endpoint.to_string(),
+        let target = crate::cluster::remote::RemoteShard::connect_with_security(
+            target_endpoint,
             handle.clone(),
             expected,
+            &self.client_security,
         )?;
         let hwm = crate::cluster::replica::catch_up_replica(
             &target,
@@ -382,10 +449,11 @@ impl ClusterEngine {
 
         // Connect to the source and pin its un-sealed tail for the WHOLE move, so the segment-copy
         // seal — or any concurrent seal — cannot trim away the tail we still need (ADR-040).
-        let source = crate::cluster::remote::RemoteShard::connect(
-            source_endpoint.to_string(),
+        let source = crate::cluster::remote::RemoteShard::connect_with_security(
+            source_endpoint,
             handle.clone(),
             expected,
+            &self.client_security,
         )?;
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
@@ -393,13 +461,14 @@ impl ClusterEngine {
             // Ship the dict + frozen tag space + drive the target to pull the source's segments at
             // snapshot `P` (the source keeps serving + writing — no quiesce).
             let dict_bytes = crate::storage::serialize_dict(&self.dict);
-            let target = crate::cluster::remote::RemoteShard::connect_and_adopt(
-                target_endpoint.to_string(),
+            let target = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                target_endpoint,
                 handle.clone(),
                 dict_bytes,
                 expected,
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
+                &self.client_security,
             )?;
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
             // Drain the tail (writes that landed during the copy), renewing the lease each pass.

@@ -28,3 +28,4 @@ mod handoff;
 mod partial_apply;
 mod recovery;
 mod replication;
+mod security;
