@@ -38,7 +38,8 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 
 | Suite | Where | Covers |
 |---|---|---|
-| **Differential oracle** | `tests/oracle.rs` | The **correctness contract** — brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing test; never weaken it. |
+| **Differential oracle** | `tests/oracle.rs` | The **correctness contract** — brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing test; never weaken it. Includes the **messy-corpus** passes (`messy.rs` — the same contract over `gen::messify_dataset`'s adversarial surfaces, per-title + batch, ADR-063) and the **degenerate-input** differential (`degenerate.rs` — grammar/feature-model edges, engine ≡ brute on both ingest paths). |
+| **Adversarial properties** | `tests/adversarial/` | **Reference-free** correctness properties that don't share code with the engine (ADR-063): the self-match diagonal (a query must match a title built from its own positive terms — clean, messy-query×clean-title, clean-query×perturbed-title), metamorphic set-identity under surface noise, the ADR-054/058/060/061 cross-form matrices (incl. the codex-R11 whitespace-run regression), and unicode-soup fuzz (no-panic, determinism, `P(T) ⊇ N(T)`, `match_features == N(T)`). These cover the front-end divergence the differential oracle is structurally blind to. |
 | **Broad-lane batch** | `tests/broad_batch.rs` | Broad-lane **batch ≡ scalar** equivalence matrix — the load-bearing batch-correctness deliverable ([`design/matching.md`](design/matching.md) §4). |
 | Ranking | `tests/ranking.rs` | Engine-level ranking (ADR-059): additive scoring, newest-live-copy tag precedence, and the ranked-set ≡ unranked-set recall guard ([`design/matching.md`](design/matching.md) §5.4). |
 | Unit tests | `src/*.rs` | DSL parsing, vocab, WAL framing, loader, anchor filter (inline `#[cfg(test)]` modules). |
@@ -65,6 +66,16 @@ expected values are written from the spec ([`reference/dsl.md`](reference/dsl.md
 vocab-driven path is additionally run end-to-end by `zero_false_negatives_with_populated_vocab` in
 `tests/oracle.rs`. Rationale + the declined "independent reference extractor" alternative →
 [`DECISIONS.md`](DECISIONS.md) ADR-050.
+
+Two further layers close what golden tests can't (ADR-063): the `P(T)` parse-union oracle
+(`src/normalize/parse_union_oracle.rs`) independently re-derives the positive title view by exhaustive
+parse enumeration, and `tests/adversarial/` asserts **reference-free properties** — self-match,
+metamorphic set-identity, cross-form matrices — whose ground truth is the contract itself, so a bug in
+ANY shared front-end stage (including a query-side vs title-side asymmetry, the historical escape class)
+fails them directly. The oracle's corpora also now include adversarial surfaces: `tests/oracle/messy.rs`
+re-runs the differential over `gen::messify_dataset` output (case noise, whitespace runs, punctuation,
+unicode junk, out-of-dict tokens), and `tests/oracle/degenerate.rs` pins grammar/feature-model edge
+inputs. When adding corpus-driven tests, prefer running them messy unless there's a reason not to.
 
 ### The Cluster-v1 acceptance gate
 
