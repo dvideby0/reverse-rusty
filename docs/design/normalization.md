@@ -87,7 +87,12 @@ what makes the feature spaces line up. Pipeline, all over a reusable scratch buf
    - `michael jordan` / `mj`(only if safely disambiguated) → `player:michael_jordan`
    - `psa gem mt 10` / `psa 10` / `psa10` → `grader:psa` + `grade:10` + `grader_grade:psa10`
 4. **Pattern features:** regex-free scanners for `year` (19xx/20xx), `grade` (0–10, half-grades),
-   `lot/bulk/count`, set numbers, autograph/signed flags, reprint/custom/proxy flags.
+   `lot/bulk/count`, set numbers, autograph/signed flags, reprint/custom/proxy flags. Number typing
+   consults a configurable **number-context word list** ([ADR-069](../DECISIONS.md)): a number
+   immediately after a listed token is demoted to a generic term (default `["pop"]` — the population
+   rule, §4). An **empty** list disables the demotion — the percolator-parity mode, making number
+   typing position-insensitive (a 4-digit year is `year:N` everywhere); like the punctuation table,
+   the list is vocab-persisted and runs over both sides.
 5. **Dense feature IDs:** every feature → a `u32` from a global **feature dictionary** (§3). Strings die
    here; downstream is integers only.
 
@@ -154,6 +159,14 @@ behaviour is:
 The three hardening rules: (a) **diacritic folding** to ASCII; (b) keep `#` and `/` as marker tokens
 so **card-numbers, serials, and "pop N" are never read as grades**; (c) require a **grader or a
 gem/mint/graded context** before a bare number becomes a grade (kills `10,000` → `grade:10`).
+
+Every one of these context rules is configuration today: `#`/`/` ride the punctuation table
+(ADR-058 — the parity configuration declares them `split`), and the `pop` rule is the default entry
+of the **number-context word list** (ADR-069 — set it empty to disable the demotion entirely, the
+parity mode). Defaults reproduce the table above byte-identically. Note the documented trade: with
+the list emptied in a graders-configured vocabulary, `psa pop 7` reads as a PSA grade (the population
+count is no longer shielded); the parity mode targets the empty-vocabulary configuration where this
+cannot arise.
 
 **Two architectural conclusions from that real-data study** (detailed in
 [`../research/real-data-findings.md`](../research/real-data-findings.md)), both affecting *where

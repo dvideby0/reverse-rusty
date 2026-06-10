@@ -194,6 +194,77 @@ fn merge_combines_punctuation_rules_first_wins() {
     assert_eq!(apostrophe.class, PunctClassSer::Fold, "v1's rule wins");
 }
 
+// ---- number-context words (ADR-069) ----
+
+#[test]
+fn number_context_words_round_trip_and_drive_typing() {
+    let mut vocab = Vocab::new();
+    vocab.set_number_context_words(&[]); // parity mode: disable the demotion
+
+    // JSON round-trip preserves the explicit empty list (it must NOT collapse back to
+    // the `["pop"]` default — `Some([])` and `None` are different knob states) ...
+    let json = vocab.to_json().unwrap();
+    let restored = Vocab::from_json(&json).unwrap();
+    assert_eq!(restored.number_context_words(), Some(&[][..]));
+
+    // ... and the restored vocab's normalizer types position-insensitively.
+    let norm = restored.to_normalizer().expect("normalizer");
+    let mut dict = crate::dict::Dict::new();
+    let mut lc = String::new();
+    let feats = norm.compile_features("pop 1995", &mut dict, &mut lc);
+    let mut names: Vec<String> = feats.iter().map(|&id| dict.name(id).to_string()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["term:pop".to_string(), "year:1995".to_string()],
+        "parity mode: the pop-adjacent year stays a year"
+    );
+}
+
+#[test]
+fn vocab_without_number_context_field_is_default_behavior() {
+    // Old vocab JSON predating ADR-069 has no `number_context` key; it must deserialize
+    // to `None` => the historical `["pop"]` demotion, byte-identical.
+    let json = r#"{ "synonyms": [], "phrases": [], "graders": [], "grade_words": [] }"#;
+    let vocab = Vocab::from_json(json).unwrap();
+    assert!(vocab.number_context_words().is_none());
+
+    let norm = vocab.to_normalizer().expect("normalizer");
+    let mut dict = crate::dict::Dict::new();
+    let mut lc = String::new();
+    let feats = norm.compile_features("pop 1995", &mut dict, &mut lc);
+    let mut names: Vec<String> = feats.iter().map(|&id| dict.name(id).to_string()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["term:1995".to_string(), "term:pop".to_string()],
+        "default demotes the pop-adjacent year"
+    );
+}
+
+#[test]
+fn merge_number_context_first_wins() {
+    let mut v1 = Vocab::new();
+    v1.set_number_context_words(&[]);
+    let mut v2 = Vocab::new();
+    v2.set_number_context_words(&["qty"]);
+
+    v1.merge(&v2);
+    assert_eq!(
+        v1.number_context_words(),
+        Some(&[][..]),
+        "an explicitly-set list survives a merge"
+    );
+
+    let mut v3 = Vocab::new();
+    v3.merge(&v2);
+    assert_eq!(
+        v3.number_context_words(),
+        Some(&["qty".to_string()][..]),
+        "an unset vocab adopts the other's list"
+    );
+}
+
 #[test]
 fn empty_vocab_builds_valid_normalizer() {
     let vocab = Vocab::new();

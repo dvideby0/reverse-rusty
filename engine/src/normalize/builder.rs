@@ -2,8 +2,9 @@
 //! [`Normalizer`](super::Normalizer).
 //!
 //! Assembles the four vocabulary categories (phrases / synonyms / graders / grade
-//! words) plus the byte-cleaning punctuation table, then `build()`s the daachorse
-//! automaton and hands the populated fields to the `Normalizer`.
+//! words) plus the byte-cleaning punctuation table (ADR-058) and the number-context
+//! word list (ADR-069), then `build()`s the daachorse automaton and hands the
+//! populated fields to the `Normalizer`.
 
 use super::{Normalizer, PhraseEntry, PhraseMode, PunctClass, PunctTable};
 use crate::dict::FeatureKind;
@@ -49,6 +50,9 @@ pub struct NormalizerBuilder {
     /// Raw multi-word alias forms (ADR-061), cleaned + registered as alias-mode phrases at
     /// [`build`](Self::build) (after the punctuation table is final, so cleaning matches titles).
     alias_forms: Vec<String>,
+    /// Number-context words (ADR-069). `None` (the default) resolves to `["pop"]` at
+    /// [`build`](Self::build) — the historical hard-coded rule, byte-identical.
+    number_context: Option<Vec<String>>,
 }
 
 impl NormalizerBuilder {
@@ -215,6 +219,24 @@ impl NormalizerBuilder {
         self
     }
 
+    /// Replace the **number-context word list** (ADR-069): a number token immediately after
+    /// one of these words is demoted to a generic term (`pop 1995` -> `term:1995`), never
+    /// typed as a year or grade. The default — when this is never called — is `["pop"]`,
+    /// the historical hard-coded population rule, byte-identical. Passing an **empty** list
+    /// disables the rule entirely (the percolator-parity mode, ADR-064 item 3): number
+    /// typing becomes position-insensitive, so a 4-digit year is `year:N` everywhere.
+    /// Entries are matched against single cleaned tokens (lowercased at build); the same
+    /// list runs over queries and titles, so the feature spaces stay aligned (§2).
+    pub fn set_number_context_words(&mut self, words: &[&str]) {
+        self.number_context = Some(words.iter().map(|w| w.to_ascii_lowercase()).collect());
+    }
+
+    /// Fluent version of [`set_number_context_words`](Self::set_number_context_words).
+    pub fn number_context_words(mut self, words: &[&str]) -> Self {
+        self.set_number_context_words(words);
+        self
+    }
+
     /// Consume the builder and construct a [`Normalizer`](super::Normalizer).
     ///
     /// Returns `Err` if the Aho-Corasick automaton cannot be built from the
@@ -245,6 +267,10 @@ impl NormalizerBuilder {
             syn_index: self.syn_index,
             grade_words: self.grade_words,
             punct: self.punct,
+            // ADR-069: unset resolves to the historical `pop` rule, byte-identical.
+            number_context: self
+                .number_context
+                .unwrap_or_else(|| vec!["pop".to_string()]),
         })
     }
 }

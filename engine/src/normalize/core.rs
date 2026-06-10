@@ -37,6 +37,11 @@ pub struct Normalizer {
     pub(super) grade_words: Vec<String>,
     /// Byte-cleaning punctuation classification (ADR-058). Default = historical behavior.
     pub(super) punct: PunctTable,
+    /// Number-context words (ADR-069): a number immediately after one of these tokens is
+    /// demoted to a generic term (never typed as a year/grade). Default `["pop"]` = the
+    /// historical hard-coded rule; empty = parity mode (position-insensitive number typing).
+    /// Lowercased at build, so entries compare directly against cleaned tokens.
+    pub(super) number_context: Vec<String>,
 }
 
 impl std::fmt::Debug for Normalizer {
@@ -46,6 +51,7 @@ impl std::fmt::Debug for Normalizer {
             .field("graders", &self.graders)
             .field("synonyms", &self.synonyms.len())
             .field("grade_words", &self.grade_words)
+            .field("number_context", &self.number_context)
             .finish()
     }
 }
@@ -315,15 +321,20 @@ impl Normalizer {
                 continue;
             }
 
-            // 3) numbers: disambiguate card-numbers, serials, pop, grades, years
+            // 3) numbers: disambiguate card-numbers, serials, number-context words
+            //    (default `pop`, configurable — ADR-069), grades, years
             if let Some(numstr) = parse_number(tok) {
                 let prev = if i > 0 { Some(tokens[i - 1]) } else { None };
                 let next = tokens.get(i + 1).copied();
                 let is_cardnum = prev == Some("#");
                 let is_serial = prev == Some("/") || next == Some("/");
-                let is_pop = prev.is_some_and(|p| p.eq_ignore_ascii_case("pop"));
+                let is_numctx = prev.is_some_and(|p| {
+                    self.number_context
+                        .iter()
+                        .any(|w| p.eq_ignore_ascii_case(w))
+                });
 
-                if is_cardnum || is_serial || is_pop {
+                if is_cardnum || is_serial || is_numctx {
                     emit_generic(&numstr, &mut scratch, emit);
                 } else if let Some(y) = as_year(&numstr) {
                     scratch.clear();
