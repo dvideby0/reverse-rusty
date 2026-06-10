@@ -467,15 +467,21 @@ Tiers, highest-leverage first:
   compaction-that-improves — re-anchoring drifted queries on merge (✅ ADR-056, opt-in, oracle-proven
   zero-FN, cluster no-op); still open: the deferred alias-discovery sources (distributional,
   match-feedback) and the rest of the §7 "improve" menu (survival telemetry, feature-ID re-ranking).
-- **Tier 3 — scale & production maturity.** Feature-model versioning + blue/green; hardening the
-  (experimental) distributed multi-node layers; aspects-first ingestion.
+- **Tier 3 — scale & production maturity.** Feature-model versioning + blue/green; **graduating the
+  distributed multi-node layers to Distributed v1 (ADR-065)** — the 12-criterion checklist (cluster REST
+  surface, TLS/auth on the gRPC transports, a real multi-machine harness, the deferred cluster features,
+  packaging, backup, a ≥20M scale proof) that retires the "experimental" label into *release-candidate:
+  ready for full-feature multi-machine testing, not yet production-proven*; aspects-first ingestion.
 - **Tier 4 — ES/OS percolator parity.** Per-query metadata + filtered percolation (✅ built single-node
   ADR-049, ✅ through the cluster ADR-055); byte-cleaning punctuation-equivalence folding (✅ ADR-058);
   ranking + `/_mpercolate` pagination (✅ built single-node ADR-059 — cluster ranking deferred);
   bulk/learned-alias evolution Phase 1 (✅ built single-node ADR-060 — the `AliasRegistry` governance
   layer + safe single-token activation + Solr import + the alias-ID-stability fix) + Phase 2 (✅ built
   single-node ADR-061 — the token-graph multi-word matcher with positive/negative title feature views);
-  still open: cluster alias governance + the deferred multi-word discovery sources.
+  **next up: the ADR-064 drop-in parity work package** (atomic-upsert `PUT`, an opt-in class-D
+  always-candidate lane, a parity-mode normalizer knob, loud non-string tag values, the REST-PUT
+  `maybe_flush` fix, per-request `include_broad` on `/_search`); still open: cluster alias governance +
+  the deferred multi-word discovery sources.
 
 See **[`roadmap.md`](roadmap.md)** for the per-tier detail, the Nice-to-have / operational-polish
 backlog, and the Evaluated & declined list.
@@ -495,12 +501,14 @@ backlog, and the Evaluated & declined list.
   drives `rebalance` on membership/skew events (ADR-045) — with reliability hardening (auto-unfence-on-abort,
   translog-lease TTL, autoscaler-driven handoff; ADR-048) (ADR-027, 029, 031–048; per-ADR detail
   in [Implemented](#implemented-working-tested) above). But it is exercised **single-process / on localhost** by
-  the oracles — not yet deployed and hardened across real machines. **Remaining for production multi-node** (all
-  design-only; ADR-033 — no object store / cloud dependency anywhere): **auto-split** + `recommended_shard_count`
-  (and the clean node→endpoint move a real load-driven handoff implies),
-  **cross-process dynamic vocabulary** (the in-process piece is the now-complete Tier-0 v1 item — [research
-  spike](research/dynamic-vocabulary.md)), **replicate-broad-to-all**, **TLS/auth** on the (currently plaintext)
-  transports, and an end-to-end durable-multi-node rolling-restart harness — see Tier 3.
+  the oracles — not yet deployed and hardened across real machines. **The path out is now programmatized as
+  the Distributed-v1 graduation criteria (ADR-065)** — a 12-item checklist (cluster REST surface, TLS/auth,
+  a real multi-machine harness, tagged-cluster vocab change, cluster ranking, cross-process vocab shipping,
+  auto-split + `recommended_shard_count`, replicate-broad-to-all-or-decide, the tag-dict recovery
+  fingerprint, packaging + runbook, backup/restore, a ≥20M multi-shard scale proof) that graduates these
+  layers from *experimental* to *release-candidate: ready for full-feature multi-machine testing, not yet
+  production-proven* (ADR-033 still stands — no object store / cloud dependency anywhere). See
+  [`roadmap.md`](roadmap.md) Tier 3 for the ordered checklist.
   **Correctness caveat (ADR-029/030/034):** cross-process dict identity is handled — the coordinator **ships**
   its frozen dict at connect (ADR-034) and the ADR-030 fingerprint handshake fails loud
   (`ShardError::DictMismatch`) if a *populated* server holds a divergent dict, so a diverged dict can never drop
@@ -514,6 +522,30 @@ backlog, and the Evaluated & declined list.
   **aliases** (the correctness-sensitive part) remains the confidence-gated Tier-2 item. Absorbing
   vocabulary that first appears *after* the dict is frozen (live writes against a cluster's shared
   frozen dict) is the **Tier-0 dynamic-vocabulary** item.
+- **Known drop-in-parity divergences (ADR-064, audited 2026-06).** Facts about *today's build* that a
+  percolator-style integration must know — each with a decided fix in the
+  [ADR-064](decisions/adr-064-percolator-drop-in-parity-audit.md) work package
+  ([`roadmap.md`](roadmap.md) Tier 4):
+  - **`PUT /_doc` re-PUT is additive** — the old copy stays live and *matchable* until an explicit
+    DELETE (the id matches under either version's semantics; `GET /_doc` and hit `_source` resolve the
+    newest copy, so a hit can carry new text for an old-semantics match). True replace today =
+    DELETE-then-PUT, which has a brief no-match window.
+  - **Negation-only queries are rejected (class D)** while ES/OS `query_string` treats them as
+    *match-all-except* (`fixNegativeQueryIfNeeded`) — a silent semantic divergence for exclude-only
+    stored queries until the opt-in always-candidate lane lands (interim: callers side-list class-D
+    rejections as always-candidates).
+  - **The `pop` number context makes year typing position-sensitive** (a 1900–2099 token right after
+    `pop` emits `term:` not `year:`) — the one demonstrated residual FN class against a
+    position-insensitive reference matcher.
+  - **Non-string tag values are silently dropped at ingest** (and non-string elements inside filter
+    arrays silently narrow the filter, while scalar non-string filter values 400) — stringify
+    everything until the loud-failure fix lands.
+  - **REST single-doc `PUT`s never trigger the memtable flush threshold** (`put_doc` bypasses the only
+    `maybe_flush` call site) — WAL-durable, but flush happens only via `/_flush`, bulk-path
+    auto-triggers, or shutdown.
+  - **`/_search` has no per-request `include_broad`** (server `--include-broad` only; a body field is
+    silently ignored) — with broad off, class-C queries are silently absent from `/_search` hits;
+    `/_mpercolate` has the per-request override.
 - **Validated on synthetic data only.** The differential oracle and the benchmarks run against the
   seeded synthetic generator ([`gen.rs`](../engine/src/gen.rs)), which is deliberately adversarial
   (ADR-008); one design-validation pass ran ~20 real eBay titles through the normalizer
@@ -521,7 +553,12 @@ backlog, and the Evaluated & declined list.
   false-negative / false-positive audit (or throughput run) against a *real saved-search corpus* with
   messy listing titles. Synthetic data cannot stand in for the long tail of real text, so this is the
   highest-leverage step for external credibility — and a prerequisite before quoting the headline
-  numbers as production guarantees rather than design-target evidence.
+  numbers as production guarantees rather than design-target evidence. *(Partial progress: the 2026-06
+  drop-in parity audit — ADR-064 — ran an empirical pinned-pair PoC with ground truth computed by
+  executing a reference deployment's own precision matcher: zero false negatives under the documented
+  parity configuration, every false positive predicted. That validates the translation contract on
+  adversarial pinned pairs; the full real-corpus audit above remains owed, and is also Distributed-v1
+  criterion 12 — ADR-065.)*
 
 The former production-hardening audit's medium-priority items — metrics gaps (P2-2), response-envelope
 consistency (P2-8), and bulk-ingest lock scope (P2-14) — are now resolved (2026-05-29): P2-2 and P2-8
