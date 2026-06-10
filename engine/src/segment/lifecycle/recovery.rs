@@ -140,7 +140,13 @@ impl Engine {
 
         // Open WAL and replay
         let wal_path = dir.join("wal.log");
-        let wal = Some(Wal::open(&wal_path, config.wal_sync_on_write)?);
+        let mut wal_file = Wal::open(&wal_path, config.wal_sync_on_write)?;
+        // ADR-066: a reset (header-only) WAL rescans to seq 1, but the manifest
+        // keeps its watermark — pin the sequence past it so frames appended after
+        // this reopen can never sort at/below the watermark and be skipped by the
+        // NEXT recovery (which would resurrect an acknowledged delete).
+        wal_file.ensure_seq_after(manifest.wal_seq_watermark);
+        let wal = Some(wal_file);
 
         // Load persisted query sources — resident, or lazily mmap'd per
         // config.retain_source (ADR-020 Item 1).
@@ -246,11 +252,18 @@ impl Engine {
                         engine.replay_tombstone(seg_idx, local_id);
                     }
                 }
-                WalEntry::DeleteByLogical { logical, .. } => {
+                WalEntry::DeleteByLogical { seq, logical } => {
                     // Address-free (ADR-066): re-derive the affected copies from the
-                    // recovered state. Idempotent against the manifest's baked
-                    // tombstones (already-dead copies are filtered by the funnel).
-                    engine.apply_delete_by_logical(logical);
+                    // recovered state. Frames at/below the watermark are SKIPPED, not
+                    // just for economy: bulk ingest bypasses the WAL (its segment +
+                    // manifest commit IS its durability, ADR-017), so a same-id query
+                    // bulk-ingested AFTER this delete is already in the attached
+                    // segments — replaying the older delete over it would erase the
+                    // newer query (codex P1). The manifest commit that covered this
+                    // frame also baked its tombstones, so skipping loses nothing.
+                    if seq > manifest.wal_seq_watermark {
+                        engine.apply_delete_by_logical(logical);
+                    }
                 }
                 WalEntry::FlushCheckpoint { .. } => {
                     // Skip — already handled by manifest

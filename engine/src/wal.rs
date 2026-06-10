@@ -332,6 +332,19 @@ impl Wal {
         self.next_seq - 1
     }
 
+    /// Pin the next sequence number past `watermark` (ADR-066). `reset` keeps the
+    /// sequence monotonic only in memory: reopening a reset (header-only) WAL file
+    /// rescans it and restarts at 1, while the manifest keeps its old watermark —
+    /// so without this, frames appended after the reopen would sort at or below
+    /// the watermark and be wrongly skipped by the next recovery (a resurrected
+    /// delete). [`Engine::open`](crate::segment::Engine::open) calls this with the
+    /// recovered manifest's watermark.
+    pub fn ensure_seq_after(&mut self, watermark: u64) {
+        if self.next_seq <= watermark {
+            self.next_seq = watermark + 1;
+        }
+    }
+
     /// Read all valid entries from a WAL file. Returns entries and the byte
     /// count of any trailing data that could not be parsed.
     fn read_entries(path: &Path) -> io::Result<(Vec<WalEntry>, usize)> {

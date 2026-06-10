@@ -185,9 +185,9 @@ fn positional_tombstone_then_compaction_crash_skips_stale_frame() {
 }
 
 /// Replay order: delete(X) → manifest commit (bulk ingest bakes the delete) →
-/// re-insert(X) → crash. The delete frame replays first and must no-op against the
-/// already-baked state; the later insert frame then recreates X. A watermark-style
-/// skip of logical deletes is NOT needed for this — in-order replay is.
+/// re-insert(X) → crash. The delete frame sorts at/below the commit's watermark and
+/// is skipped (its tombstones are baked); the later insert frame replays and
+/// recreates X with its new semantics.
 #[test]
 fn delete_then_commit_then_reinsert_replays_in_order() {
     let dir = test_dir("tomb_delete_reinsert_order");
@@ -210,5 +210,75 @@ fn delete_then_commit_then_reinsert_replays_in_order() {
         match_ids(&eng, "rookie card player4b unique4b").contains(&4),
         "re-inserted q4 must survive via the WAL tail"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex P1: bulk ingest bypasses the WAL, so a same-id query bulk-ingested AFTER a
+/// delete exists only in the attached segments at recovery time — replaying the older
+/// delete frame over it would erase the newer query. The watermark skip (the bulk
+/// commit covers the delete's seq) must keep the bulk-ingested copy alive.
+#[test]
+fn delete_then_bulk_reinsert_same_id_survives_crash() {
+    let dir = test_dir("tomb_bulk_reinsert_same_id");
+    {
+        let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
+        eng.build_from_queries(&distinct_queries(1..=5));
+        assert!(eng.delete_by_logical_id(2).expect("delete") >= 1);
+        // Re-add logical 2 with NEW semantics via the WAL-less bulk path (its
+        // segment + manifest commit is the durable record, ADR-017).
+        eng.bulk_ingest(&[(2, "player2b unique2b".to_string())]);
+        assert!(match_ids(&eng, "rookie card player2b unique2b").contains(&2));
+        // crash with the delete frame still in the WAL
+    }
+    let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
+    assert!(
+        match_ids(&eng, "rookie card player2b unique2b").contains(&2),
+        "the bulk-ingested replacement must NOT be erased by the older delete frame"
+    );
+    assert!(
+        !match_ids(&eng, &title_for(2)).contains(&2),
+        "old q2 semantics must stay deleted"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Codex P2: a reset (header-only) WAL rescans to seq 1 on reopen while the manifest
+/// keeps its watermark — without re-pinning the sequence, deletes issued AFTER the
+/// reopen would sort at/below the watermark and be skipped by the NEXT recovery
+/// (resurrecting acknowledged deletes). Covers both the logical and positional frames.
+#[test]
+fn deletes_after_reopen_with_reset_wal_survive_second_crash() {
+    let dir = test_dir("tomb_seq_across_reopen");
+    // Stage 1: establish a manifest with a non-zero watermark, then a clean close
+    // with a RESET (empty) WAL.
+    {
+        let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
+        eng.build_from_queries(&distinct_queries(1..=10));
+        assert!(eng.delete_by_logical_id(1).expect("delete") >= 1);
+        eng.insert_live("filler query", 100, 1);
+        eng.flush(); // manifest watermark > 0; WAL checkpoints + resets
+    }
+    // Stage 2: reopen (the WAL file is header-only), delete more — one logical, one
+    // positional — then crash with those frames as the only record.
+    {
+        let mut eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen 1");
+        assert!(eng.delete_by_logical_id(2).expect("delete q2") >= 1);
+        // q3 sits at (seg 0, local 2): locals are issued in insertion order.
+        eng.tombstone_in(0, 2).expect("positional tombstone");
+        assert!(!match_ids(&eng, &title_for(3)).contains(&3), "q3 gone live");
+        // crash
+    }
+    let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen 2");
+    assert!(
+        !match_ids(&eng, &title_for(2)).contains(&2),
+        "post-reopen logical delete must replay (not be skipped by the stale watermark)"
+    );
+    assert!(
+        !match_ids(&eng, &title_for(3)).contains(&3),
+        "post-reopen positional tombstone must replay (not be skipped by the stale watermark)"
+    );
+    for i in 4..=10 {
+        assert!(match_ids(&eng, &title_for(i)).contains(&i), "q{i} intact");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

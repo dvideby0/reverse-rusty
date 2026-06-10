@@ -221,7 +221,8 @@ impl Engine {
             // The on-disk `.seg` alive flags are frozen at write time and live deletes
             // mutate only the in-RAM overlay, so without this the flush-time WAL reset
             // would drop the only durable record of a base-segment delete and the
-            // deleted query would resurrect on reopen.
+            // deleted query would resurrect on reopen. The dead set is maintained
+            // incrementally on the segment, so this is O(deletes), never a rescan.
             let segment_tombstones: Vec<(String, Vec<u8>)> = self
                 .segments
                 .iter()
@@ -229,13 +230,11 @@ impl Engine {
                     let BaseSegment::Mmap(m) = s.as_ref() else {
                         return None;
                     };
-                    if s.alive_count() == s.len() {
+                    let dead = m.dead_overlay();
+                    if dead.is_empty() {
                         return None; // clean — no bitmap to record
                     }
                     let name = m.path().file_name().and_then(|f| f.to_str())?.to_string();
-                    let dead: roaring::RoaringBitmap = (0..s.len() as u32)
-                        .filter(|&local| !s.is_alive(local))
-                        .collect();
                     let mut bytes = Vec::with_capacity(dead.serialized_size());
                     // Serialization into a Vec cannot fail; if it ever did, recording
                     // no bitmap (resurrect-risk, a bounded false positive) is the
