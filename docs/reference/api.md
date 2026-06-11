@@ -218,6 +218,7 @@ Cluster-only endpoints:
 | `/_cluster/nodes/{id}` | DELETE | Deregister a member (idempotent) |
 | `/_cluster/rebalance` | POST | Recompute + commit the shard→node map from membership (HRW, ADR-042) |
 | `/_cluster/resync` | POST | Re-drive queued partial-apply repairs (ADR-047); returns `{repaired, still_pending}` |
+| `/_cluster/handoff` | POST | Live data-moving handoff (ADR-044/048/072): `{"position": N, "source": "https://…", "target": "https://…"}` — peer-recover the target, fence + drain the source, flip routing; returns the new `generation`. Fail-closed: an aborted move auto-unfences the source. Requires a `--features distributed` build (else 501) |
 
 `GET /_stats` in cluster mode reports `{shards, replication_factor, total_queries, shard_queries[],
 class_counts, epoch, pending_repairs, has_tagged_queries, durable}`; `GET /_health` is green/yellow
