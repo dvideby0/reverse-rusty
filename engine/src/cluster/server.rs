@@ -31,27 +31,52 @@ mod service;
 #[cfg(test)]
 mod tests;
 
-/// The adopted dict, persisted by a durable `AdoptDict` so a restarted node can
-/// self-restore without a coordinator (ADR-072). Written atomically (tmp + rename).
-const ADOPTED_DICT_FILE: &str = "dict.bin";
-/// The adopted tag space (ADR-055), persisted alongside the dict.
-const ADOPTED_TAGDICT_FILE: &str = "tagdict.bin";
+/// The adopted feature space (dict + tag dict), persisted by a durable `AdoptDict`
+/// so a restarted node self-restores without a coordinator (ADR-072). The dict and
+/// tag dict are written as ONE length-framed blob under one atomic rename, so the
+/// pair can never desync — a crash leaves the whole prior file or the whole new one,
+/// never a new dict beside a stale/absent tag space (which would silently mis-filter
+/// tagged reads after restart; review finding).
+const ADOPTED_SPACE_FILE: &str = "feature_space.bin";
 
 /// Persist the adopted (already fingerprint-verified) dict + tag-space bytes under
-/// `dir` — write-to-tmp + atomic rename, so a crash mid-write leaves either the old
-/// file or the new one, never a torn blob.
+/// `dir` as one atomically-renamed blob: `dict_len u64 | dict | tag_dict`.
 fn persist_adopted_space(dir: &Path, dict_bytes: &[u8], tag_bytes: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    for (name, bytes) in [
-        (ADOPTED_DICT_FILE, dict_bytes),
-        (ADOPTED_TAGDICT_FILE, tag_bytes),
-    ] {
-        let tmp = dir.join(format!("{name}.tmp"));
-        std::fs::write(&tmp, bytes)?;
-        std::fs::File::open(&tmp)?.sync_all()?;
-        std::fs::rename(&tmp, dir.join(name))?;
-    }
+    let mut blob = Vec::with_capacity(8 + dict_bytes.len() + tag_bytes.len());
+    blob.extend_from_slice(&(dict_bytes.len() as u64).to_le_bytes());
+    blob.extend_from_slice(dict_bytes);
+    blob.extend_from_slice(tag_bytes);
+    let tmp = dir.join(format!("{ADOPTED_SPACE_FILE}.tmp"));
+    std::fs::write(&tmp, &blob)?;
+    std::fs::File::open(&tmp)?.sync_all()?;
+    std::fs::rename(&tmp, dir.join(ADOPTED_SPACE_FILE))?;
     Ok(())
+}
+
+/// The persisted dict + tag-space bytes, as read back from the feature-space blob.
+type AdoptedSpaceBytes = (Vec<u8>, Vec<u8>);
+
+/// Read back the persisted feature-space blob: `Some((dict_bytes, tag_bytes))` when
+/// present + well-framed, `None` when absent (a never-adopted durable node), an error
+/// on a corrupt/torn frame (fail loud rather than misparse).
+fn read_adopted_space(dir: &Path) -> Result<Option<AdoptedSpaceBytes>, ShardError> {
+    let path = dir.join(ADOPTED_SPACE_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let blob = std::fs::read(&path)
+        .map_err(|e| ShardError::Log(format!("reading {}: {e}", path.display())))?;
+    let dict_len = blob
+        .get(0..8)
+        .and_then(|s| s.try_into().ok())
+        .map(u64::from_le_bytes)
+        .map(|n| n as usize)
+        .filter(|&n| 8 + n <= blob.len())
+        .ok_or_else(|| ShardError::Log(format!("corrupt feature-space file {}", path.display())))?;
+    let dict_bytes = blob[8..8 + dict_len].to_vec();
+    let tag_bytes = blob[8 + dict_len..].to_vec();
+    Ok(Some((dict_bytes, tag_bytes)))
 }
 
 struct ServerState {
@@ -157,37 +182,34 @@ impl ShardServer {
         config: EngineConfig,
         data_dir: PathBuf,
     ) -> Result<Self, ShardError> {
-        let dict_path = data_dir.join(ADOPTED_DICT_FILE);
-        let tag_path = data_dir.join(ADOPTED_TAGDICT_FILE);
-        if !dict_path.exists() {
+        // The dict + tag space are ONE atomically-written blob (never desynced); absent
+        // ⇒ a never-adopted durable node, which starts pending and adopts on connect.
+        let Some((dict_bytes, tag_bytes)) = read_adopted_space(&data_dir)? else {
             return Ok(Self::pending_durable(norm, config, data_dir));
-        }
-        let dict_bytes = std::fs::read(&dict_path)
-            .map_err(|e| ShardError::Log(format!("reading {}: {e}", dict_path.display())))?;
+        };
         let dict = Arc::new(crate::storage::deserialize_dict(&dict_bytes).map_err(|e| {
             ShardError::Log(format!(
-                "deserializing persisted dict {}: {e}",
-                dict_path.display()
+                "deserializing persisted dict under {}: {e}",
+                data_dir.display()
             ))
         })?);
-        // The tag space ships (and persists) atomically with the dict; an absent file
-        // means a pre-ADR-072 node — treat as the empty (finalized) space.
-        let tag_dict = Arc::new(if tag_path.exists() {
-            let bytes = std::fs::read(&tag_path)
-                .map_err(|e| ShardError::Log(format!("reading {}: {e}", tag_path.display())))?;
-            crate::storage::deserialize_tagdict(&bytes).map_err(|e| {
+        let tag_dict = Arc::new(
+            crate::storage::deserialize_tagdict(&tag_bytes).map_err(|e| {
                 ShardError::Log(format!(
-                    "deserializing persisted tag dict {}: {e}",
-                    tag_path.display()
+                    "deserializing persisted tag dict under {}: {e}",
+                    data_dir.display()
                 ))
-            })?
-        } else {
-            finalized_empty_tag_dict()
-        });
+            })?,
+        );
         let mut sc = config.clone();
         sc.data_dir = Some(data_dir.clone());
         // `new_durable` self-restores via the checkpoint sidecar when one exists
-        // (segments attached + translog tail replayed, fingerprint-checked).
+        // (segments attached + translog tail replayed, fingerprint-checked). A
+        // fingerprint mismatch here means the durable state was built under a dict that
+        // no longer matches the persisted one — a corpus/coordinator change across the
+        // restart (ADR-034 divergence). It fails LOUD (DictMismatch); the remedy is to
+        // wipe this node's data dir and let the coordinator re-seed it (a node that
+        // crashed mid-adopt holds no data the cluster's source of truth relies on).
         let shard = LocalShard::new_durable(
             Arc::clone(&norm),
             Arc::clone(&dict),

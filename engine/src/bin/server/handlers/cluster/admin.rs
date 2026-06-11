@@ -440,6 +440,15 @@ pub(crate) struct HandoffBody {
 /// (or any post-fence) failure aborts fail-closed and auto-unfences the source — the
 /// error surfaces here with the engine's message and the cluster keeps serving.
 /// Requires a `--features distributed` build; otherwise a clear 501.
+///
+/// Deliberately does NOT hold `write_serial`: a handoff is *designed* to run
+/// concurrently with ingestion (peer-recover → fence → drain-to-convergence → flip,
+/// ADR-044) — that IS the "under load" property the harness exercises. Its own
+/// fence + retention lease + atomic backing swap provide the concurrency safety;
+/// serializing it against every `/_doc` write would both defeat the under-load test
+/// and stall cluster-wide ingestion for the whole (multi-RPC, possibly slow) move
+/// (review finding). The cluster READ guard still excludes a concurrent vocab
+/// rebuild (`&mut self`), which genuinely must not run mid-handoff.
 #[cfg(feature = "distributed")]
 #[instrument(skip_all)]
 pub(crate) async fn cluster_handoff(
@@ -449,7 +458,6 @@ pub(crate) async fn cluster_handoff(
     let handle = tokio::runtime::Handle::current();
     let state_inner = Arc::clone(&state);
     let result = tokio::task::spawn_blocking(move || {
-        let _w = state_inner.write_serial.lock();
         let cluster = state_inner.cluster.read();
         cluster.execute_handoff(body.position, &body.source, &body.target, &handle)
     })
