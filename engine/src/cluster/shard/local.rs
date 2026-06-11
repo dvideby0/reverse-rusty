@@ -115,6 +115,21 @@ impl LocalShard {
             config,
         )
         .map_err(|e| ShardError::Log(format!("creating durable shard: {e}")))?;
+        // Write the INITIAL (empty) checkpoint sidecar so a durable shard is
+        // self-restartable from the moment it exists (ADR-072): a crash before the
+        // first seal then takes the `open_durable_self` path above — open the
+        // EXISTING translog and replay its whole tail — instead of this fresh path,
+        // whose `open_fresh` resets the translog (which would drop acknowledged
+        // live writes) and ignores bulk-written segments.
+        translog::write_sidecar(
+            &dir,
+            &translog::ShardCheckpoint {
+                next_seg_id: engine.next_seg_id(),
+                local_checkpoint: 0,
+                dict_fingerprint: dict.fingerprint(),
+                segment_files: Vec::new(),
+            },
+        )?;
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         Ok(LocalShard {
             engine: Mutex::new(engine),
@@ -279,7 +294,61 @@ impl LocalShard {
         let mut eng = self.lock();
         let report = eng.ingest_extracted(items);
         Self::publish(&eng, &self.snapshot);
+        // Bulk ingest writes durable segments WITHOUT riding the translog, so the
+        // checkpoint sidecar must learn about them or a self-restart would attach a
+        // stale registry and silently lose the bulk (ADR-072). Refresh it here,
+        // PRESERVING local_checkpoint — the un-sealed translog tail is unchanged, and
+        // advancing it would skip replaying live ops (a false negative).
+        self.refresh_sidecar_segments(&eng);
         report
+    }
+
+    /// Refresh the durable checkpoint sidecar's segment registry after an
+    /// off-translog write (bulk ingest). Best-effort like the engine's degraded
+    /// paths: the segments themselves are already durable, so a failed pointer
+    /// update is surfaced as a [`DurabilityFailure`](crate::events::EngineEvent)
+    /// (data-at-risk: a self-restart before the next successful seal would miss
+    /// the bulk) rather than failing the infallible build-path ingest.
+    fn refresh_sidecar_segments(&self, eng: &Engine) {
+        let Some(dir) = &self.data_dir else { return };
+        let emit_fail = |detail: String, error: String| {
+            self.emit(&crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::ManifestWrite,
+                detail,
+                error,
+            });
+        };
+        let prev = match translog::read_sidecar(dir) {
+            Ok(c) => c.map_or(0, |c| c.local_checkpoint),
+            Err(e) => {
+                emit_fail(
+                    "reading shard.ckpt to refresh after bulk ingest".into(),
+                    e.to_string(),
+                );
+                return;
+            }
+        };
+        let segment_files = match eng.segment_filenames() {
+            Ok(f) => f,
+            Err(e) => {
+                emit_fail(
+                    "collecting segment filenames after bulk ingest".into(),
+                    e.to_string(),
+                );
+                return;
+            }
+        };
+        if let Err(e) = translog::write_sidecar(
+            dir,
+            &translog::ShardCheckpoint {
+                next_seg_id: eng.next_seg_id(),
+                local_checkpoint: prev,
+                dict_fingerprint: self.dict.fingerprint(),
+                segment_files,
+            },
+        ) {
+            emit_fail("writing shard.ckpt after bulk ingest".into(), e.to_string());
+        }
     }
 
     /// Lock the engine, recovering the guard if a prior writer panicked: a poisoned

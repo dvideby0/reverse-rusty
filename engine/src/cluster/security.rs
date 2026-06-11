@@ -95,6 +95,13 @@ pub(crate) fn configure_endpoint(
     let ep = Endpoint::from_shared(endpoint.to_string())
         .map_err(|e| ShardError::Remote(format!("invalid endpoint {endpoint:?}: {e}")))?;
     match tls {
+        // An https endpoint with NO client TLS config would die inside tonic as an
+        // opaque "transport error" — name the misconfiguration instead (the node is
+        // missing its --tls-ca / client security half).
+        None if endpoint.starts_with("https://") => Err(ShardError::Remote(format!(
+            "endpoint {endpoint:?} is https but no client TLS config is set (this node \
+             needs its CA — e.g. --tls-ca / --grpc-tls-ca — to dial a TLS mesh)"
+        ))),
         None => Ok(ep),
         Some(cfg) => {
             let mut tls_cfg =

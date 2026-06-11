@@ -16,7 +16,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use reverse_rusty::cluster::{resolve_mesh_token, ServerSecurity, ShardServer, TlsServerIdentity};
+use reverse_rusty::cluster::{
+    resolve_mesh_token, ClientSecurity, ServerSecurity, ShardServer, TlsClientConfig,
+    TlsServerIdentity,
+};
 use reverse_rusty::compile::extract;
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::Dict;
@@ -33,6 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut addr_arg: Option<String> = None;
     let mut tls_cert: Option<PathBuf> = None;
     let mut tls_key: Option<PathBuf> = None;
+    let mut tls_ca: Option<PathBuf> = None;
+    let mut tls_domain: Option<String> = None;
     let mut token_flag: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -49,6 +54,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tls_key = args.get(i + 1).map(PathBuf::from);
                 i += 1;
             }
+            "--tls-ca" => {
+                tls_ca = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--tls-domain" => {
+                tls_domain = args.get(i + 1).cloned();
+                i += 1;
+            }
             "--cluster-token" => {
                 token_flag = args.get(i + 1).cloned();
                 i += 1;
@@ -62,7 +75,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
     let addr: SocketAddr = addr_arg.as_deref().unwrap_or("127.0.0.1:50051").parse()?;
-    let security = resolve_server_security(tls_cert, tls_key, token_flag)?;
+    let (security, client_security) =
+        resolve_security(tls_cert, tls_key, tls_ca, tls_domain, token_flag)?;
 
     let norm = Arc::new(Normalizer::default_vocab()?);
     let rt = tokio::runtime::Runtime::new()?;
@@ -72,14 +86,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // places queries — the real multi-node flow, no out-of-band dict (ADR-034). With
         // `--data-dir` it is also durable: a recovering/replica node (ADR-035/036).
         let server = match &data_dir {
-            Some(dir) => ShardServer::pending_durable(norm, EngineConfig::default(), dir.clone()),
+            // open_durable self-restores a previously adopted node (ADR-072); a fresh
+            // dir starts pending exactly as before.
+            Some(dir) => ShardServer::open_durable(norm, EngineConfig::default(), dir.clone())?,
             None => ShardServer::pending(norm, EngineConfig::default()),
         };
-        let durable = if data_dir.is_some() { ", DURABLE" } else { "" };
-        println!(
-            "shardserver: serving ShardService on {addr} (PENDING{durable} — awaiting AdoptDict)"
-        );
-        rt.block_on(server.with_security(security).serve(addr))?;
+        let state = if server.is_serving() {
+            "RESUMED from durable state".to_string()
+        } else {
+            let durable = if data_dir.is_some() { ", DURABLE" } else { "" };
+            format!("PENDING{durable} — awaiting AdoptDict")
+        };
+        println!("shardserver: serving ShardService on {addr} ({state})");
+        rt.block_on(
+            server
+                .with_security(security)
+                .with_client_security(client_security)
+                .serve(addr),
+        )?;
         return Ok(());
     }
 
@@ -121,7 +145,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "shardserver: serving ShardService on {addr} ({} queries loaded)",
         queries.len()
     );
-    rt.block_on(server.with_security(security).serve(addr))?;
+    rt.block_on(
+        server
+            .with_security(security)
+            .with_client_security(client_security)
+            .serve(addr),
+    )?;
     Ok(())
 }
 
@@ -129,11 +158,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// `--cluster-token`/`RR_CLUSTER_TOKEN` — fail-loud on a half-configured TLS identity
 /// or a malformed token; warn loud when a token is configured without TLS (the secret
 /// would cross the wire in cleartext).
-fn resolve_server_security(
+fn resolve_security(
     tls_cert: Option<PathBuf>,
     tls_key: Option<PathBuf>,
+    tls_ca: Option<PathBuf>,
+    tls_domain: Option<String>,
     token_flag: Option<String>,
-) -> Result<ServerSecurity, Box<dyn std::error::Error>> {
+) -> Result<(ServerSecurity, ClientSecurity), Box<dyn std::error::Error>> {
     let tls = match (tls_cert, tls_key) {
         (None, None) => None,
         (Some(cert), Some(key)) => Some(TlsServerIdentity {
@@ -144,11 +175,31 @@ fn resolve_server_security(
         }),
         _ => return Err("--tls-cert and --tls-key must be provided together".into()),
     };
+    // The CLIENT half (ADR-071/072): the CA this node verifies a peer SOURCE against
+    // when its `RecoverFrom` handler dials out (the handoff / peer-recovery pull).
+    let client_tls = match tls_ca {
+        None => None,
+        Some(ca) => Some(TlsClientConfig {
+            ca_pem: std::fs::read(&ca)
+                .map_err(|e| format!("reading --tls-ca {}: {e}", ca.display()))?,
+            domain: tls_domain,
+        }),
+    };
     let token = resolve_mesh_token(token_flag, std::env::var("RR_CLUSTER_TOKEN"))?;
     if token.is_some() && tls.is_none() {
         eprintln!(
-            "WARNING: --cluster-token without TLS — the mesh secret crosses the wire in              cleartext; configure --tls-cert/--tls-key (ADR-071)"
+            "WARNING: --cluster-token without TLS — the mesh secret crosses the wire in \
+             cleartext; configure --tls-cert/--tls-key (ADR-071)"
         );
     }
-    Ok(ServerSecurity { tls, token })
+    Ok((
+        ServerSecurity {
+            tls,
+            token: token.clone(),
+        },
+        ClientSecurity {
+            tls: client_tls,
+            token,
+        },
+    ))
 }
