@@ -101,6 +101,94 @@ async fn delete_after_reput_reports_one_copy() {
     );
 }
 
+// -- Tag-value coercion + loud rejects (ADR-073, closing ADR-064 item 4) ----
+
+/// Shorthand: run `extract_ingest_tags` over a JSON body's top-level object.
+fn tags_of(body: serde_json::Value) -> Result<Vec<(String, String)>, String> {
+    let obj = body.as_object().expect("test body is an object");
+    super::extract_ingest_tags(obj)
+}
+
+#[test]
+fn scalar_tag_values_coerce_canonically() {
+    // Numbers and bools coerce to their canonical JSON text (the ES keyword
+    // behavior); strings pass through. Both the `tags` object and ES-style
+    // sibling fields take the same rule.
+    let mut tags = tags_of(serde_json::json!({
+        "query": "q",
+        "tags": {"priority": 7, "active": true, "tier": "gold"},
+        "category": 42.5,
+    }))
+    .expect("scalars must coerce, not error");
+    tags.sort();
+    assert_eq!(
+        tags,
+        vec![
+            ("active".to_string(), "true".to_string()),
+            ("category".to_string(), "42.5".to_string()),
+            ("priority".to_string(), "7".to_string()),
+            ("tier".to_string(), "gold".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn null_tag_values_are_skipped_not_errors() {
+    // An explicit null is the ES "no value" — the key carries no tag, top-level
+    // or as an array element; `"tags": null` means no tags at all.
+    let tags = tags_of(serde_json::json!({
+        "query": "q",
+        "tags": {"status": null},
+        "colors": ["red", null, 3],
+    }))
+    .expect("null is skip, not an error");
+    assert_eq!(
+        tags,
+        vec![
+            ("colors".to_string(), "red".to_string()),
+            ("colors".to_string(), "3".to_string()),
+        ]
+    );
+    assert_eq!(
+        tags_of(serde_json::json!({"query": "q", "tags": null})).expect("tags:null is no tags"),
+        vec![]
+    );
+}
+
+#[test]
+fn structured_tag_values_fail_loud() {
+    // Pre-fix these were dropped SILENTLY, leaving the query unreachable by any
+    // filter on the key (the ADR-064 item-4 finding). Now they are hard errors.
+    assert!(
+        tags_of(serde_json::json!({"query": "q", "tags": {"meta": {"x": 1}}})).is_err(),
+        "object tag value must error"
+    );
+    assert!(
+        tags_of(serde_json::json!({"query": "q", "colors": [["nested"]]})).is_err(),
+        "nested array tag element must error"
+    );
+    assert!(
+        tags_of(serde_json::json!({"query": "q", "tags": ["not", "an", "object"]})).is_err(),
+        "a non-object `tags` field must error (was silently ignored)"
+    );
+}
+
+#[tokio::test]
+async fn put_doc_rejects_structured_tag_value_with_400() {
+    let state = state();
+    let body: super::PutDocBody = serde_json::from_value(serde_json::json!({
+        "query": "michael jordan",
+        "tags": {"meta": {"x": 1}},
+    }))
+    .expect("body deserializes");
+    let resp = put_doc(State(Arc::clone(&state)), Path(7), Json(body))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // Nothing was ingested: the engine never saw the doc.
+    assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").is_empty());
+}
+
 #[tokio::test]
 async fn rejected_reput_leaves_old_version_live() {
     let state = state();

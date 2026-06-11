@@ -113,7 +113,28 @@ pub(crate) async fn cluster_put_doc(
     Json(body): Json<PutDocBody>,
 ) -> Response {
     let start = Instant::now();
-    let tags = extract_ingest_tags(&body.rest);
+    // A malformed tag value is a caller error: 400 before any coordinator work
+    // (ADR-073 — never silently drop a tag the caller asked for).
+    let tags = match extract_ingest_tags(&body.rest) {
+        Ok(t) => t,
+        Err(msg) => {
+            warn!(query_id = id, error = %msg, "invalid tag value");
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["put_doc", "400"])
+                .inc();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ClusterPutDocResponse {
+                    _id: id,
+                    result: "error",
+                    error: Some(msg),
+                }),
+            )
+                .into_response();
+        }
+    };
     let result = {
         let _w = state.write_serial.lock();
         let cluster = state.cluster.read();
@@ -429,10 +450,22 @@ pub(crate) async fn cluster_bulk(
             });
             continue;
         };
-        let tags = source
-            .as_object()
-            .map(extract_ingest_tags)
-            .unwrap_or_default();
+        // A malformed tag value fails the ITEM loud (ADR-073), mirroring the
+        // parse-error per-item contract — never ingest with silently fewer tags.
+        let tags = match source.as_object().map(extract_ingest_tags).transpose() {
+            Ok(t) => t.unwrap_or_default(),
+            Err(msg) => {
+                has_errors = true;
+                items.push(ClusterBulkItem {
+                    index: ClusterBulkItemInner {
+                        _id: id,
+                        status: 400,
+                        error: Some(msg),
+                    },
+                });
+                continue;
+            }
+        };
 
         let (status, error) = match cluster.upsert_query_with_tags(id, query, &tags) {
             Ok((removed, outcome)) => {

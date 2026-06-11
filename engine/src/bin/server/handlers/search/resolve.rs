@@ -4,10 +4,26 @@
 //! Any unsupported ES query node is a hard error — an unsupported filter never
 //! silently widens the result set.
 
+use crate::handlers::doc::{coerce_tag_scalar, json_type_name};
+
 use super::DocBody;
 
 /// A request filter: a conjunction of `(key, [values])` groups (ADR-049).
 pub(crate) type FilterSpec = Vec<(String, Vec<String>)>;
+
+/// Coerce one filter value through the SAME canonical scalar rule as tag ingest
+/// (ADR-073): a number or bool filter value matches the tag its ingest twin
+/// produced (`{"priority": 7}` ingested ⇒ `{"priority": 7}` filterable). `null`
+/// and structured values are hard errors — a predicate with no canonical scalar
+/// form is unanswerable, and silently dropping it would widen the result set.
+fn coerce_filter_value(ctx: &str, v: &serde_json::Value) -> Result<String, String> {
+    coerce_tag_scalar(v).ok_or_else(|| {
+        format!(
+            "{ctx} must be a string, number or bool (got {})",
+            json_type_name(v)
+        )
+    })
+}
 
 /// Parse the ES `bool.filter` clause list into a [`FilterSpec`]. Each clause is a
 /// `{"terms": {key: [values]}}` or `{"term": {key: value}}`; any other clause type is a
@@ -28,19 +44,17 @@ fn parse_es_filter(filter: &serde_json::Value) -> Result<FilterSpec, String> {
                 let vals = match v {
                     serde_json::Value::Array(a) => a
                         .iter()
-                        .filter_map(|e| e.as_str().map(str::to_string))
-                        .collect(),
-                    serde_json::Value::String(s) => vec![s.clone()],
-                    _ => return Err(format!("terms[{k}] must be a string or array of strings")),
+                        .enumerate()
+                        .map(|(i, e)| coerce_filter_value(&format!("terms[{k}][{i}]"), e))
+                        .collect::<Result<_, _>>()?,
+                    other => vec![coerce_filter_value(&format!("terms[{k}]"), other)?],
                 };
                 spec.push((k.clone(), vals));
             }
         } else if let Some(term) = obj.get("term").and_then(|t| t.as_object()) {
             for (k, v) in term {
-                let val = v
-                    .as_str()
-                    .ok_or_else(|| format!("term[{k}] must be a string"))?;
-                spec.push((k.clone(), vec![val.to_string()]));
+                let val = coerce_filter_value(&format!("term[{k}]"), v)?;
+                spec.push((k.clone(), vec![val]));
             }
         } else {
             return Err(
@@ -60,12 +74,12 @@ fn parse_native_filter(filter: &serde_json::Value) -> Result<FilterSpec, String>
     let mut spec = FilterSpec::new();
     for (k, v) in obj {
         let vals = match v {
-            serde_json::Value::String(s) => vec![s.clone()],
             serde_json::Value::Array(a) => a
                 .iter()
-                .filter_map(|e| e.as_str().map(str::to_string))
-                .collect(),
-            _ => return Err(format!("filter[{k}] must be a string or array of strings")),
+                .enumerate()
+                .map(|(i, e)| coerce_filter_value(&format!("filter[{k}][{i}]"), e))
+                .collect::<Result<_, _>>()?,
+            other => vec![coerce_filter_value(&format!("filter[{k}]"), other)?],
         };
         spec.push((k.clone(), vals));
     }

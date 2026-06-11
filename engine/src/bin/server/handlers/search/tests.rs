@@ -10,6 +10,7 @@ use super::DocBody;
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 use axum::extract::State;
+use axum::response::IntoResponse;
 use axum::Json;
 use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::segment::{Engine, MatchScratch};
@@ -339,4 +340,126 @@ async fn search_multi_doc_truncates_per_slot_by_size() {
         slots[0].hits[0]._id, 2,
         "the surviving hit is the top by priority"
     );
+}
+
+// -- Tag-value coercion on the filter path (ADR-073, ADR-064 item 4) --------
+
+/// Run `/_search` with a JSON body, returning the sorted hit ids (Ok) or the
+/// HTTP status (Err).
+async fn search_ids(
+    state: &Arc<AppState>,
+    body: serde_json::Value,
+) -> Result<Vec<u64>, axum::http::StatusCode> {
+    let req: SearchBody = serde_json::from_value(body).expect("valid SearchBody");
+    match search(State(Arc::clone(state)), Json(req)).await {
+        Ok(resp) => {
+            let mut ids: Vec<u64> = resp.0.hits.hits.iter().map(|h| h._id).collect();
+            ids.sort_unstable();
+            Ok(ids)
+        }
+        Err((status, _)) => Err(status),
+    }
+}
+
+#[allow(clippy::used_underscore_binding)]
+#[tokio::test]
+async fn numeric_tag_ingest_meets_numeric_filter() {
+    // The load-bearing agreement (ADR-073): ingest and filter coerce through the
+    // SAME canonical rule, so a numeric category ingested as `7` is reachable by
+    // a filter sending `7` OR `"7"` — pre-fix the ingest side silently dropped
+    // the tag, making the query unreachable by ANY filter on that key.
+    let state = state_with(Engine::new(Normalizer::default_vocab().expect("vocab")), false);
+    let body: crate::handlers::doc::PutDocBody = serde_json::from_value(serde_json::json!({
+        "query": "michael jordan",
+        "tags": {"category": 7, "active": true},
+    }))
+    .expect("body deserializes");
+    let resp = crate::handlers::doc::put_doc(
+        axum::extract::State(Arc::clone(&state)),
+        axum::extract::Path(1u64),
+        Json(body),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+
+    let title = serde_json::json!({"title": "1986 fleer michael jordan rookie"});
+    // Native filter, number and string forms, plus the coerced bool.
+    for filter in [
+        serde_json::json!({"category": 7}),
+        serde_json::json!({"category": "7"}),
+        serde_json::json!({"category": [7]}),
+        serde_json::json!({"active": true}),
+    ] {
+        let ids = search_ids(
+            &state,
+            serde_json::json!({"document": title, "filter": filter}),
+        )
+        .await
+        .expect("filter coerces, not 400");
+        assert_eq!(ids, vec![1], "filter {filter} must reach the tagged query");
+    }
+    // ES envelope: bool.filter terms with a numeric value.
+    let ids = search_ids(
+        &state,
+        serde_json::json!({"query": {"bool": {
+            "must": {"percolate": {"document": title}},
+            "filter": [{"terms": {"category": [7]}}],
+        }}}),
+    )
+    .await
+    .expect("ES terms coerce");
+    assert_eq!(ids, vec![1]);
+    // A different number does NOT match (coercion is exact, not fuzzy).
+    let ids = search_ids(
+        &state,
+        serde_json::json!({"document": title, "filter": {"category": 8}}),
+    )
+    .await
+    .expect("ok");
+    assert!(ids.is_empty(), "category 8 must not match a category-7 tag");
+}
+
+#[tokio::test]
+async fn unanswerable_filter_values_are_400_not_silently_dropped() {
+    // Pre-fix a non-string ARRAY ELEMENT was silently dropped from the filter
+    // (widening the predicate); scalars already 400'd. Now everything without a
+    // canonical scalar form is a loud 400 on every filter shape.
+    let state = state_with(Engine::new(Normalizer::default_vocab().expect("vocab")), false);
+    let title = serde_json::json!({"title": "anything"});
+    for (label, body) in [
+        (
+            "native null",
+            serde_json::json!({"document": title, "filter": {"category": null}}),
+        ),
+        (
+            "native object",
+            serde_json::json!({"document": title, "filter": {"category": {"x": 1}}}),
+        ),
+        (
+            "native nested array element",
+            serde_json::json!({"document": title, "filter": {"category": [["a"]]}}),
+        ),
+        (
+            "native null array element",
+            serde_json::json!({"document": title, "filter": {"category": ["a", null]}}),
+        ),
+        (
+            "ES terms null element",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"document": title}},
+                "filter": [{"terms": {"category": ["a", null]}}],
+            }}}),
+        ),
+        (
+            "ES term null",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"document": title}},
+                "filter": [{"term": {"category": null}}],
+            }}}),
+        ),
+    ] {
+        let err = search_ids(&state, body).await.expect_err(label);
+        assert_eq!(err, axum::http::StatusCode::BAD_REQUEST, "{label}");
+    }
 }
