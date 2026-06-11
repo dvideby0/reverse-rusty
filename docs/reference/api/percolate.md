@@ -30,6 +30,7 @@ Optional request fields:
 | `size` | 1000 | Maximum number of hits to return (per slot in multi-doc mode) |
 | `from` | 0 | Offset into the result set for pagination |
 | `rank` | – | Optional ranking block (ADR-059) — order hits by a priority tag and/or request boosts before `from`/`size`. See [Ranking](#ranking-adr-059). |
+| `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class-C (broad) queries for this request (ADR-073 — previously `/_mpercolate`-only; on `/_search` the field was silently ignored) |
 | `include_source` | true | Include original query text in each hit |
 
 `total` always reflects the full match count; `hits` is the paginated window. Set
@@ -113,7 +114,11 @@ to a percolate request to keep only the matches whose stored query carries the r
 [metadata tags](documents.md#per-query-metadata-tags-adr-049). The filter is a **conjunction across keys** (AND) of
 **value sets** (OR within a key); it is applied in the hot-path verify stage and can only *remove*
 matches, never add or drop a wanted one. A filter value never seen at ingest matches nothing (the safe
-`terms` semantics). Two equivalent shapes are accepted:
+`terms` semantics). Filter values take the **same canonical scalar coercion as ingest** (ADR-073):
+strings, numbers, and bools are accepted everywhere a value is (`{"category": 7}` matches a tag
+ingested as `7` or `"7"`); a `null`, object, or nested array anywhere in a filter is a loud **400** —
+an unanswerable predicate is never silently dropped (which would *widen* the result set). Two
+equivalent shapes are accepted:
 
 **Native** — a `filter` block alongside `document`/`documents`:
 

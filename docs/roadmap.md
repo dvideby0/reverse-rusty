@@ -235,9 +235,12 @@ the documented parity configuration, now recorded in
 **real-corpus** false-negative / throughput audit remains the open validation step in STATUS "Current
 limitations".)*
 
-- **Drop-in operational parity — the [ADR-064](DECISIONS.md) work package (next up in this tier).** The
-  audit's decided items, each shipping under its own ADR/PR (full detail + today's-behavior citations in
-  the program ADR):
+- **Drop-in operational parity — the [ADR-064](DECISIONS.md) work package. ✅ COMPLETE** (2026-06-10):
+  the audit's six decided items are all shipped — items 1–3 under their own ADRs (067/068/069), items
+  4–6 batched in [ADR-073](DECISIONS.md) (the ADR-052 precedent); only the program ADR's smaller
+  item-7 residue stays in the polish backlog (restart-time measurement, backup/restore procedure,
+  original-expression passthrough, tag read-back). Full detail + decision-time behavior citations in
+  the program ADR:
   1. ~~**Atomic-upsert `PUT /_doc`**~~ **✅ Shipped ([ADR-067](DECISIONS.md)).** `PUT /_doc/{id}` is now
      replace-by-id (ES `index` semantics): the new version is inserted and every prior live copy
      tombstoned under one writer critical section, one WAL frame (`Upsert`, WAL v4), and one snapshot
@@ -269,13 +272,21 @@ limitations".)*
      unrepresentable under the shared normalizer + recompile machinery; both-typings isn't FP-only
      in the single-view path). Oracle-proven: engine ≡ brute under the knob, both audit directions
      asserted closed.
-  4. **Loud non-string tag values** — ingest silently drops a non-string tag value and filter arrays
-     silently drop non-string elements (while scalar filter values 400) — the silent half corrupts
-     filtering invisibly. Reject (or canonically coerce — pick one, document it) on both paths.
-  5. **Wire `maybe_flush` into the REST PUT path** — `memtable_flush_threshold` is currently inert for
-     single-doc HTTP writes (`put_doc` bypasses the only call site); WAL-durable but the knob lies.
-  6. **Per-request `include_broad` on `/_search`** — today server-flag-only, and an `include_broad`
-     body field is *silently ignored*; `/_mpercolate` already has the per-request override.
+  4. ~~**Loud non-string tag values**~~ **✅ Shipped ([ADR-073](DECISIONS.md)).** Decided **canonical
+     scalar coercion** (number/bool → JSON text, the ES keyword behavior — the reference workload's
+     dominant filter key is a numeric category, so reject-everything would break drop-in) through ONE
+     shared function on ingest + both filter parsers, so the sides can never disagree; `null` = the
+     ES "no value" (skipped on ingest, **400 in a filter**); objects/nested arrays/non-object `tags`
+     are loud 400s everywhere they were silently dropped (`/_bulk` per-item; cluster mode shares the
+     helpers). Proven by the ingest-meets-filter agreement test.
+  5. ~~**Wire `maybe_flush` into the REST PUT path**~~ **✅ Shipped ([ADR-073](DECISIONS.md)).**
+     `maybe_flush` moved to the success tail of both fallible live-write paths
+     (`try_insert_live_with_tags` / `try_upsert_live_with_tags`), so every live write honors
+     `memtable_flush_threshold` (rejected writes never flush; replay/bulk/cluster funnels untouched).
+  6. ~~**Per-request `include_broad` on `/_search`**~~ **✅ Shipped ([ADR-073](DECISIONS.md)).** The
+     same per-request override `/_mpercolate` and the cluster handlers already had, both single- and
+     multi-doc arms; absent ⇒ the server default, byte-identical. (`deny_unknown_fields` declined —
+     ES-style sibling-tag ingest depends on tolerance.)
 - **Per-query metadata + filtered percolation — the lead item. ✅ BUILT (single-node) + oracle-proven
   (2026-06-03, [ADR-049](DECISIONS.md)).** The dominant read pattern: stored queries carry structured tags
   (a category, a status, secondary keys) and callers percolate, then **narrow the candidates by those
