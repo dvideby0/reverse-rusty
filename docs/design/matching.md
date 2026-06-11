@@ -19,7 +19,8 @@ correctness contract this section must uphold.*
 > [DECISIONS](../DECISIONS.md) ADR-019 for the reasoning. **Per-query metadata + filtered percolation
 > (§5.1–§5.3) are built (single-node) and thread end-to-end through the cluster**
 > ([DECISIONS](../DECISIONS.md) ADR-049/055), and **ranking + pagination (§5.4) are built single-node**
-> ([ADR-059](../DECISIONS.md); cluster ranking deferred). See [STATUS](../STATUS.md).
+> ([ADR-059](../DECISIONS.md)) **and through the cluster**
+> ([ADR-075](../DECISIONS.md): rank-at-shard, merged at the coordinator). See [STATUS](../STATUS.md).
 
 **TL;DR (for agents)**
 - **Owns:** signature optimizer (`compile.rs`), candidate index (`index.rs`), exact matcher (`exact.rs`), explain (`explain.rs`)
@@ -212,7 +213,8 @@ always-candidate is visible only when the request includes the broad lane.
 > shared into every shard like the `Dict`, raw tags in the log + read-only `get_or_synthetic`
 > resolution, the filter resolved once at the coordinator + shipped as `TagId` groups
 > ([ADR-055](../DECISIONS.md), 2026-06-04); **ranking + pagination (§5.4) are now built single-node**
-> ([ADR-059](../DECISIONS.md), 2026-06-04 — cluster ranking still deferred). Motivated by the reference
+> ([ADR-059](../DECISIONS.md), 2026-06-04) **and through the cluster** ([ADR-075](../DECISIONS.md),
+> 2026-06-11 — rank-at-shard + compile-once-fan). Motivated by the reference
 > workload in [`../research/percolator-workload.md`](../research/percolator-workload.md), whose dominant
 > read pattern is "percolate, then narrow to one category." Code: `src/tagdict.rs` (tag interning),
 > `src/exact.rs` (`TagPredicate` + SoA tag column + verify-stage filter), `src/rank.rs` (the post-match
@@ -267,10 +269,14 @@ priority range), and the handler orders by `(score desc, _id asc)` — a total o
 multi-doc `/_search` (closing the ADR-052 #3 pagination tail). Because it runs after verification on a
 `Vec<u64>`, it touches neither the candidate index nor the verifier — and it is **opt-in**, so with no
 `rank` block the response is byte-identical to the pre-ranking engine. Tags are resolved to the **newest
-live copy** of each id (memtable first, then base segments newest→oldest). **Single-node** (the REST
-surface); cluster ranking is deferred behind the same `RankSpec` seam (cross-shard priority fetch at the
-coordinator merge — [ADR-055](../DECISIONS.md)/[ADR-059](../DECISIONS.md)). Consistent with the reference
-workload, where ranking is a presentation-surface concern, not a matching-core one.
+live copy** of each id (memtable first, then base segments newest→oldest). **Cluster ranking is built too**
+([ADR-075](../DECISIONS.md)): the coordinator compiles the `RankSpec` once against the shared frozen tag
+space (the [ADR-055](../DECISIONS.md) compile-once-fan pattern), each probed shard scores its own matched
+ids via the same `EngineSnapshot::rank`, and the merge dedups by id — copies of a logical are
+version-identical across shards, so every shard reports the same score. One boundary, pinned: a
+post-freeze (synthetic) `priority` tag scores 0 (priority reads the tag's value string, which only an
+interned tag has); boosts fire for both (id-equality). Consistent with the reference workload, where
+ranking is a presentation-surface concern, not a matching-core one.
 
 ### 5.5 Alternatives (documented, deferred)
 

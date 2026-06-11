@@ -173,6 +173,23 @@ pub(crate) trait Shard: Send + Sync {
         include_broad: bool,
         pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError>;
+    /// [`percolate_filtered`](Self::percolate_filtered) plus a per-id ranking score
+    /// (ADR-059/075): the coordinator compiles the request's `rank` block ONCE against
+    /// the shared frozen tag space (exactly like the `TagPredicate`) and fans the same
+    /// [`CompiledRankSpec`] to every probed shard; the shard scores its OWN matched ids
+    /// against its stored tag columns (newest live copy, as single-node). Scores are
+    /// UNSORTED relative to rank — `(id, score)` pairs aligned to the id set — because
+    /// ordering/pagination is the coordinator/handler's job (the single-node
+    /// `EngineSnapshot::rank` contract). Copies of one logical id are version-identical
+    /// across shards (identical op streams), so every shard reports the same score for
+    /// the same id and the coordinator's dedup is order-safe.
+    fn percolate_filtered_ranked(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError>;
     /// Physical query count held by this shard (a replicated/any-of query is counted
     /// once per local entry, so it is counted on each shard holding it).
     fn num_queries(&self) -> Result<usize, ShardError>;

@@ -13,7 +13,7 @@ use reverse_rusty::{CompiledRankSpec, EngineSnapshot, RankSpec};
 /// and/or additive request boosts. Ranking runs AFTER matching, on the final id
 /// set — it only reorders + paginates, never changes which queries match.
 #[derive(Deserialize)]
-pub(super) struct RankBody {
+pub(crate) struct RankBody {
     /// Tag key whose numeric value is a query's base priority (e.g. `"priority"`).
     priority_key: Option<String>,
     /// Additive boosts applied when a query carries the given `(key, value)` tag.
@@ -28,15 +28,25 @@ struct BoostBody {
     boost: i64,
 }
 
-/// Lower a request `rank` block to an engine [`RankSpec`]. `None` ⇒ no ranking.
-pub(super) fn to_rank_spec(rank: Option<RankBody>) -> Option<RankSpec> {
-    rank.map(|r| RankSpec {
-        priority_key: r.priority_key,
-        boosts: r
-            .boosts
-            .into_iter()
-            .map(|b| (b.key, b.value, b.boost))
-            .collect(),
+/// Lower a request `rank` block to an engine [`RankSpec`]. `None` ⇒ no ranking —
+/// including a PRESENT-but-empty block (no `priority_key`, no `boosts`): a no-op
+/// spec must keep the response byte-identical to the unranked path (no `_score`
+/// key, engine order). Normalized here, in the lowering both modes share, so the
+/// single-node and cluster handlers can never disagree about what counts as
+/// "ranked" (the single-node compiled-`is_noop` filter remains as a second guard).
+pub(crate) fn to_rank_spec(rank: Option<RankBody>) -> Option<RankSpec> {
+    rank.and_then(|r| {
+        if r.priority_key.is_none() && r.boosts.is_empty() {
+            return None;
+        }
+        Some(RankSpec {
+            priority_key: r.priority_key,
+            boosts: r
+                .boosts
+                .into_iter()
+                .map(|b| (b.key, b.value, b.boost))
+                .collect(),
+        })
     })
 }
 

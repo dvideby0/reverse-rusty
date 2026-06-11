@@ -144,6 +144,18 @@ impl Shard for Arc<HandoffShard> {
             .percolate_filtered(title, include_broad, pred)
     }
 
+    fn percolate_filtered_ranked(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        self.current
+            .load()
+            .percolate_filtered_ranked(title, include_broad, pred, spec)
+    }
+
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.current.load().num_queries()
     }
@@ -441,6 +453,15 @@ mod tests {
             _b: bool,
             _pred: &TagPredicate,
         ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+            Ok((Vec::new(), MatchStats::default()))
+        }
+        fn percolate_filtered_ranked(
+            &self,
+            _t: &str,
+            _b: bool,
+            _pred: &TagPredicate,
+            _spec: &crate::rank::CompiledRankSpec,
+        ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
             Ok((Vec::new(), MatchStats::default()))
         }
         fn num_queries(&self) -> Result<usize, ShardError> {

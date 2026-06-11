@@ -27,6 +27,9 @@ pub(crate) use percolate::search;
 // The request-resolution helper is shared with the coordinator-mode handlers
 // (ADR-070), so both modes parse the identical native + ES envelopes.
 pub(crate) use resolve::resolve_percolate;
+// The `rank` block + its lowering are shared with the coordinator-mode handlers too
+// (ADR-075), so both modes parse the identical ranking request shape.
+pub(crate) use rank::{to_rank_spec, RankBody};
 
 #[derive(Deserialize)]
 pub(crate) struct DocBody {

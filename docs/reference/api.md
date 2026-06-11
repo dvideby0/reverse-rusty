@@ -196,8 +196,11 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   (remote clusters only) answers 200 with `"result": "partial"`: the write **is** durably logged and
   queued for repair — do **not** re-PUT (it would double-log); `POST /_cluster/resync` converges it.
 - **Per-request `include_broad`** is honored on both `/_search` and `/_mpercolate`.
-- **`rank` and `explain` are rejected with 400** (cluster ranking is ADR-065 criterion 5) — never
-  silently ignored. `profile` works (merged cross-shard `MatchStats`).
+- **`rank` works (ADR-075)** — the same block as single-node, scored at the shards against the shared
+  tag space and merged `(score desc, _id asc)` with `from`/`size` + `_score`. One cluster-specific
+  boundary: a **post-freeze (live-added) `priority` tag scores 0** — priority reads the tag's value
+  string, which only a build-time interned tag has; boosts fire for both (id-equality). `explain` is
+  rejected with 400 — never silently ignored. `profile` works (merged cross-shard `MatchStats`).
 - **`include_source` defaults to `false`** (`_source` costs a per-hit source probe); explicitly
   requesting it on a remote cluster answers 501 (remote shards expose no source readback in v1).
 - **Single-node-only surfaces answer 501 naming the alternative:** `/_compact` (per-shard policy;

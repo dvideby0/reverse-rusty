@@ -153,3 +153,66 @@ fn checkpoint_then_reopen_matches_oracle() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Ranking on a REOPENED cluster (ADR-075): scores are computed from the mmap-backed
+/// segment tag columns + the manifest-restored tag dict — a checkpoint + reopen must
+/// not change a single score. Interned boost + priority tags, exact expected rows.
+#[test]
+fn ranked_percolate_after_reopen() {
+    let queries = vec![
+        (1u64, "1994 topps zzrankone".to_string()),
+        (2, "1994 topps zzranktwo".to_string()),
+        (3, "1994 topps zzrankthree".to_string()),
+    ];
+    let tags = vec![
+        vec![
+            ("tier".to_string(), "gold".to_string()),
+            ("priority".to_string(), "5".to_string()),
+        ],
+        vec![("tier".to_string(), "silver".to_string())],
+        vec![("priority".to_string(), "7".to_string())],
+    ];
+    let dir = unique_dir("ranked_reopen");
+    {
+        let cluster = ClusterEngine::build_with_tags(
+            vocab(),
+            &durable_cfg(3, dir.clone(), false),
+            &queries,
+            &tags,
+        )
+        .expect("tagged durable build");
+        cluster.checkpoint().expect("checkpoint");
+    }
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+
+    let spec = reverse_rusty::RankSpec {
+        priority_key: Some("priority".to_string()),
+        boosts: vec![("tier".to_string(), "gold".to_string(), 100)],
+    };
+    // Each query matches its own title; scores read the reopened tag columns.
+    for (title, id, want_score) in [
+        ("1994 topps zzrankone psa", 1u64, 105i64), // gold(100) + priority 5
+        ("1994 topps zzranktwo psa", 2, 0),         // silver: unboosted, no priority
+        ("1994 topps zzrankthree psa", 3, 7),       // priority only
+    ] {
+        let (scored, _) = reopened
+            .percolate_filtered_ranked(title, &[], true, &spec)
+            .expect("ranked percolate after reopen");
+        let row = scored
+            .iter()
+            .find(|&&(i, _)| i == id)
+            .unwrap_or_else(|| panic!("query {id} must match {title:?} after reopen"));
+        assert_eq!(
+            row.1, want_score,
+            "query {id}: score from reopened tag columns"
+        );
+        // Recall guard holds across reopen too.
+        let unranked: HashSet<u64> = reopened.percolate(title).unwrap().into_iter().collect();
+        let ranked_ids: HashSet<u64> = scored.iter().map(|&(i, _)| i).collect();
+        assert_eq!(
+            ranked_ids, unranked,
+            "ranked set ≡ unranked set after reopen"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

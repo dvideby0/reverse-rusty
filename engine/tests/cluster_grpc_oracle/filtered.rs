@@ -160,3 +160,106 @@ fn grpc_filtered_percolation_matches_single_node_and_oracle() {
         "the live tagged add must NOT pass a different-category (coins) filter over gRPC"
     );
 }
+
+/// Cluster ranking over the WIRE (ADR-075): the compiled spec (resolved `TagId` boosts +
+/// priority key) rides `PercolateRequest.rank`, each server scores its own matched ids
+/// against the shipped tag space, the reply's parallel `scores` + `ranked` echo survive
+/// the round-trip, and the merged scored set equals the single-node engine's `rank`.
+#[test]
+fn grpc_ranked_percolate_matches_single_node() {
+    let (queries, titles) = build_corpus();
+    let tags = tags_parallel(&queries);
+
+    // Single-node tagged reference (the ranking ground truth).
+    let mut reference = Engine::new(vocab());
+    reference
+        .try_build_from_queries_with_tags(&queries, &tags)
+        .expect("tagged single-node build");
+    let ref_snap = reference.snapshot();
+    let raw_spec = reverse_rusty::RankSpec {
+        priority_key: Some("priority".to_string()),
+        boosts: vec![
+            ("category".to_string(), "cards".to_string(), 1000),
+            ("status".to_string(), "active".to_string(), 250),
+        ],
+    };
+    let cspec = ref_snap.compile_rank_spec(&raw_spec);
+
+    let norm = Arc::new(vocab());
+    let dict = {
+        let mut d = Dict::new();
+        let mut lc = String::new();
+        for (_id, text) in &queries {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+                let _ = extract(&ast, &norm, &mut d, &mut lc);
+            }
+        }
+        d.finalize_mask();
+        Arc::new(d)
+    };
+    let tag_dict = frozen_tag_dict_over(&tags);
+
+    let k = 3usize;
+    let cfg = ClusterConfig {
+        num_shards: k,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut addrs: Vec<SocketAddr> = Vec::with_capacity(k);
+    {
+        let _enter = rt.enter();
+        for _ in 0..k {
+            let incoming =
+                TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind ephemeral port");
+            addrs.push(incoming.local_addr().expect("local_addr"));
+            let server = ShardServer::pending(Arc::clone(&norm), EngineConfig::default());
+            rt.spawn(server.serve_with_incoming(incoming));
+        }
+    }
+    for &addr in &addrs {
+        wait_until_listening(addr);
+    }
+    let endpoints: Vec<String> = addrs.iter().map(|a| format!("http://{a}")).collect();
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        &cfg,
+        &endpoints,
+        rt.handle(),
+    )
+    .expect("connect remote cluster");
+    cluster
+        .ingest_with_tags(&queries, &tags)
+        .expect("ingest tagged corpus over gRPC");
+
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    let mut scored_nonzero = 0usize;
+    for (ti, title) in titles.iter().take(60).enumerate() {
+        let (got, _stats) = cluster
+            .percolate_filtered_ranked(title, &[], true, &raw_spec)
+            .expect("ranked percolate over gRPC");
+        ref_snap.match_title_filtered(
+            title,
+            &mut s,
+            &mut out,
+            true,
+            &reverse_rusty::exact::TagPredicate::empty(),
+        );
+        let mut want = ref_snap.rank(&out, &cspec);
+        want.sort_unstable_by_key(|&(id, _)| id);
+        assert_eq!(
+            got, want,
+            "gRPC ranked percolate diverges from single-node (title {ti})"
+        );
+        if got.iter().any(|&(_, sc)| sc != 0) {
+            scored_nonzero += 1;
+        }
+    }
+    assert!(
+        scored_nonzero > 0,
+        "degenerate: no title ever produced a non-zero score over gRPC"
+    );
+}

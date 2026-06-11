@@ -204,7 +204,17 @@ items from an external review, re-ranked to the top; **all are now done:**
      (bulk ingest never persisted `sources.dat`; a clean-shard checkpoint skipped the rewrite —
      reopen + `set_vocab` silently erased the corpus / resurrected deleted queries).
      Oracle-proven incl. checkpoint → reopen → rebuild → reopen.
-  5. **Cluster ranking** (the ADR-059 deferral) — the `RankSpec` seam at the coordinator merge.
+  5. ~~**Cluster ranking**~~ **✅ Shipped ([ADR-075](DECISIONS.md)).** Rank-at-shard +
+     compile-once-fan (the ADR-055 pattern): the coordinator compiles the `RankSpec` once
+     against the shared frozen tag space, each probed shard scores its own matched ids
+     (`Shard::percolate_filtered_ranked`), and the merge dedups by id (copies are
+     version-identical across shards ⇒ equal scores). The wire ships resolved `TagId`
+     boosts + parallel reply scores + a `ranked` echo (an old server fails loud, never
+     silently unranked). Cluster `/_search`/`/_mpercolate` accept the same `rank` block as
+     single-node — `(score desc, _id asc)`, `from`/`size`, `_score`. Synthetic-tag
+     boundary pinned: post-freeze boosts fire (id-equality); a synthetic priority tag
+     scores 0 (no recoverable value string). Oracle-proven ≡ single-node at every K, over
+     real gRPC, and from a reopened cluster; ranked-id-set ≡ unranked-id-set (zero FN).
   6. **Cross-process vocab/normalizer shipping** + multi-word aliases on a cluster (the ADR-046/061
      deferrals; per the [research spike](research/dynamic-vocabulary.md)) — ship it, or record the
      decided refusal story.

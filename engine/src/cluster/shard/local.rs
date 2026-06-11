@@ -395,6 +395,22 @@ impl Shard for LocalShard {
         Ok((out, stats))
     }
 
+    fn percolate_filtered_ranked(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        let mut scratch = MatchScratch::new();
+        let mut out = Vec::new();
+        // ONE snapshot serves both the match and the scoring, so the tags scored are
+        // exactly the tags of the copies that matched (no publish race in between).
+        let snap = self.snapshot();
+        let stats = snap.match_title_filtered(title, &mut scratch, &mut out, include_broad, pred);
+        Ok((snap.rank(&out, spec), stats))
+    }
+
     fn num_queries(&self) -> Result<usize, ShardError> {
         Ok(self.snapshot.load().num_queries())
     }
