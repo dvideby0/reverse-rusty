@@ -253,10 +253,13 @@ pub struct ClusterEngine {
     /// Latch: has any query EVER been written with a non-empty tag set (ADR-055)? `tag_dict`
     /// emptiness is NOT a sufficient proxy — a tag added *after* the dict froze resolves to a
     /// *synthetic* id and is never interned into `tag_dict`, so an untagged-built cluster with live
-    /// tagged adds keeps an empty `tag_dict` yet holds tags. [`Self::set_vocab`] consults this (via
-    /// [`Self::has_tags`]) to refuse a vocab rebuild that would silently drop those tags. Set by every
-    /// tagged write path; restored on `open` from a non-empty `tag_dict`. `Relaxed` suffices — a
-    /// monotonic latch read only on the admin `set_vocab` path, never the hot path.
+    /// tagged adds keeps an empty `tag_dict` yet holds tags. Operator introspection only
+    /// (cluster-mode `/_stats` via [`Self::has_tagged_queries`]): the vocab rebuild no longer
+    /// consults it — tags are carried through `set_vocab` by stored `TagId` (ADR-074), read from
+    /// the shards themselves, so correctness doesn't ride this latch (it is best-effort across
+    /// reopen: a checkpointed synthetic-only cluster restores it `false`). Set by every tagged
+    /// write path; restored on `open` from a non-empty `tag_dict`. `Relaxed` suffices — a
+    /// monotonic latch, never the hot path.
     tags_present: AtomicBool,
     /// The vocabulary behind the current normalizer, if one was installed via
     /// [`Self::set_vocab`] (ADR-046). `None` when the cluster was built directly

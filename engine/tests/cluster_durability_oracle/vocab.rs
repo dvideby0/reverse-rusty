@@ -1,4 +1,5 @@
-//! ADR-046 mechanism (2) + ADR-054: a runtime alias / equivalence survives a crash + reopen.
+//! ADR-046 mechanism (2) + ADR-054: a runtime alias / equivalence survives a crash + reopen;
+//! ADR-074: per-query tags survive a vocabulary rebuild, including across reopen boundaries.
 
 use crate::harness::*;
 
@@ -172,6 +173,283 @@ fn declared_equivalence_survives_reopen() {
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+#[test]
+fn tagged_set_vocab_carries_tags_across_checkpoint_reopen_and_rebuild() {
+    // The ADR-074 durable gate, sequenced to hit the hardest path: a TAGGED durable cluster
+    // (interned corpus tags + one post-freeze SYNTHETIC live tag) is checkpointed and REOPENED
+    // FIRST — so the synthetic tag's raw string exists nowhere (the log was truncated; segments
+    // hold only `TagId`s) — and only THEN gets the vocabulary change. The rebuild must gather
+    // each query's stored ids from the reopened (mmap-backed) segments and carry them through
+    // re-extraction + re-placement. A second reopen then proves the REBUILT segments durably
+    // carry the tag columns.
+    let (mut queries, titles) = build_corpus();
+    // A tagged query in the ALIAS surface form: its extraction (hence possibly its shard)
+    // changes under the vocab change — its tags must follow it.
+    let q_alias = 9_400_001u64;
+    queries.push((q_alias, "1994 fleer zzabbr".into()));
+    let tags = tags_parallel(&queries);
+
+    // "region" never appears in the corpus tag keys ⇒ guaranteed post-freeze synthetic.
+    let live_id = 9_400_002u64;
+    let live_dsl = "zzrareliveq";
+    let live_tag = || vec![("region".to_string(), "emea".to_string())];
+    let tag_of = |l: u64| {
+        if l == live_id {
+            live_tag()
+        } else {
+            tags_for(l)
+        }
+    };
+
+    let dir = unique_dir("tagged_set_vocab");
+    {
+        let cluster = ClusterEngine::build_with_tags(
+            vocab(),
+            &durable_cfg(3, dir.clone(), false),
+            &queries,
+            &tags,
+        )
+        .expect("tagged durable build");
+        cluster
+            .add_query_with_tags(live_id, live_dsl, &live_tag())
+            .expect("synthetic-tagged live add");
+        cluster.checkpoint().expect("checkpoint");
+    }
+
+    // Reopen #1, then the vocabulary change on the reopened cluster.
+    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    let rebuilt = reopened
+        .set_vocab(alias_vocab("zzabbr", "term:zzcanon"))
+        .expect("set_vocab on a reopened tagged cluster (ADR-074)");
+    assert!(rebuilt > 100, "the rebuild covers the live corpus");
+
+    // Alias-aware ground truth over the full live set, filtered via tag_of.
+    let mut all = queries.clone();
+    all.push((live_id, live_dsl.to_string()));
+    let brute = Brute::build_with_vocab(
+        &all,
+        alias_vocab("zzabbr", "term:zzcanon")
+            .to_normalizer()
+            .unwrap(),
+    );
+    let mut blc = String::new();
+    let mut bfeats = Vec::new();
+    let title_canon = "1994 fleer zzcanon psa 10";
+    let region = vec![("region".to_string(), vec!["emea".to_string()])];
+
+    let check_cluster = |cluster: &ClusterEngine,
+                         brute: &Brute,
+                         blc: &mut String,
+                         bfeats: &mut Vec<u32>,
+                         phase: &str| {
+        // The re-placed alias query keeps its interned tags; the live add keeps its
+        // synthetic tag (the id with no recoverable string).
+        let alias_cat = vec![("category".to_string(), vec![tag_of(q_alias)[0].1.clone()])];
+        assert!(
+            cluster
+                .percolate_filtered(title_canon, &alias_cat)
+                .unwrap()
+                .contains(&q_alias),
+            "{phase}: the re-placed alias query must keep its interned tags"
+        );
+        assert!(
+            cluster
+                .percolate_filtered(live_dsl, &region)
+                .unwrap()
+                .contains(&live_id),
+            "{phase}: the post-freeze synthetic tag must survive"
+        );
+        // Differential sweep: filtered ≡ brute-with-tags, filtered ⊆ unfiltered.
+        for (ti, title) in titles
+            .iter()
+            .map(String::as_str)
+            .take(50)
+            .chain([title_canon, live_dsl])
+            .enumerate()
+        {
+            let truth = brute.matches(title, blc, bfeats);
+            let unfiltered: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
+            assert_eq!(
+                unfiltered, truth,
+                "{phase}: unfiltered ≠ alias-aware oracle (title {ti})"
+            );
+            for filter in filters_for(ti) {
+                let got: HashSet<u64> = cluster
+                    .percolate_filtered(title, &filter)
+                    .unwrap()
+                    .into_iter()
+                    .collect();
+                let want: HashSet<u64> = truth
+                    .iter()
+                    .copied()
+                    .filter(|l| passes_filter(&tag_of(*l), &filter))
+                    .collect();
+                assert_eq!(
+                    got, want,
+                    "{phase}: filtered ≠ oracle (title {ti}, filter {filter:?})"
+                );
+                assert!(
+                    got.is_subset(&unfiltered),
+                    "{phase}: filter added a match (title {ti})"
+                );
+            }
+        }
+    };
+    check_cluster(&reopened, &brute, &mut blc, &mut bfeats, "post-rebuild");
+    drop(reopened);
+
+    // Reopen #2: the rebuilt segments + manifest durably carry the tag columns.
+    let reopened2 = ClusterEngine::open(dir.clone(), vocab(), None).expect("second reopen");
+    check_cluster(&reopened2, &brute, &mut blc, &mut bfeats, "post-reopen");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn set_vocab_after_reopen_rebuilds_from_persisted_sources() {
+    // Regression for the silent-corpus-loss bug the ADR-074 work surfaced: a durable shard
+    // populated ONLY by bulk ingest (the build path) wrote durable segments but never
+    // `sources.dat` — and a checkpoint on a clean shard early-returned past the sources
+    // save too. After checkpoint + reopen, `live_sources` was EMPTY, so the next
+    // `set_vocab` gathered nothing and rebuilt the cluster to zero queries (percolate
+    // returned ∅ for everything). Matching itself never noticed (segments are the match
+    // path), which is why no other oracle caught it. Untagged on purpose — the bug
+    // predates tags.
+    let queries = vec![
+        (1u64, "1994 topps zzplayerone".to_string()),
+        (2u64, "1995 fleer zzplayertwo".to_string()),
+        (3u64, "1996 upper deck zzplayerthree".to_string()),
+    ];
+    let dir = unique_dir("reopen_then_set_vocab");
+    {
+        let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+            .expect("build");
+        cluster.checkpoint().expect("checkpoint");
+    }
+    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    let rebuilt = reopened
+        .set_vocab(alias_vocab("zzabbr", "term:zzcanon"))
+        .expect("set_vocab after reopen");
+    assert_eq!(
+        rebuilt, 3,
+        "the rebuild must gather the whole bulk-built corpus from persisted sources"
+    );
+    for (id, q) in &queries {
+        assert!(
+            reopened.percolate(q).unwrap().contains(id),
+            "query {id} must survive reopen + set_vocab"
+        );
+    }
+    // And the rebuilt state is itself durable.
+    drop(reopened);
+    let again = ClusterEngine::open(dir.clone(), vocab(), None).expect("second reopen");
+    for (id, q) in &queries {
+        assert!(
+            again.percolate(q).unwrap().contains(id),
+            "query {id} must survive the rebuilt cluster's reopen"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn set_vocab_after_delete_and_checkpoint_does_not_resurrect() {
+    // The stale-sources sibling of the bug above: a DELETE removes the query from the live
+    // source store in memory, but a checkpoint on a then-clean shard (the delete is a
+    // tombstone, not a memtable entry) used to skip rewriting `sources.dat` — so a reopen
+    // resurrected the deleted query's SOURCE, and the next `set_vocab` re-ingested it: a
+    // deleted query matching again (a correctness violation worse than a false positive —
+    // the caller deleted it). The checkpoint seal now persists the source store even when
+    // the memtable is empty.
+    let queries = vec![
+        (1u64, "1994 topps zzplayerone".to_string()),
+        (2u64, "1995 fleer zzplayertwo".to_string()),
+    ];
+    let dir = unique_dir("delete_then_set_vocab");
+    {
+        let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+            .expect("build");
+        cluster.checkpoint().expect("first checkpoint");
+        assert!(cluster.remove_query(2).expect("remove") >= 1);
+        // The shard holding q2 has an EMPTY memtable here (a delete is a tombstone) — the
+        // exact shape that used to skip the sources rewrite.
+        cluster.checkpoint().expect("checkpoint after delete");
+    }
+    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    assert!(
+        !reopened
+            .percolate("1995 fleer zzplayertwo psa")
+            .unwrap()
+            .contains(&2),
+        "deleted query must stay deleted after reopen"
+    );
+    let rebuilt = reopened
+        .set_vocab(alias_vocab("zzabbr", "term:zzcanon"))
+        .expect("set_vocab after delete + reopen");
+    assert_eq!(rebuilt, 1, "only the live query rebuilds — no resurrection");
+    assert!(
+        !reopened
+            .percolate("1995 fleer zzplayertwo psa")
+            .unwrap()
+            .contains(&2),
+        "the vocabulary rebuild must NOT resurrect a deleted query"
+    );
+    assert!(
+        reopened
+            .percolate("1994 topps zzplayerone psa")
+            .unwrap()
+            .contains(&1),
+        "the live query survives the rebuild"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn synthetic_only_tags_survive_set_vocab_after_reopen() {
+    // Regression for the refusal-era blind spot ADR-074 closes structurally: a cluster whose
+    // ONLY tags are post-freeze synthetic (untagged build ⇒ empty `tag_dict`) checkpoints and
+    // reopens — and the `tags_present` latch restores from `tag_dict` emptiness alone, i.e.
+    // FALSE. Under the old guard, set_vocab here would have passed the refusal and silently
+    // dropped the tags (a filtered-read recall loss no oracle covered). With the carry-through,
+    // the latch is no longer load-bearing: tags ride the stored `TagId`s regardless.
+    let dir = unique_dir("synthonly_set_vocab");
+    let seed = vec![(1u64, "1994 topps".to_string())];
+    {
+        let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &seed)
+            .expect("untagged durable build");
+        cluster
+            .add_query_with_tags(
+                100,
+                "zzrarelivetag",
+                &[("category".to_string(), "cards".to_string())],
+            )
+            .expect("synthetic-tagged live add");
+        cluster.checkpoint().expect("checkpoint");
+    }
+
+    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen");
+    reopened
+        .set_vocab(alias_vocab("zzabbr", "term:zzcanon"))
+        .expect("set_vocab on a reopened synthetic-only-tagged cluster");
+
+    let cards = vec![("category".to_string(), vec!["cards".to_string()])];
+    let coins = vec![("category".to_string(), vec!["coins".to_string()])];
+    assert!(
+        reopened
+            .percolate_filtered("zzrarelivetag", &cards)
+            .unwrap()
+            .contains(&100),
+        "a synthetic-only tag must survive reopen + set_vocab (the old guard's blind spot)"
+    );
+    assert!(
+        !reopened
+            .percolate_filtered("zzrarelivetag", &coins)
+            .unwrap()
+            .contains(&100),
+        "the carried tag must still exclude under a non-matching filter"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -285,6 +285,25 @@ impl Engine {
         true
     }
 
+    /// [`flush`](Engine::flush), guaranteeing the on-disk source store is persisted even
+    /// when the memtable is empty — the cluster checkpoint seal's seam (ADR-074). `flush`
+    /// saves `sources.dat` whenever it seals a non-empty memtable, but a checkpoint on a
+    /// CLEAN shard (empty memtable — e.g. right after a bulk build, or with only tombstone
+    /// deletes since the last seal) early-returns past that save, leaving `sources.dat`
+    /// absent or stale. The cluster trims its translog at the checkpoint, so a reopen
+    /// rebuilds `live_sources` from this file alone: an absent/stale file would omit
+    /// bulk-loaded ids from (or resurrect tombstone-deleted ids into) the source set the
+    /// vocabulary rebuild gathers — silent corpus loss/resurrection on the next
+    /// `set_vocab`. A write failure degrades `persistence_healthy`, which the seal turns
+    /// into a fail-closed abort before any translog trim.
+    pub(crate) fn flush_and_persist_sources_for_checkpoint(&mut self) {
+        let memtable_was_empty = self.memtable.is_empty();
+        self.flush();
+        if memtable_was_empty {
+            self.save_query_sources();
+        }
+    }
+
     pub(in crate::segment) fn save_query_sources(&mut self) {
         let Some(dir) = self.config.data_dir.clone() else {
             return;

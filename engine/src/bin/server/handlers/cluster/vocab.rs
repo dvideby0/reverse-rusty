@@ -1,8 +1,10 @@
 //! Cluster-mode vocabulary + alias + settings handlers (ADR-070). The vocabulary
 //! paths map onto the cluster's own `set_vocab` machinery (ADR-046 blue/green
-//! rebuild) — its built-in refusals (non-local shards, tagged cluster, multi-word
-//! activation; ADR-046/055/061) surface as 400s carrying the engine's message,
-//! never weakened. These are the only handlers that take the cluster WRITE lock.
+//! rebuild) — its built-in refusals (non-local shards, multi-word activation;
+//! ADR-046/061) surface as 400s carrying the engine's message, never weakened.
+//! A tagged cluster is NOT refused: the rebuild carries per-query tags through by
+//! stored `TagId` (ADR-074). These are the only handlers that take the cluster
+//! WRITE lock.
 
 use std::sync::Arc;
 

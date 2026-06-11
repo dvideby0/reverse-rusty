@@ -16,8 +16,14 @@
 //! `RemoteShard` in v1, so [`ClusterEngine::set_vocab`] refuses a non-local cluster
 //! (a remote shard would keep normalizing under the stale normalizer — a silent
 //! cross-process false negative the dict-fingerprint handshake cannot catch, since
-//! the alias does not change the interned-name set). Durable clusters are handled
-//! in a follow-on (the manifest must persist the new dict + vocab).
+//! the alias does not change the interned-name set).
+//!
+//! **Per-query tags survive the rebuild (ADR-074).** The tag space is orthogonal to
+//! vocabulary and preserved unchanged, so each query's stored `TagId`s — interned
+//! dense or post-freeze *synthetic* (which have no recoverable string) — are gathered
+//! alongside its DSL and carried verbatim to wherever re-placement puts it: the
+//! cluster analogue of the single-node ADR-049 carry-through in
+//! `Engine::recompile_stale_segments`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -34,12 +40,14 @@ impl ClusterEngine {
     /// Change the cluster's vocabulary (ADR-046 mechanism 2) — e.g. declare an
     /// alias so two surface forms match. Rebuilds the cluster from its live source
     /// set under the new normalizer: re-mints the shared dict, re-places every
-    /// query (an alias can move a query's anchor, hence its shard), and re-ingests.
-    /// Atomic under `&mut self`. Returns the number of live queries rebuilt.
+    /// query (an alias can move a query's anchor, hence its shard), and re-ingests —
+    /// carrying each query's stored tags with it (ADR-074; the tag space is
+    /// preserved unchanged). Atomic under `&mut self`; a durable cluster commits the
+    /// rebuild via [`checkpoint`](Self::checkpoint). Returns the number of live
+    /// queries rebuilt.
     ///
-    /// Refuses (errors) if any shard is non-local, or — for now — if the cluster is
-    /// durable (the durable rebuild, which must persist the re-minted dict + vocab
-    /// into the manifest, is a follow-on).
+    /// Refuses (errors) if any shard is non-local or handoff-wrapped, or if the
+    /// vocabulary would activate a multi-word alias (ADR-061 routing boundary).
     pub fn set_vocab(&mut self, vocab: Vocab) -> Result<usize, ShardError> {
         // 1. Correctness boundary: in-process only (see module doc). On a
         //    non-distributed build every shard is local, so this never fires — but
@@ -59,24 +67,6 @@ impl ClusterEngine {
                     .into(),
             ));
         }
-        // A vocabulary change rebuilds queries from their live DSL (`live_sources`), which carries
-        // no tags — and per-query tags cannot be reconstructed from a shard's stored `TagId`s (a
-        // synthetic, post-freeze tag has no stored string). Rather than silently drop tags on the
-        // rebuild (ADR-049/055), refuse a vocab change on a tagged cluster; the tag space itself is
-        // orthogonal to vocabulary, so it is otherwise preserved unchanged. Combined tags + live
-        // vocab change is a deferred follow-on. `has_tags` checks the `tags_present` latch (which
-        // also catches POST-FREEZE synthetic tags that never enter `tag_dict`), not just `tag_dict`
-        // emptiness — so an untagged-built cluster with live tagged adds is correctly refused.
-        // Untagged ⇒ `has_tags()` is false ⇒ byte-identical to before tags.
-        if self.has_tags() {
-            return Err(ShardError::Config(
-                "set_vocab is not supported on a cluster with per-query tags yet: the blue/green \
-                 rebuild reconstructs queries from their DSL and would drop tags (a synthetic tag \
-                 has no recoverable string). Deferred follow-on (ADR-055)."
-                    .into(),
-            ));
-        }
-
         // 2. Build the new normalizer up front (a parse/build error aborts before any swap).
         let new_norm = Arc::new(
             vocab
@@ -123,19 +113,28 @@ impl ClusterEngine {
             ));
         }
 
-        // 3. Gather the deduped live `(logical, dsl)` set across shards. A selective /
-        //    any-of query lives on several shards but has ONE dsl — dedup by logical id.
-        let live = self.live_corpus()?;
+        // 3. Gather the deduped live `(logical, dsl, tag_ids)` set across shards. A
+        //    selective / any-of query lives on several shards but has ONE dsl (and one
+        //    tag set — every fanned-out copy carries the same tags) — dedup by logical
+        //    id. Tags ride as stored `TagId`s, NOT raw strings: the tag space is
+        //    orthogonal to vocabulary and preserved unchanged through the rebuild, so a
+        //    stored id — interned dense or post-freeze synthetic (which has no
+        //    recoverable string) — stays valid and is carried verbatim to the query's
+        //    new shard (ADR-074, the cluster analogue of the single-node ADR-049
+        //    carry-through in `recompile_stale_segments`). Untagged ⇒ every tag vec is
+        //    empty ⇒ byte-identical to the pre-tag rebuild.
+        let live = self.live_corpus_tagged()?;
 
         // 4. Pass A — re-mint the dict over the live corpus under the new normalizer
         //    (interning + frequencies + hot-mask), exactly as `build`.
         let mut dict = Dict::new();
         let mut lc = String::new();
-        let mut extracted: Vec<(u64, Extracted, String)> = Vec::with_capacity(live.len());
-        for (logical, text) in live {
+        let mut extracted: Vec<(u64, Extracted, String, Vec<crate::tagdict::TagId>)> =
+            Vec::with_capacity(live.len());
+        for (logical, text, tag_ids) in live {
             if let Ok(ast) = crate::dsl::parse(&text) {
                 let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
-                extracted.push((logical, ex, text));
+                extracted.push((logical, ex, text, tag_ids));
             }
         }
         dict.finalize_mask();
@@ -145,18 +144,20 @@ impl ClusterEngine {
         // is now an any-of fans to every member's shard), then install the map on the dict so
         // future incremental adds expand through `extract`. No groups ⇒ empty ⇒ byte-identical.
         let equiv = vocab.resolve_equivalences(&new_norm, &dict);
-        for (_, ex, _) in &mut extracted {
+        for (_, ex, _, _) in &mut extracted {
             ex.expand_equivalences(&equiv);
         }
         dict.set_equivalences(equiv);
         let new_dict = Arc::new(dict);
         let rebuilt = extracted.len();
 
-        // 5. Pass B — re-place each query under the NEW dict and bucket per shard.
+        // 5. Pass B — re-place each query under the NEW dict and bucket per shard. Tags
+        //    travel with the query (`tag_ids`, the ADR-074 carry-through): an alias can
+        //    move a query's anchor — hence its shard — and the filtered-read contract
+        //    requires its tags on whichever shard now holds it.
         let num_shards = self.ring.num_shards();
         let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
-        // The guard above ensures an untagged cluster here, so every rebuilt query has empty tags.
-        for (logical, ex, text) in extracted {
+        for (logical, ex, text, tag_ids) in extracted {
             match placement_of(&new_dict, &self.ring, &ex) {
                 Target::Reject => {}
                 Target::Replicated => buckets[0].push(PlacedQuery {
@@ -165,6 +166,7 @@ impl ClusterEngine {
                     dsl: text,
                     version: 1,
                     tags: Vec::new(),
+                    tag_ids,
                 }),
                 Target::Selective(shs) => {
                     for &s in &shs {
@@ -174,6 +176,7 @@ impl ClusterEngine {
                             dsl: text.clone(),
                             version: 1,
                             tags: Vec::new(),
+                            tag_ids: tag_ids.clone(),
                         });
                     }
                 }
@@ -208,8 +211,8 @@ impl ClusterEngine {
                         LocalShard::open_segments(
                             Arc::clone(&new_norm),
                             Arc::clone(&new_dict),
-                            // The tag space is orthogonal to vocabulary — preserve it unchanged
-                            // (the guard above ensures it is empty here anyway).
+                            // The tag space is orthogonal to vocabulary — preserve it
+                            // unchanged, so the carried `tag_ids` stay valid (ADR-074).
                             Arc::clone(&self.tag_dict),
                             sc,
                             &[],
@@ -275,6 +278,25 @@ impl ClusterEngine {
             }
         }
         Ok(live.into_iter().collect())
+    }
+
+    /// [`live_corpus`](Self::live_corpus) plus each query's stored `TagId`s — the gather
+    /// behind the tagged rebuild (ADR-074). A query fanned out to several shards carries
+    /// the same tags on every copy (one `PlacedQuery` per copy, identical op streams), so
+    /// dedup-by-logical keeps the first copy seen. Same non-local error boundary.
+    fn live_corpus_tagged(
+        &self,
+    ) -> Result<Vec<(u64, String, Vec<crate::tagdict::TagId>)>, ShardError> {
+        let mut live: BTreeMap<u64, (String, Vec<crate::tagdict::TagId>)> = BTreeMap::new();
+        for s in &self.shards {
+            for (logical, dsl, tag_ids) in s.live_sources_tagged()? {
+                live.entry(logical).or_insert((dsl, tag_ids));
+            }
+        }
+        Ok(live
+            .into_iter()
+            .map(|(logical, (dsl, tag_ids))| (logical, dsl, tag_ids))
+            .collect())
     }
 
     /// Learn vocabulary rules from the cluster's own live corpus WITHOUT applying them —

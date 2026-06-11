@@ -456,9 +456,11 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   contract is untouched. Proven by `tests/cluster_oracle.rs` (filtered ≡ single-node ≡ brute across
   K∈{1,3,8,16}×RF∈{1,2}, filtered ⊆ unfiltered, + synthetic-tag cross-shard consistency),
   `tests/cluster_durability_oracle.rs` (tags survive checkpoint/reopen), and `tests/cluster_grpc_oracle.rs`
-  (filtered percolate + tag-dict shipping over the wire). **Honest scope:** a runtime vocabulary change on
-  a tagged cluster (`set_vocab`/`learn_and_apply`) is refused fail-loud (the blue/green rebuild can't
-  reconstruct a synthetic tag's string) — a deferred follow-on.
+  (filtered percolate + tag-dict shipping over the wire). **The one deferral is closed by ADR-074:** a runtime
+  vocabulary change on a tagged cluster (`set_vocab`/`learn_and_apply`) — originally refused fail-loud —
+  now works: the rebuild gathers each query's stored `TagId`s and carries them through re-placement
+  verbatim (the tag space is preserved across a vocab change, so a synthetic id needs no recoverable
+  string), proven across checkpoint/reopen.
 - **Percolate ranking + pagination (ADR-059)** — closes ADR-049's decision point 4 (and the ADR-052 #3
   pagination tail) on the **single-node** REST surface. A new lean-core `src/rank.rs`
   (`RankSpec`/`CompiledRankSpec`/`score`) + `EngineSnapshot::{compile_rank_spec, rank}` score the
@@ -615,7 +617,7 @@ backlog, and the Evaluated & declined list.
   the oracles — not yet deployed and hardened across real machines. **The path out is now programmatized as
   the Distributed-v1 graduation criteria (ADR-065)** — a 12-item checklist (cluster REST surface — **✅
   shipped, ADR-070**; TLS/auth on the gRPC transports — **✅ shipped, ADR-071**;
-  a real multi-machine harness — **✅ shipped, ADR-072**; tagged-cluster vocab change, cluster ranking, cross-process vocab shipping,
+  a real multi-machine harness — **✅ shipped, ADR-072**; tagged-cluster vocab change — **✅ shipped, ADR-074**; cluster ranking, cross-process vocab shipping,
   auto-split + `recommended_shard_count`, replicate-broad-to-all-or-decide, the tag-dict recovery
   fingerprint, packaging + runbook, backup/restore, a ≥20M multi-shard scale proof) that graduates these
   layers from *experimental* to *release-candidate: ready for full-feature multi-machine testing, not yet

@@ -407,6 +407,12 @@ impl Shard for LocalShard {
         Ok(self.lock().live_sources())
     }
 
+    fn live_sources_tagged(
+        &self,
+    ) -> Result<Vec<(u64, String, Vec<crate::tagdict::TagId>)>, ShardError> {
+        Ok(self.lock().live_sources_tagged())
+    }
+
     fn is_local(&self) -> bool {
         true
     }
@@ -556,15 +562,20 @@ impl LocalShard {
         now: Instant,
     ) -> Result<LogPos, ShardError> {
         let mut eng = self.lock();
-        eng.flush(); // seal the memtable into a base segment
+        // Seal the memtable into a base segment; ALSO persists `sources.dat` when the
+        // memtable is empty (a plain `flush` would early-return past its sources save),
+        // so the on-disk source store mirrors the live set as of `p` — otherwise a
+        // reopen's `live_sources` omits bulk-loaded ids / resurrects tombstone-deleted
+        // ones into the vocabulary rebuild (ADR-074).
+        eng.flush_and_persist_sources_for_checkpoint();
         eng.reseal_tombstoned_segments(); // bake base-segment tombstones onto disk
-                                          // Fail closed (ADR-051): if the flush or reseal could not durably persist,
-                                          // the segments on disk do NOT yet reflect every flushed write / applied
+                                          // Fail closed (ADR-051): if the flush / reseal / sources write could not durably
+                                          // persist, the on-disk state does NOT yet reflect every flushed write / applied
                                           // delete (a failed reseal keeps the original, un-baked segment). Bail BEFORE
-                                          // reading `p` and trimming the translog, so its tail still carries those ops
-                                          // for the next recovery — advancing the checkpoint now would let a delete
-                                          // resurrect (false positive) or a write vanish on reopen. The caller treats
-                                          // this as a transient failed checkpoint; the data is safe in the translog.
+                                          // reading `p` and trimming the translog, so its tail still carries those ops for
+                                          // the next recovery — advancing the checkpoint now would let a delete resurrect
+                                          // (false positive) or a write vanish on reopen. The caller treats this as a
+                                          // transient failed checkpoint; the data is safe in the translog.
         if !eng.persistence_healthy {
             return Err(ShardError::Log(
                 "checkpoint aborted: flush/reseal could not durably persist; translog left intact \

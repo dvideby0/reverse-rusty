@@ -478,7 +478,8 @@ async fn filtered_search_narrows_by_tags() {
     assert_eq!(body["hits"]["total"], 1);
     assert_eq!(body["hits"]["hits"][0]["_id"], 41);
 
-    // A tagged cluster refuses a vocab change — loud, with the engine's message.
+    // A tagged cluster ACCEPTS a vocab change (ADR-074): the rebuild carries each query's
+    // stored TagIds, so the filter still narrows identically afterwards.
     let (status, body) = send(
         &state,
         req(
@@ -488,7 +489,24 @@ async fn filtered_search_narrows_by_tags() {
         ),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = send(
+        &state,
+        req(
+            "POST",
+            "/_search",
+            &serde_json::json!({
+                "document": {"title": "1994 topps"},
+                "filter": {"category": "cards"}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        body["hits"]["total"], 1,
+        "the synthetic tag must survive the rebuild: {body}"
+    );
+    assert_eq!(body["hits"]["hits"][0]["_id"], 41);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

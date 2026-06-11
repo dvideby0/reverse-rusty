@@ -87,6 +87,7 @@ impl ClusterEngine {
                     dsl: text.clone(),
                     version: *version,
                     tags: qtags.clone(),
+                    tag_ids: Vec::new(),
                 }),
                 Target::Selective(shs) => {
                     for &s in &shs {
@@ -96,6 +97,7 @@ impl ClusterEngine {
                             dsl: text.clone(),
                             version: *version,
                             tags: qtags.clone(),
+                            tag_ids: Vec::new(),
                         });
                     }
                 }
@@ -118,8 +120,9 @@ impl ClusterEngine {
 
     /// True if the cluster holds (or has ever held) any tagged query (ADR-055): the `tags_present`
     /// latch (any tagged write, incl. post-freeze *synthetic* tags never interned into `tag_dict`)
-    /// OR a non-empty `tag_dict` (build-time interned tags). [`Self::set_vocab`] uses this to refuse
-    /// a vocab rebuild that would silently drop tags — `tag_dict` emptiness alone is NOT sufficient.
+    /// OR a non-empty `tag_dict` (build-time interned tags). Operator introspection only
+    /// ([`Self::has_tagged_queries`]) — the vocab rebuild carries tags by stored `TagId` (ADR-074)
+    /// and no longer consults this.
     pub(in crate::cluster::coordinator) fn has_tags(&self) -> bool {
         self.tags_present.load(std::sync::atomic::Ordering::Relaxed) || !self.tag_dict.is_empty()
     }
@@ -341,7 +344,7 @@ impl ClusterEngine {
         dsl: &str,
         tags: &[(String, String)],
     ) -> Result<AddOutcome, ShardError> {
-        // Latch tags_present for the set_vocab guard (ADR-055) — covers both the live add
+        // Latch tags_present (ADR-055, `/_stats` introspection) — covers both the live add
         // (`add_query_with_tags`) and a tagged log-tail entry replayed on `open`.
         self.note_tags(tags);
         let ast = match crate::dsl::parse(dsl) {

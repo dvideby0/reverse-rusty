@@ -229,9 +229,11 @@ impl ClusterEngine {
         &self.per_shard
     }
 
-    /// True if the cluster holds (or has ever held) any tagged query (ADR-055) — the
-    /// condition under which a vocabulary change is refused. Introspection for
-    /// operators (cluster-mode `/_stats`, ADR-070).
+    /// True if the cluster holds (or has ever held) any tagged query (ADR-055).
+    /// Introspection for operators (cluster-mode `/_stats`, ADR-070); best-effort
+    /// across reopen (a checkpointed synthetic-only cluster restores it `false`).
+    /// No longer gates anything: a vocabulary change carries tags through the
+    /// rebuild by stored `TagId` (ADR-074).
     pub fn has_tagged_queries(&self) -> bool {
         self.has_tags()
     }
