@@ -218,6 +218,14 @@ pub(crate) async fn put_doc(
                 .http_requests_total
                 .with_label_values(&["put_doc", "400"])
                 .inc();
+            // Keep the latency histogram complete: every other put_doc exit
+            // records a duration (review catch — a counted-but-unobserved
+            // request skews the percentiles' denominator).
+            state
+                .prom
+                .http_request_duration
+                .with_label_values(&["put_doc"])
+                .observe(start.elapsed().as_secs_f64());
             return (
                 StatusCode::BAD_REQUEST,
                 Json(PutDocResponse {

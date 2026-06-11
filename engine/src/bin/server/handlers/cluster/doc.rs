@@ -124,6 +124,13 @@ pub(crate) async fn cluster_put_doc(
                 .http_requests_total
                 .with_label_values(&["put_doc", "400"])
                 .inc();
+            // Keep the latency histogram complete (mirrors the single-node
+            // handler — every other exit records a duration).
+            state
+                .prom
+                .http_request_duration
+                .with_label_values(&["put_doc"])
+                .observe(start.elapsed().as_secs_f64());
             return (
                 StatusCode::BAD_REQUEST,
                 Json(ClusterPutDocResponse {

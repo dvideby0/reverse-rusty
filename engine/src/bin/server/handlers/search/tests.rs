@@ -526,6 +526,23 @@ async fn unanswerable_filter_values_are_400_not_silently_dropped() {
                 "filter": [{"term": {"category": null}}],
             }}}),
         ),
+        // A clause carrying TWO queries silently dropped the second pre-fix —
+        // the widening direction (review catch); ES errors on the shape too.
+        (
+            "ES clause with both terms and term",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"document": title}},
+                "filter": [{"terms": {"a": ["x"]}, "term": {"b": "y"}}],
+            }}}),
+        ),
+        // An empty `terms` object was a silent no-op clause; ES rejects it.
+        (
+            "ES empty terms clause",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"document": title}},
+                "filter": [{"terms": {}}],
+            }}}),
+        ),
     ] {
         let err = search_ids(&state, body).await.expect_err(label);
         assert_eq!(err, axum::http::StatusCode::BAD_REQUEST, "{label}");

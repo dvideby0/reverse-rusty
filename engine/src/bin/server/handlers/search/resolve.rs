@@ -39,7 +39,20 @@ fn parse_es_filter(filter: &serde_json::Value) -> Result<FilterSpec, String> {
         let obj = clause
             .as_object()
             .ok_or_else(|| "filter clause must be an object".to_string())?;
+        // ES parity + this module's contract: a clause object holds exactly ONE
+        // query. Pre-ADR-073 a clause like `{"terms": {...}, "term": {...}}` took
+        // the first branch and silently DROPPED the sibling predicate — the
+        // widening direction (codex-class review catch).
+        if obj.len() != 1 {
+            return Err(
+                "filter clause must contain exactly one `terms` or `term` query".to_string(),
+            );
+        }
         if let Some(terms) = obj.get("terms").and_then(|t| t.as_object()) {
+            // An empty `terms` object would be a silent no-op clause; ES rejects it.
+            if terms.is_empty() {
+                return Err("`terms` clause must name at least one field".to_string());
+            }
             for (k, v) in terms {
                 let vals = match v {
                     serde_json::Value::Array(a) => a
@@ -52,6 +65,9 @@ fn parse_es_filter(filter: &serde_json::Value) -> Result<FilterSpec, String> {
                 spec.push((k.clone(), vals));
             }
         } else if let Some(term) = obj.get("term").and_then(|t| t.as_object()) {
+            if term.is_empty() {
+                return Err("`term` clause must name at least one field".to_string());
+            }
             for (k, v) in term {
                 let val = coerce_filter_value(&format!("term[{k}]"), v)?;
                 spec.push((k.clone(), vec![val]));
