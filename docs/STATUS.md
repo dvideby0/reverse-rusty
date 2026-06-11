@@ -588,10 +588,11 @@ Tiers, highest-leverage first:
   bulk/learned-alias evolution Phase 1 (✅ built single-node ADR-060 — the `AliasRegistry` governance
   layer + safe single-token activation + Solr import + the alias-ID-stability fix) + Phase 2 (✅ built
   single-node ADR-061 — the token-graph multi-word matcher with positive/negative title feature views);
-  **next up: the ADR-064 drop-in parity work package** (atomic-upsert `PUT`, an opt-in class-D
-  always-candidate lane, a parity-mode normalizer knob, loud non-string tag values, the REST-PUT
-  `maybe_flush` fix, per-request `include_broad` on `/_search`); still open: cluster alias governance +
-  the deferred multi-word discovery sources.
+  **the ADR-064 drop-in parity work package ✅ COMPLETE** (atomic-upsert `PUT` ADR-067, the opt-in
+  class-D always-candidate lane ADR-068, the parity-mode normalizer knob ADR-069, and the ADR-073
+  batch — canonical tag-value coercion with loud rejects, the REST-PUT `maybe_flush` fix, per-request
+  `include_broad` on `/_search`); still open: cluster alias governance + the deferred multi-word
+  discovery sources.
 
 See **[`roadmap.md`](roadmap.md)** for the per-tier detail, the Nice-to-have / operational-polish
 backlog, and the Evaluated & declined list.
@@ -650,15 +651,17 @@ backlog, and the Evaluated & declined list.
     demotion is now a configurable number-context word list — an empty list (part of the documented
     parity configuration) makes number typing position-insensitive, closing the audit's last
     residual FN class in both directions; the default keeps the historical rule byte-identically.
-  - **Non-string tag values are silently dropped at ingest** (and non-string elements inside filter
-    arrays silently narrow the filter, while scalar non-string filter values 400) — stringify
-    everything until the loud-failure fix lands.
-  - **REST single-doc `PUT`s never trigger the memtable flush threshold** (`put_doc` bypasses the only
-    `maybe_flush` call site) — WAL-durable, but flush happens only via `/_flush`, bulk-path
-    auto-triggers, or shutdown.
-  - **`/_search` has no per-request `include_broad`** (server `--include-broad` only; a body field is
-    silently ignored) — with broad off, class-C queries are silently absent from `/_search` hits;
-    `/_mpercolate` has the per-request override.
+  - ~~**Non-string tag values are silently dropped at ingest**~~ **✅ Fixed (ADR-073):** numbers and
+    bools now coerce to their canonical JSON text through ONE rule shared by ingest and both filter
+    parsers (the ES keyword behavior — `{"category": 7}` ingested is matched by filter `7` or `"7"`);
+    `null` is the ES "no value" (skipped on ingest, 400 in a filter); objects/nested arrays/non-object
+    `tags` are loud 400s everywhere they were silently dropped.
+  - ~~**REST single-doc `PUT`s never trigger the memtable flush threshold**~~ **✅ Fixed (ADR-073):**
+    `maybe_flush` runs at the success tail of both fallible live-write paths, so every live write
+    honors the knob (replay/bulk/cluster funnels deliberately untouched).
+  - ~~**`/_search` has no per-request `include_broad`**~~ **✅ Fixed (ADR-073):** the same per-request
+    override `/_mpercolate` and the cluster handlers already had, on both the single- and multi-doc
+    arms; absent ⇒ the server default.
 - **Validated on synthetic data only.** The differential oracle and the benchmarks run against the
   seeded synthetic generator ([`gen.rs`](../engine/src/gen.rs)), which is deliberately adversarial
   (ADR-008); one design-validation pass ran ~20 real eBay titles through the normalizer

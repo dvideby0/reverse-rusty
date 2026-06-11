@@ -101,6 +101,143 @@ async fn delete_after_reput_reports_one_copy() {
     );
 }
 
+// -- memtable_flush_threshold honored by REST PUT (ADR-073, ADR-064 item 5) --
+
+#[tokio::test]
+async fn put_doc_honors_memtable_flush_threshold() {
+    // Pre-fix the REST PUT path bypassed the only `maybe_flush` call site, so
+    // the knob was INERT for single-doc HTTP writes: memtable + WAL grew until
+    // a manual /_flush. With threshold 2, the third PUT must have produced at
+    // least one sealed segment — and every query must keep matching across the
+    // flush boundary.
+    use reverse_rusty::config::EngineConfig;
+    let cfg = EngineConfig {
+        memtable_flush_threshold: 2,
+        ..EngineConfig::default()
+    };
+    let eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg);
+    let snap = Arc::new(eng.snapshot());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("pool");
+    let state = Arc::new(AppState {
+        engine: parking_lot::Mutex::new(eng),
+        snapshot: arc_swap::ArcSwap::new(snap),
+        pool,
+        include_broad: true,
+        prom: PrometheusMetrics::new(),
+        slow_query_threshold_ms: 0,
+        auth: None,
+    });
+
+    do_put(&state, 1, "michael jordan").await;
+    do_put(&state, 2, "lebron james").await;
+    do_put(&state, 3, "wayne gretzky").await;
+    // A re-PUT (the upsert path) must honor the threshold too.
+    do_put(&state, 2, "mario lemieux").await;
+
+    assert!(
+        state.engine.lock().num_segments() > 0,
+        "threshold-2 PUTs must auto-flush the memtable into a segment"
+    );
+    assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&1));
+    assert!(matches_in_snapshot(&state, "1985 opc mario lemieux rookie").contains(&2));
+    assert!(matches_in_snapshot(&state, "1979 opc wayne gretzky rookie").contains(&3));
+    assert!(
+        !matches_in_snapshot(&state, "2003 topps lebron james rookie").contains(&2),
+        "the upserted-away version must stay dead across the flush"
+    );
+}
+
+// -- Tag-value coercion + loud rejects (ADR-073, closing ADR-064 item 4) ----
+
+/// Shorthand: run `extract_ingest_tags` over a JSON body's top-level object.
+fn tags_of(body: &serde_json::Value) -> Result<Vec<(String, String)>, String> {
+    let obj = body.as_object().expect("test body is an object");
+    super::extract_ingest_tags(obj)
+}
+
+#[test]
+fn scalar_tag_values_coerce_canonically() {
+    // Numbers and bools coerce to their canonical JSON text (the ES keyword
+    // behavior); strings pass through. Both the `tags` object and ES-style
+    // sibling fields take the same rule.
+    let mut tags = tags_of(&serde_json::json!({
+        "query": "q",
+        "tags": {"priority": 7, "active": true, "tier": "gold"},
+        "category": 42.5,
+    }))
+    .expect("scalars must coerce, not error");
+    tags.sort();
+    assert_eq!(
+        tags,
+        vec![
+            ("active".to_string(), "true".to_string()),
+            ("category".to_string(), "42.5".to_string()),
+            ("priority".to_string(), "7".to_string()),
+            ("tier".to_string(), "gold".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn null_tag_values_are_skipped_not_errors() {
+    // An explicit null is the ES "no value" — the key carries no tag, top-level
+    // or as an array element; `"tags": null` means no tags at all.
+    let tags = tags_of(&serde_json::json!({
+        "query": "q",
+        "tags": {"status": null},
+        "colors": ["red", null, 3],
+    }))
+    .expect("null is skip, not an error");
+    assert_eq!(
+        tags,
+        vec![
+            ("colors".to_string(), "red".to_string()),
+            ("colors".to_string(), "3".to_string()),
+        ]
+    );
+    assert_eq!(
+        tags_of(&serde_json::json!({"query": "q", "tags": null})).expect("tags:null is no tags"),
+        vec![]
+    );
+}
+
+#[test]
+fn structured_tag_values_fail_loud() {
+    // Pre-fix these were dropped SILENTLY, leaving the query unreachable by any
+    // filter on the key (the ADR-064 item-4 finding). Now they are hard errors.
+    assert!(
+        tags_of(&serde_json::json!({"query": "q", "tags": {"meta": {"x": 1}}})).is_err(),
+        "object tag value must error"
+    );
+    assert!(
+        tags_of(&serde_json::json!({"query": "q", "colors": [["nested"]]})).is_err(),
+        "nested array tag element must error"
+    );
+    assert!(
+        tags_of(&serde_json::json!({"query": "q", "tags": ["not", "an", "object"]})).is_err(),
+        "a non-object `tags` field must error (was silently ignored)"
+    );
+}
+
+#[tokio::test]
+async fn put_doc_rejects_structured_tag_value_with_400() {
+    let state = state();
+    let body: super::PutDocBody = serde_json::from_value(serde_json::json!({
+        "query": "michael jordan",
+        "tags": {"meta": {"x": 1}},
+    }))
+    .expect("body deserializes");
+    let resp = put_doc(State(Arc::clone(&state)), Path(7), Json(body))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    // Nothing was ingested: the engine never saw the doc.
+    assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").is_empty());
+}
+
 #[tokio::test]
 async fn rejected_reput_leaves_old_version_live() {
     let state = state();

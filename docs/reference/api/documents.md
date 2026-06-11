@@ -43,7 +43,16 @@ regardless.
 A stored query may carry **structured tags** — `(key, value)` metadata used to *narrow* percolated
 results later (see [filtered percolation](percolate.md#filtered-percolation-adr-049) below). Provide them either as
 a canonical `tags` object or, Elasticsearch-style, as sibling fields of `query` (anything that isn't
-`query`/`version`/`tags`); a value may be a string or an array of strings. The two forms are merged.
+`query`/`version`/`tags`). The two forms are merged.
+
+A value may be a **string, number, bool, or an array of those** (ADR-073). Numbers and bools coerce
+to their canonical JSON text — `7` → `"7"`, `true` → `"true"`, the ES keyword behavior — and the
+filter side coerces with the **same rule**, so a category ingested as `7` is matched by a filter
+sending `7` *or* `"7"` (note `7.0` coerces to `"7.0"`, a *different* tag, exactly as in ES). An
+explicit `null` — top-level or as an array element — is the ES "no value" and contributes no tag.
+Anything else (an object, a nested array, or a non-object `tags` field) is a loud **400**; in
+`/_bulk` the rejection is per-item. Before ADR-073 such values were dropped *silently*, leaving the
+query unreachable by any filter on that key.
 
 ```bash
 # ES-style siblings:

@@ -95,39 +95,103 @@ mod tests;
 /// Reserved top-level fields on an ingest body that are NOT metadata tags.
 const RESERVED_INGEST_FIELDS: [&str; 3] = ["query", "version", "tags"];
 
+/// Canonical scalar coercion shared by tag ingest and the filter parsers (ADR-073,
+/// closing ADR-064 item 4): a string is itself; a number or bool coerces to its
+/// canonical JSON text (`7` → `"7"`, `true` → `"true"`) — the ES keyword behavior.
+/// One function serves BOTH sides, so an ingested value and a filter value can never
+/// disagree about the coerced form (`7.0` coerces to `"7.0"` on both, exactly as in
+/// ES). Returns `None` for null/array/object — no canonical scalar form; the caller
+/// decides skip vs reject.
+pub(crate) fn coerce_tag_scalar(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// The JSON type of a value, for error messages.
+pub(crate) fn json_type_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a bool",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
 /// Extract per-query metadata tags from an ingest body's top-level fields (`PUT /_doc` or a
 /// `/_bulk` source line), ES-style (ADR-049). Tags come from a canonical `tags` object
-/// **and** any other non-reserved top-level scalar/array field (ES stores percolator
-/// metadata as siblings of `query`). A value that is neither a string nor an array of
-/// strings is ignored.
+/// **and** any other non-reserved top-level field (ES stores percolator metadata as
+/// siblings of `query`). Scalar values coerce canonically ([`coerce_tag_scalar`]); an
+/// explicit `null` — top-level or array element — contributes no tag (the ES null
+/// semantics: an explicit "no value"); an object or nested array is a hard error
+/// (ADR-073: a silently dropped value left the query unreachable by any filter on that
+/// key, corrupting filtered percolation invisibly).
 pub(crate) fn extract_ingest_tags(
     obj: &serde_json::Map<String, serde_json::Value>,
-) -> Vec<(String, String)> {
+) -> Result<Vec<(String, String)>, String> {
     let mut out: Vec<(String, String)> = Vec::new();
-    let mut push_kv = |key: &str, v: &serde_json::Value| match v {
-        serde_json::Value::String(s) => out.push((key.to_string(), s.clone())),
-        serde_json::Value::Array(arr) => {
-            for e in arr {
-                if let serde_json::Value::String(s) = e {
-                    out.push((key.to_string(), s.clone()));
+    let mut push_kv = |key: &str, v: &serde_json::Value| -> Result<(), String> {
+        match v {
+            // Explicit "no value" — the key carries no tag (ES null semantics).
+            serde_json::Value::Null => Ok(()),
+            serde_json::Value::Array(arr) => {
+                for (i, e) in arr.iter().enumerate() {
+                    if e.is_null() {
+                        continue;
+                    }
+                    match coerce_tag_scalar(e) {
+                        Some(s) => out.push((key.to_string(), s)),
+                        None => {
+                            return Err(format!(
+                                "tag {key}[{i}] must be a string, number, bool or null \
+                                 (got {})",
+                                json_type_name(e)
+                            ))
+                        }
+                    }
                 }
+                Ok(())
+            }
+            _ => match coerce_tag_scalar(v) {
+                Some(s) => {
+                    out.push((key.to_string(), s));
+                    Ok(())
+                }
+                None => Err(format!(
+                    "tag '{key}' must be a string, number, bool, null or an array of \
+                     those (got {})",
+                    json_type_name(v)
+                )),
+            },
+        }
+    };
+    // canonical `tags` object (an explicit `"tags": null` means "no tags")
+    match obj.get("tags") {
+        Some(serde_json::Value::Object(tags)) => {
+            for (k, v) in tags {
+                push_kv(k, v)?;
             }
         }
-        _ => {}
-    };
-    // canonical `tags` object
-    if let Some(serde_json::Value::Object(tags)) = obj.get("tags") {
-        for (k, v) in tags {
-            push_kv(k, v);
+        Some(serde_json::Value::Null) | None => {}
+        Some(other) => {
+            return Err(format!(
+                "`tags` must be an object of key → value(s) (got {})",
+                json_type_name(other)
+            ))
         }
     }
     // ES-style sibling fields
     for (k, v) in obj {
         if !RESERVED_INGEST_FIELDS.contains(&k.as_str()) {
-            push_kv(k, v);
+            push_kv(k, v)?;
         }
     }
-    out
+    Ok(out)
 }
 
 /// PUT /_doc/{id} — register or replace a single query. ES `index` semantics
@@ -143,7 +207,35 @@ pub(crate) async fn put_doc(
     Json(body): Json<PutDocBody>,
 ) -> impl IntoResponse {
     let start = Instant::now();
-    let tags = extract_ingest_tags(&body.rest);
+    // A malformed tag value is a caller error: 400 before any engine work
+    // (ADR-073 — never silently drop a tag the caller asked for).
+    let tags = match extract_ingest_tags(&body.rest) {
+        Ok(t) => t,
+        Err(msg) => {
+            warn!(query_id = id, error = %msg, "invalid tag value");
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["put_doc", "400"])
+                .inc();
+            // Keep the latency histogram complete: every other put_doc exit
+            // records a duration (review catch — a counted-but-unobserved
+            // request skews the percentiles' denominator).
+            state
+                .prom
+                .http_request_duration
+                .with_label_values(&["put_doc"])
+                .observe(start.elapsed().as_secs_f64());
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(PutDocResponse {
+                    _id: id,
+                    result: "error",
+                    error: Some(msg),
+                }),
+            );
+        }
+    };
     let result = {
         let mut engine = state.engine.lock();
         match engine.try_upsert_live_with_tags(&body.query, id, body.version, &tags) {
@@ -490,13 +582,25 @@ pub(crate) async fn bulk_ingest(
             continue;
         };
 
+        // A malformed tag value fails the ITEM loud (ADR-073), mirroring the
+        // parse-error per-item contract — never ingest with silently fewer tags.
+        let tags = match source.as_object().map(extract_ingest_tags).transpose() {
+            Ok(t) => t.unwrap_or_default(),
+            Err(msg) => {
+                has_errors = true;
+                items.push(BulkItem {
+                    index: BulkItemInner {
+                        _id: id,
+                        status: 400,
+                        error: Some(msg),
+                    },
+                });
+                continue;
+            }
+        };
+
         pairs.push((id, query));
-        tags_per_pair.push(
-            source
-                .as_object()
-                .map(extract_ingest_tags)
-                .unwrap_or_default(),
-        );
+        tags_per_pair.push(tags);
         // Provisional success; the engine outcome (below) may downgrade this
         // item to a 400 once the batch is compiled.
         pair_item_idx.push(items.len());

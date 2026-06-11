@@ -10,6 +10,7 @@ use super::DocBody;
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 use axum::extract::State;
+use axum::response::IntoResponse;
 use axum::Json;
 use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::segment::{Engine, MatchScratch};
@@ -339,4 +340,211 @@ async fn search_multi_doc_truncates_per_slot_by_size() {
         slots[0].hits[0]._id, 2,
         "the surviving hit is the top by priority"
     );
+}
+
+// -- Per-request include_broad on /_search (ADR-073, ADR-064 item 6) --------
+
+/// The engine-truth match set for `title` at a given broad setting.
+fn expected_ids(state: &Arc<AppState>, title: &str, include_broad: bool) -> Vec<u64> {
+    let snap = state.snapshot.load();
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    snap.match_title(title, &mut s, &mut out, include_broad);
+    out.sort_unstable();
+    out
+}
+
+#[tokio::test]
+async fn search_honors_per_request_include_broad() {
+    // Pre-fix `/_search` honored only the server-wide --include-broad and an
+    // `include_broad` body field was SILENTLY ignored (serde unknown-field
+    // tolerance) — with broad off, class-C hits read as missing data.
+    // `/_mpercolate` and the cluster handlers already had the override.
+    let (eng, titles) = corpus();
+    let state = state_with(eng, false); // server default: broad OFF
+
+    // A title whose match set differs with the broad lane on — the probe that
+    // makes the override observable.
+    let title = titles
+        .iter()
+        .find(|t| expected_ids(&state, t, true).len() > expected_ids(&state, t, false).len())
+        .expect("corpus(broad_frac=0.1) has a broad-affected title")
+        .clone();
+    let with_broad = expected_ids(&state, &title, true);
+    let without_broad = expected_ids(&state, &title, false);
+
+    // Absent ⇒ the server default (off).
+    let ids = search_ids(&state, serde_json::json!({"document": {"title": title}}))
+        .await
+        .expect("ok");
+    assert_eq!(ids, without_broad);
+    // Per-request true overrides the off default.
+    let ids = search_ids(
+        &state,
+        serde_json::json!({"document": {"title": title}, "include_broad": true}),
+    )
+    .await
+    .expect("ok");
+    assert_eq!(
+        ids, with_broad,
+        "include_broad:true must surface class-C hits"
+    );
+
+    // And the reverse: on a broad-ON server, per-request false suppresses —
+    // through the multi-doc arm, so both handler paths honor the override.
+    let (eng2, _) = corpus();
+    let state_on = state_with(eng2, true);
+    let req = serde_json::json!({"documents": [{"title": title}], "include_broad": false});
+    let ids = search_ids(&state_on, req).await.expect("ok");
+    assert_eq!(
+        ids, without_broad,
+        "include_broad:false must suppress broad"
+    );
+}
+
+// -- Tag-value coercion on the filter path (ADR-073, ADR-064 item 4) --------
+
+/// Run `/_search` with a JSON body, returning the sorted hit ids (Ok) or the
+/// HTTP status (Err).
+// Reads the ES-convention `_id` field on hits (clippy::used_underscore_binding).
+#[allow(clippy::used_underscore_binding)]
+async fn search_ids(
+    state: &Arc<AppState>,
+    body: serde_json::Value,
+) -> Result<Vec<u64>, axum::http::StatusCode> {
+    let req: SearchBody = serde_json::from_value(body).expect("valid SearchBody");
+    match search(State(Arc::clone(state)), Json(req)).await {
+        Ok(resp) => {
+            let mut ids: Vec<u64> = resp.0.hits.hits.iter().map(|h| h._id).collect();
+            ids.sort_unstable();
+            Ok(ids)
+        }
+        Err((status, _)) => Err(status),
+    }
+}
+
+#[allow(clippy::used_underscore_binding)]
+#[tokio::test]
+async fn numeric_tag_ingest_meets_numeric_filter() {
+    // The load-bearing agreement (ADR-073): ingest and filter coerce through the
+    // SAME canonical rule, so a numeric category ingested as `7` is reachable by
+    // a filter sending `7` OR `"7"` — pre-fix the ingest side silently dropped
+    // the tag, making the query unreachable by ANY filter on that key.
+    let state = state_with(
+        Engine::new(Normalizer::default_vocab().expect("vocab")),
+        false,
+    );
+    let body: crate::handlers::doc::PutDocBody = serde_json::from_value(serde_json::json!({
+        "query": "michael jordan",
+        "tags": {"category": 7, "active": true},
+    }))
+    .expect("body deserializes");
+    let resp = crate::handlers::doc::put_doc(
+        axum::extract::State(Arc::clone(&state)),
+        axum::extract::Path(1u64),
+        Json(body),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), axum::http::StatusCode::CREATED);
+
+    let title = serde_json::json!({"title": "1986 fleer michael jordan rookie"});
+    // Native filter, number and string forms, plus the coerced bool.
+    for filter in [
+        serde_json::json!({"category": 7}),
+        serde_json::json!({"category": "7"}),
+        serde_json::json!({"category": [7]}),
+        serde_json::json!({"active": true}),
+    ] {
+        let ids = search_ids(
+            &state,
+            serde_json::json!({"document": title, "filter": filter}),
+        )
+        .await
+        .expect("filter coerces, not 400");
+        assert_eq!(ids, vec![1], "filter {filter} must reach the tagged query");
+    }
+    // ES envelope: bool.filter terms with a numeric value.
+    let ids = search_ids(
+        &state,
+        serde_json::json!({"query": {"bool": {
+            "must": {"percolate": {"document": title}},
+            "filter": [{"terms": {"category": [7]}}],
+        }}}),
+    )
+    .await
+    .expect("ES terms coerce");
+    assert_eq!(ids, vec![1]);
+    // A different number does NOT match (coercion is exact, not fuzzy).
+    let ids = search_ids(
+        &state,
+        serde_json::json!({"document": title, "filter": {"category": 8}}),
+    )
+    .await
+    .expect("ok");
+    assert!(ids.is_empty(), "category 8 must not match a category-7 tag");
+}
+
+#[tokio::test]
+async fn unanswerable_filter_values_are_400_not_silently_dropped() {
+    // Pre-fix a non-string ARRAY ELEMENT was silently dropped from the filter
+    // (widening the predicate); scalars already 400'd. Now everything without a
+    // canonical scalar form is a loud 400 on every filter shape.
+    let state = state_with(
+        Engine::new(Normalizer::default_vocab().expect("vocab")),
+        false,
+    );
+    let title = serde_json::json!({"title": "anything"});
+    for (label, body) in [
+        (
+            "native null",
+            serde_json::json!({"document": title, "filter": {"category": null}}),
+        ),
+        (
+            "native object",
+            serde_json::json!({"document": title, "filter": {"category": {"x": 1}}}),
+        ),
+        (
+            "native nested array element",
+            serde_json::json!({"document": title, "filter": {"category": [["a"]]}}),
+        ),
+        (
+            "native null array element",
+            serde_json::json!({"document": title, "filter": {"category": ["a", null]}}),
+        ),
+        (
+            "ES terms null element",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"document": title}},
+                "filter": [{"terms": {"category": ["a", null]}}],
+            }}}),
+        ),
+        (
+            "ES term null",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"document": title}},
+                "filter": [{"term": {"category": null}}],
+            }}}),
+        ),
+        // A clause carrying TWO queries silently dropped the second pre-fix —
+        // the widening direction (review catch); ES errors on the shape too.
+        (
+            "ES clause with both terms and term",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"document": title}},
+                "filter": [{"terms": {"a": ["x"]}, "term": {"b": "y"}}],
+            }}}),
+        ),
+        // An empty `terms` object was a silent no-op clause; ES rejects it.
+        (
+            "ES empty terms clause",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"document": title}},
+                "filter": [{"terms": {}}],
+            }}}),
+        ),
+    ] {
+        let err = search_ids(&state, body).await.expect_err(label);
+        assert_eq!(err, axum::http::StatusCode::BAD_REQUEST, "{label}");
+    }
 }
