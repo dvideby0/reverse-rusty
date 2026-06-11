@@ -385,7 +385,10 @@ async fn search_honors_per_request_include_broad() {
     )
     .await
     .expect("ok");
-    assert_eq!(ids, with_broad, "include_broad:true must surface class-C hits");
+    assert_eq!(
+        ids, with_broad,
+        "include_broad:true must surface class-C hits"
+    );
 
     // And the reverse: on a broad-ON server, per-request false suppresses —
     // through the multi-doc arm, so both handler paths honor the override.
@@ -393,13 +396,18 @@ async fn search_honors_per_request_include_broad() {
     let state_on = state_with(eng2, true);
     let req = serde_json::json!({"documents": [{"title": title}], "include_broad": false});
     let ids = search_ids(&state_on, req).await.expect("ok");
-    assert_eq!(ids, without_broad, "include_broad:false must suppress broad");
+    assert_eq!(
+        ids, without_broad,
+        "include_broad:false must suppress broad"
+    );
 }
 
 // -- Tag-value coercion on the filter path (ADR-073, ADR-064 item 4) --------
 
 /// Run `/_search` with a JSON body, returning the sorted hit ids (Ok) or the
 /// HTTP status (Err).
+// Reads the ES-convention `_id` field on hits (clippy::used_underscore_binding).
+#[allow(clippy::used_underscore_binding)]
 async fn search_ids(
     state: &Arc<AppState>,
     body: serde_json::Value,
@@ -422,7 +430,10 @@ async fn numeric_tag_ingest_meets_numeric_filter() {
     // SAME canonical rule, so a numeric category ingested as `7` is reachable by
     // a filter sending `7` OR `"7"` — pre-fix the ingest side silently dropped
     // the tag, making the query unreachable by ANY filter on that key.
-    let state = state_with(Engine::new(Normalizer::default_vocab().expect("vocab")), false);
+    let state = state_with(
+        Engine::new(Normalizer::default_vocab().expect("vocab")),
+        false,
+    );
     let body: crate::handlers::doc::PutDocBody = serde_json::from_value(serde_json::json!({
         "query": "michael jordan",
         "tags": {"category": 7, "active": true},
@@ -479,7 +490,10 @@ async fn unanswerable_filter_values_are_400_not_silently_dropped() {
     // Pre-fix a non-string ARRAY ELEMENT was silently dropped from the filter
     // (widening the predicate); scalars already 400'd. Now everything without a
     // canonical scalar form is a loud 400 on every filter shape.
-    let state = state_with(Engine::new(Normalizer::default_vocab().expect("vocab")), false);
+    let state = state_with(
+        Engine::new(Normalizer::default_vocab().expect("vocab")),
+        false,
+    );
     let title = serde_json::json!({"title": "anything"});
     for (label, body) in [
         (

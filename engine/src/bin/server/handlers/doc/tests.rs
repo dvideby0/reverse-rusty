@@ -153,7 +153,7 @@ async fn put_doc_honors_memtable_flush_threshold() {
 // -- Tag-value coercion + loud rejects (ADR-073, closing ADR-064 item 4) ----
 
 /// Shorthand: run `extract_ingest_tags` over a JSON body's top-level object.
-fn tags_of(body: serde_json::Value) -> Result<Vec<(String, String)>, String> {
+fn tags_of(body: &serde_json::Value) -> Result<Vec<(String, String)>, String> {
     let obj = body.as_object().expect("test body is an object");
     super::extract_ingest_tags(obj)
 }
@@ -163,7 +163,7 @@ fn scalar_tag_values_coerce_canonically() {
     // Numbers and bools coerce to their canonical JSON text (the ES keyword
     // behavior); strings pass through. Both the `tags` object and ES-style
     // sibling fields take the same rule.
-    let mut tags = tags_of(serde_json::json!({
+    let mut tags = tags_of(&serde_json::json!({
         "query": "q",
         "tags": {"priority": 7, "active": true, "tier": "gold"},
         "category": 42.5,
@@ -185,7 +185,7 @@ fn scalar_tag_values_coerce_canonically() {
 fn null_tag_values_are_skipped_not_errors() {
     // An explicit null is the ES "no value" — the key carries no tag, top-level
     // or as an array element; `"tags": null` means no tags at all.
-    let tags = tags_of(serde_json::json!({
+    let tags = tags_of(&serde_json::json!({
         "query": "q",
         "tags": {"status": null},
         "colors": ["red", null, 3],
@@ -199,7 +199,7 @@ fn null_tag_values_are_skipped_not_errors() {
         ]
     );
     assert_eq!(
-        tags_of(serde_json::json!({"query": "q", "tags": null})).expect("tags:null is no tags"),
+        tags_of(&serde_json::json!({"query": "q", "tags": null})).expect("tags:null is no tags"),
         vec![]
     );
 }
@@ -209,15 +209,15 @@ fn structured_tag_values_fail_loud() {
     // Pre-fix these were dropped SILENTLY, leaving the query unreachable by any
     // filter on the key (the ADR-064 item-4 finding). Now they are hard errors.
     assert!(
-        tags_of(serde_json::json!({"query": "q", "tags": {"meta": {"x": 1}}})).is_err(),
+        tags_of(&serde_json::json!({"query": "q", "tags": {"meta": {"x": 1}}})).is_err(),
         "object tag value must error"
     );
     assert!(
-        tags_of(serde_json::json!({"query": "q", "colors": [["nested"]]})).is_err(),
+        tags_of(&serde_json::json!({"query": "q", "colors": [["nested"]]})).is_err(),
         "nested array tag element must error"
     );
     assert!(
-        tags_of(serde_json::json!({"query": "q", "tags": ["not", "an", "object"]})).is_err(),
+        tags_of(&serde_json::json!({"query": "q", "tags": ["not", "an", "object"]})).is_err(),
         "a non-object `tags` field must error (was silently ignored)"
     );
 }
