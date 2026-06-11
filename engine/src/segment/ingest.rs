@@ -186,10 +186,7 @@ impl Engine {
         tags: &[(String, String)],
     ) -> Option<u32> {
         match self.try_insert_live_with_tags(text, logical, version, tags) {
-            Ok(InsertOutcome::Inserted(local)) => {
-                self.maybe_flush();
-                Some(local)
-            }
+            Ok(InsertOutcome::Inserted(local)) => Some(local),
             Ok(InsertOutcome::RejectedClassD) => None,
             Err(crate::error::WriteError::Parse(_)) => {
                 self.rejected_parse += 1;
@@ -233,6 +230,13 @@ impl Engine {
     /// [`try_insert_live`](Self::try_insert_live) carrying per-query metadata tags
     /// (ADR-049). Tags ride the same WAL-first / fail-closed path as the query: they are
     /// logged before the in-memory apply, so a recovered insert keeps its tags.
+    ///
+    /// An accepted insert honors `config.memtable_flush_threshold` (ADR-073,
+    /// closing ADR-064 item 5: the REST PUT path calls this directly, so the
+    /// knob was inert for single-doc HTTP writes — WAL-durable, but memtable +
+    /// WAL grew until a manual `/_flush`). The flush may invalidate the returned
+    /// memtable-local id, exactly as on the infallible wrapper; address-stable
+    /// callers key on the logical id.
     pub fn try_insert_live_with_tags(
         &mut self,
         text: &str,
@@ -284,6 +288,7 @@ impl Engine {
             .add_compiled(&ex, &tag_ids, &self.dict, logical, version, true);
         if let Some(local) = outcome {
             self.query_store.insert(logical, text.to_string());
+            self.maybe_flush();
             Ok(InsertOutcome::Inserted(local))
         } else {
             // Unreachable: the pre-WAL gate shares its predicate with
@@ -319,6 +324,9 @@ impl Engine {
 
     /// [`try_upsert_live`](Self::try_upsert_live) carrying per-query metadata tags
     /// (ADR-049). Tags ride the upsert WAL frame exactly as on the insert path.
+    /// An accepted upsert honors `config.memtable_flush_threshold` exactly as
+    /// [`try_insert_live_with_tags`](Self::try_insert_live_with_tags) does
+    /// (ADR-073 — the REST PUT path calls this directly).
     pub fn try_upsert_live_with_tags(
         &mut self,
         text: &str,
@@ -363,7 +371,14 @@ impl Engine {
                 return Err(crate::error::WriteError::Wal(e));
             }
         }
-        Ok(self.apply_upsert(&ex, text, logical, version, tags, true, true))
+        let outcome = self.apply_upsert(&ex, text, logical, version, tags, true, true);
+        if matches!(
+            outcome,
+            UpsertOutcome::Created(_) | UpsertOutcome::Updated { .. }
+        ) {
+            self.maybe_flush();
+        }
+        Ok(outcome)
     }
 
     /// The shared apply funnel behind [`try_upsert_live_with_tags`](Self::try_upsert_live_with_tags)

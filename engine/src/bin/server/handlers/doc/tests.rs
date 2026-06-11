@@ -101,6 +101,55 @@ async fn delete_after_reput_reports_one_copy() {
     );
 }
 
+// -- memtable_flush_threshold honored by REST PUT (ADR-073, ADR-064 item 5) --
+
+#[tokio::test]
+async fn put_doc_honors_memtable_flush_threshold() {
+    // Pre-fix the REST PUT path bypassed the only `maybe_flush` call site, so
+    // the knob was INERT for single-doc HTTP writes: memtable + WAL grew until
+    // a manual /_flush. With threshold 2, the third PUT must have produced at
+    // least one sealed segment — and every query must keep matching across the
+    // flush boundary.
+    use reverse_rusty::config::EngineConfig;
+    let cfg = EngineConfig {
+        memtable_flush_threshold: 2,
+        ..EngineConfig::default()
+    };
+    let eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg);
+    let snap = Arc::new(eng.snapshot());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .expect("pool");
+    let state = Arc::new(AppState {
+        engine: parking_lot::Mutex::new(eng),
+        snapshot: arc_swap::ArcSwap::new(snap),
+        pool,
+        include_broad: true,
+        prom: PrometheusMetrics::new(),
+        slow_query_threshold_ms: 0,
+        auth: None,
+    });
+
+    do_put(&state, 1, "michael jordan").await;
+    do_put(&state, 2, "lebron james").await;
+    do_put(&state, 3, "wayne gretzky").await;
+    // A re-PUT (the upsert path) must honor the threshold too.
+    do_put(&state, 2, "mario lemieux").await;
+
+    assert!(
+        state.engine.lock().num_segments() > 0,
+        "threshold-2 PUTs must auto-flush the memtable into a segment"
+    );
+    assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&1));
+    assert!(matches_in_snapshot(&state, "1985 opc mario lemieux rookie").contains(&2));
+    assert!(matches_in_snapshot(&state, "1979 opc wayne gretzky rookie").contains(&3));
+    assert!(
+        !matches_in_snapshot(&state, "2003 topps lebron james rookie").contains(&2),
+        "the upserted-away version must stay dead across the flush"
+    );
+}
+
 // -- Tag-value coercion + loud rejects (ADR-073, closing ADR-064 item 4) ----
 
 /// Shorthand: run `extract_ingest_tags` over a JSON body's top-level object.
