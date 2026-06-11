@@ -211,8 +211,11 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   with the engine's message (remote-cluster vocabulary is deploy-time configuration, ADR-076). A
   **tagged** cluster is not refused (tags carry through by stored `TagId`, ADR-074), and a
   **multi-word alias activates** (P(T)-aware routing, ADR-076). At startup, `--vocab` on a fresh
-  in-process cluster fully activates (`build_with_vocab`); on a REMOTE assembly a vocab file carrying
-  equivalence-driven rules fails startup loudly rather than running silently inert.
+  in-process cluster fully activates (`build_with_vocab`); on an **empty** durable reopen whose
+  manifest carries no vocabulary it activates through the rebuild funnel (a **populated** reopen
+  keeps the committed state authoritative and warns — apply explicitly via `PUT /_vocab`); a
+  REMOTE assembly refuses ANY vocab file at startup (shard servers run the stock normalizer, so
+  even normalizer-level rules would silently diverge the feature space).
 
 Cluster-only endpoints:
 

@@ -224,7 +224,8 @@ items from an external review, re-ranked to the top; **all are now done:**
      activation gap the flip exposed (the server's `--vocab` startup silently dropped
      equivalence-driven rules). **Live cross-process vocab shipping is the decided refusal:**
      remote-cluster vocabulary is deploy-time configuration (the ES analyzer-reindex precedent);
-     a remote assembly given an equivalence-bearing vocab file now fails startup loudly; the
+     a remote assembly given a vocab file now fails startup loudly (shard servers run the stock
+     normalizer — even normalizer-level rules would silently diverge the feature space); the
      redeploy procedure lands in the criterion-10 runbook.
   7. **Auto-split + `recommended_shard_count`** — ring re-keying + the data move via the existing live
      handoff (the autoscaler's split advisory gains a real mechanism).

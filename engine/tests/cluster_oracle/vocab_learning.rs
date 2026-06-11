@@ -229,8 +229,9 @@ fn learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives() {
     }
 }
 
-/// A multi-word alias form (`new york`) for testing the cluster refusal (ADR-061).
-fn vocab_with_multiword_alias() -> reverse_rusty::vocab::Vocab {
+/// A multi-word alias form (`new york`) shared with the durable-reopen suite
+/// ([`crate::vocab_reopen`]).
+pub(crate) fn vocab_with_multiword_alias() -> reverse_rusty::vocab::Vocab {
     let mut v = reverse_rusty::vocab::Vocab::new();
     let n = reverse_rusty::normalize::Normalizer::default_vocab().unwrap();
     let d = reverse_rusty::dict::Dict::new();
@@ -496,51 +497,6 @@ fn overlapping_aliases_match_nested_entity_titles_across_the_cluster() {
 }
 
 #[test]
-fn build_with_vocab_persists_the_vocab_from_the_first_durable_commit() {
-    // Review finding: the durable `build_with_vocab` path (vocab_data written by
-    // `commit_durable_base` at BUILD time — no set_vocab, no explicit checkpoint)
-    // had no test. The ADR's crash-window claim: a crash before any later checkpoint
-    // still reopens with the vocabulary in effect. Reopen with a BARE default
-    // normalizer; the manifest's persisted vocab must drive matching from disk alone.
-    let dir = std::env::temp_dir().join(format!("rr-adr076-bwv-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let cfg = ClusterConfig {
-        num_shards: 3,
-        include_broad: true,
-        data_dir: Some(dir.clone()),
-        ..ClusterConfig::default()
-    };
-    {
-        let cluster = ClusterEngine::build_with_vocab(
-            vocab_with_multiword_alias(),
-            &cfg,
-            &[(1, "ny".into())],
-        )
-        .expect("durable build_with_vocab");
-        for title in ["ny psa 10", "new york psa 10"] {
-            assert!(
-                cluster.percolate(title).unwrap().contains(&1),
-                "pre-reopen: {title:?} must match"
-            );
-        }
-        // Dropped WITHOUT a checkpoint: the build's own commit is the only durable state.
-    }
-    let reopened = ClusterEngine::open(
-        &dir,
-        reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
-        None,
-    )
-    .expect("reopen from the build-time manifest");
-    for title in ["ny psa 10", "new york psa 10"] {
-        assert!(
-            reopened.percolate(title).unwrap().contains(&1),
-            "post-reopen: {title:?} must still match (vocab persisted at the FIRST commit)"
-        );
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
-#[test]
 fn bare_normalizer_build_matches_single_node_semantics() {
     // The boundary, pinned: a cluster built from a BARE normalizer (no Vocab) leaves
     // equivalence-driven vocabulary (registry aliases) inert — exactly like a
@@ -581,50 +537,6 @@ fn bare_normalizer_build_matches_single_node_semantics() {
         let want: std::collections::HashSet<u64> = out.iter().copied().collect();
         assert_eq!(got, want, "cluster ≠ single-node for bare-norm {title:?}");
     }
-}
-
-#[test]
-fn multiword_alias_survives_durable_checkpoint_and_reopen() {
-    // ADR-076 (flips the ADR-061 durable refusal): a multi-word alias activated via
-    // `set_vocab` on a DURABLE cluster persists through the manifest's vocab blob —
-    // after checkpoint + reopen the alias (and its P(T)-aware routing) is still in
-    // effect: both surface forms match the alias-anchored query from disk alone.
-    let dir = std::env::temp_dir().join(format!("rr-adr076-durable-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let cfg = ClusterConfig {
-        num_shards: 3,
-        include_broad: true,
-        data_dir: Some(dir.clone()),
-        ..ClusterConfig::default()
-    };
-    {
-        let mut cluster =
-            ClusterEngine::build(vocab(), &cfg, &[(1, "ny".into())]).expect("durable build");
-        cluster
-            .set_vocab(vocab_with_multiword_alias())
-            .expect("set_vocab activates the multi-word alias on a durable cluster");
-        for title in ["ny psa 10", "new york psa 10"] {
-            assert!(
-                cluster.percolate(title).unwrap().contains(&1),
-                "pre-reopen: {title:?} must match"
-            );
-        }
-        // set_vocab already checkpointed (the durable rebuild commits itself).
-    }
-    let reopened = ClusterEngine::open(
-        &dir,
-        reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
-        None,
-    )
-    .expect("reopen restores the persisted multi-word vocab from the manifest");
-    for title in ["ny psa 10", "new york psa 10"] {
-        assert!(
-            reopened.percolate(title).unwrap().contains(&1),
-            "post-reopen: {title:?} must still match (the persisted vocab drives \
-             P(T)-aware routing from disk alone)"
-        );
-    }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

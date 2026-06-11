@@ -391,7 +391,33 @@ fn assemble_cluster(
             info!(data_dir = ?dir, "reopening durable cluster from manifest");
             // The manifest's persisted vocab is authoritative on a reopen (it matches
             // the committed segments); the file-supplied one only derived `norm`.
-            let cluster = ClusterEngine::open(dir, norm, Some(cfg))?;
+            let mut cluster = ClusterEngine::open(dir, norm, Some(cfg))?;
+            if let Some(v) = vocab {
+                if cluster.vocab().is_some() {
+                    info!(
+                        "--vocab-file ignored on reopen: the manifest's persisted \
+                         vocabulary is authoritative (change it via PUT /_vocab)"
+                    );
+                } else if cluster.num_queries()? == 0 {
+                    // A bare manifest (no persisted vocab) + an EMPTY corpus: activate
+                    // the file vocab so this reopen behaves exactly like a fresh
+                    // `build_with_vocab` — `set_vocab` installs the equivalence/alias
+                    // machinery and its own durable checkpoint persists the vocab,
+                    // BEFORE any --load-file ingest below (codex: this path used to
+                    // ingest with the rules silently inert and the next reopen lost
+                    // the file's vocabulary entirely).
+                    info!("activating the vocab file on the empty reopened cluster");
+                    cluster.set_vocab(v)?;
+                } else {
+                    warn!(
+                        "--vocab-file NOT applied: this reopened cluster is populated \
+                         and its manifest carries no vocabulary, so the file's \
+                         equivalence/alias rules stay inactive (only its \
+                         normalizer-level rules derived `norm`). Apply it explicitly \
+                         via PUT /_vocab (a full blue/green rebuild)."
+                    );
+                }
+            }
             if !queries.is_empty() {
                 match cluster.num_queries()? {
                     0 => cluster.ingest(queries)?,
@@ -412,21 +438,25 @@ fn assemble_cluster(
             None => ClusterEngine::build(norm, cfg, queries),
         };
     }
-    // Remote assembly ships only the NORMALIZER out-of-band; equivalence-driven
-    // vocabulary (declared equivalences, registry aliases) cannot activate across
-    // processes in v1 (ADR-076 records the refusal: vocabulary on a remote cluster is
-    // deploy-time configuration). Fail loud rather than run with silently-inert rules.
-    if let Some(v) = &vocab {
-        if !v.effective_equivalence_groups().is_empty() {
-            return Err(ShardError::Config(
-                "the vocab file declares equivalences / registry aliases, which cannot \
-                 activate on a REMOTE cluster in v1 (ADR-076): they need the coordinator's \
-                 dict-side install, and remote shards are not shipped vocabulary changes. \
-                 Plain synonyms/phrases/punctuation (normalizer-level rules) work; remove \
-                 the equivalence rules or run the cluster in-process (--shards K)."
-                    .into(),
-            ));
-        }
+    // Remote shard servers run the STOCK normalizer (`shardserver` has no vocab flag)
+    // and `AdoptDict` ships only the frozen dict — NO mechanism ships a normalizer
+    // across processes. ANY vocab file would therefore split the feature space:
+    // equivalence-driven rules would be silently inert, and even normalizer-level
+    // rules (synonyms/phrases/punctuation/number-context) would have the coordinator
+    // extracting queries and routing under a normalizer the shards' title side does
+    // not run — cross-process query/title normalizer divergence, silent cross-form
+    // false negatives (codex review broadened this from the equivalence-only check).
+    // ADR-076 records the refusal: vocabulary on a remote cluster is deploy-time
+    // configuration, and v1 ships no mechanism to deploy one.
+    if vocab.is_some() {
+        return Err(ShardError::Config(
+            "a --vocab-file cannot apply to a REMOTE cluster (ADR-076): remote shard \
+             servers run the stock normalizer and are not shipped vocabulary, so \
+             queries and titles would normalize differently across processes (silent \
+             false negatives — even for plain synonyms/phrases/punctuation). Remove \
+             the vocab file or run the cluster in-process (--shards K)."
+                .into(),
+        ));
     }
 
     #[cfg(feature = "distributed")]

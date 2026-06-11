@@ -23,3 +23,4 @@ mod placement;
 mod ranking;
 mod replication;
 mod vocab_learning;
+mod vocab_reopen;

@@ -42,7 +42,14 @@
     manifest from the first commit** (a crash before any later checkpoint still reopens
     with the vocabulary in effect).
   - The coordinator-mode server's fresh in-process build routes `--vocab` through it; a
-    reopen keeps the manifest's persisted vocab authoritative.
+    reopen keeps the manifest's persisted vocab authoritative. When the manifest carries
+    NO vocabulary (a bare pre-vocab build): an **empty** reopened cluster activates the
+    file vocab through the `set_vocab` funnel before any `--load-file` ingest — exactly
+    fresh-`build_with_vocab` semantics, including persistence via the rebuild's own
+    checkpoint (codex review: this path used to ingest with the rules silently inert and
+    lose the file's vocabulary at the next reopen); a **populated** one warns loudly that
+    the file is not applied (committed segments are authoritative — apply explicitly via
+    `PUT /_vocab`, a full rebuild).
   - Building from a bare normalizer remains accepted with single-node-parity semantics
     (pinned by an oracle test) — the boundary is documented, not silent divergence.
 - **Decision (a) — REFUSED, documented: no live cross-process vocabulary shipping at v1.**
@@ -60,10 +67,14 @@
     `TagId`s on the wire, which is only sound behind the criterion-9 tag-dict fingerprint
     handshake (not yet built).
   - The **mesh refuses loudly today**: `set_vocab` keeps its non-local refusal, and the
-    coordinator-mode server now **fails startup** when a remote assembly is given a vocab
-    file carrying equivalence-driven rules (they would be silently inert; plain
-    synonyms/phrases/punctuation are normalizer-level and ship fine via the out-of-band
-    `norm`). Nothing degrades silently.
+    coordinator-mode server now **fails startup** when a remote assembly is given ANY
+    vocab file (codex review broadened this from an equivalence-only check):
+    equivalence-driven rules would be silently inert, and even normalizer-level rules
+    (synonyms/phrases/punctuation/number-context) cannot apply — `shardserver` runs the
+    stock normalizer and nothing ships a custom one across processes, so the coordinator
+    would extract queries and route under a normalizer the shards' title side does not
+    run (cross-process query/title divergence, silent cross-form false negatives).
+    Nothing degrades silently.
 - **Why this is safe:** routing only ever widens (a superset of probed shards can only add
   candidates, never lose one — and the exact verifier rejects false positives); alias-free
   clusters are byte-identical on every path; `build_with_vocab` is a new constructor
