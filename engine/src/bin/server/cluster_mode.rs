@@ -197,6 +197,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             data_dir,
             &cfg,
             norm,
+            vocab,
             &queries,
             &handle,
             mesh,
@@ -379,6 +380,7 @@ fn assemble_cluster(
     data_dir: Option<PathBuf>,
     cfg: &ClusterConfig,
     norm: Normalizer,
+    vocab: Option<reverse_rusty::vocab::Vocab>,
     queries: &[(u64, String)],
     handle: &tokio::runtime::Handle,
     mesh: MeshClientParts,
@@ -387,6 +389,8 @@ fn assemble_cluster(
         let _ = (handle, mesh); // only the remote path connects on the runtime
         if let Some(dir) = data_dir.filter(|d| ClusterEngine::cluster_exists(d)) {
             info!(data_dir = ?dir, "reopening durable cluster from manifest");
+            // The manifest's persisted vocab is authoritative on a reopen (it matches
+            // the committed segments); the file-supplied one only derived `norm`.
             let cluster = ClusterEngine::open(dir, norm, Some(cfg))?;
             if !queries.is_empty() {
                 match cluster.num_queries()? {
@@ -399,7 +403,30 @@ fn assemble_cluster(
             }
             return Ok(cluster);
         }
-        return ClusterEngine::build(norm, cfg, queries);
+        // A vocab FILE must fully activate (ADR-076): `build_with_vocab` installs the
+        // equivalence/alias machinery on the minted dict (a bare-normalizer build
+        // would leave declared equivalences + registry aliases silently inert) and
+        // persists the vocab in the manifest from the first durable commit.
+        return match vocab {
+            Some(v) => ClusterEngine::build_with_vocab(v, cfg, queries),
+            None => ClusterEngine::build(norm, cfg, queries),
+        };
+    }
+    // Remote assembly ships only the NORMALIZER out-of-band; equivalence-driven
+    // vocabulary (declared equivalences, registry aliases) cannot activate across
+    // processes in v1 (ADR-076 records the refusal: vocabulary on a remote cluster is
+    // deploy-time configuration). Fail loud rather than run with silently-inert rules.
+    if let Some(v) = &vocab {
+        if !v.effective_equivalence_groups().is_empty() {
+            return Err(ShardError::Config(
+                "the vocab file declares equivalences / registry aliases, which cannot \
+                 activate on a REMOTE cluster in v1 (ADR-076): they need the coordinator's \
+                 dict-side install, and remote shards are not shipped vocabulary changes. \
+                 Plain synonyms/phrases/punctuation (normalizer-level rules) work; remove \
+                 the equivalence rules or run the cluster in-process (--shards K)."
+                    .into(),
+            ));
+        }
     }
 
     #[cfg(feature = "distributed")]

@@ -12,13 +12,31 @@ use super::ClusterEngine;
 impl ClusterEngine {
     /// The shards a title is routed to: shard 0 (the replicated-lane evaluator)
     /// plus the shard owning each anchor-eligible (non-hot) title feature. Reuses
-    /// the same `match_features` primitive the match path uses, so routing and
+    /// the same `match_features` primitives the match path uses, so routing and
     /// matching cannot drift.
+    ///
+    /// **P(T)-aware under multi-word aliases (ADR-076):** with an active multi-word
+    /// alias, routing derives targets from the **maximal positive view** `P(T)` —
+    /// the same superset the shard-local verifier reads required/any-of against
+    /// (ADR-061) — instead of the canonical leftmost-longest `N(T)`. The cover
+    /// argument: a query's anchor is one of its extracted positive features, and
+    /// `P(T)` contains every feature ANY parse of the title emits (the parse-union
+    /// property the ADR-061 oracle pins), so a title that could satisfy a query
+    /// always routes to the query's anchor shard — zero false negatives. `P(T) ⊇
+    /// N(T)` means fan-out only ever widens, and only on alias-bearing titles; with
+    /// no active multi-word alias `P(T) == N(T)` and this takes the single-view
+    /// path, byte-identical to the pre-ADR-076 routing.
     fn route(&self, title: &str) -> Vec<usize> {
         let mut lc = String::new();
         let mut feats: Vec<FeatureId> = Vec::new();
-        self.norm
-            .match_features(title, &self.dict, &mut lc, &mut feats);
+        if self.norm.has_multiword_aliases() {
+            let mut neg: Vec<FeatureId> = Vec::new();
+            self.norm
+                .match_features_dual(title, &self.dict, &mut lc, &mut neg, &mut feats);
+        } else {
+            self.norm
+                .match_features(title, &self.dict, &mut lc, &mut feats);
+        }
         let mut targets: Vec<usize> = Vec::with_capacity(feats.len() + 1);
         targets.push(0);
         for &f in &feats {

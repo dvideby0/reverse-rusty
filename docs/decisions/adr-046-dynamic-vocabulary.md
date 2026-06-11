@@ -70,7 +70,9 @@
   node computes them), so the token half works in-process *and* cross-process for free. The alias half's
   **cross-process normalizer *shipping*** (a versioned normalizer + the propagation-window consistency
   design, analogous to dict shipping ADR-034) rides with the experimental distributed layers and is
-  **beyond v1**.
+  **beyond v1** *(decided at v1 by [ADR-076](adr-076-cluster-multiword-aliases-vocab-shipping.md): live
+  shipping stays refused — remote-cluster vocabulary is deploy-time configuration, the ES
+  analyzer-reindex precedent)*.
 - **Alternatives declined:** *coordinator-assigned exact ids* (ES global-ordinals style via the control
   plane) — exact, but adds a coordination step + a propagation window (transient FN) + Raft coupling, a
   hazard hashing avoids; *post-freeze dict mutation* — the dict is an immutable shared `Arc`, and breaking

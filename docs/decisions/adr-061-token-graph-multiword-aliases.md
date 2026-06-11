@@ -188,7 +188,10 @@
   active, the extra cost is one Aho-Corasick pass over the (typically small) alias-phrase set plus a
   second mask/slice — paid only on titles that actually contain an overlapping alias phrase.
 
-- **Scope / what's deferred.** **Single-node first** (like ADR-054 / ADR-059 / ADR-060). The cluster
+- **Scope / what's deferred.** **Single-node first** (like ADR-054 / ADR-059 / ADR-060). *(The cluster
+  deferral below is resolved by [ADR-076](adr-076-cluster-multiword-aliases-vocab-shipping.md): routing is
+  now P(T)-aware and the refusals are retired — the paragraph records the decision-time rationale; the
+  flipped regression tests live on under activation names.)* The cluster
   deferral is now **enforced, not silent**: cluster content routing derives a title's target shards from
   the canonical leftmost-longest view `N(T)` (the `route` primitive reuses `match_features`), so a nested
   alias entity that lives only in the positive superset `P(T)` would never probe the shard holding a

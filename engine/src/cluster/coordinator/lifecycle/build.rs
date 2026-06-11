@@ -85,6 +85,54 @@ impl ClusterEngine {
         queries: &[(u64, String)],
         tags: &[Vec<(String, String)>],
     ) -> Result<Self, ShardError> {
+        Self::build_inner(norm, None, config, queries, tags)
+    }
+
+    /// [`build`](Self::build) from a [`Vocab`](crate::vocab::Vocab) — the constructor that
+    /// fully ACTIVATES the vocabulary (ADR-076), mirroring the single-node
+    /// `Engine::with_vocab`: the normalizer is derived (with the unexpressible-alias
+    /// self-heal), the vocab's equivalence/alias forms are interned into the fresh dict
+    /// FIRST (pinning dense ids), and the equivalence map is installed BEFORE the corpus
+    /// extracts — so every query expands through declared equivalences and registry
+    /// aliases (single- AND multi-word; routing is P(T)-aware) from the first percolate.
+    /// The vocab is installed on the engine (served by `GET /_vocab`) and persisted in
+    /// the durable manifest at build time, so a crash before any later checkpoint still
+    /// reopens with the vocabulary in effect.
+    ///
+    /// Building from a bare `Normalizer` instead leaves equivalence-driven features
+    /// (declared equivalences, registry aliases) INERT — identical to a single-node
+    /// engine built from a bare normalizer. Operators with a vocab file want THIS
+    /// constructor (the coordinator-mode server uses it).
+    pub fn build_with_vocab(
+        vocab: crate::vocab::Vocab,
+        config: &ClusterConfig,
+        queries: &[(u64, String)],
+    ) -> Result<Self, ShardError> {
+        let mut vocab = vocab;
+        let mut norm = vocab
+            .to_normalizer()
+            .map_err(|e| ShardError::Config(format!("building normalizer from vocab: {e}")))?;
+        // Self-heal stale-active aliases (the codex-R13 install seam): an entry whose form
+        // the classification can no longer express is demoted rather than installed inert.
+        if vocab
+            .aliases_mut()
+            .demote_unexpressible(&norm, &Dict::new())
+            > 0
+        {
+            norm = vocab
+                .to_normalizer()
+                .map_err(|e| ShardError::Config(format!("building normalizer from vocab: {e}")))?;
+        }
+        Self::build_inner(norm, Some(vocab), config, queries, &[])
+    }
+
+    fn build_inner(
+        norm: Normalizer,
+        vocab: Option<crate::vocab::Vocab>,
+        config: &ClusterConfig,
+        queries: &[(u64, String)],
+        tags: &[Vec<(String, String)>],
+    ) -> Result<Self, ShardError> {
         if config.num_shards == 0 {
             return Err(ShardError::Config(
                 "cluster needs at least one shard".into(),
@@ -95,27 +143,28 @@ impl ClusterEngine {
                 "replication_factor must be ≥ 1 (1 = primary only)".into(),
             ));
         }
-        // ADR-061: reject a multi-word-alias normalizer **before any durable state is written**.
-        // `from_parts` (called at the end of this fn) is the central backstop for every
-        // constructor, but a `data_dir` build ingests shards + commits the manifest/log *before*
-        // reaching it — so a deferred rejection would leave a reopenable durable cluster compiled
-        // under the unsupported normalizer (a later `open` with a different normalizer would
-        // silently miss queries). Fail here, before `commit_durable_base`. Single-token aliases
-        // (`N(T) == P(T)`) are unaffected; see the routing rationale on the `from_parts` guard.
-        if norm.has_multiword_aliases() {
-            return Err(ShardError::Config(
-                "a normalizer with active multi-word aliases is single-node only (ADR-061): \
-                 cluster routing uses the canonical leftmost-longest title view and would miss a \
-                 nested alias entity's shard (a false negative). Single-token aliases are supported."
-                    .into(),
-            ));
-        }
+        // A multi-word-alias normalizer is supported on a cluster since ADR-076:
+        // content routing is P(T)-aware (`route` derives targets from the maximal
+        // positive view when multi-word aliases are active), so a nested alias
+        // entity's shard is always probed — the ADR-061 single-node-only refusal
+        // that used to live here is retired.
         let norm = Arc::new(norm);
 
         // Pass A — build the authoritative dict + tag space over the WHOLE corpus, then freeze both.
         // Each accepted query carries its raw tags forward so pass B can place them; the tags are
         // interned now so a corpus tag keeps a dense id (a post-build tag hashes to a synthetic id).
         let mut dict = Dict::new();
+        // Install the vocabulary's equivalence machinery BEFORE extraction (ADR-076,
+        // the `Engine::with_vocab` fresh-path order): intern every active
+        // equivalence/alias form so it pins a dense id, then install the resolved map —
+        // the corpus loop's `extract` then expands each query through it (an alias can
+        // widen an anchor into an any-of, which placement fans accordingly). `None` ⇒
+        // both are no-ops ⇒ byte-identical to the bare-normalizer build.
+        if let Some(v) = &vocab {
+            v.intern_equivalence_forms(&norm, &mut dict);
+            let equiv = v.resolve_equivalences(&norm, &dict);
+            dict.set_equivalences(equiv);
+        }
         let mut tag_dict = TagDict::new();
         let mut lc = String::new();
         let mut extracted: Vec<ExtractedTagged> = Vec::with_capacity(queries.len());
@@ -226,7 +275,15 @@ impl ClusterEngine {
         let durable = match &config.data_dir {
             Some(dir) => {
                 let primaries: Vec<&LocalShard> = groups.iter().map(|g| &g[0]).collect();
-                Self::commit_durable_base(dir, &dict, &tag_dict, &ring, config, &primaries)?
+                Self::commit_durable_base(
+                    dir,
+                    &dict,
+                    &tag_dict,
+                    &ring,
+                    config,
+                    &primaries,
+                    vocab.as_ref(),
+                )?
             }
             None => ClusterDurable::in_memory(
                 config.num_shards as u32,
@@ -241,7 +298,7 @@ impl ClusterEngine {
         for copies in groups {
             shards.push(into_shard(copies)?);
         }
-        let engine = Self::from_parts(
+        let mut engine = Self::from_parts(
             norm,
             dict,
             tag_dict,
@@ -252,6 +309,12 @@ impl ClusterEngine {
             config.per_shard.clone(),
             durable,
         )?;
+        // Install the vocabulary on the engine (ADR-076): served by `GET /_vocab`,
+        // merged-under by the learn paths, and re-persisted at every checkpoint.
+        // (The durable manifest above already carries it.)
+        if let Some(v) = vocab {
+            engine.vocab = Some(Arc::new(v));
+        }
         // Latch tags_present (ADR-055, `/_stats` introspection). For a build with interned corpus
         // tags `tag_dict` is also non-empty, but this also covers a build whose only tags would be
         // synthetic, keeping `has_tags` correct regardless.
@@ -273,6 +336,7 @@ impl ClusterEngine {
         ring: &HashRing,
         config: &ClusterConfig,
         primaries: &[&LocalShard],
+        vocab: Option<&crate::vocab::Vocab>,
     ) -> Result<ClusterDurable, ShardError> {
         std::fs::create_dir_all(dir)
             .map_err(|e| ShardError::Log(format!("creating cluster data dir: {e}")))?;
@@ -294,9 +358,20 @@ impl ClusterEngine {
             segment_registry,
             next_seg_ids,
             dict_data: crate::storage::serialize_dict(dict),
-            // A freshly built cluster has no runtime vocabulary change yet; a
-            // declared alias lands here on a later `set_vocab` → `checkpoint`.
-            vocab_data: Vec::new(),
+            // A `build_with_vocab` cluster persists its vocabulary from the FIRST
+            // commit (ADR-076) — a crash before any later checkpoint must still
+            // reopen with the vocab in effect; serialization failure fails the
+            // build loudly. A bare-normalizer build has none (a later `set_vocab`
+            // → `checkpoint` lands it).
+            vocab_data: match vocab {
+                Some(v) => v
+                    .to_json()
+                    .map_err(|e| {
+                        ShardError::Log(format!("serializing cluster vocab at build: {e}"))
+                    })?
+                    .into_bytes(),
+                None => Vec::new(),
+            },
             // The frozen per-query tag space (ADR-049/055) — persisted so a reopen resolves a
             // request filter to the SAME `TagId`s the stored segments carry. Empty + finalized for
             // an untagged cluster ⇒ a byte-identical empty blob (manifest v4 round-trips it).

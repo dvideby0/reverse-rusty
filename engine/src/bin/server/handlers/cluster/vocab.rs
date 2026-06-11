@@ -1,10 +1,10 @@
 //! Cluster-mode vocabulary + alias + settings handlers (ADR-070). The vocabulary
 //! paths map onto the cluster's own `set_vocab` machinery (ADR-046 blue/green
-//! rebuild) — its built-in refusals (non-local shards, multi-word activation;
-//! ADR-046/061) surface as 400s carrying the engine's message, never weakened.
-//! A tagged cluster is NOT refused: the rebuild carries per-query tags through by
-//! stored `TagId` (ADR-074). These are the only handlers that take the cluster
-//! WRITE lock.
+//! rebuild) — its one built-in refusal (non-local shards; ADR-046/076) surfaces
+//! as a 400 carrying the engine's message, never weakened. A tagged cluster is
+//! NOT refused (tags carry through by stored `TagId`, ADR-074), and a multi-word
+//! alias activates (P(T)-aware routing, ADR-076). These are the only handlers
+//! that take the cluster WRITE lock.
 
 use std::sync::Arc;
 
@@ -42,7 +42,7 @@ struct VocabApplyResponse {
 
 /// PUT /_vocab — replace the cluster vocabulary (ADR-046 mechanism 2): re-mint the
 /// dict, re-place every query, atomic swap; durable clusters checkpoint the new
-/// state. Refusals (non-local / tagged / multi-word) come back as 400s.
+/// state. The non-local refusal comes back as a 400 (tags + multi-word activate, ADR-074/076).
 #[instrument(skip_all)]
 pub(crate) async fn cluster_put_vocab(
     State(state): State<Arc<ClusterAppState>>,
