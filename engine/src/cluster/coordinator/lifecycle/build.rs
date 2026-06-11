@@ -344,7 +344,20 @@ impl ClusterEngine {
         // catalogued (rebuilt from the primary via peer recovery on reopen — ADR-035).
         let mut segment_registry = Vec::with_capacity(primaries.len());
         let mut next_seg_ids = Vec::with_capacity(primaries.len());
-        for p in primaries {
+        for (i, p) in primaries.iter().enumerate() {
+            // The sources-half of the commit guard (`segment_filenames` is the
+            // segments-half): a failed `sources.dat` write during the build's bulk seal
+            // only degrades `persistence_healthy` (best-effort path, ADR-021) — acking
+            // the build anyway would commit durable segments whose reopen gathers an
+            // incomplete source corpus, and a later vocabulary rebuild would silently
+            // drop the missing queries (codex retro-review, ADR-074). Fail the build.
+            if !p.persistence_healthy() {
+                return Err(ShardError::Log(format!(
+                    "shard {i}: a durability write failed during the build (sources.dat) — \
+                     refusing to commit the cluster manifest; the on-disk corpus would be \
+                     incomplete for a later vocabulary rebuild"
+                )));
+            }
             segment_registry.push(p.segment_filenames()?);
             next_seg_ids.push(p.next_seg_id()?);
         }

@@ -160,7 +160,8 @@ match. A `rank` block has two optional parts:
 
 - **`priority_key`** — the name of a [tag](documents.md#per-query-metadata-tags-adr-049) whose **numeric
   value** is the query's base priority (a query tagged `priority=50` scores 50; a non-numeric or absent
-  value scores 0).
+  value scores 0). An empty string means "no priority term" — identical to omitting the field — on every
+  path (single-node, in-process cluster, and over gRPC, whose wire encodes the absent key as `""`).
 - **`boosts`** — a list of `{key, value, boost}` entries; a query scores `+boost` for each `(key, value)`
   tag it carries.
 

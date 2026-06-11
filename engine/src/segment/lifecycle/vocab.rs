@@ -185,12 +185,19 @@ impl Engine {
     /// The current live `(logical_id, query_text)` set — the source corpus the
     /// index is a materialized view of, sorted by logical id for deterministic
     /// rebuilds. Backed by the query store (kept in sync with the index by the
-    /// insert/delete paths), so it reflects exactly the queries that should be
-    /// matchable. Used by [`recompile_stale_segments`](Self::recompile_stale_segments).
+    /// insert/delete paths) and **cross-checked against index liveness**: a store
+    /// entry with no live copy in this engine is stale residue (e.g. a query a
+    /// pre-fix green rebuild moved to another shard — codex retro-review, ADR-074)
+    /// and is skipped, so a polluted `sources.dat` self-heals at the next gather
+    /// rather than resurrecting moved or deleted queries.
+    /// Used by [`recompile_stale_segments`](Self::recompile_stale_segments).
     pub fn live_sources(&self) -> Vec<(u64, String)> {
         let mut out: Vec<(u64, String)> = Vec::with_capacity(self.query_store.len());
-        self.query_store
-            .for_each_live(|logical, text| out.push((logical, text.to_string())));
+        self.query_store.for_each_live(|logical, text| {
+            if self.live_tag_ids_for(logical).is_some() {
+                out.push((logical, text.to_string()));
+            }
+        });
         out.sort_unstable_by_key(|&(l, _)| l);
         out
     }
@@ -202,33 +209,40 @@ impl Engine {
     /// across a vocabulary change, so they stay valid (the same ADR-049 carry-through
     /// [`recompile_stale_segments`](Self::recompile_stale_segments) uses in-place).
     pub fn live_sources_tagged(&self) -> Vec<(u64, String, Vec<crate::tagdict::TagId>)> {
-        self.live_sources()
-            .into_iter()
-            .map(|(logical, text)| {
-                let tags = self.live_tag_ids_for(logical);
-                (logical, text, tags)
-            })
-            .collect()
+        let mut out: Vec<(u64, String, Vec<crate::tagdict::TagId>)> =
+            Vec::with_capacity(self.query_store.len());
+        // One liveness scan per entry: `None` = no live copy in this engine (stale store
+        // residue — skipped, see `live_sources`), `Some(tags)` = live, possibly untagged.
+        self.query_store.for_each_live(|logical, text| {
+            if let Some(tags) = self.live_tag_ids_for(logical) {
+                out.push((logical, text.to_string(), tags));
+            }
+        });
+        out.sort_unstable_by_key(|&(l, _, _)| l);
+        out
     }
 
     /// The current `TagId`s of the live entry for `logical` (ADR-049), read from the
     /// memtable or a base segment. Used by [`recompile_stale_segments`] to carry a
     /// query's tags through a vocabulary change unchanged (same tag space ⇒ the ids stay
-    /// valid). Empty when the query is untagged or absent.
-    fn live_tag_ids_for(&self, logical: u64) -> Vec<crate::tagdict::TagId> {
+    /// valid), and by the gathers above as the index-liveness check. `None` when the
+    /// query has NO live copy in this engine (distinct from `Some(vec![])` — live but
+    /// untagged): conflating the two is exactly what let a stale store entry shadow a
+    /// moved query's tagged copy (codex retro-review, ADR-074).
+    fn live_tag_ids_for(&self, logical: u64) -> Option<Vec<crate::tagdict::TagId>> {
         for &local in self.memtable.locals_for_logical(logical) {
             if self.memtable.is_alive(local) {
-                return self.memtable.tags_of(local).to_vec();
+                return Some(self.memtable.tags_of(local).to_vec());
             }
         }
         for seg in &self.segments {
             for &local in seg.locals_for_logical(logical) {
                 if seg.is_alive(local) {
-                    return seg.tags_of(local).to_vec();
+                    return Some(seg.tags_of(local).to_vec());
                 }
             }
         }
-        Vec::new()
+        None
     }
 
     /// Recompile every live query under the CURRENT normalizer, replacing all
@@ -267,7 +281,9 @@ impl Engine {
                 let ex = crate::compile::extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
                 // Carry the query's existing tags forward unchanged — tags are orthogonal
                 // to the normalizer, so a vocabulary change must not drop them (ADR-049).
-                let tags = self.live_tag_ids_for(*logical);
+                // `live_sources` only returns entries with a live copy, so the lookup
+                // cannot be `None` here; the empty default is unreachable belt-and-braces.
+                let tags = self.live_tag_ids_for(*logical).unwrap_or_default();
                 // `accept_class_d = true` unconditionally (ADR-068): a STORED query
                 // must survive a vocabulary change. A query whose positives vanish
                 // under the new vocab (re-classifying to D) is kept as an

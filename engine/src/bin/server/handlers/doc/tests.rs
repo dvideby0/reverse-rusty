@@ -205,6 +205,21 @@ fn null_tag_values_are_skipped_not_errors() {
 }
 
 #[test]
+fn empty_tag_keys_fail_loud() {
+    // An empty KEY rejects (codex retro-review, ADR-075 family): an empty
+    // `priority_key` means "no priority term" (the gRPC wire cannot express it),
+    // so an empty-key tag would be reachable by SOME ranking paths and not others.
+    // Both intake shapes — the `tags` object and an ES-style sibling field.
+    let err = tags_of(&serde_json::json!({"query": "q", "tags": {"": "v"}}))
+        .expect_err("an empty tag key in `tags` must reject");
+    assert!(err.contains("non-empty"), "names the rule (got: {err})");
+    assert!(
+        tags_of(&serde_json::json!({"query": "q", "": "v"})).is_err(),
+        "an empty sibling-field key must reject too"
+    );
+}
+
+#[test]
 fn structured_tag_values_fail_loud() {
     // Pre-fix these were dropped SILENTLY, leaving the query unreachable by any
     // filter on the key (the ADR-064 item-4 finding). Now they are hard errors.

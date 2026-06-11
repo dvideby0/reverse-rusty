@@ -24,3 +24,4 @@ mod replication;
 mod torn_tail;
 mod upsert;
 mod vocab;
+mod vocab_stale_sources;

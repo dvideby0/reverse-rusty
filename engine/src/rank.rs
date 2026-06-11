@@ -46,10 +46,17 @@ impl CompiledRankSpec {
     /// Build a compiled spec from already-resolved parts. Prefer
     /// [`EngineSnapshot::compile_rank_spec`](crate::EngineSnapshot::compile_rank_spec),
     /// which resolves boost `(key,value)`s against the live tag dict.
+    ///
+    /// An EMPTY `priority_key` normalizes to `None`: the gRPC wire encodes the absent
+    /// key as `""` (proto3 strings have no presence), so accepting `Some("")` here
+    /// would score empty-key tags in-process but never on a remote shard — a silent
+    /// local/remote ranking divergence (codex retro-review, ADR-075). Every
+    /// construction path (single-node compile, cluster compile, wire decode) funnels
+    /// through this constructor, so the two sides agree by construction.
     #[must_use]
     pub fn new(priority_key: Option<String>, boosts: FastMap<TagId, i64>) -> Self {
         Self {
-            priority_key,
+            priority_key: priority_key.filter(|k| !k.is_empty()),
             boosts,
         }
     }
@@ -128,6 +135,26 @@ mod tests {
         let spec = CompiledRankSpec::default();
         assert!(spec.is_noop());
         assert_eq!(score(&[1, 2, 3], &dict, &spec), 0);
+    }
+
+    #[test]
+    fn empty_priority_key_normalizes_to_none() {
+        // The gRPC wire encodes the absent priority key as "" (proto3 — no string
+        // presence), so `Some("")` must mean "no priority term" EVERYWHERE or
+        // in-process and remote shards rank differently (codex retro-review, ADR-075).
+        let spec = compiled(Some(""), &[]);
+        assert_eq!(spec.priority_key(), None);
+        assert!(spec.is_noop(), "an empty key alone requests no ranking");
+        // With boosts the spec stays live — only the priority term is absent.
+        let mut dict = TagDict::new();
+        let gold = dict.intern("tier", "gold");
+        let empty_key = dict.intern("", "5");
+        let spec = compiled(Some(""), &[(gold, 100)]);
+        assert_eq!(spec.priority_key(), None);
+        assert!(!spec.is_noop());
+        // The empty-key tag contributes NO priority — same as a remote shard, where
+        // the wire cannot even express the empty key.
+        assert_eq!(score(&[gold, empty_key], &dict, &spec), 100);
     }
 
     #[test]
