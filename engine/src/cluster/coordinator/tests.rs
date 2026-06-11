@@ -120,6 +120,15 @@ impl Shard for ToggleFailShard {
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         self.inner.percolate_filtered(t, b, pred)
     }
+    fn percolate_filtered_ranked(
+        &self,
+        t: &str,
+        b: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        self.inner.percolate_filtered_ranked(t, b, pred, spec)
+    }
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.inner.num_queries()
     }

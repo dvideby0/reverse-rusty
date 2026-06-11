@@ -191,6 +191,7 @@ fn fence_rejects_writes_but_serves_reads() {
         title: "1994 upper deck".to_string(),
         include_broad: false,
         filter: Vec::new(),
+        rank: None,
     })))
     .expect("percolate after fence");
 

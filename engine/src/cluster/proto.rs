@@ -45,6 +45,31 @@ pub(crate) fn tag_predicate_from_proto(groups: Vec<TagGroup>) -> TagPredicate {
     TagPredicate::new(groups)
 }
 
+/// Compiled engine rank spec → the proto `RankSpec` (ADR-075): already-resolved `TagId`
+/// boosts + the priority key, mirroring how the tag filter ships resolved ids — the
+/// shard never re-resolves strings. The wire's empty `priority_key` encodes `None`.
+pub(crate) fn rank_spec_to_proto(spec: &crate::rank::CompiledRankSpec) -> RankSpec {
+    RankSpec {
+        priority_key: spec.priority_key().unwrap_or_default().to_string(),
+        boosts: spec
+            .boosts()
+            .map(|(tag_id, weight)| RankBoost { tag_id, weight })
+            .collect(),
+    }
+}
+
+/// Proto `RankSpec` → the compiled engine spec (ADR-075). An empty wire
+/// `priority_key` decodes to `None` (no priority term).
+pub(crate) fn rank_spec_from_proto(p: RankSpec) -> crate::rank::CompiledRankSpec {
+    let boosts = p.boosts.into_iter().map(|b| (b.tag_id, b.weight)).collect();
+    let priority_key = if p.priority_key.is_empty() {
+        None
+    } else {
+        Some(p.priority_key)
+    };
+    crate::rank::CompiledRankSpec::new(priority_key, boosts)
+}
+
 /// Proto wire `MatchStats` → engine [`MatchStats`]. Field order pinned to `segment.rs`.
 pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
     EngineStats {

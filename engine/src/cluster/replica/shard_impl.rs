@@ -29,6 +29,18 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.percolate_filtered(title, include_broad, pred))
     }
 
+    fn percolate_filtered_ranked(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        // Set-equal copies carry identical tags (identical op streams), so any in-sync
+        // copy yields the same scores — the same failover as `percolate_filtered`.
+        self.read(|s| s.percolate_filtered_ranked(title, include_broad, pred, spec))
+    }
+
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.read(|s| s.num_queries())
     }

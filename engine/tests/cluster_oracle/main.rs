@@ -20,5 +20,6 @@ mod differential;
 mod dynamic_vocab;
 mod filtered;
 mod placement;
+mod ranking;
 mod replication;
 mod vocab_learning;

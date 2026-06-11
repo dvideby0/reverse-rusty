@@ -138,6 +138,83 @@ impl ClusterEngine {
         Ok((out, stats))
     }
 
+    /// Compile a request `rank` block against the coordinator's frozen tag space
+    /// (ADR-059/075) — the ranking analogue of [`Self::compile_tag_predicate`], with
+    /// the same `get_or_synthetic` resolution the single-node
+    /// `EngineSnapshot::compile_rank_spec` uses: a boost value never seen at ingest
+    /// yields a `TagId` no stored query carries and simply never fires. The shards
+    /// resolved their stored tags against this SAME shared dict, so the integer
+    /// boost ids are directly comparable cluster-wide.
+    pub fn compile_rank_spec(&self, spec: &crate::rank::RankSpec) -> crate::rank::CompiledRankSpec {
+        let boosts = spec
+            .boosts
+            .iter()
+            .map(|(key, value, weight)| (self.tag_dict.get_or_synthetic(key, value), *weight))
+            .collect();
+        crate::rank::CompiledRankSpec::new(spec.priority_key.clone(), boosts)
+    }
+
+    /// [`Self::percolate_filtered_with_stats`] plus a per-id ranking score (the
+    /// cluster `rank` path, ADR-059/075). The spec is compiled ONCE here and fanned
+    /// to every probed shard, which scores its own matched ids against its stored
+    /// tag columns; the merge dedups by id — copies of one logical are
+    /// version-identical across shards (identical op streams), so every shard
+    /// reports the same score and dedup cannot lose information. Returns the scored
+    /// set sorted by id (the same order the unranked merge returns); the caller owns
+    /// the `(score desc, _id asc)` presentation order + `from`/`size`, exactly as
+    /// with the single-node `EngineSnapshot::rank`. Ranking only reorders — the id
+    /// set is identical to the unranked percolate (zero-FN trivially preserved).
+    pub fn percolate_filtered_ranked(
+        &self,
+        title: &str,
+        filter: &[(String, Vec<String>)],
+        include_broad: bool,
+        rank: &crate::rank::RankSpec,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        let pred = self.compile_tag_predicate(filter);
+        let spec = self.compile_rank_spec(rank);
+        let targets = self.route(title);
+        // Same fan-out + fail-loud shape as `percolate_inner` (a dropped shard probe
+        // would shrink the union into a false negative).
+        let parts: Vec<(Vec<(u64, i64)>, MatchStats)> = if targets.len() <= 1 {
+            targets
+                .iter()
+                .map(|&s| {
+                    self.shards[s].percolate_filtered_ranked(
+                        title,
+                        include_broad && s == 0,
+                        &pred,
+                        &spec,
+                    )
+                })
+                .collect::<Result<_, _>>()?
+        } else {
+            use rayon::prelude::*;
+            targets
+                .par_iter()
+                .map(|&s| {
+                    self.shards[s].percolate_filtered_ranked(
+                        title,
+                        include_broad && s == 0,
+                        &pred,
+                        &spec,
+                    )
+                })
+                .collect::<Result<_, _>>()?
+        };
+
+        let mut out: Vec<(u64, i64)> = Vec::new();
+        let mut stats = MatchStats::default();
+        for (scored, st) in parts {
+            out.extend_from_slice(&scored);
+            stats.merge(st);
+        }
+        out.sort_unstable_by_key(|&(id, _)| id);
+        out.dedup_by_key(|&mut (id, _)| id);
+        stats.matches = out.len() as u32;
+        Ok((out, stats))
+    }
+
     /// Introspection: the shards a title would be routed to (its fan-out).
     pub fn shard_fanout(&self, title: &str) -> Vec<usize> {
         self.route(title)

@@ -106,10 +106,32 @@ message PercolateRequest {
   // ALREADY-RESOLVED tag filter (ADR-049/055): a conjunction of groups of `TagId`s. Empty ⇒ an
   // unfiltered probe (byte-identical to the pre-tag wire).
   repeated TagGroup filter = 3;
+  // ALREADY-COMPILED rank spec (ADR-059/075): boost `(key,value)`s resolved to `TagId`s by the
+  // coordinator against the shared frozen tag space (the same `get_or_synthetic` resolution as
+  // the filter groups). Absent ⇒ an unranked probe (byte-identical to the pre-rank wire).
+  RankSpec rank = 4;
+}
+// A compiled ranking request (ADR-059/075): the shard scores each matched query as
+// `Σ(weight of each boost tag the query carries) + numeric value of its priority-key tag`.
+message RankSpec {
+  // Tag key whose numeric value is a query's base priority; empty ⇒ no priority term.
+  string priority_key = 1;
+  repeated RankBoost boosts = 2;
+}
+message RankBoost {
+  uint32 tag_id = 1;
+  int64 weight = 2;
 }
 message PercolateReply {
   repeated uint64 ids = 1;
   MatchStats stats = 2;
+  // Per-id ranking scores, PARALLEL to `ids` (ADR-075). Same length as `ids` iff the request
+  // carried a `rank` spec and this server scored it; empty otherwise.
+  repeated int64 scores = 3;
+  // Echo: true iff this server scored the reply. The ranked client checks it — an older server
+  // that ignores `rank` leaves it false, and the client fails LOUD rather than silently treating
+  // unranked results as ranked (version-skew honesty).
+  bool ranked = 4;
 }
 
 // Field order pinned to engine `segment.rs` MatchStats (11 u32 fields). The

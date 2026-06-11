@@ -61,6 +61,19 @@ impl CompiledRankSpec {
     pub fn is_noop(&self) -> bool {
         self.priority_key.is_none() && self.boosts.is_empty()
     }
+
+    /// The priority tag key, if one was requested. Read access for the gRPC wire
+    /// mapper (ADR-075): a compiled spec crosses the cluster wire as resolved ids.
+    #[must_use]
+    pub fn priority_key(&self) -> Option<&str> {
+        self.priority_key.as_deref()
+    }
+
+    /// The resolved `(TagId, weight)` boost pairs (arbitrary order). Read access for
+    /// the gRPC wire mapper (ADR-075).
+    pub fn boosts(&self) -> impl Iterator<Item = (TagId, i64)> + '_ {
+        self.boosts.iter().map(|(&t, &w)| (t, w))
+    }
 }
 
 /// Score one query's tag set under a compiled spec. Off the match hot path:

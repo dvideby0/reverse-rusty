@@ -55,7 +55,9 @@
   `EngineSnapshot`, so this fully closes the REST-surface gap. **Cluster ranking stays design-only**
   (consistent with [ADR-055](adr-055-cluster-tags-filtered-percolation.md)): cross-shard ranking needs
   each shard's per-query priority fetched at the coordinator merge point
-  (`cluster/coordinator/matching.rs`), a distinct problem behind the same `RankSpec` seam, deferred.
+  (`cluster/coordinator/matching.rs`), a distinct problem behind the same `RankSpec` seam, deferred
+  *(resolved by [ADR-075](adr-075-cluster-ranking.md): rank-at-shard behind
+  `Shard::percolate_filtered_ranked`, merged at the coordinator)*.
 - **Alternatives declined.** *Scoring inside the verifier / threading a rank budget into the matcher* —
   rejected (ADR-049 already): it entangles a presentation concern with the boolean hot path and could
   push `from`/`size` into matching, where a low-priority early match could wrongly survive over a

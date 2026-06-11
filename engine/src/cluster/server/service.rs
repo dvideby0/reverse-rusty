@@ -37,14 +37,33 @@ impl ShardService for ShardServer {
         // unfiltered. The ids are authoritative-from-coordinator, so the server never re-resolves
         // strings — immune to any server-side tag-space skew on reads.
         let pred = proto::tag_predicate_from_proto(req.filter);
-        let (ids, stats) = self
-            .loaded()?
+        let st = self.loaded()?;
+        // A `rank` spec (ADR-075) rides the same already-compiled-ids pattern: score this
+        // shard's matched ids and echo `ranked = true` so the client can tell a scored reply
+        // from an old server that silently ignored the field. Absent ⇒ the pre-rank wire.
+        if let Some(rank) = req.rank {
+            let spec = proto::rank_spec_from_proto(rank);
+            let (scored, stats) = st
+                .shard
+                .percolate_filtered_ranked(&req.title, req.include_broad, &pred, &spec)
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let (ids, scores) = scored.into_iter().unzip();
+            return Ok(Response::new(proto::PercolateReply {
+                ids,
+                stats: Some(proto::stats_from_engine(stats)),
+                scores,
+                ranked: true,
+            }));
+        }
+        let (ids, stats) = st
             .shard
             .percolate_filtered(&req.title, req.include_broad, &pred)
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::PercolateReply {
             ids,
             stats: Some(proto::stats_from_engine(stats)),
+            scores: Vec::new(),
+            ranked: false,
         }))
     }
 

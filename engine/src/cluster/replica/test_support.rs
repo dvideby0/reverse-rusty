@@ -111,6 +111,18 @@ impl Shard for FailingShard {
             None => Ok((Vec::new(), MatchStats::default())),
         }
     }
+    fn percolate_filtered_ranked(
+        &self,
+        _t: &str,
+        _b: bool,
+        _pred: &TagPredicate,
+        _spec: &crate::rank::CompiledRankSpec,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        match self.read_err() {
+            Some(e) => Err(e),
+            None => Ok((Vec::new(), MatchStats::default())),
+        }
+    }
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.read_err().map_or(Ok(0), Err)
     }

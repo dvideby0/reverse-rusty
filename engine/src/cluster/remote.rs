@@ -342,6 +342,7 @@ impl Shard for RemoteShard {
             include_broad,
             // Ship the ALREADY-RESOLVED `TagId` groups (ADR-055); empty ⇒ unfiltered.
             filter: proto::tag_predicate_to_proto(pred),
+            rank: None,
         };
         let reply = self
             .block_on(async move { client.percolate(req).await })
@@ -349,6 +350,43 @@ impl Shard for RemoteShard {
             .into_inner();
         let stats = reply.stats.map(proto::stats_to_engine).unwrap_or_default();
         Ok((reply.ids, stats))
+    }
+
+    fn percolate_filtered_ranked(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        let mut client = self.client.clone();
+        let req = proto::PercolateRequest {
+            title: title.to_string(),
+            include_broad,
+            filter: proto::tag_predicate_to_proto(pred),
+            // The ALREADY-COMPILED spec (ADR-075): resolved `TagId` boosts + the priority
+            // key, exactly like the filter groups — the server never re-resolves strings.
+            rank: Some(proto::rank_spec_to_proto(spec)),
+        };
+        let reply = self
+            .block_on(async move { client.percolate(req).await })
+            .map_err(rpc_err)?
+            .into_inner();
+        // Version-skew honesty: an older server ignores the `rank` field and leaves
+        // `ranked` false — fail LOUD rather than fabricate scores or silently hand the
+        // caller an unranked ordering it will present as ranked.
+        if !reply.ranked || reply.scores.len() != reply.ids.len() {
+            return Err(ShardError::Remote(format!(
+                "shard did not score a ranked percolate (ranked={}, ids={}, scores={}): \
+                 the server predates cluster ranking (ADR-075) — upgrade it or drop the \
+                 rank block",
+                reply.ranked,
+                reply.ids.len(),
+                reply.scores.len()
+            )));
+        }
+        let stats = reply.stats.map(proto::stats_to_engine).unwrap_or_default();
+        Ok((reply.ids.into_iter().zip(reply.scores).collect(), stats))
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {
