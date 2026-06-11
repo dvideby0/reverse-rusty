@@ -24,6 +24,11 @@ pub(super) fn retention_lease(
             "RetentionLease dict-fingerprint mismatch (divergent feature space)",
         ));
     }
+    if req.tag_dict_fingerprint != st.tag_dict.fingerprint() {
+        return Err(Status::failed_precondition(
+            "RetentionLease tag-dict-fingerprint mismatch (divergent tag space)",
+        ));
+    }
     match req.op {
         0 => {
             let (lease_id, pos) = st
@@ -65,6 +70,11 @@ pub(super) fn fence(
             "Fence dict-fingerprint mismatch (divergent feature space)",
         ));
     }
+    if req.tag_dict_fingerprint != st.tag_dict.fingerprint() {
+        return Err(Status::failed_precondition(
+            "Fence tag-dict-fingerprint mismatch (divergent tag space)",
+        ));
+    }
     // Monotonic max: a later, lower-generation Fence (a stale/duplicate message) never lowers
     // the fence. `fetch_max` returns the previous value; the stored value becomes the max.
     let prev = server
@@ -85,6 +95,11 @@ pub(super) fn unfence(
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(
             "Unfence dict-fingerprint mismatch (divergent feature space)",
+        ));
+    }
+    if req.tag_dict_fingerprint != st.tag_dict.fingerprint() {
+        return Err(Status::failed_precondition(
+            "Unfence tag-dict-fingerprint mismatch (divergent tag space)",
         ));
     }
     // CAS from the exact generation this handoff fenced at. If the node is at 0 (not fenced)

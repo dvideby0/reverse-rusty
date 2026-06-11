@@ -97,8 +97,14 @@ impl ShardService for ShardServer {
         &self,
         _request: Request<proto::Empty>,
     ) -> Result<Response<proto::DictFingerprintReply>, Status> {
+        let st = self.loaded()?;
         Ok(Response::new(proto::DictFingerprintReply {
-            fingerprint: self.loaded()?.dict.fingerprint(),
+            fingerprint: st.dict.fingerprint(),
+            // ADR-077: the probe carries the tag-space identity too, so a bare
+            // `connect` (no adopt) verifies BOTH dicts. A stale server omits this
+            // (proto3 zero), which can never equal a real fingerprint — loud, not
+            // silently unverified.
+            tag_dict_fingerprint: st.tag_dict.fingerprint(),
         }))
     }
 

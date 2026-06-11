@@ -617,9 +617,9 @@ backlog, and the Evaluated & declined list.
   the oracles — not yet deployed and hardened across real machines. **The path out is now programmatized as
   the Distributed-v1 graduation criteria (ADR-065)** — a 12-item checklist (cluster REST surface — **✅
   shipped, ADR-070**; TLS/auth on the gRPC transports — **✅ shipped, ADR-071**;
-  a real multi-machine harness — **✅ shipped, ADR-072**; tagged-cluster vocab change — **✅ shipped, ADR-074**; cluster ranking — **✅ shipped, ADR-075**; cluster multi-word aliases + the vocab-shipping decision — **✅ shipped/decided, ADR-076**;
-  auto-split + `recommended_shard_count`, replicate-broad-to-all-or-decide, the tag-dict recovery
-  fingerprint, packaging + runbook, backup/restore, a ≥20M multi-shard scale proof) that graduates these
+  a real multi-machine harness — **✅ shipped, ADR-072**; tagged-cluster vocab change — **✅ shipped, ADR-074**; cluster ranking — **✅ shipped, ADR-075**; cluster multi-word aliases + the vocab-shipping decision — **✅ shipped/decided, ADR-076**; the tag-dict recovery
+  fingerprint — **✅ shipped, ADR-077**;
+  auto-split + `recommended_shard_count`, replicate-broad-to-all-or-decide, packaging + runbook, backup/restore, a ≥20M multi-shard scale proof) that graduates these
   layers from *experimental* to *release-candidate: ready for full-feature multi-machine testing, not yet
   production-proven* (ADR-033 still stands — no object store / cloud dependency anywhere). See
   [`roadmap.md`](roadmap.md) Tier 3 for the ordered checklist.

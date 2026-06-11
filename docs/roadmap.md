@@ -231,8 +231,14 @@ items from an external review, re-ranked to the top; **all are now done:**
      handoff (the autoscaler's split advisory gains a real mechanism).
   8. **Replicate-broad-to-all** — or the explicit ADR for why the RF-replicated shard-0 lane suffices
      at v1.
-  9. **Tag-dict fingerprint in the recovery handshakes** (the deferred ADR-055 hardening — the
-     feature-dict fingerprint is already validated).
+  9. ~~**Tag-dict fingerprint in the recovery handshakes**~~ **✅ Shipped ([ADR-077](DECISIONS.md)).**
+     The six fingerprint-guarded RPCs (`FetchSegments`/`RecoverFrom`/`FetchTranslog`/
+     `RetentionLease`/`Fence`/`Unfence`) now verify the tag-dict fingerprint exactly like
+     the feature dict's, and the bare-`connect` probe attests BOTH spaces (a pre-077
+     server's zero can never match — version skew fails loud, the ADR-075 echo
+     principle). `RemoteShard` stores + presents the verified tag fingerprint on every
+     guarded RPC. Fail-closed only; untagged meshes unchanged by construction.
+     Guard oracle mutation-validated; all gRPC recovery oracles flow it end-to-end.
   10. **Deployment packaging + runbook** — Dockerfile/compose for a K-shard + control-plane cluster +
       an ops doc (closes the backlog "no Dockerfile" line).
   11. **Backup/restore documented + tested** (coordinates with ADR-064 item 7; the cluster version must

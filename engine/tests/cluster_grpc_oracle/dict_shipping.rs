@@ -191,3 +191,125 @@ fn grpc_connect_rejects_divergent_dict() {
         Ok(_) => panic!("connect SUCCEEDED against a divergent dict — the silent-FN guard failed"),
     }
 }
+
+/// ADR-077 (criterion 9): the recovery/lease/fence handshakes verify the TAG-dict
+/// fingerprint exactly like the feature dict's — a divergent tag space would silently
+/// mis-filter (segments carry resolved `TagId`s; translog tags re-resolve against the
+/// receiver's space), so every guarded RPC refuses it loudly. Three layers probed:
+/// the bare `connect` handshake (the probe reply now attests the tag space — a wrong
+/// expectation, or a pre-ADR-077 server's zero, fails the connect), then raw
+/// wrong-tag-fingerprint `Fence`/`Unfence`/`RetentionLease`/`FetchTranslog` RPCs
+/// against a live server (each `failed_precondition`, naming the tag space), with the
+/// correct-fingerprint fence accepted as the control. The durable pair
+/// (`FetchSegments`/`RecoverFrom`) runs the identical two-line check, and its
+/// happy path is exercised by every existing peer-recovery oracle now that
+/// `RemoteShard` presents the tag fingerprint on all guarded RPCs.
+#[test]
+fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
+    use reverse_rusty_shard_proto as raw;
+
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_with(&[], &norm);
+    let dict_fp = dict.fingerprint();
+    let tag_fp = empty_tag_dict().fingerprint(); // ShardServer::new's finalized empty space
+    let wrong_tag_fp = tag_fp ^ 0xBEEF_CAFE;
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let addr = {
+        let _enter = rt.enter();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let addr = incoming.local_addr().expect("local_addr");
+        let server = ShardServer::new(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            EngineConfig::default(),
+        );
+        server.ingest_dsl(&[(1u64, "1994 upper deck".to_string())]);
+        rt.spawn(server.serve_with_incoming(incoming));
+        addr
+    };
+    wait_until_listening(addr);
+    let endpoint = format!("http://{addr}");
+
+    // 1. The bare connect handshake: a wrong tag expectation fails LOUD. (The same
+    // arm covers a pre-ADR-077 server: its probe reply leaves the field 0, which can
+    // never equal a real fingerprint.)
+    match reverse_rusty::cluster::RemoteShard::connect(
+        &endpoint,
+        rt.handle().clone(),
+        dict_fp,
+        wrong_tag_fp,
+    ) {
+        Err(e) => assert!(
+            e.to_string().contains("tag-dict"),
+            "the connect refusal names the tag space (got: {e})"
+        ),
+        Ok(_) => panic!("connect SUCCEEDED against a divergent tag dict"),
+    }
+    // Control: the correct pair connects.
+    reverse_rusty::cluster::RemoteShard::connect(&endpoint, rt.handle().clone(), dict_fp, tag_fp)
+        .expect("connect with the matching tag fingerprint");
+
+    // 2. Raw RPCs with the RIGHT dict fingerprint but a WRONG tag fingerprint: each
+    // guarded handler refuses with failed_precondition naming the tag space.
+    rt.block_on(async {
+        let mut client = raw::shard_service_client::ShardServiceClient::connect(endpoint.clone())
+            .await
+            .expect("raw client connect");
+
+        let fence_err = client
+            .fence(raw::FenceRequest {
+                generation: 1,
+                dict_fingerprint: dict_fp,
+                tag_dict_fingerprint: wrong_tag_fp,
+            })
+            .await
+            .expect_err("Fence must refuse a divergent tag dict");
+        assert_eq!(fence_err.code(), tonic::Code::FailedPrecondition);
+        assert!(fence_err.message().contains("tag-dict"), "{fence_err}");
+
+        let unfence_err = client
+            .unfence(raw::UnfenceRequest {
+                generation: 1,
+                dict_fingerprint: dict_fp,
+                tag_dict_fingerprint: wrong_tag_fp,
+            })
+            .await
+            .expect_err("Unfence must refuse a divergent tag dict");
+        assert_eq!(unfence_err.code(), tonic::Code::FailedPrecondition);
+
+        let lease_err = client
+            .retention_lease(raw::RetentionLeaseRequest {
+                op: 0,
+                lease_id: 0,
+                pos: 0,
+                dict_fingerprint: dict_fp,
+                tag_dict_fingerprint: wrong_tag_fp,
+            })
+            .await
+            .expect_err("RetentionLease must refuse a divergent tag dict");
+        assert_eq!(lease_err.code(), tonic::Code::FailedPrecondition);
+
+        let translog_err = client
+            .fetch_translog(raw::FetchTranslogRequest {
+                after_seqno: 0,
+                dict_fingerprint: dict_fp,
+                tag_dict_fingerprint: wrong_tag_fp,
+            })
+            .await
+            .expect_err("FetchTranslog must refuse a divergent tag dict");
+        assert_eq!(translog_err.code(), tonic::Code::FailedPrecondition);
+
+        // Control: the correct pair is accepted (the fence actually applies).
+        let ok = client
+            .fence(raw::FenceRequest {
+                generation: 1,
+                dict_fingerprint: dict_fp,
+                tag_dict_fingerprint: tag_fp,
+            })
+            .await
+            .expect("fence with the matching tag fingerprint")
+            .into_inner();
+        assert_eq!(ok.fenced_at_generation, 1);
+    });
+}

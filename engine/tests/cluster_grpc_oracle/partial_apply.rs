@@ -102,6 +102,7 @@ fn grpc_partial_apply_is_detected_and_queued() {
         &endpoints[target],
         rt.handle().clone(),
         dict.fingerprint(),
+        empty_tag_dict().fingerprint(),
     )
     .expect("connect fencer to target server");
     fencer.fence(1).expect("fence target server");

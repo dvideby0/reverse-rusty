@@ -65,6 +65,9 @@ pub struct RemoteShard {
     /// The coordinator's frozen-dict fingerprint (verified equal to the server's at connect).
     /// Carried so dict-guarded RPCs (e.g. `FetchTranslog`) can present it.
     dict_fp: u64,
+    /// The coordinator's frozen tag-dict fingerprint (ADR-077), verified at connect/adopt
+    /// exactly like `dict_fp` and presented on every fingerprint-guarded recovery RPC.
+    tag_dict_fp: u64,
 }
 
 /// Connect the mesh channel: configure the endpoint (TLS when the security config
@@ -82,10 +85,24 @@ impl RemoteShard {
     /// Connect to a `ShardService` at `endpoint` (e.g. `"http://127.0.0.1:50051"`),
     /// driving the async connect on `handle`, then verify the server's frozen-dict
     /// fingerprint equals `expected_fp` (the coordinator's
-    /// [`crate::dict::Dict::fingerprint`]). A mismatch returns [`ShardError::DictMismatch`]
-    /// — a divergent dict would otherwise drop matches silently across the wire (ADR-029).
-    pub fn connect(endpoint: &str, handle: Handle, expected_fp: u64) -> Result<Self, ShardError> {
-        Self::connect_with_security(endpoint, handle, expected_fp, &ClientSecurity::default())
+    /// [`crate::dict::Dict::fingerprint`]) AND its frozen tag-dict fingerprint equals
+    /// `expected_tag_fp` (ADR-077 — both spaces are one identity; a divergent tag space
+    /// would silently mis-filter). A dict mismatch returns [`ShardError::DictMismatch`];
+    /// a tag mismatch fails loud too — including against a pre-ADR-077 server, whose
+    /// probe reply leaves the tag fingerprint 0 (never a silently unverified link).
+    pub fn connect(
+        endpoint: &str,
+        handle: Handle,
+        expected_fp: u64,
+        expected_tag_fp: u64,
+    ) -> Result<Self, ShardError> {
+        Self::connect_with_security(
+            endpoint,
+            handle,
+            expected_fp,
+            expected_tag_fp,
+            &ClientSecurity::default(),
+        )
     }
 
     /// [`connect`](Self::connect) over a secured mesh link (ADR-071): TLS per the
@@ -95,28 +112,36 @@ impl RemoteShard {
         endpoint: &str,
         handle: Handle,
         expected_fp: u64,
+        expected_tag_fp: u64,
         security: &ClientSecurity,
     ) -> Result<Self, ShardError> {
         let client = connect_channel(endpoint, &handle, security)?;
         // Handshake before trusting the shard: clone the client for the probe RPC (a cheap
         // Channel bump, mirroring the per-call pattern below).
         let mut probe = client.clone();
-        let actual_fp = block_on_in_context(&handle, async move {
+        let reply = block_on_in_context(&handle, async move {
             probe.dict_fingerprint(proto::Empty {}).await
         })
         .map_err(rpc_err)?
-        .into_inner()
-        .fingerprint;
-        if actual_fp != expected_fp {
+        .into_inner();
+        if reply.fingerprint != expected_fp {
             return Err(ShardError::DictMismatch {
                 expected: expected_fp,
-                actual: actual_fp,
+                actual: reply.fingerprint,
             });
+        }
+        if reply.tag_dict_fingerprint != expected_tag_fp {
+            return Err(ShardError::Remote(format!(
+                "tag-dict fingerprint mismatch at connect: coordinator {expected_tag_fp:#018x} != \
+                 server {:#018x} (a 0 means a pre-ADR-077 server that cannot attest its tag space)",
+                reply.tag_dict_fingerprint
+            )));
         }
         Ok(RemoteShard {
             client,
             handle,
             dict_fp: expected_fp,
+            tag_dict_fp: expected_tag_fp,
         })
     }
 
@@ -211,6 +236,7 @@ impl RemoteShard {
             client,
             handle,
             dict_fp: expected_fp,
+            tag_dict_fp: expected_tag_fp,
         })
     }
 
@@ -240,6 +266,7 @@ impl RemoteShard {
     ) -> Result<(u64, u64, u64), ShardError> {
         let mut client = self.client.clone();
         let req = proto::RecoverFromRequest {
+            tag_dict_fingerprint: self.tag_dict_fp,
             source_endpoint: source_endpoint.to_string(),
             dict_fingerprint: dict_fp,
         };
@@ -263,6 +290,7 @@ impl RemoteShard {
     pub fn fence(&self, generation: u64) -> Result<u64, ShardError> {
         let mut client = self.client.clone();
         let req = proto::FenceRequest {
+            tag_dict_fingerprint: self.tag_dict_fp,
             generation,
             dict_fingerprint: self.dict_fp,
         };
@@ -282,6 +310,7 @@ impl RemoteShard {
     pub fn unfence(&self, generation: u64) -> Result<u64, ShardError> {
         let mut client = self.client.clone();
         let req = proto::UnfenceRequest {
+            tag_dict_fingerprint: self.tag_dict_fp,
             generation,
             dict_fingerprint: self.dict_fp,
         };
@@ -516,6 +545,7 @@ impl Shard for RemoteShard {
         // the no-quiesce catch-up (ADR-039). The tail is the small un-sealed delta.
         let mut client = self.client.clone();
         let req = proto::FetchTranslogRequest {
+            tag_dict_fingerprint: self.tag_dict_fp,
             after_seqno: from.0,
             dict_fingerprint: self.dict_fp,
         };
@@ -539,6 +569,7 @@ impl Shard for RemoteShard {
     fn acquire_retention_lease(&self) -> Result<(u64, LogPos), ShardError> {
         let mut client = self.client.clone();
         let req = proto::RetentionLeaseRequest {
+            tag_dict_fingerprint: self.tag_dict_fp,
             op: 0,
             lease_id: 0,
             pos: 0,
@@ -554,6 +585,7 @@ impl Shard for RemoteShard {
     fn renew_retention_lease(&self, lease: u64, to: LogPos) -> Result<(), ShardError> {
         let mut client = self.client.clone();
         let req = proto::RetentionLeaseRequest {
+            tag_dict_fingerprint: self.tag_dict_fp,
             op: 1,
             lease_id: lease,
             pos: to.0,
@@ -567,6 +599,7 @@ impl Shard for RemoteShard {
     fn release_retention_lease(&self, lease: u64) -> Result<(), ShardError> {
         let mut client = self.client.clone();
         let req = proto::RetentionLeaseRequest {
+            tag_dict_fingerprint: self.tag_dict_fp,
             op: 2,
             lease_id: lease,
             pos: 0,
