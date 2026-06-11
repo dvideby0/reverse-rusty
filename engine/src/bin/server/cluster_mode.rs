@@ -36,8 +36,8 @@ use crate::cli::Cli;
 use crate::handlers::{
     cluster_bulk, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats, cluster_checkpoint,
     cluster_compact, cluster_delete_doc, cluster_deregister_node, cluster_flush,
-    cluster_get_aliases, cluster_get_doc, cluster_get_settings, cluster_get_vocab, cluster_health,
-    cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
+    cluster_get_aliases, cluster_get_doc, cluster_get_settings, cluster_get_vocab, cluster_handoff,
+    cluster_health, cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
     cluster_learn_vocab, cluster_metrics, cluster_mpercolate, cluster_put_doc,
     cluster_put_settings, cluster_put_vocab, cluster_rebalance, cluster_register_node,
     cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
@@ -293,6 +293,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         )
         .route("/_cluster/rebalance", post(cluster_rebalance))
         .route("/_cluster/resync", post(cluster_resync))
+        .route("/_cluster/handoff", post(cluster_handoff))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
         // Auth outside the limiter, exactly as in single-node mode (ADR-062).

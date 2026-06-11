@@ -33,9 +33,9 @@ mod tests;
 
 pub(crate) use admin::{
     cluster_cat_segments, cluster_cat_shards, cluster_cat_stats, cluster_checkpoint,
-    cluster_compact, cluster_deregister_node, cluster_flush, cluster_health, cluster_metrics,
-    cluster_rebalance, cluster_register_node, cluster_resync, cluster_root, cluster_state,
-    cluster_stats,
+    cluster_compact, cluster_deregister_node, cluster_flush, cluster_handoff, cluster_health,
+    cluster_metrics, cluster_rebalance, cluster_register_node, cluster_resync, cluster_root,
+    cluster_state, cluster_stats,
 };
 pub(crate) use doc::{cluster_bulk, cluster_delete_doc, cluster_get_doc, cluster_put_doc};
 pub(crate) use search::{cluster_mpercolate, cluster_search};
