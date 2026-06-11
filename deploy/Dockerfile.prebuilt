@@ -1,0 +1,22 @@
+# Runtime-only image over PREBUILT linux binaries (ADR-072) — the CI harness path:
+# the workflow compiles natively on the runner (with the shared cargo cache), then
+# wraps the bins here, skipping the slow in-container compile. Functionally
+# identical to deploy/Dockerfile's runtime stage.
+#
+# Build with a directory holding the three bins as the CONTEXT (the harness stages
+# them into a scratch dir — the repo root can't be the context because .dockerignore
+# excludes target/, which would hide the bins from COPY):
+#   docker build -f deploy/Dockerfile.prebuilt <dir-with-bins>
+ARG BIN_DIR=.
+
+FROM debian:trixie-slim
+ARG BIN_DIR
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY ${BIN_DIR}/server ${BIN_DIR}/shardserver ${BIN_DIR}/controlserver /usr/local/bin/
+RUN useradd --system --create-home --uid 10001 rr \
+    && mkdir -p /data && chown rr /data
+USER rr
+ENTRYPOINT []
+CMD ["server", "--help"]

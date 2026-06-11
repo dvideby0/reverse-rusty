@@ -8,7 +8,7 @@
 //! `percolate` / `ingest` / `insert` / `delete` / `flush`.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -30,6 +30,54 @@ mod service;
 
 #[cfg(test)]
 mod tests;
+
+/// The adopted feature space (dict + tag dict), persisted by a durable `AdoptDict`
+/// so a restarted node self-restores without a coordinator (ADR-072). The dict and
+/// tag dict are written as ONE length-framed blob under one atomic rename, so the
+/// pair can never desync — a crash leaves the whole prior file or the whole new one,
+/// never a new dict beside a stale/absent tag space (which would silently mis-filter
+/// tagged reads after restart; review finding).
+const ADOPTED_SPACE_FILE: &str = "feature_space.bin";
+
+/// Persist the adopted (already fingerprint-verified) dict + tag-space bytes under
+/// `dir` as one atomically-renamed blob: `dict_len u64 | dict | tag_dict`.
+fn persist_adopted_space(dir: &Path, dict_bytes: &[u8], tag_bytes: &[u8]) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let mut blob = Vec::with_capacity(8 + dict_bytes.len() + tag_bytes.len());
+    blob.extend_from_slice(&(dict_bytes.len() as u64).to_le_bytes());
+    blob.extend_from_slice(dict_bytes);
+    blob.extend_from_slice(tag_bytes);
+    let tmp = dir.join(format!("{ADOPTED_SPACE_FILE}.tmp"));
+    std::fs::write(&tmp, &blob)?;
+    std::fs::File::open(&tmp)?.sync_all()?;
+    std::fs::rename(&tmp, dir.join(ADOPTED_SPACE_FILE))?;
+    Ok(())
+}
+
+/// The persisted dict + tag-space bytes, as read back from the feature-space blob.
+type AdoptedSpaceBytes = (Vec<u8>, Vec<u8>);
+
+/// Read back the persisted feature-space blob: `Some((dict_bytes, tag_bytes))` when
+/// present + well-framed, `None` when absent (a never-adopted durable node), an error
+/// on a corrupt/torn frame (fail loud rather than misparse).
+fn read_adopted_space(dir: &Path) -> Result<Option<AdoptedSpaceBytes>, ShardError> {
+    let path = dir.join(ADOPTED_SPACE_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let blob = std::fs::read(&path)
+        .map_err(|e| ShardError::Log(format!("reading {}: {e}", path.display())))?;
+    let dict_len = blob
+        .get(0..8)
+        .and_then(|s| s.try_into().ok())
+        .map(u64::from_le_bytes)
+        .map(|n| n as usize)
+        .filter(|&n| 8 + n <= blob.len())
+        .ok_or_else(|| ShardError::Log(format!("corrupt feature-space file {}", path.display())))?;
+    let dict_bytes = blob[8..8 + dict_len].to_vec();
+    let tag_bytes = blob[8 + dict_len..].to_vec();
+    Ok(Some((dict_bytes, tag_bytes)))
+}
 
 struct ServerState {
     dict: Arc<Dict>,
@@ -121,6 +169,69 @@ impl ShardServer {
         }
     }
 
+    /// Open (or start) a durable data node at `data_dir` (ADR-072): if the node
+    /// previously adopted a dict (persisted alongside its shard state by the durable
+    /// `AdoptDict` path), **self-restore** — deserialize the persisted dict + tag
+    /// space and reopen the shard from its checkpoint sidecar + translog tail
+    /// (ADR-039 §6) — so a restarted container/process resumes serving without
+    /// waiting for a coordinator. A fresh directory starts **pending** exactly like
+    /// [`Self::pending_durable`]. This is what a deployable node should boot through;
+    /// `pending_durable` remains the explicit always-start-empty constructor.
+    pub fn open_durable(
+        norm: Arc<Normalizer>,
+        config: EngineConfig,
+        data_dir: PathBuf,
+    ) -> Result<Self, ShardError> {
+        // The dict + tag space are ONE atomically-written blob (never desynced); absent
+        // ⇒ a never-adopted durable node, which starts pending and adopts on connect.
+        let Some((dict_bytes, tag_bytes)) = read_adopted_space(&data_dir)? else {
+            return Ok(Self::pending_durable(norm, config, data_dir));
+        };
+        let dict = Arc::new(crate::storage::deserialize_dict(&dict_bytes).map_err(|e| {
+            ShardError::Log(format!(
+                "deserializing persisted dict under {}: {e}",
+                data_dir.display()
+            ))
+        })?);
+        let tag_dict = Arc::new(
+            crate::storage::deserialize_tagdict(&tag_bytes).map_err(|e| {
+                ShardError::Log(format!(
+                    "deserializing persisted tag dict under {}: {e}",
+                    data_dir.display()
+                ))
+            })?,
+        );
+        let mut sc = config.clone();
+        sc.data_dir = Some(data_dir.clone());
+        // `new_durable` self-restores via the checkpoint sidecar when one exists
+        // (segments attached + translog tail replayed, fingerprint-checked). A
+        // fingerprint mismatch here means the durable state was built under a dict that
+        // no longer matches the persisted one — a corpus/coordinator change across the
+        // restart (ADR-034 divergence). It fails LOUD (DictMismatch); the remedy is to
+        // wipe this node's data dir and let the coordinator re-seed it (a node that
+        // crashed mid-adopt holds no data the cluster's source of truth relies on).
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            sc,
+        )?;
+        let state = ArcSwapOption::from(Some(Arc::new(ServerState {
+            dict,
+            tag_dict,
+            shard,
+        })));
+        Ok(ShardServer {
+            norm,
+            config,
+            data_dir: Some(data_dir),
+            state,
+            fenced_at_generation: AtomicU64::new(0),
+            security: ServerSecurity::default(),
+            client_security: ClientSecurity::default(),
+        })
+    }
+
     /// A **durable, pending** server (ADR-035/036): empty (awaiting `AdoptDict`) but rooted at
     /// `data_dir`, so once it adopts a dict its shard persists segments there. This is the real
     /// recovering/replica node — after adoption it can serve `FetchSegments` and accept
@@ -169,6 +280,12 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
         })
+    }
+
+    /// Whether this server currently holds an adopted/restored state (false ⇒ pending,
+    /// awaiting `AdoptDict`). Introspection for the deployable bin's startup banner.
+    pub fn is_serving(&self) -> bool {
+        self.state.load_full().is_some()
     }
 
     /// The adopted state, or `failed_precondition` if the server is still pending.

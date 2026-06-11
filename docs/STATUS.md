@@ -526,6 +526,25 @@ pressure/soak suite (`tests/stress.rs` — now committed and run by `cargo test`
   `tests/cluster_control_raft_oracle.rs::grpc_secured_control_plane_elects_and_commits` (a secured
   3-node control plane elects + quorum-commits over TLS+token), and security-module unit tests.
   In-test certificates come from `rcgen` (dev-dependency) — no key material in the repo.
+- **The multi-machine test harness (ADR-072, Distributed-v1 criterion 3).** The missing analogue of
+  the localhost oracles: a compose-based harness (`deploy/`) that drives a **fully secured**
+  containerized cluster — 3 durable `shardserver` nodes + a pending handoff target + the ADR-070
+  REST coordinator + a durable 3-node `controlserver` quorum, every link secured (ADR-071) and
+  crossing a real container network boundary — through the lifecycle events localhost structurally
+  cannot test. `deploy/harness.sh` asserts, black-box through REST: a **killed shard fails loud**
+  (502; every still-succeeding probe ≡ baseline exactly — never a silently truncated union), the
+  restarted node **self-restores** from its durable state (ADR-039) and the coordinator's channel
+  reconnects (≡ baseline incl. a pre-kill live write); a **rolling restart** of every shard ≡
+  baseline; a **coordinator restart** re-mints the identical dict against the populated shards
+  (ADR-034 handshake; `--load-file` skip) ≡ baseline; a **live handoff under load** — driven
+  through the new `POST /_cluster/handoff` operator endpoint (`execute_handoff` on the blocking
+  pool; fail-closed + auto-unfence on abort, ADR-048) — keeps every acknowledged write matchable
+  across the cross-container move (zero FN over real infrastructure) and lands ≡ a fresh baseline;
+  the control-plane quorum rolling-restarts from durable Raft state. One multi-stage
+  `deploy/Dockerfile` (builder + slim runtime — the image criterion 10's packaging ships) + a
+  prebuilt-bin variant so CI wraps natively-built binaries; the **`multi-machine harness` CI job
+  runs the whole thing on every PR**. Deferred (recorded in the ADR): multi-host topologies (same
+  images), partition/latency fault injection, control-plane→coordinator wiring.
 
 ## Measured
 
@@ -595,7 +614,7 @@ backlog, and the Evaluated & declined list.
   the oracles — not yet deployed and hardened across real machines. **The path out is now programmatized as
   the Distributed-v1 graduation criteria (ADR-065)** — a 12-item checklist (cluster REST surface — **✅
   shipped, ADR-070**; TLS/auth on the gRPC transports — **✅ shipped, ADR-071**;
-  a real multi-machine harness, tagged-cluster vocab change, cluster ranking, cross-process vocab shipping,
+  a real multi-machine harness — **✅ shipped, ADR-072**; tagged-cluster vocab change, cluster ranking, cross-process vocab shipping,
   auto-split + `recommended_shard_count`, replicate-broad-to-all-or-decide, the tag-dict recovery
   fingerprint, packaging + runbook, backup/restore, a ≥20M multi-shard scale proof) that graduates these
   layers from *experimental* to *release-candidate: ready for full-feature multi-machine testing, not yet

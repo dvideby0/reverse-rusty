@@ -151,6 +151,26 @@ manual dispatch. One job on `ubuntu-latest`:
 
 In-progress runs are cancelled when a newer commit lands on the same ref.
 
+## The multi-machine harness (ADR-072)
+
+The compose-based lifecycle suite — the analogue of the localhost oracles across **real container
+network boundaries** (kill-and-recover, rolling restarts, coordinator restart, live handoff under
+load, all on the fully secured ADR-071 mesh):
+
+```bash
+./deploy/harness.sh                                 # builds the image from source (slow first time)
+./deploy/harness.sh --prebuilt engine/target/release  # wrap prebuilt LINUX bins (the CI path)
+```
+
+Requires Docker (compose v2), `curl`, `jq`, `openssl`. Generates an ephemeral CA + corpus per run
+(nothing committed), brings up `deploy/compose.harness.yml` (3 durable shard nodes + a handoff
+target + the REST coordinator + a 3-node control-plane quorum), runs the assertion legs, and tears
+everything down — exit 0 ⇔ PASS. CI runs it on every PR as the `multi-machine harness` job
+(natively built bins wrapped via `deploy/Dockerfile.prebuilt`). Its assertions are black-box REST
+invariants: a dead shard **fails loud** (502, never a silently truncated result), every lifecycle
+event lands **≡ the percolate baseline**, and every acknowledged write stays matchable across a
+live cross-node handoff.
+
 ## Adding tests (for agents)
 
 - Integration tests → a file in `engine/tests/`; unit tests → an inline `#[cfg(test)]` module next to

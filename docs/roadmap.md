@@ -183,9 +183,15 @@ items from an external review, re-ranked to the top; **all are now done:**
      Fail-loud config; documented trust model (token = mesh admission, TLS = server auth + wire
      privacy; mTLS deferred). Oracle-proven: secured cluster ≡ brute, wrong/missing-token +
      plaintext-to-TLS fail loud, secured 3-node control plane elects + commits.
-  3. **A real multi-machine test harness** — durable multi-node rolling-restart / kill-and-recover /
-     handoff-under-load across a real network boundary (containers or hosts), plus a CI-runnable compose
-     variant. Every later criterion lands with harness coverage.
+  3. ~~**A real multi-machine test harness**~~ **✅ Shipped ([ADR-072](DECISIONS.md)).** A
+     compose-based harness (`deploy/harness.sh` + `compose.harness.yml` + the `Dockerfile` criterion
+     10 will ship) driving a **fully secured** containerized cluster (3 durable shards + handoff
+     target + REST coordinator + 3-node control plane) through kill-and-recover (dead shard ⇒ 502
+     fail-loud, never silent truncation; restart ⇒ durable self-restore ≡ baseline), rolling
+     restarts, a coordinator restart, and a **live handoff under load** via the new
+     `POST /_cluster/handoff` (zero FN for acknowledged writes across the move) — every link
+     crossing a real container network boundary. Runs in CI on every PR (the `multi-machine
+     harness` job). Later criteria land with harness coverage here.
   4. **Tagged-cluster vocabulary change** (the ADR-055 deferral) — persist raw tag strings so the
      blue/green rebuild can reconstruct synthetic tags instead of refusing fail-loud.
   5. **Cluster ranking** (the ADR-059 deferral) — the `RankSpec` seam at the coordinator merge.

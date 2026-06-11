@@ -420,6 +420,81 @@ pub(crate) async fn cluster_rebalance(State(state): State<Arc<ClusterAppState>>)
     }
 }
 
+#[derive(Deserialize)]
+// The non-`distributed` build's handoff handler ignores the body (it 501s), so the
+// fields read only under the feature — gate the dead-code lint accordingly.
+#[cfg_attr(not(feature = "distributed"), allow(dead_code))]
+pub(crate) struct HandoffBody {
+    /// The shard position to move.
+    position: usize,
+    /// The current owner's gRPC endpoint (will be fenced + drained).
+    source: String,
+    /// The new owner's gRPC endpoint (peer-recovered, then routing flips to it).
+    target: String,
+}
+
+/// POST /_cluster/handoff — live data-moving handoff (ADR-044/048): peer-recover the
+/// target from the source under a retention lease, fence the source, drain to
+/// convergence, flip routing. The operator surface for the library mechanism (ADR-072);
+/// runs on the blocking pool (the drive uses the sync→async bridge). A non-converging
+/// (or any post-fence) failure aborts fail-closed and auto-unfences the source — the
+/// error surfaces here with the engine's message and the cluster keeps serving.
+/// Requires a `--features distributed` build; otherwise a clear 501.
+///
+/// Deliberately does NOT hold `write_serial`: a handoff is *designed* to run
+/// concurrently with ingestion (peer-recover → fence → drain-to-convergence → flip,
+/// ADR-044) — that IS the "under load" property the harness exercises. Its own
+/// fence + retention lease + atomic backing swap provide the concurrency safety;
+/// serializing it against every `/_doc` write would both defeat the under-load test
+/// and stall cluster-wide ingestion for the whole (multi-RPC, possibly slow) move
+/// (review finding). The cluster READ guard still excludes a concurrent vocab
+/// rebuild (`&mut self`), which genuinely must not run mid-handoff.
+#[cfg(feature = "distributed")]
+#[instrument(skip_all)]
+pub(crate) async fn cluster_handoff(
+    State(state): State<Arc<ClusterAppState>>,
+    Json(body): Json<HandoffBody>,
+) -> Response {
+    let handle = tokio::runtime::Handle::current();
+    let state_inner = Arc::clone(&state);
+    let result = tokio::task::spawn_blocking(move || {
+        let cluster = state_inner.cluster.read();
+        cluster.execute_handoff(body.position, &body.source, &body.target, &handle)
+    })
+    .await;
+    match result {
+        Ok(Ok(generation)) => {
+            info!(generation, "handoff complete; routing flipped");
+            Json(serde_json::json!({"acknowledged": true, "generation": generation}))
+                .into_response()
+        }
+        Ok(Err(e)) => {
+            error!(error = %e, "handoff failed (source auto-unfenced; cluster still serving)");
+            shard_error_response("handoff failed", &e)
+        }
+        Err(e) => {
+            error!(error = %e, "handoff task panicked");
+            ApiError::response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "handoff_error",
+                "internal handoff task failed",
+            )
+            .into_response()
+        }
+    }
+}
+
+/// The non-`distributed` build cannot drive a cross-node handoff (the gRPC transport
+/// is compiled out) — answer the standard 501-with-reason instead of a silent 404.
+#[cfg(not(feature = "distributed"))]
+pub(crate) async fn cluster_handoff(Json(_body): Json<HandoffBody>) -> Response {
+    not_in_cluster_mode(
+        "POST /_cluster/handoff",
+        "a live handoff needs the gRPC transport — rebuild the server with \
+         --features distributed",
+    )
+}
+
 /// POST /_cluster/resync — re-drive queued partial-apply repairs (ADR-047). Holds
 /// the writer-serialization mutex so a resync pass cannot interleave with REST
 /// writes for the same ids (the drain → re-drive window; the library-level race

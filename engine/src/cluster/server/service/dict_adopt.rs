@@ -70,15 +70,51 @@ pub(super) fn adopt_dict(
         // replica (ADR-035/036). An in-memory node keeps today's behavior.
         let shard = match &server.data_dir {
             Some(dir) => {
+                // The DISK is part of the divergence check (ADR-072): the volume may hold
+                // segments/translog built under another dict even while the in-RAM state
+                // is pending (a restart racing an adopt). Refuse loud — persisting the
+                // shipped bytes over a divergent durable state would poison the
+                // dict.bin↔sidecar pair and crash-loop every later self-restore.
+                if let Some(ckpt) = crate::cluster::translog::read_sidecar(dir)
+                    .map_err(|e| Status::internal(format!("reading shard checkpoint: {e}")))?
+                {
+                    // ANY divergence refuses — even with no committed segments the
+                    // translog can hold acknowledged writes compiled under the old
+                    // space. Re-seeding an intentionally repurposed node = wipe the dir.
+                    if ckpt.dict_fingerprint != fp {
+                        return Err(Status::failed_precondition(format!(
+                            "durable state under {} was built with dict {:#018x}; refusing \
+                             to adopt a divergent dict {fp:#018x} (wipe the data dir to re-seed \
+                             this node)",
+                            dir.display(),
+                            ckpt.dict_fingerprint
+                        )));
+                    }
+                }
                 let mut sc = server.config.clone();
                 sc.data_dir = Some(dir.clone());
-                LocalShard::new_durable(
+                let shard = LocalShard::new_durable(
                     Arc::clone(&server.norm),
                     Arc::clone(&dict),
                     Arc::clone(&tag_dict),
                     sc,
                 )
-                .map_err(|e| Status::internal(format!("durable adopt: {e}")))?
+                .map_err(|e| Status::internal(format!("durable adopt: {e}")))?;
+                // Persist the (verified) shipped bytes LAST — only after the durable shard
+                // accepted them — so a node that crashes after acknowledging can
+                // self-restore without a coordinator (ADR-072), and a failed/refused adopt
+                // never overwrites the previously persisted space. A crash between the
+                // build and this persist just reverts the node to pending (the coordinator
+                // re-ships at its next connect; the shard held no data yet).
+                super::super::persist_adopted_space(dir, &req.dict, &req.tag_dict).map_err(
+                    |e| {
+                        Status::internal(format!(
+                            "persisting adopted dict under {}: {e}",
+                            dir.display()
+                        ))
+                    },
+                )?;
+                shard
             }
             None => LocalShard::new(
                 Arc::clone(&server.norm),
