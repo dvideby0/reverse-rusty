@@ -52,7 +52,9 @@ sending `7` *or* `"7"` (note `7.0` coerces to `"7.0"`, a *different* tag, exactl
 explicit `null` — top-level or as an array element — is the ES "no value" and contributes no tag.
 Anything else (an object, a nested array, or a non-object `tags` field) is a loud **400**; in
 `/_bulk` the rejection is per-item. Before ADR-073 such values were dropped *silently*, leaving the
-query unreachable by any filter on that key.
+query unreachable by any filter on that key. An **empty tag key** is also a loud 400: an empty
+`priority_key` means "no priority term" (the gRPC wire cannot express it), so an empty-key tag
+would be reachable by some ranking paths and not others.
 
 ```bash
 # ES-style siblings:

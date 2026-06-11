@@ -119,6 +119,16 @@ impl Engine {
         self.next_seg_id
     }
 
+    /// Whether every best-effort durability write so far succeeded — `false` after e.g.
+    /// a failed `sources.dat` write (surfaced as a `DurabilityFailure` event, ADR-021).
+    /// The cluster's durable BUILD checks this before committing its manifest
+    /// ([`segment_filenames`](Self::segment_filenames) is the segments-half of the same
+    /// guard): acking a build whose source store failed to persist would hand a later
+    /// vocabulary rebuild an incomplete gather corpus (codex retro-review, ADR-074).
+    pub fn persistence_healthy(&self) -> bool {
+        self.persistence_healthy
+    }
+
     /// The filenames of this engine's live (mmap'd) base segments, in order — the
     /// per-shard registry the cluster coordinator commits (ADR-032). Returns `Err` if
     /// ANY base segment is in-memory: that means a segment write fell back to `Memory`

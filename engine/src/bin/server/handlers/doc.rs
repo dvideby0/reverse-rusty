@@ -136,6 +136,14 @@ pub(crate) fn extract_ingest_tags(
 ) -> Result<Vec<(String, String)>, String> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut push_kv = |key: &str, v: &serde_json::Value| -> Result<(), String> {
+        // An empty tag KEY rejects loudly (the ADR-073 family): an empty `priority_key`
+        // means "no priority term" (ADR-075 — the gRPC wire cannot express it), so an
+        // empty-key tag could never be consistently reachable by ranking or filtering;
+        // accepting it would store a tag only SOME paths can see. Engine-side replay
+        // (WAL/cluster log) is untouched — previously stored tags still load.
+        if key.is_empty() {
+            return Err("tag keys must be non-empty".to_string());
+        }
         match v {
             // Explicit "no value" — the key carries no tag (ES null semantics).
             serde_json::Value::Null => Ok(()),
