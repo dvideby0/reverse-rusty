@@ -342,6 +342,60 @@ async fn search_multi_doc_truncates_per_slot_by_size() {
     );
 }
 
+// -- Per-request include_broad on /_search (ADR-073, ADR-064 item 6) --------
+
+/// The engine-truth match set for `title` at a given broad setting.
+fn expected_ids(state: &Arc<AppState>, title: &str, include_broad: bool) -> Vec<u64> {
+    let snap = state.snapshot.load();
+    let mut s = MatchScratch::new();
+    let mut out = Vec::new();
+    snap.match_title(title, &mut s, &mut out, include_broad);
+    out.sort_unstable();
+    out
+}
+
+#[tokio::test]
+async fn search_honors_per_request_include_broad() {
+    // Pre-fix `/_search` honored only the server-wide --include-broad and an
+    // `include_broad` body field was SILENTLY ignored (serde unknown-field
+    // tolerance) — with broad off, class-C hits read as missing data.
+    // `/_mpercolate` and the cluster handlers already had the override.
+    let (eng, titles) = corpus();
+    let state = state_with(eng, false); // server default: broad OFF
+
+    // A title whose match set differs with the broad lane on — the probe that
+    // makes the override observable.
+    let title = titles
+        .iter()
+        .find(|t| expected_ids(&state, t, true).len() > expected_ids(&state, t, false).len())
+        .expect("corpus(broad_frac=0.1) has a broad-affected title")
+        .clone();
+    let with_broad = expected_ids(&state, &title, true);
+    let without_broad = expected_ids(&state, &title, false);
+
+    // Absent ⇒ the server default (off).
+    let ids = search_ids(&state, serde_json::json!({"document": {"title": title}}))
+        .await
+        .expect("ok");
+    assert_eq!(ids, without_broad);
+    // Per-request true overrides the off default.
+    let ids = search_ids(
+        &state,
+        serde_json::json!({"document": {"title": title}, "include_broad": true}),
+    )
+    .await
+    .expect("ok");
+    assert_eq!(ids, with_broad, "include_broad:true must surface class-C hits");
+
+    // And the reverse: on a broad-ON server, per-request false suppresses —
+    // through the multi-doc arm, so both handler paths honor the override.
+    let (eng2, _) = corpus();
+    let state_on = state_with(eng2, true);
+    let req = serde_json::json!({"documents": [{"title": title}], "include_broad": false});
+    let ids = search_ids(&state_on, req).await.expect("ok");
+    assert_eq!(ids, without_broad, "include_broad:false must suppress broad");
+}
+
 // -- Tag-value coercion on the filter path (ADR-073, ADR-064 item 4) --------
 
 /// Run `/_search` with a JSON body, returning the sorted hit ids (Ok) or the

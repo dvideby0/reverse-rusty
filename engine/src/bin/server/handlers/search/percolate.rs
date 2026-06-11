@@ -36,6 +36,11 @@ pub(crate) struct SearchBody {
     /// or a bare `{percolate:{document(s)}}`. When present, the documents and tag filter are
     /// taken from here instead of the native fields.
     query: Option<serde_json::Value>,
+    /// Per-request broad-lane (class C) override, falling back to the server-wide
+    /// `--include-broad` default when absent (ADR-073, closing ADR-064 item 6 —
+    /// `/_mpercolate` and the cluster handlers already had it; here the field was
+    /// silently ignored, so class-C hits read as missing data).
+    include_broad: Option<bool>,
     /// Optional per-request timeout in milliseconds (default: 30000).
     timeout_ms: Option<u64>,
     /// Maximum number of hits to return (default: 1000).
@@ -104,7 +109,7 @@ pub(crate) async fn search(
     Json(body): Json<SearchBody>,
 ) -> Result<Json<SearchResponse>, (StatusCode, Json<ApiError>)> {
     let start = Instant::now();
-    let include_broad = state.include_broad;
+    let include_broad = body.include_broad.unwrap_or(state.include_broad);
     let include_source = body.include_source.unwrap_or(true);
     let include_explain = body.explain.unwrap_or(false);
     let include_profile = body.profile.unwrap_or(false);
