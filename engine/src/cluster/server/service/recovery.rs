@@ -37,9 +37,17 @@ pub(super) fn fetch_segments(
         ));
     };
     let fp = st.dict.fingerprint();
-    if request.into_inner().dict_fingerprint != fp {
+    let req = request.into_inner();
+    if req.dict_fingerprint != fp {
         return Err(Status::failed_precondition(
             "FetchSegments dict-fingerprint mismatch (divergent feature space)",
+        ));
+    }
+    // ADR-077: the streamed segments' tag columns hold resolved `TagId`s — shipping
+    // them into a divergent tag space would silently mis-filter, so refuse like the dict.
+    if req.tag_dict_fingerprint != st.tag_dict.fingerprint() {
+        return Err(Status::failed_precondition(
+            "FetchSegments tag-dict-fingerprint mismatch (divergent tag space)",
         ));
     }
     // Seal so the on-disk `.seg` set reflects live state (memtable flushed, base tombstones
@@ -110,6 +118,12 @@ pub(super) async fn recover_from(
             "RecoverFrom dict-fingerprint mismatch (divergent feature space)",
         ));
     }
+    let tag_fp = st.tag_dict.fingerprint();
+    if req.tag_dict_fingerprint != tag_fp {
+        return Err(Status::failed_precondition(
+            "RecoverFrom tag-dict-fingerprint mismatch (divergent tag space)",
+        ));
+    }
     // Dial the peer source through the MESH path (ADR-071): this node's client
     // security (TLS + token) applies to the outbound pull exactly as it does to a
     // coordinator connection — a bare connect here would silently bypass the mesh
@@ -126,6 +140,7 @@ pub(super) async fn recover_from(
     let mut stream = client
         .fetch_segments(proto::FetchSegmentsRequest {
             dict_fingerprint: dict_fp,
+            tag_dict_fingerprint: tag_fp,
         })
         .await?
         .into_inner();
@@ -177,6 +192,13 @@ pub(super) fn fetch_translog(
     if req.dict_fingerprint != fp {
         return Err(Status::failed_precondition(
             "FetchTranslog dict-fingerprint mismatch (divergent feature space)",
+        ));
+    }
+    // ADR-077: the tail's raw tags re-resolve against the receiver's tag space —
+    // consistent only if both sides hold the SAME frozen tag dict.
+    if req.tag_dict_fingerprint != st.tag_dict.fingerprint() {
+        return Err(Status::failed_precondition(
+            "FetchTranslog tag-dict-fingerprint mismatch (divergent tag space)",
         ));
     }
     let tail = st

@@ -131,6 +131,13 @@ fn fence_rejects_writes_but_serves_reads() {
     let n = norm();
     let d = frozen_dict(&["1994 upper deck", "psa 10"], &n);
     let fp = d.fingerprint();
+    // ADR-077: `ShardServer::new` starts with the FINALIZED empty tag space; fences
+    // must present its fingerprint exactly like the dict's.
+    let tag_fp = {
+        let mut td = TagDict::new();
+        td.mark_finalized();
+        td.fingerprint()
+    };
     let srv = ShardServer::new(Arc::clone(&n), Arc::new(d), EngineConfig::default());
     srv.ingest_dsl(&[(1u64, "1994 upper deck".to_string())]);
 
@@ -154,6 +161,7 @@ fn fence_rejects_writes_but_serves_reads() {
         .block_on(srv.fence(Request::new(proto::FenceRequest {
             generation: 5,
             dict_fingerprint: fp,
+            tag_dict_fingerprint: tag_fp,
         })))
         .expect("fence")
         .into_inner()
@@ -200,6 +208,7 @@ fn fence_rejects_writes_but_serves_reads() {
         .block_on(srv.fence(Request::new(proto::FenceRequest {
             generation: 3,
             dict_fingerprint: fp,
+            tag_dict_fingerprint: tag_fp,
         })))
         .expect("stale fence")
         .into_inner()
@@ -217,6 +226,7 @@ fn fence_rejects_writes_but_serves_reads() {
         rt.block_on(srv.fence(Request::new(proto::FenceRequest {
             generation: 9,
             dict_fingerprint: fp ^ 0xDEAD_BEEF,
+            tag_dict_fingerprint: tag_fp,
         })))
         .expect_err("fence fp mismatch")
         .code(),

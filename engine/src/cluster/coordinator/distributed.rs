@@ -306,12 +306,14 @@ impl ClusterEngine {
         // Bound on the convergence loop (a safety cap, not a correctness requirement).
         const FINALIZE_PASSES: usize = 8;
         let expected = self.dict.fingerprint();
+        let expected_tag = self.tag_dict.fingerprint();
         // Pin the source's tail BEFORE the segment-copy seal trims it (ADR-040). Held across the
         // whole recovery; released below whether it converges or errors.
         let source = crate::cluster::remote::RemoteShard::connect_with_security(
             source_endpoint,
             handle.clone(),
             expected,
+            expected_tag,
             &self.client_security,
         )?;
         let (lease, _pinned) = source.acquire_retention_lease()?;
@@ -377,16 +379,19 @@ impl ClusterEngine {
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
         let expected = self.dict.fingerprint();
+        let expected_tag = self.tag_dict.fingerprint();
         let source = crate::cluster::remote::RemoteShard::connect_with_security(
             source_endpoint,
             handle.clone(),
             expected,
+            expected_tag,
             &self.client_security,
         )?;
         let target = crate::cluster::remote::RemoteShard::connect_with_security(
             target_endpoint,
             handle.clone(),
             expected,
+            expected_tag,
             &self.client_security,
         )?;
         let hwm = crate::cluster::replica::catch_up_replica(
@@ -446,6 +451,7 @@ impl ClusterEngine {
             .clone();
         let new_gen = handoff.generation() + 1;
         let expected = self.dict.fingerprint();
+        let expected_tag = self.tag_dict.fingerprint();
 
         // Connect to the source and pin its un-sealed tail for the WHOLE move, so the segment-copy
         // seal — or any concurrent seal — cannot trim away the tail we still need (ADR-040).
@@ -453,6 +459,7 @@ impl ClusterEngine {
             source_endpoint,
             handle.clone(),
             expected,
+            expected_tag,
             &self.client_security,
         )?;
         let (lease, _pinned) = source.acquire_retention_lease()?;

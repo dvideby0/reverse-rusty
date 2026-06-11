@@ -187,8 +187,14 @@ message FlushReply   {}
 message CountReply       { uint64 count = 1; }            // usize num_queries
 message ClassCountsReply { repeated uint64 counts = 1; }  // exactly 4: [A, B, C, D]
 
-// 64-bit fingerprint of the server's frozen dict (engine `Dict::fingerprint`).
-message DictFingerprintReply { uint64 fingerprint = 1; }
+// 64-bit fingerprints of the server's frozen dict (engine `Dict::fingerprint`) and its
+// frozen tag dict (`TagDict::fingerprint`, ADR-077). A pre-ADR-077 server leaves
+// `tag_dict_fingerprint` 0, which can never equal a real fingerprint — so a client that
+// expects a tag space fails LOUD against a stale server instead of skipping the check.
+message DictFingerprintReply {
+  uint64 fingerprint = 1;
+  uint64 tag_dict_fingerprint = 2;
+}
 
 // The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
 // plus the coordinator's own `Dict::fingerprint` of it. The server deserializes `dict`,
@@ -215,6 +221,9 @@ message FetchSegmentsRequest {
   // The coordinator's frozen-dict fingerprint; the source refuses a mismatch (never ships
   // segments compiled against a divergent feature space).
   uint64 dict_fingerprint = 1;
+  // The frozen tag-dict fingerprint (ADR-077): the shipped segments' tag columns hold
+  // resolved `TagId`s, so a divergent tag space silently mis-filters — refused like the dict.
+  uint64 tag_dict_fingerprint = 2;
 }
 // First stream frame: the snapshot manifest — the COMPLETE file set + the seg-id cursor — so
 // the receiver can pre-validate completeness and reject a truncated stream (never attach a
@@ -248,6 +257,7 @@ message FetchSegmentsChunk {
 message RecoverFromRequest {
   string source_endpoint = 1;  // the peer to pull from (e.g. "http://127.0.0.1:50051")
   uint64 dict_fingerprint = 2; // must match this node's adopted dict
+  uint64 tag_dict_fingerprint = 3; // ADR-077: refused on mismatch, like dict_fingerprint
 }
 message RecoverFromReply {
   uint64 segments_attached = 1;
@@ -260,6 +270,7 @@ message RecoverFromReply {
 message FetchTranslogRequest {
   uint64 after_seqno = 1;      // stream only ops with position strictly after this (the snapshot P)
   uint64 dict_fingerprint = 2; // the source refuses a mismatch (never ships ops for a divergent space)
+  uint64 tag_dict_fingerprint = 3; // ADR-077: refused on mismatch, like dict_fingerprint
 }
 // One un-sealed translog entry: its position + the logical mutation. Mirrors engine
 // `clog::ClusterMutation` 1:1 — the Add arm REUSES `AddItem {logical_id, dsl, version}` (the
@@ -278,6 +289,7 @@ message RetentionLeaseRequest {
   uint64 lease_id = 2;         // the lease to renew/release (ignored for acquire)
   uint64 pos = 3;              // renew: the new retained position (the consumer's high-water)
   uint64 dict_fingerprint = 4; // the source refuses a mismatch (divergent feature space)
+  uint64 tag_dict_fingerprint = 5; // ADR-077: refused on mismatch, like dict_fingerprint
 }
 message RetentionLeaseReply {
   uint64 lease_id = 1;         // acquire: the newly assigned lease id (0 for renew/release)
@@ -288,6 +300,7 @@ message RetentionLeaseReply {
 message FenceRequest {
   uint64 generation = 1;       // the control-plane epoch the new owner is taking over under (> 0)
   uint64 dict_fingerprint = 2; // the source refuses a mismatch (divergent feature space)
+  uint64 tag_dict_fingerprint = 3; // ADR-077: refused on mismatch, like dict_fingerprint
 }
 message FenceReply {
   uint64 fenced_at_generation = 1; // the server's fence generation after this call (monotonic max)
@@ -297,6 +310,7 @@ message FenceReply {
 message UnfenceRequest {
   uint64 generation = 1;       // CAS target: lift the fence only if it currently equals this gen
   uint64 dict_fingerprint = 2; // the source refuses a mismatch (divergent feature space)
+  uint64 tag_dict_fingerprint = 3; // ADR-077: refused on mismatch, like dict_fingerprint
 }
 message UnfenceReply {
   uint64 fenced_at_generation = 1; // the server's fence generation after this call (0 ⇒ un-fenced)
