@@ -3,9 +3,11 @@
 # wraps the bins here, skipping the slow in-container compile. Functionally
 # identical to deploy/Dockerfile's runtime stage.
 #
-# Build from a directory holding the three bins:
-#   docker build -f deploy/Dockerfile.prebuilt --build-arg BIN_DIR=engine/target/release .
-ARG BIN_DIR=engine/target/release
+# Build with a directory holding the three bins as the CONTEXT (the harness stages
+# them into a scratch dir — the repo root can't be the context because .dockerignore
+# excludes target/, which would hide the bins from COPY):
+#   docker build -f deploy/Dockerfile.prebuilt <dir-with-bins>
+ARG BIN_DIR=.
 
 FROM debian:trixie-slim
 ARG BIN_DIR

@@ -43,7 +43,7 @@ cleanup() {
   status=$?
   if [[ $status -ne 0 ]]; then
     echo "--- harness FAILED (exit $status); recent container logs:" >&2
-    compose logs --tail 40 >&2 || true
+    compose logs --tail 200 >&2 || true
   fi
   compose down -v --remove-orphans >/dev/null 2>&1 || true
   rm -rf "$WORK"
@@ -115,8 +115,13 @@ if [[ -n "$PREBUILT_DIR" ]]; then
   if command -v file >/dev/null && ! file "$PREBUILT_DIR/server" | grep -qi 'ELF'; then
     fail "prebuilt $PREBUILT_DIR/server is not a Linux (ELF) binary — the container needs linux/amd64 bins (build on a Linux host/runner, or omit --prebuilt to build from source)"
   fi
-  docker build -q -f deploy/Dockerfile.prebuilt --build-arg "BIN_DIR=$PREBUILT_DIR" \
-    -t "$RR_IMAGE" "$REPO_ROOT" >/dev/null
+  # Stage the bins into a scratch dir and build with THAT as the context: the repo
+  # root cannot be the context because .dockerignore excludes target/ (COPY would
+  # not see the bins), and a bins-only context skips shipping the repo to dockerd.
+  mkdir -p "$WORK/image"
+  cp "$PREBUILT_DIR/server" "$PREBUILT_DIR/shardserver" "$PREBUILT_DIR/controlserver" \
+    "$WORK/image/"
+  docker build -q -f deploy/Dockerfile.prebuilt -t "$RR_IMAGE" "$WORK/image" >/dev/null
 else
   step "image from source (slow on a cold cache)"
   docker build -q -f deploy/Dockerfile -t "$RR_IMAGE" "$REPO_ROOT" >/dev/null
