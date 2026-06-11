@@ -207,9 +207,15 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   use `POST /_checkpoint` for the durability commit), `PUT /_settings` (cluster settings are fixed
   at assembly), `/_cat/stats`, `/_cat/segments`.
 - **Vocabulary admin** (`PUT /_vocab`, `/_vocab/learn_and_apply`, `/_vocab/aliases/*`) maps onto the
-  cluster blue/green rebuild (ADR-046); its refusals — non-local (gRPC) shards, multi-word alias
-  activation (ADR-061) — surface as 400s with the engine's message. A **tagged** cluster is no longer
-  refused: the rebuild carries per-query tags through by stored `TagId` (ADR-074).
+  cluster blue/green rebuild (ADR-046); its one refusal — non-local (gRPC) shards — surfaces as a 400
+  with the engine's message (remote-cluster vocabulary is deploy-time configuration, ADR-076). A
+  **tagged** cluster is not refused (tags carry through by stored `TagId`, ADR-074), and a
+  **multi-word alias activates** (P(T)-aware routing, ADR-076). At startup, `--vocab` on a fresh
+  in-process cluster fully activates (`build_with_vocab`); on an **empty** durable reopen whose
+  manifest carries no vocabulary it activates through the rebuild funnel (a **populated** reopen
+  keeps the committed state authoritative and warns — apply explicitly via `PUT /_vocab`); a
+  REMOTE assembly refuses ANY vocab file at startup (shard servers run the stock normalizer, so
+  even normalizer-level rules would silently diverge the feature space).
 
 Cluster-only endpoints:
 

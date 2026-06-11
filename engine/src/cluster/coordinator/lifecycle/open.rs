@@ -47,24 +47,16 @@ impl ClusterEngine {
                 ring.num_shards()
             )));
         }
-        // ADR-061: multi-word aliases are single-node only, enforced at the ONE shared assembly
-        // seam so every constructor is covered (`build`/`build_with_tags`, `open`, and the
-        // distributed `connect_remote`/`connect_replicated` via this `from_parts`). Cluster content
-        // routing derives a title's target shards from the canonical leftmost-longest view
-        // (`route` uses `match_features`), so a nested alias entity that lives only in the positive
-        // superset `P(T)` would never probe the shard holding a query anchored on it — a false
-        // negative the shard-local two-view verifier cannot recover. Single-token aliases
-        // (`N(T) == P(T)`) are unaffected; cluster multi-word (P(T)-aware routing + cross-process
-        // normalizer shipping) is a deferred follow-on. `set_vocab` guards its in-place swap path
-        // separately (it does not reconstruct through `from_parts`).
-        if norm.has_multiword_aliases() {
-            return Err(ShardError::Config(
-                "a normalizer with active multi-word aliases is single-node only (ADR-061): \
-                 cluster routing uses the canonical leftmost-longest title view and would miss a \
-                 nested alias entity's shard (a false negative). Single-token aliases are supported."
-                    .into(),
-            ));
-        }
+        // Multi-word aliases are cluster-supported since ADR-076: `route` is P(T)-aware
+        // (targets derived from the maximal positive view when multi-word aliases are
+        // active), so a nested alias entity that lives only in `P(T)` still probes the
+        // shard holding a query anchored on it — the ADR-061 single-node-only refusal
+        // that guarded this assembly seam is retired (the shard-local two-view verifier
+        // was already correct once the probe arrives). Cross-process callers
+        // (`connect_remote`/`connect_replicated`) still arrange ONE normalizer
+        // out-of-band — the same consistency every vocabulary feature already relies
+        // on; ADR-076 records that trust model and keeps LIVE vocab changes on a
+        // remote cluster refused (`set_vocab` non-local guard).
         Ok(ClusterEngine {
             norm,
             dict,

@@ -229,8 +229,9 @@ fn learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives() {
     }
 }
 
-/// A multi-word alias form (`new york`) for testing the cluster refusal (ADR-061).
-fn vocab_with_multiword_alias() -> reverse_rusty::vocab::Vocab {
+/// A multi-word alias form (`new york`) shared with the durable-reopen suite
+/// ([`crate::vocab_reopen`]).
+pub(crate) fn vocab_with_multiword_alias() -> reverse_rusty::vocab::Vocab {
     let mut v = reverse_rusty::vocab::Vocab::new();
     let n = reverse_rusty::normalize::Normalizer::default_vocab().unwrap();
     let d = reverse_rusty::dict::Dict::new();
@@ -245,47 +246,80 @@ fn vocab_with_multiword_alias() -> reverse_rusty::vocab::Vocab {
 }
 
 #[test]
-fn set_vocab_refuses_active_multiword_alias_on_cluster() {
-    // ADR-061: multi-word aliases are single-node only. Cluster content routing derives target
-    // shards from the canonical leftmost-longest title view, so a nested alias entity that lives
-    // only in the positive superset would miss its shard (a false negative the shard-local
-    // two-view verifier cannot recover). `set_vocab` must refuse activating one — enforcing the
-    // documented deferral rather than silently dropping matches. Single-token aliases (N(T)==P(T))
-    // stay supported (see `declared_alias_makes_both_surface_forms_match`).
-    let (queries, _titles) = build_corpus();
-    let cfg = ClusterConfig {
-        num_shards: 8,
-        include_broad: true,
-        ..ClusterConfig::default()
-    };
-    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+fn set_vocab_activates_multiword_alias_with_pt_aware_routing() {
+    // ADR-076 (flips the ADR-061 refusal): `set_vocab` ACTIVATES a multi-word alias on a
+    // cluster. Routing is P(T)-aware, so a title bearing the multi-word surface form
+    // (`new york ...`) — whose canonical alias entity lives only in the positive superset
+    // P(T), never in the leftmost-longest N(T) — still probes the shard holding a query
+    // anchored on that entity. The cluster must agree with a single-node engine carrying
+    // the same vocabulary (the ADR-061-proven dual-view ground truth) on both surface
+    // forms AND on a corpus sample (no regression on alias-free titles).
+    let (mut queries, titles) = build_corpus();
+    // The probe query is expansion-widened (any-of of the group's forms) and the title's
+    // canonical view carries the entity additively, so this test proves ACTIVATION +
+    // expansion ≡ single-node; the routing-specific false-negative proof (a nested
+    // entity that exists ONLY in P(T)) is `overlapping_aliases_match_nested_entity_...`.
+    let q_alias = 9_600_001u64;
+    queries.push((q_alias, "ny".into()));
 
-    let v = vocab_with_multiword_alias();
-    assert!(
-        !v.aliases().active_alias_forms().is_empty(),
-        "the declared multi-word alias must be active"
-    );
-    let err = cluster
-        .set_vocab(v)
-        .expect_err("cluster set_vocab must refuse an active multi-word alias");
-    assert!(
-        format!("{err}").contains("multi-word"),
-        "the error must explain the multi-word refusal: {err}"
-    );
-    // The refused change left the cluster intact and usable.
-    assert!(
-        cluster.percolate("1994 fleer psa 10").is_ok(),
-        "the cluster remains usable after the refusal"
-    );
+    let title_direct = "ny psa 10";
+    let title_full = "new york psa 10";
+
+    for &k in &[1usize, 3, 8] {
+        let cfg = ClusterConfig {
+            num_shards: k,
+            include_broad: true,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let rebuilt = cluster
+            .set_vocab(vocab_with_multiword_alias())
+            .expect("set_vocab must ACTIVATE a multi-word alias on a cluster (ADR-076)");
+        assert!(rebuilt > 100, "K={k}: the rebuild covers the corpus");
+
+        // Single-node ground truth under the SAME vocabulary.
+        let mut reference = reverse_rusty::segment::Engine::with_vocab(
+            vocab_with_multiword_alias(),
+            reverse_rusty::config::EngineConfig::default(),
+        )
+        .expect("single-node engine with the multi-word vocab");
+        reference.build_from_queries(&queries);
+        let ref_snap = reference.snapshot();
+        let mut s = reverse_rusty::segment::MatchScratch::new();
+        let mut out = Vec::new();
+
+        // The headline: the FULL surface form routes to the alias entity's shard and
+        // matches the alias-anchored query (pre-ADR-076 this was the false negative).
+        for title in [title_direct, title_full] {
+            let got: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
+            assert!(
+                got.contains(&q_alias),
+                "K={k}: {title:?} must match the alias-anchored query (P(T)-aware routing)"
+            );
+            ref_snap.match_title(title, &mut s, &mut out, true);
+            let want: HashSet<u64> = out.iter().copied().collect();
+            assert_eq!(got, want, "K={k}: cluster ≠ single-node for {title:?}");
+        }
+        // No regression on a corpus sample.
+        for title in titles.iter().take(60) {
+            let got: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
+            ref_snap.match_title(title, &mut s, &mut out, true);
+            let want: HashSet<u64> = out.iter().copied().collect();
+            assert_eq!(
+                got, want,
+                "K={k}: cluster ≠ single-node for corpus {title:?}"
+            );
+        }
+    }
 }
 
 #[test]
 fn set_vocab_heals_unexpressible_alias_instead_of_refusing() {
-    // Codex R14: the multi-word refusal must judge the HEALED vocabulary. An active group like
-    // `psa-10 ≡ new york` — classified while '-' split (`psa-10` = 2 tokens) — whose first form
-    // later becomes unexpressible (`psa` grader + '-' fold ⇒ fused `psa10`) is demoted at the
-    // install seam; with the entry demoted nothing registers a multi-word alias phrase, so the
-    // vocabulary is cluster-safe and must be ACCEPTED, not rejected on its pre-heal state.
+    // Codex R14 (kept post-ADR-076): the install seam must judge the HEALED vocabulary. An
+    // active group like `psa-10 ≡ new york` — classified while '-' split (`psa-10` = 2 tokens)
+    // — whose first form later becomes unexpressible (`psa` grader + '-' fold ⇒ fused `psa10`)
+    // is demoted at the install seam rather than installed as an alias that reports active and
+    // silently never matches. The vocabulary is accepted and the demotion is observable.
     let (queries, _titles) = build_corpus();
     let cfg = ClusterConfig {
         num_shards: 4,
@@ -324,50 +358,185 @@ fn set_vocab_heals_unexpressible_alias_instead_of_refusing() {
 }
 
 #[test]
-fn build_refuses_a_multiword_alias_normalizer() {
-    // The same single-node restriction at construction: a normalizer carrying multi-word alias
-    // phrases cannot back a cluster (routing would miss nested entities).
+fn build_with_vocab_activates_multiword_alias() {
+    // ADR-076 (flips the ADR-061 construction refusal): a cluster built FROM A VOCAB
+    // fully activates a multi-word alias at construction — the equivalence machinery
+    // installs on the minted dict before extraction, P(T)-aware routing probes the
+    // nested entity's shard, and BOTH surface forms match the alias-anchored query
+    // with no set_vocab involved. (The coordinator-mode server's --vocab path.)
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let cluster =
+        ClusterEngine::build_with_vocab(vocab_with_multiword_alias(), &cfg, &[(1, "ny".into())])
+            .expect("build_with_vocab must activate a multi-word alias (ADR-076)");
+    assert!(
+        cluster.vocab().is_some(),
+        "the vocab is installed on the engine (GET /_vocab serves it)"
+    );
+    for title in ["ny psa 10", "new york psa 10"] {
+        assert!(
+            cluster.percolate(title).unwrap().contains(&1),
+            "{title:?} must match the alias-anchored query on a built-with-vocab cluster"
+        );
+    }
+}
+
+#[test]
+fn overlapping_aliases_match_nested_entity_titles_across_the_cluster() {
+    // The dual-view divergence case end-to-end (ADR-076; reshaped from a review
+    // finding): with two OVERLAPPING multi-word aliases active, a title bearing the
+    // longer surface form emits the NESTED alias entity only in the positive superset
+    // P(T) (the overlap pass) — never in the canonical N(T). The structural facts this
+    // test also pins: an alias-group query is EXPANSION-WIDENED into an any-of
+    // (ADR-060/061) that places SELECTIVELY on each member feature's shard, and the
+    // nested title carries NEITHER member in its canonical view (`ny` is not a title
+    // token; the inner entity is P(T)-only) — so pre-ADR-076 routing probed none of
+    // the query's shards: a real false negative only P(T)-aware routing closes.
+    // Cluster ≡ single-node under the same vocab at every K.
+    let two_alias_vocab = || {
+        let mut v = reverse_rusty::vocab::Vocab::new();
+        let n = reverse_rusty::normalize::Normalizer::default_vocab().unwrap();
+        let d = reverse_rusty::dict::Dict::new();
+        v.aliases_mut().add_classified(
+            &["nyc".into(), "new york city".into()],
+            reverse_rusty::vocab::AliasProvenance::DeclaredFile,
+            1.0,
+            &n,
+            &d,
+        );
+        v.aliases_mut().add_classified(
+            &["ny".into(), "new york".into()],
+            reverse_rusty::vocab::AliasProvenance::DeclaredFile,
+            1.0,
+            &n,
+            &d,
+        );
+        v
+    };
+    let (mut queries, _titles) = build_corpus();
+    let q_inner = 9_700_001u64;
+    queries.push((q_inner, "ny".into())); // the INNER alias's query form
+                                          // The nested-entity title: leftmost-longest takes `new york city` (the outer
+                                          // alias); the inner `new york` entity lives only in P(T).
+    let title_nested = "new york city psa 10";
+
+    for &k in &[1usize, 3, 8] {
+        let cfg = ClusterConfig {
+            num_shards: k,
+            include_broad: true,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        cluster
+            .set_vocab(two_alias_vocab())
+            .expect("activate both overlapping multi-word aliases");
+
+        // Single-node ground truth under the same vocab.
+        let mut reference = reverse_rusty::segment::Engine::with_vocab(
+            two_alias_vocab(),
+            reverse_rusty::config::EngineConfig::default(),
+        )
+        .expect("single-node engine");
+        reference.build_from_queries(&queries);
+        let snap = reference.snapshot();
+        let mut s = reverse_rusty::segment::MatchScratch::new();
+        let mut out = Vec::new();
+
+        let got: HashSet<u64> = cluster
+            .percolate(title_nested)
+            .unwrap()
+            .into_iter()
+            .collect();
+        snap.match_title(title_nested, &mut s, &mut out, true);
+        let want: HashSet<u64> = out.iter().copied().collect();
+        assert!(
+            got.contains(&q_inner),
+            "K={k}: the nested-entity title must match the inner-alias query"
+        );
+        assert_eq!(
+            got, want,
+            "K={k}: cluster ≠ single-node for the nested title"
+        );
+    }
+
+    // Pin the load-bearing preconditions. (1) The alias query places SELECTIVELY
+    // (the any-of fans to member shards — NOT the always-probed replicated lane), so
+    // routing must genuinely reach one of ITS shards for the title to match it.
+    let cfg = ClusterConfig {
+        num_shards: 8,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+    cluster.set_vocab(two_alias_vocab()).expect("set_vocab");
+    let placed = cluster.add_query(9_700_002, "ny").expect("add alias query");
+    assert!(
+        matches!(placed, reverse_rusty::cluster::AddOutcome::Placed { .. }),
+        "the expansion-widened alias query places selectively (got {placed:?})"
+    );
+    // (2) The nested entity is genuinely P(T)-only for the title (the routing-miss
+    // precondition): under the active normalizer, P(T) ⊋ N(T) on this title.
+    let norm = two_alias_vocab().to_normalizer().unwrap();
+    let mut probe_dict = reverse_rusty::dict::Dict::new();
+    let mut lc = String::new();
+    for q in ["ny", "nyc"] {
+        let ast = reverse_rusty::dsl::parse(q).unwrap();
+        let _ = reverse_rusty::compile::extract(&ast, &norm, &mut probe_dict, &mut lc);
+    }
+    probe_dict.finalize_mask();
+    let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    norm.match_features_dual(title_nested, &probe_dict, &mut lc, &mut neg, &mut pos);
+    assert!(
+        pos.iter().any(|f| !neg.contains(f)),
+        "the nested title must carry a P(T)-only feature (the inner alias entity) — \
+         else this construction stopped exercising the routing fix (N={neg:?} P={pos:?})"
+    );
+}
+
+#[test]
+fn bare_normalizer_build_matches_single_node_semantics() {
+    // The boundary, pinned: a cluster built from a BARE normalizer (no Vocab) leaves
+    // equivalence-driven vocabulary (registry aliases) inert — exactly like a
+    // single-node engine built from a bare normalizer. Cluster ≡ single-node holds on
+    // both surface forms (the direct form matches; the multi-word form does not,
+    // because no equivalence map was ever installed). Activation requires the
+    // vocab-carrying constructors (`build_with_vocab` / `set_vocab` / a persisted
+    // reopen) — documented in ADR-076, not silently divergent.
+    use std::sync::Arc;
     let norm = vocab_with_multiword_alias().to_normalizer().unwrap();
     assert!(norm.has_multiword_aliases());
     let cfg = ClusterConfig {
         num_shards: 4,
+        include_broad: true,
         ..ClusterConfig::default()
     };
-    let Err(err) = ClusterEngine::build(norm, &cfg, &[(1, "new york".into())]) else {
-        panic!("build must refuse a multi-word-alias normalizer");
-    };
-    assert!(format!("{err}").contains("multi-word"), "error: {err}");
-}
+    let cluster = ClusterEngine::build(
+        vocab_with_multiword_alias().to_normalizer().unwrap(),
+        &cfg,
+        &[(1, "ny".into())],
+    )
+    .expect("a bare multi-word normalizer is accepted (single-node parity)");
 
-#[test]
-fn durable_build_with_multiword_alias_leaves_no_recoverable_state() {
-    // ADR-061 (codex review): a `data_dir` build must reject a multi-word-alias normalizer BEFORE
-    // writing any durable state. Otherwise it ingests durable shards + commits the manifest/log,
-    // then returns Err — leaving a reopenable cluster compiled under the unsupported normalizer
-    // that a later `open` (with any normalizer) would silently mis-route (a false negative).
-    let norm = vocab_with_multiword_alias().to_normalizer().unwrap();
-    let dir = std::env::temp_dir().join(format!("rr-adr061-durable-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let cfg = ClusterConfig {
-        num_shards: 2,
-        data_dir: Some(dir.clone()),
-        ..ClusterConfig::default()
-    };
-    assert!(
-        ClusterEngine::build(norm, &cfg, &[(1, "new york mets".into())]).is_err(),
-        "a durable build must refuse a multi-word-alias normalizer"
+    let mut reference = reverse_rusty::segment::Engine::with_shared(
+        Arc::new(norm),
+        Arc::new(reverse_rusty::dict::Dict::new()),
+        Arc::new(reverse_rusty::tagdict::TagDict::new()),
+        reverse_rusty::config::EngineConfig::default(),
     );
-    // No committed cluster was left behind: a reopen finds nothing to recover.
-    assert!(
-        ClusterEngine::open(
-            &dir,
-            reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
-            None,
-        )
-        .is_err(),
-        "the refused build must leave no recoverable durable state"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
+    reference.bulk_ingest(&[(1u64, "ny".to_string())]);
+    let snap = reference.snapshot();
+    let mut s = reverse_rusty::segment::MatchScratch::new();
+    let mut out = Vec::new();
+    for title in ["ny psa 10", "new york psa 10"] {
+        let got: std::collections::HashSet<u64> =
+            cluster.percolate(title).unwrap().into_iter().collect();
+        snap.match_title(title, &mut s, &mut out, true);
+        let want: std::collections::HashSet<u64> = out.iter().copied().collect();
+        assert_eq!(got, want, "cluster ≠ single-node for bare-norm {title:?}");
+    }
 }
 
 #[test]

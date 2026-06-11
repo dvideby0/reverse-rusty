@@ -46,8 +46,8 @@ impl ClusterEngine {
     /// rebuild via [`checkpoint`](Self::checkpoint). Returns the number of live
     /// queries rebuilt.
     ///
-    /// Refuses (errors) if any shard is non-local or handoff-wrapped, or if the
-    /// vocabulary would activate a multi-word alias (ADR-061 routing boundary).
+    /// Refuses (errors) if any shard is non-local or handoff-wrapped. A vocabulary
+    /// that activates a multi-word alias is supported (ADR-076: P(T)-aware routing).
     pub fn set_vocab(&mut self, vocab: Vocab) -> Result<usize, ShardError> {
         // 1. Correctness boundary: in-process only (see module doc). On a
         //    non-distributed build every shard is local, so this never fires — but
@@ -77,10 +77,9 @@ impl ClusterEngine {
         //     in this vocab can make an Active alias form unexpressible (e.g. a fused grader);
         //     demote those to review candidates rather than install an alias that reports
         //     active and silently never matches. Demotion can only shrink the registered phrase
-        //     set, so rebuild the normalizer when it fires — and run this BEFORE the multi-word
-        //     refusal below, so the refusal judges the HEALED vocabulary (an active group whose
-        //     only multi-word registration came from a now-demoted entry must not be rejected
-        //     on its pre-heal state, codex R14).
+        //     set, so rebuild the normalizer when it fires, so every later consumer (the
+        //     rebuild + the installed normalizer) judges the HEALED vocabulary (codex R13/R14;
+        //     the multi-word refusal this once guarded is retired by ADR-076, the heal stays).
         let mut vocab = vocab;
         let new_norm =
             if vocab
@@ -95,23 +94,12 @@ impl ClusterEngine {
                 new_norm
             };
 
-        // ADR-061: refuse a vocab that would activate a multi-word alias on a cluster. The new
-        // normalizer's `P(T)` superset is correct shard-locally, but cluster content routing
-        // derives target shards from the canonical `N(T)` (`route` uses `match_features`), so a
-        // nested alias entity that lives only in `P(T)` would never probe the shard holding a
-        // query anchored on it — a false negative routing cannot recover. Single-token aliases
-        // (`N(T)==P(T)`) are unaffected; cluster multi-word (P(T)-aware routing + cross-process
-        // normalizer shipping) is a deferred follow-on. Checked on the rebuilt (post-heal)
-        // normalizer so it catches a multi-word alias from any source (import / manual / merge).
-        if new_norm.has_multiword_aliases() {
-            return Err(ShardError::Config(
-                "set_vocab cannot activate a multi-word alias on a cluster yet (ADR-061): content \
-                 routing uses the canonical leftmost-longest title view, so a nested alias entity \
-                 would miss its shard (a false negative). Single-token aliases are supported; \
-                 cluster multi-word support is a deferred follow-on."
-                    .into(),
-            ));
-        }
+        // A vocab that activates a multi-word alias is cluster-supported since ADR-076:
+        // `route` is P(T)-aware when multi-word aliases are active, so a nested alias
+        // entity that lives only in the positive superset still probes the shard holding
+        // a query anchored on it. The ADR-061 refusal that used to guard this swap is
+        // retired; the rebuild below re-places every query under the new normalizer, so
+        // routing and placement stay derived from the same vocabulary.
 
         // 3. Gather the deduped live `(logical, dsl, tag_ids)` set across shards. A
         //    selective / any-of query lives on several shards but has ONE dsl (and one
@@ -310,9 +298,10 @@ impl ClusterEngine {
 
     /// Import a Solr/Lucene synonym file into the governed alias registry and apply it
     /// (ADR-060 at the cluster, ADR-070): classifies against the cluster's CURRENT
-    /// normalizer + frozen dict, then rebuilds via [`Self::set_vocab`] — whose refusals
-    /// (non-local / tagged / multi-word activation) all hold unchanged. Returns the
-    /// engine-shaped apply report (`recompiled` = queries rebuilt).
+    /// normalizer + frozen dict, then rebuilds via [`Self::set_vocab`] — whose non-local
+    /// refusal holds unchanged (tags carry through per ADR-074; multi-word activation is
+    /// supported per ADR-076). Returns the engine-shaped apply report (`recompiled` =
+    /// queries rebuilt).
     pub fn import_alias_synonyms(
         &mut self,
         solr_text: &str,
