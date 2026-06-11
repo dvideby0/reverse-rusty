@@ -192,8 +192,18 @@ items from an external review, re-ranked to the top; **all are now done:**
      `POST /_cluster/handoff` (zero FN for acknowledged writes across the move) — every link
      crossing a real container network boundary. Runs in CI on every PR (the `multi-machine
      harness` job). Later criteria land with harness coverage here.
-  4. **Tagged-cluster vocabulary change** (the ADR-055 deferral) — persist raw tag strings so the
-     blue/green rebuild can reconstruct synthetic tags instead of refusing fail-loud.
+  4. ~~**Tagged-cluster vocabulary change**~~ **✅ Shipped ([ADR-074](DECISIONS.md)).**
+     `set_vocab`/`learn_and_apply` work on a tagged cluster: each query's stored `TagId`s —
+     interned dense or post-freeze synthetic — are gathered alongside its DSL
+     (`Shard::live_sources_tagged`) and **carried verbatim** through the blue/green rebuild to
+     wherever re-placement puts it (the single-node ADR-049 carry-through, not the raw-string
+     persistence this item hypothesized: the tag space is preserved across a vocab change, so
+     id carry-through is byte-identical reconstruction with zero new durable state). The wire
+     stays dict-agnostic (`RemoteShard` refuses carried ids loudly); non-local + multi-word
+     refusals stand. Fixed two pre-existing sources-durability bugs the new oracle exposed
+     (bulk ingest never persisted `sources.dat`; a clean-shard checkpoint skipped the rewrite —
+     reopen + `set_vocab` silently erased the corpus / resurrected deleted queries).
+     Oracle-proven incl. checkpoint → reopen → rebuild → reopen.
   5. **Cluster ranking** (the ADR-059 deferral) — the `RankSpec` seam at the coordinator merge.
   6. **Cross-process vocab/normalizer shipping** + multi-word aliases on a cluster (the ADR-046/061
      deferrals; per the [research spike](research/dynamic-vocabulary.md)) — ship it, or record the

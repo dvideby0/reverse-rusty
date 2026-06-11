@@ -377,6 +377,7 @@ impl Shard for RemoteShard {
     }
 
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
+        refuse_wire_tag_ids(items)?;
         let mut client = self.client.clone();
         // Send raw DSL + raw tags, NOT the pre-extracted feature ids: the server re-compiles
         // read-only against its own frozen dict + resolves tags against its adopted frozen tag
@@ -536,5 +537,62 @@ impl Shard for RemoteShard {
         self.block_on(async move { client.retention_lease(req).await })
             .map_err(rpc_err)?;
         Ok(())
+    }
+}
+
+/// Fail-loud guard (ADR-074): pre-resolved `tag_ids` — the tagged vocabulary rebuild's
+/// carry-through — cannot cross the dict-agnostic wire. The proto ships raw `(key,value)`
+/// tags only, and a synthetic `TagId` has no recoverable string to send; silently dropping
+/// the ids would lose the query's tags (a filtered-read recall loss). `set_vocab` refuses a
+/// non-local cluster before ever building such a bucket, so this is defense in depth at the
+/// transport seam, not a reachable path.
+fn refuse_wire_tag_ids(items: &[PlacedQuery]) -> Result<(), ShardError> {
+    if items.iter().any(|q| !q.tag_ids.is_empty()) {
+        return Err(ShardError::Config(
+            "pre-resolved tag ids cannot cross the process boundary: the gRPC wire ships raw \
+             (key,value) tags only (a synthetic TagId has no recoverable string) — the tagged \
+             vocabulary rebuild is in-process only (ADR-074)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn placed(tags: Vec<(String, String)>, tag_ids: Vec<crate::tagdict::TagId>) -> PlacedQuery {
+        let norm = crate::normalize::Normalizer::default_vocab().expect("vocab");
+        let mut dict = crate::dict::Dict::new();
+        let mut lc = String::new();
+        let ast = crate::dsl::parse("1994 upper deck").expect("parse");
+        let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+        PlacedQuery {
+            logical: 1,
+            ex,
+            dsl: "1994 upper deck".into(),
+            version: 1,
+            tags,
+            tag_ids,
+        }
+    }
+
+    #[test]
+    fn wire_guard_passes_raw_tags_and_refuses_pre_resolved_ids() {
+        // Raw (key,value) tags are the supported wire shape — no refusal.
+        let raw = placed(vec![("category".into(), "cards".into())], Vec::new());
+        assert!(refuse_wire_tag_ids(std::slice::from_ref(&raw)).is_ok());
+        // Pre-resolved ids (the ADR-074 carry-through) must be refused loudly.
+        let carried = placed(
+            Vec::new(),
+            vec![crate::tagdict::synthetic_tag_id("region", "emea")],
+        );
+        let err = refuse_wire_tag_ids(&[raw, carried])
+            .expect_err("ids must not cross the process boundary");
+        assert!(
+            format!("{err}").contains("process boundary"),
+            "the refusal names the boundary: {err}"
+        );
     }
 }

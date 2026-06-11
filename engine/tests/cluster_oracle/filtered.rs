@@ -1,6 +1,7 @@
 //! Filtered percolation through the cluster (ADR-049/055): a tag-carrying corpus held to the
 //! same frozen-`TagDict` filter semantics as the single-node engine + brute oracle, plus the
-//! live-tagged-add and set_vocab-refusal guards.
+//! live-tagged-add guard and the tagged vocabulary rebuild (ADR-074: tags — interned and
+//! post-freeze synthetic — are carried through `set_vocab` by stored `TagId`).
 
 use crate::harness::*;
 use reverse_rusty::cluster::{ClusterConfig, ClusterEngine};
@@ -167,21 +168,21 @@ fn live_tagged_add_is_filterable_with_post_freeze_tag() {
         .contains(&200));
 }
 
-/// A vocab change on a cluster that received tags ONLY via live adds (post-freeze *synthetic* tags,
-/// never interned into `tag_dict`) must still be REFUSED (ADR-055). `tag_dict` emptiness is not a
-/// sufficient proxy — the `tags_present` latch catches it. Otherwise the blue/green rebuild (which
-/// reconstructs queries from DSL alone) would silently drop those tags → a filtered-read recall loss.
+/// A vocab change on a cluster that received tags ONLY via live adds (post-freeze *synthetic*
+/// tags, never interned into `tag_dict` — the ids that have NO recoverable string) carries those
+/// tags through the blue/green rebuild verbatim (ADR-074). This is the exact scenario ADR-055
+/// deferred by refusing: the rebuild now gathers each query's stored `TagId`s alongside its DSL,
+/// so a filter on the synthetic tag still narrows correctly after the rebuild — zero FN.
 #[test]
-fn set_vocab_refused_after_live_synthetic_tagged_add() {
+fn set_vocab_carries_live_synthetic_tags_through_rebuild() {
     let cfg = ClusterConfig {
         num_shards: 3,
         include_broad: true,
         ..ClusterConfig::default()
     };
-    // Built UNTAGGED ⇒ tag_dict stays empty + frozen.
+    // Built UNTAGGED ⇒ tag_dict stays empty + frozen ⇒ every live tag below is synthetic.
     let seed = vec![(1u64, "1994 topps".to_string())];
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
-    // A live tagged add whose tag is post-freeze ⇒ a synthetic TagId, NOT interned into tag_dict.
     cluster
         .add_query_with_tags(
             100,
@@ -189,18 +190,189 @@ fn set_vocab_refused_after_live_synthetic_tagged_add() {
             &[("category".to_string(), "cards".to_string())],
         )
         .expect("tagged live add");
-    // The guard must fire even though tag_dict is still empty (the latch saw the tagged write).
-    let res = cluster.set_vocab(reverse_rusty::vocab::Vocab::default());
-    assert!(
-        res.is_err(),
-        "set_vocab must be refused on a cluster holding live synthetic tags, got {res:?}"
+    cluster
+        .add_query_with_tags(
+            200,
+            "zzotherlivetag",
+            &[("category".to_string(), "coins".to_string())],
+        )
+        .expect("tagged live add");
+
+    // The vocab change is unrelated to the tagged queries — the rebuild must not disturb them.
+    let mut v = reverse_rusty::vocab::Vocab::new();
+    v.add_synonym(
+        "zzabbr",
+        "term:zzcanon",
+        reverse_rusty::dict::FeatureKind::Generic,
     );
-    // Sanity: an UNTAGGED cluster still allows set_vocab (the latch stays false).
-    let mut plain = ClusterEngine::build(vocab(), &cfg, &seed).expect("build plain");
-    assert!(
-        plain
-            .set_vocab(reverse_rusty::vocab::Vocab::default())
-            .is_ok(),
-        "set_vocab must still work on a genuinely untagged cluster"
+    let rebuilt = cluster.set_vocab(v).expect(
+        "set_vocab must succeed on a cluster holding live synthetic tags (ADR-074 carry-through)",
     );
+    assert_eq!(rebuilt, 3, "the seed + both live adds rebuild");
+
+    let cards = vec![("category".to_string(), vec!["cards".to_string()])];
+    let coins = vec![("category".to_string(), vec!["coins".to_string()])];
+    // Each query still matches unfiltered, still passes its OWN tag's filter (the synthetic id
+    // was carried, not dropped), and is still removed by the other filter (it was carried
+    // correctly, not smeared).
+    assert!(cluster.percolate("zzrarelivetag").unwrap().contains(&100));
+    assert!(
+        cluster
+            .percolate_filtered("zzrarelivetag", &cards)
+            .unwrap()
+            .contains(&100),
+        "a post-freeze synthetic tag must survive the vocab rebuild (filtered-read recall)"
+    );
+    assert!(
+        !cluster
+            .percolate_filtered("zzrarelivetag", &coins)
+            .unwrap()
+            .contains(&100),
+        "the carried tag must still EXCLUDE under a non-matching filter"
+    );
+    assert!(cluster
+        .percolate_filtered("zzotherlivetag", &coins)
+        .unwrap()
+        .contains(&200));
+    assert!(!cluster
+        .percolate_filtered("zzotherlivetag", &cards)
+        .unwrap()
+        .contains(&200));
+
+    // The learn paths delegate to the same rebuild — they too now work on a tagged
+    // cluster (a second full rebuild; the carried tags survive again).
+    cluster
+        .learn_and_apply(2)
+        .expect("learn_and_apply must succeed on a tagged cluster (ADR-074)");
+    assert!(
+        cluster
+            .percolate_filtered("zzrarelivetag", &cards)
+            .unwrap()
+            .contains(&100),
+        "tags survive a second (learn-driven) rebuild"
+    );
+}
+
+/// The tagged vocabulary rebuild, held to the full differential gate (ADR-074): a tag-carrying
+/// corpus (interned build-time tags + a post-freeze synthetic live add), swept across K, after a
+/// declared alias `set_vocab` — cluster filtered ≡ brute-with-tags (zero FN/FP), filtered ⊆
+/// unfiltered, and a tagged query whose extraction CHANGES under the alias keeps its tags on
+/// whichever shard re-placement chose.
+#[test]
+fn set_vocab_preserves_tags_through_tagged_rebuild() {
+    let (mut queries, titles) = build_corpus();
+    // A tagged query written in the ALIAS surface form: post-alias its extraction (and
+    // possibly its anchor/shard) changes, so its tags must travel with the re-placement.
+    let q_alias = 9_300_001u64;
+    queries.push((q_alias, "1994 fleer zzabbr".into()));
+    let tags = tags_parallel(&queries);
+
+    // The live add's tag key never appears in the corpus tags ⇒ guaranteed synthetic.
+    let live_id = 9_300_002u64;
+    let live_dsl = "zzrareliveq";
+    let live_tag = || vec![("region".to_string(), "emea".to_string())];
+
+    let make_vocab = || {
+        let mut v = reverse_rusty::vocab::Vocab::new();
+        v.add_synonym(
+            "zzabbr",
+            "term:zzcanon",
+            reverse_rusty::dict::FeatureKind::Generic,
+        );
+        v
+    };
+    let tag_of = |l: u64| {
+        if l == live_id {
+            live_tag()
+        } else {
+            tags_for(l)
+        }
+    };
+
+    // Alias-aware independent ground truth over the full live set (corpus + live add).
+    let mut all = queries.clone();
+    all.push((live_id, live_dsl.to_string()));
+    let brute = Brute::build_with_vocab(&all, make_vocab().to_normalizer().unwrap());
+    let mut blc = String::new();
+    let mut bfeats = Vec::new();
+
+    let title_canon = "1994 fleer zzcanon psa 10";
+    for &k in &[1usize, 3, 8] {
+        let cfg = ClusterConfig {
+            num_shards: k,
+            include_broad: true,
+            ..ClusterConfig::default()
+        };
+        let mut cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags)
+            .expect("tagged cluster build");
+        cluster
+            .add_query_with_tags(live_id, live_dsl, &live_tag())
+            .expect("synthetic-tagged live add");
+
+        let rebuilt = cluster.set_vocab(make_vocab()).expect("tagged set_vocab");
+        assert!(
+            rebuilt > 100,
+            "K={k}: the rebuild covers the whole live corpus (got {rebuilt})"
+        );
+
+        // The alias-form tagged query: the canonical-form title now matches it (the vocab
+        // change took effect), and its interned tags survived the re-extraction + re-placement.
+        let q_alias_filter = vec![("category".to_string(), vec![tag_of(q_alias)[0].1.clone()])];
+        let got: HashSet<u64> = cluster
+            .percolate_filtered(title_canon, &q_alias_filter)
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert!(
+            got.contains(&q_alias),
+            "K={k}: the re-placed alias query must keep its tags (filtered-read recall)"
+        );
+
+        // The synthetic-tagged live add survives the rebuild.
+        let region = vec![("region".to_string(), vec!["emea".to_string()])];
+        assert!(
+            cluster
+                .percolate_filtered(live_dsl, &region)
+                .unwrap()
+                .contains(&live_id),
+            "K={k}: a post-freeze synthetic tag must survive the rebuild"
+        );
+
+        // Full differential over a title sample: cluster filtered ≡ brute-with-tags,
+        // filtered ⊆ unfiltered, every removed id truly fails the filter.
+        for (ti, title) in titles
+            .iter()
+            .map(String::as_str)
+            .take(60)
+            .chain([title_canon, live_dsl])
+            .enumerate()
+        {
+            let truth = brute.matches(title, &mut blc, &mut bfeats);
+            let unfiltered: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
+            assert_eq!(
+                unfiltered, truth,
+                "K={k}: post-rebuild unfiltered ≠ alias-aware oracle (title {ti})"
+            );
+            for filter in filters_for(ti) {
+                let got: HashSet<u64> = cluster
+                    .percolate_filtered(title, &filter)
+                    .unwrap()
+                    .into_iter()
+                    .collect();
+                let brute_filtered: HashSet<u64> = truth
+                    .iter()
+                    .copied()
+                    .filter(|l| passes_filter(&tag_of(*l), &filter))
+                    .collect();
+                assert_eq!(
+                    got, brute_filtered,
+                    "K={k}: post-rebuild filtered ≠ oracle (title {ti}, filter {filter:?})"
+                );
+                assert!(
+                    got.is_subset(&unfiltered),
+                    "K={k}: filter added a match post-rebuild (title {ti})"
+                );
+            }
+        }
+    }
 }

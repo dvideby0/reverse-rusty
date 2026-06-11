@@ -65,7 +65,10 @@
     bytes; `tag_dict_data` round-trips empty; the lean (`--no-default-features`) build is unaffected
     (`TagPredicate`/`TagDict` live in always-compiled modules). Every prior cluster oracle stays green.
 - **Scope / deferred:** A runtime **vocabulary change on a tagged cluster** (`set_vocab` /
-  `learn_and_apply`) is **refused** (fail-loud): the blue/green rebuild reconstructs queries from their
+  `learn_and_apply`) is **refused** (fail-loud) *(resolved by
+  [ADR-074](adr-074-tagged-cluster-vocab-change.md): the rebuild now carries each query's stored
+  `TagId`s through re-placement verbatim, so the refusal — and the latch's load-bearing role — are
+  retired; the paragraph below records the decision-time rationale)*: the blue/green rebuild reconstructs queries from their
   DSL via `live_sources()`, which carries no tags, and a synthetic post-freeze tag has no recoverable
   string — so a rebuild would silently drop tags. The refusal is driven by a `tags_present` latch (set
   by every tagged write, restored on `open`), **not** by `tag_dict` emptiness — because a post-freeze

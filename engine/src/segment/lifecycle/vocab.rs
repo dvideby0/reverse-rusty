@@ -195,6 +195,22 @@ impl Engine {
         out
     }
 
+    /// [`live_sources`](Self::live_sources) plus each live query's current `TagId`s — the
+    /// gather behind the CLUSTER blue/green rebuild (`ClusterEngine::set_vocab`, ADR-074),
+    /// which re-places every query and must carry its tags to the new shard. Ids — interned
+    /// dense or post-freeze synthetic — are carried verbatim: the tag space is preserved
+    /// across a vocabulary change, so they stay valid (the same ADR-049 carry-through
+    /// [`recompile_stale_segments`](Self::recompile_stale_segments) uses in-place).
+    pub fn live_sources_tagged(&self) -> Vec<(u64, String, Vec<crate::tagdict::TagId>)> {
+        self.live_sources()
+            .into_iter()
+            .map(|(logical, text)| {
+                let tags = self.live_tag_ids_for(logical);
+                (logical, text, tags)
+            })
+            .collect()
+    }
+
     /// The current `TagId`s of the live entry for `logical` (ADR-049), read from the
     /// memtable or a base segment. Used by [`recompile_stale_segments`] to carry a
     /// query's tags through a vocabulary change unchanged (same tag space ⇒ the ids stay

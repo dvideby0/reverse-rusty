@@ -125,6 +125,8 @@ impl ShardService for ShardServer {
                     dsl: it.dsl,
                     version: it.version.max(1),
                     tags: proto::tags_from_proto(it.tags),
+                    // The wire is dict-agnostic (raw tags only) — pre-resolved ids never arrive.
+                    tag_ids: Vec::new(),
                 }),
                 None => rejected_parse += 1,
             }

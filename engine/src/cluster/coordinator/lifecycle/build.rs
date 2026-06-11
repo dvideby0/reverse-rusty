@@ -189,6 +189,7 @@ impl ClusterEngine {
                     dsl: text,
                     version: 1,
                     tags: qtags,
+                    tag_ids: Vec::new(),
                 }),
                 Target::Selective(shs) => {
                     for &s in &shs {
@@ -198,6 +199,7 @@ impl ClusterEngine {
                             dsl: text.clone(),
                             version: 1,
                             tags: qtags.clone(),
+                            tag_ids: Vec::new(),
                         });
                     }
                 }
@@ -250,7 +252,7 @@ impl ClusterEngine {
             config.per_shard.clone(),
             durable,
         )?;
-        // Latch tags_present for the set_vocab guard (ADR-055). For a build with interned corpus
+        // Latch tags_present (ADR-055, `/_stats` introspection). For a build with interned corpus
         // tags `tag_dict` is also non-empty, but this also covers a build whose only tags would be
         // synthetic, keeping `has_tags` correct regardless.
         if tags.iter().any(|t| !t.is_empty()) {

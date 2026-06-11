@@ -329,6 +329,7 @@ impl ShardServer {
                     dsl: dsl.clone(),
                     version: 1,
                     tags: Vec::new(),
+                    tag_ids: Vec::new(),
                 })
             })
             .collect();

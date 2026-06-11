@@ -251,6 +251,13 @@ pub struct PlacedQuery {
     pub version: u32,
     /// Raw `(key, value)` metadata tags; resolved to `TagId`s read-only at ingest. Empty ⇒ untagged.
     pub tags: Vec<(String, String)>,
+    /// Pre-resolved `TagId`s carried through a blue/green vocabulary rebuild (ADR-074): the tag
+    /// space is preserved across a vocab change, so a stored id — interned dense or post-freeze
+    /// synthetic — stays valid and is carried verbatim (the cluster analogue of the single-node
+    /// ADR-049 carry-through in `recompile_stale_segments`). Unioned with the resolved `tags` at
+    /// ingest. In-process only: a synthetic id has no recoverable string, so this never crosses
+    /// the dict-agnostic gRPC wire (`RemoteShard::ingest_extracted` fails loud). Empty ⇒ unused.
+    pub tag_ids: Vec<crate::tagdict::TagId>,
 }
 
 /// Outcome of ingesting a batch of stored queries. Lets callers see how many

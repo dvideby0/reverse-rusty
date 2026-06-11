@@ -204,8 +204,9 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   use `POST /_checkpoint` for the durability commit), `PUT /_settings` (cluster settings are fixed
   at assembly), `/_cat/stats`, `/_cat/segments`.
 - **Vocabulary admin** (`PUT /_vocab`, `/_vocab/learn_and_apply`, `/_vocab/aliases/*`) maps onto the
-  cluster blue/green rebuild (ADR-046); its refusals — non-local (gRPC) shards, tagged clusters,
-  multi-word alias activation (ADR-055/061) — surface as 400s with the engine's message.
+  cluster blue/green rebuild (ADR-046); its refusals — non-local (gRPC) shards, multi-word alias
+  activation (ADR-061) — surface as 400s with the engine's message. A **tagged** cluster is no longer
+  refused: the rebuild carries per-query tags through by stored `TagId` (ADR-074).
 
 Cluster-only endpoints:
 

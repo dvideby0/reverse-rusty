@@ -746,8 +746,15 @@ impl Engine {
         for item in items {
             // Resolve the query's tags read-only against the shared frozen tag space (ADR-055) —
             // never the CoW `intern_tags`, which would fork the shared dict per shard. Empty ⇒
-            // empty slice ⇒ byte-identical to the pre-tag `&[]` path.
-            let tag_ids = self.resolve_tags_readonly(&item.tags);
+            // empty slice ⇒ byte-identical to the pre-tag `&[]` path. A vocabulary rebuild also
+            // carries pre-resolved ids (`tag_ids`, ADR-074) — union them in, re-establishing the
+            // sorted/deduped column invariant `resolve_tags_readonly` provides.
+            let mut tag_ids = self.resolve_tags_readonly(&item.tags);
+            if !item.tag_ids.is_empty() {
+                tag_ids.extend_from_slice(&item.tag_ids);
+                tag_ids.sort_unstable();
+                tag_ids.dedup();
+            }
             if seg
                 .add_compiled(
                     &item.ex,
@@ -768,8 +775,19 @@ impl Engine {
         }
         seg.build_filter();
         self.seal_and_push(seg);
+        let accepted_any = !accepted.is_empty();
         for (logical, text) in accepted {
             self.query_store.insert(logical, text);
+        }
+        // Bulk ingest has no WAL/translog backstop (mirroring `commit_base_segment`):
+        // this is the sole point at which the bulk's source text becomes durable. A
+        // segments-only cluster shard that skipped this would reopen with durable
+        // segments but an EMPTY source store — and the vocabulary rebuild, which
+        // gathers `live_sources`, would silently erase the bulk-loaded corpus
+        // (ADR-074). In-memory engines no-op (no data_dir); a write failure degrades
+        // `persistence_healthy` via the DurabilityFailure event path.
+        if accepted_any {
+            self.save_query_sources();
         }
         report
     }

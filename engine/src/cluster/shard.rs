@@ -192,6 +192,19 @@ pub(crate) trait Shard: Send + Sync {
         ))
     }
 
+    /// [`live_sources`](Self::live_sources) plus each live query's stored `TagId`s — the
+    /// gather behind the TAGGED vocabulary rebuild (ADR-074): `ClusterEngine::set_vocab`
+    /// re-places every query and must carry its tags (interned or post-freeze synthetic)
+    /// to the new shard verbatim, since a synthetic id has no recoverable string. Same
+    /// in-process-only boundary (and default `Err`) as `live_sources`.
+    fn live_sources_tagged(
+        &self,
+    ) -> Result<Vec<(u64, String, Vec<crate::tagdict::TagId>)>, ShardError> {
+        Err(ShardError::Config(
+            "live_sources_tagged is only supported for in-process shards".into(),
+        ))
+    }
+
     /// Whether this shard is backed by an in-process [`Engine`](crate::segment::Engine), so its normalizer
     /// can be swapped in place by a vocabulary change. `false` for a
     /// `RemoteShard`/`HandoffShard`, whose normalizer lives in another process and
