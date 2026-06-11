@@ -1,0 +1,154 @@
+# The multi-machine harness topology (ADR-072): a fully SECURED cluster (mesh TLS +
+# token, ADR-071) on an isolated bridge network — 3 durable shard nodes + a spare
+# pending node (the handoff target) + the REST coordinator (ADR-070) + a 3-node
+# control-plane quorum. Driven by deploy/harness.sh; not a production reference
+# (criterion 10's packaging builds on the same image with a runbook).
+#
+# Required env (the harness exports them): RR_IMAGE, RR_CLUSTER_TOKEN, RR_CERT_DIR
+# (a host dir holding ca.crt/node.crt/node.key), RR_CORPUS_DIR (queries.csv).
+
+x-shard-base: &shard-base
+  image: ${RR_IMAGE}
+  networks: [rrmesh]
+  environment:
+    RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN}
+  volumes:
+    - ${RR_CERT_DIR}:/certs:ro
+  healthcheck:
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/50051"]
+    interval: 2s
+    timeout: 2s
+    retries: 30
+
+services:
+  shard0:
+    <<: *shard-base
+    command: >
+      shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - shard0-data:/data
+  shard1:
+    <<: *shard-base
+    command: >
+      shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - shard1-data:/data
+  shard2:
+    <<: *shard-base
+    command: >
+      shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - shard2-data:/data
+
+  # The spare node the handoff-under-load leg moves a position onto.
+  target:
+    <<: *shard-base
+    command: >
+      shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - target-data:/data
+
+  coordinator:
+    image: ${RR_IMAGE}
+    networks: [rrmesh]
+    command: >
+      server --cluster --host 0.0.0.0 --port 9200
+      --shard-endpoint https://shard0:50051
+      --shard-endpoint https://shard1:50051
+      --shard-endpoint https://shard2:50051
+      --grpc-tls-ca /certs/ca.crt
+      --load-file /corpus/queries.csv
+      --include-broad
+    environment:
+      RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN}
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - ${RR_CORPUS_DIR}:/corpus:ro
+    ports:
+      - "127.0.0.1:19200:9200"
+    depends_on:
+      shard0: { condition: service_healthy }
+      shard1: { condition: service_healthy }
+      shard2: { condition: service_healthy }
+    # The connect handshake can still race a shard's first listen — retry, don't die.
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:9200/_health"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+
+  # The control-plane quorum (durable, secured both directions). The harness proves
+  # the container lifecycle (rolling restart from durable Raft state); the protocol
+  # (elections, failover) is the localhost oracle's job.
+  control0:
+    image: ${RR_IMAGE}
+    networks: [rrmesh]
+    command: >
+      controlserver 0 0.0.0.0:50061 --data-dir /data --bootstrap
+      --peer 1=https://control1:50061 --peer 2=https://control2:50061
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    environment:
+      RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN}
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - control0-data:/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/50061"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  control1:
+    image: ${RR_IMAGE}
+    networks: [rrmesh]
+    command: >
+      controlserver 1 0.0.0.0:50061 --data-dir /data
+      --peer 0=https://control0:50061 --peer 2=https://control2:50061
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    environment:
+      RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN}
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - control1-data:/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/50061"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  control2:
+    image: ${RR_IMAGE}
+    networks: [rrmesh]
+    command: >
+      controlserver 2 0.0.0.0:50061 --data-dir /data
+      --peer 0=https://control0:50061 --peer 1=https://control1:50061
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    environment:
+      RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN}
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - control2-data:/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/50061"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+networks:
+  rrmesh:
+
+volumes:
+  shard0-data:
+  shard1-data:
+  shard2-data:
+  target-data:
+  control0-data:
+  control1-data:
+  control2-data:

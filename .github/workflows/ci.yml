@@ -89,3 +89,38 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_soak }}
         working-directory: engine
         run: cargo test --release --test stress -- --ignored --nocapture
+
+  # The multi-machine harness (ADR-072, Distributed-v1 criterion 3): a fully secured
+  # containerized cluster (3 durable shard nodes + handoff target + REST coordinator +
+  # a 3-node control plane) driven through kill-and-recover, rolling restarts, a
+  # coordinator restart, and a live handoff under load — every link crossing a real
+  # container network boundary. Builds the bins natively (cached), wraps them in the
+  # prebuilt runtime image, and runs deploy/harness.sh.
+  harness:
+    name: multi-machine harness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pinned toolchain
+        working-directory: engine
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          # Separate cache key from the gate job (different feature set).
+          key: harness-distributed
+
+      - name: Build node binaries (distributed)
+        working-directory: engine
+        run: >
+          cargo build --release --features distributed
+          --bin server --bin shardserver --bin controlserver
+
+      - name: Run the harness
+        run: ./deploy/harness.sh --prebuilt engine/target/release
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: docker compose -f deploy/compose.harness.yml logs --tail 200 || true

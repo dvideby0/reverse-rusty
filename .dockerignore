@@ -1,0 +1,6 @@
+# Keep the image build context lean (the Dockerfile COPYies engine/ from the repo root).
+engine/target/
+**/target/
+.git/
+data/
+*.log
