@@ -194,7 +194,15 @@ impl ClusterEngine {
                         });
                         // Seed green segment numbering above the old shard's (primary and every
                         // replica share the counter, kept equal by identical op streams), so the
-                        // freshly written `.seg` never collide with the old ones.
+                        // freshly written `.seg` never collide with the old ones. The green
+                        // engine deliberately LOADS the dir's old `sources.dat` (resident store
+                        // = old ∪ bucket): the green ingest persists sources eagerly, BEFORE the
+                        // manifest commit below, so the on-disk store must stay a SUPERSET of
+                        // every generation a crash-reopen could make authoritative — a
+                        // bucket-only store would lose moved-away queries if the crash lands
+                        // before the commit (codex). The liveness-checked gather
+                        // (`Engine::live_sources*`) projects the superset to exactly the
+                        // committed generation's corpus, so the stale residue is never gathered.
                         let next_seg = self.shards[s].next_seg_id()?;
                         LocalShard::open_segments(
                             Arc::clone(&new_norm),

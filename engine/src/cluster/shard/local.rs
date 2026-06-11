@@ -369,6 +369,13 @@ impl LocalShard {
     fn snapshot(&self) -> Arc<EngineSnapshot> {
         self.snapshot.load_full()
     }
+
+    /// Whether this shard's engine has had every best-effort durability write succeed
+    /// ([`Engine::persistence_healthy`]) — checked by the cluster's durable build
+    /// before its manifest commit (codex retro-review, ADR-074).
+    pub(crate) fn persistence_healthy(&self) -> bool {
+        self.lock().persistence_healthy()
+    }
 }
 
 impl Shard for LocalShard {
