@@ -495,6 +495,53 @@ pub(crate) async fn cluster_handoff(Json(_body): Json<HandoffBody>) -> Response 
     )
 }
 
+#[derive(Deserialize)]
+pub(crate) struct ResizeBody {
+    /// The desired new shard count (≥ 1). Equal to the current count ⇒ a no-op.
+    num_shards: usize,
+}
+
+/// POST /_cluster/resize — blue/green cluster resize (ADR-078, ADR-065 criterion 7):
+/// re-place every live query under a fresh consistent-hash ring with `num_shards`
+/// buckets, build fresh shards, atomically swap, and (for a durable cluster) checkpoint
+/// the result. The vocabulary, dict, and per-query tags are preserved unchanged. The
+/// operator surface for the library mechanism; in-process only — a cross-process /
+/// handoff-wrapped cluster comes back as a 400 (same boundary as `PUT /_vocab`).
+///
+/// Holds the writer-serialization mutex + the cluster WRITE lock for the full rebuild
+/// (`&mut self`), exactly like `PUT /_vocab` (`set_vocab`): a resize is a stop-the-world
+/// blue/green rebuild, not interleavable with incremental writes. Cost is `O(corpus)`, so
+/// this is a rare administrative operation (a multi-second pause on a large cluster).
+#[instrument(skip_all)]
+pub(crate) async fn cluster_resize(
+    State(state): State<Arc<ClusterAppState>>,
+    Json(body): Json<ResizeBody>,
+) -> Response {
+    let start = Instant::now();
+    let result = {
+        let _w = state.write_serial.lock();
+        let mut cluster = state.cluster.write();
+        cluster.resize(body.num_shards)
+    };
+    match result {
+        Ok(rebuilt) => {
+            info!(
+                num_shards = body.num_shards,
+                rebuilt,
+                took_ms = start.elapsed().as_millis() as u64,
+                "cluster resized"
+            );
+            Json(serde_json::json!({
+                "acknowledged": true,
+                "num_shards": body.num_shards,
+                "rebuilt": rebuilt,
+            }))
+            .into_response()
+        }
+        Err(e) => shard_error_response("resize refused", &e),
+    }
+}
+
 /// POST /_cluster/resync — re-drive queued partial-apply repairs (ADR-047). Holds
 /// the writer-serialization mutex so a resync pass cannot interleave with REST
 /// writes for the same ids (the drain → re-drive window; the library-level race

@@ -28,13 +28,10 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::compile::{extract, Extracted};
-use crate::dict::Dict;
-use crate::segment::PlacedQuery;
 use crate::vocab::{CorpusLearnConfig, Vocab};
 
-use super::{into_shard, placement_of, replica_dir, shard_dir, ClusterEngine, Target};
-use crate::cluster::shard::{LocalShard, Shard, ShardError};
+use super::ClusterEngine;
+use crate::cluster::shard::ShardError;
 
 impl ClusterEngine {
     /// Change the cluster's vocabulary (ADR-046 mechanism 2) — e.g. declare an
@@ -101,144 +98,18 @@ impl ClusterEngine {
         // retired; the rebuild below re-places every query under the new normalizer, so
         // routing and placement stay derived from the same vocabulary.
 
-        // 3. Gather the deduped live `(logical, dsl, tag_ids)` set across shards. A
-        //    selective / any-of query lives on several shards but has ONE dsl (and one
-        //    tag set — every fanned-out copy carries the same tags) — dedup by logical
-        //    id. Tags ride as stored `TagId`s, NOT raw strings: the tag space is
-        //    orthogonal to vocabulary and preserved unchanged through the rebuild, so a
-        //    stored id — interned dense or post-freeze synthetic (which has no
-        //    recoverable string) — stays valid and is carried verbatim to the query's
-        //    new shard (ADR-074, the cluster analogue of the single-node ADR-049
-        //    carry-through in `recompile_stale_segments`). Untagged ⇒ every tag vec is
-        //    empty ⇒ byte-identical to the pre-tag rebuild.
-        let live = self.live_corpus_tagged()?;
+        // 3. Rebuild the cluster from its live source set under the new normalizer, KEEPING the
+        //    ring (same shard count). The shared blue/green core (ADR-046/078) re-mints the dict,
+        //    re-places every query, builds fresh shards, and atomically swaps under `&mut self`.
+        //    `Some(vocab)` installs the new vocabulary and uses ITS equivalence groups; per-query
+        //    tags carry through as stored `TagId`s (ADR-074). The resize path (ADR-078) calls the
+        //    SAME core with a fresh ring instead of a new vocab.
+        let rebuilt = self.rebuild_from_live(new_norm, self.ring.clone(), Some(vocab))?;
 
-        // 4. Pass A — re-mint the dict over the live corpus under the new normalizer
-        //    (interning + frequencies + hot-mask), exactly as `build`.
-        let mut dict = Dict::new();
-        let mut lc = String::new();
-        let mut extracted: Vec<(u64, Extracted, String, Vec<crate::tagdict::TagId>)> =
-            Vec::with_capacity(live.len());
-        for (logical, text, tag_ids) in live {
-            if let Ok(ast) = crate::dsl::parse(&text) {
-                let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
-                extracted.push((logical, ex, text, tag_ids));
-            }
-        }
-        dict.finalize_mask();
-        // Resolve declared/learned equivalence groups (ADR-054) against the freshly-minted
-        // dict and apply them via expansion: widen the already-extracted queries (so THIS
-        // rebuild's re-placement + ingest use the FN-safe widened form — a query whose anchor
-        // is now an any-of fans to every member's shard), then install the map on the dict so
-        // future incremental adds expand through `extract`. No groups ⇒ empty ⇒ byte-identical.
-        let equiv = vocab.resolve_equivalences(&new_norm, &dict);
-        for (_, ex, _, _) in &mut extracted {
-            ex.expand_equivalences(&equiv);
-        }
-        dict.set_equivalences(equiv);
-        let new_dict = Arc::new(dict);
-        let rebuilt = extracted.len();
-
-        // 5. Pass B — re-place each query under the NEW dict and bucket per shard. Tags
-        //    travel with the query (`tag_ids`, the ADR-074 carry-through): an alias can
-        //    move a query's anchor — hence its shard — and the filtered-read contract
-        //    requires its tags on whichever shard now holds it.
-        let num_shards = self.ring.num_shards();
-        let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
-        for (logical, ex, text, tag_ids) in extracted {
-            match placement_of(&new_dict, &self.ring, &ex) {
-                Target::Reject => {}
-                Target::Replicated => buckets[0].push(PlacedQuery {
-                    logical,
-                    ex,
-                    dsl: text,
-                    version: 1,
-                    tags: Vec::new(),
-                    tag_ids,
-                }),
-                Target::Selective(shs) => {
-                    for &s in &shs {
-                        buckets[s].push(PlacedQuery {
-                            logical,
-                            ex: ex.clone(),
-                            dsl: text.clone(),
-                            version: 1,
-                            tags: Vec::new(),
-                            tag_ids: tag_ids.clone(),
-                        });
-                    }
-                }
-            }
-        }
-
-        // 6. Construct fresh shards sharing the new norm + re-minted dict, `replication_factor`
-        //    copies per position, and ingest each bucket into EVERY copy (identical op stream ⇒
-        //    copies set-equal, as in `build`). A durable cluster rebuilds each shard as a
-        //    segments-only engine in the SAME shard dir, numbered ABOVE the old segments so the
-        //    new `.seg` files coexist with the still-committed old ones until the manifest commit
-        //    (step 8) — crash-safe: a crash before the commit leaves the old manifest + old
-        //    segments authoritative. An in-memory cluster builds in-RAM copies.
-        let rf = self.replication_factor.max(1);
-        let data_dir = self.data_dir.clone();
-        let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
-        for (s, bucket) in buckets.into_iter().enumerate() {
-            let mut copies = Vec::with_capacity(rf);
-            for r in 0..rf {
-                let copy = match &data_dir {
-                    Some(dir) => {
-                        let mut sc = self.per_shard.clone();
-                        sc.data_dir = Some(if r == 0 {
-                            shard_dir(dir, s)
-                        } else {
-                            replica_dir(dir, s, r)
-                        });
-                        // Seed green segment numbering above the old shard's (primary and every
-                        // replica share the counter, kept equal by identical op streams), so the
-                        // freshly written `.seg` never collide with the old ones. The green
-                        // engine deliberately LOADS the dir's old `sources.dat` (resident store
-                        // = old ∪ bucket): the green ingest persists sources eagerly, BEFORE the
-                        // manifest commit below, so the on-disk store must stay a SUPERSET of
-                        // every generation a crash-reopen could make authoritative — a
-                        // bucket-only store would lose moved-away queries if the crash lands
-                        // before the commit (codex). The liveness-checked gather
-                        // (`Engine::live_sources*`) projects the superset to exactly the
-                        // committed generation's corpus, so the stale residue is never gathered.
-                        let next_seg = self.shards[s].next_seg_id()?;
-                        LocalShard::open_segments(
-                            Arc::clone(&new_norm),
-                            Arc::clone(&new_dict),
-                            // The tag space is orthogonal to vocabulary — preserve it
-                            // unchanged, so the carried `tag_ids` stay valid (ADR-074).
-                            Arc::clone(&self.tag_dict),
-                            sc,
-                            &[],
-                            next_seg,
-                        )?
-                    }
-                    None => LocalShard::new(
-                        Arc::clone(&new_norm),
-                        Arc::clone(&new_dict),
-                        Arc::clone(&self.tag_dict),
-                        self.per_shard.clone(),
-                    ),
-                };
-                if !bucket.is_empty() {
-                    copy.ingest_local(&bucket);
-                }
-                copies.push(copy);
-            }
-            shards.push(into_shard(copies)?);
-        }
-
-        // 7. Atomic swap (under `&mut self`, so no read observes a half-state). For a durable
-        //    cluster, `checkpoint` then seals the green shards, writes the new manifest (the
-        //    re-minted dict + serialized vocab + green segment registry — the atomic commit
-        //    point), truncates the log, and GCs the superseded old segment files.
-        self.norm = new_norm;
-        self.dict = new_dict;
-        self.shards = shards;
-        self.vocab = Some(Arc::new(vocab));
-        if data_dir.is_some() {
+        // 4. Commit a durable cluster's rebuild via `checkpoint`: seal the green shards, write the
+        //    new manifest (re-minted dict + serialized vocab + green segment registry — the atomic
+        //    commit point), truncate the log, and GC the superseded old segment files.
+        if self.data_dir.is_some() {
             self.checkpoint()?;
         }
         Ok(rebuilt)
@@ -280,7 +151,9 @@ impl ClusterEngine {
     /// behind the tagged rebuild (ADR-074). A query fanned out to several shards carries
     /// the same tags on every copy (one `PlacedQuery` per copy, identical op streams), so
     /// dedup-by-logical keeps the first copy seen. Same non-local error boundary.
-    fn live_corpus_tagged(
+    /// `pub(super)` so the shared rebuild core in `coordinator::resize` can gather the corpus
+    /// for both a vocabulary change ([`set_vocab`](Self::set_vocab)) and a resize.
+    pub(super) fn live_corpus_tagged(
         &self,
     ) -> Result<Vec<(u64, String, Vec<crate::tagdict::TagId>)>, ShardError> {
         let mut live: BTreeMap<u64, (String, Vec<crate::tagdict::TagId>)> = BTreeMap::new();

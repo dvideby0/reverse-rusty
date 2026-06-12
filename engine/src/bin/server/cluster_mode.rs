@@ -40,7 +40,7 @@ use crate::handlers::{
     cluster_health, cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
     cluster_learn_vocab, cluster_metrics, cluster_mpercolate, cluster_put_doc,
     cluster_put_settings, cluster_put_vocab, cluster_rebalance, cluster_register_node,
-    cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
+    cluster_resize, cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -293,6 +293,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             axum::routing::delete(cluster_deregister_node),
         )
         .route("/_cluster/rebalance", post(cluster_rebalance))
+        .route("/_cluster/resize", post(cluster_resize))
         .route("/_cluster/resync", post(cluster_resync))
         .route("/_cluster/handoff", post(cluster_handoff))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
