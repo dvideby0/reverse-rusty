@@ -40,9 +40,7 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
 ### Tier 3 — scale & production maturity
 
 - **Distributed v1 ([ADR-065](decisions/adr-065-distributed-v1-graduation.md)) — open criteria**
-  (1–6 and 9 shipped: ADR-070/071/072/074/075/076/077; see [`STATUS.md`](STATUS.md)):
-  - **Criterion 7 — auto-split + `recommended_shard_count`:** ring re-keying + the data move via
-    the existing live handoff (the autoscaler's split advisory gains a real mechanism).
+  (1–7 and 9 shipped: ADR-070/071/072/074/075/076/077/078; see [`STATUS.md`](STATUS.md)):
   - **Criterion 8 — replicate-broad-to-all:** or the explicit ADR for why the RF-replicated
     shard-0 lane suffices at v1. (Also unblocks the cluster class-D lane — ADR-068 single-node
     today.)
@@ -56,6 +54,10 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
   - **Criterion 12 — scale proof at target:** a multi-shard load test at ≥20M stored queries on
     real hardware (largest soak to date: 10M single-node), plus the **real-corpus FN/throughput
     audit** owed in [`STATUS.md`](STATUS.md) "Current limitations".
+  - *Criterion 7 follow-ons (deferred, [ADR-078](decisions/adr-078-cluster-resize.md)):* always-on
+    autoscaler-driven resize (needs hysteresis to avoid thrash, since a resize is non-idempotent +
+    `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
+    live-handoff machinery; the v1 resize is in-process blue/green).
 - **Feature-model versioning + blue/green re-materialize** — frozen common-mask across minor
   versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
 - **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying

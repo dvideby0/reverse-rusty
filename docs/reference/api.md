@@ -227,6 +227,7 @@ Cluster-only endpoints:
 | `/_cluster/nodes` | POST | Register a cluster member (`{"id": N, "addr": "...", "role": "data"\|"manager"}`) |
 | `/_cluster/nodes/{id}` | DELETE | Deregister a member (idempotent) |
 | `/_cluster/rebalance` | POST | Recompute + commit the shard→node map from membership (HRW, ADR-042) |
+| `/_cluster/resize` | POST | Resize the cluster (ADR-078): `{"num_shards": N}` — a blue/green rebuild re-places every live query under a fresh ring; returns `{acknowledged, num_shards, rebuilt}`. In-process only (a non-local cluster → 400); vocab + tags preserved; `O(corpus)` (holds the write lock like `PUT /_vocab`) |
 | `/_cluster/resync` | POST | Re-drive queued partial-apply repairs (ADR-047); returns `{repaired, still_pending}` |
 | `/_cluster/handoff` | POST | Live data-moving handoff (ADR-044/048/072): `{"position": N, "source": "https://…", "target": "https://…"}` — peer-recover the target, fence + drain the source, flip routing; returns the new `generation`. Fail-closed: an aborted move auto-unfences the source. Requires a `--features distributed` build (else 501) |
 

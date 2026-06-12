@@ -22,7 +22,7 @@ pub(crate) use cluster::{
     cluster_health, cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
     cluster_learn_vocab, cluster_metrics, cluster_mpercolate, cluster_put_doc,
     cluster_put_settings, cluster_put_vocab, cluster_rebalance, cluster_register_node,
-    cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
+    cluster_resize, cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
 };
 pub(crate) use doc::{bulk_ingest, delete_doc, get_doc, put_doc};
 pub(crate) use search::{mpercolate, search};

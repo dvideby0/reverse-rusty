@@ -37,7 +37,10 @@ mod control_plane;
 mod ingest;
 mod lifecycle;
 mod matching;
+mod resize;
 mod vocab;
+
+pub use resize::recommended_shard_count;
 
 #[cfg(feature = "distributed")]
 mod distributed;

@@ -18,8 +18,8 @@ dynamic vocabulary — **built and oracle-proven, zero false negatives** (Tier 0
 **distributed multi-node layers** (gRPC transport, replication, Raft control plane, translog
 recovery, live handoff, autoscaler) are **built and oracle-proven in-process / on localhost, but
 experimental** — graduating to release-candidate via the **Distributed-v1 program
-([ADR-065](decisions/adr-065-distributed-v1-graduation.md))**: criteria **1–6 and 9 shipped**
-(ADR-070/071/072/074/075/076/077); **7, 8, 10, 11, 12 open** ([`roadmap.md`](roadmap.md) Tier 3).
+([ADR-065](decisions/adr-065-distributed-v1-graduation.md))**: criteria **1–7 and 9 shipped**
+(ADR-070/071/072/074/075/076/077/078); **8, 10, 11, 12 open** ([`roadmap.md`](roadmap.md) Tier 3).
 Everything `distributed`-gated is off by default; the lean / in-process path is byte-identical.
 
 ## Built
@@ -110,6 +110,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **Control-plane seam + allocator + autoscaler policy** — in-memory backend default (ADR-037);
   rendezvous shard→node map + minimal-movement `rebalance` (ADR-042); tick-driven policy, disabled
   by default (ADR-045). All lean core; the openraft backend below is gated.
+- **Runtime cluster resize** — `num_shards` no longer fixed at construction: a blue/green rebuild
+  re-places every live query under a fresh ring (the `set_vocab` machinery), in-process, durable
+  (no manifest format bump), vocab/tags + dict fingerprint preserved; `recommended_shard_count` +
+  `resize_to_recommended` + `POST /_cluster/resize`; the autoscaler split advisory now points at a
+  real mechanism (ADR-078).
 - **gRPC transport** — `ShardServer`/`RemoteShard` (ADR-029); dict fingerprint handshake
   (ADR-030); dict + tag-dict shipping at connect (ADR-034, ADR-055); tag-dict fingerprint on all
   six recovery RPCs (ADR-077).
@@ -155,15 +160,15 @@ live in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)
 The prioritized roadmap (open work only) is **[`roadmap.md`](roadmap.md)**. Tiers: **0** Cluster-v1
 gate (✅ complete) · **1** measured bottlenecks (✅ complete) · **2** feature-model self-tuning
 (open: alias-discovery sources, the "improve" menu) · **3** scale & production maturity (open:
-ADR-065 criteria 7/8/10/11/12, model versioning, aspects-first ingestion) · **4** percolator
+ADR-065 criteria 8/10/11/12, model versioning, aspects-first ingestion) · **4** percolator
 parity (✅ program complete; small deferred refinements) · the operational-polish backlog.
 
 ## Current limitations
 
 - **Not yet a hardened multi-machine deployment.** The distributed layers are oracle-proven
   in-process / on localhost / in the containerized harness, but the Distributed-v1 graduation
-  (ADR-065) is incomplete — open criteria: auto-split, replicate-broad-to-all (or decide),
-  packaging + runbook, backup/restore, and the ≥20M scale proof. Mesh TLS + token auth are
+  (ADR-065) is incomplete — open criteria: replicate-broad-to-all (or decide), packaging +
+  runbook, backup/restore, and the ≥20M scale proof. Mesh TLS + token auth are
   **opt-in** (ADR-071) — enable both outside a trusted network. Remote-cluster vocabulary is
   deploy-time configuration, not live-shipped (decided, ADR-076).
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at

@@ -57,15 +57,17 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > vocabulary** (absorbing new terms after the dict is frozen — see
 > [`../research/dynamic-vocabulary.md`](../research/dynamic-vocabulary.md) → ADR-046). Reliability
 > hardening — auto-unfence-on-abort, the translog-lease TTL, and wiring that advisory handoff to
-> `execute_handoff` — landed in ADR-048. Still design-only beyond that: auto-split +
-> `recommended_shard_count`, a clean cross-node load-move (deployment-model maturity), and TLS/auth.
+> `execute_handoff` — landed in ADR-048; **runtime resize** (`num_shards` no longer fixed at
+> construction — a blue/green rebuild under a fresh ring) + `recommended_shard_count` landed in
+> ADR-078. Still design-only beyond that: an *online* targeted shard `_split` and a clean
+> cross-node load-move (deployment-model maturity).
 
 **TL;DR (for agents)**
 - **Owns:** Horizontal scaling design — sharding, replication, autoscaling, durable cluster storage
 - **Key idea:** Shard by entity hash (player/brand); titles fan out to ~2–5 shards (not all N) because entity is known from normalization
 - **Asymmetry exploited:** Queries are the large corpus (sharded); titles are small and routed — the inverse of a normal search engine
 - **Patterns borrowed:** Elasticsearch/Cassandra **shared-nothing** (local segments + WAL + peer recovery + quorum control plane) and consistent hashing — **not** Aurora's shared object storage (ADR-033)
-- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`), and the **quorum/Raft control plane** — its seam (step 5a; ADR-037 — a `trait ControlPlane` + in-memory backend holding the shard→node map) and the **openraft backend** behind it (step 5b; ADR-038 — a `RaftControlPlane` + gRPC `ControlService`, multi-process elections + leader failover); steps 5c–6c (translog/no-quiesce recovery, retention/finalize, durable Raft log, the shard→node allocator, the runtime-swappable backing + live data-moving handoff, and the **autoscaler** — ADR-039–045) are built too — **all oracle-proven _in-process / on localhost_ but experimental beyond the v1 core.** **Cluster v1** = the in-process multi-shard core + durable reopen + **dynamic vocabulary** (new terms absorbed after the dict is frozen — **built + oracle-proven**, [`dynamic-vocabulary`](../research/dynamic-vocabulary.md) → ADR-046); auto-split + TLS/auth + the rest of the multi-node hardening are beyond v1 (roadmap Tier 0 then Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
+- **Status:** In-process multi-shard core **built** (steps 1–2 below; ADR-027), plus the gRPC transport with coordinator **dict shipping** (ADR-029/034), a durable coordinator log (step 3a; ADR-031), per-shard local durable segments with attach-and-mmap reopen (step 3b; ADR-032), and **per-shard replication + peer recovery** — in-process (step 4a; ADR-035 — the `ReplicatedShard` composite) and over gRPC (step 4b; ADR-036 — remote replicas + `FetchSegments`/`RecoverFrom`), and the **quorum/Raft control plane** — its seam (step 5a; ADR-037 — a `trait ControlPlane` + in-memory backend holding the shard→node map) and the **openraft backend** behind it (step 5b; ADR-038 — a `RaftControlPlane` + gRPC `ControlService`, multi-process elections + leader failover); steps 5c–6c (translog/no-quiesce recovery, retention/finalize, durable Raft log, the shard→node allocator, the runtime-swappable backing + live data-moving handoff, and the **autoscaler** — ADR-039–045) are built too — **all oracle-proven _in-process / on localhost_ but experimental beyond the v1 core.** **Cluster v1** = the in-process multi-shard core + durable reopen + **dynamic vocabulary** (new terms absorbed after the dict is frozen — **built + oracle-proven**, [`dynamic-vocabulary`](../research/dynamic-vocabulary.md) → ADR-046); a runtime **resize** + mesh TLS/auth are built (ADR-078/071), and an *online* targeted split + the rest of the multi-node hardening are beyond v1 (roadmap Tier 0 then Tier 3 — see [`../STATUS.md`](../STATUS.md)); the single-node engine extrapolates to 100M with stated assumptions
 - **Gotchas:** Broad-lane queries must be replicated to all shards; scale-to-zero needs entity-frequency stats from the feature dictionary; **no object store / cloud dependency** — durability is a local WAL + replicas (ADR-033)
 
 ---
@@ -247,7 +249,8 @@ Elasticsearch's per-shard **translog** / Cassandra's commitlog.
   peer-recovers the new owner, **fences** the old owner's writes, drains its tail to convergence, then flips the
   backing, so a shard moves between owners under concurrent writes with zero false negatives). Built on top
   (step 6c; ADR-045): the **autoscaler** policy that *triggers* `rebalance` on membership/skew events (§8);
-  load-driven handoff + auto-split remain advisory/design-only.
+  load-driven handoff is autoscaler-driven (ADR-048) and a runtime **resize** + `recommended_shard_count`
+  is built (ADR-078, a blue/green rebuild); an *online* targeted split + always-on auto-resize remain design-only.
 
 ---
 
@@ -306,6 +309,10 @@ The operator experience should be: **one binary, one join command, everything el
    log tail online** (no downtime, no reindex) — like an Elasticsearch shard `_split`. The compaction job
    emits a **`recommended_shard_count`** from telemetry — driven by our "compaction that improves" loop.
    The cluster reshards itself when a shard exceeds size/latency thresholds.
+   **Built (ADR-078):** a runtime `resize(K′)` does this as a *blue/green* rebuild — re-place every
+   live query under a fresh ring (the `set_vocab` machinery), in-process + durable, with
+   `recommended_shard_count` + `resize_to_recommended` + `POST /_cluster/resize`; the *online*
+   (no stop-the-world) targeted single-shard `_split` is the deferred refinement.
 4. **Auto-rebalance via peer recovery.** Adding/removing a node changes the ring; new owners **stream the
    moved shard's segments from a current owner (peer recovery)** and replay the log tail. Consistent
    hashing moves only ~1/N of the ranges, so the copy is bounded — the Elasticsearch/Cassandra rebalance
@@ -499,9 +506,10 @@ without operator action. The defaults are the product.
      `Rebalance` (the idempotent `rebalance(rf)`) and surfaces the advisories. Disabled by default ⇒
      byte-identical; lean core. Proven by `autoscale.rs` units + `tests/cluster_autoscale_oracle.rs` (`tick` ≡ a
      manual rebalance; `percolate` byte-identical before/after ⇒ zero FN; a second tick commits nothing; a split
-     advisory mutates nothing). **Still design-only:** **auto-split** + `recommended_shard_count` (the ES
-     `_split` analogue — the ring's `num_shards` is fixed at construction) and wiring the advisory handoff to
-     `execute_handoff`.
+     advisory mutates nothing). **Built since:** the autoscaler→handoff wiring (ADR-048) and **runtime
+     resize** + `recommended_shard_count` (ADR-078 — `num_shards` no longer fixed at construction; a
+     blue/green rebuild under a fresh ring, in-process + durable). **Still design-only:** an *online*
+     targeted shard `_split` and always-on auto-resize (needs hysteresis to avoid thrash).
 7. Each step is independently testable; the differential oracle is realized as `tests/cluster_oracle.rs`,
    a multi-shard harness asserting the cluster returns exactly the single-node result set.
 
@@ -512,7 +520,7 @@ step 3b's per-shard local durable segments, step 4's per-shard replication + pee
 step 5e's durable Raft log, step 5f's **shard→node allocator**, step 6a's **runtime-swappable shard backing**,
 step 6b's **live data-moving handoff**, step 6c's **autoscaler**, and the **reliability hardening** layered on top (auto-unfence-on-abort, translog-lease TTL, autoscaler→handoff wiring) are built; ADR-027 + ADR-029 + ADR-034 +
 ADR-031 + ADR-032 + ADR-035 + ADR-036 + ADR-037 + ADR-038 + ADR-039 + ADR-040 + ADR-041 + ADR-042 + ADR-043 +
-ADR-044 + ADR-045 + ADR-048. The remaining shared-nothing multi-node work — **auto-split** + `recommended_shard_count`
+ADR-044 + ADR-045 + ADR-048 + ADR-078 (runtime **resize** + `recommended_shard_count`). The remaining shared-nothing multi-node work — an *online* targeted shard `_split`
 and a clean cross-node load-move (deployment-model maturity — multi-shard-per-node endpoints / a spare-node target) — is design-only (ADR-033). See
 [`../STATUS.md`](../STATUS.md).)
 

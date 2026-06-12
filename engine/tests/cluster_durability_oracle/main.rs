@@ -21,6 +21,7 @@ mod backends;
 mod checkpoint;
 mod core;
 mod replication;
+mod resize;
 mod torn_tail;
 mod upsert;
 mod vocab;

@@ -148,6 +148,13 @@ pub enum ClusterStateChange {
     AssignShard(ShardAssignment),
     /// Advance the feature-model version (sets the fingerprint, bumps `model_version`).
     BumpModelVersion { dict_fingerprint: u64 },
+    /// Resize the cluster to `num_shards` positions (ADR-078): set the count, add a default
+    /// single-node assignment (`primary NodeId(0)`, no replicas) for each new position on grow,
+    /// and prune assignments for positions ≥ `num_shards` on shrink. The ring itself is
+    /// re-derived by the coordinator from the new count; this keeps the cluster-state document
+    /// (and thus `collect_load` / `assignment_for`) consistent. On a multi-node cluster a
+    /// follow-up `rebalance` spreads the new positions across nodes.
+    SetShardCount { num_shards: u32 },
 }
 
 /// Why a control-plane operation could not commit. Typed (not stringly) so callers can act
@@ -264,6 +271,23 @@ pub(super) fn apply(state: &mut ClusterState, change: ClusterStateChange) {
         ClusterStateChange::BumpModelVersion { dict_fingerprint } => {
             state.dict_fingerprint = dict_fingerprint;
             state.model_version += 1;
+        }
+        ClusterStateChange::SetShardCount { num_shards } => {
+            state.num_shards = num_shards;
+            // Shrink: drop assignments for positions that no longer exist.
+            state.assignments.retain(|a| a.position < num_shards);
+            // Grow: add a default single-node assignment for each new position. A multi-node
+            // caller follows with `rebalance` to spread the new positions across nodes.
+            for position in 0..num_shards {
+                if !state.assignments.iter().any(|a| a.position == position) {
+                    state.assignments.push(ShardAssignment {
+                        position,
+                        primary: NodeId(0),
+                        replicas: Vec::new(),
+                    });
+                }
+            }
+            state.assignments.sort_by_key(|x| x.position);
         }
     }
 }

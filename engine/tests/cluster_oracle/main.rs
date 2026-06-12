@@ -22,5 +22,6 @@ mod filtered;
 mod placement;
 mod ranking;
 mod replication;
+mod resize;
 mod vocab_learning;
 mod vocab_reopen;
