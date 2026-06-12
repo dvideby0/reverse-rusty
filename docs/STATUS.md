@@ -94,20 +94,22 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **Dynamic vocabulary** — feature-hashing for post-freeze terms + blue/green vocab rebuild
   (ADR-046); works on a tagged cluster via TagId carry-through (ADR-074).
 
-### Cluster v1 — lean core (built + oracle-proven, zero FN)
+### Cluster v1 (built + oracle-proven, zero FN — the shippable milestone)
 
 - **In-process multi-shard core** — one shared frozen dict, anchor ring, content routing with ~2–5
   shard fan-out (ADR-027).
 - **Durable coordinator log + per-shard segments** — attach-and-mmap reopen, coordinator manifest
   = the atomic commit point (ADR-031, ADR-032); shared-nothing storage model (ADR-033).
+- The third v1 pillar — **dynamic vocabulary** (ADR-046) — is listed under Vocabulary & aliases
+  above.
+
+### Distributed layers (experimental, localhost-proven; gRPC parts `distributed`-gated)
+
 - **In-process replication** — `ReplicatedShard` primary + N replicas, in-sync-only failover, peer
-  recovery (ADR-035).
+  recovery (lean core, RF=1 default byte-identical; ADR-035).
 - **Control-plane seam + allocator + autoscaler policy** — in-memory backend default (ADR-037);
   rendezvous shard→node map + minimal-movement `rebalance` (ADR-042); tick-driven policy, disabled
-  by default (ADR-045).
-
-### Distributed layers (`distributed`-gated — experimental, localhost-proven)
-
+  by default (ADR-045). All lean core; the openraft backend below is gated.
 - **gRPC transport** — `ShardServer`/`RemoteShard` (ADR-029); dict fingerprint handshake
   (ADR-030); dict + tag-dict shipping at connect (ADR-034, ADR-055); tag-dict fingerprint on all
   six recovery RPCs (ADR-077).

@@ -41,20 +41,21 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
 
 - **Distributed v1 ([ADR-065](decisions/adr-065-distributed-v1-graduation.md)) — open criteria**
   (1–6 and 9 shipped: ADR-070/071/072/074/075/076/077; see [`STATUS.md`](STATUS.md)):
-  7. **Auto-split + `recommended_shard_count`** — ring re-keying + the data move via the existing
-     live handoff (the autoscaler's split advisory gains a real mechanism).
-  8. **Replicate-broad-to-all** — or the explicit ADR for why the RF-replicated shard-0 lane
-     suffices at v1. (Also unblocks the cluster class-D lane — ADR-068 single-node today.)
-  10. **Deployment packaging + runbook** — the harness image exists (`deploy/`, ADR-072); ship the
-      operator packaging (compose/k8s for a K-shard + control-plane cluster) + an ops runbook,
-      incl. the ADR-076 vocab-redeploy procedure.
-  11. **Backup/restore documented + tested** — single-node and cluster (coordinator manifest +
-      per-shard segments + logs). Today a *live* hot-copy is unsafe: a concurrent
-      flush/compaction can delete superseded segments mid-copy, so the procedure needs
-      write-quiescing, an FS snapshot, or file pinning (ADR-064 item 7).
-  12. **Scale proof at target** — a multi-shard load test at ≥20M stored queries on real hardware
-      (largest soak to date: 10M single-node), plus the **real-corpus FN/throughput audit** owed
-      in [`STATUS.md`](STATUS.md) "Current limitations".
+  - **Criterion 7 — auto-split + `recommended_shard_count`:** ring re-keying + the data move via
+    the existing live handoff (the autoscaler's split advisory gains a real mechanism).
+  - **Criterion 8 — replicate-broad-to-all:** or the explicit ADR for why the RF-replicated
+    shard-0 lane suffices at v1. (Also unblocks the cluster class-D lane — ADR-068 single-node
+    today.)
+  - **Criterion 10 — deployment packaging + runbook:** the harness image exists (`deploy/`,
+    ADR-072); ship the operator packaging (compose/k8s for a K-shard + control-plane cluster) +
+    an ops runbook, incl. the ADR-076 vocab-redeploy procedure.
+  - **Criterion 11 — backup/restore documented + tested:** single-node and cluster (coordinator
+    manifest + per-shard segments + logs). Today a *live* hot-copy is unsafe: a concurrent
+    flush/compaction can delete superseded segments mid-copy, so the procedure needs
+    write-quiescing, an FS snapshot, or file pinning (ADR-064 item 7).
+  - **Criterion 12 — scale proof at target:** a multi-shard load test at ≥20M stored queries on
+    real hardware (largest soak to date: 10M single-node), plus the **real-corpus FN/throughput
+    audit** owed in [`STATUS.md`](STATUS.md) "Current limitations".
 - **Feature-model versioning + blue/green re-materialize** — frozen common-mask across minor
   versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
 - **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying
@@ -100,12 +101,16 @@ Low-priority polish and micro-optimizations — none are production blockers.
   sub-second-to-seconds; capture a number.
 - **Tags are write-only over REST** — no endpoint returns a stored query's tags; small read-back
   addition for metadata audits (ADR-064 item 7).
+- **Class-C ingest warnings / rewrite suggestions** — surface "this query landed in the broad
+  lane" at ingest with a rewrite hint (the ADR-026 follow-up).
 
 **Memory / hot-path micro-optimizations**
 - **`alive: Vec<bool>`** — 8× the memory of a bitvec.
 - **`seg_lens` Vec allocated on the match hot path** — could be a fixed-size array.
 - **WAL `append_insert` allocates a Vec per write** — pre-allocated write buffers.
 - **Byte-at-a-time CRC-32 for manifest writes** — table-based is ~10× faster.
+- **SIMD intersection** for medium/large (mostly broad-lane) roaring postings (the ADR-026
+  follow-up).
 
 **Test-infrastructure follow-ons (ADR-063 audit)**
 - **Extend the parse-union oracle's fuzz alphabet** with `#`/`/`/`pop` markers, 4-digit years, and
