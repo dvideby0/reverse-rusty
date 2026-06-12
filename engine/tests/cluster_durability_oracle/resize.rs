@@ -213,6 +213,66 @@ fn resize_preserves_dict_fingerprint() {
 }
 
 #[test]
+fn resize_preserves_dict_fingerprint_for_unsorted_corpus_with_post_freeze_add() {
+    // The DISCRIMINATING fingerprint test (codex P2): re-minting the dict over the sorted live
+    // corpus renumbers feature ids when the ORIGINAL build interned in a different order, or when
+    // a post-freeze term was added (interned dense by a re-mint, but only a synthetic id in the
+    // live dict) — a spurious fingerprint change that desyncs the control-plane / manifest.
+    // Reusing the frozen dict makes the fingerprint invariant BY CONSTRUCTION. This corpus is
+    // supplied OUT of logical-id order AND gets a post-freeze add, so a re-mint WOULD change the
+    // fingerprint (the pre-fix bug) — the reuse path keeps it stable.
+    let queries = vec![
+        (90u64, "zulu uniquealpha".to_string()),
+        (10u64, "yankee uniquebravo".to_string()),
+        (50u64, "xray uniquecharlie".to_string()),
+    ];
+    let dir = unique_dir("resize_fp_unsorted");
+    let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(2, dir.clone(), false), &queries)
+        .expect("durable build (ids out of order)");
+    cluster
+        .add_query(70, "zzbrandnewterm uniquedelta")
+        .expect("post-freeze add (a brand-new token ⇒ synthetic id)");
+    let fp_before = read_cluster_manifest(&dir.join(MANIFEST))
+        .expect("manifest after build")
+        .dict_fingerprint;
+
+    cluster.resize(4).expect("resize");
+    let m_after = read_cluster_manifest(&dir.join(MANIFEST)).expect("manifest after resize");
+    assert_eq!(m_after.num_shards, 4);
+    assert_eq!(
+        m_after.dict_fingerprint, fp_before,
+        "the dict fingerprint must be invariant across a resize even for an out-of-order corpus + \
+         a post-freeze add (a re-mint would renumber ids and change it)"
+    );
+    drop(cluster);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn same_count_resize_recommits_on_a_durable_cluster() {
+    // P1 (codex): a same-K resize must not bare-acknowledge — a prior resize could have swapped
+    // the ring in RAM and then failed to checkpoint, leaving the manifest at the old count, so a
+    // retry (which hits this same-K path) must re-ensure the durable commit rather than mask it.
+    // Observable: a same-count resize on a DURABLE cluster re-checkpoints (the epoch bumps),
+    // which is exactly what heals an un-committed prior resize; it still rebuilds nothing.
+    let (queries, _titles) = build_corpus();
+    let dir = unique_dir("resize_same_k");
+    let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+        .expect("durable build");
+    let epoch_before = cluster.epoch();
+    let rebuilt = cluster.resize(3).expect("same-count resize");
+    assert_eq!(rebuilt, 0, "a same-count resize rebuilds nothing");
+    assert_eq!(cluster.num_shards(), 3);
+    assert!(
+        cluster.epoch() > epoch_before,
+        "a same-count resize on a durable cluster re-checkpoints (heals an un-committed prior \
+         resize) rather than bare-acking"
+    );
+    drop(cluster);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn resize_then_live_add_survives_reopen() {
     // A query added AFTER a resize lands under the NEW ring and is logged (not yet
     // checkpointed); on reopen the log tail replays over the resized manifest. Zero FN.

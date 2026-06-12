@@ -23,11 +23,13 @@
 //! writes `num_shards = self.ring.num_shards()` and [`open`](ClusterEngine::open) re-derives
 //! `HashRing::new(num_shards, vnodes)`, so a resized cluster reopens byte-identically.
 //!
-//! **Vocab + tags preserved.** A resize does not touch the vocabulary: the normalizer is
-//! reused as-is, the existing vocab's equivalence groups are re-resolved onto the re-minted
-//! dict (so a declared alias does not go silent), and per-query tags carry through as stored
-//! `TagId`s exactly as [`set_vocab`](ClusterEngine::set_vocab) does (ADR-074). The re-minted
-//! dict is identical (same corpus, same normalizer) ⇒ the dict fingerprint is invariant.
+//! **Dict + vocab + tags preserved.** A resize does not touch the feature space: the normalizer
+//! is reused as-is and — because the normalizer is unchanged — the frozen dict is REUSED verbatim
+//! (same dense ids, same hot-mask, same fingerprint). A resize is a ring change, not a model
+//! change, so the manifest's dict fingerprint and the control-plane's `dict_fingerprint` stay
+//! valid; an installed alias's equivalences ride the reused dict (`extract_readonly` auto-expands
+//! them), and per-query tags carry through as stored `TagId`s exactly as
+//! [`set_vocab`](ClusterEngine::set_vocab) does (ADR-074).
 
 use std::path::Path;
 use std::sync::{Arc, PoisonError};
@@ -36,7 +38,7 @@ use crate::cluster::autoscale::{AutoscaleConfig, LoadSnapshot};
 use crate::cluster::control::ClusterStateChange;
 use crate::cluster::ring::HashRing;
 use crate::cluster::shard::{LocalShard, Shard, ShardError};
-use crate::compile::{extract, Extracted};
+use crate::compile::{extract, extract_readonly, Extracted};
 use crate::dict::Dict;
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
@@ -84,9 +86,18 @@ impl ClusterEngine {
                     .into(),
             ));
         }
-        let old_num_shards = self.ring.num_shards();
-        if new_num_shards == old_num_shards {
-            return Ok(0); // no-op — a full rebuild would change nothing
+        if new_num_shards == self.ring.num_shards() {
+            // The LIVE ring already has this many shards — a full rebuild would change nothing.
+            // But a PRIOR resize may have swapped the ring in RAM and then FAILED to checkpoint,
+            // leaving the durable manifest at the old count; a bare `Ok(0)` here would falsely
+            // acknowledge that un-committed resize, and a restart would roll it back. So for a
+            // durable cluster, re-ensure the commit (checkpoint is idempotent — a clean one is
+            // cheap) + re-assert the on-disk dir set, so a retry HEALS rather than masks.
+            if self.data_dir.is_some() {
+                self.checkpoint()?;
+                self.remove_shard_dirs_at_or_above(new_num_shards);
+            }
+            return Ok(0);
         }
 
         let new_ring = HashRing::new(new_num_shards, self.vnodes)?;
@@ -119,7 +130,7 @@ impl ClusterEngine {
         // commits the new one, so deleting them earlier would break crash-recovery to the old K.
         if self.data_dir.is_some() {
             self.checkpoint()?;
-            self.remove_orphan_shard_dirs(old_num_shards, new_num_shards);
+            self.remove_shard_dirs_at_or_above(new_num_shards);
         }
         Ok(rebuilt)
     }
@@ -140,15 +151,16 @@ impl ClusterEngine {
         }
     }
 
-    /// The shared blue/green rebuild core (ADR-046/078): gather the deduped live corpus,
-    /// re-mint the dict under `new_norm`, re-place every query under `new_ring`, build fresh
-    /// shards, and atomically swap `norm`/`dict`/`ring`/`shards`. Does NOT checkpoint — the
-    /// caller owns the durable commit (so it can interleave control-plane + orphan-cleanup
-    /// steps first). Returns the number of live queries rebuilt.
+    /// The shared blue/green rebuild core (ADR-046/078): gather the deduped live corpus, obtain a
+    /// dict (REUSE the frozen one when `new_norm` is the current normalizer — a resize — else
+    /// re-mint it — a `set_vocab`), re-place every query under `new_ring`, build fresh shards, and
+    /// atomically swap `norm`/`dict`/`ring`/`shards`. Does NOT checkpoint — the caller owns the
+    /// durable commit (so it can interleave control-plane + orphan-cleanup steps first). Returns
+    /// the number of live queries rebuilt.
     ///
     /// `new_vocab`: `Some(v)` (a [`set_vocab`](Self::set_vocab) call) installs `v` and uses its
     /// equivalence groups; `None` (a [`resize`](Self::resize) call) PRESERVES the existing
-    /// `self.vocab` and re-resolves ITS equivalences onto the re-minted dict.
+    /// `self.vocab` (its equivalences are already installed on the reused dict).
     pub(super) fn rebuild_from_live(
         &mut self,
         new_norm: Arc<Normalizer>,
@@ -165,39 +177,60 @@ impl ClusterEngine {
         // the pre-tag rebuild.
         let live = self.live_corpus_tagged()?;
 
-        // Pass A — re-mint the dict over the live corpus under `new_norm` (interning +
-        // frequencies + hot-mask), exactly as `build`. With an unchanged normalizer (a resize)
-        // this yields a dict identical to the current one (same corpus, same interning order) ⇒
-        // an invariant fingerprint.
-        let mut dict = Dict::new();
+        // Pass A — produce the (dict, extracted) the rebuild re-places. Two paths, keyed off
+        // whether the NORMALIZER changed (an `Arc::ptr_eq` against the current one):
+        //
+        //  - **Normalizer unchanged (a resize):** the feature space cannot have changed, so REUSE
+        //    the frozen dict verbatim — same dense ids, same hot-mask, same fingerprint. A resize
+        //    is a ring change, NOT a model change: reusing the dict keeps the manifest's dict
+        //    fingerprint invariant and the control-plane's `dict_fingerprint` valid (re-minting
+        //    would renumber ids if the live corpus order differed from the original build, or if
+        //    post-freeze terms were added — a spurious fingerprint change desyncing cluster
+        //    state). `extract_readonly` resolves each query against it, auto-expanding installed
+        //    equivalences (ADR-054) and resolving post-freeze terms to their stable synthetic ids
+        //    (ADR-046) — so placement is exactly the live cluster's, just re-distributed.
+        //  - **Normalizer changed (a `set_vocab`):** re-mint the dict over the live corpus under
+        //    `new_norm` (interning + frequencies + hot-mask), exactly as `build`, then resolve +
+        //    expand the new vocab's equivalence groups onto it.
         let mut lc = String::new();
         let mut extracted: Vec<(u64, Extracted, String, Vec<TagId>)> =
             Vec::with_capacity(live.len());
-        for (logical, text, tag_ids) in live {
-            if let Ok(ast) = crate::dsl::parse(&text) {
-                let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
-                extracted.push((logical, ex, text, tag_ids));
+        let new_dict = if Arc::ptr_eq(&new_norm, &self.norm) {
+            let dict = Arc::clone(&self.dict);
+            for (logical, text, tag_ids) in live {
+                if let Ok(ast) = crate::dsl::parse(&text) {
+                    let ex = extract_readonly(&ast, &new_norm, &dict, &mut lc);
+                    extracted.push((logical, ex, text, tag_ids));
+                }
             }
-        }
-        dict.finalize_mask();
-        // Resolve declared/learned equivalence groups (ADR-054) against the freshly-minted dict
-        // and apply them via expansion: widen the already-extracted queries (so THIS rebuild's
-        // re-placement + ingest use the FN-safe widened form — a query whose anchor is now an
-        // any-of fans to every member's shard), then install the map on the dict so future
-        // incremental adds expand through `extract`. The groups come from `new_vocab` (set_vocab)
-        // or, when preserving, the EXISTING `self.vocab` (resize) — so a resize never silences a
-        // declared alias. No groups ⇒ no-op ⇒ byte-identical.
-        let equiv = new_vocab
-            .as_ref()
-            .or(self.vocab.as_deref())
-            .map(|v| v.resolve_equivalences(&new_norm, &dict));
-        if let Some(equiv) = equiv {
-            for (_, ex, _, _) in &mut extracted {
-                ex.expand_equivalences(&equiv);
+            dict
+        } else {
+            let mut dict = Dict::new();
+            for (logical, text, tag_ids) in live {
+                if let Ok(ast) = crate::dsl::parse(&text) {
+                    let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
+                    extracted.push((logical, ex, text, tag_ids));
+                }
             }
-            dict.set_equivalences(equiv);
-        }
-        let new_dict = Arc::new(dict);
+            dict.finalize_mask();
+            // Resolve declared/learned equivalence groups (ADR-054) against the freshly-minted
+            // dict and apply them via expansion: widen the already-extracted queries (so THIS
+            // rebuild's re-placement + ingest use the FN-safe widened form — a query whose anchor
+            // is now an any-of fans to every member's shard), then install the map on the dict so
+            // future incremental adds expand through `extract`. The groups come from `new_vocab`
+            // (set_vocab) or, when preserving, the EXISTING `self.vocab`. No groups ⇒ no-op.
+            let equiv = new_vocab
+                .as_ref()
+                .or(self.vocab.as_deref())
+                .map(|v| v.resolve_equivalences(&new_norm, &dict));
+            if let Some(equiv) = equiv {
+                for (_, ex, _, _) in &mut extracted {
+                    ex.expand_equivalences(&equiv);
+                }
+                dict.set_equivalences(equiv);
+            }
+            Arc::new(dict)
+        };
         let rebuilt = extracted.len();
 
         // Pass B — re-place each query under the NEW dict + NEW ring and bucket per shard. Tags
@@ -312,26 +345,42 @@ impl ClusterEngine {
         Ok(rebuilt)
     }
 
-    /// Best-effort removal of shard dirs left orphaned by a SHRINK (positions
-    /// `new_num_shards..old_num_shards`), called AFTER the manifest commit so the new manifest
-    /// no longer references them. An orphan left behind is benign for correctness (`open` reads
-    /// only `0..num_shards`), but removing it keeps the on-disk dir set exactly
-    /// `shard_000..shard_{K′-1}`, so a later GROW back through these positions cannot
-    /// self-restart `new_durable` from a stale sidecar. A no-op on grow (empty range).
-    fn remove_orphan_shard_dirs(&self, old_num_shards: usize, new_num_shards: usize) {
+    /// Best-effort removal of every top-level `shard_NNN` directory whose index is `≥
+    /// num_shards`, called AFTER the manifest commit so the committed manifest no longer
+    /// references them. This asserts the invariant "a committed cluster's on-disk dir set is
+    /// exactly `shard_000..shard_{num_shards-1}`": a SHRINK's orphan dirs are removed (so a later
+    /// GROW back through these positions cannot self-restart `new_durable` from a stale sidecar),
+    /// and the heal path (a same-K retry after a failed checkpoint) re-asserts it too. Scans
+    /// rather than taking an old count, so it is correct without knowing the prior shape. An
+    /// orphan left behind is benign for correctness (`open` reads only `0..num_shards`).
+    fn remove_shard_dirs_at_or_above(&self, num_shards: usize) {
         let Some(dir) = &self.data_dir else {
             return;
         };
-        for s in new_num_shards..old_num_shards {
-            let sd = shard_dir(dir, s);
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(idx) = name
+                .to_str()
+                .and_then(|n| n.strip_prefix("shard_"))
+                .and_then(|s| s.parse::<usize>().ok())
+            else {
+                continue; // not a shard dir (the manifest, the log, a replica is nested, …)
+            };
+            if idx < num_shards {
+                continue;
+            }
+            let sd = entry.path();
             match std::fs::remove_dir_all(&sd) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => self.emit(EngineEvent::DurabilityFailure {
                     op: DurabilityOp::WalReset,
                     detail: format!(
-                        "removing orphaned shard dir {} after a shrink failed (benign: it is not \
-                         in the committed manifest, so `open` ignores it)",
+                        "removing orphaned shard dir {} failed (benign: it is not in the committed \
+                         manifest, so `open` ignores it)",
                         sd.display()
                     ),
                     error: e.to_string(),

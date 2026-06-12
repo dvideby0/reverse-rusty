@@ -51,10 +51,14 @@ explicitly:
   shared `apply` funnel) so `collect_load` / `assignment_for` stay consistent.
 - **`pending_repair`** (ADR-047) is cleared (its shard indices index the old space; the durable
   backstop is the log).
-- **Vocab + tags preserved:** the normalizer is reused as-is and the existing vocab's equivalence
-  groups are re-resolved onto the re-minted dict (a declared alias does not go silent); per-query
-  tags carry through as stored `TagId`s (ADR-074). The re-minted dict is identical (same corpus,
-  same normalizer) ⇒ the dict fingerprint is **invariant** across a resize.
+- **Dict + vocab + tags preserved:** because the normalizer is unchanged, the frozen dict is
+  REUSED verbatim (`extract_readonly` resolves each query against it, auto-expanding installed
+  equivalences and resolving post-freeze terms to their stable synthetic ids) — so a resize is a
+  ring change, not a model change, and the dict fingerprint is **invariant by construction** (the
+  manifest's and the control-plane's `dict_fingerprint` stay valid). Re-minting instead would
+  renumber ids whenever the original build interned in a different order than the sorted live
+  corpus, or whenever a post-freeze term existed — a spurious fingerprint change desyncing cluster
+  state (codex P2). Per-query tags carry through as stored `TagId`s (ADR-074).
 
 **Why this is safe.** Every step reuses an already-oracle-proven mechanism (the `set_vocab`
 rebuild, the `checkpoint` fail-closed commit ordering, the `open` reattach). Re-placing the full
@@ -70,6 +74,14 @@ with an invariant dict fingerprint; a shrink leaves exactly `K′` shard dirs; a
 add replays over the resized manifest; tags + a declared alias carry through the resize across
 the restart; and **`shrink_then_regrow_does_not_resurrect_deleted_queries`** — the changed-dir-set
 hazard, mutation-validated (disabling the dir cleanup fails it).
+
+**Codex review fixes (both mutation-validated).** P1 — a same-K resize no longer bare-acks: a
+durable cluster re-checkpoints + re-asserts the on-disk dir set, so a retry after a failed
+checkpoint heals the manifest instead of falsely acknowledging an un-committed resize
+(`same_count_resize_recommits_on_a_durable_cluster`). P2 — the dict is reused (not re-minted), so
+the fingerprint is invariant for an out-of-order corpus + a post-freeze add
+(`resize_preserves_dict_fingerprint_for_unsorted_corpus_with_post_freeze_add`; the discriminating
+test the original `build_corpus`-ordered one masked).
 
 **See also:** ADR-046 (the `set_vocab` blue/green rebuild this reuses), ADR-027 (placement +
 the cover proof), ADR-031/032 (the durable manifest + reattach), ADR-045 (the autoscaler split
