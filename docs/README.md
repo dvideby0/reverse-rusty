@@ -26,10 +26,12 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 ## Map — what to read when
 
 ### Status & decisions
-- [`STATUS.md`](STATUS.md) — **what's built vs design-only**, the measured numbers in brief, and a
-  one-line tier glance. Read when asking "is X implemented?".
-- [`roadmap.md`](roadmap.md) — the **prioritized roadmap**: design-only work, the Cluster v1 gate, the
-  operational-polish backlog, and evaluated-and-declined. Read when asking "what's next?".
+- [`STATUS.md`](STATUS.md) — **what's built vs design-only**: a one-line-per-capability inventory
+  with ADR pointers, the measured numbers in brief, and a one-line tier glance. Read when asking
+  "is X implemented?".
+- [`roadmap.md`](roadmap.md) — the **prioritized roadmap**: **open work only** (a shipped item is
+  deleted — the ADR is the record), plus the operational-polish backlog and evaluated-and-declined.
+  Read when asking "what's next?".
 - [`DECISIONS.md`](DECISIONS.md) — the **index** of ADRs (architecture decision records); each ADR's
   full record is one file under [`decisions/`](decisions/). Read when asking "why was it done this
   way?" or "why was X *not* built?" (declined → ADR-019).
@@ -96,8 +98,9 @@ never a second copy. This is what keeps the docs from drifting.
 | Dependency versions | `engine/Cargo.toml` | `../README.md` lists crate *purposes* (no versions); docs never pin versions. |
 | Performance numbers | [`performance/results.md`](performance/results.md) (exact) + [`performance/benchmark-results.txt`](performance/benchmark-results.txt) (invariants) | everywhere else rounds (`~710k`) and links. |
 | Module map (file → purpose → ADR) | [`../CLAUDE.md`](../CLAUDE.md) | `design/README.md` §4 keeps a coarser design-topic↔module view + link. |
-| Implemented vs design-only | [`STATUS.md`](STATUS.md) | `../CLAUDE.md` keeps a 3–4 line skeleton + link. |
-| Roadmap / next steps | [`roadmap.md`](roadmap.md) | [`STATUS.md`](STATUS.md) keeps a one-line tier glance; "tracked in Tier N" refs resolve via either. |
+| Implemented vs design-only | [`STATUS.md`](STATUS.md) (one line per capability) | `../CLAUDE.md` keeps a 3–4 line skeleton + link. |
+| Roadmap / next steps | [`roadmap.md`](roadmap.md) (open items only) | [`STATUS.md`](STATUS.md) keeps a one-line tier glance; "tracked in Tier N" refs resolve via either. |
+| Completed-work narrative (what shipped, how, scope, proof) | the one ADR file in [`decisions/`](decisions/) | `STATUS.md` carries one line + the ADR number; `roadmap.md` deletes the item on ship. Never a second prose copy. |
 | Architecture decisions / "why" | [`DECISIONS.md`](DECISIONS.md) index → one file per ADR in [`decisions/`](decisions/) | referenced by `ADR-NNN` (pointers, never copies). |
 | Test count | `cargo test` | docs describe the suites qualitatively; no hand-maintained integer. |
 | Testing / benchmark / CI workflow | [`testing.md`](testing.md) | `../CLAUDE.md` Build/test/run keeps the commands; CI rationale in [`DECISIONS.md`](DECISIONS.md) ADR-024; benchmark numbers in `performance/`. |
@@ -120,8 +123,10 @@ link-checker in CI — the discipline has to live here).
   - New architecture decision → a new `decisions/adr-NNN-slug.md` file (next number) + an index row in
     [`DECISIONS.md`](DECISIONS.md); **never renumber or delete** — superseded ones are marked, not removed.
   - Component/algorithm design → the matching `design/<topic>.md` (extend, don't fork).
-  - "Is it built?" → [`STATUS.md`](STATUS.md) (the home for implemented-vs-design); "what's next?" →
-    [`roadmap.md`](roadmap.md) (the prioritized roadmap). Design docs link here, they don't re-list.
+  - "Is it built?" → [`STATUS.md`](STATUS.md) — **one line per capability**, the ADR carries the
+    narrative. "What's next?" → [`roadmap.md`](roadmap.md) — **open items only**. When an item
+    ships: add/extend the one STATUS line, **delete** the roadmap item (don't strike it through),
+    and let the ADR be the permanent record. Design docs link here, they don't re-list.
   - Benchmark numbers → append a dated entry to [`performance/benchmark-results.txt`](performance/benchmark-results.txt)
     first, then narrate in [`performance/results.md`](performance/results.md).
   - Dependency version → `engine/Cargo.toml` only. Docs describe a crate's purpose, never its version.
