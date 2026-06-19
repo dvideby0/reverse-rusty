@@ -75,7 +75,7 @@ With a token configured (`RR_AUTH_TOKEN` env var or `--auth-token`; the env var 
 values appear in process listings), **every non-GET/HEAD request requires
 `Authorization: Bearer <token>`** except the read-via-POST percolate endpoints (`POST /_search`,
 `POST /_mpercolate`). That default-deny rule covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
-`_vocab` writes (including `/_vocab/learn*` and `/_vocab/aliases/*`), `_settings` writes — and any
+`_backup`, `_vocab` writes (including `/_vocab/learn*` and `/_vocab/aliases/*`), `_settings` writes — and any
 future mutating endpoint, which fails closed rather than open. Reads stay open unless
 `--auth-protect-reads` extends the gate to them too (stored queries are data worth protecting on an
 exposed port); only `GET /_health` is always open so liveness probes keep working.
@@ -120,6 +120,7 @@ Endpoints are grouped by concern — open the one you need:
 - **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
 - **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias registry (`/_vocab/aliases*`, ADR-060).
 - **[Settings](api/settings.md)** — read + runtime-update engine settings (`GET`/`PUT /_settings`).
+- **[Backup & restore](../operations/backup-restore.md)** — snapshot durable state (`POST /_backup`); restore via `--data-dir` (ADR-079).
 
 The full method/path matrix is below.
 
@@ -136,6 +137,7 @@ The full method/path matrix is below.
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |
 | `/_flush` | POST | Flush memtable to immutable segment |
 | `/_compact` | POST | Force segment compaction |
+| `/_backup` | POST | Snapshot durable state to a server-side dir (body `{"dest":"..."}`); restore via `--data-dir` ([backup/restore](../operations/backup-restore.md), ADR-079) |
 | `/_stats` | GET | JSON metrics snapshot |
 | `/_cat/stats` | GET | Human-readable metrics |
 | `/_cat/segments` | GET | Per-segment LSM detail (text table or `?format=json`) |
@@ -222,6 +224,7 @@ Cluster-only endpoints:
 | Endpoint | Method | Description |
 |---|---|---|
 | `/_checkpoint` | POST | The cluster durability commit point (seal shards + commit the coordinator manifest + truncate the log, ADR-031/032); returns the new `epoch` |
+| `/_backup` | POST | Snapshot the cluster's durable state to a server-side dir (body `{"dest":"..."}`): checkpoint, then copy the coordinator manifest + per-shard segments + sources + the log. Restore via `--data-dir` ([backup/restore](../operations/backup-restore.md), ADR-079) |
 | `/_cat/shards` | GET | Per-shard query counts + node assignments (text table or `?format=json`) |
 | `/_cluster/state` | GET | The committed control-plane document (membership + shard→node map + ring params, ADR-037) |
 | `/_cluster/nodes` | POST | Register a cluster member (`{"id": N, "addr": "...", "role": "data"\|"manager"}`) |

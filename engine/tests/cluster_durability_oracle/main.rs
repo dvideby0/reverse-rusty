@@ -18,6 +18,7 @@ mod harness;
 
 mod attach;
 mod backends;
+mod backup;
 mod checkpoint;
 mod core;
 mod replication;

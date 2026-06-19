@@ -8,6 +8,7 @@
 //!   POST /_bulk              NDJSON bulk ingest ({action}\n{source}\n...)
 //!   POST /_flush             Flush memtable to immutable segment
 //!   POST /_compact           Force compaction
+//!   POST /_backup            Snapshot durable state to a dir (body: {"dest":"..."})
 //!   GET  /_stats             JSON metrics snapshot
 //!   GET  /_cat/stats         Human-readable metrics
 //!   GET  /_cat/segments      Per-segment LSM detail (text table; ?format=json)
@@ -70,8 +71,8 @@ use reverse_rusty::segment::Engine;
 
 use cli::Cli;
 use handlers::{
-    api_root, bulk_ingest, cat_segments, cat_stats, compact, delete_doc, flush, get_aliases,
-    get_doc, get_settings, get_vocab, health, import_aliases, learn_and_apply_aliases,
+    api_root, backup, bulk_ingest, cat_segments, cat_stats, compact, delete_doc, flush,
+    get_aliases, get_doc, get_settings, get_vocab, health, import_aliases, learn_and_apply_aliases,
     learn_and_apply_vocab, learn_vocab, mpercolate, prometheus_metrics, put_doc, put_settings,
     put_vocab, search, stats,
 };
@@ -385,6 +386,7 @@ async fn main() {
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))
         .route("/_compact", post(compact))
+        .route("/_backup", post(backup))
         .route("/_stats", get(stats))
         .route("/_cat/stats", get(cat_stats))
         .route("/_cat/segments", get(cat_segments))
@@ -419,7 +421,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply",
+        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, POST /_flush, POST /_compact, POST /_backup, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply",
         "server listening"
     );
 

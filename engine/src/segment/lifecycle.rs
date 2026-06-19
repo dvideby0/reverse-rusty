@@ -15,8 +15,11 @@
 //!     bookkeeping, live sources/tags, `recompile_stale_segments`, learn-and-apply
 //!   - [`accessors`] — observer hook, config get/set, `snapshot`, and the read-only
 //!     engine-handle accessors (dict / normalizer / segment filenames / explain)
+//!   - [`backup`]    — `backup_to`: a consistent on-disk snapshot of `data_dir`
+//!     (ADR-079); restore is `open`
 
 mod accessors;
+mod backup;
 mod construct;
 mod recovery;
 mod vocab;

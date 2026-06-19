@@ -8,6 +8,7 @@
 
 mod harness;
 
+mod backup;
 mod compaction;
 mod durability;
 mod round_trip;

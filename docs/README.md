@@ -57,6 +57,10 @@ Three levels, each giving *just enough* to decide whether to go deeper:
   method/path matrix); per-group endpoint detail lives in [`reference/api/`](reference/api/).
 - [`reference/dsl.md`](reference/dsl.md) — the query DSL, normalization, and vocabulary.
 
+### Operations
+- [`operations/backup-restore.md`](operations/backup-restore.md) — back up + restore a deployment
+  (single-node or cluster); the safety guarantee + the FS-snapshot zero-stall path (ADR-079).
+
 ### Performance
 - [`performance/README.md`](performance/README.md) — headline numbers + how to reproduce.
 - [`performance/results.md`](performance/results.md) — **the canonical, detailed measurements**,

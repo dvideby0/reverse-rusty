@@ -6,6 +6,7 @@
 
 mod admin;
 mod alias;
+mod backup;
 mod cluster;
 mod doc;
 mod search;
@@ -15,14 +16,16 @@ pub(crate) use admin::{
     api_root, cat_segments, cat_stats, compact, flush, health, prometheus_metrics, stats,
 };
 pub(crate) use alias::{get_aliases, import_aliases, learn_and_apply_aliases};
+pub(crate) use backup::backup;
 pub(crate) use cluster::{
-    cluster_bulk, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats, cluster_checkpoint,
-    cluster_compact, cluster_delete_doc, cluster_deregister_node, cluster_flush,
-    cluster_get_aliases, cluster_get_doc, cluster_get_settings, cluster_get_vocab, cluster_handoff,
-    cluster_health, cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
-    cluster_learn_vocab, cluster_metrics, cluster_mpercolate, cluster_put_doc,
-    cluster_put_settings, cluster_put_vocab, cluster_rebalance, cluster_register_node,
-    cluster_resize, cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
+    cluster_backup, cluster_bulk, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats,
+    cluster_checkpoint, cluster_compact, cluster_delete_doc, cluster_deregister_node,
+    cluster_flush, cluster_get_aliases, cluster_get_doc, cluster_get_settings, cluster_get_vocab,
+    cluster_handoff, cluster_health, cluster_import_aliases, cluster_learn_aliases,
+    cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_metrics, cluster_mpercolate,
+    cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_rebalance,
+    cluster_register_node, cluster_resize, cluster_resync, cluster_root, cluster_search,
+    cluster_state, cluster_stats,
 };
 pub(crate) use doc::{bulk_ingest, delete_doc, get_doc, put_doc};
 pub(crate) use search::{mpercolate, search};

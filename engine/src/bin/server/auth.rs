@@ -211,6 +211,7 @@ mod tests {
             (Method::POST, "/_bulk"),
             (Method::POST, "/_flush"),
             (Method::POST, "/_compact"),
+            (Method::POST, "/_backup"),
             (Method::PUT, "/_vocab"),
             (Method::POST, "/_vocab/learn"),
             (Method::POST, "/_vocab/learn_and_apply"),
