@@ -232,6 +232,33 @@ fn backup_refuses_in_memory_cluster() {
     assert!(!dest.exists(), "no dest created for an in-memory cluster");
 }
 
+/// An existing dest is rejected as a 400-class `Config` error BEFORE `checkpoint()`
+/// runs (codex P2): the epoch is unchanged, proving the bad request had no side
+/// effect (no epoch bump / log truncation).
+#[test]
+fn backup_refuses_existing_dest_without_checkpointing() {
+    let (queries, _titles) = build_corpus();
+    let dir = unique_dir("backup_dest_exists_src");
+    let backup = unique_dir("backup_dest_exists_dest");
+    std::fs::create_dir_all(&backup).unwrap(); // pre-existing dest
+
+    let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+        .expect("durable cluster builds");
+    let epoch_before = cluster.epoch();
+    match cluster.backup_to(&backup) {
+        Err(ShardError::Config(_)) => {}
+        other => panic!("expected Config error for an existing dest, got {other:?}"),
+    }
+    assert_eq!(
+        cluster.epoch(),
+        epoch_before,
+        "checkpoint must not run when the dest already exists"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&backup);
+}
+
 /// `verify_cluster_backup` catches a corrupted per-shard segment.
 #[test]
 fn cluster_backup_corrupt_segment_fails_verify() {

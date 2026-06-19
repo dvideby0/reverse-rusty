@@ -28,7 +28,7 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::{read_cluster_manifest, read_manifest, MmapSegment};
+use super::{load_query_sources, read_cluster_manifest, read_manifest, MmapSegment};
 
 // On-disk filenames. Mirrored from the writers (single-node:
 // segment/persistence.rs + segment/lifecycle/{construct,recovery}.rs; cluster:
@@ -143,11 +143,14 @@ fn commit_staging(staging: &Path, dest: &Path) -> io::Result<()> {
     }
 }
 
-/// Run `stage` into a fresh staging dir, then atomically rename it onto `dest`.
-/// Refuses a pre-existing `dest`; cleans the staging dir on any failure.
-fn staged_backup<F>(dest: &Path, stage: F) -> Result<(), BackupError>
+/// Run `stage` into a fresh staging dir, `verify` the staged tree, then atomically
+/// rename it onto `dest`. Refuses a pre-existing `dest`; cleans the staging dir on any
+/// failure. Verifying BEFORE the commit means a verification failure leaves NO `dest`
+/// behind (a retry isn't blocked by a half-written backup).
+fn staged_backup<S, V>(dest: &Path, stage: S, verify: V) -> Result<(), BackupError>
 where
-    F: FnOnce(&Path) -> Result<(), BackupError>,
+    S: FnOnce(&Path) -> Result<(), BackupError>,
+    V: FnOnce(&Path) -> Result<(), BackupError>,
 {
     if dest.exists() {
         return Err(BackupError::DestExists(dest.to_path_buf()));
@@ -156,7 +159,7 @@ where
     // Remove any leftover staging from a prior aborted attempt.
     std::fs::remove_dir_all(&staging).ok();
     std::fs::create_dir_all(&staging)?;
-    match stage(&staging) {
+    match stage(&staging).and_then(|()| verify(&staging)) {
         Ok(()) => {
             commit_staging(&staging, dest)?;
             Ok(())
@@ -175,7 +178,11 @@ where
 /// MUST hold the engine's write-path exclusion for the duration of this call so no
 /// concurrent compaction deletes a referenced segment mid-copy.
 pub fn copy_engine_dir(src: &Path, dest: &Path) -> Result<(), BackupError> {
-    staged_backup(dest, |staging| stage_engine_dir(src, staging))
+    staged_backup(
+        dest,
+        |staging| stage_engine_dir(src, staging),
+        verify_backup,
+    )
 }
 
 fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
@@ -220,7 +227,11 @@ fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
 /// and every clean shard's `sources.dat` exists) and hold the cluster write lock
 /// across both the checkpoint and this copy.
 pub fn copy_cluster_dir(src: &Path, dest: &Path) -> Result<(), BackupError> {
-    staged_backup(dest, |staging| stage_cluster_dir(src, staging))
+    staged_backup(
+        dest,
+        |staging| stage_cluster_dir(src, staging),
+        verify_cluster_backup,
+    )
 }
 
 fn stage_cluster_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
@@ -261,21 +272,24 @@ fn shard_dir_name(shard: usize) -> String {
     format!("shard_{shard:03}")
 }
 
-/// Validate a single-node backup: the manifest (if present) parses and every
-/// segment it references opens + passes its CRC check. A manifest-absent backup
-/// (a never-checkpointed engine whose state is WAL-only, or an empty engine) is
-/// structurally valid and accepted.
+/// Validate a single-node backup: the manifest (if present) parses, every segment it
+/// references opens + passes its CRC check, and the `sources.dat` store (if present)
+/// loads — i.e. everything `Engine::open` will read. A manifest-absent backup (a
+/// never-checkpointed engine whose state is WAL-only, or an empty engine) is
+/// structurally valid; the WAL itself is validated by `Engine::backup_to` before the
+/// copy (kept out of `storage` to avoid a `storage`→`wal` dependency).
 pub fn verify_backup(dir: &Path) -> Result<(), BackupError> {
     let manifest_path = dir.join(ENGINE_MANIFEST);
-    if !manifest_path.exists() {
-        return Ok(());
+    if manifest_path.exists() {
+        let manifest = read_manifest(&manifest_path)?;
+        verify_segments(&dir.join(SEGMENTS_DIR), &manifest.segment_files)?;
     }
-    let manifest = read_manifest(&manifest_path)?;
-    verify_segments(&dir.join(SEGMENTS_DIR), &manifest.segment_files)
+    verify_sources(&dir.join(SOURCES))
 }
 
-/// Validate a cluster backup: the cluster manifest parses and every per-shard
-/// referenced segment opens + passes its CRC check.
+/// Validate a cluster backup: the cluster manifest parses and, for every shard, each
+/// referenced segment opens + passes its CRC check and the shard's `sources.dat` loads
+/// — everything `ClusterEngine::open` will read per shard.
 pub fn verify_cluster_backup(dir: &Path) -> Result<(), BackupError> {
     let manifest_path = dir.join(CLUSTER_MANIFEST);
     if !manifest_path.exists() {
@@ -283,7 +297,9 @@ pub fn verify_cluster_backup(dir: &Path) -> Result<(), BackupError> {
     }
     let manifest = read_cluster_manifest(&manifest_path)?;
     for (i, files) in manifest.segment_registry.iter().enumerate() {
-        verify_segments(&dir.join(shard_dir_name(i)).join(SEGMENTS_DIR), files)?;
+        let shard = dir.join(shard_dir_name(i));
+        verify_segments(&shard.join(SEGMENTS_DIR), files)?;
+        verify_sources(&shard.join(SOURCES))?;
     }
     Ok(())
 }
@@ -303,10 +319,31 @@ fn verify_segments(seg_dir: &Path, files: &[String]) -> Result<(), BackupError> 
     Ok(())
 }
 
+/// Validate a `sources.dat` store (no-op if absent): `open` loads it via the same
+/// `load_query_sources`, so a corrupt copy must fail the backup, not the restore.
+fn verify_sources(path: &Path) -> Result<(), BackupError> {
+    if path.exists() {
+        load_query_sources(path).map_err(|e| {
+            BackupError::Io(io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+        })?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::{write_cluster_manifest, write_manifest, ClusterManifest, Manifest};
+    use crate::storage::{
+        write_cluster_manifest, write_manifest, ClusterManifest, Manifest, SourceStore,
+    };
+
+    /// Write a valid `sources.dat` (so the round-trip fixtures pass the new
+    /// sources validation; the rejection tests write garbage on purpose).
+    fn write_valid_sources(path: &Path) {
+        let store = SourceStore::new_resident();
+        store.insert(1, "a stored query".into());
+        store.write_to(path).unwrap();
+    }
 
     fn empty_manifest(files: Vec<String>) -> Manifest {
         Manifest {
@@ -337,7 +374,7 @@ mod tests {
         // An empty-corpus manifest (no segments) + a WAL + sources.dat.
         write_manifest(&empty_manifest(vec![]), &src.join(ENGINE_MANIFEST)).unwrap();
         std::fs::write(src.join(ENGINE_WAL), b"wal-bytes").unwrap();
-        std::fs::write(src.join(SOURCES), b"sources-bytes").unwrap();
+        write_valid_sources(&src.join(SOURCES));
 
         let dest = root.join("dest");
         copy_engine_dir(&src, &dest).unwrap();
@@ -417,7 +454,7 @@ mod tests {
         // Two shards, both with empty registries (empty corpus) + a coordinator log.
         for i in 0..2 {
             std::fs::create_dir_all(src.join(shard_dir_name(i)).join(SEGMENTS_DIR)).unwrap();
-            std::fs::write(src.join(shard_dir_name(i)).join(SOURCES), b"src").unwrap();
+            write_valid_sources(&src.join(shard_dir_name(i)).join(SOURCES));
         }
         std::fs::write(src.join(CLUSTER_LOG), b"clog").unwrap();
         let manifest = ClusterManifest {
@@ -452,5 +489,77 @@ mod tests {
             Err(BackupError::MissingManifest(_)) => {}
             other => panic!("expected MissingManifest, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn verify_rejects_corrupt_sources() {
+        // A corrupt sources.dat (open would fail loading it) must fail verify, not be
+        // silently accepted (codex P1).
+        let root = tmp_root("engine-corrupt-sources");
+        let dir = root.join("backup");
+        std::fs::create_dir_all(dir.join(SEGMENTS_DIR)).unwrap();
+        write_manifest(&empty_manifest(vec![]), &dir.join(ENGINE_MANIFEST)).unwrap();
+        std::fs::write(dir.join(SOURCES), b"not a valid sources store").unwrap();
+        assert!(
+            verify_backup(&dir).is_err(),
+            "corrupt sources must fail verify"
+        );
+    }
+
+    #[test]
+    fn cluster_verify_rejects_corrupt_shard_sources() {
+        // A corrupt per-shard sources.dat must fail verify (codex P1): otherwise the
+        // endpoint acks a backup ClusterEngine::open later refuses.
+        let root = tmp_root("cluster-corrupt-sources");
+        let dir = root.join("backup");
+        for i in 0..2 {
+            std::fs::create_dir_all(dir.join(shard_dir_name(i)).join(SEGMENTS_DIR)).unwrap();
+        }
+        write_valid_sources(&dir.join(shard_dir_name(0)).join(SOURCES));
+        std::fs::write(dir.join(shard_dir_name(1)).join(SOURCES), b"corrupt").unwrap();
+        let manifest = ClusterManifest {
+            epoch: 1,
+            snapshot_pos: 0,
+            dict_fingerprint: 0,
+            num_shards: 2,
+            vnodes: 64,
+            include_broad: true,
+            segment_registry: vec![vec![], vec![]],
+            next_seg_ids: vec![1, 1],
+            dict_data: Vec::new(),
+            vocab_data: Vec::new(),
+            tag_dict_data: Vec::new(),
+        };
+        write_cluster_manifest(&manifest, &dir.join(CLUSTER_MANIFEST)).unwrap();
+        assert!(
+            verify_cluster_backup(&dir).is_err(),
+            "corrupt shard sources must fail verify"
+        );
+    }
+
+    #[test]
+    fn copy_verifies_before_commit_so_a_bad_source_leaves_no_dest() {
+        // A manifest referencing a corrupt segment fails verification, which now runs
+        // on the staging tree BEFORE the rename (codex P2) — so no dest is created and
+        // a retry isn't blocked by a half-written backup.
+        let root = tmp_root("verify-before-commit");
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join(SEGMENTS_DIR)).unwrap();
+        std::fs::write(src.join(SEGMENTS_DIR).join("seg_000001.seg"), b"garbage").unwrap();
+        write_manifest(
+            &empty_manifest(vec!["seg_000001.seg".into()]),
+            &src.join(ENGINE_MANIFEST),
+        )
+        .unwrap();
+        let dest = root.join("dest");
+        match copy_engine_dir(&src, &dest) {
+            Err(BackupError::CorruptSegment { .. }) => {}
+            other => panic!("expected CorruptSegment, got {other:?}"),
+        }
+        assert!(
+            !dest.exists(),
+            "verify failure must not leave a dest behind"
+        );
+        assert!(!staging_dir(&dest).exists(), "staging must be cleaned up");
     }
 }

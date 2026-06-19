@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::segment::Engine;
 use crate::storage::{self, BackupError};
+use crate::wal::Wal;
 
 impl Engine {
     /// Back up this engine's durable state into `dest` (which must not already exist).
@@ -17,7 +18,8 @@ impl Engine {
     /// construction. Reads keep flowing off the lock-free snapshot. The copy is
     /// manifest-driven (orphan `.seg` files are skipped) and includes `sources.dat`
     /// and the WAL; on restore [`Engine::open`] replays the WAL tail, so no flush is
-    /// forced here. The produced backup is verified before returning.
+    /// forced here. `copy_engine_dir` verifies the staged tree (segments + sources)
+    /// before the atomic commit, so a failure leaves no `dest` behind.
     ///
     /// Returns [`BackupError::NotDurable`] for an in-memory engine,
     /// [`BackupError::PersistenceDegraded`] when a prior durability write failed
@@ -30,7 +32,19 @@ impl Engine {
         if !self.persistence_healthy {
             return Err(BackupError::PersistenceDegraded);
         }
-        storage::copy_engine_dir(&src, dest)?;
-        storage::verify_backup(dest)
+        // Validate the WAL before snapshotting it: a never-flushed engine's acked
+        // writes live ONLY here, and the copy is byte-faithful, so a recoverable
+        // source WAL ⇒ a recoverable backup WAL. `Wal::recover` is exactly what
+        // `open` runs — it tolerates a torn tail (the documented crash semantics)
+        // and errs only on a missing/too-small/bad-magic file (real corruption we
+        // must not silently snapshot). This lives here, not in `storage`, to avoid a
+        // `storage`→`wal` dependency.
+        let wal_path = src.join("wal.log");
+        if wal_path.exists() {
+            Wal::recover(&wal_path).map_err(|e| {
+                BackupError::Io(std::io::Error::new(e.kind(), format!("wal.log: {e}")))
+            })?;
+        }
+        storage::copy_engine_dir(&src, dest)
     }
 }
