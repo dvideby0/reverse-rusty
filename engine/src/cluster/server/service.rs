@@ -151,7 +151,12 @@ impl ShardService for ShardServer {
                     logical: it.logical_id,
                     ex,
                     dsl: it.dsl,
-                    version: it.version.max(1),
+                    // Store the wire version verbatim — the coordinator's REST layer already
+                    // defaulted an absent version to 1 before placing, so an explicit value
+                    // (incl. 0) is caller-supplied and must round-trip identically to the
+                    // in-process / single-node path. Clamping here was a deployment-dependent
+                    // divergence: the coordinator logged N while the shard stored N.max(1).
+                    version: it.version,
                     tags: proto::tags_from_proto(it.tags),
                     // The wire is dict-agnostic (raw tags only) — pre-resolved ids never arrive.
                     tag_ids: Vec::new(),
@@ -187,9 +192,12 @@ impl ShardService for ShardServer {
             }));
         };
         let tags = proto::tags_from_proto(item.tags);
+        // Store the wire version verbatim (see `ingest_extracted`): the coordinator already
+        // defaulted an absent version to 1, so an explicit value (incl. 0) is caller-supplied
+        // and must match the in-process / single-node store rather than be clamped to 1.
         let out = st
             .shard
-            .insert_extracted_with_tags(&ex, item.logical_id, item.version.max(1), &item.dsl, &tags)
+            .insert_extracted_with_tags(&ex, item.logical_id, item.version, &item.dsl, &tags)
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::InsertReply {
             present: out.is_some(),

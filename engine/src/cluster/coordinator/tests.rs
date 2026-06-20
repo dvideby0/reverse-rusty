@@ -562,6 +562,59 @@ fn upsert_threads_request_version_into_the_log_frame() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// B2 follow-up (codex review): a blue/green rebuild (`set_vocab` / resize) must PRESERVE
+/// each query's stored version rather than reset it to 1. Before the fix the rebuild gather
+/// dropped the version and `rebuild_from_live` recreated every `PlacedQuery` with
+/// `version: 1`, so a `PUT {"version":42}` was silently rewritten to 1 (and the checkpoint
+/// truncated the original log frame — durable divergence from single-node). Asserts the
+/// gather carries the stored version across the rebuild.
+#[test]
+fn rebuild_preserves_stored_query_version() {
+    let dir = scratch_dir("rebuild_version");
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let seed = vec![(1u64, "1994 topps".to_string())];
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
+
+    // Upsert id 5 at a non-default version, then confirm the gather sees version 42.
+    cluster
+        .upsert_query(5, "1995 fleer", 42)
+        .expect("versioned upsert");
+    let before = cluster.live_corpus_tagged().expect("gather");
+    let pre = before.iter().find(|(l, ..)| *l == 5).map(|&(_, _, v, _)| v);
+    assert_eq!(
+        pre,
+        Some(42),
+        "gather must see the stored version before rebuild"
+    );
+
+    // A vocabulary change forces a blue/green rebuild of every shard.
+    let mut new_vocab = crate::vocab::Vocab::new();
+    new_vocab.add_synonym("rc", "term:rookie", crate::dict::FeatureKind::Category);
+    cluster.set_vocab(new_vocab).expect("set_vocab rebuild");
+
+    // After the rebuild id 5 must STILL carry version 42 (not reset to 1) and still match.
+    let after = cluster.live_corpus_tagged().expect("gather after rebuild");
+    let post = after.iter().find(|(l, ..)| *l == 5).map(|&(_, _, v, _)| v);
+    assert_eq!(
+        post,
+        Some(42),
+        "rebuild must preserve the stored version, not reset it to 1"
+    );
+    assert!(
+        cluster
+            .percolate("1995 fleer")
+            .expect("percolate")
+            .contains(&5),
+        "the re-placed query must still match after the rebuild"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Tier-D: a degenerate same-node handoff (`from == to`) is a silent no-op — it must NOT
 /// fence the source then flip routing onto itself. The `from == to` guard sits before the
 /// handle resolve, so the self-handoff returns immediately, emitting no event and never

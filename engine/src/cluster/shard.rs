@@ -142,6 +142,12 @@ impl std::error::Error for ShardError {}
 /// [`ReplicatedShard`]: super::replica::ReplicatedShard
 pub(crate) type EventSink = Arc<dyn Fn(&crate::events::EngineEvent) + Send + Sync>;
 
+/// One live query as gathered for a blue/green rebuild (`set_vocab` / resize, ADR-074):
+/// `(logical, dsl, version, tag_ids)`. The version + tags ride the gather so the rebuild
+/// re-places each query at the version it was durably stored with (not reset to 1) and
+/// carries its tags (interned or post-freeze synthetic) to its new shard.
+pub(crate) type LiveTaggedQuery = (u64, String, u32, Vec<crate::tagdict::TagId>);
+
 /// One shard, local or remote — the seam that lets a coordinator hold a mix of
 /// in-process and (eventually) networked shards behind one type.
 ///
@@ -209,14 +215,13 @@ pub(crate) trait Shard: Send + Sync {
         ))
     }
 
-    /// [`live_sources`](Self::live_sources) plus each live query's stored `TagId`s — the
-    /// gather behind the TAGGED vocabulary rebuild (ADR-074): `ClusterEngine::set_vocab`
-    /// re-places every query and must carry its tags (interned or post-freeze synthetic)
-    /// to the new shard verbatim, since a synthetic id has no recoverable string. Same
-    /// in-process-only boundary (and default `Err`) as `live_sources`.
-    fn live_sources_tagged(
-        &self,
-    ) -> Result<Vec<(u64, String, Vec<crate::tagdict::TagId>)>, ShardError> {
+    /// [`live_sources`](Self::live_sources) plus each live query's stored `version` and
+    /// `TagId`s — the gather behind the TAGGED vocabulary rebuild (ADR-074):
+    /// `ClusterEngine::set_vocab` re-places every query and must carry its tags (interned or
+    /// post-freeze synthetic, since a synthetic id has no recoverable string) AND its stored
+    /// version to the new shard verbatim, so a rebuild re-places at version N rather than
+    /// resetting to 1. Same in-process-only boundary (and default `Err`) as `live_sources`.
+    fn live_sources_tagged(&self) -> Result<Vec<LiveTaggedQuery>, ShardError> {
         Err(ShardError::Config(
             "live_sources_tagged is only supported for in-process shards".into(),
         ))

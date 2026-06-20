@@ -111,7 +111,10 @@ pub(crate) fn translog_entry_to_mutation(e: TranslogEntry) -> Option<(LogPos, Cl
     let m = match e.op? {
         translog_entry::Op::Add(item) => ClusterMutation::Add {
             logical: item.logical_id,
-            version: item.version.max(1),
+            // Replay the logged version verbatim: a translog frame carries the version the
+            // source shard durably stored, so clamping it to 1 here would make a recovered
+            // replica diverge from its primary for any query stored at version 0.
+            version: item.version,
             dsl: item.dsl,
             // Tags ride the translog entry (ADR-055), so a peer-recovered replica keeps them.
             tags: tags_from_proto(item.tags),
@@ -226,5 +229,36 @@ mod tests {
     fn round_trip_is_identity() {
         let e = engine_sample();
         assert_eq!(stats_to_engine(stats_from_engine(e)), e);
+    }
+
+    // Codex review (Finding 2): a translog `Add` replay must reproduce the LOGGED version
+    // verbatim, including 0 — the source shard durably stored what the coordinator logged, so
+    // clamping to 1 here would make a recovered replica diverge from its primary. (The same
+    // de-clamp on the live wire — `ShardService::ingest`/`insert` — keeps the distributed PUT
+    // path byte-identical to the in-process / single-node store for an explicit version 0.)
+    #[test]
+    fn translog_replay_preserves_version_including_zero() {
+        use super::{translog_entry, translog_entry_to_mutation, AddItem, TranslogEntry};
+        use crate::cluster::clog::ClusterMutation;
+
+        for v in [0u32, 1, 42] {
+            let e = TranslogEntry {
+                seqno: 7,
+                op: Some(translog_entry::Op::Add(AddItem {
+                    logical_id: 9,
+                    dsl: "1994 topps".to_string(),
+                    version: v,
+                    tags: Vec::new(),
+                })),
+            };
+            let got = translog_entry_to_mutation(e).expect("Add maps to a mutation");
+            match got.1 {
+                ClusterMutation::Add { version, .. } => assert_eq!(
+                    version, v,
+                    "translog replay must preserve the logged version verbatim"
+                ),
+                other => panic!("expected Add, got {other:?}"),
+            }
+        }
     }
 }

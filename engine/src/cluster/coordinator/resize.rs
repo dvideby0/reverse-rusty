@@ -193,23 +193,23 @@ impl ClusterEngine {
         //    `new_norm` (interning + frequencies + hot-mask), exactly as `build`, then resolve +
         //    expand the new vocab's equivalence groups onto it.
         let mut lc = String::new();
-        let mut extracted: Vec<(u64, Extracted, String, Vec<TagId>)> =
+        let mut extracted: Vec<(u64, Extracted, String, u32, Vec<TagId>)> =
             Vec::with_capacity(live.len());
         let new_dict = if Arc::ptr_eq(&new_norm, &self.norm) {
             let dict = Arc::clone(&self.dict);
-            for (logical, text, tag_ids) in live {
+            for (logical, text, version, tag_ids) in live {
                 if let Ok(ast) = crate::dsl::parse(&text) {
                     let ex = extract_readonly(&ast, &new_norm, &dict, &mut lc);
-                    extracted.push((logical, ex, text, tag_ids));
+                    extracted.push((logical, ex, text, version, tag_ids));
                 }
             }
             dict
         } else {
             let mut dict = Dict::new();
-            for (logical, text, tag_ids) in live {
+            for (logical, text, version, tag_ids) in live {
                 if let Ok(ast) = crate::dsl::parse(&text) {
                     let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
-                    extracted.push((logical, ex, text, tag_ids));
+                    extracted.push((logical, ex, text, version, tag_ids));
                 }
             }
             dict.finalize_mask();
@@ -224,7 +224,7 @@ impl ClusterEngine {
                 .or(self.vocab.as_deref())
                 .map(|v| v.resolve_equivalences(&new_norm, &dict));
             if let Some(equiv) = equiv {
-                for (_, ex, _, _) in &mut extracted {
+                for (_, ex, _, _, _) in &mut extracted {
                     ex.expand_equivalences(&equiv);
                 }
                 dict.set_equivalences(equiv);
@@ -239,7 +239,7 @@ impl ClusterEngine {
         // tags on whichever shard now holds it.
         let num_shards = new_ring.num_shards();
         let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
-        for (logical, ex, text, tag_ids) in extracted {
+        for (logical, ex, text, version, tag_ids) in extracted {
             // Re-placing ALREADY-STORED queries: a stored class-D was accepted when it was
             // added, so a rebuild (resize / set_vocab) must never drop it via the current knob
             // (mirrors the single-node ADR-068 vocab recompile, which passes accept=true
@@ -248,13 +248,15 @@ impl ClusterEngine {
             match placement_of(&new_dict, &new_ring, &ex, true) {
                 Target::Reject => {}
                 Target::Replicated => {
-                    // The broad lane is replicated to every shard (ADR-080).
+                    // The broad lane is replicated to every shard (ADR-080). Carry the stored
+                    // version through the rebuild so a re-placed query keeps version N rather
+                    // than being reset to 1 (the version-preserving rebuild, ADR-074).
                     for bucket in &mut buckets {
                         bucket.push(PlacedQuery {
                             logical,
                             ex: ex.clone(),
                             dsl: text.clone(),
-                            version: 1,
+                            version,
                             tags: Vec::new(),
                             tag_ids: tag_ids.clone(),
                         });
@@ -266,7 +268,7 @@ impl ClusterEngine {
                             logical,
                             ex: ex.clone(),
                             dsl: text.clone(),
-                            version: 1,
+                            version,
                             tags: Vec::new(),
                             tag_ids: tag_ids.clone(),
                         });

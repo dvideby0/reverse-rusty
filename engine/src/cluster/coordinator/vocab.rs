@@ -147,24 +147,25 @@ impl ClusterEngine {
         Ok(live.into_iter().collect())
     }
 
-    /// [`live_corpus`](Self::live_corpus) plus each query's stored `TagId`s — the gather
-    /// behind the tagged rebuild (ADR-074). A query fanned out to several shards carries
-    /// the same tags on every copy (one `PlacedQuery` per copy, identical op streams), so
-    /// dedup-by-logical keeps the first copy seen. Same non-local error boundary.
+    /// [`live_corpus`](Self::live_corpus) plus each query's stored `version` and `TagId`s —
+    /// the gather behind the tagged + version-preserving rebuild (ADR-074). A query fanned out
+    /// to several shards carries the same version + tags on every copy (one `PlacedQuery` per
+    /// copy, identical op streams), so dedup-by-logical keeps the first copy seen. Same
+    /// non-local error boundary.
     /// `pub(super)` so the shared rebuild core in `coordinator::resize` can gather the corpus
     /// for both a vocabulary change ([`set_vocab`](Self::set_vocab)) and a resize.
     pub(super) fn live_corpus_tagged(
         &self,
-    ) -> Result<Vec<(u64, String, Vec<crate::tagdict::TagId>)>, ShardError> {
-        let mut live: BTreeMap<u64, (String, Vec<crate::tagdict::TagId>)> = BTreeMap::new();
+    ) -> Result<Vec<crate::cluster::shard::LiveTaggedQuery>, ShardError> {
+        let mut live: BTreeMap<u64, (String, u32, Vec<crate::tagdict::TagId>)> = BTreeMap::new();
         for s in &self.shards {
-            for (logical, dsl, tag_ids) in s.live_sources_tagged()? {
-                live.entry(logical).or_insert((dsl, tag_ids));
+            for (logical, dsl, version, tag_ids) in s.live_sources_tagged()? {
+                live.entry(logical).or_insert((dsl, version, tag_ids));
             }
         }
         Ok(live
             .into_iter()
-            .map(|(logical, (dsl, tag_ids))| (logical, dsl, tag_ids))
+            .map(|(logical, (dsl, version, tag_ids))| (logical, dsl, version, tag_ids))
             .collect())
     }
 

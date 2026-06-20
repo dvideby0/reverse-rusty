@@ -208,17 +208,19 @@ impl Engine {
     /// dense or post-freeze synthetic — are carried verbatim: the tag space is preserved
     /// across a vocabulary change, so they stay valid (the same ADR-049 carry-through
     /// [`recompile_stale_segments`](Self::recompile_stale_segments) uses in-place).
-    pub fn live_sources_tagged(&self) -> Vec<(u64, String, Vec<crate::tagdict::TagId>)> {
-        let mut out: Vec<(u64, String, Vec<crate::tagdict::TagId>)> =
+    pub fn live_sources_tagged(&self) -> Vec<(u64, String, u32, Vec<crate::tagdict::TagId>)> {
+        let mut out: Vec<(u64, String, u32, Vec<crate::tagdict::TagId>)> =
             Vec::with_capacity(self.query_store.len());
         // One liveness scan per entry: `None` = no live copy in this engine (stale store
-        // residue — skipped, see `live_sources`), `Some(tags)` = live, possibly untagged.
+        // residue — skipped, see `live_sources`), `Some((version, tags))` = live, possibly
+        // untagged. The version is the live copy's stored version, carried through the rebuild
+        // so a `set_vocab`/resize re-places at version N rather than resetting to 1 (ADR-074).
         self.query_store.for_each_live(|logical, text| {
-            if let Some(tags) = self.live_tag_ids_for(logical) {
-                out.push((logical, text.to_string(), tags));
+            if let Some((version, tags)) = self.live_tag_ids_for(logical) {
+                out.push((logical, text.to_string(), version, tags));
             }
         });
-        out.sort_unstable_by_key(|&(l, _, _)| l);
+        out.sort_unstable_by_key(|&(l, ..)| l);
         out
     }
 
@@ -229,16 +231,19 @@ impl Engine {
     /// query has NO live copy in this engine (distinct from `Some(vec![])` — live but
     /// untagged): conflating the two is exactly what let a stale store entry shadow a
     /// moved query's tagged copy (codex retro-review, ADR-074).
-    fn live_tag_ids_for(&self, logical: u64) -> Option<Vec<crate::tagdict::TagId>> {
+    fn live_tag_ids_for(&self, logical: u64) -> Option<(u32, Vec<crate::tagdict::TagId>)> {
         for &local in self.memtable.locals_for_logical(logical) {
             if self.memtable.is_alive(local) {
-                return Some(self.memtable.tags_of(local).to_vec());
+                return Some((
+                    self.memtable.version_of(local),
+                    self.memtable.tags_of(local).to_vec(),
+                ));
             }
         }
         for seg in &self.segments {
             for &local in seg.locals_for_logical(logical) {
                 if seg.is_alive(local) {
-                    return Some(seg.tags_of(local).to_vec());
+                    return Some((seg.version_of(local), seg.tags_of(local).to_vec()));
                 }
             }
         }
@@ -279,11 +284,12 @@ impl Engine {
         for (logical, text) in &live {
             if let Ok(ast) = crate::dsl::parse(text) {
                 let ex = crate::compile::extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                // Carry the query's existing tags forward unchanged — tags are orthogonal
-                // to the normalizer, so a vocabulary change must not drop them (ADR-049).
-                // `live_sources` only returns entries with a live copy, so the lookup
-                // cannot be `None` here; the empty default is unreachable belt-and-braces.
-                let tags = self.live_tag_ids_for(*logical).unwrap_or_default();
+                // Carry the query's existing tags AND stored version forward unchanged —
+                // both are orthogonal to the normalizer, so a vocabulary change must not
+                // drop the tags (ADR-049) nor reset the version to 1 (the version-preserving
+                // rebuild, ADR-074). `live_sources` only returns entries with a live copy, so
+                // the lookup cannot be `None` here; the default is unreachable belt-and-braces.
+                let (version, tags) = self.live_tag_ids_for(*logical).unwrap_or((1, Vec::new()));
                 // `accept_class_d = true` unconditionally (ADR-068): a STORED query
                 // must survive a vocabulary change. A query whose positives vanish
                 // under the new vocab (re-classifying to D) is kept as an
@@ -291,7 +297,7 @@ impl Engine {
                 // bounded FP — instead of being silently dropped from the rebuilt
                 // index (the pre-existing hazard); only the all-empty case drops.
                 if seg
-                    .add_compiled(&ex, &tags, &self.dict, *logical, 1, true)
+                    .add_compiled(&ex, &tags, &self.dict, *logical, version, true)
                     .is_some()
                 {
                     recompiled += 1;
