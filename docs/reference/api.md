@@ -38,6 +38,11 @@ Options:
 | `--max-anyof-group-size` | 64 | Maximum members in an any-of group |
 | `--retain-source` | true | Keep query source text resident; set `false` to store it on disk and fetch `_source`/explain lazily (large memory saving at scale — ADR-020) |
 | `--accept-class-d` | false | Store negation-only queries as broad-lane always-candidates instead of rejecting them (ADR-068) — needed at startup for a `--load-file` corpus containing such queries; also dynamic via `/_settings` |
+| `--wal-sync-on-write` | false | Fsync the WAL on every mutation before acknowledging it (SQLite FULL). When false, appends reach the OS page cache and fsync at the next flush checkpoint — survives a process crash but not power loss until checkpoint (RocksDB sync=false / SQLite NORMAL) |
+| `--broad-batch-size` | 256 | Title sub-batch size for the columnar broad lane on `POST /_mpercolate` (ADR-026) — larger amortizes broad-posting scans over more titles. Dynamic via `/_settings` |
+| `--broad-columnar` | true | Use the columnar broad evaluator (once per batch); set `false` to fall back to the inline per-title broad probe — the kill-switch (identical results, no amortization). Dynamic via `/_settings` |
+| `--broad-materialize` | true | Use the pure-anchor materialization fast path (emit pure-anchor broad queries straight from the anchor bitmap, skipping verification). Dynamic via `/_settings` |
+| `--max-percolate-batch` | 10000 | Maximum documents accepted in one `POST /_mpercolate` batch; larger requests are rejected with 400. Dynamic via `/_settings` |
 
 Example with persistence, vocabulary, and pre-loaded queries:
 
@@ -88,6 +93,11 @@ set-but-not-UTF-8 `RR_AUTH_TOKEN`, or `--auth-protect-reads` without a token ref
 (fail-loud — a malformed token never silently disables auth); binding a non-loopback interface
 *without* auth logs a startup warning.
 
+**`POST /_backup` is privileged operator surface.** It writes a snapshot to an arbitrary
+server-side `dest` path with the server process's filesystem permissions (UID), so it grants
+filesystem-write on the host to anyone who can call it. It is in the default-deny set above and
+**must stay behind auth** on any non-loopback bind — never expose it unauthenticated.
+
 With **no token configured the server behaves exactly as before** (no auth — strictly opt-in). The
 transport is plain HTTP either way: a bearer token is only as private as the link it crosses, so on
 an untrusted network still front the server with a reverse proxy that terminates TLS. (TLS, and auth
@@ -109,6 +119,9 @@ curl localhost:9200/
   "tagline": "you know, for matching"
 }
 ```
+
+> `version` is the crate's `CARGO_PKG_VERSION` (from `engine/Cargo.toml`), not a pinned literal —
+> the `"0.1.0"` above is illustrative and will track the package version as it bumps.
 
 ## Endpoint reference
 
@@ -205,9 +218,12 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   rejected with 400 — never silently ignored. `profile` works (merged cross-shard `MatchStats`).
 - **`include_source` defaults to `false`** (`_source` costs a per-hit source probe); explicitly
   requesting it on a remote cluster answers 501 (remote shards expose no source readback in v1).
+- **`GET /_settings` works in cluster mode** — it returns the live cluster + per-shard configuration
+  (`mode`, `shards`, `replication_factor`, `include_broad`, `durable`, and the assembled `per_shard`
+  `EngineConfig`). Only **`PUT /_settings`** is 501 in cluster mode (see below).
 - **Single-node-only surfaces answer 501 naming the alternative:** `/_compact` (per-shard policy;
   use `POST /_checkpoint` for the durability commit), `PUT /_settings` (cluster settings are fixed
-  at assembly), `/_cat/stats`, `/_cat/segments`.
+  at assembly — restart the coordinator with the new flags), `/_cat/stats`, `/_cat/segments`.
 - **Vocabulary admin** (`PUT /_vocab`, `/_vocab/learn_and_apply`, `/_vocab/aliases/*`) maps onto the
   cluster blue/green rebuild (ADR-046); its one refusal — non-local (gRPC) shards — surfaces as a 400
   with the engine's message (remote-cluster vocabulary is deploy-time configuration, ADR-076). A
