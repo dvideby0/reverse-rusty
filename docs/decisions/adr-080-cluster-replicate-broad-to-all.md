@@ -40,12 +40,16 @@ stand-in and unblocks class D, reusing the entire existing shard/replication/dur
   Because broad evaluates on exactly one shard, a broad query is counted once; the existing
   union+dedup-by-logical-id merge is the backstop. The hash spreads the broad-eval shard across titles
   — the shard-0 always-probe hotspot is gone.
-- **Durability — the class-D rollback fence.** Cluster shards are segments-only durable (ADR-032, no
-  per-shard manifest), so the single-node manifest-v4 fence (ADR-068) has no per-shard home; it lives
-  at the **`ClusterManifest`**. A commit registering any class-D-bearing shard writes manifest **v5**
-  (layout-identical to v4; the version word *is* the fence — set from `any(shard.class_counts()[3] >
-  0)`); a pre-ADR-080 binary accepts only v2..=4 and fails `ClusterEngine::open` outright on v5. A
-  class-D-free commit keeps writing v4 byte-identically.
+- **Durability — the v5 replicate-to-all layout fence (two-way).** Cluster shards are segments-only
+  durable (ADR-032, no per-shard manifest), so the layout marker lives at the **`ClusterManifest`**:
+  every ADR-080 durable cluster writes manifest **v5** (layout-identical to v4 — the version word *is*
+  the marker, `broad_replicate_all`). It fences both directions, each load-bearing for zero false
+  negatives: (1) **rollback** — a pre-ADR-080 binary accepts only v2..=4 and fails `open` outright on
+  v5, so it never writes broad onto shard 0 only (which the rotating routing would mis-read) nor
+  silently drops class-D (it has no universal-signature probe); (2) **forward** — this binary refuses to
+  `open` a v<5 cluster, whose broad lives on shard 0 only and would be mis-routed by the rotating
+  broad-eval shard (a silent FN on the upgrade path — a codex-review catch). A pre-ADR-080 durable
+  cluster must be rebuilt with this binary.
 - **The clog needs no new op markers.** Unlike the single-node WAL (which logs *before* classifying, so
   it needed `InsertClassD`/`UpsertClassD` markers to replay legacy frames under the old gate), the
   coordinator clog logs raw DSL and re-derives placement deterministically on replay, reproducing the
@@ -54,6 +58,15 @@ stand-in and unblocks class D, reusing the entire existing shard/replication/dur
   gates *acceptance*, never *visibility*; only the un-checkpointed clog tail is re-placed under the
   reopen-time knob (knob-off ⇒ drop, never resurrect — the safe direction). The server supplies
   `accept_class_d` consistently via its CLI flag across build and reopen.
+- **Lifecycle correctness (codex review).** Two front-door edge cases the cluster must mirror from the
+  single node: (a) an **effectively-empty** class-D query (no positives AND no forbidden) is rejected at
+  placement *before* fan-out even with the lane on (`accept_class_d && !ex.forbidden.is_empty()`) — so
+  an `upsert` to one cannot tombstone the prior version in pass 1 and then store nothing in pass 2 (a
+  failed replace never deletes, ADR-067 parity); (b) a **rebuild** (`resize` / `set_vocab`) re-ingests
+  ALREADY-STORED queries, so its fresh shards force `accept_class_d` **on** — a cluster reopened with the
+  knob off keeps its sealed always-candidates through the next rebuild instead of silently dropping them
+  (the cluster analogue of ADR-068 mech 2; the coordinator still gates *new* class-D adds via the
+  unchanged `self.per_shard.accept_class_d`, which runs before any shard sees the query).
 - **gRPC.** The in-process path is wire-transparent (the protocol carries DSL + `include_broad` + tags,
   never the placement decision), so it lands and is oracle-proven first. The coordinator's
   `accept_class_d` drives placement; each remote shard server runs its *own* engine's gate, so the
@@ -91,10 +104,13 @@ physical placement and the evaluating shard move); the new behavior is opt-in cl
 test (storage fan-out = N — class C/D summed counts are multiples of K — while read fan-out stays
 bounded and at least one title's fan-out omits shard 0, proving the hotspot is gone).
 `tests/cluster_durability_oracle/class_d.rs` — a durable class-D cluster reopens ≡ pre-crash ≡ brute
-across K∈{1,3,8} (segment base + clog tail), the build commit writes the v5 fence, and a knob-off reopen
-keeps sealed always-candidates matchable while rejecting a new class-D add. `storage::manifest` unit —
-the v5 fence round-trips and an unknown future version fails loud. The full existing cluster +
-durability oracles stay green (replicate-to-all is result-identical for the broad set).
+across K∈{1,3,8} (segment base + clog tail), the build commit writes the v5 marker, a knob-off reopen
+keeps sealed always-candidates matchable while rejecting a new class-D add, plus the three lifecycle
+guards (codex review): the **forward fence** refuses a downgraded (v4) manifest loudly, a **knob-off
+resize** preserves sealed class-D ≡ brute, and (in the oracle) an **empty class-D** rejects + a failed
+upsert never deletes the prior version. `storage::manifest` unit — the v5 replicate-to-all marker
+round-trips and an unknown future version fails loud. The full existing cluster + durability oracles stay
+green (replicate-to-all is result-identical for the broad set).
 
 **See also:** ADR-027 (the multi-shard core + the shard-0 stand-in this graduates), ADR-068 (the
 single-node class-D lane + the manifest-v4 fence this mirrors at the cluster manifest), ADR-026 (the

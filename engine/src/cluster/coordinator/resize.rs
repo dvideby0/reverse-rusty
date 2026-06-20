@@ -240,7 +240,12 @@ impl ClusterEngine {
         let num_shards = new_ring.num_shards();
         let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
         for (logical, ex, text, tag_ids) in extracted {
-            match placement_of(&new_dict, &new_ring, &ex, self.per_shard.accept_class_d) {
+            // Re-placing ALREADY-STORED queries: a stored class-D was accepted when it was
+            // added, so a rebuild (resize / set_vocab) must never drop it via the current knob
+            // (mirrors the single-node ADR-068 vocab recompile, which passes accept=true
+            // unconditionally). The empty-forbidden guard in `placement_of` still rejects the
+            // never-stored empty query, so passing `true` cannot resurrect one.
+            match placement_of(&new_dict, &new_ring, &ex, true) {
                 Target::Reject => {}
                 Target::Replicated => {
                     // The broad lane is replicated to every shard (ADR-080).
@@ -287,13 +292,21 @@ impl ClusterEngine {
         let old_num_shards = self.shards.len();
         let rf = self.replication_factor.max(1);
         let data_dir = self.data_dir.clone();
+        // The rebuild re-ingests ALREADY-STORED queries, so the fresh shards must ACCEPT class-D
+        // regardless of the cluster's current front-door knob — an always-candidate accepted when
+        // it was added must survive a rebuild (the cluster analogue of ADR-068 mech 2: the
+        // single-node vocab recompile passes accept=true unconditionally). NEW class-D adds are
+        // still gated by `self.per_shard.accept_class_d` at the coordinator (unchanged), which
+        // runs before any shard sees the query — so this override only affects the rebuild ingest.
+        let mut rebuild_cfg = self.per_shard.clone();
+        rebuild_cfg.accept_class_d = true;
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
         for (s, bucket) in buckets.into_iter().enumerate() {
             let mut copies = Vec::with_capacity(rf);
             for r in 0..rf {
                 let copy = match &data_dir {
                     Some(dir) => {
-                        let mut sc = self.per_shard.clone();
+                        let mut sc = rebuild_cfg.clone();
                         let cdir = if r == 0 {
                             shard_dir(dir, s)
                         } else {
@@ -326,7 +339,7 @@ impl ClusterEngine {
                         Arc::clone(&new_norm),
                         Arc::clone(&new_dict),
                         Arc::clone(&self.tag_dict),
-                        self.per_shard.clone(),
+                        rebuild_cfg.clone(),
                     ),
                 };
                 if !bucket.is_empty() {

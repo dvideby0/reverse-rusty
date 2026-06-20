@@ -259,13 +259,17 @@ const CLUSTER_MANIFEST_MAGIC: [u8; 4] = *b"RCMN";
 // behind filtered percolation, so interned tag ids survive reopen. A v2/v3 manifest
 // reads back with an empty `tag_dict_data` (no tags).
 const CLUSTER_MANIFEST_VERSION: u32 = 4;
-// v5 (ADR-080): byte-identical layout to v4 — written ONLY while a registered shard holds
-// class-D always-candidates, as the **rollback fence** (the cluster analogue of the engine
-// manifest's v4 fence, ADR-068). The cluster has no per-shard manifest (segments-only durable,
-// ADR-032), so the fence must live here: a pre-ADR-080 binary accepts only v2..=4 and fails
-// `ClusterEngine::open` outright on a v5 manifest — the loud refusal rollback needs. A
-// class-D-free commit keeps writing v4 byte-identically.
-const CLUSTER_MANIFEST_VERSION_CLASS_D: u32 = 5;
+// v5 (ADR-080): the replicate-to-all broad-layout marker (layout-identical to v4 — the version
+// word IS the marker). The broad lane (class C + B-arity-2 + opt-in class D) now lives on EVERY
+// shard, evaluated on one broad-eval shard per title (not pinned to shard 0), so EVERY ADR-080
+// durable cluster writes v5. A TWO-WAY fence, both halves load-bearing for zero false negatives
+// (the cluster has no per-shard manifest — segments-only durable, ADR-032 — so it must live here):
+//   (1) ROLLBACK — a pre-ADR-080 binary accepts only v2..=4 and fails `ClusterEngine::open` on v5,
+//       so it never places broad on shard 0 only (which the new rotating routing would mis-read)
+//       and never silently drops class-D (it has no universal-signature probe).
+//   (2) FORWARD — the new binary refuses to OPEN a v<5 cluster, whose broad lives on shard 0 only
+//       and would be mis-routed by the rotating broad-eval shard. Such a cluster must be rebuilt.
+const CLUSTER_MANIFEST_VERSION_REPLICATE_ALL: u32 = 5;
 
 /// The coordinator's cluster-state document (the analogue of what a Raft quorum will
 /// later hold). Written atomically (tmp + CRC + rename) — the SINGLE commit point that
@@ -283,10 +287,12 @@ pub struct ClusterManifest {
     pub vnodes: u32,
     /// Default broad-lane toggle.
     pub include_broad: bool,
-    /// `true` ⇔ some registered shard holds class-D always-candidates (ADR-080). Not
-    /// serialized as data — it selects the version word (v5 vs v4), the loud rollback fence
-    /// (the cluster analogue of the engine manifest's v4 fence). Set from the version on read.
-    pub class_d_fence: bool,
+    /// `true` ⇔ this cluster uses the ADR-080 replicate-to-all broad layout (broad on every
+    /// shard, evaluated on one broad-eval shard per title) — every ADR-080 cluster sets it. Not
+    /// serialized as data — it selects the version word (v5 vs v4), the two-way fence
+    /// `ClusterEngine::open` requires (a v<5 / legacy-layout cluster is refused). Set from the
+    /// version on read.
+    pub broad_replicate_all: bool,
     /// Per-shard committed base: `segment_registry[i]` is the list of `.seg` filenames
     /// (relative to `shard_<i>/segments/`) that constitute shard `i`'s base. This is the
     /// atomic-commit replacement for the v1 raw-DSL snapshot — on open a shard
@@ -316,8 +322,8 @@ pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Re
     f.write_all(&CLUSTER_MANIFEST_MAGIC)?;
     write_u32(
         &mut f,
-        if manifest.class_d_fence {
-            CLUSTER_MANIFEST_VERSION_CLASS_D
+        if manifest.broad_replicate_all {
+            CLUSTER_MANIFEST_VERSION_REPLICATE_ALL
         } else {
             CLUSTER_MANIFEST_VERSION
         },
@@ -389,7 +395,7 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
     let version = read_u32_at(&data, 4)?;
     // v2, v3 and v4 are accepted; v3 appends `vocab_data` (ADR-046) and v4 appends
     // `tag_dict_data` (ADR-049), each absent in the earlier versions.
-    if !(2..=CLUSTER_MANIFEST_VERSION_CLASS_D).contains(&version) {
+    if !(2..=CLUSTER_MANIFEST_VERSION_REPLICATE_ALL).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported cluster manifest version {version}"),
@@ -478,7 +484,7 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         num_shards,
         vnodes,
         include_broad,
-        class_d_fence: version >= CLUSTER_MANIFEST_VERSION_CLASS_D,
+        broad_replicate_all: version >= CLUSTER_MANIFEST_VERSION_REPLICATE_ALL,
         segment_registry,
         next_seg_ids,
         dict_data,
@@ -576,7 +582,7 @@ mod tests {
             num_shards: 3,
             vnodes: 64,
             include_broad: true,
-            class_d_fence: false,
+            broad_replicate_all: false,
             segment_registry: vec![
                 vec!["seg_000001.seg".to_string(), "seg_000004.seg".to_string()],
                 vec![], // an empty shard (no committed segments)
@@ -596,10 +602,14 @@ mod tests {
         assert_eq!(got.num_shards, manifest.num_shards);
         assert_eq!(got.vnodes, manifest.vnodes);
         assert_eq!(got.include_broad, manifest.include_broad);
-        assert_eq!(got.class_d_fence, manifest.class_d_fence);
-        // A class-D-free manifest writes the v4 version word byte-identically (no fence).
+        assert_eq!(got.broad_replicate_all, manifest.broad_replicate_all);
+        // A non-replicate-all (legacy-shaped) manifest writes the v4 version word.
         let raw = std::fs::read(&path).expect("read raw for version");
-        assert_eq!(read_u32_at(&raw, 4).unwrap(), 4, "no class-D ⇒ v4");
+        assert_eq!(
+            read_u32_at(&raw, 4).unwrap(),
+            4,
+            "broad_replicate_all=false ⇒ v4"
+        );
         assert_eq!(got.segment_registry, manifest.segment_registry);
         assert_eq!(got.next_seg_ids, manifest.next_seg_ids);
         assert_eq!(got.dict_data, manifest.dict_data);
@@ -619,12 +629,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The cluster v5 class-D rollback fence (ADR-080): a class-D-bearing commit writes the
-    /// v5 version word (round-tripping `class_d_fence`), and a pre-ADR-080 binary — modeled
-    /// by a forged FUTURE version — fails loud rather than mis-decoding (the loud refusal the
+    /// The cluster v5 ADR-080 replicate-to-all marker: an ADR-080 commit writes the v5 version
+    /// word (round-tripping `broad_replicate_all`), and a pre-ADR-080 binary — modeled by a
+    /// forged FUTURE version — fails loud rather than mis-decoding (the loud refusal the two-way
     /// fence exists for; the cluster has no per-shard manifest to carry it instead).
     #[test]
-    fn cluster_manifest_v5_class_d_fence_round_trips_and_unknown_version_fails_loud() {
+    fn cluster_manifest_v5_replicate_all_marker_round_trips_and_unknown_version_fails_loud() {
         let dir = std::env::temp_dir().join(format!("rr_cmanifest_v5_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("cluster_manifest_v5.bin");
@@ -636,7 +646,7 @@ mod tests {
             num_shards: 4,
             vnodes: 64,
             include_broad: true,
-            class_d_fence: true, // a class-D-bearing commit
+            broad_replicate_all: true, // an ADR-080 replicate-to-all cluster
             segment_registry: vec![vec![], vec![], vec![], vec![]],
             next_seg_ids: vec![1, 1, 1, 1],
             dict_data: vec![1, 2, 3],
@@ -649,10 +659,10 @@ mod tests {
         assert_eq!(
             read_u32_at(&raw, 4).unwrap(),
             5,
-            "class-D commit ⇒ cluster manifest v5"
+            "ADR-080 replicate-to-all ⇒ cluster manifest v5"
         );
         let got = read_cluster_manifest(&path).expect("read");
-        assert!(got.class_d_fence, "v5 reads back as fenced");
+        assert!(got.broad_replicate_all, "v5 reads back as replicate-to-all");
         assert_eq!(got.segment_registry, manifest.segment_registry);
 
         // Forge a v6 (future) version word + re-seal the trailing whole-file CRC, so the

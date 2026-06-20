@@ -397,7 +397,12 @@ fn placement_of(dict: &Dict, ring: &HashRing, ex: &Extracted, accept_class_d: bo
     let ap = anchor_plan(ex, dict);
     match ap.class {
         CostClass::D => {
-            if accept_class_d {
+            // Stored only when the lane is on AND there is something to forbid: an
+            // effectively-empty query (no positives, no negatives) would match every title,
+            // so the shard engines reject it regardless (`rejects_class_d`). Rejecting HERE —
+            // before fan-out — is load-bearing for `upsert`: a plan every shard would reject
+            // must not tombstone the prior version first (a silent delete-with-no-replace).
+            if accept_class_d && !ex.forbidden.is_empty() {
                 Target::Replicated
             } else {
                 Target::Reject

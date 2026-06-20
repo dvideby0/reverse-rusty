@@ -366,15 +366,6 @@ impl ClusterEngine {
             segment_registry.push(p.segment_filenames()?);
             next_seg_ids.push(p.next_seg_id()?);
         }
-        // The class-D rollback fence (ADR-080): set iff some primary holds a class-D
-        // always-candidate at build (accept_class_d on + a negation-only query).
-        let mut class_d_fence = false;
-        for p in primaries {
-            if p.class_counts()?[3] > 0 {
-                class_d_fence = true;
-                break;
-            }
-        }
         let manifest = crate::storage::ClusterManifest {
             epoch: 0,
             snapshot_pos: 0,
@@ -382,7 +373,8 @@ impl ClusterEngine {
             num_shards: ring.num_shards() as u32,
             vnodes: config.vnodes,
             include_broad: config.include_broad,
-            class_d_fence,
+            // ADR-080 replicate-to-all layout marker (always set — broad on every shard, v5).
+            broad_replicate_all: true,
             segment_registry,
             next_seg_ids,
             dict_data: crate::storage::serialize_dict(dict),

@@ -177,6 +177,62 @@ fn cluster_class_d_rejected_when_lane_off() {
     }
 }
 
+/// An effectively-empty query (no positives AND no forbidden) is rejected even with the lane on
+/// — storing it would be a match-all (ADR-068). Crucially, an UPSERT to such a query must NOT
+/// tombstone the prior live version: the coordinator rejects at placement BEFORE the two-pass
+/// tombstone (a failed replace never deletes), so the prior query survives. The bug this guards:
+/// placement fanned the empty plan to every shard, each stored nothing, and the upsert had
+/// already deleted the prior copies — silent data loss.
+#[test]
+fn empty_class_d_is_rejected_and_a_failed_upsert_never_deletes() {
+    let mut cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    cfg.per_shard.accept_class_d = true;
+    let cluster =
+        ClusterEngine::build(vocab(), &cfg, &[(1, "1996 skybox".to_string())]).expect("build");
+
+    // An empty / whitespace-only add is rejected (class D, nothing to forbid), stores nothing.
+    for empty in ["", "   "] {
+        assert_eq!(
+            cluster.add_query(42, empty).unwrap(),
+            AddOutcome::RejectedClassD,
+            "an effectively-empty query must reject"
+        );
+    }
+    assert_eq!(cluster.class_counts().unwrap()[3], 0, "no class-D stored");
+
+    // Query 1 matches its title before the bad upsert.
+    let before: HashSet<u64> = cluster
+        .percolate("1996 skybox premium")
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(
+        before.contains(&1),
+        "query 1 should match before the upsert"
+    );
+
+    // Upserting query 1 to an EMPTY DSL is rejected WITHOUT tombstoning the live version.
+    let (removed, outcome) = cluster.upsert_query(1, "   ").unwrap();
+    assert_eq!(outcome, AddOutcome::RejectedClassD);
+    assert_eq!(
+        removed, 0,
+        "a rejected empty upsert must not tombstone the prior version"
+    );
+    let after: HashSet<u64> = cluster
+        .percolate("1996 skybox premium")
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert!(
+        after.contains(&1),
+        "query 1 was lost by a rejected empty upsert — silent data loss"
+    );
+}
+
 /// With the broad lane excluded an always-candidate is invisible — the same documented
 /// quarantine semantics as class C (the lane it rides), now across the cluster.
 #[test]

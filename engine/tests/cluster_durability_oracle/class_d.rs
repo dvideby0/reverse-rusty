@@ -59,11 +59,11 @@ fn durable_cluster_class_d_reopens_and_matches() {
             // drop — no checkpoint: recovery replays the clog tail (the live add).
         };
 
-        // The build-time commit wrote the v5 rollback fence (class-D present).
+        // The build-time commit wrote the v5 ADR-080 replicate-to-all marker.
         let m = read_cluster_manifest(&dir.join(MANIFEST)).expect("manifest");
         assert!(
-            m.class_d_fence,
-            "k={k}: class-D commit must write the v5 fence"
+            m.broad_replicate_all,
+            "k={k}: an ADR-080 cluster must write the v5 replicate-to-all marker"
         );
 
         // Reopen (lane on, consistent with build): class-D survives the segment base AND the
@@ -143,5 +143,100 @@ fn sealed_class_d_survives_reopen_with_knob_off_but_new_adds_rejected() {
         AddOutcome::RejectedClassD,
         "the knob still gates the front door after a knob-off reopen"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ADR-080 FORWARD fence: a pre-ADR-080 durable cluster placed the broad lane on shard 0 only;
+/// this binary's rotating broad-eval shard would silently miss it. Such a cluster (manifest
+/// v<5, no replicate-to-all marker) must be REFUSED on open, not mis-routed. Modeled by
+/// downgrading a fresh v5 manifest's version word to v4 and re-sealing its CRC — the data is
+/// irrelevant; the version marker is the gate.
+#[test]
+fn open_refuses_a_pre_adr080_cluster_loudly() {
+    let (queries, _titles) = corpus_with_class_d(20);
+    let dir = unique_dir("pre_adr080");
+    {
+        let cluster = ClusterEngine::build(vocab(), &lane_on_cfg(3, dir.clone()), &queries)
+            .expect("durable cluster builds");
+        cluster.checkpoint().expect("checkpoint");
+    }
+
+    // Downgrade the manifest version word 5 -> 4 (a legacy / pre-ADR-080 cluster) + re-seal the
+    // trailing whole-file CRC, so the layout fence — not the CRC — is what fires on open.
+    let mpath = dir.join(MANIFEST);
+    let mut bytes = std::fs::read(&mpath).expect("read manifest");
+    assert_eq!(
+        u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+        5,
+        "a fresh ADR-080 cluster commits manifest v5"
+    );
+    bytes[4..8].copy_from_slice(&4u32.to_le_bytes());
+    let body = bytes.len() - 4;
+    let crc = reverse_rusty::storage::crc32(&bytes[..body]);
+    bytes[body..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&mpath, &bytes).expect("rewrite manifest");
+
+    // open must refuse loudly rather than silently mis-route the shard-0-only broad lane.
+    let result = ClusterEngine::open(dir.clone(), vocab(), None);
+    assert!(
+        result.is_err(),
+        "open must refuse a pre-ADR-080 cluster, but it succeeded"
+    );
+    if let Err(ShardError::Config(msg)) = result {
+        assert!(
+            msg.contains("predates ADR-080") || msg.contains("rebuild"),
+            "expected a 'predates ADR-080 / rebuild' refusal, got: {msg}"
+        );
+    } else {
+        panic!("expected a ShardError::Config refusal for a pre-ADR-080 cluster");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A rebuild (resize / set_vocab) must preserve already-stored class-D entries even when the
+/// cluster was reopened with `accept_class_d` OFF — an always-candidate was accepted when added,
+/// so the front-door knob must not drop it on a rebuild (the cluster analogue of ADR-068's
+/// "vocab recompile passes accept=true unconditionally"). The bug: `rebuild_from_live` re-placed
+/// the stored queries through the current (off) knob, dropping class D, and the checkpoint then
+/// committed that deletion permanently.
+#[test]
+fn resize_with_knob_off_preserves_sealed_class_d() {
+    let (queries, titles) = corpus_with_class_d(120);
+    let dir = unique_dir("class_d_resize_knob_off");
+    {
+        let cluster = ClusterEngine::build(vocab(), &lane_on_cfg(3, dir.clone()), &queries)
+            .expect("durable cluster builds");
+        cluster.checkpoint().expect("checkpoint");
+    }
+
+    // Reopen with the knob OFF, then resize (a rebuild that re-places every stored query).
+    let cfg_off = durable_cfg(3, dir.clone(), false);
+    let mut reopened = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg_off)).expect("reopen");
+    assert!(
+        reopened.class_counts().expect("cc")[3] > 0,
+        "sealed class-D present after the knob-off reopen"
+    );
+    reopened.resize(5).expect("resize 3 -> 5");
+    assert!(
+        reopened.class_counts().expect("cc")[3] > 0,
+        "class-D dropped by a knob-off resize — acknowledged always-candidates lost"
+    );
+
+    // And still matches exactly the brute that keeps class-D.
+    let brute = Brute::build_accepting_class_d(&queries);
+    let mut lc = String::new();
+    let mut feats: Vec<u32> = Vec::new();
+    for t in &titles {
+        let got: HashSet<u64> = reopened
+            .percolate(t)
+            .expect("percolate")
+            .into_iter()
+            .collect();
+        assert_eq!(
+            got,
+            brute.matches(t, &mut lc, &mut feats),
+            "post-resize class-D differential on {t:?}"
+        );
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
