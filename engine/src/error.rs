@@ -53,6 +53,10 @@ pub enum ParseErrorKind {
     TooManyClauses,
     /// An any-of group exceeds the configured maximum member count.
     AnyOfGroupTooLarge,
+    /// A query carries more `(key, value)` metadata tags than the configured
+    /// `max_tags` ceiling (ADR-049). Rejected loudly rather than truncating the
+    /// SoA tag column (which would silently drop a real tag).
+    TooManyTags,
 }
 
 impl ParseErrorKind {
@@ -66,6 +70,7 @@ impl ParseErrorKind {
             ParseErrorKind::QueryTooLong => "query string exceeds maximum length",
             ParseErrorKind::TooManyClauses => "query has too many clauses",
             ParseErrorKind::AnyOfGroupTooLarge => "any-of group has too many members",
+            ParseErrorKind::TooManyTags => "query has too many metadata tags",
         }
     }
 }
