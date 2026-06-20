@@ -462,9 +462,18 @@ impl Vocab {
         serde_json::from_str(json)
     }
 
-    /// Number of entries (synonyms + phrases + graders + grade words).
+    /// Number of entries across ALL recall-bearing fields (synonyms + phrases +
+    /// graders + grade words + equivalence groups + aliases). Equivalences and
+    /// aliases must be counted: an expansion-mode vocab (learned equivalences or
+    /// aliases only) is NOT empty, and a "skip if empty" guard that omitted them
+    /// would silently drop those recall-bearing groups.
     pub fn len(&self) -> usize {
-        self.synonyms.len() + self.phrases.len() + self.graders.len() + self.grade_words.len()
+        self.synonyms.len()
+            + self.phrases.len()
+            + self.graders.len()
+            + self.grade_words.len()
+            + self.equivalences.len()
+            + self.aliases.len()
     }
 
     pub fn is_empty(&self) -> bool {
