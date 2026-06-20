@@ -292,21 +292,18 @@ impl ClusterEngine {
         let old_num_shards = self.shards.len();
         let rf = self.replication_factor.max(1);
         let data_dir = self.data_dir.clone();
-        // The rebuild re-ingests ALREADY-STORED queries, so the fresh shards must ACCEPT class-D
-        // regardless of the cluster's current front-door knob — an always-candidate accepted when
-        // it was added must survive a rebuild (the cluster analogue of ADR-068 mech 2: the
-        // single-node vocab recompile passes accept=true unconditionally). NEW class-D adds are
-        // still gated by `self.per_shard.accept_class_d` at the coordinator (unchanged), which
-        // runs before any shard sees the query — so this override only affects the rebuild ingest.
-        let mut rebuild_cfg = self.per_shard.clone();
-        rebuild_cfg.accept_class_d = true;
+        // The rebuild re-places ALREADY-STORED queries, so stored class-D must survive regardless
+        // of the current front-door knob: `placement_of(.., true)` above buckets it, and the shards
+        // are coordinator-gated storage that always accept (forced in `LocalShard`), so the fresh
+        // shards re-ingest it. NEW class-D adds stay gated at the coordinator by the unchanged
+        // `self.per_shard.accept_class_d`.
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
         for (s, bucket) in buckets.into_iter().enumerate() {
             let mut copies = Vec::with_capacity(rf);
             for r in 0..rf {
                 let copy = match &data_dir {
                     Some(dir) => {
-                        let mut sc = rebuild_cfg.clone();
+                        let mut sc = self.per_shard.clone();
                         let cdir = if r == 0 {
                             shard_dir(dir, s)
                         } else {
@@ -339,7 +336,7 @@ impl ClusterEngine {
                         Arc::clone(&new_norm),
                         Arc::clone(&new_dict),
                         Arc::clone(&self.tag_dict),
-                        rebuild_cfg.clone(),
+                        self.per_shard.clone(),
                     ),
                 };
                 if !bucket.is_empty() {

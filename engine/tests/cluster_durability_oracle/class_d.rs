@@ -240,3 +240,80 @@ fn resize_with_knob_off_preserves_sealed_class_d() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The clog replay is configuration-independent (codex review): a class-D add LOGGED while the
+/// lane was ON survives a reopen with the lane OFF (apply/replay forces accept), and a class-D
+/// add attempted while the lane was OFF is never logged, so a reopen with the lane ON cannot
+/// resurrect it. Neither direction of a knob flip drops an acknowledged write nor resurrects a
+/// rejected one — the cluster analogue of the single-node WAL-v5 op markers (ADR-068).
+#[test]
+fn clog_class_d_replay_is_configuration_independent() {
+    // Part 1 — no LOSS: add a class-D into the clog tail with the lane ON (no checkpoint), then
+    // reopen with the lane OFF; the tail class-D must survive (replay forces accept).
+    let dir = unique_dir("clog_no_loss");
+    {
+        let cluster = ClusterEngine::build(
+            vocab(),
+            &lane_on_cfg(3, dir.clone()),
+            &[(1, "1996 skybox".to_string())],
+        )
+        .expect("durable cluster builds");
+        assert_eq!(
+            cluster
+                .add_query(CLASS_D_ID_BASE, "-loggedwhileon")
+                .expect("add"),
+            AddOutcome::Replicated,
+            "a class-D add with the lane on is accepted + logged"
+        );
+        // drop without checkpoint: the add lives only in the clog tail.
+    }
+    let cfg_off = durable_cfg(3, dir.clone(), false);
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg_off)).expect("reopen off");
+    let got: HashSet<u64> = reopened
+        .percolate("a plain unrelated title")
+        .expect("percolate")
+        .into_iter()
+        .collect();
+    assert!(
+        got.contains(&CLASS_D_ID_BASE),
+        "a class-D add logged while the lane was ON was dropped by a lane-off reopen — \
+         an acknowledged write was lost"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Part 2 — no RESURRECTION: attempt a class-D add with the lane OFF (rejected, NEVER logged),
+    // then reopen with the lane ON; the rejected query must stay absent.
+    let dir2 = unique_dir("clog_no_resurrect");
+    {
+        let cluster = ClusterEngine::build(
+            vocab(),
+            &durable_cfg(3, dir2.clone(), false),
+            &[(1, "1996 skybox".to_string())],
+        )
+        .expect("durable cluster builds");
+        assert_eq!(
+            cluster
+                .add_query(CLASS_D_ID_BASE + 1, "-loggedwhileoff")
+                .expect("add"),
+            AddOutcome::RejectedClassD,
+            "a class-D add with the lane off is rejected (and never logged)"
+        );
+    }
+    let reopened2 = ClusterEngine::open(dir2.clone(), vocab(), Some(&lane_on_cfg(3, dir2.clone())))
+        .expect("reopen on");
+    let got2: HashSet<u64> = reopened2
+        .percolate("a plain unrelated title")
+        .expect("percolate")
+        .into_iter()
+        .collect();
+    assert!(
+        !got2.contains(&(CLASS_D_ID_BASE + 1)),
+        "a class-D add REJECTED while the lane was off resurrected on a lane-on reopen"
+    );
+    assert_eq!(
+        reopened2.class_counts().expect("cc")[3],
+        0,
+        "no class-D may be stored after the no-resurrection reopen"
+    );
+    let _ = std::fs::remove_dir_all(&dir2);
+}

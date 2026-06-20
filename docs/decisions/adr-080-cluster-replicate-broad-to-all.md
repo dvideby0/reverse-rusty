@@ -72,7 +72,13 @@ stand-in and unblocks class D, reusing the entire existing shard/replication/dur
   `accept_class_d` drives placement; each remote shard server runs its *own* engine's gate, so the
   **operator contract** is that every shard server runs with the same `--accept-class-d` (else a
   class-D add fanned to a knob-off shard is silently dropped). Coordinator-mode startup warns when the
-  flag is set in remote mode; a connect-time accept echo is the documented follow-on.
+  flag is set in remote mode. The in-process **forward layout fence has no remote analogue yet**: a
+  `distributed` coordinator reconnecting to *populated pre-ADR-080* shard servers (broad on shard 0
+  only) would mis-route under the rotating broad-eval shard, with no layout handshake to catch it (a
+  codex-review catch). A connect-time handshake carrying both the `accept_class_d` decision and the
+  broad-layout version — so the coordinator refuses a legacy remote shard rather than mis-routing it —
+  is the documented follow-on; until then a cross-version *remote* upgrade is unsupported (rebuild the
+  cluster). The in-process v1 core (the production-relevant path) is fully fenced.
 
 **Rejected: R-coord (broad on the coordinator, evaluated locally).** §7's literal *"every matcher node…
 locally"* predates this codebase's split of "matcher node" into a routing-only coordinator + stateful
@@ -116,6 +122,8 @@ green (replicate-to-all is result-identical for the broad set).
 single-node class-D lane + the manifest-v4 fence this mirrors at the cluster manifest), ADR-026 (the
 broad lane), ADR-032 (segments-only durability — why the fence lives at the cluster manifest), ADR-047
 (the partial-apply repair the broad fan-out reuses), ADR-065 criterion 8 (the requirement),
-[`clustering-and-scaling.md`](../design/clustering-and-scaling.md) §7. Deferred: R-coord (coordinator-local
-broad for multi-coordinator deployments); a connect-time `accept_class_d` handshake echo for remote
-shard servers.
+[`clustering-and-scaling.md`](../design/clustering-and-scaling.md) §7. Deferred (all in the experimental `distributed` path): R-coord (coordinator-local broad for
+multi-coordinator deployments); a connect-time handshake carrying the `accept_class_d` decision **and**
+the broad-layout version (the remote analogue of the in-process forward fence — refuse a populated
+pre-ADR-080 shard server instead of mis-routing it); and class-D under remote partial-apply `resync`
+(ADR-047), where re-driving a queued class-D mutation must likewise force accept.

@@ -148,11 +148,13 @@ impl ClusterEngine {
     /// still anchors its query (a hash collision is a bounded over-match the exact
     /// matcher rejects, never a dropped required term).
     ///
-    /// WAL-first: the mutation is durably logged BEFORE it is applied to any shard, so a
-    /// crash can never leave an acknowledged add that [`Self::open`] would lose. A log
-    /// append failure rejects the add (shards untouched) and surfaces a
-    /// [`DurabilityFailure`](EngineEvent::DurabilityFailure) — the cluster analogue of
-    /// the engine's WAL-first write path (ADR-013).
+    /// WAL-first: an ACCEPTED mutation is durably logged BEFORE it is applied to any shard, so a
+    /// crash can never leave an acknowledged add that [`Self::open`] would lose. A log append
+    /// failure rejects the add (shards untouched) and surfaces a
+    /// [`DurabilityFailure`](EngineEvent::DurabilityFailure) — the cluster analogue of the
+    /// engine's WAL-first write path (ADR-013). A REJECTED write (class D with the lane off, an
+    /// empty query, or a parse error) is classified out BEFORE the log, so the log holds only
+    /// accepted mutations and replay is configuration-independent (codex review).
     pub fn add_query(&self, id: u64, dsl: &str) -> Result<AddOutcome, ShardError> {
         self.add_query_with_tags(id, dsl, &[])
     }
@@ -170,8 +172,20 @@ impl ClusterEngine {
     ) -> Result<AddOutcome, ShardError> {
         // Reject malformed DSL up front: it carries no replayable mutation, so it must
         // never reach the log (a logged record must parse on replay).
-        if let Err(e) = crate::dsl::parse(dsl) {
-            return Ok(AddOutcome::RejectedParse(e));
+        let ast = match crate::dsl::parse(dsl) {
+            Ok(a) => a,
+            Err(e) => return Ok(AddOutcome::RejectedParse(e)),
+        };
+        // Classify BEFORE logging (against the CURRENT knob): a REJECTED write — class D with the
+        // lane off, or an effectively-empty query — carries no replayable mutation and must NEVER
+        // reach the log. Else, replaying it under a since-flipped knob would resurrect a query the
+        // caller was told was rejected (codex review). This is the cluster analogue of the
+        // single-node "the WAL records only accepted mutations" (ADR-068); the apply/replay funnel
+        // then forces accept=true, so replay reproduces the writer's decision regardless of config.
+        let mut lc = String::new();
+        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        if matches!(self.placement(&ex), Target::Reject) {
+            return Ok(AddOutcome::RejectedClassD);
         }
         let m = ClusterMutation::Add {
             logical: id,
@@ -214,8 +228,18 @@ impl ClusterEngine {
         // Reject malformed DSL up front: it carries no replayable mutation, so it must
         // never reach the log (a logged record must parse on replay) — and a failed
         // replace never deletes.
-        if let Err(e) = crate::dsl::parse(dsl) {
-            return Ok((0, AddOutcome::RejectedParse(e)));
+        let ast = match crate::dsl::parse(dsl) {
+            Ok(a) => a,
+            Err(e) => return Ok((0, AddOutcome::RejectedParse(e))),
+        };
+        // Classify BEFORE logging (current knob): a rejected new version carries no replayable
+        // mutation AND must not delete the prior version, so it never reaches the log or the
+        // tombstone pass. Same config-independent-replay discipline as add (codex review): the
+        // log holds only accepted mutations, and apply/replay forces accept=true.
+        let mut lc = String::new();
+        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        if matches!(self.placement(&ex), Target::Reject) {
+            return Ok((0, AddOutcome::RejectedClassD));
         }
         let m = ClusterMutation::Upsert {
             logical: id,
@@ -258,7 +282,12 @@ impl ClusterEngine {
         };
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-        let (insert_shards, outcome) = match self.placement(&ex) {
+        // Force accept=true: apply is reached ONLY for already-accepted writes (live upsert
+        // classified + accepted before logging; replay sees only logged=accepted frames), so this
+        // placement is configuration-independent — a knob flip on reopen neither drops nor
+        // resurrects (codex review). The empty-class-D guard in `placement_of` still rejects a
+        // never-stored empty query defensively.
+        let (insert_shards, outcome) = match placement_of(&self.dict, &self.ring, &ex, true) {
             Target::Reject => return Ok((0, AddOutcome::RejectedClassD)),
             // The broad lane is replicated to every shard (ADR-080); pass 1 already tombstones
             // every shard, so pass 2 re-inserts the new version on every shard.
@@ -408,9 +437,13 @@ impl ClusterEngine {
         };
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-        let outcome = match self.placement(&ex) {
-            // Class D with accept_class_d off is logged-but-unplaceable: a harmless no-op on
-            // replay (stored nowhere), matching the caller-visible "rejected, stored nowhere".
+        // Force accept=true (same only-accepted-writes invariant as apply_upsert): apply/replay
+        // reproduces the writer's decision regardless of the current knob, so a knob flip on
+        // reopen cannot drop or resurrect a class-D write (codex review). Rejected writes never
+        // reach the log (classified out in add_query), so the Reject arm is defensive.
+        let outcome = match placement_of(&self.dict, &self.ring, &ex, true) {
+            // Defensive: an effectively-empty query is rejected before logging, so a logged
+            // mutation never lands here; a replayed no-op (stored nowhere) is still safe.
             Target::Reject => return Ok(AddOutcome::RejectedClassD),
             // The broad lane (class C / B arity-2 / accepted D): replicated to EVERY shard
             // (ADR-080). Same fail-collect fan-out as Selective, so a mid-fan-out remote failure
