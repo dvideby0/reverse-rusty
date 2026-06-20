@@ -130,8 +130,9 @@ impl Brute {
         feats: &mut Vec<u32>,
     ) -> HashSet<u64> {
         let mut pos = Vec::new();
+        let mut sc = reverse_rusty::normalize::NormScratch::new();
         self.norm
-            .match_features_dual(title, &self.dict, lc, feats, &mut pos);
+            .match_features_dual(title, &self.dict, lc, &mut sc, feats, &mut pos);
         let in_pos = |f: u32| pos.binary_search(&f).is_ok();
         let in_neg = |f: u32| feats.binary_search(&f).is_ok();
         let mut out = HashSet::new();

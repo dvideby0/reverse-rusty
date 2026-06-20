@@ -38,6 +38,58 @@ mod parse_union_oracle;
 pub use builder::NormalizerBuilder;
 pub use core::{fold_diacritic, Normalizer};
 
+/// Reusable per-call working buffers for the normalizer's two-phase
+/// [`emit`](Normalizer::emit) pipeline and its match-time entry points
+/// ([`match_features`](Normalizer::match_features) /
+/// [`match_features_dual`](Normalizer::match_features_dual)).
+///
+/// **Why this exists (the allocation-free hot-path invariant).** `emit` runs per
+/// incoming title. Before this struct it heap-allocated several `Vec`s and `String`s on
+/// every call (the phrase-match list, the tokenization, the two per-token bool vecs, the
+/// feature-name builder, the intern buffer, …). Owning them here and `.clear()`-ing them
+/// at the start of each use turns ~6–8 allocations/title (doubled under an active
+/// multi-word alias, which re-runs `emit`) into ~0 in steady state — the same reuse
+/// pattern [`MatchScratch`](crate::segment::MatchScratch) already applies to `lc`/`feats`.
+///
+/// **The token-borrow problem.** The old code held `tokens: Vec<&str>` borrowing from the
+/// cleaned `lc` String, which a reusable buffer cannot store (the borrow outlives no single
+/// call). Instead [`tokens`](Self::tokens) stores token byte-ranges `(start, end)` into
+/// `lc`; use sites re-slice `lc` (`&lc[start..end]`) on demand. The buffer owns no borrow,
+/// so it lives across calls cleanly. The range's `.0` also replaces the old separate
+/// `token_offsets` vec.
+///
+/// Every buffer is cleared at the start of each `emit`, so **no state is ever carried
+/// between titles** — reuse is purely an allocation optimization, never a behavior change.
+#[derive(Debug, Default)]
+pub struct NormScratch {
+    /// Phase-1 phrase matches: `(byte_start, byte_end, phrase_entries index)`.
+    phrase_matches: Vec<(usize, usize, usize)>,
+    /// Phase-2 token byte-ranges into the cleaned `lc` (replaces the old `Vec<&str>`
+    /// tokens + the separate `token_offsets`: `tokens[i].0` is the offset).
+    tokens: Vec<(usize, usize)>,
+    /// Per-phrase "already emitted" flags, sized to `phrase_matches.len()`.
+    phrase_emitted: Vec<bool>,
+    /// Per-token "consumed by a phrase" flags, sized to `tokens.len()`.
+    token_consumed: Vec<bool>,
+    /// Feature-name builder (`"term:"`/`"grade:"`/… + value) handed to the helper emitters.
+    scratch: String,
+    /// Positive-view (`P(T)`, ADR-061 `force_additive`) active graders. Empty on the
+    /// query/compile and single-view title paths (no allocation churn there).
+    active_graders: Vec<(String, u8)>,
+    /// The `"term:<token>"` builder used by [`Normalizer::match_features_dual`]'s
+    /// positive-view raw-token pass (the dual path's only feature-name allocation otherwise).
+    name: String,
+}
+
+impl NormScratch {
+    /// A fresh scratch with empty buffers. Allocate once per matching thread and reuse;
+    /// the match path keeps one inside [`MatchScratch`](crate::segment::MatchScratch).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Metadata for a phrase pattern registered in the automaton.
 #[derive(Debug, Clone)]
 struct PhraseEntry {

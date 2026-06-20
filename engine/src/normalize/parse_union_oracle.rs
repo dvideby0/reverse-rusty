@@ -252,6 +252,7 @@ fn engine_positive_view_is_a_superset_of_every_parse() {
     }
 
     let mut lc = String::new();
+    let mut sc = super::NormScratch::new();
     let mut neg: Vec<FeatureId> = Vec::new();
     let mut pos: Vec<FeatureId> = Vec::new();
     let mut checked = 0usize;
@@ -261,7 +262,7 @@ fn engine_positive_view_is_a_superset_of_every_parse() {
     while let Some(title_toks) = stack.pop() {
         // Run the engine's dual view on the space-joined title.
         let title = title_toks.join(" ");
-        norm.match_features_dual(&title, &dict, &mut lc, &mut neg, &mut pos);
+        norm.match_features_dual(&title, &dict, &mut lc, &mut sc, &mut neg, &mut pos);
 
         // Every reference feature must be present in P(T).
         let want = reference.union(&title_toks);
