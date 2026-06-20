@@ -40,10 +40,7 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
 ### Tier 3 — scale & production maturity
 
 - **Distributed v1 ([ADR-065](decisions/adr-065-distributed-v1-graduation.md)) — open criteria**
-  (1–9 and 11 shipped: ADR-070/071/072/074/075/076/077/078/079/080; see [`STATUS.md`](STATUS.md)):
-  - **Criterion 10 — deployment packaging + runbook:** the harness image exists (`deploy/`,
-    ADR-072); ship the operator packaging (compose/k8s for a K-shard + control-plane cluster) +
-    an ops runbook, incl. the ADR-076 vocab-redeploy procedure.
+  (1–11 shipped: ADR-070/071/072/074/075/076/077/078/079/080/081; see [`STATUS.md`](STATUS.md)):
   - **Criterion 12 — scale proof at target:** a multi-shard load test at ≥20M stored queries on
     real hardware (largest soak to date: 10M single-node), plus the **real-corpus FN/throughput
     audit** owed in [`STATUS.md`](STATUS.md) "Current limitations".
@@ -51,6 +48,14 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     autoscaler-driven resize (needs hysteresis to avoid thrash, since a resize is non-idempotent +
     `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
     live-handoff machinery; the v1 resize is in-process blue/green).
+  - *Packaging follow-ons (deferred, [ADR-081](decisions/adr-081-deployment-packaging-runbook.md)):*
+    the **control-plane↔coordinator wiring** (a `--control-endpoint` attaching the coordinator's
+    `ControlPlane` to the durable `controlserver` quorum — today the deployed coordinator runs an
+    in-memory control plane) **+ a `controlserver` advertise-URL** (the bootstrap node commits its
+    wildcard bind address into Raft membership, so the multi-node quorum can't route — moot while idle);
+    **`shardserver --accept-class-d`** (so negation-only queries work on the remote topology, not just
+    in-process); and **k8s/Helm manifests** (the `StatefulSet` shape is sketched in ADR-081, gated on the
+    wiring so it isn't a misleading "HA control plane").
 - **Feature-model versioning + blue/green re-materialize** — frozen common-mask across minor
   versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
 - **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying

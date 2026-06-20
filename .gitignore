@@ -20,6 +20,10 @@
 # Environment / secrets
 .env
 .env.*
+# Operator-filled cluster env + minted mesh certs (deploy/cluster.env.example is the
+# tracked template — *.env does not match *.env.example).
+deploy/*.env
+deploy/certs/
 
 # Data files that may appear at runtime
 data/

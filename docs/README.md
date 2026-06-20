@@ -58,6 +58,9 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`reference/dsl.md`](reference/dsl.md) — the query DSL, normalization, and vocabulary.
 
 ### Operations
+- [`operations/cluster-deployment.md`](operations/cluster-deployment.md) — deploy + run a multi-node
+  cluster from the container image: topology, bootstrap order, certs/tokens, scale, recover, monitor,
+  the vocab-redeploy procedure ([`deploy/`](../deploy/) packaging + ADR-081).
 - [`operations/backup-restore.md`](operations/backup-restore.md) — back up + restore a deployment
   (single-node or cluster); the safety guarantee + the FS-snapshot zero-stall path (ADR-079).
 
