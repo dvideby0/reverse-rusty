@@ -301,6 +301,50 @@ pub(crate) async fn cluster_checkpoint(State(state): State<Arc<ClusterAppState>>
     }
 }
 
+#[derive(Deserialize)]
+pub(crate) struct BackupBody {
+    /// Server-side destination directory for the snapshot. Must not already exist.
+    dest: String,
+}
+
+/// POST /_backup — snapshot the cluster's durable state into `dest`, a server-side
+/// path that must not already exist (ADR-079): checkpoint, then copy the coordinator
+/// manifest + per-shard segments + `sources.dat` + the coordinator log. Restore by
+/// pointing a fresh coordinator at the copy via `--data-dir`. Replicas are rebuilt on
+/// open, so they are not copied.
+///
+/// Holds the writer-serialization mutex + the cluster READ lock across the checkpoint
+/// AND the copy (mirroring `cluster_checkpoint`), so no concurrent mutation or shard
+/// compaction runs during the snapshot; reads keep flowing off the shard snapshots.
+/// An in-memory cluster (no `--data-dir`) is a 400.
+#[instrument(skip_all)]
+pub(crate) async fn cluster_backup(
+    State(state): State<Arc<ClusterAppState>>,
+    Json(body): Json<BackupBody>,
+) -> Response {
+    let start = Instant::now();
+    let dest = std::path::PathBuf::from(&body.dest);
+    let result = {
+        let _w = state.write_serial.lock();
+        let cluster = state.cluster.read();
+        cluster.backup_to(&dest)
+    };
+    match result {
+        Ok(()) => {
+            info!(
+                dest = %body.dest,
+                took_ms = start.elapsed().as_millis() as u64,
+                "cluster backup complete"
+            );
+            Json(serde_json::json!({"acknowledged": true, "dest": body.dest})).into_response()
+        }
+        Err(e) => {
+            error!(dest = %body.dest, error = %e, "cluster backup failed");
+            shard_error_response("backup failed", &e)
+        }
+    }
+}
+
 /// GET /_cat/stats — single-node only; the cluster summary is `GET /_stats`.
 pub(crate) async fn cluster_cat_stats() -> Response {
     not_in_cluster_mode("GET /_cat/stats", "use GET /_stats or GET /_cat/shards")

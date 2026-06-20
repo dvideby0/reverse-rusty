@@ -8,6 +8,8 @@
 //! - [`dict`] — feature-dictionary (de)serialization (stored inside the manifests)
 //! - [`manifest`] — the engine `Manifest` + the coordinator `ClusterManifest`
 //! - [`sources`] — the per-query source-text store (`SourceStore`, ADR-020 Item 1)
+//! - [`backup`] — manifest-driven atomic directory snapshot (ADR-079); restore is
+//!   the existing `Engine::open` / `ClusterEngine::open`
 //!
 //! All multi-byte values are little-endian; integrity is a trailing CRC-32 plus
 //! write-to-tmp + atomic rename (`durable_rename`).
@@ -16,12 +18,16 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::Path;
 
+mod backup;
 mod dict;
 mod manifest;
 mod segment;
 mod sources;
 mod tagdict;
 
+pub use backup::{
+    copy_cluster_dir, copy_engine_dir, verify_backup, verify_cluster_backup, BackupError,
+};
 pub use dict::{deserialize_dict, serialize_dict};
 pub use manifest::{
     read_cluster_manifest, read_manifest, write_cluster_manifest, write_manifest, ClusterManifest,

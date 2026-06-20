@@ -40,17 +40,13 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
 ### Tier 3 — scale & production maturity
 
 - **Distributed v1 ([ADR-065](decisions/adr-065-distributed-v1-graduation.md)) — open criteria**
-  (1–7 and 9 shipped: ADR-070/071/072/074/075/076/077/078; see [`STATUS.md`](STATUS.md)):
+  (1–7, 9, and 11 shipped: ADR-070/071/072/074/075/076/077/078/079; see [`STATUS.md`](STATUS.md)):
   - **Criterion 8 — replicate-broad-to-all:** or the explicit ADR for why the RF-replicated
     shard-0 lane suffices at v1. (Also unblocks the cluster class-D lane — ADR-068 single-node
     today.)
   - **Criterion 10 — deployment packaging + runbook:** the harness image exists (`deploy/`,
     ADR-072); ship the operator packaging (compose/k8s for a K-shard + control-plane cluster) +
     an ops runbook, incl. the ADR-076 vocab-redeploy procedure.
-  - **Criterion 11 — backup/restore documented + tested:** single-node and cluster (coordinator
-    manifest + per-shard segments + logs). Today a *live* hot-copy is unsafe: a concurrent
-    flush/compaction can delete superseded segments mid-copy, so the procedure needs
-    write-quiescing, an FS snapshot, or file pinning (ADR-064 item 7).
   - **Criterion 12 — scale proof at target:** a multi-shard load test at ≥20M stored queries on
     real hardware (largest soak to date: 10M single-node), plus the **real-corpus FN/throughput
     audit** owed in [`STATUS.md`](STATUS.md) "Current limitations".
