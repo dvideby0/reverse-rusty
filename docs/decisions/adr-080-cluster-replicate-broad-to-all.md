@@ -72,13 +72,20 @@ stand-in and unblocks class D, reusing the entire existing shard/replication/dur
   `accept_class_d` drives placement; each remote shard server runs its *own* engine's gate, so the
   **operator contract** is that every shard server runs with the same `--accept-class-d` (else a
   class-D add fanned to a knob-off shard is silently dropped). Coordinator-mode startup warns when the
-  flag is set in remote mode. The in-process **forward layout fence has no remote analogue yet**: a
-  `distributed` coordinator reconnecting to *populated pre-ADR-080* shard servers (broad on shard 0
-  only) would mis-route under the rotating broad-eval shard, with no layout handshake to catch it (a
-  codex-review catch). A connect-time handshake carrying both the `accept_class_d` decision and the
-  broad-layout version — so the coordinator refuses a legacy remote shard rather than mis-routing it —
-  is the documented follow-on; until then a cross-version *remote* upgrade is unsupported (rebuild the
-  cluster). The in-process v1 core (the production-relevant path) is fully fenced.
+  flag is set in remote mode. The forward layout fence now has a **remote analogue** (a codex-review
+  catch): a `distributed` coordinator reconnecting to *populated pre-ADR-080* shard servers (broad on
+  shard 0 only) would otherwise mis-route under the rotating broad-eval shard with nothing to catch it.
+  Every ADR-080 shard server now **attests `broad_replicate_all`** in its `DictFingerprint`/`AdoptDict`
+  handshake replies (a pre-ADR-080 server omits the field ⇒ proto3 `false`), and the coordinator's
+  `RemoteShard::connect{,_and_adopt}` **fail loud** on a non-attesting server — mirroring the dict /
+  tag-dict fingerprint refusals (ADR-029/077), so a legacy remote shard is refused rather than silently
+  dropping broad matches off shard 0. The attestation reflects the server *binary*'s layout, which
+  catches the common rolling-upgrade case (old servers still running the old binary); migrating a *new*
+  binary onto *old, shard-0-only-broad* data still requires a re-ingest (a segments-only shard has no
+  per-shard manifest to attest its data's layout). Carrying the `accept_class_d` decision in the same
+  handshake — vs. today's operator contract + startup warning — and discounting the replicated class-B
+  lane from autoscaler split pressure are the remaining follow-ons. The in-process v1 core (the
+  production-relevant path) is fully fenced.
 
 **Rejected: R-coord (broad on the coordinator, evaluated locally).** §7's literal *"every matcher node…
 locally"* predates this codebase's split of "matcher node" into a routing-only coordinator + stateful

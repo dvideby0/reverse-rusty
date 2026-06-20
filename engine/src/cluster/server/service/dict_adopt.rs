@@ -133,5 +133,7 @@ pub(super) fn adopt_dict(
     Ok(Response::new(proto::AdoptDictReply {
         fingerprint: fp,
         tag_dict_fingerprint: tag_fp,
+        // ADR-080: this binary serves the replicate-to-all broad layout (see service.rs).
+        broad_replicate_all: true,
     }))
 }

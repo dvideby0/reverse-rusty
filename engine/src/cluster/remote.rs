@@ -137,6 +137,9 @@ impl RemoteShard {
                 reply.tag_dict_fingerprint
             )));
         }
+        if !reply.broad_replicate_all {
+            return Err(legacy_broad_layout_err(endpoint));
+        }
         Ok(RemoteShard {
             client,
             handle,
@@ -196,11 +199,11 @@ impl RemoteShard {
             tag_dict: tag_dict_bytes,
             tag_dict_fingerprint: expected_tag_fp,
         };
-        let (adopted, adopted_tag) =
+        let (adopted, adopted_tag, adopted_replicate_all) =
             match block_on_in_context(&handle, async move { shipper.adopt_dict(req).await }) {
                 Ok(reply) => {
                     let r = reply.into_inner();
-                    (r.fingerprint, r.tag_dict_fingerprint)
+                    (r.fingerprint, r.tag_dict_fingerprint, r.broad_replicate_all)
                 }
                 // The server holds data under a different dict and refused ours. Read its actual
                 // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
@@ -231,6 +234,12 @@ impl RemoteShard {
                 "tag-dict fingerprint mismatch after adopt: coordinator {expected_tag_fp:#018x} != \
                  server {adopted_tag:#018x} (the shipped tag space did not round-trip)"
             )));
+        }
+        // A populated pre-ADR-080 server whose dict matches ours would adopt as an idempotent
+        // no-op and pass the fingerprint checks above, yet hold broad only on shard 0 — refuse it
+        // (see `connect`), because our broad routing assumes every shard holds the replicated lane.
+        if !adopted_replicate_all {
+            return Err(legacy_broad_layout_err(endpoint));
         }
         Ok(RemoteShard {
             client,
@@ -356,6 +365,22 @@ where
 
 fn rpc_err<E: std::fmt::Display>(e: E) -> ShardError {
     ShardError::Remote(e.to_string())
+}
+
+/// The connect-time refusal when a shard server does not attest the ADR-080 replicate-to-all
+/// broad layout (`broad_replicate_all` false — a pre-ADR-080 server, where broad lived only on
+/// shard 0). This coordinator routes broad on a per-title broad-eval shard assuming EVERY shard
+/// holds the replicated lane, so serving such a server would silently miss broad matches off
+/// shard 0 (a false negative — the cardinal sin). Fail loud at connect instead, mirroring the
+/// dict / tag-dict fingerprint handshake. The fix is to re-ingest the corpus through an ADR-080
+/// coordinator (which replicates broad to every shard) or run an ADR-080 shard server binary.
+fn legacy_broad_layout_err(endpoint: &str) -> ShardError {
+    ShardError::Remote(format!(
+        "shard at {endpoint} does not attest ADR-080's replicate-to-all broad layout \
+         (broad_replicate_all=false — a pre-ADR-080 server keeps broad only on shard 0); this \
+         coordinator routes broad on every shard and would silently miss those matches. Re-ingest \
+         under the replicate-to-all layout, or run an ADR-080 shard server."
+    ))
 }
 
 impl Shard for RemoteShard {

@@ -105,6 +105,9 @@ impl ShardService for ShardServer {
             // (proto3 zero), which can never equal a real fingerprint — loud, not
             // silently unverified.
             tag_dict_fingerprint: st.tag_dict.fingerprint(),
+            // ADR-080: this binary serves the replicate-to-all broad layout. A pre-ADR-080
+            // server omits the field (proto3 false), so a replicate-all coordinator refuses it.
+            broad_replicate_all: true,
         }))
     }
 
