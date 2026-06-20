@@ -102,13 +102,21 @@ impl ClusterEngine {
     /// move did or didn't happen. A failed move leaves routing unchanged and the source unfenced
     /// (ADR-048), so the next tick can retry.
     #[cfg(feature = "distributed")]
-    fn drive_autoscaled_handoff(
+    pub(in crate::cluster::coordinator) fn drive_autoscaled_handoff(
         &self,
         snapshot: &LoadSnapshot,
         position: u32,
         from: NodeId,
         to: NodeId,
     ) {
+        // A degenerate self-handoff (`from == to`) would fence the source and then flip routing
+        // onto itself — a needless write-fence window for no movement. Skip it silently like the
+        // stale-recommendation case below; the endpoint-level check (`src_ep == tgt_ep`) catches
+        // the case where two distinct ids resolve to the SAME endpoint. Checked before the handle
+        // resolve so it is the unambiguous reason a self-handoff is a no-op.
+        if from.0 == to.0 {
+            return;
+        }
         // Only a gRPC-built cluster carries a runtime handle (and only it has remote endpoints to
         // move between). An in-process cluster has neither, so there is nothing to do.
         let Some(handle) = self.handle.clone() else {
@@ -143,6 +151,11 @@ impl ClusterEngine {
             });
             return;
         };
+        // Distinct ids may still resolve to the SAME endpoint (a self-handoff in disguise): skip
+        // rather than fence-then-flip onto itself.
+        if src_ep == tgt_ep {
+            return;
+        }
         if let Err(e) = self.execute_handoff(position as usize, &src_ep, &tgt_ep, &handle) {
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::ReplicaDesync,
