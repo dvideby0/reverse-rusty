@@ -240,16 +240,26 @@ impl ClusterEngine {
         let num_shards = new_ring.num_shards();
         let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
         for (logical, ex, text, tag_ids) in extracted {
-            match placement_of(&new_dict, &new_ring, &ex) {
+            // Re-placing ALREADY-STORED queries: a stored class-D was accepted when it was
+            // added, so a rebuild (resize / set_vocab) must never drop it via the current knob
+            // (mirrors the single-node ADR-068 vocab recompile, which passes accept=true
+            // unconditionally). The empty-forbidden guard in `placement_of` still rejects the
+            // never-stored empty query, so passing `true` cannot resurrect one.
+            match placement_of(&new_dict, &new_ring, &ex, true) {
                 Target::Reject => {}
-                Target::Replicated => buckets[0].push(PlacedQuery {
-                    logical,
-                    ex,
-                    dsl: text,
-                    version: 1,
-                    tags: Vec::new(),
-                    tag_ids,
-                }),
+                Target::Replicated => {
+                    // The broad lane is replicated to every shard (ADR-080).
+                    for bucket in &mut buckets {
+                        bucket.push(PlacedQuery {
+                            logical,
+                            ex: ex.clone(),
+                            dsl: text.clone(),
+                            version: 1,
+                            tags: Vec::new(),
+                            tag_ids: tag_ids.clone(),
+                        });
+                    }
+                }
                 Target::Selective(shs) => {
                     for &s in &shs {
                         buckets[s].push(PlacedQuery {
@@ -282,6 +292,11 @@ impl ClusterEngine {
         let old_num_shards = self.shards.len();
         let rf = self.replication_factor.max(1);
         let data_dir = self.data_dir.clone();
+        // The rebuild re-places ALREADY-STORED queries, so stored class-D must survive regardless
+        // of the current front-door knob: `placement_of(.., true)` above buckets it, and the shards
+        // are coordinator-gated storage that always accept (forced in `LocalShard`), so the fresh
+        // shards re-ingest it. NEW class-D adds stay gated at the coordinator by the unchanged
+        // `self.per_shard.accept_class_d`.
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
         for (s, bucket) in buckets.into_iter().enumerate() {
             let mut copies = Vec::with_capacity(rf);
@@ -416,7 +431,11 @@ pub fn recommended_shard_count(snapshot: &LoadSnapshot, config: &AutoscaleConfig
     let over = snapshot
         .shard_corpus
         .iter()
-        .filter(|&&c| c > config.split_corpus_threshold)
+        // Discount the replicated broad lane (on every shard regardless of K, ADR-080): only the
+        // SELECTIVE load is reduced by splitting, so only it counts as split pressure. Else every
+        // shard looks hot and a driver applying `resize_to_recommended` grows without bound
+        // (codex review).
+        .filter(|&&c| c.saturating_sub(snapshot.replicated_corpus) > config.split_corpus_threshold)
         .count();
     if over == 0 {
         None

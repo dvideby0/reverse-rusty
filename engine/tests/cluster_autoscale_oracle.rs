@@ -191,14 +191,24 @@ fn corpus_over_threshold_recommends_split() {
     let (cluster, titles) = build();
     let baseline = sweep(&cluster, &titles, true);
 
-    // Pick a threshold just below the largest shard so at least the busiest shard is over it.
+    // Split pressure measures the SELECTIVE (non-replicated) per-shard load (ADR-080): the
+    // replicated broad lane (class C + D) is on every shard and splitting won't shrink it, so the
+    // autoscaler discounts it. Pick a threshold just below the busiest shard's SELECTIVE load.
     let counts = cluster.shard_query_counts().expect("counts");
-    let (max_pos, &max_corpus) = counts
+    let cc = cluster.class_counts().expect("class counts");
+    let num_shards = cluster.num_shards() as u64;
+    let replicated = ((cc[2] + cc[3]) / num_shards) as usize;
+    let selective: Vec<usize> = counts
+        .iter()
+        .map(|&c| c.saturating_sub(replicated))
+        .collect();
+    let (max_pos, &max_sel) = selective
         .iter()
         .enumerate()
         .max_by_key(|(_, &c)| c)
         .expect("non-empty");
-    let threshold = max_corpus.saturating_sub(1);
+    assert!(max_sel > 0, "need some selective load to split on");
+    let threshold = max_sel.saturating_sub(1);
     let cfg = AutoscaleConfig {
         enabled: true,
         target_replication_factor: 1,
@@ -209,8 +219,8 @@ fn corpus_over_threshold_recommends_split() {
     let epoch_before = cluster.control_state().expect("state").epoch;
     let decision = cluster.tick(&cfg).expect("tick");
 
-    // Every split advisory is well-formed (its corpus matches the live per-shard count), and the
-    // busiest shard is among them.
+    // Every split advisory is well-formed (its corpus matches the live per-shard SELECTIVE count),
+    // and the busiest shard is among them.
     let splits: Vec<(u32, usize)> = decision
         .actions
         .iter()
@@ -225,8 +235,8 @@ fn corpus_over_threshold_recommends_split() {
     );
     for (pos, corpus) in &splits {
         assert_eq!(
-            *corpus, counts[*pos as usize],
-            "split corpus matches the shard"
+            *corpus, selective[*pos as usize],
+            "split corpus matches the shard's selective (non-replicated) load"
         );
         assert!(
             *corpus > threshold,
@@ -235,7 +245,7 @@ fn corpus_over_threshold_recommends_split() {
     }
     assert!(
         splits.iter().any(|(p, _)| *p as usize == max_pos),
-        "the busiest shard ({max_pos}, corpus {max_corpus}) is recommended for split"
+        "the busiest shard ({max_pos}, selective corpus {max_sel}) is recommended for split"
     );
 
     // Advisory ⇒ no mutation: the control plane and matching are untouched.

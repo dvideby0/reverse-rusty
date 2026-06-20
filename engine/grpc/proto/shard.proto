@@ -194,6 +194,11 @@ message ClassCountsReply { repeated uint64 counts = 1; }  // exactly 4: [A, B, C
 message DictFingerprintReply {
   uint64 fingerprint = 1;
   uint64 tag_dict_fingerprint = 2;
+  // ADR-080: the server attests it serves the replicate-to-all broad layout (broad lane on
+  // EVERY shard, the universal/per-title broad-eval routing). A pre-ADR-080 server omits this
+  // (proto3 false), where broad lived only on shard 0 — so a coordinator whose routing assumes
+  // broad-on-every-shard refuses it rather than silently missing broad matches off shard 0.
+  bool broad_replicate_all = 3;
 }
 
 // The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
@@ -214,6 +219,10 @@ message AdoptDictRequest {
 message AdoptDictReply {
   uint64 fingerprint = 1;
   uint64 tag_dict_fingerprint = 2;
+  // ADR-080 layout attestation — see `DictFingerprintReply.broad_replicate_all`. Carried here too
+  // so the adopt path (which trusts the reply instead of a separate fingerprint probe) refuses a
+  // populated pre-ADR-080 server whose idempotent no-op adopt would otherwise pass unchecked.
+  bool broad_replicate_all = 3;
 }
 
 // ---- peer recovery (ADR-035/036) ----

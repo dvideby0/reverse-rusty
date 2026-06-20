@@ -129,6 +129,19 @@ impl ClusterEngine {
         }
         let manifest = crate::storage::read_cluster_manifest(&manifest_path)
             .map_err(|e| ShardError::Config(format!("reading cluster manifest: {e}")))?;
+        // ADR-080 forward fence: a pre-ADR-080 durable cluster placed the broad lane (class C +
+        // B-arity-2) on shard 0 ONLY. This binary evaluates broad on a rotating per-title
+        // broad-eval shard, which would silently miss those queries whenever the chosen shard is
+        // not 0 — a false negative. Refuse loudly rather than mis-route; the operator rebuilds the
+        // cluster with this binary (which writes the v5 replicate-to-all layout).
+        if !manifest.broad_replicate_all {
+            return Err(ShardError::Config(format!(
+                "cluster at {} predates ADR-080's replicate-to-all broad layout (its broad lane \
+                 lives on shard 0 only); reopening it here would mis-route broad queries — rebuild \
+                 the cluster with this binary",
+                data_dir.display()
+            )));
+        }
         let dict = crate::storage::deserialize_dict(&manifest.dict_data)
             .map_err(|e| ShardError::Config(format!("deserializing cluster dict: {e}")))?;
         let mut dict = Arc::new(dict);

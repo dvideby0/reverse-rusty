@@ -51,7 +51,9 @@ fn cluster_matches_single_node_and_oracle() {
         let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
         assert_eq!(cluster.num_shards(), k);
 
-        // Every placement branch is exercised (A, B, C all present).
+        // Every placement branch is exercised (A, B, C all present). Under replicate-to-all
+        // (ADR-080) the class-C/B-arity-2 broad lane lives on every shard, so cc[2] (and the
+        // B-arity-2 share of cc[1]) is summed K times — still positive, the check we make here.
         let cc = cluster.class_counts().unwrap();
         assert!(cc[0] > 0, "K={k}: no class-A queries");
         assert!(

@@ -69,8 +69,10 @@
   local↔remote `Shard` trait (step 1 networking), the durable externalized mutation log / read-your-writes
   quorum (§4.1/§6), Raft cluster-manager quorum (§4.3), object storage / attach-and-mmap replicas (§4.2),
   auto shard count / auto-split / rebalance (§8), autoscaling (§8.5), epoch fencing / self-heal (§9),
-  replicate-broad-to-*all*-nodes (§7; in-process uses one designated evaluator), and incremental
-  **new-vocabulary** adds (the dict is frozen post-build; `add_query` compiles read-only against it).
+  replicate-broad-to-*all*-nodes (§7; in-process uses one designated evaluator — now graduated by
+  [ADR-080](adr-080-cluster-replicate-broad-to-all.md): the broad lane lives on every shard, evaluated
+  on one broad-eval shard per title), and incremental **new-vocabulary** adds (the dict is frozen
+  post-build; `add_query` compiles read-only against it).
 - **See also:** the clustering design ([clustering-and-scaling.md](../design/clustering-and-scaling.md) §3,
   §7, §10) and the prior-art survey ([research/clustering-prior-art.md](../research/clustering-prior-art.md) —
   the hashing-variant comparison + the formal cross-shard correctness argument behind this ADR), ADR-001

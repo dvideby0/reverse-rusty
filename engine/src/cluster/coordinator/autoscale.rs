@@ -22,10 +22,20 @@ impl ClusterEngine {
     pub fn collect_load(&self, config: &AutoscaleConfig) -> Result<LoadSnapshot, ShardError> {
         let state = self.control_state()?;
         let shard_corpus = self.shard_query_counts()?;
+        // The replicated broad lane (class C + class D — fully replicated to every shard, ADR-080)
+        // is the same size on each shard and does not shrink when shards are added, so it must not
+        // drive split pressure. `class_counts` sums across shards; C and D are on EVERY shard, so
+        // their per-shard size is total / num_shards (exact — each query is on every shard). The
+        // class-B-arity-2 share of the replicated lane lives in the main index (mixed into class B):
+        // a small residual not discounted here, tied to the deferred broad-main-index follow-on.
+        let cc = self.class_counts()?;
+        let num_shards = u64::from(state.num_shards).max(1);
+        let replicated_corpus = ((cc[2] + cc[3]) / num_shards) as usize;
         Ok(LoadSnapshot {
             nodes: state.nodes,
             assignments: state.assignments,
             shard_corpus,
+            replicated_corpus,
             num_shards: state.num_shards,
             replication_factor: config.target_replication_factor,
         })

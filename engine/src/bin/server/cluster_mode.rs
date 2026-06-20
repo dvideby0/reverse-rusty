@@ -76,16 +76,19 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         }
         std::process::exit(1);
     }
-    if cli.accept_class_d {
-        warn!(
-            "--accept-class-d is inert in cluster mode: the coordinator rejects \
-             negation-only queries at placement (the cluster always-candidate lane is \
-             ADR-065 criterion 8)"
-        );
-    }
-
     let remote_groups: Vec<String> = cli.shard_endpoint.clone();
     let in_process = remote_groups.is_empty();
+    // accept_class_d now drives the cluster always-candidate lane (ADR-080): the coordinator
+    // places class-D on the broad lane (replicated to every shard). In REMOTE mode every shard
+    // server must ALSO run with --accept-class-d, else a class-D insert fanned to a shard whose
+    // engine rejects it is silently dropped (the operator contract; in-process has one config).
+    if !in_process && cli.accept_class_d {
+        warn!(
+            "--accept-class-d in remote cluster mode: every shard server must also run with \
+             --accept-class-d (ADR-080 operator contract), else class-D queries are dropped \
+             on a shard that rejects them"
+        );
+    }
     if in_process
         && (cli.grpc_tls_ca.is_some()
             || cli.grpc_tls_domain.is_some()

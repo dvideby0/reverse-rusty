@@ -40,10 +40,7 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
 ### Tier 3 — scale & production maturity
 
 - **Distributed v1 ([ADR-065](decisions/adr-065-distributed-v1-graduation.md)) — open criteria**
-  (1–7, 9, and 11 shipped: ADR-070/071/072/074/075/076/077/078/079; see [`STATUS.md`](STATUS.md)):
-  - **Criterion 8 — replicate-broad-to-all:** or the explicit ADR for why the RF-replicated
-    shard-0 lane suffices at v1. (Also unblocks the cluster class-D lane — ADR-068 single-node
-    today.)
+  (1–9 and 11 shipped: ADR-070/071/072/074/075/076/077/078/079/080; see [`STATUS.md`](STATUS.md)):
   - **Criterion 10 — deployment packaging + runbook:** the harness image exists (`deploy/`,
     ADR-072); ship the operator packaging (compose/k8s for a K-shard + control-plane cluster) +
     an ops runbook, incl. the ADR-076 vocab-redeploy procedure.

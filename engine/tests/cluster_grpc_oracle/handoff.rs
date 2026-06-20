@@ -126,8 +126,8 @@ fn grpc_live_handoff_under_sustained_writes() {
 
     // Run the handoff CONCURRENTLY with a writer streaming the additions through the cluster. The
     // add routes to position 0's CURRENT backing — the source pre-flip, the target post-flip — and is
-    // briefly REJECTED in the fence→flip window (the source is fenced, routing not yet flipped); the
-    // writer retries until it lands, so no add is lost.
+    // briefly REJECTED in the fence→flip window (the source is fenced, routing not yet flipped). The
+    // write is durably logged BEFORE apply, so no add is lost regardless of HOW the fence surfaces.
     std::thread::scope(|s| {
         let cluster_ref = &cluster;
         let adds = &additions;
@@ -135,10 +135,18 @@ fn grpc_live_handoff_under_sustained_writes() {
             for (id, dsl) in adds {
                 loop {
                     match cluster_ref.add_query(*id, dsl) {
-                        Ok(_) => break,
-                        // The brief fence→flip window: the fenced source rejects the write
-                        // (failed_precondition → ShardError::Remote). Retry — after the flip it lands
-                        // on the new owner.
+                        // This id is durably accounted for, so stop retrying it (re-`add_query`
+                        // would double-log):
+                        //  - Ok: it landed on the position's current owner.
+                        //  - PartiallyApplied: the brief fence→flip window — the fenced source
+                        //    rejected it with `failed_precondition`, which the broad lane's fan-out
+                        //    funnel reports as PartiallyApplied (ADR-080 routes it through the same
+                        //    fail-collect path as the selective lane). The add is ALREADY durably
+                        //    logged and queued for repair (ADR-047); the post-handoff `resync`
+                        //    re-drives it onto the new owner.
+                        Ok(_) | Err(ShardError::PartiallyApplied { .. }) => break,
+                        // A clean pre-apply failure (nothing logged or applied) — safe to retry until
+                        // the flip lands it on the new owner.
                         Err(ShardError::Remote(_)) => std::thread::sleep(Duration::from_millis(2)),
                         Err(e) => panic!("unexpected writer error: {e}"),
                     }
@@ -157,6 +165,24 @@ fn grpc_live_handoff_under_sustained_writes() {
         cluster.handoff_generations(),
         vec![1],
         "the handoff bumped position 0's generation"
+    );
+
+    // Converge any fence-window write that was durably logged but queued for repair (ADR-047). Its
+    // failed position is 0, whose backing the flip swapped to the (healthy) new owner, so `resync`
+    // re-drives the add there in a single pass. This is exactly what an operator, the autoscaler
+    // `tick`, or a reopen-replay would do. A no-op when the fence window stayed empty (it is a race —
+    // some runs land every add cleanly), so the loop converges immediately in that case too.
+    for _ in 0..50 {
+        if cluster.pending_repairs() == 0 {
+            break;
+        }
+        let _ = cluster.resync();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        cluster.pending_repairs(),
+        0,
+        "every fence-window write must converge via resync after the flip"
     );
 
     // Over EVERY title the cluster (now serving from the new owner) matches the brute oracle over the

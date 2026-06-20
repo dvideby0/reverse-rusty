@@ -25,6 +25,7 @@ mod core;
 mod dict_shipping;
 mod filtered;
 mod handoff;
+mod legacy_layout;
 mod partial_apply;
 mod recovery;
 mod replication;

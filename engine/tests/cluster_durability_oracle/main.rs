@@ -20,6 +20,7 @@ mod attach;
 mod backends;
 mod backup;
 mod checkpoint;
+mod class_d;
 mod core;
 mod replication;
 mod resize;

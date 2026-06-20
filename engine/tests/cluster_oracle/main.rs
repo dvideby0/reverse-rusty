@@ -16,6 +16,7 @@
 
 mod harness;
 
+mod class_d;
 mod differential;
 mod dynamic_vocab;
 mod filtered;

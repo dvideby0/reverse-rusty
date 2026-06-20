@@ -167,8 +167,9 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
 
 - **Not yet a hardened multi-machine deployment.** The distributed layers are oracle-proven
   in-process / on localhost / in the containerized harness, but the Distributed-v1 graduation
-  (ADR-065) is incomplete — open criteria: replicate-broad-to-all (or decide), packaging +
-  runbook, and the ≥20M scale proof (backup/restore shipped, ADR-079). Mesh TLS + token auth are
+  (ADR-065) is incomplete — open criteria: packaging + runbook, and the ≥20M scale proof
+  (replicate-broad-to-all + the cluster class-D lane shipped, ADR-080; backup/restore, ADR-079).
+  Mesh TLS + token auth are
   **opt-in** (ADR-071) — enable both outside a trusted network. Remote-cluster vocabulary is
   deploy-time configuration, not live-shipped (decided, ADR-076).
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at

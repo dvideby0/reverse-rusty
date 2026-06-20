@@ -120,6 +120,13 @@ pub struct LoadSnapshot {
     pub assignments: Vec<ShardAssignment>,
     /// Per-shard physical query count, index-aligned with position `0..num_shards`.
     pub shard_corpus: Vec<usize>,
+    /// The REPLICATED broad lane held on EVERY shard (the same size on each, ADR-080): class C +
+    /// class D, copied to every shard regardless of `num_shards`. Split pressure discounts it —
+    /// splitting never shrinks the replicated lane, so counting it would make every shard look hot
+    /// and recommend growing without bound. (Class-B-arity-2 is also replicated but lives in the
+    /// always-probed main index, mixed into class B — a small residual not yet discounted, the
+    /// deferred broad-main-index follow-on.)
+    pub replicated_corpus: usize,
     /// Ring shard count (`shard_corpus.len()` mirrors this).
     pub num_shards: u32,
     /// The cluster's configured replication factor (context).
@@ -287,14 +294,18 @@ fn corpus_split(
         return;
     }
     for (pos, &corpus) in snapshot.shard_corpus.iter().enumerate() {
-        if corpus > config.split_corpus_threshold {
+        // Split pressure measures the SELECTIVE (non-replicated) load: the replicated broad lane is
+        // on every shard regardless of `num_shards`, so splitting never reduces it — counting it
+        // would make every shard look hot and recommend growing forever (codex review, ADR-080).
+        let selective = corpus.saturating_sub(snapshot.replicated_corpus);
+        if selective > config.split_corpus_threshold {
             decision.actions.push(ScalingAction::RecommendSplit {
                 position: pos as u32,
-                corpus,
+                corpus: selective,
             });
             decision.rationale.push(format!(
-                "shard {pos} corpus {corpus} exceeds split threshold {}; recommend split \
-                 (advisory only — no split mechanism this increment)",
+                "shard {pos} selective corpus {selective} exceeds split threshold {}; recommend \
+                 split (advisory only — no split mechanism this increment)",
                 config.split_corpus_threshold
             ));
         }
@@ -351,6 +362,7 @@ mod tests {
             nodes: vec![node(0), node(1)],
             assignments: vec![assign(0, 0, &[1]), assign(1, 1, &[0])],
             shard_corpus: vec![100, 100],
+            replicated_corpus: 0,
             num_shards: 2,
             replication_factor: 2,
         }
@@ -377,6 +389,7 @@ mod tests {
             nodes: vec![node(0), node(1), node(2)],
             assignments: vec![assign(0, 0, &[])],
             shard_corpus: vec![100],
+            replicated_corpus: 0,
             num_shards: 1,
             replication_factor: 1,
         };
@@ -391,6 +404,7 @@ mod tests {
             nodes: vec![node(0), node(1), node(2)],
             assignments: vec![assign(0, 0, &[]), assign(1, 0, &[])],
             shard_corpus: vec![50, 50],
+            replicated_corpus: 0,
             num_shards: 2,
             replication_factor: 1,
         };
@@ -406,6 +420,7 @@ mod tests {
             nodes: vec![node(0)],
             assignments: vec![assign(0, 0, &[1]), assign(1, 1, &[0])],
             shard_corpus: vec![50, 50],
+            replicated_corpus: 0,
             num_shards: 2,
             replication_factor: 1,
         };
@@ -430,6 +445,7 @@ mod tests {
             nodes: vec![node(0), node(1)],
             assignments: vec![assign(0, 0, &[]), assign(1, 0, &[]), assign(2, 1, &[])],
             shard_corpus: vec![100, 100, 10],
+            replicated_corpus: 0,
             num_shards: 3,
             replication_factor: 1,
         };
@@ -469,12 +485,61 @@ mod tests {
         assert_eq!(split, Some((1, 5000)), "shard 1 over threshold: {d:?}");
     }
 
+    /// The replicated broad lane (ADR-080) must not drive split pressure: when every shard is over
+    /// threshold ONLY because of the replicated lane (identical on each), splitting would copy it to
+    /// the new shards too, so neither `corpus_split` nor `recommended_shard_count` may recommend
+    /// growing — else runaway shard doubling (codex review).
+    #[test]
+    fn replicated_lane_does_not_drive_split_pressure() {
+        let snap = LoadSnapshot {
+            nodes: vec![node(0), node(1)],
+            assignments: vec![assign(0, 0, &[]), assign(1, 1, &[])],
+            shard_corpus: vec![5000, 5000], // total per shard
+            replicated_corpus: 4990,        // 4990 of it is the replicated lane (same on both)
+            num_shards: 2,
+            replication_factor: 1,
+        };
+        let cfg = AutoscaleConfig {
+            split_corpus_threshold: 1000,
+            ..enabled()
+        };
+        // Selective load = 5000 - 4990 = 10 ≤ 1000 ⇒ no split, no growth recommendation.
+        let d = evaluate(&snap, &cfg);
+        assert!(
+            !d.actions
+                .iter()
+                .any(|a| matches!(a, ScalingAction::RecommendSplit { .. })),
+            "the replicated lane alone must not recommend a split: {d:?}"
+        );
+        assert_eq!(
+            crate::cluster::recommended_shard_count(&snap, &cfg),
+            None,
+            "no shard is selectively hot ⇒ no resize (no runaway)"
+        );
+        // Sanity: a genuinely large SELECTIVE load on one shard DOES still recommend a split.
+        let mut hot = snap.clone();
+        hot.shard_corpus = vec![5000, 7000]; // shard 1 selective = 7000 - 4990 = 2010 > 1000
+        assert!(
+            evaluate(&hot, &cfg)
+                .actions
+                .iter()
+                .any(|a| matches!(a, ScalingAction::RecommendSplit { .. })),
+            "a real selective overload must still recommend a split"
+        );
+        assert_eq!(
+            crate::cluster::recommended_shard_count(&hot, &cfg),
+            Some(3),
+            "one selectively-hot shard ⇒ +1"
+        );
+    }
+
     #[test]
     fn split_on_a_single_node_also_recommends_scale_out() {
         let snap = LoadSnapshot {
             nodes: vec![node(0)],
             assignments: vec![assign(0, 0, &[])],
             shard_corpus: vec![9000],
+            replicated_corpus: 0,
             num_shards: 1,
             replication_factor: 1,
         };
@@ -503,6 +568,7 @@ mod tests {
             nodes: vec![node(0), node(1), node(2)],
             assignments: vec![assign(0, 0, &[]), assign(1, 0, &[]), assign(2, 1, &[])],
             shard_corpus: vec![100, 100, 10],
+            replicated_corpus: 0,
             num_shards: 3,
             replication_factor: 1,
         };

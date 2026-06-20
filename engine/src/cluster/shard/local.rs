@@ -69,8 +69,14 @@ impl LocalShard {
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
         tag_dict: Arc<TagDict>,
-        config: EngineConfig,
+        mut config: EngineConfig,
     ) -> Self {
+        // Cluster shards are coordinator-gated storage: the COORDINATOR's placement is the SOLE
+        // class-D gate (ADR-068/080), so a shard must ACCEPT whatever the coordinator places — else
+        // a class-D the coordinator accepted (or replays / rebuilds as already-accepted) would be
+        // silently dropped by the shard's own knob, a false negative (codex review). The operator's
+        // front-door knob lives on the coordinator (`ClusterEngine::per_shard`), not here.
+        config.accept_class_d = true;
         let retention_lease_ttl = resolve_lease_ttl(&config);
         // `tag_dict` is moved into the engine (the shard keeps no separate copy — the engine holds
         // the shared frozen tag space and does all read-only resolution against it).
@@ -98,8 +104,11 @@ impl LocalShard {
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
         tag_dict: Arc<TagDict>,
-        config: EngineConfig,
+        mut config: EngineConfig,
     ) -> Result<Self, ShardError> {
+        // Coordinator-gated storage: the shard always accepts class-D (see `new`); the operator's
+        // front-door knob lives on the coordinator. Forced before the self-restart path inherits it.
+        config.accept_class_d = true;
         let dir = config.data_dir.clone().ok_or_else(|| {
             ShardError::Log("durable shard requires a data_dir for its translog".into())
         })?;
@@ -154,10 +163,14 @@ impl LocalShard {
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
         tag_dict: Arc<TagDict>,
-        config: EngineConfig,
+        mut config: EngineConfig,
         files: &[String],
         next_seg_id: u64,
     ) -> Result<Self, ShardError> {
+        // Coordinator-gated storage: the reopened shard always accepts class-D, so a clog-tail or
+        // peer-recovery replay of an already-accepted class-D write is stored, not re-rejected by a
+        // shard built under a since-flipped knob (codex review). See `new` for the full rationale.
+        config.accept_class_d = true;
         let dir = config.data_dir.clone();
         let retention_lease_ttl = resolve_lease_ttl(&config);
         let translog = match &dir {

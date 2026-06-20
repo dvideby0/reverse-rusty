@@ -64,6 +64,10 @@ impl ClusterEngine {
             num_shards: self.ring.num_shards() as u32,
             vnodes: self.vnodes,
             include_broad: self.include_broad,
+            // ADR-080 replicate-to-all layout marker (always set by this binary — broad on every
+            // shard). Writes v5: the two-way fence (a pre-ADR-080 binary refuses it on open; this
+            // binary refuses a pre-ADR-080 v<5 cluster on open, whose broad is on shard 0 only).
+            broad_replicate_all: true,
             segment_registry: segment_registry.clone(),
             next_seg_ids,
             dict_data: crate::storage::serialize_dict(&self.dict),

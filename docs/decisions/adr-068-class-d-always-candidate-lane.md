@@ -99,6 +99,9 @@
   the accept decision; that work rides the ADR-065 replicate-broad-to-all criterion and ships
   separately (precedent: ADR-055 deferring `set_vocab` on a tagged cluster). The coordinator gates
   before any shard engine sees the query, so a misconfigured shard knob cannot create divergence.
+  **Shipped: [ADR-080](adr-080-cluster-replicate-broad-to-all.md)** — the cluster now accepts class D on
+  the replicate-to-all broad lane behind `accept_class_d`, with the rollback fence at the v5
+  `ClusterManifest`.
 
 - **Why this is safe (the correctness contract).** The lossless-cover contract says: if a title `T`
   *could* satisfy `Q`'s positive semantics, `T` must generate a signature that retrieves `Q`. For a
