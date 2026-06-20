@@ -102,6 +102,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Validate the PRODUCTION compose (deploy/compose.cluster.yml, ADR-081). The
+      # harness below exercises compose.harness.yml, not this file, so without this it
+      # has no CI coverage. `config` is a daemon-independent client-side parse (anchors,
+      # env interpolation, volume/network refs); the fail-loud required-secret guards
+      # need dummy values supplied, exactly as a real bring-up would. Fails fast.
+      - name: Lint the production cluster compose
+        run: >
+          RR_CLUSTER_TOKEN=ci-lint RR_CERT_DIR=./deploy/certs
+          docker compose --project-directory . -f deploy/compose.cluster.yml config >/dev/null
+
       - name: Install pinned toolchain
         working-directory: engine
         run: rustc --version && cargo --version

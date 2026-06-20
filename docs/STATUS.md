@@ -160,15 +160,17 @@ live in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)
 The prioritized roadmap (open work only) is **[`roadmap.md`](roadmap.md)**. Tiers: **0** Cluster-v1
 gate (✅ complete) · **1** measured bottlenecks (✅ complete) · **2** feature-model self-tuning
 (open: alias-discovery sources, the "improve" menu) · **3** scale & production maturity (open:
-ADR-065 criteria 8/10/12, model versioning, aspects-first ingestion) · **4** percolator
+ADR-065 criterion 12, model versioning, aspects-first ingestion) · **4** percolator
 parity (✅ program complete; small deferred refinements) · the operational-polish backlog.
 
 ## Current limitations
 
 - **Not yet a hardened multi-machine deployment.** The distributed layers are oracle-proven
   in-process / on localhost / in the containerized harness, but the Distributed-v1 graduation
-  (ADR-065) is incomplete — open criteria: packaging + runbook, and the ≥20M scale proof
-  (replicate-broad-to-all + the cluster class-D lane shipped, ADR-080; backup/restore, ADR-079).
+  (ADR-065) is incomplete — one open criterion: the ≥20M scale proof (deployment packaging +
+  operations runbook shipped, ADR-081; replicate-broad-to-all + the cluster class-D lane, ADR-080;
+  backup/restore, ADR-079). The deployed coordinator runs an in-memory control plane — the durable
+  `controlserver` quorum is shippable but not yet consulted for routing (ADR-081 deferral).
   Mesh TLS + token auth are
   **opt-in** (ADR-071) — enable both outside a trusted network. Remote-cluster vocabulary is
   deploy-time configuration, not live-shipped (decided, ADR-076).

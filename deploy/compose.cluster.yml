@@ -1,0 +1,214 @@
+# Reverse Rusty — production cluster topology (ADR-081, Distributed-v1 criterion 10).
+# A K-shard + control-plane cluster from ONE image (deploy/Dockerfile), role chosen
+# by command. The default is K=3 shards, RF=1 (primary only). Full operations
+# procedure — bootstrap order, certs, scaling, recovery, backup, vocab redeploy:
+#   docs/operations/cluster-deployment.md
+#
+# Quick start (run from the repo root):
+#   docker build -f deploy/Dockerfile -t reverse-rusty:latest .
+#   deploy/gen-mesh-certs.sh                      # writes ./deploy/certs
+#   cp deploy/cluster.env.example deploy/cluster.env && $EDITOR deploy/cluster.env
+#   docker compose --project-directory . -f deploy/compose.cluster.yml \
+#     --env-file deploy/cluster.env up -d --wait
+#
+# `--project-directory .` is required: docker resolves a relative bind path (like
+# RR_CERT_DIR=./deploy/certs) against the PROJECT directory, which otherwise defaults
+# to this file's dir (deploy/) and would look for deploy/deploy/certs. Pinning the
+# project dir to the repo root makes every relative path repo-root-relative. (Or set
+# RR_CERT_DIR to an absolute path and the flag no longer matters.)
+#
+# This is NOT deploy/compose.harness.yml — that file is the test driver (ADR-072):
+# it bakes a corpus, a spare handoff node, and aggressive 2s probes. This file is a
+# long-lived deployment: durable volumes, no baked data, conservative health probes,
+# loopback-published API, auth expected.
+#
+# IMPORTANT — the control plane is present but not yet load-bearing at v1. A remote
+# coordinator runs its OWN in-memory control plane and re-derives placement
+# deterministically from the frozen dict + ring on every (re)start; it does not yet
+# consult the controlserver quorum (no --control-endpoint wiring exists — ADR-072
+# §Scope, ADR-081). The quorum is included so the durable placement-state tier is
+# production-shaped and ready when the wiring lands; today it is durable but idle.
+# You may omit control0..2 entirely at v1 with no behavioral change.
+
+# Shared shard definition (the three primaries differ only in name + volume).
+x-shard-base: &shard-base
+  image: ${RR_IMAGE:-reverse-rusty:latest}
+  networks: [rrmesh]
+  # Read by the bin via RR_CLUSTER_TOKEN (resolve_mesh_token) — never a flag, so it
+  # stays out of `docker inspect`-visible process args.
+  environment:
+    RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN:?set RR_CLUSTER_TOKEN (openssl rand -hex 32)}
+  restart: unless-stopped
+  stop_grace_period: 20s
+  healthcheck:
+    # The gRPC listener is up as soon as the server binds (a --pending shard listens
+    # before it has a dict), which is exactly when the coordinator may start dialing.
+    test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/50051"]
+    interval: 10s
+    timeout: 3s
+    retries: 6
+    start_period: 10s
+
+services:
+  # --- Data plane: durable shard nodes (gRPC). ---------------------------------
+  # `--pending` starts dict-less and waits for the coordinator's AdoptDict at
+  # connect (the real multi-node flow). `--data-dir /data` makes the node durable —
+  # /data MUST be the mount point so the named volume inherits the image's uid-10001
+  # ownership (deploy/Dockerfile), else the durable store fails EACCES.
+  shard0:
+    <<: *shard-base
+    command: >
+      shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    volumes:
+      - ${RR_CERT_DIR:?set RR_CERT_DIR}:/certs:ro
+      - shard0-data:/data
+  shard1:
+    <<: *shard-base
+    command: >
+      shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - shard1-data:/data
+  shard2:
+    <<: *shard-base
+    command: >
+      shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - shard2-data:/data
+
+  # To ADD a shard (remote add-a-shard is a redeploy, not an online resize — ADR-078
+  # resize is in-process only): copy a shard block, bump the name + volume, add a
+  # matching `--shard-endpoint https://shard3:50051` line to the coordinator below,
+  # add `shard3` to the cert SANs (deploy/gen-mesh-certs.sh ... shard3), and declare
+  # `shard3-data:` under volumes. See cluster-deployment.md §5.
+  #
+  # For RF=2 (a replica per position), run a second node per shard (e.g. shard0r)
+  # and list it INSIDE the coordinator's endpoint group, comma-separated:
+  #   --shard-endpoint https://shard0:50051,https://shard0r:50051
+
+  # --- The coordinator: the REST API over the cluster (ADR-070). ---------------
+  # A REMOTE coordinator is STATELESS — durability lives on the shard nodes — so it
+  # takes NO --data-dir (the bin refuses --data-dir with --shard-endpoint). It ships
+  # its deterministically re-minted frozen dict to every shard at connect, so a
+  # coordinator restart needs no local state. Load data at runtime via _bulk/_doc.
+  coordinator:
+    image: ${RR_IMAGE:-reverse-rusty:latest}
+    networks: [rrmesh]
+    command: >
+      server --cluster --host 0.0.0.0 --port 9200
+      --shard-endpoint https://shard0:50051
+      --shard-endpoint https://shard1:50051
+      --shard-endpoint https://shard2:50051
+      --grpc-tls-ca /certs/ca.crt
+    # --include-broad makes broad-lane queries match by DEFAULT; broad is also a
+    # per-request flag (`"include_broad": true` in the _search body), so leave it off
+    # here unless every request should include broad. To accept negation-only
+    # (class-D) queries, add --accept-class-d HERE *and* to every shardserver above
+    # (all-or-nothing — ADR-080 operator contract), else they are silently dropped.
+    environment:
+      RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN:?set RR_CLUSTER_TOKEN}
+      # The HTTP bearer gate (ADR-062). Required once the API is reachable off-box;
+      # the server warns at startup if it binds beyond loopback without it.
+      RR_AUTH_TOKEN: ${RR_AUTH_TOKEN:-}
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+    ports:
+      # Loopback-only by default. Widen RR_PORT to 0.0.0.0:9200 ONLY behind a
+      # firewall/proxy and with RR_AUTH_TOKEN set.
+      - "${RR_PORT:-127.0.0.1:9200}:9200"
+    depends_on:
+      shard0: {condition: service_healthy}
+      shard1: {condition: service_healthy}
+      shard2: {condition: service_healthy}
+    # unless-stopped also covers the connect race: if the coordinator starts before a
+    # shard's first listen, the connect fails non-zero and it is restarted (the shard
+    # depends_on healthcheck makes this rare). It is not restarted after a clean
+    # `compose stop`/`down`.
+    restart: unless-stopped
+    stop_grace_period: 35s  # allow the graceful drain (server --drain-timeout, default 30s)
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:9200/_health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  # --- Control plane: durable openraft quorum (ADR-038/041). -------------------
+  # Present but NOT yet wired to the coordinator at v1 (see the header note). Shipped
+  # so the durable placement tier is production-shaped; safe to omit at v1. Node 0
+  # bootstraps the cluster from the --peer members once they listen.
+  control0:
+    image: ${RR_IMAGE:-reverse-rusty:latest}
+    networks: [rrmesh]
+    command: >
+      controlserver 0 0.0.0.0:50061 --data-dir /data --bootstrap
+      --peer 1=https://control1:50061 --peer 2=https://control2:50061
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    environment:
+      RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN:?set RR_CLUSTER_TOKEN}
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - control0-data:/data
+    restart: unless-stopped
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/50061"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+  control1:
+    image: ${RR_IMAGE:-reverse-rusty:latest}
+    networks: [rrmesh]
+    command: >
+      controlserver 1 0.0.0.0:50061 --data-dir /data
+      --peer 0=https://control0:50061 --peer 2=https://control2:50061
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    environment:
+      RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN:?set RR_CLUSTER_TOKEN}
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - control1-data:/data
+    restart: unless-stopped
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/50061"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+  control2:
+    image: ${RR_IMAGE:-reverse-rusty:latest}
+    networks: [rrmesh]
+    command: >
+      controlserver 2 0.0.0.0:50061 --data-dir /data
+      --peer 0=https://control0:50061 --peer 1=https://control1:50061
+      --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
+    environment:
+      RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN:?set RR_CLUSTER_TOKEN}
+    volumes:
+      - ${RR_CERT_DIR}:/certs:ro
+      - control2-data:/data
+    restart: unless-stopped
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/50061"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+
+networks:
+  rrmesh:
+
+volumes:
+  shard0-data:
+  shard1-data:
+  shard2-data:
+  control0-data:
+  control1-data:
+  control2-data:
