@@ -134,10 +134,18 @@ This is an in-process blue/green rebuild under a fresh ring (ADR-078) — correc
 **in-process only**. `recommended_shard_count` (the autoscaler's load-based advisory) is a library/auto
 driver concept, not a REST knob; pick `num_shards` yourself, optionally guided by `/_stats`.
 
-**The remote topology** (this compose — shards on separate nodes) scales by **redeploy**, not online
-resize: add a `shardN` service + a matching `--shard-endpoint` on the coordinator + the new SAN, then
-re-place data by re-ingesting the corpus into the resized coordinator. The compose carries the exact
-template inline. Cross-process / online resize is a deferred follow-on (ADR-078, ADR-081 §Deferred).
+**The remote topology** (this compose — shards on separate nodes) has **no online resize**: changing K
+re-keys the ring, and a coordinator restarted at the new K routes on the new ring while the existing data
+is still placed under the old one — searches in that window silently miss queries. So scale by
+**blue/green**, never in place:
+
+1. Stand up a **separate** green cluster at the new K (new project name + volumes + a `--shard-endpoint`
+   per new shard + SANs).
+2. Re-ingest the full corpus into the green coordinator and validate it.
+3. Cut traffic over (swap the published port / proxy upstream), then decommission blue.
+
+Do **not** add a shard to the live cluster and re-ingest in place. Cross-process / online resize is a
+deferred follow-on (ADR-078, ADR-081 §Deferred).
 
 ## 6. Recovery
 
@@ -150,7 +158,8 @@ short result (ADR-072).
 | **Rolling shard restart** | One shard at a time; the others keep serving (reads to the down shard fail loud meanwhile). | `rrc restart shardN` sequentially; wait for `/_health` green between each. |
 | **Coordinator restart** | Stateless: reconnects to the same endpoints, re-mints + re-ships the dict, re-derives placement. No data loss. | `rrc restart coordinator`; wait for green. |
 | **Control-plane restart** | Each node resumes from its durable Raft log/vote (ADR-041). | Restart control nodes; quorum re-forms. (Idle at v1 — no data-path impact.) |
-| **Replica failover / peer recovery** (RF>1) | Reads fail over to an in-sync replica; a fresh replica rebuilds from its primary over `FetchSegments`/`RecoverFrom` without quiescing writes (ADR-035/036). | Bring up the replacement node; it catches up automatically. |
+| **Replica failover** (RF>1) | Reads fail over to an in-sync replica; the primary stays authoritative for writes (ADR-035). | None — automatic. |
+| **Replica replacement** (RF>1) | A replacement reusing the **same durable volume** self-restores from its own segments + translog. A **fresh-volume** replica simply listed in the endpoint group is assembled as *in-sync without recovery* — reads could then serve it empty (silent FN). | Prefer same-volume restart. A fresh replica must complete an explicit peer recovery (`RecoverFrom`, ADR-036) **before** it serves reads — not a plain "start it"; treat fresh-volume replica replacement as a care-needed v1 operation. |
 
 The lifecycle invariants above are exercised end-to-end by the multi-machine harness
 ([`deploy/harness.sh`](../../deploy/harness.sh), ADR-072): kill-and-recover, rolling restart, coordinator
@@ -180,20 +189,19 @@ Backup depends on topology, because the durable state lives in different places:
   time — acceptable only if your ingest can re-drive recent writes. For an engine-driven consistent backup
   *without* quiescing, use the in-process `--data-dir` cluster above.
 
-## 8. Vocabulary redeploy
+## 8. Vocabulary
 
-**Vocabulary is deploy-time configuration on a remote cluster, not a live operation** (ADR-076). A remote
-cluster *refuses* a live `set_vocab`, and the coordinator *fails startup* if given a `--vocab-file`
-against remote shards — by design: the `shardserver` runs the stock normalizer, and there is no
-cross-process normalizer shipping in v1. To change vocabulary, **redeploy blue/green**:
+**A custom vocabulary is not supported on the remote topology in v1** (ADR-076). There is no cross-process
+normalizer shipping: each `shardserver` always builds `Normalizer::default_vocab()` (`AdoptDict` ships the
+frozen *dict*, not the normalizer), and the coordinator *fails startup* if given a `--vocab-file` against
+remote shards — precisely to avoid a coordinator/shard normalizer mismatch. So **a remote cluster runs the
+default vocabulary on every node, full stop.** A live `set_vocab` is likewise refused.
 
-1. Stand up a **parallel** cluster (a second compose project, e.g. `-p rr-green`, on its own ports/
-   volumes) whose corpus is rebuilt under the new vocabulary. For an **in-process** `--data-dir`
-   coordinator, pass the new `--vocab-file` at build; for the **remote** topology, build the new vocab
-   into the data by re-ingesting the corpus into the green coordinator.
-2. Validate the green cluster (percolate your golden titles).
-3. Cut traffic over — swap the published port or the reverse-proxy upstream from blue to green.
-4. Decommission blue.
+To run — or change — a **custom** vocabulary, use the **in-process `--data-dir` cluster**
+(`server --cluster --data-dir … --vocab-file vocab.json --shards K`, no `--shard-endpoint`), where the
+coordinator owns the in-process shards' normalizer. Change it **blue/green**: stand up a parallel
+in-process cluster built with the new `--vocab-file`, validate (percolate your golden titles), cut traffic
+over (swap the published port / proxy upstream), decommission the old one.
 
 This is the deployment-level realization of ADR-076's "vocab is deploy-time" decision. Background:
 [research/dynamic-vocabulary.md](../research/dynamic-vocabulary.md).
@@ -238,7 +246,8 @@ unreachable endpoint.
   in ADR-081 (StatefulSets for shards/control, a Deployment for the stateless coordinator).
 - **Online / cross-process resize** — `/_cluster/resize` is in-process only; the remote topology scales
   by redeploy ([§5](#5-scaling)).
-- **Live remote vocabulary shipping** — vocab is deploy-time on a remote cluster ([§8](#8-vocabulary-redeploy)).
+- **Custom vocabulary on the remote topology** — unsupported; remote shards run the default normalizer.
+  Custom vocab is an in-process `--data-dir` cluster capability ([§8](#8-vocabulary)).
 - **Negation-only (class-D) queries on the remote topology** — `shardserver` has no `--accept-class-d`
   (it always runs the default config), so a class-D-accepting coordinator would acknowledge writes every
   shard drops. Use the in-process `--data-dir` cluster for class D; exposing the shard flag is a tracked

@@ -55,9 +55,11 @@ ADR-078 resize, ADR-079 backup, ADR-080 broad lane):
 - **(c) Remote add-a-shard is a redeploy, not an online resize.** `POST /_cluster/resize` is the
   in-process blue/green rebuild (ADR-078); the remote topology scales by adding a shard service + endpoint
   + re-ingest. Cross-process/online resize is the ADR-078 follow-on.
-- **(d) Vocab redeploy = deployment-level blue/green.** ADR-076 decided vocab is deploy-time on a remote
-  cluster (live `set_vocab` refused, `--vocab-file` against remote shards fails startup); the runbook
-  operationalizes that as a parallel-cluster-then-cut-over procedure.
+- **(d) Custom vocabulary is an in-process-cluster capability.** ADR-076 decided there is no cross-process
+  normalizer shipping — remote shards always run `Normalizer::default_vocab()` and the coordinator refuses
+  `--vocab-file` against remote shards — so a remote cluster runs the **default vocabulary only**. Custom
+  or changed vocabulary uses the in-process `--data-dir` cluster (`--vocab-file`), redeployed blue/green;
+  the runbook documents this (and that remote custom vocab is unsupported in v1).
 
 The runbook also surfaces three honest v1 limitations of the remote/stateless path (none new — all are
 properties of the already-shipped distributed layers, found in the ADR-081 review): the stateless

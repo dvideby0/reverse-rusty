@@ -86,9 +86,14 @@ services:
   # add `shard3` to the cert SANs (deploy/gen-mesh-certs.sh ... shard3), and declare
   # `shard3-data:` under volumes. See cluster-deployment.md §5.
   #
-  # For RF=2 (a replica per position), run a second node per shard (e.g. shard0r)
-  # and list it INSIDE the coordinator's endpoint group, comma-separated:
-  #   --shard-endpoint https://shard0:50051,https://shard0r:50051
+  # For RF=2 (a replica per position), run a second node per shard (e.g. shard0r),
+  # list it INSIDE the coordinator's endpoint group comma-separated, AND set
+  # --replication-factor 2 on the coordinator (else the cluster reports/rebalances as
+  # RF=1 even though the replica is serving):
+  #   server --cluster ... --replication-factor 2 \
+  #     --shard-endpoint https://shard0:50051,https://shard0r:50051
+  # NOTE: a fresh replica is assembled as in-sync without recovery — bring replicas up
+  # from a recovered/same volume, not an empty one (cluster-deployment.md §6).
 
   # --- The coordinator: the REST API over the cluster (ADR-070). ---------------
   # A REMOTE coordinator is STATELESS — durability lives on the shard nodes — so it
