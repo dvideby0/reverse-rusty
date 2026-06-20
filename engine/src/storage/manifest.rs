@@ -165,9 +165,14 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     for _ in 0..num_files {
         let len = read_u32_at(&data, cursor)? as usize;
         cursor += 4;
-        let name = std::str::from_utf8(&data[cursor..cursor + len])
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-            .to_string();
+        // Route through `data.get(..)` like the dict/tag-dict/tombstone reads below,
+        // so a crafted (CRC-recomputed) `len` that overruns the buffer fails loud with
+        // a typed `InvalidData` error instead of panicking on the slice index.
+        let name = std::str::from_utf8(data.get(cursor..cursor + len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "truncated segment filename")
+        })?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        .to_string();
         cursor += len;
         segment_files.push(name);
     }
@@ -562,6 +567,39 @@ mod tests {
         assert!(got.tag_dict_data.is_empty());
         assert_eq!(got.wal_seq_watermark, 0, "v2 has no watermark");
         assert!(got.segment_tombstones.is_empty(), "v2 has no bitmaps");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tier-D (defense-in-depth): a crafted segment-filename length prefix that overruns
+    /// the manifest buffer must fail loud with a typed `InvalidData` error, not panic on a
+    /// slice index — matching the dict/tag-dict/tombstone reads in `read_manifest`. Only
+    /// reachable via tampering that also recomputes the trailing CRC, which this forges.
+    #[test]
+    fn manifest_segment_filename_length_overrun_fails_loud() {
+        let dir = std::env::temp_dir().join(format!("rr_manifest_fn_ovr_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("manifest.bin");
+
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(b"PMAN");
+        bytes.extend_from_slice(&2u32.to_le_bytes()); // version 2 (simplest layout)
+        bytes.extend_from_slice(&5u64.to_le_bytes()); // next_seg_id
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // rejected_parse
+        bytes.extend_from_slice(&0u64.to_le_bytes()); // rejected_class_d
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // 1 segment file
+                                                      // A length prefix far larger than any remaining bytes → would index out of bounds.
+        bytes.extend_from_slice(&1_000_000u32.to_le_bytes());
+        bytes.extend_from_slice(b"seg_000001.seg"); // only 14 bytes actually present
+                                                    // Re-seal the trailing whole-file CRC so the CRC gate passes and the structural
+                                                    // guard is what fires.
+        let crc = crc32(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("write forged bytes");
+
+        match read_manifest(&path) {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::InvalidData, "got: {e}"),
+            Ok(_) => panic!("overrunning segment-filename length must fail loud"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
