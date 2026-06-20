@@ -57,7 +57,25 @@ pub fn learn_from_queries(queries: &[(u64, String)], min_count: usize) -> Vocab 
     let mut vocab = Vocab::default();
     let mut seen_aliases: HashMap<String, String> = HashMap::new();
 
-    for ((canonical, alias), count) in &pair_counts {
+    // Make collision resolution order-independent: `pair_counts` is a HashMap, so
+    // iterating it directly would let hash order decide which canonical an alias keeps
+    // (the "first canonical wins" guard below is order-sensitive). Two replicas / a
+    // pre-vs-post-crash rebuild could then canonicalize the same alias to different
+    // FeatureIds, breaking the "ONE shared frozen dict ⇒ globally-consistent FeatureIds"
+    // contract. Sort by (alias asc, count desc, canonical asc) so the kept canonical is
+    // unambiguously "highest count, ties broken lexicographically smallest canonical",
+    // matching the deterministic-Vec discipline of the sibling learners.
+    let mut pairs: Vec<((String, String), usize)> = pair_counts.into_iter().collect();
+    pairs.sort_by(
+        |((a_canon, a_alias), a_count), ((b_canon, b_alias), b_count)| {
+            a_alias
+                .cmp(b_alias)
+                .then_with(|| b_count.cmp(a_count))
+                .then_with(|| a_canon.cmp(b_canon))
+        },
+    );
+
+    for ((canonical, alias), count) in &pairs {
         if *count < min_count {
             continue;
         }
