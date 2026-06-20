@@ -114,6 +114,98 @@ pub struct MmapSegment {
     logical_index: MmapLogicalIndex,
 }
 
+/// Cross-validate the per-query SoA columns against the blobs they index, once at
+/// open so the hot path (`verify_slices` / `to_memory_segment`) can slice the blobs
+/// branch-free (ADR-052 extended to *intra-section* consistency).
+///
+/// `checked_section_end` already proved each section's own `count` lands inside the
+/// mmap, but NOT that `req_off[i] + req_len[i]` lands inside `req_blob` (etc.). A
+/// writer bug, a torn write that re-passes CRC, or tampering could leave an offset
+/// column pointing past its blob; the unchecked `&blob[o..o+l]` slices downstream
+/// would then panic (out-of-bounds) instead of failing loud. This verifies, for
+/// every query `i`, that every column entry indexes inside its blob — and that the
+/// any-of group window and each group's posting land inside their arrays — turning a
+/// corrupt segment into a typed `InvalidData` error.
+#[allow(clippy::too_many_arguments)]
+fn validate_columns(
+    num_queries: usize,
+    req_off: &[u32],
+    req_len: &[u16],
+    req_blob_len: usize,
+    forb_off: &[u32],
+    forb_len: &[u16],
+    forb_blob_len: usize,
+    q_group_start: &[u32],
+    q_group_count: &[u16],
+    group_off: &[u32],
+    group_len: &[u16],
+    anyof_blob_len: usize,
+    tag_off: &[u32],
+    tag_len: &[u16],
+    tag_blob_len: usize,
+    tag_count: usize,
+) -> io::Result<()> {
+    let invalid = |msg: &'static str| io::Error::new(io::ErrorKind::InvalidData, msg);
+
+    // The per-query columns are indexed by local id `0..num_queries` (the accessors
+    // read exactly `num_queries` elements), so each must hold at least that many.
+    if req_off.len() < num_queries
+        || req_len.len() < num_queries
+        || forb_off.len() < num_queries
+        || forb_len.len() < num_queries
+        || q_group_start.len() < num_queries
+        || q_group_count.len() < num_queries
+    {
+        return Err(invalid("segment per-query column shorter than num_queries"));
+    }
+    // The tag column is either empty (v1/v2) or has one entry per query (v3+).
+    if tag_count != 0 && (tag_off.len() < num_queries || tag_len.len() < num_queries) {
+        return Err(invalid("segment tag column shorter than num_queries"));
+    }
+
+    // Each `off + len` must land inside its blob; `as usize` widens u32/u16 so the
+    // add cannot wrap on a 64-bit target.
+    let fits =
+        |off: u32, len: u16, blob_len: usize| -> bool { off as usize + len as usize <= blob_len };
+
+    for i in 0..num_queries {
+        if !fits(req_off[i], req_len[i], req_blob_len) {
+            return Err(invalid("segment req column overruns req_blob"));
+        }
+        if !fits(forb_off[i], forb_len[i], forb_blob_len) {
+            return Err(invalid("segment forb column overruns forb_blob"));
+        }
+        // The any-of group window for query `i` must land inside group_off/group_len.
+        let gs = q_group_start[i] as usize;
+        let gc = q_group_count[i] as usize;
+        let gend = gs
+            .checked_add(gc)
+            .ok_or_else(|| invalid("segment any-of group window overflows usize"))?;
+        if gend > group_off.len() || gend > group_len.len() {
+            return Err(invalid("segment any-of group window overruns group arrays"));
+        }
+        if tag_count != 0 && !fits(tag_off[i], tag_len[i], tag_blob_len) {
+            return Err(invalid("segment tag column overruns tag_blob"));
+        }
+    }
+
+    // Every group's posting must land inside anyof_blob (groups are shared across
+    // queries, so validate the whole group_off/group_len array once). The two arrays
+    // are parallel, so a length mismatch is itself corruption.
+    if group_off.len() != group_len.len() {
+        return Err(invalid(
+            "segment any-of group_off/group_len length mismatch",
+        ));
+    }
+    for (&go, &gl) in group_off.iter().zip(group_len.iter()) {
+        if go as usize + gl as usize > anyof_blob_len {
+            return Err(invalid("segment any-of group overruns anyof_blob"));
+        }
+    }
+
+    Ok(())
+}
+
 // SAFETY: every raw pointer in MmapSegment points into the read-only `Arc<Mmap>`
 // it owns. The mapping is never written through, does not move, and stays alive
 // for as long as any clone (clones share the Arc). All other fields are Send,
@@ -371,34 +463,66 @@ impl MmapSegment {
         // Tag section (ADR-049): v3 borrows the SoA tag columns straight from the mmap;
         // v1/v2 have no section, so the columns read back empty (every query untagged).
         // A non-null dangling pointer keeps the empty-slice accessors sound.
-        let (tag_off_ptr, tag_len_ptr, tag_blob_ptr, tag_blob_len, tag_count) =
-            if format_version >= 3 {
-                let toff = read_u64_at(data_for_parse, 64)? as usize;
-                let (tag_off_s, after) = read_u32_slice(data_for_parse, toff)?;
-                let (tag_len_s, after2) = read_u16_slice(data_for_parse, after)?;
-                let (tag_blob_s, _) = read_u32_slice(data_for_parse, after2)?;
-                if tag_off_s.len() != tag_len_s.len() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "tag column length mismatch",
-                    ));
-                }
-                (
-                    tag_off_s.as_ptr(),
-                    tag_len_s.as_ptr(),
-                    tag_blob_s.as_ptr(),
-                    tag_blob_s.len(),
-                    tag_off_s.len(),
-                )
-            } else {
-                (
-                    std::ptr::NonNull::<u32>::dangling().as_ptr().cast_const(),
-                    std::ptr::NonNull::<u16>::dangling().as_ptr().cast_const(),
-                    std::ptr::NonNull::<u32>::dangling().as_ptr().cast_const(),
-                    0usize,
-                    0usize,
-                )
-            };
+        let (tag_off_s, tag_len_s, tag_blob_ptr, tag_blob_len, tag_count) = if format_version >= 3 {
+            let toff = read_u64_at(data_for_parse, 64)? as usize;
+            let (tag_off_s, after) = read_u32_slice(data_for_parse, toff)?;
+            let (tag_len_s, after2) = read_u16_slice(data_for_parse, after)?;
+            let (tag_blob_s, _) = read_u32_slice(data_for_parse, after2)?;
+            if tag_off_s.len() != tag_len_s.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "tag column length mismatch",
+                ));
+            }
+            (
+                tag_off_s,
+                tag_len_s,
+                tag_blob_s.as_ptr(),
+                tag_blob_s.len(),
+                tag_off_s.len(),
+            )
+        } else {
+            (
+                &[][..],
+                &[][..],
+                std::ptr::NonNull::<u32>::dangling().as_ptr().cast_const(),
+                0usize,
+                0usize,
+            )
+        };
+        let tag_off_ptr = if tag_count != 0 {
+            tag_off_s.as_ptr()
+        } else {
+            std::ptr::NonNull::<u32>::dangling().as_ptr().cast_const()
+        };
+        let tag_len_ptr = if tag_count != 0 {
+            tag_len_s.as_ptr()
+        } else {
+            std::ptr::NonNull::<u16>::dangling().as_ptr().cast_const()
+        };
+
+        // Cross-validate the per-query columns against their blobs once, here at open,
+        // so the hot path stays branch-free. Turns an intra-section inconsistency (a
+        // CRC-valid offset/length column overrunning its blob) into a fail-loud
+        // `InvalidData` error instead of an out-of-bounds slice panic downstream.
+        validate_columns(
+            num_queries as usize,
+            req_off_s,
+            req_len_s,
+            req_blob_s.len(),
+            forb_off_s,
+            forb_len_s,
+            forb_blob_s.len(),
+            q_group_start_s,
+            q_group_count_s,
+            group_off_s,
+            group_len_s,
+            anyof_blob_s.len(),
+            tag_off_s,
+            tag_len_s,
+            tag_blob_len,
+            tag_count,
+        )?;
 
         Ok(MmapSegment {
             format_version,
