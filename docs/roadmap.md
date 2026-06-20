@@ -51,8 +51,11 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
   - *Packaging follow-ons (deferred, [ADR-081](decisions/adr-081-deployment-packaging-runbook.md)):*
     the **control-plane↔coordinator wiring** (a `--control-endpoint` attaching the coordinator's
     `ControlPlane` to the durable `controlserver` quorum — today the deployed coordinator runs an
-    in-memory control plane) + **k8s/Helm manifests** (the `StatefulSet` shape is sketched in ADR-081,
-    gated on that wiring so it isn't a misleading "HA control plane").
+    in-memory control plane) **+ a `controlserver` advertise-URL** (the bootstrap node commits its
+    wildcard bind address into Raft membership, so the multi-node quorum can't route — moot while idle);
+    **`shardserver --accept-class-d`** (so negation-only queries work on the remote topology, not just
+    in-process); and **k8s/Helm manifests** (the `StatefulSet` shape is sketched in ADR-081, gated on the
+    wiring so it isn't a misleading "HA control plane").
 - **Feature-model versioning + blue/green re-materialize** — frozen common-mask across minor
   versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
 - **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying

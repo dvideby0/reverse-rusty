@@ -242,6 +242,9 @@ unreachable endpoint.
 - **Control-plane↔coordinator wiring** — the coordinator runs an in-memory control plane; the durable
   `controlserver` quorum is present but not yet consulted for routing (the follow-on is a
   `--control-endpoint` flag attaching the coordinator's `ControlPlane` to a `RaftControlPlane` client).
+  Relatedly, the bootstrap control node advertises its wildcard **bind** address (`0.0.0.0:50061`) into
+  Raft membership, which peers can't route — so a clean multi-node control quorum doesn't form yet (a
+  `controlserver` advertise-URL is part of this follow-on). Both are moot while the quorum is idle.
 - **Kubernetes manifests / Helm** — deferred; the deployment unit is Compose at v1. The shape is sketched
   in ADR-081 (StatefulSets for shards/control, a Deployment for the stateless coordinator).
 - **Online / cross-process resize** — `/_cluster/resize` is in-process only; the remote topology scales

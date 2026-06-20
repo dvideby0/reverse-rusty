@@ -45,8 +45,12 @@ ADR-078 resize, ADR-079 backup, ADR-080 broad lane):
   ships the durable 3-node quorum so the placement-state tier is production-shaped and the eventual wiring
   PR is a drop-in, but the runbook states **loudly** that at v1 the quorum is durable-but-idle. The
   follow-on is a `--control-endpoint` flag wiring the coordinator's `ControlPlane` to a `RaftControlPlane`
-  client over the existing gRPC `ControlService` (ADR-038). Shipping a misleading "HA control plane" that
-  the data path ignores would be worse than naming the gap.
+  client over the existing gRPC `ControlService` (ADR-038), plus a **controlserver advertise URL** — today
+  the bootstrap node commits its wildcard bind address (`https://0.0.0.0:50061`) into Raft membership,
+  which peers can't route, so the multi-node quorum doesn't cleanly form (the bind must parse as an IP, so
+  the routable hostname can't be the bind; it needs a separate advertise flag). Both are moot while the
+  quorum is idle. Shipping a misleading "HA control plane" that the data path ignores — or one whose nodes
+  can't even route to each other — would be worse than naming the gap.
 - **(b) Kubernetes manifests deferred.** Criterion 10 requires only "Dockerfile / compose," and a k8s
   `StatefulSet` for a control plane the coordinator ignores (deferral a) would imply HA placement the v1
   cluster doesn't have. The shape, for when wiring lands: `StatefulSet`s for shards + control (stable DNS

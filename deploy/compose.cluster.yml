@@ -28,7 +28,11 @@
 # consult the controlserver quorum (no --control-endpoint wiring exists — ADR-072
 # §Scope, ADR-081). The quorum is included so the durable placement-state tier is
 # production-shaped and ready when the wiring lands; today it is durable but idle.
-# You may omit control0..2 entirely at v1 with no behavioral change.
+# You may omit control0..2 entirely at v1 with no behavioral change. Note also that the
+# bootstrap node advertises its BIND address (0.0.0.0) into Raft membership, which peers
+# can't route, so a clean multi-node quorum doesn't actually form yet — also moot while
+# the quorum is idle, and part of the same deferred wiring (a controlserver advertise
+# URL; cluster-deployment.md §11).
 
 # Shared shard definition (the three primaries differ only in name + volume).
 x-shard-base: &shard-base
