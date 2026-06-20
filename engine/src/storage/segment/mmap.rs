@@ -128,6 +128,7 @@ pub struct MmapSegment {
 /// corrupt segment into a typed `InvalidData` error.
 #[allow(clippy::too_many_arguments)]
 fn validate_columns(
+    format_version: u32,
     num_queries: usize,
     req_off: &[u32],
     req_len: &[u16],
@@ -143,7 +144,6 @@ fn validate_columns(
     tag_off: &[u32],
     tag_len: &[u16],
     tag_blob_len: usize,
-    tag_count: usize,
 ) -> io::Result<()> {
     let invalid = |msg: &'static str| io::Error::new(io::ErrorKind::InvalidData, msg);
 
@@ -158,8 +158,19 @@ fn validate_columns(
     {
         return Err(invalid("segment per-query column shorter than num_queries"));
     }
-    // The tag column is either empty (v1/v2) or has one entry per query (v3+).
-    if tag_count != 0 && (tag_off.len() < num_queries || tag_len.len() < num_queries) {
+    // The tag column is indexed by local id `0..num_queries` just like the others
+    // (the writer pushes one `tag_off`/`tag_len` entry per query, length 0 for an
+    // untagged query — `ExactStore::push`). So for any v3+ file it MUST hold one
+    // entry per query. v1/v2 predate the section and read back empty.
+    //
+    // We must NOT relax this to "either empty or full-length": a torn/corrupt v3+
+    // tag section that re-passes CRC could surface as a zero-length column, which
+    // would otherwise read every query back as untagged — silently dropping tagged
+    // queries from *filtered* percolation instead of failing loud. Tags never gate
+    // the lossless cover (matching.md §5.3), so this is not a positive-semantics FN,
+    // but it is exactly the intra-segment corruption this validation exists to catch.
+    let tags_expected = format_version >= 3 && num_queries > 0;
+    if tags_expected && (tag_off.len() < num_queries || tag_len.len() < num_queries) {
         return Err(invalid("segment tag column shorter than num_queries"));
     }
 
@@ -184,7 +195,7 @@ fn validate_columns(
         if gend > group_off.len() || gend > group_len.len() {
             return Err(invalid("segment any-of group window overruns group arrays"));
         }
-        if tag_count != 0 && !fits(tag_off[i], tag_len[i], tag_blob_len) {
+        if tags_expected && !fits(tag_off[i], tag_len[i], tag_blob_len) {
             return Err(invalid("segment tag column overruns tag_blob"));
         }
     }
@@ -506,6 +517,7 @@ impl MmapSegment {
         // CRC-valid offset/length column overrunning its blob) into a fail-loud
         // `InvalidData` error instead of an out-of-bounds slice panic downstream.
         validate_columns(
+            format_version,
             num_queries as usize,
             req_off_s,
             req_len_s,
@@ -521,7 +533,6 @@ impl MmapSegment {
             tag_off_s,
             tag_len_s,
             tag_blob_len,
-            tag_count,
         )?;
 
         Ok(MmapSegment {
@@ -581,5 +592,55 @@ impl MmapSegment {
             vocab_epoch: 0,
             logical_index,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Well-formed per-query columns for ONE untagged query against empty blobs:
+    // one entry each, every offset/len landing inside a zero-length blob. Calls
+    // `validate_columns` for that one query at `version` with the given tag columns.
+    fn validate_one_query(version: u32, tag_off: &[u32], tag_len: &[u16]) -> io::Result<()> {
+        let off1 = [0u32];
+        let len1 = [0u16];
+        validate_columns(
+            version,
+            1,
+            &off1,
+            &len1,
+            0,
+            &off1,
+            &len1,
+            0,
+            &off1,
+            &len1,
+            &[],
+            &[],
+            0,
+            tag_off,
+            tag_len,
+            0,
+        )
+    }
+
+    /// A v3+ segment with `num_queries > 0` MUST carry a per-query tag column (the
+    /// writer pushes one entry per query, length 0 when untagged). A zero-length tag
+    /// column on such a file is corruption — e.g. a torn write that re-passes CRC —
+    /// and must fail loud rather than silently read every query back as untagged
+    /// (which would drop tagged queries from filtered percolation). Codex review.
+    #[test]
+    fn v3_with_queries_requires_tag_column() {
+        let err = validate_one_query(3, &[], &[])
+            .expect_err("v3 + queries + empty tag column must fail loud");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// The same empty tag column on a pre-tag v1/v2 file is legitimate (the section
+    /// did not exist), so it must still open — back-compat is preserved.
+    #[test]
+    fn v2_with_queries_allows_empty_tag_column() {
+        validate_one_query(2, &[], &[]).expect("v2 untagged column must still validate");
     }
 }
