@@ -431,7 +431,11 @@ pub fn recommended_shard_count(snapshot: &LoadSnapshot, config: &AutoscaleConfig
     let over = snapshot
         .shard_corpus
         .iter()
-        .filter(|&&c| c > config.split_corpus_threshold)
+        // Discount the replicated broad lane (on every shard regardless of K, ADR-080): only the
+        // SELECTIVE load is reduced by splitting, so only it counts as split pressure. Else every
+        // shard looks hot and a driver applying `resize_to_recommended` grows without bound
+        // (codex review).
+        .filter(|&&c| c.saturating_sub(snapshot.replicated_corpus) > config.split_corpus_threshold)
         .count();
     if over == 0 {
         None

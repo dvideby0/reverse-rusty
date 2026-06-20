@@ -122,7 +122,14 @@ green (replicate-to-all is result-identical for the broad set).
 single-node class-D lane + the manifest-v4 fence this mirrors at the cluster manifest), ADR-026 (the
 broad lane), ADR-032 (segments-only durability — why the fence lives at the cluster manifest), ADR-047
 (the partial-apply repair the broad fan-out reuses), ADR-065 criterion 8 (the requirement),
-[`clustering-and-scaling.md`](../design/clustering-and-scaling.md) §7. Deferred (all in the experimental `distributed` path): R-coord (coordinator-local broad for
+[`clustering-and-scaling.md`](../design/clustering-and-scaling.md) §7. **Deferred — operational (codex P2):** gating the replicated **class-B-arity-2** lane to one
+eval shard per title. Unlike class C/D (in the broad index, covered by the broad-eval-shard gate),
+class-B-arity-2 lives in the always-probed **main** index, so once replicated to every shard a matching
+title re-scans + re-verifies it on every routed shard — results stay correct (deduped by logical id) but
+CPU + candidate stats multiply by fan-out. The clean fix is a per-query one-eval-shard gate inside the
+main index (or moving class-B-arity-2 into the broad index so the existing broad-eval-shard gate covers
+it). The autoscaler already discounts class C/D from split pressure (`replicated_corpus`) but not this
+main-index residual. **Deferred — distributed path:** R-coord (coordinator-local broad for
 multi-coordinator deployments); a connect-time handshake carrying the `accept_class_d` decision **and**
 the broad-layout version (the remote analogue of the in-process forward fence — refuse a populated
 pre-ADR-080 shard server instead of mis-routing it); and class-D under remote partial-apply `resync`
