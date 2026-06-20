@@ -264,11 +264,39 @@ async fn stream_file(
     }
 }
 
+/// Validate that every file the manifest advertised fully arrived (a truncated stream must
+/// error, not attach a subset and report success). Covers BOTH the segment files AND
+/// `sources.dat` — the latter streams LAST, so a stream cut between the final segment and a
+/// complete `sources.dat` would otherwise attach a full segment set yet silently lose the
+/// query SOURCES (percolate stays intact, but `_doc` reads + a corpus rebuild lose those
+/// queries). A source-less node (`has_sources == false`) is unaffected — the byte-identical
+/// pre-sources path. Extracted so the receiver-side check is unit-testable without a live
+/// gRPC stream.
+fn validate_received(
+    manifest: &proto::FetchManifest,
+    received: &std::collections::HashSet<String>,
+) -> Result<(), Status> {
+    for name in &manifest.segment_files {
+        if !received.contains(name) {
+            return Err(Status::internal(format!(
+                "recovery stream truncated: segment {name} did not fully arrive"
+            )));
+        }
+    }
+    if manifest.has_sources && !received.contains("sources.dat") {
+        return Err(Status::internal(
+            "recovery stream truncated: sources.dat did not fully arrive",
+        ));
+    }
+    Ok(())
+}
+
 /// Drain a `FetchSegments` stream into `dir`: the manifest frame first, then per-file runs
 /// written via tmp+rename (so a crash mid-recovery never leaves a half-written `.seg` that a
-/// later attach would CRC-reject). Validates that every manifested segment fully arrived — a
-/// truncated stream errors rather than attaching a subset (a silent shard-sized false
-/// negative). Returns the attach file list + seg-id cursor from the manifest.
+/// later attach would CRC-reject). Validates that every manifested file (segments AND
+/// `sources.dat`) fully arrived — a truncated stream errors rather than attaching a subset (a
+/// silent shard-sized false negative). Returns the attach file list + seg-id cursor from the
+/// manifest.
 async fn drain_recovery_stream(
     stream: &mut tonic::Streaming<proto::FetchSegmentsChunk>,
     dir: &std::path::Path,
@@ -318,16 +346,77 @@ async fn drain_recovery_stream(
     }
     let manifest =
         manifest.ok_or_else(|| Status::internal("recovery stream had no manifest frame"))?;
-    for name in &manifest.segment_files {
-        if !received.contains(name) {
-            return Err(Status::internal(format!(
-                "recovery stream truncated: segment {name} did not fully arrive"
-            )));
-        }
-    }
+    validate_received(&manifest, &received)?;
     Ok((
         manifest.segment_files,
         manifest.next_seg_id,
         manifest.up_to_seqno,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_received;
+    use crate::cluster::proto;
+    use std::collections::HashSet;
+
+    fn manifest(segs: &[&str], has_sources: bool) -> proto::FetchManifest {
+        proto::FetchManifest {
+            segment_files: segs.iter().map(|s| (*s).to_string()).collect(),
+            next_seg_id: 1,
+            dict_fingerprint: 0,
+            has_sources,
+            up_to_seqno: 0,
+        }
+    }
+
+    fn received(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// B3: a stream truncated after the final segment but before/while `sources.dat` —
+    /// every segment present, `has_sources` advertised, but `sources.dat` missing — must
+    /// error rather than attach a complete segment set and report success (which would
+    /// silently lose the query SOURCES).
+    #[test]
+    fn missing_sources_when_advertised_is_an_error() {
+        let m = manifest(&["seg-0.seg", "seg-1.seg"], true);
+        let got = received(&["seg-0.seg", "seg-1.seg"]); // sources.dat NOT received
+        let err = validate_received(&m, &got).expect_err("must reject a missing sources.dat");
+        assert!(
+            err.message().contains("sources.dat"),
+            "error must name sources.dat: {}",
+            err.message()
+        );
+    }
+
+    /// The complete stream — every segment AND `sources.dat` received — succeeds.
+    #[test]
+    fn complete_stream_with_sources_succeeds() {
+        let m = manifest(&["seg-0.seg"], true);
+        let got = received(&["seg-0.seg", "sources.dat"]);
+        assert!(validate_received(&m, &got).is_ok());
+    }
+
+    /// A source-less node (`has_sources == false`) succeeds without `sources.dat` — the
+    /// byte-identical pre-sources path is not regressed by the new check.
+    #[test]
+    fn source_less_node_succeeds_without_sources() {
+        let m = manifest(&["seg-0.seg", "seg-1.seg"], false);
+        let got = received(&["seg-0.seg", "seg-1.seg"]);
+        assert!(validate_received(&m, &got).is_ok());
+    }
+
+    /// A missing SEGMENT still errors (the pre-existing check is preserved).
+    #[test]
+    fn missing_segment_is_an_error() {
+        let m = manifest(&["seg-0.seg", "seg-1.seg"], false);
+        let got = received(&["seg-0.seg"]); // seg-1 missing
+        let err = validate_received(&m, &got).expect_err("must reject a missing segment");
+        assert!(
+            err.message().contains("seg-1.seg"),
+            "error must name the missing segment: {}",
+            err.message()
+        );
+    }
 }
