@@ -5,7 +5,7 @@ use super::*;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::cluster::clog::LogPos;
+use crate::cluster::clog::{ClusterMutation, LogPos};
 use crate::events::DurabilityOp;
 use crate::exact::TagPredicate;
 use crate::segment::{IngestReport, MatchStats, PlacedQuery};
@@ -399,7 +399,7 @@ fn upsert_creates_then_replaces_by_logical_id() {
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster builds");
 
     // Create: a fresh id reports zero prior copies removed.
-    let (removed, outcome) = cluster.upsert_query(3, "1996 skybox").expect("upsert");
+    let (removed, outcome) = cluster.upsert_query(3, "1996 skybox", 1).expect("upsert");
     assert_eq!(removed, 0, "fresh id ⇒ created");
     assert!(matches!(
         outcome,
@@ -411,7 +411,7 @@ fn upsert_creates_then_replaces_by_logical_id() {
     // no-additive-duplicate proof (the pre-ADR-067 hazard was both versions live at
     // once). Entry counts grow by design (tombstone + insert), so they are not asserted.
     let (removed, _) = cluster
-        .upsert_query(3, "1997 metal universe")
+        .upsert_query(3, "1997 metal universe", 1)
         .expect("upsert");
     assert!(removed > 0, "prior copy tombstoned ⇒ updated");
     assert!(
@@ -427,7 +427,7 @@ fn upsert_creates_then_replaces_by_logical_id() {
     );
 
     // Replace back: repeated upserts keep converging (no stale copy resurfaces).
-    let (removed, _) = cluster.upsert_query(3, "1996 skybox").expect("upsert");
+    let (removed, _) = cluster.upsert_query(3, "1996 skybox", 1).expect("upsert");
     assert!(removed > 0);
     assert!(cluster.percolate("1996 skybox").expect("p").contains(&3));
     assert!(
@@ -453,7 +453,7 @@ fn upsert_rejection_keeps_prior_version_live() {
     assert!(cluster.percolate("1994 topps").expect("p").contains(&1));
 
     // Class D: negation-only — rejected at placement, stored nowhere, deletes nothing.
-    let (removed, outcome) = cluster.upsert_query(1, "-junk").expect("upsert");
+    let (removed, outcome) = cluster.upsert_query(1, "-junk", 1).expect("upsert");
     assert_eq!(removed, 0, "a failed replace never deletes");
     assert!(matches!(outcome, AddOutcome::RejectedClassD));
     assert!(
@@ -462,7 +462,7 @@ fn upsert_rejection_keeps_prior_version_live() {
     );
 
     // Parse error: rejected before logging, deletes nothing.
-    let (removed, outcome) = cluster.upsert_query(1, "(((").expect("upsert");
+    let (removed, outcome) = cluster.upsert_query(1, "(((", 1).expect("upsert");
     assert_eq!(removed, 0);
     assert!(matches!(outcome, AddOutcome::RejectedParse(_)));
     assert!(
@@ -486,7 +486,7 @@ fn upsert_is_fail_closed_when_log_append_fails() {
     let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
 
     cluster.log.break_writes_for_test();
-    let res = cluster.upsert_query(7, "1995 fleer");
+    let res = cluster.upsert_query(7, "1995 fleer", 1);
     assert!(
         matches!(res, Err(ShardError::Log(_))),
         "expected Log error, got {res:?}"
@@ -501,4 +501,129 @@ fn upsert_is_fail_closed_when_log_append_fails() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// B2: a cluster `PUT /_doc/{id} {"version":N}` must STORE version N, not the
+/// hardcoded 1 — matching single-node `try_upsert_live_with_tags`. The version
+/// rides the `ClusterMutation::Upsert` log frame (the durable, replayed-on-reopen
+/// source of truth), so asserting the logged frame's version is the faithful
+/// round-trip check. Needs private `log` access, so it lives in-module.
+#[test]
+fn upsert_threads_request_version_into_the_log_frame() {
+    let dir = scratch_dir("upsert_version");
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let seed = vec![(1u64, "1994 topps".to_string())];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("durable cluster builds");
+
+    // Upsert id 5 at a non-default version.
+    let (_removed, outcome) = cluster
+        .upsert_query(5, "1995 fleer", 42)
+        .expect("versioned upsert");
+    assert!(
+        matches!(outcome, AddOutcome::Placed { .. } | AddOutcome::Replicated),
+        "in-vocabulary upsert is accepted, got {outcome:?}"
+    );
+
+    // The logged Upsert frame must carry version 42 (NOT the old hardcoded 1).
+    let replay = cluster.log.replay(LogPos(0)).expect("replay clog");
+    let logged_version = replay.entries.iter().find_map(|(_, m)| match m {
+        ClusterMutation::Upsert {
+            logical: 5,
+            version,
+            ..
+        } => Some(*version),
+        _ => None,
+    });
+    assert_eq!(
+        logged_version,
+        Some(42),
+        "cluster upsert must log the request version, not the hardcoded 1"
+    );
+
+    // And the default still logs version 1 (the byte-identical RF=1 path) for a fresh id.
+    cluster
+        .upsert_query(6, "1994 topps", 1)
+        .expect("default-version upsert");
+    let replay = cluster.log.replay(LogPos(0)).expect("replay clog");
+    let default_version = replay.entries.iter().find_map(|(_, m)| match m {
+        ClusterMutation::Upsert {
+            logical: 6,
+            version,
+            ..
+        } => Some(*version),
+        _ => None,
+    });
+    assert_eq!(default_version, Some(1), "default upsert version stays 1");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Tier-D: a degenerate same-node handoff (`from == to`) is a silent no-op — it must NOT
+/// fence the source then flip routing onto itself. The `from == to` guard sits before the
+/// handle resolve, so the self-handoff returns immediately, emitting no event and never
+/// touching a shard. Asserted via the observer (no event) + percolate-unchanged. Gated:
+/// `drive_autoscaled_handoff` only exists under `distributed`.
+#[cfg(feature = "distributed")]
+#[test]
+fn self_handoff_is_skipped_without_fencing() {
+    use crate::cluster::autoscale::LoadSnapshot;
+    use crate::cluster::control::{NodeDescriptor, NodeId, NodeRole, ShardAssignment};
+
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![
+        (1u64, "1994 topps".to_string()),
+        (2u64, "1995 fleer".to_string()),
+    ];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster builds");
+
+    // Record any emitted event — a real handoff (or its abort) emits a DurabilityFailure.
+    let events: Arc<Mutex<Vec<EngineEvent>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = Arc::clone(&events);
+        cluster.set_observer(Arc::new(move |ev: &EngineEvent| {
+            sink.lock().unwrap().push(ev.clone());
+        }));
+    }
+
+    let before = cluster.percolate("1994 topps").expect("percolate");
+
+    // A snapshot where node 7 owns position 0 — and a Handoff that moves it from node 7 to
+    // node 7 (the same node, same endpoint). The guard must short-circuit this.
+    let node = NodeDescriptor {
+        id: NodeId(7),
+        addr: Some("http://127.0.0.1:65530".to_string()),
+        role: NodeRole::Data,
+    };
+    let snapshot = LoadSnapshot {
+        nodes: vec![node],
+        assignments: vec![ShardAssignment {
+            position: 0,
+            primary: NodeId(7),
+            replicas: Vec::new(),
+        }],
+        shard_corpus: vec![1, 1, 0],
+        replicated_corpus: 0,
+        num_shards: 3,
+        replication_factor: 1,
+    };
+
+    cluster.drive_autoscaled_handoff(&snapshot, 0, NodeId(7), NodeId(7));
+
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "a self-handoff must emit no event (no fence, no abort): {:?}",
+        events.lock().unwrap()
+    );
+    assert_eq!(
+        cluster.percolate("1994 topps").expect("percolate"),
+        before,
+        "matching must be byte-identical across a skipped self-handoff"
+    );
 }

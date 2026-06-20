@@ -216,7 +216,7 @@ fn empty_class_d_is_rejected_and_a_failed_upsert_never_deletes() {
     );
 
     // Upserting query 1 to an EMPTY DSL is rejected WITHOUT tombstoning the live version.
-    let (removed, outcome) = cluster.upsert_query(1, "   ").unwrap();
+    let (removed, outcome) = cluster.upsert_query(1, "   ", 1).unwrap();
     assert_eq!(outcome, AddOutcome::RejectedClassD);
     assert_eq!(
         removed, 0,

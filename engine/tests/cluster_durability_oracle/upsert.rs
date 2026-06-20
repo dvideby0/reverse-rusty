@@ -56,7 +56,7 @@ fn upserts_survive_reopen_via_log_tail_and_checkpoint() {
                 ClusterEngine::build(vocab(), &durable_cfg(k, dir.clone(), false), &queries)
                     .expect("durable cluster builds");
             for (id, dsl) in &upserts {
-                let (_removed, outcome) = cluster.upsert_query(*id, dsl).expect("upsert");
+                let (_removed, outcome) = cluster.upsert_query(*id, dsl, 1).expect("upsert");
                 assert!(
                     !matches!(
                         outcome,

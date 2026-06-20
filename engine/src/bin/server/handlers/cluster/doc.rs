@@ -145,7 +145,7 @@ pub(crate) async fn cluster_put_doc(
     let result = {
         let _w = state.write_serial.lock();
         let cluster = state.cluster.read();
-        cluster.upsert_query_with_tags(id, &body.query, &tags)
+        cluster.upsert_query_with_tags(id, &body.query, body.version, &tags)
     };
     let response = match result {
         Ok((removed, outcome)) => {
@@ -474,7 +474,9 @@ pub(crate) async fn cluster_bulk(
             }
         };
 
-        let (status, error) = match cluster.upsert_query_with_tags(id, query, &tags) {
+        // Bulk carries no per-item version (parity with the single-node `_bulk` path,
+        // which ingests at the default version 1); `PUT /_doc/{id}` is the versioned write.
+        let (status, error) = match cluster.upsert_query_with_tags(id, query, 1, &tags) {
             Ok((removed, outcome)) => {
                 let (status, _, error) = upsert_status(removed, &outcome);
                 if status.is_success() {
