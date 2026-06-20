@@ -240,16 +240,21 @@ impl ClusterEngine {
         let num_shards = new_ring.num_shards();
         let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
         for (logical, ex, text, tag_ids) in extracted {
-            match placement_of(&new_dict, &new_ring, &ex) {
+            match placement_of(&new_dict, &new_ring, &ex, self.per_shard.accept_class_d) {
                 Target::Reject => {}
-                Target::Replicated => buckets[0].push(PlacedQuery {
-                    logical,
-                    ex,
-                    dsl: text,
-                    version: 1,
-                    tags: Vec::new(),
-                    tag_ids,
-                }),
+                Target::Replicated => {
+                    // The broad lane is replicated to every shard (ADR-080).
+                    for bucket in &mut buckets {
+                        bucket.push(PlacedQuery {
+                            logical,
+                            ex: ex.clone(),
+                            dsl: text.clone(),
+                            version: 1,
+                            tags: Vec::new(),
+                            tag_ids: tag_ids.clone(),
+                        });
+                    }
+                }
                 Target::Selective(shs) => {
                     for &s in &shs {
                         buckets[s].push(PlacedQuery {

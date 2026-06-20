@@ -259,6 +259,13 @@ const CLUSTER_MANIFEST_MAGIC: [u8; 4] = *b"RCMN";
 // behind filtered percolation, so interned tag ids survive reopen. A v2/v3 manifest
 // reads back with an empty `tag_dict_data` (no tags).
 const CLUSTER_MANIFEST_VERSION: u32 = 4;
+// v5 (ADR-080): byte-identical layout to v4 — written ONLY while a registered shard holds
+// class-D always-candidates, as the **rollback fence** (the cluster analogue of the engine
+// manifest's v4 fence, ADR-068). The cluster has no per-shard manifest (segments-only durable,
+// ADR-032), so the fence must live here: a pre-ADR-080 binary accepts only v2..=4 and fails
+// `ClusterEngine::open` outright on a v5 manifest — the loud refusal rollback needs. A
+// class-D-free commit keeps writing v4 byte-identically.
+const CLUSTER_MANIFEST_VERSION_CLASS_D: u32 = 5;
 
 /// The coordinator's cluster-state document (the analogue of what a Raft quorum will
 /// later hold). Written atomically (tmp + CRC + rename) — the SINGLE commit point that
@@ -276,6 +283,10 @@ pub struct ClusterManifest {
     pub vnodes: u32,
     /// Default broad-lane toggle.
     pub include_broad: bool,
+    /// `true` ⇔ some registered shard holds class-D always-candidates (ADR-080). Not
+    /// serialized as data — it selects the version word (v5 vs v4), the loud rollback fence
+    /// (the cluster analogue of the engine manifest's v4 fence). Set from the version on read.
+    pub class_d_fence: bool,
     /// Per-shard committed base: `segment_registry[i]` is the list of `.seg` filenames
     /// (relative to `shard_<i>/segments/`) that constitute shard `i`'s base. This is the
     /// atomic-commit replacement for the v1 raw-DSL snapshot — on open a shard
@@ -303,7 +314,14 @@ pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Re
     let tmp = path.with_extension("cmanifest.tmp");
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(&CLUSTER_MANIFEST_MAGIC)?;
-    write_u32(&mut f, CLUSTER_MANIFEST_VERSION)?;
+    write_u32(
+        &mut f,
+        if manifest.class_d_fence {
+            CLUSTER_MANIFEST_VERSION_CLASS_D
+        } else {
+            CLUSTER_MANIFEST_VERSION
+        },
+    )?;
     write_u64(&mut f, manifest.epoch)?;
     write_u64(&mut f, manifest.snapshot_pos)?;
     write_u64(&mut f, manifest.dict_fingerprint)?;
@@ -371,7 +389,7 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
     let version = read_u32_at(&data, 4)?;
     // v2, v3 and v4 are accepted; v3 appends `vocab_data` (ADR-046) and v4 appends
     // `tag_dict_data` (ADR-049), each absent in the earlier versions.
-    if !(2..=CLUSTER_MANIFEST_VERSION).contains(&version) {
+    if !(2..=CLUSTER_MANIFEST_VERSION_CLASS_D).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported cluster manifest version {version}"),
@@ -460,6 +478,7 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         num_shards,
         vnodes,
         include_broad,
+        class_d_fence: version >= CLUSTER_MANIFEST_VERSION_CLASS_D,
         segment_registry,
         next_seg_ids,
         dict_data,
@@ -557,6 +576,7 @@ mod tests {
             num_shards: 3,
             vnodes: 64,
             include_broad: true,
+            class_d_fence: false,
             segment_registry: vec![
                 vec!["seg_000001.seg".to_string(), "seg_000004.seg".to_string()],
                 vec![], // an empty shard (no committed segments)
@@ -576,6 +596,10 @@ mod tests {
         assert_eq!(got.num_shards, manifest.num_shards);
         assert_eq!(got.vnodes, manifest.vnodes);
         assert_eq!(got.include_broad, manifest.include_broad);
+        assert_eq!(got.class_d_fence, manifest.class_d_fence);
+        // A class-D-free manifest writes the v4 version word byte-identically (no fence).
+        let raw = std::fs::read(&path).expect("read raw for version");
+        assert_eq!(read_u32_at(&raw, 4).unwrap(), 4, "no class-D ⇒ v4");
         assert_eq!(got.segment_registry, manifest.segment_registry);
         assert_eq!(got.next_seg_ids, manifest.next_seg_ids);
         assert_eq!(got.dict_data, manifest.dict_data);
@@ -591,6 +615,62 @@ mod tests {
             read_cluster_manifest(&path).is_err(),
             "corrupt manifest must error"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The cluster v5 class-D rollback fence (ADR-080): a class-D-bearing commit writes the
+    /// v5 version word (round-tripping `class_d_fence`), and a pre-ADR-080 binary — modeled
+    /// by a forged FUTURE version — fails loud rather than mis-decoding (the loud refusal the
+    /// fence exists for; the cluster has no per-shard manifest to carry it instead).
+    #[test]
+    fn cluster_manifest_v5_class_d_fence_round_trips_and_unknown_version_fails_loud() {
+        let dir = std::env::temp_dir().join(format!("rr_cmanifest_v5_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cluster_manifest_v5.bin");
+
+        let manifest = ClusterManifest {
+            epoch: 3,
+            snapshot_pos: 9,
+            dict_fingerprint: 0xABCD,
+            num_shards: 4,
+            vnodes: 64,
+            include_broad: true,
+            class_d_fence: true, // a class-D-bearing commit
+            segment_registry: vec![vec![], vec![], vec![], vec![]],
+            next_seg_ids: vec![1, 1, 1, 1],
+            dict_data: vec![1, 2, 3],
+            vocab_data: Vec::new(),
+            tag_dict_data: Vec::new(),
+        };
+        write_cluster_manifest(&manifest, &path).expect("write");
+
+        let raw = std::fs::read(&path).expect("read raw");
+        assert_eq!(
+            read_u32_at(&raw, 4).unwrap(),
+            5,
+            "class-D commit ⇒ cluster manifest v5"
+        );
+        let got = read_cluster_manifest(&path).expect("read");
+        assert!(got.class_d_fence, "v5 reads back as fenced");
+        assert_eq!(got.segment_registry, manifest.segment_registry);
+
+        // Forge a v6 (future) version word + re-seal the trailing whole-file CRC, so the
+        // version range check is what fires: an unsupported version must error.
+        let mut bytes = raw.clone();
+        bytes[4..8].copy_from_slice(&6u32.to_le_bytes());
+        let body = bytes.len() - 4;
+        let crc = crc32(&bytes[..body]);
+        bytes[body..].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("rewrite");
+        match read_cluster_manifest(&path) {
+            Err(e) => assert!(
+                e.to_string()
+                    .contains("unsupported cluster manifest version"),
+                "got: {e}"
+            ),
+            Ok(_) => panic!("future cluster manifest version must fail loud"),
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

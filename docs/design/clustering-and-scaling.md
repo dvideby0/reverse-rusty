@@ -288,9 +288,15 @@ We follow the **shared-nothing** column (Elasticsearch / Cassandra). The Aurora 
 ## 7. Broad queries in a cluster
 Class-C broad queries (anchored only on a hot feature like `grade:10`) would all hash to one **hot
 shard**. Don't let them. Because they are few in count (~0.2% in our data) but high-traffic, **replicate
-the entire broad lane to every matcher node** (it's small) and evaluate it locally in batch. This
-turns a hot-shard problem into a cheap local scan and keeps the selective ring balanced — the cluster
-analogue of the broad-query quarantine in [`matching.md`](matching.md) §4.
+the broad lane to every shard** (it's small) and evaluate it as a batch scan on the one shard each title
+already probes — its *broad-eval shard* — turning a hot-shard problem into a cheap local scan and
+keeping the selective ring balanced (the cluster analogue of the broad-query quarantine in
+[`matching.md`](matching.md) §4). Built as **R-shard**
+([ADR-080](../decisions/adr-080-cluster-replicate-broad-to-all.md), graduating ADR-027's shard-0
+stand-in): in this codebase the "matcher node" is split into a routing coordinator + stateful shards, so
+the broad lane lives on the **shards**, not the coordinator — a coordinator-local broad lane (the literal
+"every matcher node" reading) is a deferred multi-coordinator optimization. The same replicate-to-all
+placement carries the opt-in class-D always-candidate lane (ADR-068) cluster-wide.
 
 ---
 

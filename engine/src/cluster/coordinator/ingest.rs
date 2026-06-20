@@ -81,14 +81,19 @@ impl ClusterEngine {
             let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
             match self.placement(&ex) {
                 Target::Reject => {}
-                Target::Replicated => buckets[0].push(PlacedQuery {
-                    logical: *logical,
-                    ex,
-                    dsl: text.clone(),
-                    version: *version,
-                    tags: qtags.clone(),
-                    tag_ids: Vec::new(),
-                }),
+                Target::Replicated => {
+                    // The broad lane is replicated to every shard (ADR-080).
+                    for bucket in &mut buckets {
+                        bucket.push(PlacedQuery {
+                            logical: *logical,
+                            ex: ex.clone(),
+                            dsl: text.clone(),
+                            version: *version,
+                            tags: qtags.clone(),
+                            tag_ids: Vec::new(),
+                        });
+                    }
+                }
                 Target::Selective(shs) => {
                     for &s in &shs {
                         buckets[s].push(PlacedQuery {
@@ -115,7 +120,7 @@ impl ClusterEngine {
     /// Delegates to the free [`placement_of`] so `build` can bucket the corpus before
     /// the cluster value exists.
     fn placement(&self, ex: &Extracted) -> Target {
-        placement_of(&self.dict, &self.ring, ex)
+        placement_of(&self.dict, &self.ring, ex, self.per_shard.accept_class_d)
     }
 
     /// True if the cluster holds (or has ever held) any tagged query (ADR-055): the `tags_present`
@@ -255,7 +260,9 @@ impl ClusterEngine {
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
         let (insert_shards, outcome) = match self.placement(&ex) {
             Target::Reject => return Ok((0, AddOutcome::RejectedClassD)),
-            Target::Replicated => (vec![0usize], AddOutcome::Replicated),
+            // The broad lane is replicated to every shard (ADR-080); pass 1 already tombstones
+            // every shard, so pass 2 re-inserts the new version on every shard.
+            Target::Replicated => ((0..self.shards.len()).collect(), AddOutcome::Replicated),
             Target::Selective(shards) => (
                 shards.clone(),
                 AddOutcome::Placed {
@@ -333,6 +340,54 @@ impl ClusterEngine {
         self.apply_remove(id)
     }
 
+    /// Insert a compiled query on a set of target shards, collecting partial-apply failures
+    /// (ADR-047): try EVERY shard rather than bailing on the first error, so a mid-fan-out
+    /// remote failure is queued for repair (keyed by logical id, an idempotent re-insert on the
+    /// failed shards) instead of leaving a silent partial mutation. In-process inserts are
+    /// infallible ⇒ `failed` stays empty ⇒ byte-identical to a plain loop. On any failure it
+    /// queues the repair, emits, and returns the honest error; otherwise it returns `success`.
+    /// Shared by the `Selective` (its placement shards) and `Replicated` (every shard, ADR-080)
+    /// arms of [`Self::apply_add`].
+    #[allow(clippy::too_many_arguments)]
+    fn insert_on_shards(
+        &self,
+        shards: &[usize],
+        ex: &Extracted,
+        id: u64,
+        version: u32,
+        dsl: &str,
+        tags: &[(String, String)],
+        success: AddOutcome,
+    ) -> Result<AddOutcome, ShardError> {
+        let mut applied = Vec::with_capacity(shards.len());
+        let mut failed = Vec::new();
+        let mut first_err: Option<ShardError> = None;
+        for &s in shards {
+            match self.shards[s].insert_extracted_with_tags(ex, id, version, dsl, tags) {
+                Ok(_) => applied.push(s),
+                Err(e) => {
+                    failed.push(s);
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if !failed.is_empty() {
+            return Err(self.note_partial(
+                ClusterMutation::Add {
+                    logical: id,
+                    version,
+                    dsl: dsl.to_string(),
+                    tags: tags.to_vec(),
+                },
+                id,
+                applied,
+                failed,
+                first_err,
+            ));
+        }
+        Ok(success)
+    }
+
     /// Apply an ADD to the shards — the state-machine `apply` for adds, shared by the live
     /// write path ([`Self::add_query`], after logging) and log replay ([`Self::open`]).
     /// Re-deriving placement here from the frozen dict makes live and replayed application
@@ -354,51 +409,28 @@ impl ClusterEngine {
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
         let outcome = match self.placement(&ex) {
-            // Class D is logged-but-unplaceable: a harmless no-op on replay (stored
-            // nowhere), matching the caller-visible "rejected, stored nowhere".
+            // Class D with accept_class_d off is logged-but-unplaceable: a harmless no-op on
+            // replay (stored nowhere), matching the caller-visible "rejected, stored nowhere".
             Target::Reject => return Ok(AddOutcome::RejectedClassD),
-            // Single shard (the replicated lane): a failure is a CLEAN total failure (nothing
-            // applied), so the raw `?` error is honest. The logged mutation still converges on
-            // reopen via replay; the live `resync` repair targets the multi-shard PARTIAL case.
+            // The broad lane (class C / B arity-2 / accepted D): replicated to EVERY shard
+            // (ADR-080). Same fail-collect fan-out as Selective, so a mid-fan-out remote failure
+            // is queued for repair rather than a silent partial. In-process inserts are infallible
+            // ⇒ the outcome is byte-identical save that the entry now lands on every shard.
             Target::Replicated => {
-                self.shards[0].insert_extracted_with_tags(&ex, id, version, dsl, tags)?;
-                AddOutcome::Replicated
+                let all: Vec<usize> = (0..self.shards.len()).collect();
+                self.insert_on_shards(&all, &ex, id, version, dsl, tags, AddOutcome::Replicated)?
             }
-            Target::Selective(shards) => {
-                // Try EVERY target shard and collect failures rather than bailing on the first
-                // `?` — so a mid-fan-out remote failure is recorded for repair instead of
-                // leaving a silent partial mutation (ADR-047). In-process inserts are infallible
-                // ⇒ `failed` stays empty ⇒ the outcome is byte-identical to the old loop.
-                let mut applied = Vec::new();
-                let mut failed = Vec::new();
-                let mut first_err: Option<ShardError> = None;
-                for &s in &shards {
-                    match self.shards[s].insert_extracted_with_tags(&ex, id, version, dsl, tags) {
-                        Ok(_) => applied.push(s),
-                        Err(e) => {
-                            failed.push(s);
-                            first_err.get_or_insert(e);
-                        }
-                    }
-                }
-                if !failed.is_empty() {
-                    // Already durably logged: queue the failed shards for repair, emit, and return
-                    // the honest error. Unreachable on the in-process path (infallible writes).
-                    return Err(self.note_partial(
-                        ClusterMutation::Add {
-                            logical: id,
-                            version,
-                            dsl: dsl.to_string(),
-                            tags: tags.to_vec(),
-                        },
-                        id,
-                        applied,
-                        failed,
-                        first_err,
-                    ));
-                }
-                AddOutcome::Placed { shards }
-            }
+            Target::Selective(shards) => self.insert_on_shards(
+                &shards,
+                &ex,
+                id,
+                version,
+                dsl,
+                tags,
+                AddOutcome::Placed {
+                    shards: shards.clone(),
+                },
+            )?,
         };
         // A successful full apply supersedes any stale partial-apply queued for this id, so
         // `resync` never re-drives an outdated mutation. Cheap no-op on the default path.

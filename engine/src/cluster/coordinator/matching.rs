@@ -26,7 +26,7 @@ impl ClusterEngine {
     /// N(T)` means fan-out only ever widens, and only on alias-bearing titles; with
     /// no active multi-word alias `P(T) == N(T)` and this takes the single-view
     /// path, byte-identical to the pre-ADR-076 routing.
-    fn route(&self, title: &str) -> Vec<usize> {
+    fn route(&self, title: &str) -> (Vec<usize>, usize) {
         let mut lc = String::new();
         let mut feats: Vec<FeatureId> = Vec::new();
         if self.norm.has_multiword_aliases() {
@@ -37,8 +37,8 @@ impl ClusterEngine {
             self.norm
                 .match_features(title, &self.dict, &mut lc, &mut feats);
         }
+        // Selective targets: the shard owning each anchor-eligible (non-hot) feature.
         let mut targets: Vec<usize> = Vec::with_capacity(feats.len() + 1);
-        targets.push(0);
         for &f in &feats {
             if !is_hot(&self.dict, f) {
                 targets.push(self.ring.lookup(f));
@@ -46,7 +46,21 @@ impl ClusterEngine {
         }
         targets.sort_unstable();
         targets.dedup();
-        targets
+        // Broad-eval shard: the ONE shard that evaluates the replicated-to-all broad lane for
+        // this title (ADR-080), picked by a stable title hash so no shard is a broad hotspot.
+        // Free-ride an already-probed selective target when there is one (zero extra fan-out);
+        // otherwise probe a single hashed shard (a title with no selective anchor — all-hot or
+        // empty). Either way `broad_eval_shard ∈ targets`, so every title evaluates broad on a
+        // shard it probes, and that shard holds the complete (replicated) broad lane.
+        let h = crate::util::fnv1a64(title.as_bytes());
+        let broad_eval_shard = if targets.is_empty() {
+            let s = (h % self.ring.num_shards() as u64) as usize;
+            targets.push(s);
+            s
+        } else {
+            targets[(h % targets.len() as u64) as usize]
+        };
+        (targets, broad_eval_shard)
     }
 
     /// Match one title against the cluster, using the cluster's default broad-lane
@@ -125,22 +139,34 @@ impl ClusterEngine {
         include_broad: bool,
         pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        let targets = self.route(title);
-        // Broad is evaluated ONLY on shard 0 (the replicated lane); selective
-        // shards hold only main-index queries, so probing their (empty) broad
-        // index would be pure waste — and double-counting a broadcast query.
-        // A failed shard probe propagates rather than being dropped: a silently
-        // missing shard would shrink the union into a FALSE NEGATIVE.
+        let (targets, broad_eval_shard) = self.route(title);
+        // The broad lane is replicated to every shard (ADR-080) but evaluated on exactly ONE
+        // shard per title — its broad-eval shard — so a broad query is counted once; the other
+        // probed shards run with broad off (they would re-scan the same replicated lane). A
+        // failed shard probe propagates rather than being dropped: a silently missing shard
+        // would shrink the union into a FALSE NEGATIVE.
         let parts: Vec<(Vec<u64>, MatchStats)> = if targets.len() <= 1 {
             targets
                 .iter()
-                .map(|&s| self.shards[s].percolate_filtered(title, include_broad && s == 0, pred))
+                .map(|&s| {
+                    self.shards[s].percolate_filtered(
+                        title,
+                        include_broad && s == broad_eval_shard,
+                        pred,
+                    )
+                })
                 .collect::<Result<_, _>>()?
         } else {
             use rayon::prelude::*;
             targets
                 .par_iter()
-                .map(|&s| self.shards[s].percolate_filtered(title, include_broad && s == 0, pred))
+                .map(|&s| {
+                    self.shards[s].percolate_filtered(
+                        title,
+                        include_broad && s == broad_eval_shard,
+                        pred,
+                    )
+                })
                 .collect::<Result<_, _>>()?
         };
 
@@ -191,16 +217,16 @@ impl ClusterEngine {
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
         let pred = self.compile_tag_predicate(filter);
         let spec = self.compile_rank_spec(rank);
-        let targets = self.route(title);
+        let (targets, broad_eval_shard) = self.route(title);
         // Same fan-out + fail-loud shape as `percolate_inner` (a dropped shard probe
-        // would shrink the union into a false negative).
+        // would shrink the union into a false negative); broad on the one broad-eval shard.
         let parts: Vec<(Vec<(u64, i64)>, MatchStats)> = if targets.len() <= 1 {
             targets
                 .iter()
                 .map(|&s| {
                     self.shards[s].percolate_filtered_ranked(
                         title,
-                        include_broad && s == 0,
+                        include_broad && s == broad_eval_shard,
                         &pred,
                         &spec,
                     )
@@ -213,7 +239,7 @@ impl ClusterEngine {
                 .map(|&s| {
                     self.shards[s].percolate_filtered_ranked(
                         title,
-                        include_broad && s == 0,
+                        include_broad && s == broad_eval_shard,
                         &pred,
                         &spec,
                     )
@@ -233,9 +259,10 @@ impl ClusterEngine {
         Ok((out, stats))
     }
 
-    /// Introspection: the shards a title would be routed to (its fan-out).
+    /// Introspection: the shards a title would be routed to (its fan-out) — the selective
+    /// targets plus the one broad-eval shard (ADR-080).
     pub fn shard_fanout(&self, title: &str) -> Vec<usize> {
-        self.route(title)
+        self.route(title).0
     }
 
     /// Number of shards.

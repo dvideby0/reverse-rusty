@@ -68,8 +68,8 @@ fn main() {
         cc[0], cc[1], cc[2]
     );
     println!(
-        "per-shard counts    : min={min_s} max={max_s} (shard 0 = replicated broad lane: {})",
-        per_shard.first().copied().unwrap_or(0)
+        "per-shard counts    : min={min_s} max={max_s}  (broad lane replicated to every shard, \
+         ADR-080; eval-shard rotates per title — counts even, no shard-0 hotspot)"
     );
     println!(
         "build time          : {build_s:.2}s  ({:.0} queries/sec)",
@@ -104,7 +104,7 @@ fn main() {
         pct(&mut fanout.clone(), 0.99),
         fanout.iter().copied().max().unwrap_or(0),
     );
-    println!("(content routing touches a handful of shards — shard 0 + each rare anchor's owner — never all N)");
+    println!("(content routing touches a handful of shards — one broad-eval shard + each rare anchor's owner — never all N)");
 
     println!("================ CANDIDATES / TITLE ================");
     println!(
@@ -126,7 +126,7 @@ fn main() {
     println!("avg matches/title     : {:.3}", sum_matches as f64 / n);
 
     // ---- fan-out scaling: same corpus, varying K (the machine-independent invariant) ----
-    // Fan-out is bounded by a title's distinct rare-anchor count (+ shard 0), so it saturates
+    // Fan-out is bounded by a title's distinct rare-anchor count (+ its one broad-eval shard), so it saturates
     // at ~2–5 regardless of K once anchors land on distinct shards — it does NOT grow toward N.
     println!("================ FAN-OUT SCALING (same corpus, varying K) ================");
     println!(

@@ -57,6 +57,16 @@ impl ClusterEngine {
                 .into_bytes(),
             None => Vec::new(),
         };
+        // The class-D rollback fence (ADR-080): set iff some shard holds a class-D
+        // always-candidate, so a pre-ADR-080 binary fails loud on reopen instead of silently
+        // dropping it. A boolean `any`, immune to any replica count inflation.
+        let mut class_d_fence = false;
+        for s in &self.shards {
+            if s.class_counts()?[3] > 0 {
+                class_d_fence = true;
+                break;
+            }
+        }
         let manifest = crate::storage::ClusterManifest {
             epoch: new_epoch,
             snapshot_pos: up_to.0,
@@ -64,6 +74,7 @@ impl ClusterEngine {
             num_shards: self.ring.num_shards() as u32,
             vnodes: self.vnodes,
             include_broad: self.include_broad,
+            class_d_fence,
             segment_registry: segment_registry.clone(),
             next_seg_ids,
             dict_data: crate::storage::serialize_dict(&self.dict),

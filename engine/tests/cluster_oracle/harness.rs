@@ -50,6 +50,34 @@ impl Brute {
         }
     }
 
+    /// Like `build` but KEEPS negation-only (class-D) queries as always-candidates —
+    /// the ground truth for the cluster always-candidate lane (ADR-068/080). A class-D
+    /// query matches exactly the titles bearing none of its forbidden features (the
+    /// `matches` loop already computes this: empty required/any-of pass vacuously, the
+    /// forbidden check gates). Only the effectively-empty query (no positives AND no
+    /// negatives — a match-all the engine also rejects) is dropped.
+    pub(crate) fn build_accepting_class_d(queries: &[(u64, String)]) -> Self {
+        let norm = vocab();
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let mut qs = Vec::new();
+        for (logical, text) in queries {
+            if let Ok(ast) = reverse_rusty::dsl::parse(text) {
+                let ex = extract(&ast, &norm, &mut dict, &mut lc);
+                if ex.required.is_empty() && ex.anyof.is_empty() && ex.forbidden.is_empty() {
+                    continue; // an effectively-empty query (match-all) — rejected on both sides
+                }
+                qs.push((*logical, ex));
+            }
+        }
+        dict.finalize_mask();
+        Brute {
+            norm,
+            dict,
+            queries: qs,
+        }
+    }
+
     /// Like `build_with_vocab` but additionally applies the vocab's equivalence groups
     /// (ADR-054) via expansion — an independent ground truth that widens each query exactly
     /// as the cluster does, so `cluster ≡ brute` proves the expanded queries match correctly.

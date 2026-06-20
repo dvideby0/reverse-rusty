@@ -9,28 +9,37 @@
 //! - **A** (one rare required anchor `r1`): one shard = `ring.lookup(r1)`.
 //! - **B any-of** (members all rare): one shard per any-of member, deduped.
 //! - **B arity-2** (rarest required is hot ⇒ all required hot ⇒ no rare anchor):
-//!   the replicated lane → shard 0.
-//! - **C** (broad, hot-only anchor): the replicated lane → shard 0.
-//! - **D** (no anchorable feature): rejected, stored nowhere.
+//!   the broad lane → every shard.
+//! - **C** (broad, hot-only anchor): the broad lane → every shard.
+//! - **D** (no anchorable feature): the broad lane → every shard, under the
+//!   universal signature, when `accept_class_d` is on (the always-candidate lane,
+//!   ADR-068); rejected and stored nowhere otherwise.
 //!
-//! Shard 0 is the in-process stand-in for "replicate the broad lane to every node"
-//! (§7): it holds the complete class-C + class-B-arity-2 set and is the only shard
-//! that evaluates it, so there is no double-counting.
+//! The broad lane (class C / B-arity-2 / accepted D) is **replicated to every
+//! shard** (ADR-080, graduating ADR-027's shard-0 stand-in for §7's "replicate the
+//! broad lane to every node"). It is small (~0.2% of the corpus), so N copies cost
+//! little; in return no single shard is a broad hotspot. To avoid double-counting,
+//! each title evaluates the broad lane on **exactly one** shard — its broad-eval
+//! shard (see Routing) — and the cross-shard merge dedups by logical id.
 //!
 //! ## Routing (reads)
-//! A title is probed on shard 0 (always, for the replicated lane) plus the shard
-//! owning each of the title's *anchor-eligible* (non-hot) features — a ~2–5 shard
-//! fan-out, never all N. Shard 0 runs with `include_broad`; the selective shards
-//! run without it (they hold only main-index queries). Results are unioned and
-//! deduped.
+//! A title is probed on the shard owning each of its *anchor-eligible* (non-hot)
+//! features — a ~2–5 shard fan-out, never all N — plus its **broad-eval shard**:
+//! one shard, picked by a stable title hash, that runs the replicated broad lane
+//! with `include_broad`. The broad-eval shard free-rides an already-probed
+//! selective target when the title has one (zero extra fan-out), else a hashed
+//! shard (a title with no selective anchor — all-hot or empty). The other probed
+//! shards run without `include_broad`. Results are unioned and deduped.
 //!
 //! ## Why this is lossless
 //! For any query `Q` a title `T` truly matches: if `Q` is class A / B-any-of, its
 //! anchor (resp. some matched member) is a *required* feature, hence present in
 //! `T` and non-hot, so `T` routes to `ring.lookup(anchor) =` `Q`'s shard; if `Q`
-//! is class B-arity-2 / C it lives on shard 0, which `T` always probes. Each shard
-//! is a verbatim single-node engine, so its lossless cover + exact verify finish
-//! the job. No shard boundary can drop a match.
+//! is class B-arity-2 / C / accepted D it lives on the broad lane, which is on
+//! **every** shard — and `T`'s broad-eval shard (always one of the shards `T`
+//! probes) holds the complete broad lane and evaluates it under `include_broad`.
+//! Each shard is a verbatim single-node engine, so its lossless cover + exact
+//! verify finish the job. No shard boundary can drop a match.
 
 mod autoscale;
 mod control_plane;
@@ -163,9 +172,11 @@ impl Default for ClusterConfig {
 pub enum AddOutcome {
     /// Selective query (class A / B any-of): placed on these shard(s).
     Placed { shards: Vec<usize> },
-    /// Replicated-lane query (class C / B arity-2): placed on the designated shard.
+    /// Broad-lane query (class C / B arity-2 / accepted class D): replicated to
+    /// every shard (ADR-080).
     Replicated,
-    /// Compiled but rejected as cost-class D — no anchorable feature, stored nowhere.
+    /// Compiled but rejected as cost-class D with `accept_class_d` off — no
+    /// anchorable feature, stored nowhere.
     RejectedClassD,
     /// The DSL failed to parse.
     RejectedParse(ParseError),
@@ -194,8 +205,10 @@ pub struct ResyncReport {
 
 /// Internal placement decision for one compiled query.
 enum Target {
+    /// Class D with `accept_class_d` off — no anchorable feature, stored nowhere.
     Reject,
-    /// The replicated lane (class C / B arity-2) → shard 0.
+    /// The broad lane (class C / B arity-2 / accepted class D) → replicated to
+    /// EVERY shard (ADR-080); evaluated on one broad-eval shard per title.
     Replicated,
     /// Selective shards (class A / B any-of), sorted + deduped, non-empty.
     Selective(Vec<usize>),
@@ -374,10 +387,22 @@ fn into_shard(copies: Vec<LocalShard>) -> Result<Box<dyn Shard>, ShardError> {
 /// the cluster value exists, and [`ClusterEngine::placement`] can delegate. Forbidden
 /// features can't leak in: `anchor_plan` reads only `required`/`anyof`, never
 /// `forbidden` (ADR-006 holds structurally).
-fn placement_of(dict: &Dict, ring: &HashRing, ex: &Extracted) -> Target {
+///
+/// `accept_class_d` (the per-shard [`EngineConfig`](crate::config::EngineConfig) knob)
+/// gates the cluster always-candidate lane (ADR-068/080): a negation-only class-D query
+/// is placed on the broad lane (every shard, under the universal signature) when the knob
+/// is on, and rejected otherwise. The decision is re-derived identically on log replay
+/// (same frozen dict + same config), so live ≡ replay.
+fn placement_of(dict: &Dict, ring: &HashRing, ex: &Extracted, accept_class_d: bool) -> Target {
     let ap = anchor_plan(ex, dict);
     match ap.class {
-        CostClass::D => Target::Reject,
+        CostClass::D => {
+            if accept_class_d {
+                Target::Replicated
+            } else {
+                Target::Reject
+            }
+        }
         CostClass::C => Target::Replicated,
         CostClass::A | CostClass::B => {
             // A class-B-arity-2 query's only main anchor is an all-hot PAIR (a len-2
