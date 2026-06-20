@@ -106,14 +106,18 @@ services:
       --grpc-tls-ca /certs/ca.crt
     # --include-broad makes broad-lane queries match by DEFAULT; broad is also a
     # per-request flag (`"include_broad": true` in the _search body), so leave it off
-    # here unless every request should include broad. To accept negation-only
-    # (class-D) queries, add --accept-class-d HERE *and* to every shardserver above
-    # (all-or-nothing — ADR-080 operator contract), else they are silently dropped.
+    # here unless every request should include broad. NOTE: negation-only (class-D)
+    # queries are NOT supported on this remote topology in v1 — `shardserver` has no
+    # --accept-class-d, so a class-D-accepting coordinator would acknowledge writes
+    # every shard silently drops. Class D needs the in-process
+    # `server --cluster --data-dir` cluster (cluster-deployment.md §11).
     environment:
       RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN:?set RR_CLUSTER_TOKEN}
-      # The HTTP bearer gate (ADR-062). Required once the API is reachable off-box;
-      # the server warns at startup if it binds beyond loopback without it.
-      RR_AUTH_TOKEN: ${RR_AUTH_TOKEN:-}
+      # The HTTP bearer gate (ADR-062) — REQUIRED: the server refuses to start on an
+      # EMPTY token (fail-loud, never silently open). To run without REST auth on a
+      # trusted single host, DELETE this line (an absent var = auth off); an empty
+      # value is rejected, not read as "off".
+      RR_AUTH_TOKEN: ${RR_AUTH_TOKEN:?set a REST bearer token (openssl rand -hex 32), or delete this line to disable auth on a trusted host}
     volumes:
       - ${RR_CERT_DIR}:/certs:ro
     ports:

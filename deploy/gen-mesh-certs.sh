@@ -60,8 +60,15 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -sha256 -nodes \
 # The CA bundle a client verifies against IS the self-signed cert (it is its own
 # issuer), so node.crt doubles as ca.crt.
 cp "$OUT_DIR/node.crt" "$OUT_DIR/ca.crt"
+# ca.crt + node.crt are public. node.key is private but must be 0644 so the container
+# user (uid 10001 ≠ the host user that owns it) can READ it through the read-only
+# bind mount. On a SHARED/multi-tenant host that makes the key world-readable — there,
+# don't bind-mount it: use Docker/Swarm/K8s secrets (mounted 0400 to the container
+# user) instead. See cluster-deployment.md §10.
 chmod 644 "$OUT_DIR"/ca.crt "$OUT_DIR"/node.crt "$OUT_DIR"/node.key
 
 echo "Wrote mesh identity to $OUT_DIR:"
 echo "  ca.crt node.crt node.key  (valid 825 days, SANs: ${SERVICES[*]})"
+echo "  WARNING: node.key is 0644 (world-readable) for the bind-mount flow — on a"
+echo "  shared host use Docker secrets instead (cluster-deployment.md §10)."
 echo "Point RR_CERT_DIR at this directory (see deploy/cluster.env.example)."

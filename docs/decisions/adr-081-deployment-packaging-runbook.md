@@ -59,6 +59,18 @@ ADR-078 resize, ADR-079 backup, ADR-080 broad lane):
   cluster (live `set_vocab` refused, `--vocab-file` against remote shards fails startup); the runbook
   operationalizes that as a parallel-cluster-then-cut-over procedure.
 
+The runbook also surfaces three honest v1 limitations of the remote/stateless path (none new — all are
+properties of the already-shipped distributed layers, found in the ADR-081 review): the stateless
+coordinator has **no cross-shard backup consistency barrier** (`POST /_backup`/`/_checkpoint` no-op
+without a `data_dir`), so a consistent remote backup quiesces writes then snapshots each shard's
+`--data-dir`; **class-D queries need the in-process `--data-dir` cluster** (`shardserver` exposes no
+`--accept-class-d`, so a class-D-accepting coordinator would acknowledge writes every shard drops —
+exposing the shard flag is a tracked follow-on); and `shardserver` is **gRPC-only with no HTTP
+`/_metrics`**, so shard liveness is watched via the coordinator's fail-loud `/_health`. The production
+compose also makes the **HTTP bearer token required** (the server rejects an empty `RR_AUTH_TOKEN`; the
+documented opt-out is to omit the env line on a trusted host) rather than injecting an empty value that
+would crash-loop the coordinator.
+
 **Why this is safe.** It adds **no code on any path** — pure deployment artifacts + documentation over
 surfaces that are already oracle-proven and harness-proven. The compose is the *same image, bins, and
 mesh security* the CI harness already exercises across a real container boundary (ADR-072), with the

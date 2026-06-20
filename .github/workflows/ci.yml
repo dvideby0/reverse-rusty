@@ -109,7 +109,7 @@ jobs:
       # need dummy values supplied, exactly as a real bring-up would. Fails fast.
       - name: Lint the production cluster compose
         run: >
-          RR_CLUSTER_TOKEN=ci-lint RR_CERT_DIR=./deploy/certs
+          RR_CLUSTER_TOKEN=ci-lint RR_AUTH_TOKEN=ci-lint RR_CERT_DIR=./deploy/certs
           docker compose --project-directory . -f deploy/compose.cluster.yml config >/dev/null
 
       - name: Install pinned toolchain

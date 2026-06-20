@@ -17,6 +17,7 @@ REPO_ROOT=$(pwd)
 COMPOSE_FILE="$REPO_ROOT/deploy/compose.cluster.yml"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/rr_smoke.XXXXXX")
 
+EXPLICIT_IMAGE="${RR_IMAGE:+1}"   # "1" iff the caller provided RR_IMAGE
 export RR_IMAGE="${RR_IMAGE:-reverse-rusty:smoke}"
 export RR_CLUSTER_TOKEN="smoke-mesh-secret-$$"
 export RR_AUTH_TOKEN="smoke-auth-secret-$$"
@@ -44,7 +45,11 @@ for tool in docker curl jq openssl; do command -v "$tool" >/dev/null || fail "mi
 echo "==> mesh certs (SANs cover the compose service names)"
 deploy/gen-mesh-certs.sh "$RR_CERT_DIR" shard0 shard1 shard2 coordinator control0 control1 control2 localhost >/dev/null
 
-if ! docker image inspect "$RR_IMAGE" >/dev/null 2>&1; then
+# Reuse a caller-supplied image if present; otherwise ALWAYS (re)build the default
+# smoke tag, so a second run never smoke-tests stale binaries from an earlier build.
+if [[ -n "$EXPLICIT_IMAGE" ]] && docker image inspect "$RR_IMAGE" >/dev/null 2>&1; then
+  echo "==> reuse provided image $RR_IMAGE"
+else
   echo "==> build image $RR_IMAGE (slow on a cold cache)"
   docker build -q -f deploy/Dockerfile -t "$RR_IMAGE" "$REPO_ROOT" >/dev/null
 fi

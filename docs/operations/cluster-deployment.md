@@ -77,10 +77,15 @@ $EDITOR deploy/cluster.env          # fill in RR_CLUSTER_TOKEN and RR_AUTH_TOKEN
 
 ## 3. Bootstrap & startup ordering
 
+Every `docker compose` command below needs the same `--project-directory`, `-f`, and `--env-file`
+arguments (run from the repo root, so `RR_CERT_DIR=./deploy/certs` resolves correctly). Define a wrapper
+once per shell and use it throughout:
+
 ```sh
-# from the repo root — --project-directory . makes relative paths (RR_CERT_DIR) repo-root-relative
-docker compose --project-directory . -f deploy/compose.cluster.yml \
-  --env-file deploy/cluster.env up -d --wait
+rrc() { docker compose --project-directory . -f deploy/compose.cluster.yml \
+          --env-file deploy/cluster.env "$@"; }
+
+rrc up -d --wait          # start the cluster; --wait blocks until every service is healthy
 ```
 
 `--wait` blocks until every service is healthy. The dependency order the compose encodes:
@@ -141,9 +146,9 @@ short result (ADR-072).
 
 | Event | What happens | Action |
 |---|---|---|
-| **A shard crashes/restarts** | Durable self-restore from its `--data-dir` (segments + translog, ADR-039); reads that route to it return `502` until it's back. | `docker compose restart shardN` (or let `unless-stopped` do it). Matches resume automatically. |
-| **Rolling shard restart** | One shard at a time; the others keep serving (reads to the down shard fail loud meanwhile). | Restart shards sequentially; wait for `/_health` green between each. |
-| **Coordinator restart** | Stateless: reconnects to the same endpoints, re-mints + re-ships the dict, re-derives placement. No data loss. | `docker compose restart coordinator`; wait for green. |
+| **A shard crashes/restarts** | Durable self-restore from its `--data-dir` (segments + translog, ADR-039); reads that route to it return `502` until it's back. | `rrc restart shardN` (or let `unless-stopped` do it). Matches resume automatically. |
+| **Rolling shard restart** | One shard at a time; the others keep serving (reads to the down shard fail loud meanwhile). | `rrc restart shardN` sequentially; wait for `/_health` green between each. |
+| **Coordinator restart** | Stateless: reconnects to the same endpoints, re-mints + re-ships the dict, re-derives placement. No data loss. | `rrc restart coordinator`; wait for green. |
 | **Control-plane restart** | Each node resumes from its durable Raft log/vote (ADR-041). | Restart control nodes; quorum re-forms. (Idle at v1 — no data-path impact.) |
 | **Replica failover / peer recovery** (RF>1) | Reads fail over to an in-sync replica; a fresh replica rebuilds from its primary over `FetchSegments`/`RecoverFrom` without quiescing writes (ADR-035/036). | Bring up the replacement node; it catches up automatically. |
 
@@ -153,17 +158,27 @@ restart, live handoff under load, control-plane restart.
 
 ## 7. Backup & restore
 
-Backup depends on topology — the durable state lives in different places:
+Backup depends on topology, because the durable state lives in different places:
 
-- **In-process `--data-dir` cluster** (coordinator owns the data dir): use the engine-driven
-  `POST /_backup` — a consistent, self-contained snapshot. Full procedure:
+- **In-process `--data-dir` cluster** (one `server --cluster --data-dir` process owns the data): use the
+  engine-driven `POST /_backup` — a consistent, self-contained snapshot taken under the engine's write
+  lock. This is the path with a real consistency barrier. Full procedure:
   [backup-restore.md](backup-restore.md).
-- **Remote topology** (this compose — the coordinator is stateless): `POST /_backup` does **not** apply;
-  the durable state is the per-node `--data-dir` volumes (`shardN-data`, `controlN-data`). Back them up
-  at the filesystem layer — `POST /_checkpoint` to commit a consistent on-disk state, then snapshot each
-  volume (ZFS/LVM/EBS/GCP disk snapshot — the zero-write-stall path in
-  [backup-restore.md](backup-restore.md#zero-write-stall-backups-large-deployments)). Restore = mount the
-  snapshots back into the same `--data-dir` volumes and restart the shard nodes.
+- **Remote topology** (this compose — the coordinator is **stateless**): `POST /_backup` and
+  `POST /_checkpoint` do **not** seal the remote shards — they no-op on a coordinator that has no
+  `data_dir`. The durable state is each node's own `--data-dir` volume (`shardN-data`, `controlN-data`),
+  fsync'd by that node per its WAL policy. **There is no coordinator-driven cross-shard consistency
+  barrier in v1**, so for a globally consistent backup you must **quiesce writes**:
+  1. Stop the ingest source (no `_doc`/`_bulk` writes in flight).
+  2. Snapshot each `shardN-data` and `controlN-data` volume at the filesystem layer (ZFS/LVM/EBS/GCP disk
+     snapshot — instantaneous; see [backup-restore.md](backup-restore.md#zero-write-stall-backups-large-deployments)).
+  3. Resume writes.
+
+  Restore = mount the snapshots back into the same `--data-dir` volumes and restart the nodes; each shard
+  recovers its own segments + translog. Without quiescence, each shard's snapshot is still individually
+  crash-consistent (its translog replays on restart), but shards may capture slightly different points in
+  time — acceptable only if your ingest can re-drive recent writes. For an engine-driven consistent backup
+  *without* quiescing, use the in-process `--data-dir` cluster above.
 
 ## 8. Vocabulary redeploy
 
@@ -185,8 +200,10 @@ This is the deployment-level realization of ADR-076's "vocab is deploy-time" dec
 
 ## 9. Monitoring & observability
 
-`GET /_metrics` exposes Prometheus text with the `reverse_rusty_` prefix. Scrape the coordinator (and
-each shard server, which exposes its own engine metrics). High-signal alerts:
+`GET /_metrics` on the **coordinator** exposes Prometheus text with the `reverse_rusty_` prefix. (The
+`shardserver` is gRPC-only — it has **no HTTP `/_metrics`** in v1, so shard-local engine metrics aren't
+scrapable; watch shard liveness via the coordinator's `/_health`, which fails loud on an unreachable
+shard, and the shard containers' structured logs.) High-signal coordinator alerts:
 
 | Metric | Alert when |
 |---|---|
@@ -201,10 +218,14 @@ unreachable endpoint.
 
 - [ ] **Mesh TLS + token on** (`--tls-*` + `RR_CLUSTER_TOKEN`) — opt-in (ADR-071); enable on any
       untrusted network. Plaintext mesh is for a single trusted host only.
-- [ ] **`RR_AUTH_TOKEN` set** before the REST port is reachable off-box (ADR-062). The server warns at
-      startup if it binds beyond loopback without it.
+- [ ] **`RR_AUTH_TOKEN` set** (ADR-062) — required to start; the coordinator refuses an empty token. To
+      run without REST auth on a trusted single host, delete the `RR_AUTH_TOKEN` line from the coordinator
+      service (an absent var disables auth; an empty one is rejected, never read as "off").
 - [ ] **REST port loopback-bound** (`RR_PORT=127.0.0.1:9200`) unless behind a firewall/authenticating
       proxy. Widen to `0.0.0.0:9200` only with the bearer token set.
+- [ ] **Mesh private key not world-readable on a shared host** — `gen-mesh-certs.sh` writes `node.key`
+      0644 so the container user (uid 10001) can read it through the bind mount; on a multi-tenant host
+      use Docker secrets (mounted 0400 to the container user) instead of bind-mounting the key.
 - [ ] **Cert SANs cover every service name**; rotate by re-running `gen-mesh-certs.sh` (remove the old
       certs first) and redeploying every node together.
 
@@ -218,3 +239,7 @@ unreachable endpoint.
 - **Online / cross-process resize** — `/_cluster/resize` is in-process only; the remote topology scales
   by redeploy ([§5](#5-scaling)).
 - **Live remote vocabulary shipping** — vocab is deploy-time on a remote cluster ([§8](#8-vocabulary-redeploy)).
+- **Negation-only (class-D) queries on the remote topology** — `shardserver` has no `--accept-class-d`
+  (it always runs the default config), so a class-D-accepting coordinator would acknowledge writes every
+  shard drops. Use the in-process `--data-dir` cluster for class D; exposing the shard flag is a tracked
+  follow-on.
