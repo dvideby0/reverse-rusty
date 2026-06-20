@@ -57,6 +57,12 @@ pub enum ParseErrorKind {
     /// `max_tags` ceiling (ADR-049). Rejected loudly rather than truncating the
     /// SoA tag column (which would silently drop a real tag).
     TooManyTags,
+    /// A compiled query's required / forbidden / any-of column would overflow the
+    /// SoA exact store's `u16` count encoding. The independent parser ceilings bound
+    /// the AST, but several AST clauses can flatten into one over-`u16` column (e.g.
+    /// two negated any-of groups → one forbidden column). Rejected loudly rather than
+    /// truncating the count (which would silently drop features — a false negative).
+    CompiledColumnTooLarge,
 }
 
 impl ParseErrorKind {
@@ -71,6 +77,9 @@ impl ParseErrorKind {
             ParseErrorKind::TooManyClauses => "query has too many clauses",
             ParseErrorKind::AnyOfGroupTooLarge => "any-of group has too many members",
             ParseErrorKind::TooManyTags => "query has too many metadata tags",
+            ParseErrorKind::CompiledColumnTooLarge => {
+                "compiled query exceeds the u16 exact-store column limit"
+            }
         }
     }
 }

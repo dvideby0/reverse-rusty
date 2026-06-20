@@ -97,6 +97,43 @@ impl Extracted {
         self.anyof.sort_unstable();
         self.anyof.dedup();
     }
+
+    /// Reject a compiled query whose any column would overflow the SoA exact store's
+    /// `u16` count encoding (`req_len`/`forb_len`/`q_group_count`/`group_len` in
+    /// [`ExactStore::push`](crate::exact::ExactStore::push)). The independent parser
+    /// ceilings (`max_query_clauses`, `max_anyof_group_size`) bound the *AST* but NOT
+    /// the *compiled* columns: e.g. two negated any-of clauses each near
+    /// `max_anyof_group_size` flatten into one forbidden column that can exceed
+    /// `u16::MAX` even though both knobs validate (the per-knob ceilings live in
+    /// [`EngineConfig::validate`](crate::config::EngineConfig::validate)). Equivalence
+    /// expansion can widen the columns too, so the check must run on the FINAL
+    /// `Extracted` (post-[`expand_equivalences`](Self::expand_equivalences)), at the
+    /// ingest front door — exactly where this is called. A `u16` truncation here would
+    /// silently drop required / any-of / forbidden features (a false negative, or — for
+    /// a dropped forbidden — a silent over-match), so reject LOUDLY instead.
+    ///
+    /// Conservative: each checked count is `>=` what the column actually stores (the
+    /// store splits a few required/forbidden features into the u64 common-mask, never
+    /// into the tail), so a guarded query can never overflow the cast. Returns the
+    /// total feature count of the offending column on overflow.
+    pub fn column_overflow(&self) -> Option<usize> {
+        let ceiling = u16::MAX as usize;
+        if self.required.len() > ceiling {
+            return Some(self.required.len());
+        }
+        if self.forbidden.len() > ceiling {
+            return Some(self.forbidden.len());
+        }
+        if self.anyof.len() > ceiling {
+            return Some(self.anyof.len());
+        }
+        for g in &self.anyof {
+            if g.len() > ceiling {
+                return Some(g.len());
+            }
+        }
+        None
+    }
 }
 
 /// Fully compiled query (used for explain/demo; the at-scale path streams into

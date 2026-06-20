@@ -149,6 +149,21 @@ impl ClusterEngine {
         Ok(())
     }
 
+    /// Reject a COMPILED query whose required / forbidden / any-of column would overflow
+    /// the shards' SoA exact-store `u16` count encoding, BEFORE the mutation reaches the
+    /// log — so the truncating cast in `ExactStore::push` is never reached on apply (a
+    /// truncated store is a silent false negative). Cluster analogue of the single-node
+    /// `Engine::check_column_limit`; runs on the read-only-compiled `Extracted` (after
+    /// equivalence expansion). See [`Extracted::column_overflow`](crate::compile::Extracted::column_overflow).
+    pub(in crate::cluster::coordinator) fn check_column_limit(
+        ex: &crate::compile::Extracted,
+    ) -> Result<(), ParseError> {
+        if ex.column_overflow().is_some() {
+            return Err(ParseError::new(ParseErrorKind::CompiledColumnTooLarge, 0));
+        }
+        Ok(())
+    }
+
     /// Latch [`tags_present`](ClusterEngine::tags_present) when a non-empty tagged write happens.
     /// Cheap + idempotent; no-op for an untagged write (the byte-identical path).
     pub(in crate::cluster::coordinator) fn note_tags(&self, tags: &[(String, String)]) {
@@ -207,6 +222,11 @@ impl ClusterEngine {
         // then forces accept=true, so replay reproduces the writer's decision regardless of config.
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        // Reject a column-overflowing compiled query before the log too: it would
+        // truncate the shards' u16 exact-store counts on apply (a false negative).
+        if let Err(e) = Self::check_column_limit(&ex) {
+            return Ok(AddOutcome::RejectedParse(e));
+        }
         if matches!(self.placement(&ex), Target::Reject) {
             return Ok(AddOutcome::RejectedClassD);
         }
@@ -267,6 +287,12 @@ impl ClusterEngine {
         // log holds only accepted mutations, and apply/replay forces accept=true.
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        // Reject a column-overflowing compiled query before the log (and before any
+        // tombstone): it would truncate the shards' u16 exact-store counts on apply.
+        // A failed replace never deletes, so the prior version stays live (0 replaced).
+        if let Err(e) = Self::check_column_limit(&ex) {
+            return Ok((0, AddOutcome::RejectedParse(e)));
+        }
         if matches!(self.placement(&ex), Target::Reject) {
             return Ok((0, AddOutcome::RejectedClassD));
         }

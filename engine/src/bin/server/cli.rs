@@ -96,6 +96,11 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = reverse_rusty::dsl::MAX_ANY_OF_SIZE)]
     pub(crate) max_anyof_group_size: usize,
 
+    /// Maximum number of per-query metadata tags (ADR-049). Capped at u16::MAX
+    /// (the structural ceiling of the SoA tag column); a larger query is rejected.
+    #[arg(long, default_value_t = u16::MAX as usize)]
+    pub(crate) max_tags: usize,
+
     /// Fsync the write-ahead log on every mutation before acknowledging it.
     /// When false (default), WAL appends reach the OS page cache and are
     /// fsync'd at the next flush checkpoint — an acknowledged write survives a

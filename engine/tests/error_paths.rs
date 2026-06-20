@@ -326,3 +326,106 @@ fn oversize_tag_set_rejected_loudly_not_truncated() {
     }
     assert_eq!(eng2.num_queries(), 0);
 }
+
+#[test]
+fn compiled_forbidden_column_over_u16_rejected_not_truncated() {
+    // The parser ceilings bound the AST per-clause, NOT the COMPILED columns: TWO
+    // negated any-of clauses `-(...) -(...)`, each within `max_anyof_group_size`
+    // (≤ u16::MAX, so validate() passes), flatten into ONE forbidden column. Their
+    // combined member count can exceed u16::MAX, overflowing the `forb_len` cast in
+    // ExactStore::push: a debug-mode panic, a release-mode truncation that silently
+    // DROPS forbidden features (a dropped MUST_NOT → a silent over-match). The
+    // front-door column guard must reject it loudly (CompiledColumnTooLarge) instead —
+    // and never store it. (This is exactly the scenario the per-knob validate ceilings
+    // do NOT cover; the structural guard is the backstop.)
+    let half = 35_000usize; // each group ≤ u16::MAX; 2 * 35000 = 70000 > u16::MAX
+    let cfg = EngineConfig {
+        max_query_clauses: 3,                 // a positive anchor + two negated groups
+        max_anyof_group_size: 40_000,         // ≤ u16::MAX, so validate() passes
+        max_query_length: 64 * 1_024 * 1_024, // the joined groups are large
+        ..EngineConfig::default()
+    };
+    assert!(
+        cfg.validate().is_empty(),
+        "per-knob ceilings still validate (the overflow is in the compiled column), got {:?}",
+        cfg.validate()
+    );
+    let mut eng = engine_with(cfg);
+
+    // Two negated groups with `half` distinct members each → one forbidden column of 2*half.
+    let mut group_a = String::with_capacity(half * 7);
+    let mut group_b = String::with_capacity(half * 7);
+    for i in 0..half {
+        if i > 0 {
+            group_a.push(',');
+            group_b.push(',');
+        }
+        group_a.push_str(&format!("fa{i}"));
+        group_b.push_str(&format!("fb{i}"));
+    }
+    let query = format!("anchorw -({group_a}) -({group_b})");
+
+    // Live insert: typed reject, nothing stored, no panic.
+    match eng.try_insert_live(&query, 1, 1).unwrap_err() {
+        WriteError::Parse(pe) => assert_eq!(pe.kind, ParseErrorKind::CompiledColumnTooLarge),
+        WriteError::Wal(e) => panic!("expected a parse error, got WAL error: {e}"),
+    }
+    assert_eq!(
+        eng.num_queries(),
+        0,
+        "the column-overflowing query must not be stored"
+    );
+
+    // Build path: reported as a parse reject, not stored.
+    let report = eng.build_from_queries(&[(2, query)]);
+    assert_eq!(report.ingested, 0);
+    assert_eq!(report.rejected_parse, 1);
+    assert_eq!(eng.num_queries(), 0);
+}
+
+#[test]
+fn compiled_column_within_u16_still_ingests_and_matches() {
+    // A large-but-within-u16 negated group must still ingest and forbid correctly —
+    // the guard rejects only true overflow, not large valid queries.
+    let n = 2_000usize; // well under u16::MAX
+    let cfg = EngineConfig {
+        max_anyof_group_size: n + 1,
+        max_query_length: 1_000_000,
+        ..EngineConfig::default()
+    };
+    assert!(cfg.validate().is_empty());
+    let mut eng = engine_with(cfg);
+
+    let mut members = String::new();
+    for i in 0..n {
+        if i > 0 {
+            members.push(',');
+        }
+        members.push_str(&format!("nope{i}"));
+    }
+    let query = format!("anchorw -({members})");
+    let report = eng.build_from_queries(&[(7, query)]);
+    assert_eq!(report.ingested, 1, "the within-u16 query must be stored");
+
+    let snap = eng.snapshot();
+    let mut scratch = MatchScratch::new();
+    // Title with the anchor but none of the forbidden terms: matches.
+    let mut out = Vec::new();
+    snap.match_title("anchorw clean", &mut scratch, &mut out, true);
+    assert!(
+        out.contains(&7),
+        "anchor without any forbidden term must match"
+    );
+    // Title carrying a high-index forbidden term: rejected (forbidden not truncated).
+    let mut out2 = Vec::new();
+    snap.match_title(
+        &format!("anchorw nope{}", n - 1),
+        &mut scratch,
+        &mut out2,
+        true,
+    );
+    assert!(
+        !out2.contains(&7),
+        "a high-index forbidden term must still suppress the match (no truncation)"
+    );
+}
