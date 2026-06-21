@@ -487,8 +487,16 @@ fn overlapping_aliases_match_nested_entity_titles_across_the_cluster() {
         let _ = reverse_rusty::compile::extract(&ast, &norm, &mut probe_dict, &mut lc);
     }
     probe_dict.finalize_mask();
+    let mut sc = reverse_rusty::normalize::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    norm.match_features_dual(title_nested, &probe_dict, &mut lc, &mut neg, &mut pos);
+    norm.match_features_dual(
+        title_nested,
+        &probe_dict,
+        &mut lc,
+        &mut sc,
+        &mut neg,
+        &mut pos,
+    );
     assert!(
         pos.iter().any(|f| !neg.contains(f)),
         "the nested title must carry a P(T)-only feature (the inner alias entity) — \

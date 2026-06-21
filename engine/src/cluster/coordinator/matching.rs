@@ -28,14 +28,15 @@ impl ClusterEngine {
     /// path, byte-identical to the pre-ADR-076 routing.
     fn route(&self, title: &str) -> (Vec<usize>, usize) {
         let mut lc = String::new();
+        let mut sc = crate::normalize::NormScratch::new();
         let mut feats: Vec<FeatureId> = Vec::new();
         if self.norm.has_multiword_aliases() {
             let mut neg: Vec<FeatureId> = Vec::new();
             self.norm
-                .match_features_dual(title, &self.dict, &mut lc, &mut neg, &mut feats);
+                .match_features_dual(title, &self.dict, &mut lc, &mut sc, &mut neg, &mut feats);
         } else {
             self.norm
-                .match_features(title, &self.dict, &mut lc, &mut feats);
+                .match_features(title, &self.dict, &mut lc, &mut sc, &mut feats);
         }
         // Selective targets: the shard owning each anchor-eligible (non-hot) feature.
         let mut targets: Vec<usize> = Vec::with_capacity(feats.len() + 1);

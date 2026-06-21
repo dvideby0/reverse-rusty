@@ -24,6 +24,21 @@ fn learn_ignores_below_threshold() {
 }
 
 #[test]
+fn equivalence_only_vocab_is_not_empty() {
+    // An expansion-mode vocab carrying only equivalence groups (no synonyms/
+    // phrases/graders/grade-words) must NOT report empty: those groups are
+    // recall-bearing and a "skip if empty" guard would otherwise drop them.
+    let mut vocab = Vocab::new();
+    assert!(vocab.is_empty(), "a fresh vocab starts empty");
+    vocab.add_equivalence(&["rc", "rookie"]);
+    assert!(
+        !vocab.is_empty(),
+        "a vocab with only an equivalence group must not be empty"
+    );
+    assert_eq!(vocab.len(), 1, "the equivalence group must be counted");
+}
+
+#[test]
 fn learn_ignores_negated_groups() {
     let queries: Vec<(u64, String)> = (0..20)
         .map(|i| (i, format!("-(badterm,anotherbad) good{i:03}")))

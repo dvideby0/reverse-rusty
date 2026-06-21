@@ -4,10 +4,21 @@
 use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::Engine;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) fn test_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("reverse_rusty_test_{name}"));
-    // Clean up from previous runs
+    // Per-invocation unique suffix: the persistence suite runs alongside the other
+    // test binaries (cargo schedules them concurrently), and `backup_to` fails loud
+    // on a pre-existing dest. A fixed path that relied on a best-effort `remove_dir_all`
+    // succeeding raced under that load (stale subdir → `DestExists`), so derive a
+    // collision-free directory from pid + a process-local counter instead.
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "reverse_rusty_test_{name}_{}_{unique}",
+        std::process::id()
+    ));
+    // Clean up any residue from a previous run that happened to collide.
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

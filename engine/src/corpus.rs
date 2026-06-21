@@ -63,7 +63,6 @@ pub fn learn_phrases(corpus: &[Vec<String>], min_count: usize, tau: f64) -> Vec<
     let mut uni: HashMap<&str, usize> = HashMap::new();
     let mut bi: HashMap<(&str, &str), usize> = HashMap::new();
     let mut total_uni: u64 = 0;
-    let mut total_bi: u64 = 0;
 
     for q in corpus {
         for t in q {
@@ -72,7 +71,6 @@ pub fn learn_phrases(corpus: &[Vec<String>], min_count: usize, tau: f64) -> Vec<
         }
         for w in q.windows(2) {
             *bi.entry((w[0].as_str(), w[1].as_str())).or_insert(0) += 1;
-            total_bi += 1;
         }
     }
 
@@ -88,14 +86,20 @@ pub fn learn_phrases(corpus: &[Vec<String>], min_count: usize, tau: f64) -> Vec<
         }
     }
 
+    // Normalize all three probabilities over the SAME base — the total token
+    // count `N` (the unigram/word2vec-phrase form). Mixing bases (joint over the
+    // bigram-window total, marginals over the token total) is not a true PMI and
+    // pushes NPMI outside its defining range [-1, 1]. With one consistent space,
+    // `npmi = pmi / -ln(p_ab)` is provably bounded in [-1, 1]: a never-apart
+    // (maximally bound) pair scores exactly +1 (p_ab == p_a == p_b ⇒
+    // pmi == -ln(p_ab)), independence scores 0, and never-together scores -1.
     let tu = total_uni as f64;
-    let tb = total_bi as f64;
     let mut phrases = Vec::new();
     for (&(a, b), &c) in &bi {
         if c < min_count {
             continue;
         }
-        let p_ab = c as f64 / tb;
+        let p_ab = c as f64 / tu;
         let p_a = *uni.get(a).unwrap_or(&1) as f64 / tu;
         let p_b = *uni.get(b).unwrap_or(&1) as f64 / tu;
         let pmi = (p_ab / (p_a * p_b)).ln();
@@ -208,6 +212,36 @@ mod tests {
         assert_eq!(tokenize("Upper Deck"), vec!["upper", "deck"]);
         assert_eq!(tokenize("-(a,b)"), vec!["a", "b"]);
         assert_eq!(tokenize("psa 10 -reprint"), vec!["psa", "10", "reprint"]);
+    }
+
+    #[test]
+    fn npmi_stays_in_canonical_range() {
+        // All three probabilities share one base (total tokens), so NPMI must
+        // land in its defining range [-1, 1]. A pair that only ever appears
+        // adjacent and never apart is maximally bound and must score ≈ +1.
+        let corpus: Vec<Vec<String>> = planted_pair("upper", "deck", 40)
+            .iter()
+            .map(|(_, q)| tokenize(q))
+            .collect();
+        let phrases = learn_phrases(&corpus, 5, -1.0); // tau = -1 keeps every pair
+        assert!(!phrases.is_empty(), "the planted pair must surface");
+        for p in &phrases {
+            assert!(
+                (-1.0 - 1e-9..=1.0 + 1e-9).contains(&p.npmi),
+                "npmi {} for {} escaped [-1, 1]",
+                p.npmi,
+                p.token
+            );
+        }
+        let bound = phrases
+            .iter()
+            .find(|p| p.token == "upper_deck")
+            .expect("the maximally-bound pair must be present");
+        assert!(
+            (bound.npmi - 1.0).abs() < 1e-9,
+            "a never-apart pair must score ≈ 1.0, got {}",
+            bound.npmi
+        );
     }
 
     #[test]
