@@ -134,13 +134,14 @@ fn normalizer_and_parser_survive_unicode_soup_with_invariants_intact() {
     }
 
     let mut lc = String::new();
+    let mut sc = reverse_rusty::normalize::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
     let (mut neg2, mut pos2) = (Vec::new(), Vec::new());
     let mut single = Vec::new();
 
     for input in &inputs {
         // Alias-active normalizer: the real dual-view path.
-        alias_norm.match_features_dual(input, &dict, &mut lc, &mut neg, &mut pos);
+        alias_norm.match_features_dual(input, &dict, &mut lc, &mut sc, &mut neg, &mut pos);
         assert_sorted_dedup(&neg, "N(T)", input);
         assert_sorted_dedup(&pos, "P(T)", input);
         assert!(
@@ -149,19 +150,19 @@ fn normalizer_and_parser_survive_unicode_soup_with_invariants_intact() {
         );
 
         // Documented equality: N(T) == the single-view match_features output.
-        alias_norm.match_features(input, &dict, &mut lc, &mut single);
+        alias_norm.match_features(input, &dict, &mut lc, &mut sc, &mut single);
         assert_eq!(
             single, neg,
             "match_features != N(T) of match_features_dual for input {input:?}"
         );
 
         // Determinism: same input, same views.
-        alias_norm.match_features_dual(input, &dict, &mut lc, &mut neg2, &mut pos2);
+        alias_norm.match_features_dual(input, &dict, &mut lc, &mut sc, &mut neg2, &mut pos2);
         assert_eq!(neg, neg2, "non-deterministic N(T) for {input:?}");
         assert_eq!(pos, pos2, "non-deterministic P(T) for {input:?}");
 
         // Plain normalizer: single view ⇒ the two outputs are identical by contract.
-        plain_norm.match_features_dual(input, &dict, &mut lc, &mut neg, &mut pos);
+        plain_norm.match_features_dual(input, &dict, &mut lc, &mut sc, &mut neg, &mut pos);
         assert_eq!(
             neg, pos,
             "no-alias normalizer must produce identical views for {input:?}"

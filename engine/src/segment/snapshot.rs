@@ -16,6 +16,7 @@ impl MatchScratch {
             lc: String::with_capacity(256),
             feats: Vec::with_capacity(64),
             feats_pos: Vec::with_capacity(64),
+            norm: crate::normalize::NormScratch::new(),
             seen: Vec::new(),
             epoch: 0,
         }
@@ -114,6 +115,7 @@ impl MatchView<'_> {
                 title,
                 self.dict,
                 &mut s.lc,
+                &mut s.norm,
                 &mut s.feats,
                 &mut s.feats_pos,
             );
@@ -121,7 +123,7 @@ impl MatchView<'_> {
             feats_pos = std::mem::take(&mut s.feats_pos);
         } else {
             self.norm
-                .match_features(title, self.dict, &mut s.lc, &mut s.feats);
+                .match_features(title, self.dict, &mut s.lc, &mut s.norm, &mut s.feats);
             feats = std::mem::take(&mut s.feats);
             feats_pos = Vec::new();
         }

@@ -62,7 +62,9 @@ impl Brute {
     }
 
     fn matches(&self, title: &str, lc: &mut String, feats: &mut Vec<u32>) -> HashSet<u64> {
-        self.norm.match_features(title, &self.dict, lc, feats);
+        let mut sc = reverse_rusty::normalize::NormScratch::new();
+        self.norm
+            .match_features(title, &self.dict, lc, &mut sc, feats);
         let present = |f: u32| feats.binary_search(&f).is_ok();
         let mut out = HashSet::new();
         for (logical, ex) in &self.queries {
