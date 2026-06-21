@@ -38,6 +38,29 @@ impl Rng {
         let x = u.powf(skew); // skew>1 pushes toward 0
         ((x * n as f64) as usize).min(n - 1)
     }
+    /// Pick a random index in `0..slice.len()`, or `None` for an empty slice —
+    /// `below` would divide by zero on a 0-length pool. The non-empty path
+    /// consumes the RNG exactly as a bare `below(slice.len())`, so default
+    /// (non-degenerate) generation stays byte-identical.
+    #[inline]
+    fn pick<'a, T>(&mut self, slice: &'a [T]) -> Option<&'a T> {
+        if slice.is_empty() {
+            None
+        } else {
+            Some(&slice[self.below(slice.len())])
+        }
+    }
+    /// Skew-pick from a slice, or `None` for an empty slice — `skewed` underflows
+    /// (`n - 1` on `n == 0`) on an empty pool. Non-empty path is byte-identical
+    /// to `skewed(slice.len(), skew)`.
+    #[inline]
+    fn pick_skewed<'a, T>(&mut self, slice: &'a [T], skew: f64) -> Option<&'a T> {
+        if slice.is_empty() {
+            None
+        } else {
+            Some(&slice[self.skewed(slice.len(), skew)])
+        }
+    }
 }
 
 pub const PLAYERS: &[&str] = &[
@@ -151,7 +174,12 @@ fn gen_queries(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<(u64, Strin
         if rng.frac() < cfg.broad_query_frac {
             // broad query: just a (hot) player, or a grade, or a card term
             let q = match rng.below(3) {
-                0 => pools.players[rng.skewed(pools.players.len(), cfg.hot_skew)].clone(),
+                // Empty player pool -> fall back to a grade so we never index an
+                // empty vec (degenerate config only; default pool is non-empty).
+                0 => rng.pick_skewed(&pools.players, cfg.hot_skew).map_or_else(
+                    || format!("{} {}", GRADERS[0], GRADES[GRADES.len() - 1]),
+                    Clone::clone,
+                ),
                 1 => format!("{} {}", GRADERS[0], GRADES[GRADES.len() - 1]), // "psa 10"
                 _ => "rookie".to_string(),
             };
@@ -159,17 +187,26 @@ fn gen_queries(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<(u64, Strin
             id += 1;
             continue;
         }
-        // a near-duplicate family sharing player+year+brand+set
-        let player = &pools.players[rng.skewed(pools.players.len(), cfg.hot_skew)];
+        // a near-duplicate family sharing player+year+brand+set. `pools.players`
+        // always carries the built-in PLAYERS; `pools.sets` is empty iff
+        // `num_sets == 0`, so skip the set token rather than index an empty pool.
+        let Some(player) = rng.pick_skewed(&pools.players, cfg.hot_skew) else {
+            // No players to anchor a family on (degenerate config): skip.
+            id += 1;
+            continue;
+        };
         let year = 1986 + rng.below(39); // 1986..2024
         let brand = BRANDS[rng.below(BRANDS.len())];
-        let set = &pools.sets[rng.below(pools.sets.len())];
+        let set = rng.pick(&pools.sets).map(String::as_str);
         let fam = cfg.family_size.max(1);
         for _ in 0..fam {
             if out.len() >= cfg.num_queries {
                 break;
             }
-            let mut q = format!("{year} {brand} {set} {player}");
+            let mut q = match set {
+                Some(set) => format!("{year} {brand} {set} {player}"),
+                None => format!("{year} {brand} {player}"),
+            };
             // card term
             if rng.frac() < 0.7 {
                 q.push(' ');
@@ -432,8 +469,12 @@ pub fn messify_dataset(rng: &mut Rng, data: &mut Dataset, title_frac: f64, query
 fn gen_titles(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<String> {
     let mut out = Vec::with_capacity(cfg.num_titles);
     for _ in 0..cfg.num_titles {
-        let pi = rng.skewed(pools.players.len(), cfg.hot_skew);
-        let player = &pools.players[pi];
+        // `pools.players` always carries the built-in PLAYERS; an empty pool here
+        // would mean PLAYERS itself is empty (it never is), but guard anyway so a
+        // degenerate pool skips the title rather than indexing an empty vec.
+        let Some(player) = rng.pick_skewed(&pools.players, cfg.hot_skew) else {
+            continue;
+        };
         let year = 1986 + rng.below(39);
         let bi = rng.below(BRANDS.len());
         // alternate brand form sometimes (UD vs Upper Deck)
@@ -442,9 +483,13 @@ fn gen_titles(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<String> {
         } else {
             BRANDS[bi]
         };
-        let set = &pools.sets[rng.below(pools.sets.len())];
+        // `pools.sets` is empty iff `num_sets == 0`: drop the set token instead.
+        let set = rng.pick(&pools.sets).map(String::as_str);
 
-        let mut t = format!("{year} {brand} {set} {player}");
+        let mut t = match set {
+            Some(set) => format!("{year} {brand} {set} {player}"),
+            None => format!("{year} {brand} {player}"),
+        };
         // leading/trailing noise
         if rng.frac() < 0.5 {
             t = format!("{} {}", NOISE[rng.below(NOISE.len())], t);
@@ -475,4 +520,49 @@ fn gen_titles(rng: &mut Rng, cfg: &GenConfig, pools: &Pools) -> Vec<String> {
         out.push(t);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Degenerate pools (`num_sets == 0`, `num_players == 0`) must not panic:
+    /// `below(0)` divides by zero and `skewed(0, _)` underflows `n - 1`. The
+    /// guards skip the missing token instead. (The default `num_players` path
+    /// still has the built-in PLAYERS, so titles/queries are still produced.)
+    #[test]
+    fn empty_pools_do_not_panic() {
+        let cfg = GenConfig {
+            num_queries: 64,
+            num_titles: 64,
+            num_sets: 0,
+            num_players: 0,
+            ..GenConfig::default()
+        };
+        let data = generate(&cfg);
+        // PLAYERS is non-empty, so generation still yields content with no sets.
+        assert!(
+            !data.queries.is_empty(),
+            "queries still produced without sets"
+        );
+        assert!(
+            !data.titles.is_empty(),
+            "titles still produced without sets"
+        );
+    }
+
+    /// Only the sets pool is empty: the common degenerate case the guards target.
+    #[test]
+    fn empty_set_pool_does_not_panic() {
+        let cfg = GenConfig {
+            num_queries: 64,
+            num_titles: 64,
+            num_sets: 0,
+            num_players: 50,
+            ..GenConfig::default()
+        };
+        let data = generate(&cfg);
+        assert_eq!(data.queries.len(), 64);
+        assert_eq!(data.titles.len(), 64);
+    }
 }
