@@ -9,6 +9,44 @@ use crate::segment::UpsertOutcome;
 use crate::tagdict::TagId;
 
 impl Engine {
+    /// Reject a query whose tag set exceeds `config.max_tags` (ADR-049) BEFORE any
+    /// durable write, so an over-large set never reaches the SoA tag column (whose
+    /// per-query count is a `u16` — truncation there would silently drop a real tag
+    /// and break filtered percolation's match guarantee). Conservative: checks the
+    /// raw `(key,value)` count, which is `>=` the deduped count the column stores, so
+    /// it never lets a truncating set through. Empty / within-limit ⇒ `Ok`.
+    ///
+    /// Enforced on the live/build ingest front doors only; WAL replay does NOT call
+    /// this (an already-acknowledged write must never be dropped on recovery — the
+    /// same policy the clause/any-of limits follow, see [`replay_insert`]).
+    fn check_tag_limit(&self, tags: &[(String, String)]) -> Result<(), crate::error::ParseError> {
+        if tags.len() > self.config.max_tags {
+            return Err(crate::error::ParseError::new(
+                crate::error::ParseErrorKind::TooManyTags,
+                0,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Reject a COMPILED query whose required / forbidden / any-of column would
+    /// overflow the SoA exact store's `u16` count encoding, BEFORE any durable
+    /// write — so the truncating `as u16` cast in [`ExactStore::push`] is never
+    /// reached. The parser ceilings (`max_query_clauses`, `max_anyof_group_size`)
+    /// bound the AST but NOT the compiled columns (e.g. two negated any-of clauses
+    /// flatten into one forbidden column that can exceed `u16::MAX`), so this is the
+    /// structural backstop. Runs on the FINAL `Extracted` (after equivalence
+    /// expansion, which can widen the columns). See [`Extracted::column_overflow`].
+    fn check_column_limit(ex: &Extracted) -> Result<(), crate::error::ParseError> {
+        if ex.column_overflow().is_some() {
+            return Err(crate::error::ParseError::new(
+                crate::error::ParseErrorKind::CompiledColumnTooLarge,
+                0,
+            ));
+        }
+        Ok(())
+    }
+
     /// Intern a query's `(key, value)` metadata tags into the engine's tag dictionary
     /// (copy-on-write, like the feature dict), returning a sorted + deduped `TagId` slice
     /// ready for the SoA tag column (ADR-049). Empty input ⇒ empty (no CoW clone).
@@ -135,11 +173,17 @@ impl Engine {
         }
 
         // Intern each accepted query's tags (separate pass to avoid borrowing `self`
-        // mutably while the dict is read in pass B).
-        let mut tag_ids: Vec<Vec<TagId>> = Vec::with_capacity(extracted.len());
+        // mutably while the dict is read in pass B). A query whose tag set exceeds
+        // `max_tags` is rejected here (marked `None`) rather than truncated into the
+        // u16 tag column — counted as a parse-level reject in pass B.
+        let mut tag_ids: Vec<Option<Vec<TagId>>> = Vec::with_capacity(extracted.len());
         for (idx, _, _, _) in &extracted {
             let qtags = tags.get(*idx).map_or(&[][..], Vec::as_slice);
-            tag_ids.push(self.intern_tags(qtags));
+            if self.check_tag_limit(qtags).is_err() {
+                tag_ids.push(None);
+            } else {
+                tag_ids.push(Some(self.intern_tags(qtags)));
+            }
         }
 
         // Pass B -> first base segment. Accepted source text is collected and
@@ -150,8 +194,21 @@ impl Engine {
         let mut accepted: Vec<(u64, String)> = Vec::new();
         let accept_class_d = self.config.accept_class_d;
         for (i, (_, logical, ex, text)) in extracted.iter().enumerate() {
+            let Some(qtag_ids) = &tag_ids[i] else {
+                // Over-large tag set: rejected, never stored truncated.
+                self.rejected_parse += 1;
+                report.rejected_parse += 1;
+                continue;
+            };
+            if Self::check_column_limit(ex).is_err() {
+                // Column would overflow the u16 exact-store counts: rejected, never
+                // stored truncated (silent false negative).
+                self.rejected_parse += 1;
+                report.rejected_parse += 1;
+                continue;
+            }
             if seg
-                .add_compiled(ex, &tag_ids[i], &self.dict, *logical, 1, accept_class_d)
+                .add_compiled(ex, qtag_ids, &self.dict, *logical, 1, accept_class_d)
                 .is_none()
             {
                 self.rejected_class_d += 1;
@@ -249,6 +306,10 @@ impl Engine {
         // complexity limits here, at the front door.
         let ast = crate::dsl::parse_with_limits(text, &self.config.parse_limits())
             .map_err(crate::error::WriteError::Parse)?;
+        // Reject an over-large tag set at the front door too, before the WAL: it
+        // would otherwise truncate the u16 tag column and silently drop a real tag.
+        self.check_tag_limit(tags)
+            .map_err(crate::error::WriteError::Parse)?;
         // Extract + class-gate BEFORE the WAL (ADR-068): the log records only
         // ACCEPTED mutations, so replay re-applies unconditionally — live ≡ replay
         // by construction even if the accept_class_d knob flips between runs.
@@ -260,6 +321,9 @@ impl Engine {
             let dict = Arc::make_mut(&mut self.dict);
             extract(&ast, &self.norm, dict, &mut lc)
         };
+        // Reject a compiled query whose columns would overflow the u16 exact-store
+        // counts BEFORE the WAL — a truncated store is a silent false negative.
+        Self::check_column_limit(&ex).map_err(crate::error::WriteError::Parse)?;
         let class = crate::compile::anchor_plan(&ex, &self.dict).class;
         if super::seg::rejects_class_d(class, &ex, self.config.accept_class_d) {
             self.rejected_class_d += 1;
@@ -338,6 +402,10 @@ impl Engine {
         // the WAL — and must never tombstone the prior version.
         let ast = crate::dsl::parse_with_limits(text, &self.config.parse_limits())
             .map_err(crate::error::WriteError::Parse)?;
+        // Reject an over-large tag set before the WAL too, for the same reason as on
+        // insert — and so a failed replace never tombstones the prior version.
+        self.check_tag_limit(tags)
+            .map_err(crate::error::WriteError::Parse)?;
         // Extract + class-gate BEFORE the WAL (ADR-068): the log records only
         // ACCEPTED mutations, so replay re-applies unconditionally — live ≡
         // replay by construction even if the accept_class_d knob flips between
@@ -350,6 +418,9 @@ impl Engine {
             let dict = Arc::make_mut(&mut self.dict);
             extract(&ast, &self.norm, dict, &mut lc)
         };
+        // Reject a column-overflowing compiled query before the WAL too — and so a
+        // failed replace never tombstones the prior version (same reason as tags).
+        Self::check_column_limit(&ex).map_err(crate::error::WriteError::Parse)?;
         let class = crate::compile::anchor_plan(&ex, &self.dict).class;
         if super::seg::rejects_class_d(class, &ex, self.config.accept_class_d) {
             self.rejected_class_d += 1;
@@ -695,19 +766,45 @@ impl Engine {
             }
         }
         // Intern each accepted query's tags (separate pass so `self` is not borrowed
-        // mutably while the dict is read in pass B).
-        let mut tag_ids: Vec<Vec<TagId>> = Vec::with_capacity(extracted.len());
+        // mutably while the dict is read in pass B). A query whose tag set exceeds
+        // `max_tags` is rejected here (`None`) rather than truncated into the u16 tag
+        // column — reported as a parse-level reject in pass B.
+        let mut tag_ids: Vec<Option<Vec<TagId>>> = Vec::with_capacity(extracted.len());
         for (idx, _, _, _) in &extracted {
             let qtags = tags.get(*idx).map_or(&[][..], Vec::as_slice);
-            tag_ids.push(self.intern_tags(qtags));
+            match self.check_tag_limit(qtags) {
+                Ok(()) => tag_ids.push(Some(self.intern_tags(qtags))),
+                Err(_) => tag_ids.push(None),
+            }
         }
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
         let accept_class_d = self.config.accept_class_d;
         for (i, (idx, logical, ex, text)) in extracted.iter().enumerate() {
+            let Some(qtag_ids) = &tag_ids[i] else {
+                // Over-large tag set: rejected, never stored truncated.
+                self.rejected_parse += 1;
+                report.rejected_parse += 1;
+                item_status[*idx] = IngestItemStatus::RejectedParse(crate::error::ParseError::new(
+                    crate::error::ParseErrorKind::TooManyTags,
+                    0,
+                ));
+                continue;
+            };
+            if Self::check_column_limit(ex).is_err() {
+                // Column would overflow the u16 exact-store counts: rejected, never
+                // stored truncated (silent false negative).
+                self.rejected_parse += 1;
+                report.rejected_parse += 1;
+                item_status[*idx] = IngestItemStatus::RejectedParse(crate::error::ParseError::new(
+                    crate::error::ParseErrorKind::CompiledColumnTooLarge,
+                    0,
+                ));
+                continue;
+            }
             if seg
-                .add_compiled(ex, &tag_ids[i], &self.dict, *logical, 1, accept_class_d)
+                .add_compiled(ex, qtag_ids, &self.dict, *logical, 1, accept_class_d)
                 .is_none()
             {
                 self.rejected_class_d += 1;
@@ -744,12 +841,27 @@ impl Engine {
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
         for item in items {
-            // Resolve the query's tags read-only against the shared frozen tag space (ADR-055) —
-            // never the CoW `intern_tags`, which would fork the shared dict per shard. Empty ⇒
-            // empty slice ⇒ byte-identical to the pre-tag `&[]` path. A vocabulary rebuild also
-            // carries pre-resolved ids (`tag_ids`, ADR-074) — union them in, re-establishing the
-            // sorted/deduped column invariant `resolve_tags_readonly` provides.
-            let mut tag_ids = self.resolve_tags_readonly(&item.tags);
+            // Resolve the query's FRESH raw tags read-only against the shared frozen tag
+            // space (ADR-055) — never the CoW `intern_tags`, which would fork the shared
+            // dict per shard. Empty ⇒ empty slice ⇒ byte-identical to the pre-tag `&[]`
+            // path.
+            let resolved = self.resolve_tags_readonly(&item.tags);
+            // Cap ONLY the fresh raw-tag ingestion (`item.tags`), NOT the carry-through.
+            // `item.tag_ids` is ALREADY-STORED tags travelling through a resize / vocab
+            // rebuild (ADR-074): those were accepted under the prior limit, and the rebuild
+            // ignores this report and swaps in the new shards — so skipping them here would
+            // PERMANENTLY drop acknowledged data (a false negative). Fresh raw tags, by
+            // contrast, must be rejected rather than truncated into the u16 column. (The
+            // cluster front door already caps fresh tags via `check_tag_limit`; this is the
+            // defense for the build/bulk path that reaches here with raw tags directly.)
+            if resolved.len() > self.config.max_tags {
+                self.rejected_parse += 1;
+                report.rejected_parse += 1;
+                continue;
+            }
+            // Union the stored carry-through ids in, re-establishing the sorted/deduped
+            // column invariant `resolve_tags_readonly` provides.
+            let mut tag_ids = resolved;
             if !item.tag_ids.is_empty() {
                 tag_ids.extend_from_slice(&item.tag_ids);
                 tag_ids.sort_unstable();

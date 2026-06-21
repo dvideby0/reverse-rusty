@@ -315,6 +315,7 @@ fn apply_settings_patch(
             "max_anyof_group_size" => {
                 set_usize(&mut cfg.max_anyof_group_size, key, val, &mut errors);
             }
+            "max_tags" => set_usize(&mut cfg.max_tags, key, val, &mut errors),
             "holes_ratio_threshold" => {
                 set_f64(&mut cfg.holes_ratio_threshold, key, val, &mut errors);
             }

@@ -154,7 +154,26 @@ pub struct EngineConfig {
     /// Exceeding it is rejected with `ParseErrorKind::AnyOfGroupTooLarge`.
     ///
     /// Default: [`dsl::MAX_ANY_OF_SIZE`](crate::dsl::MAX_ANY_OF_SIZE).
+    ///
+    /// Hard ceiling: the SoA exact store encodes per-query counts (required tail,
+    /// forbidden tail, any-of group size, group count, tag count) as `u16`, so a
+    /// value above [`u16::MAX`] would silently truncate the stored set and drop
+    /// real matches (a false negative). [`validate`](Self::validate) rejects any
+    /// limit above `u16::MAX` for exactly this reason.
     pub max_anyof_group_size: usize,
+
+    /// Maximum number of per-query metadata `(key, value)` tags (ADR-049) accepted
+    /// on a single query. A query with more (after dedup) is rejected with
+    /// `ParseErrorKind::TooManyTags` at the ingest front door, before any durable
+    /// write — so an over-large tag set never reaches the SoA tag column where the
+    /// count is encoded as `u16` (truncation there would silently drop a real
+    /// tag and break filtered percolation's match guarantee). Enforced on the
+    /// live/build ingest paths only; WAL replay deliberately ignores it (an
+    /// already-acknowledged write must never be dropped on recovery), exactly as
+    /// the clause/any-of limits are.
+    ///
+    /// Default: `u16::MAX` (65535) — the structural ceiling of the tag column.
+    pub max_tags: usize,
 
     // ---- merge scoring ----
     /// Fixed-cost bias in the ClickHouse-inspired merge score formula:
@@ -250,6 +269,7 @@ impl Default for EngineConfig {
             max_query_length: crate::dsl::MAX_QUERY_LENGTH,
             max_query_clauses: crate::dsl::MAX_CLAUSES,
             max_anyof_group_size: crate::dsl::MAX_ANY_OF_SIZE,
+            max_tags: u16::MAX as usize,
             compaction_fixed_cost: 1000.0,
             broad_batch_size: 256,
             broad_columnar: true,
@@ -300,6 +320,29 @@ impl EngineConfig {
         }
         if self.max_anyof_group_size == 0 {
             problems.push("max_anyof_group_size must be >= 1".into());
+        }
+        // Structural ceiling: the SoA exact store encodes per-query counts as `u16`
+        // (required/forbidden tails, any-of group size, group count, tag count). A
+        // limit above u16::MAX would let an accepted query overflow those casts and
+        // silently truncate the stored set — a false negative. Reject at config time.
+        let u16_max = u16::MAX as usize;
+        if self.max_query_clauses > u16_max {
+            problems.push(format!(
+                "max_query_clauses must be <= {u16_max} (the u16 exact-store ceiling)"
+            ));
+        }
+        if self.max_anyof_group_size > u16_max {
+            problems.push(format!(
+                "max_anyof_group_size must be <= {u16_max} (the u16 exact-store ceiling)"
+            ));
+        }
+        if self.max_tags == 0 {
+            problems.push("max_tags must be >= 1".into());
+        }
+        if self.max_tags > u16_max {
+            problems.push(format!(
+                "max_tags must be <= {u16_max} (the u16 exact-store tag-column ceiling)"
+            ));
         }
         if self.compaction_fixed_cost < 0.0 {
             problems.push("compaction_fixed_cost must be >= 0".into());

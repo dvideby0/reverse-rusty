@@ -502,3 +502,68 @@ fn upsert_is_fail_closed_when_log_append_fails() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A blue/green rebuild (resize / set_vocab) re-ingests ALREADY-STORED queries through
+/// `ingest_extracted`, carrying their tags as pre-resolved `TagId`s. Tightening `max_tags`
+/// after those queries were accepted must NOT drop them on the rebuild — the rebuild swaps
+/// in the new shards and ignores the ingest report, so a skipped query is permanently lost
+/// (a false negative on acknowledged data). The `max_tags` cap applies only to FRESH raw-tag
+/// ingestion, never to stored carry-through (codex review).
+#[test]
+fn rebuild_preserves_stored_tags_under_tightened_max_tags() {
+    let mut per_shard = EngineConfig {
+        max_tags: 5,
+        ..EngineConfig::default()
+    };
+    per_shard.data_dir = None;
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        per_shard,
+        ..Default::default()
+    };
+    // Seed so the dict knows the tokens, then add a query carrying 4 tags (≤ 5).
+    let seed = vec![(1u64, "1994 topps baseball".to_string())];
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster builds");
+    let four_tags: Vec<(String, String)> = (0..4).map(|i| ("k".into(), format!("v{i}"))).collect();
+    cluster
+        .add_query_with_tags(2, "1995 fleer baseball", &four_tags)
+        .expect("tagged add");
+    // The tagged query is matchable and filterable by one of its tags before the rebuild.
+    let filter = vec![("k".to_string(), vec!["v3".to_string()])];
+    assert!(cluster
+        .percolate_filtered("1995 fleer baseball", &filter)
+        .expect("filtered")
+        .contains(&2));
+
+    // Tighten the per-shard tag ceiling BELOW the stored query's 4 tags, then rebuild
+    // (a resize triggers `rebuild_from_live` → `ingest_extracted` with the carry-through).
+    cluster.per_shard.max_tags = 2;
+    let rebuilt = cluster.resize(5).expect("resize rebuilds");
+    assert_eq!(rebuilt, 2, "both stored queries are re-ingested");
+
+    // The 4-tag query SURVIVES the rebuild: still matchable AND still filterable by its tag.
+    assert!(
+        cluster
+            .percolate("1995 fleer baseball")
+            .expect("p")
+            .contains(&2),
+        "stored over-limit-tagged query must survive the rebuild (no silent drop)"
+    );
+    assert!(
+        cluster
+            .percolate_filtered("1995 fleer baseball", &filter)
+            .expect("filtered")
+            .contains(&2),
+        "the stored tags must survive carry-through — filter still matches"
+    );
+
+    // A FRESH add still respects the now-tightened cap: 3 raw tags > max_tags(2) is rejected.
+    let three_tags: Vec<(String, String)> = (0..3).map(|i| ("k".into(), format!("w{i}"))).collect();
+    let outcome = cluster
+        .add_query_with_tags(9, "1996 skybox baseball", &three_tags)
+        .expect("add returns");
+    assert!(
+        matches!(outcome, AddOutcome::RejectedParse(ref e) if e.kind == crate::error::ParseErrorKind::TooManyTags),
+        "a fresh over-limit raw-tag add must still be rejected, got {outcome:?}"
+    );
+}

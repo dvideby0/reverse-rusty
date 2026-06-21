@@ -4,6 +4,7 @@
 use crate::cluster::clog::ClusterMutation;
 use crate::cluster::shard::ShardError;
 use crate::compile::{extract_readonly, Extracted};
+use crate::error::{ParseError, ParseErrorKind};
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::segment::PlacedQuery;
 
@@ -132,6 +133,37 @@ impl ClusterEngine {
         self.tags_present.load(std::sync::atomic::Ordering::Relaxed) || !self.tag_dict.is_empty()
     }
 
+    /// Reject a tag set larger than the per-shard `max_tags` ceiling (ADR-049) at the
+    /// cluster front door, BEFORE the mutation reaches the log — so an over-large set
+    /// never truncates the shards' u16 tag column (which would silently drop a real tag
+    /// and mis-filter). Mirrors the single-node `Engine::check_tag_limit`; conservative
+    /// (raw `(key,value)` count, `>=` the post-dedup column count). Replay does not call
+    /// this (an acknowledged write must never be dropped on recovery).
+    pub(in crate::cluster::coordinator) fn check_tag_limit(
+        &self,
+        tags: &[(String, String)],
+    ) -> Result<(), ParseError> {
+        if tags.len() > self.per_shard.max_tags {
+            return Err(ParseError::new(ParseErrorKind::TooManyTags, 0));
+        }
+        Ok(())
+    }
+
+    /// Reject a COMPILED query whose required / forbidden / any-of column would overflow
+    /// the shards' SoA exact-store `u16` count encoding, BEFORE the mutation reaches the
+    /// log — so the truncating cast in `ExactStore::push` is never reached on apply (a
+    /// truncated store is a silent false negative). Cluster analogue of the single-node
+    /// `Engine::check_column_limit`; runs on the read-only-compiled `Extracted` (after
+    /// equivalence expansion). See [`Extracted::column_overflow`](crate::compile::Extracted::column_overflow).
+    pub(in crate::cluster::coordinator) fn check_column_limit(
+        ex: &crate::compile::Extracted,
+    ) -> Result<(), ParseError> {
+        if ex.column_overflow().is_some() {
+            return Err(ParseError::new(ParseErrorKind::CompiledColumnTooLarge, 0));
+        }
+        Ok(())
+    }
+
     /// Latch [`tags_present`](ClusterEngine::tags_present) when a non-empty tagged write happens.
     /// Cheap + idempotent; no-op for an untagged write (the byte-identical path).
     pub(in crate::cluster::coordinator) fn note_tags(&self, tags: &[(String, String)]) {
@@ -176,6 +208,12 @@ impl ClusterEngine {
             Ok(a) => a,
             Err(e) => return Ok(AddOutcome::RejectedParse(e)),
         };
+        // Reject an over-large tag set BEFORE the log too: it would truncate the u16 tag
+        // column on apply and silently drop a real tag. Like a parse error, it carries no
+        // replayable mutation (cluster analogue of the single-node front-door gate).
+        if let Err(e) = self.check_tag_limit(tags) {
+            return Ok(AddOutcome::RejectedParse(e));
+        }
         // Classify BEFORE logging (against the CURRENT knob): a REJECTED write — class D with the
         // lane off, or an effectively-empty query — carries no replayable mutation and must NEVER
         // reach the log. Else, replaying it under a since-flipped knob would resurrect a query the
@@ -184,6 +222,11 @@ impl ClusterEngine {
         // then forces accept=true, so replay reproduces the writer's decision regardless of config.
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        // Reject a column-overflowing compiled query before the log too: it would
+        // truncate the shards' u16 exact-store counts on apply (a false negative).
+        if let Err(e) = Self::check_column_limit(&ex) {
+            return Ok(AddOutcome::RejectedParse(e));
+        }
         if matches!(self.placement(&ex), Target::Reject) {
             return Ok(AddOutcome::RejectedClassD);
         }
@@ -232,12 +275,24 @@ impl ClusterEngine {
             Ok(a) => a,
             Err(e) => return Ok((0, AddOutcome::RejectedParse(e))),
         };
+        // Reject an over-large tag set BEFORE the log (and before any tombstone): it would
+        // truncate the u16 tag column on apply. A failed replace never deletes, so this
+        // returns 0 replaced — the prior version stays live.
+        if let Err(e) = self.check_tag_limit(tags) {
+            return Ok((0, AddOutcome::RejectedParse(e)));
+        }
         // Classify BEFORE logging (current knob): a rejected new version carries no replayable
         // mutation AND must not delete the prior version, so it never reaches the log or the
         // tombstone pass. Same config-independent-replay discipline as add (codex review): the
         // log holds only accepted mutations, and apply/replay forces accept=true.
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        // Reject a column-overflowing compiled query before the log (and before any
+        // tombstone): it would truncate the shards' u16 exact-store counts on apply.
+        // A failed replace never deletes, so the prior version stays live (0 replaced).
+        if let Err(e) = Self::check_column_limit(&ex) {
+            return Ok((0, AddOutcome::RejectedParse(e)));
+        }
         if matches!(self.placement(&ex), Target::Reject) {
             return Ok((0, AddOutcome::RejectedClassD));
         }
