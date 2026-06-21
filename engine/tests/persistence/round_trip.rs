@@ -299,6 +299,91 @@ fn logical_index_v1_backcompat_reconstruct() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A `.seg` whose per-query exact column overruns its blob must fail loud on
+/// `MmapSegment::open` — NOT panic with an out-of-bounds slice on the hot path or in
+/// compaction's `to_memory_segment` (B1 / ADR-052 extended to intra-section
+/// consistency). `checked_section_end` proves each section's own length, but not that
+/// `req_off[i] + req_len[i]` lands inside `req_blob`; a writer bug, a torn write that
+/// re-passes CRC, or tampering could leave it overrunning. We build a real durable
+/// segment, then hand-corrupt `req_len[0]` to a huge value, recompute the trailing
+/// whole-file CRC so the file passes the CRC gate, and assert `open` returns `Err`.
+#[test]
+fn corrupt_req_column_fails_loud_on_open() {
+    use reverse_rusty::storage::{crc32, MmapSegment};
+
+    let dir = test_dir("corrupt_req_column");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    // A query with a required (non-anchor) tail feature so `req_blob` is populated
+    // and `req_off`/`req_len` point into it.
+    let mut eng = Engine::with_config(make_norm(), config);
+    eng.build_from_queries(&[(1u64, "michael jordan 1986 fleer".into())]);
+    drop(eng); // seal + flush the base segment to disk
+
+    // Find the written .seg.
+    let seg_dir = dir.join("segments");
+    let seg_path = std::fs::read_dir(&seg_dir)
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("seg"))
+        .expect("a base segment .seg file");
+
+    // Sanity: it opens cleanly before corruption.
+    MmapSegment::open(&seg_path).expect("pristine segment opens");
+
+    let mut bytes = std::fs::read(&seg_path).unwrap();
+    let rd_u32 = |b: &[u8], off: usize| -> usize {
+        u32::from_le_bytes(b[off..off + 4].try_into().unwrap()) as usize
+    };
+    let rd_u64 = |b: &[u8], off: usize| -> usize {
+        u64::from_le_bytes(b[off..off + 8].try_into().unwrap()) as usize
+    };
+    let align8 = |x: usize| (x + 7) & !7;
+
+    // Header: num_queries @ 8..12, exact_section_off @ 16..24.
+    let nq = rd_u32(&bytes, 8);
+    let exact_off = rd_u64(&bytes, 16);
+
+    // Walk the exact section to the start of the `req_len` (u16) data column. Layout
+    // (see write::write_exact_section): req_mask(u64), forb_mask(u64), req_off(u32),
+    // req_len(u16), ... . u64 arrays are [count:u32][pad:4][data]; u32/u16 arrays are
+    // [count:u32][data][pad_to_8].
+    let mut cursor = exact_off;
+    // req_mask (u64 array)
+    cursor += 8 + nq * 8;
+    // forb_mask (u64 array)
+    cursor += 8 + nq * 8;
+    // req_off (u32 array): [count:u32][data: nq*4][pad_to_8]
+    cursor = align8(cursor + 4 + nq * 4);
+    // req_len (u16 array): cursor now points at its [count:u32] header.
+    let req_len_count = rd_u32(&bytes, cursor);
+    assert_eq!(req_len_count, nq, "req_len column has one entry per query");
+    let req_len_data = cursor + 4;
+    // Overrun req_blob: set req_len[0] to u16::MAX so req_off[0] + req_len[0] far
+    // exceeds req_blob.len().
+    bytes[req_len_data..req_len_data + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+
+    // Recompute the trailing whole-file CRC so the file still passes the CRC gate;
+    // only the structural validation should now reject it.
+    let n = bytes.len();
+    let crc = crc32(&bytes[..n - 4]);
+    bytes[n - 4..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(&seg_path, &bytes).unwrap();
+
+    // The corrupt-but-CRC-valid segment must fail loud, not panic.
+    let err =
+        MmapSegment::open(&seg_path).expect_err("open must reject a column that overruns its blob");
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::InvalidData,
+        "corrupt segment must fail with InvalidData, got: {err}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A single-node DURABLE engine with an active MULTI-WORD alias (ADR-061) survives reopen with zero
 /// false negatives, INCLUDING a post-reopen live insert. The cluster durability suites can't cover
 /// this (the cluster refuses multi-word aliases), and it exercises the trickiest `adopt_vocab`
