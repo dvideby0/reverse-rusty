@@ -160,14 +160,20 @@ fn match_batch_chunk(
                 title.as_ref(),
                 view.dict,
                 &mut ms.lc,
+                &mut ms.norm,
                 &mut ms.feats,
                 &mut ms.feats_pos,
             );
             feats = std::mem::take(&mut ms.feats);
             feats_pos = std::mem::take(&mut ms.feats_pos);
         } else {
-            view.norm
-                .match_features(title.as_ref(), view.dict, &mut ms.lc, &mut ms.feats);
+            view.norm.match_features(
+                title.as_ref(),
+                view.dict,
+                &mut ms.lc,
+                &mut ms.norm,
+                &mut ms.feats,
+            );
             feats = std::mem::take(&mut ms.feats);
             feats_pos = Vec::new();
         }

@@ -164,6 +164,7 @@ async fn main() {
         max_query_length: cli.max_query_length,
         max_query_clauses: cli.max_query_clauses,
         max_anyof_group_size: cli.max_anyof_group_size,
+        max_tags: cli.max_tags,
         wal_sync_on_write: cli.wal_sync_on_write,
         retain_source: cli.retain_source,
         broad_batch_size: cli.broad_batch_size,

@@ -24,6 +24,21 @@ fn learn_ignores_below_threshold() {
 }
 
 #[test]
+fn equivalence_only_vocab_is_not_empty() {
+    // An expansion-mode vocab carrying only equivalence groups (no synonyms/
+    // phrases/graders/grade-words) must NOT report empty: those groups are
+    // recall-bearing and a "skip if empty" guard would otherwise drop them.
+    let mut vocab = Vocab::new();
+    assert!(vocab.is_empty(), "a fresh vocab starts empty");
+    vocab.add_equivalence(&["rc", "rookie"]);
+    assert!(
+        !vocab.is_empty(),
+        "a vocab with only an equivalence group must not be empty"
+    );
+    assert_eq!(vocab.len(), 1, "the equivalence group must be counted");
+}
+
+#[test]
 fn learn_ignores_negated_groups() {
     let queries: Vec<(u64, String)> = (0..20)
         .map(|i| (i, format!("-(badterm,anotherbad) good{i:03}")))
@@ -33,6 +48,50 @@ fn learn_ignores_negated_groups() {
         vocab.is_empty(),
         "negated groups should not produce synonyms"
     );
+}
+
+#[test]
+fn learn_canonical_selection_is_deterministic_under_collision() {
+    // `abk` co-occurs equally (5x each) with two eligible canonicals `abcd` and `abxy`.
+    // Within each group the longer member is canonical, so we get the competing pairs
+    // (abcd, abk)=5 and (abxy, abk)=5. The kept canonical must be the deterministic
+    // tie-break winner (count tied -> lexicographically smallest canonical = "abcd"),
+    // identical on every run regardless of HashMap iteration order. A non-deterministic
+    // pick would let two replicas / a pre-vs-post-crash rebuild canonicalize `abk` to
+    // different FeatureIds, breaking cluster consistency + the durability oracle.
+    let mut queries: Vec<(u64, String)> = Vec::new();
+    let mut id = 0u64;
+    for _ in 0..5 {
+        queries.push((id, "(abk,abcd) padonea".to_string()));
+        id += 1;
+        queries.push((id, "(abk,abxy) padtwob".to_string()));
+        id += 1;
+    }
+
+    let first = learn_from_queries(&queries, 2);
+    let chosen = first
+        .synonyms
+        .iter()
+        .find(|s| s.token == "abk")
+        .map(|s| s.canonical.clone());
+    assert_eq!(
+        chosen.as_deref(),
+        Some("term:abcd"),
+        "tie-break winner must be the lexicographically smallest canonical"
+    );
+
+    for _ in 0..40 {
+        let v = learn_from_queries(&queries, 2);
+        let again = v
+            .synonyms
+            .iter()
+            .find(|s| s.token == "abk")
+            .map(|s| s.canonical.clone());
+        assert_eq!(
+            again, chosen,
+            "canonical selection must be identical on every run (hash-order independent)"
+        );
+    }
 }
 
 #[test]

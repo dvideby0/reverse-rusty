@@ -3,9 +3,19 @@
 use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::{Engine, MatchScratch};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) fn test_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("reverse_rusty_hardening_{name}"));
+    // Per-invocation unique suffix (pid + process-local counter): cargo runs the test
+    // binaries concurrently, so a fixed path that relied on a best-effort
+    // `remove_dir_all` succeeding raced under load. Derive a collision-free directory
+    // instead (matches the persistence + cluster-durability harnesses).
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "reverse_rusty_hardening_{name}_{}_{unique}",
+        std::process::id()
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir

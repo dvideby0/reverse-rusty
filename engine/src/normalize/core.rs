@@ -7,7 +7,7 @@
 //! /generic tokenization), and the small free helpers `emit` relies on
 //! (`fold_diacritic`, number/year/grade parsing, generic emission).
 
-use super::{PhraseEntry, PhraseMode, PunctClass, PunctTable, Side};
+use super::{NormScratch, PhraseEntry, PhraseMode, PunctClass, PunctTable, Side};
 use crate::dict::{Dict, FeatureId, FeatureKind};
 use daachorse::DoubleArrayAhoCorasick;
 
@@ -109,7 +109,9 @@ impl Normalizer {
 
     /// Core: emit canonical feature names for `text`. Calls `emit(name, kind)`
     /// for each feature found. Shared by compile and match paths so the two
-    /// always agree. `lc` is a reusable scratch String.
+    /// always agree. `lc` is a reusable scratch String; `sc` holds the reusable
+    /// per-call working buffers (see [`NormScratch`]) — every one is cleared at
+    /// the start, so no state is carried between calls.
     ///
     /// Two-phase approach:
     ///   1) Run the daachorse automaton over the cleaned text to find all
@@ -122,6 +124,7 @@ impl Normalizer {
         &self,
         text: &str,
         lc: &mut String,
+        sc: &mut NormScratch,
         side: Side,
         force_additive: bool,
         emit: &mut F,
@@ -146,7 +149,8 @@ impl Normalizer {
         // We collect (byte_start, byte_end, pattern_index) for each match.
         // The automaton operates on the cleaned string, matching space-joined
         // token sequences. We need to ensure matches align on word boundaries.
-        let mut phrase_matches: Vec<(usize, usize, usize)> = Vec::new();
+        let phrase_matches = &mut sc.phrase_matches;
+        phrase_matches.clear();
         if let Some(ov) = &self.alias_overlap {
             // ADR-061 (codex R12): with multi-word aliases active, boundary validity must
             // participate in match SELECTION — see `AliasOverlap::select_phrases`. The legacy
@@ -154,7 +158,7 @@ impl Normalizer {
             // valid overlapping phrase (a query-side FN). Gated on `alias_overlap`, so the
             // no-alias configuration keeps the legacy pass byte-identical (its pathological
             // collapse-phrase cases are baked into persisted canonical features — codex R8).
-            ov.select_phrases(lc, &mut phrase_matches);
+            ov.select_phrases(lc, phrase_matches);
         } else {
             for m in self.automaton.leftmost_find_iter(&**lc) {
                 let start = m.start();
@@ -175,31 +179,42 @@ impl Normalizer {
         // with binary search works.
 
         // Phase 2: tokenize and iterate, skipping phrase-consumed spans.
-        let tokens: Vec<&str> = lc.split_whitespace().collect();
-        // Compute byte offsets for each token in `lc`.
-        let token_offsets: Vec<usize> = {
-            let mut offsets = Vec::with_capacity(tokens.len());
-            let mut pos = 0usize;
+        // Token byte-ranges into `lc` (reused buffer): `(start, end)`. This replaces the
+        // old `Vec<&str>` (a borrow a reusable buffer cannot hold) AND the separate
+        // `token_offsets` — `tokens[i].0` is the offset, `&lc[s..e]` re-slices on demand.
+        let tokens = &mut sc.tokens;
+        tokens.clear();
+        {
             let bytes = lc.as_bytes();
-            for &tok in &tokens {
-                // skip whitespace
+            let mut pos = 0usize;
+            while pos < bytes.len() {
                 while pos < bytes.len() && bytes[pos] == b' ' {
                     pos += 1;
                 }
-                offsets.push(pos);
-                pos += tok.len();
+                if pos >= bytes.len() {
+                    break;
+                }
+                let start = pos;
+                while pos < bytes.len() && bytes[pos] != b' ' {
+                    pos += 1;
+                }
+                tokens.push((start, pos));
             }
-            offsets
-        };
+        }
 
         // For each token, determine if it's inside a phrase match.
         // If so, emit the phrase feature at the FIRST token of the match (skip rest).
-        let mut phrase_emitted: Vec<bool> = vec![false; phrase_matches.len()];
-        let mut token_consumed: Vec<bool> = vec![false; tokens.len()];
+        let phrase_emitted = &mut sc.phrase_emitted;
+        phrase_emitted.clear();
+        phrase_emitted.resize(phrase_matches.len(), false);
+        let token_consumed = &mut sc.token_consumed;
+        token_consumed.clear();
+        token_consumed.resize(tokens.len(), false);
 
-        for (ti, &toff) in token_offsets.iter().enumerate() {
+        for ti in 0..tokens.len() {
+            let (tstart, tend) = tokens[ti];
             for (pi, &(ps, pe, _)) in phrase_matches.iter().enumerate() {
-                if toff >= ps && toff + tokens[ti].len() <= pe {
+                if tstart >= ps && tend <= pe {
                     let entry = &self.phrase_entries[phrase_matches[pi].2];
                     // Additive phrases (corpus-learned, ADR-053) emit the phrase feature but
                     // leave the component tokens for phase 2b, so the component features are
@@ -230,7 +245,13 @@ impl Normalizer {
         }
 
         // Phase 2b: process non-consumed tokens through the existing pipeline.
-        let mut scratch = String::new();
+        // `scratch`/`active_graders` are reused buffers on `sc` (cleared here); the token
+        // text is re-sliced from `lc` on demand via `tok_at` (the ranges live in `tokens`).
+        let scratch = &mut sc.scratch;
+        scratch.clear();
+        let active_graders = &mut sc.active_graders;
+        active_graders.clear();
+        let tok_at = |r: (usize, usize)| &lc[r.0..r.1];
         let mut i = 0;
         let mut pending_grader: Option<String> = None;
         let mut pending_grader_age = 0u8;
@@ -242,7 +263,6 @@ impl Normalizer {
         // positive pass we track EVERY grader still in window and grade each number with all of
         // them. The query/compile and single-view title paths keep the single-pending semantics
         // (byte-identical) and this Vec stays empty ⇒ `age_active_graders` is a no-op, no alloc.
-        let mut active_graders: Vec<(String, u8)> = Vec::new();
 
         while i < tokens.len() {
             if token_consumed[i] {
@@ -260,12 +280,12 @@ impl Normalizer {
                         grade_ctx = false;
                     }
                 }
-                age_active_graders(&mut active_graders);
+                age_active_graders(active_graders);
                 i += 1;
                 continue;
             }
 
-            let tok = tokens[i];
+            let tok = tok_at(tokens[i]);
 
             // 0) structural markers from cleaning: skip
             if tok == "#" || tok == "/" {
@@ -279,10 +299,10 @@ impl Normalizer {
                 scratch.clear();
                 scratch.push_str("grader:");
                 scratch.push_str(&gcanon);
-                emit(&scratch, FeatureKind::Grader);
+                emit(scratch, FeatureKind::Grader);
                 let fused = rest.is_some();
                 if let Some(num) = rest {
-                    Self::emit_grade(&gcanon, &num, &mut scratch, emit);
+                    Self::emit_grade(&gcanon, &num, scratch, emit);
                 }
                 if force_additive {
                     // Positive view: keep this grader active (don't overwrite earlier ones), so a
@@ -316,7 +336,7 @@ impl Normalizer {
                 if pending_grader.is_some() {
                     pending_grader_age = pending_grader_age.saturating_add(1);
                 }
-                age_active_graders(&mut active_graders);
+                age_active_graders(active_graders);
                 i += 1;
                 continue;
             }
@@ -324,8 +344,12 @@ impl Normalizer {
             // 3) numbers: disambiguate card-numbers, serials, number-context words
             //    (default `pop`, configurable — ADR-069), grades, years
             if let Some(numstr) = parse_number(tok) {
-                let prev = if i > 0 { Some(tokens[i - 1]) } else { None };
-                let next = tokens.get(i + 1).copied();
+                let prev = if i > 0 {
+                    Some(tok_at(tokens[i - 1]))
+                } else {
+                    None
+                };
+                let next = tokens.get(i + 1).map(|&r| tok_at(r));
                 let is_cardnum = prev == Some("#");
                 let is_serial = prev == Some("/") || next == Some("/");
                 let is_numctx = prev.is_some_and(|p| {
@@ -335,12 +359,12 @@ impl Normalizer {
                 });
 
                 if is_cardnum || is_serial || is_numctx {
-                    emit_generic(&numstr, &mut scratch, emit);
+                    emit_generic(&numstr, scratch, emit);
                 } else if let Some(y) = as_year(&numstr) {
                     scratch.clear();
                     scratch.push_str("year:");
                     scratch.push_str(&y);
-                    emit(&scratch, FeatureKind::Year);
+                    emit(scratch, FeatureKind::Year);
                 } else if force_additive {
                     // Positive view (P(T)) parse-union: grade this number with EVERY active grader
                     // still in window AND the grade context, all STICKY (never cleared by this
@@ -351,36 +375,36 @@ impl Normalizer {
                     let gradeable = is_grade_value(&numstr);
                     let mut graded = false;
                     if gradeable {
-                        for (g, _) in &active_graders {
-                            Self::emit_grade(g, &numstr, &mut scratch, emit);
+                        for (g, _) in active_graders.iter() {
+                            Self::emit_grade(g, &numstr, scratch, emit);
                             graded = true;
                         }
                         if grade_ctx {
                             scratch.clear();
                             scratch.push_str("grade:");
                             scratch.push_str(&numstr);
-                            emit(&scratch, FeatureKind::Grade);
+                            emit(scratch, FeatureKind::Grade);
                             graded = true;
                         }
                     }
                     if !graded {
-                        emit_generic(&numstr, &mut scratch, emit);
+                        emit_generic(&numstr, scratch, emit);
                     }
                 } else if let Some(g) = pending_grader.clone() {
                     if is_grade_value(&numstr) {
-                        Self::emit_grade(&g, &numstr, &mut scratch, emit);
+                        Self::emit_grade(&g, &numstr, scratch, emit);
                         pending_grader = None;
                     } else {
-                        emit_generic(&numstr, &mut scratch, emit);
+                        emit_generic(&numstr, scratch, emit);
                     }
                 } else if grade_ctx && is_grade_value(&numstr) {
                     scratch.clear();
                     scratch.push_str("grade:");
                     scratch.push_str(&numstr);
-                    emit(&scratch, FeatureKind::Grade);
+                    emit(scratch, FeatureKind::Grade);
                     grade_ctx = false;
                 } else {
-                    emit_generic(&numstr, &mut scratch, emit);
+                    emit_generic(&numstr, scratch, emit);
                 }
                 i += 1;
                 continue;
@@ -395,7 +419,7 @@ impl Normalizer {
             }
 
             // 5) generic fallback term
-            emit_generic(tok, &mut scratch, emit);
+            emit_generic(tok, scratch, emit);
             i += 1;
 
             // age out stale pending grader / grade context
@@ -411,7 +435,7 @@ impl Normalizer {
                     grade_ctx = false;
                 }
             }
-            age_active_graders(&mut active_graders);
+            age_active_graders(active_graders);
         }
     }
 
@@ -452,10 +476,15 @@ impl Normalizer {
     // ---- compile-time and match-time entry points ----
 
     /// Compile path: intern features (creating new ones), returning sorted+deduped IDs.
+    ///
+    /// Off the hot path (per stored query at compile time, not per title), so it owns a
+    /// local [`NormScratch`] and keeps its stable `&mut String` signature — callers across
+    /// the compile/vocab paths are unchanged. The per-title reuse lives on the match path.
     pub fn compile_features(&self, text: &str, dict: &mut Dict, lc: &mut String) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
         let mut names: Vec<(String, FeatureKind)> = Vec::new();
-        self.emit(text, lc, Side::Query, false, &mut |name, kind| {
+        let mut sc = NormScratch::new();
+        self.emit(text, lc, &mut sc, Side::Query, false, &mut |name, kind| {
             names.push((name.to_string(), kind));
         });
         for (name, kind) in names {
@@ -478,7 +507,8 @@ impl Normalizer {
         lc: &mut String,
     ) -> Vec<FeatureId> {
         let mut ids: Vec<FeatureId> = Vec::new();
-        self.emit(text, lc, Side::Query, false, &mut |name, _kind| {
+        let mut sc = NormScratch::new();
+        self.emit(text, lc, &mut sc, Side::Query, false, &mut |name, _kind| {
             ids.push(dict.get_or_synthetic(name));
         });
         ids.sort_unstable();
@@ -497,16 +527,18 @@ impl Normalizer {
         text: &str,
         dict: &Dict,
         lc: &mut String,
+        sc: &mut NormScratch,
         out: &mut Vec<FeatureId>,
     ) {
+        // Push straight into `out` (the caller's reused buffer), then sort + dedup in
+        // place — no separate `tmp` allocation. `emit` borrows `sc` for its internal
+        // working buffers; the closure writes to `out`, which is disjoint from `sc`.
         out.clear();
-        let mut tmp: Vec<FeatureId> = Vec::new();
-        self.emit(text, lc, Side::Title, false, &mut |name, _kind| {
-            tmp.push(dict.get_or_synthetic(name));
+        self.emit(text, lc, sc, Side::Title, false, &mut |name, _kind| {
+            out.push(dict.get_or_synthetic(name));
         });
-        tmp.sort_unstable();
-        tmp.dedup();
-        out.extend_from_slice(&tmp);
+        out.sort_unstable();
+        out.dedup();
     }
 
     /// Match path producing the **two title feature views** of ADR-061:
@@ -532,27 +564,31 @@ impl Normalizer {
         text: &str,
         dict: &Dict,
         lc: &mut String,
+        sc: &mut NormScratch,
         neg: &mut Vec<FeatureId>,
         pos: &mut Vec<FeatureId>,
     ) {
         neg.clear();
         pos.clear();
         // N(T): the canonical leftmost-longest parse (phrase modes respected). `emit` cleans
-        // `text` into `lc` first.
-        let mut tmp: Vec<FeatureId> = Vec::new();
-        self.emit(text, lc, Side::Title, false, &mut |name, _kind| {
-            tmp.push(dict.get_or_synthetic(name));
+        // `text` into `lc` first. We accumulate into `pos` (the caller's reused buffer, disjoint
+        // from the `sc` working buffers `emit` borrows), sort + dedup, then copy the canonical
+        // set into `neg`. `pos` then stays the running superset accumulator below — so the path
+        // allocates no per-call `tmp`.
+        self.emit(text, lc, sc, Side::Title, false, &mut |name, _kind| {
+            pos.push(dict.get_or_synthetic(name));
         });
-        tmp.sort_unstable();
-        tmp.dedup();
-        neg.extend_from_slice(&tmp);
+        pos.sort_unstable();
+        pos.dedup();
+        neg.extend_from_slice(pos);
 
         match &self.alias_overlap {
             // No alias phrases: positive view == negative view (single-view fast path elsewhere).
-            None => pos.extend_from_slice(&tmp),
+            // `pos` already holds N(T) == P(T); nothing more to add.
+            None => {}
             Some(ov) => {
                 // P(T) = N(T) ∪ force-additive parse-union ∪ raw token features ∪ overlapping
-                // entities. `tmp` already holds N(T); only ever ADD (never replace), so P(T) is a
+                // entities. `pos` already holds N(T); only ever ADD (never replace), so P(T) is a
                 // strict superset of every parse and activating an alias can never drop a feature.
                 // The force-additive re-emit recovers components of a displaced additive phrase; it
                 // can, however, change a *stateful* token read (a grader un-consumed from a phrase
@@ -565,22 +601,26 @@ impl Normalizer {
                 // "Goldilocks parse" — `psa 9 lives 8` reads `psa 8` once `9 lives` collapses;
                 // `psa a bgs 8` reads `psa 8` once `a bgs` collapses). The second `emit` re-cleans
                 // into `lc`, leaving it holding the text the overlap pass + token scan use.
-                self.emit(text, lc, Side::Title, true, &mut |name, _kind| {
-                    tmp.push(dict.get_or_synthetic(name));
+                self.emit(text, lc, sc, Side::Title, true, &mut |name, _kind| {
+                    pos.push(dict.get_or_synthetic(name));
                 });
-                let mut name = String::from("term:");
+                // The `"term:<token>"` builder is reused on `sc.name` (the second `emit` has
+                // returned, so `sc` is free again). `lc` is borrowed immutably for tokenization,
+                // disjoint from the `&mut sc.name` write and the `&mut pos` push.
+                let name = &mut sc.name;
+                name.clear();
+                name.push_str("term:");
                 for tok in lc.split_whitespace() {
                     if tok == "#" || tok == "/" {
                         continue; // structural markers, never a term feature
                     }
                     name.truncate(5); // keep the "term:" prefix
                     name.push_str(tok);
-                    tmp.push(dict.get_or_synthetic(&name));
+                    pos.push(dict.get_or_synthetic(name));
                 }
-                ov.collect_into(lc, dict, &mut tmp);
-                tmp.sort_unstable();
-                tmp.dedup();
-                pos.extend_from_slice(&tmp);
+                ov.collect_into(lc, dict, pos);
+                pos.sort_unstable();
+                pos.dedup();
             }
         }
     }

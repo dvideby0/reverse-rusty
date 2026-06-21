@@ -197,8 +197,16 @@ fn query_side_collapses_whitespace_runs_only_when_aliases_active() {
     let mut lc = String::new();
     let _ = n.compile_features("new york", &mut dict, &mut lc); // intern the entity dense
     let entity = dict.get_or_synthetic("term:new_york");
+    let mut sc = super::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    n.match_features_dual("new  york mets", &dict, &mut lc, &mut neg, &mut pos);
+    n.match_features_dual(
+        "new  york mets",
+        &dict,
+        &mut lc,
+        &mut sc,
+        &mut neg,
+        &mut pos,
+    );
     assert!(
         !neg.contains(&entity),
         "title canonical N(T) keeps whitespace runs verbatim (codex R8)"
@@ -241,9 +249,11 @@ fn repeated_graders_stay_deduped_in_the_positive_view() {
     let n = NormalizerBuilder::new().grader("psa").build().expect("n");
     let mut emitted: Vec<String> = Vec::new();
     let mut lc = String::new();
+    let mut sc = super::NormScratch::new();
     n.emit(
         "psa psa psa 10",
         &mut lc,
+        &mut sc,
         Side::Title,
         true,
         &mut |name, _| {
@@ -413,8 +423,16 @@ fn alias_phrase_collapses_on_query_overlaps_on_title() {
     assert_eq!(q, vec![ny], "query-side alias must collapse to one entity");
 
     // Title side: dual view of "new york city yankees".
+    let mut sc = super::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    norm.match_features_dual("new york city yankees", &dict, &mut lc, &mut neg, &mut pos);
+    norm.match_features_dual(
+        "new york city yankees",
+        &dict,
+        &mut lc,
+        &mut sc,
+        &mut neg,
+        &mut pos,
+    );
 
     // Negative (canonical) view: leftmost-longest reads "new york city", NOT the nested
     // "new york" — so a forbidden clause stays recall-correct.
@@ -452,8 +470,9 @@ fn positive_view_is_always_a_superset_of_negative() {
     let mut lc = String::new();
     let _ = n.compile_features("psa foo 10", &mut dict, &mut lc);
 
+    let mut sc = super::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    n.match_features_dual("psa foo 10", &dict, &mut lc, &mut neg, &mut pos);
+    n.match_features_dual("psa foo 10", &dict, &mut lc, &mut sc, &mut neg, &mut pos);
     let ten = dict.get_or_synthetic("term:10");
     assert!(
         neg.contains(&ten),
@@ -506,8 +525,9 @@ fn assert_grades_psa8(n: &Normalizer, title: &str) {
     let psa8 = dict.get_or_synthetic("grader_grade:psa8");
     let grade8 = dict.get_or_synthetic("grade:8");
 
+    let mut sc = super::NormScratch::new();
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    n.match_features_dual(title, &dict, &mut lc, &mut neg, &mut pos);
+    n.match_features_dual(title, &dict, &mut lc, &mut sc, &mut neg, &mut pos);
 
     assert!(
         pos.binary_search(&psa8).is_ok() && pos.binary_search(&grade8).is_ok(),
@@ -538,10 +558,11 @@ fn dual_view_equals_single_view_without_aliases() {
     // Seed the dict with a mutating compile so ids are dense.
     let _ = n.compile_features(title, &mut dict, &mut lc);
 
+    let mut sc = super::NormScratch::new();
     let mut single = Vec::new();
-    n.match_features(title, &dict, &mut lc, &mut single);
+    n.match_features(title, &dict, &mut lc, &mut sc, &mut single);
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    n.match_features_dual(title, &dict, &mut lc, &mut neg, &mut pos);
+    n.match_features_dual(title, &dict, &mut lc, &mut sc, &mut neg, &mut pos);
     assert_eq!(neg, single, "negative view == single view without aliases");
     assert_eq!(pos, single, "positive view == single view without aliases");
 }

@@ -75,11 +75,12 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
 /// Explain a single title against a single compiled query.
 pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &Dict) -> String {
     let mut lc = String::new();
+    let mut sc = crate::normalize::NormScratch::new();
     // Two title views (ADR-061): `pos` (overlapping superset `P(T)`) drives retrieval + required +
     // any-of; `neg` (canonical `N(T)`) drives forbidden — matching the real verifier so explain
     // can't disagree with the matcher under an active multi-word alias. No alias ⇒ pos == neg.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    norm.match_features_dual(title, dict, &mut lc, &mut neg, &mut pos);
+    norm.match_features_dual(title, dict, &mut lc, &mut sc, &mut neg, &mut pos);
 
     let mut s = String::new();
     s.push_str(&format!("title: {title:?}\n"));
@@ -150,10 +151,11 @@ pub fn explain_match_structured(
     dict: &Dict,
 ) -> ExplainDetail {
     let mut lc = String::new();
+    let mut sc = crate::normalize::NormScratch::new();
     // Two title views (ADR-061), matching the verifier: positive superset `pos` for retrieval +
     // required + any-of, canonical `neg` for forbidden. No active multi-word alias ⇒ pos == neg.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    norm.match_features_dual(title, dict, &mut lc, &mut neg, &mut pos);
+    norm.match_features_dual(title, dict, &mut lc, &mut sc, &mut neg, &mut pos);
 
     let title_features: Vec<String> = pos.iter().map(|&id| dict.name(id).to_string()).collect();
 

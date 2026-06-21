@@ -18,8 +18,8 @@ dynamic vocabulary — **built and oracle-proven, zero false negatives** (Tier 0
 **distributed multi-node layers** (gRPC transport, replication, Raft control plane, translog
 recovery, live handoff, autoscaler) are **built and oracle-proven in-process / on localhost, but
 experimental** — graduating to release-candidate via the **Distributed-v1 program
-([ADR-065](decisions/adr-065-distributed-v1-graduation.md))**: criteria **1–7, 9, and 11 shipped**
-(ADR-070/071/072/074/075/076/077/078/079); **8, 10, 12 open** ([`roadmap.md`](roadmap.md) Tier 3).
+([ADR-065](decisions/adr-065-distributed-v1-graduation.md))**: criteria **1–11 shipped**
+(ADR-070/071/072/074/075/076/077/078/079/080/081); **12 open** ([`roadmap.md`](roadmap.md) Tier 3).
 Everything `distributed`-gated is off by default; the lean / in-process path is byte-identical.
 
 ## Built

@@ -5,12 +5,18 @@
 //! never silently dropped, and `try_insert_live` surfaces parse errors as typed
 //! `Err`s rather than folding them into a bare `None`.
 
+use reverse_rusty::config::EngineConfig;
+use reverse_rusty::segment::MatchScratch;
 use reverse_rusty::{
     Engine, IngestItemStatus, InsertOutcome, Normalizer, ParseErrorKind, WriteError,
 };
 
 fn engine() -> Engine {
     Engine::new(Normalizer::default_vocab().expect("built-in vocab"))
+}
+
+fn engine_with(config: EngineConfig) -> Engine {
+    Engine::with_config(Normalizer::default_vocab().expect("built-in vocab"), config)
 }
 
 #[test]
@@ -141,5 +147,285 @@ fn try_insert_live_surfaces_typed_error_without_counting() {
     assert!(
         matches!(outcome, InsertOutcome::Inserted(_)),
         "expected Inserted, got {outcome:?}"
+    );
+}
+
+// ── A2: u16 count truncation guards (no silent false negatives) ──────────────
+
+#[test]
+fn validate_rejects_oversize_count_limits() {
+    // The SoA exact store encodes per-query counts as u16; a limit above u16::MAX
+    // (65535) would let an accepted query overflow the cast and silently truncate
+    // the stored set (a false negative). validate() must reject the runtime-tunable
+    // knobs above that ceiling, closing the /_settings path.
+    let over = (u16::MAX as usize) + 1; // 65536
+
+    let cfg = EngineConfig {
+        max_anyof_group_size: 70_000,
+        ..EngineConfig::default()
+    };
+    assert!(
+        cfg.validate()
+            .iter()
+            .any(|p| p.contains("max_anyof_group_size")),
+        "max_anyof_group_size = 70000 must be rejected, got {:?}",
+        cfg.validate()
+    );
+
+    let cfg = EngineConfig {
+        max_query_clauses: over,
+        ..EngineConfig::default()
+    };
+    assert!(
+        cfg.validate()
+            .iter()
+            .any(|p| p.contains("max_query_clauses")),
+        "max_query_clauses above u16::MAX must be rejected"
+    );
+
+    let cfg = EngineConfig {
+        max_tags: over,
+        ..EngineConfig::default()
+    };
+    assert!(
+        cfg.validate().iter().any(|p| p.contains("max_tags")),
+        "max_tags above u16::MAX must be rejected"
+    );
+
+    // The exact ceiling (u16::MAX) is still valid, and the default config is clean.
+    let cfg = EngineConfig {
+        max_anyof_group_size: u16::MAX as usize,
+        max_query_clauses: u16::MAX as usize,
+        max_tags: u16::MAX as usize,
+        ..EngineConfig::default()
+    };
+    assert!(
+        cfg.validate().is_empty(),
+        "the u16::MAX ceiling itself must validate, got {:?}",
+        cfg.validate()
+    );
+    assert!(EngineConfig::default().validate().is_empty());
+}
+
+#[test]
+fn large_anyof_group_within_limit_matches_high_index_member() {
+    // With the any-of limit raised (but still <= u16::MAX, so validate() passes),
+    // a large group must NOT be truncated: a title matching the LAST member still
+    // matches. (A u16 cast truncation would drop high-index members silently.)
+    let n = 500usize; // far above the default 64, well within u16::MAX
+    let cfg = EngineConfig {
+        max_anyof_group_size: 4_000,
+        max_query_length: 1_000_000, // the joined group is long; don't hit QueryTooLong
+        ..EngineConfig::default()
+    };
+    assert!(cfg.validate().is_empty());
+    let mut eng = engine_with(cfg);
+
+    let members: Vec<String> = (0..n).map(|i| format!("mbr{i:04}")).collect();
+    let query = format!("anchorword ({})", members.join(","));
+    let report = eng.build_from_queries(&[(1, query)]);
+    assert_eq!(report.ingested, 1, "the large-group query must be stored");
+
+    // A title carrying the anchor + the LAST any-of member must match.
+    let snap = eng.snapshot();
+    let mut scratch = MatchScratch::new();
+    let mut out = Vec::new();
+    let title = format!("anchorword mbr{:04}", n - 1);
+    snap.match_title(&title, &mut scratch, &mut out, true);
+    assert!(
+        out.contains(&1),
+        "title with the high-index any-of member must match (no truncation)"
+    );
+}
+
+#[test]
+fn oversize_anyof_group_rejected_loudly_not_truncated() {
+    // A group exceeding the configured limit is rejected at parse with a typed
+    // AnyOfGroupTooLarge error — never silently truncated into the store. Combined
+    // with validate() capping the knob at u16::MAX, no group can ever reach the
+    // u16 group_len cast over-full.
+    let cfg = EngineConfig {
+        max_anyof_group_size: 8,
+        ..EngineConfig::default()
+    };
+    let mut eng = engine_with(cfg);
+    let members: Vec<String> = (0..9).map(|i| format!("m{i}")).collect(); // 9 > 8
+    let query = format!("anchor ({})", members.join(","));
+
+    match eng.try_insert_live(&query, 1, 1).unwrap_err() {
+        WriteError::Parse(pe) => assert_eq!(pe.kind, ParseErrorKind::AnyOfGroupTooLarge),
+        WriteError::Wal(e) => panic!("expected a parse error, got WAL error: {e}"),
+    }
+    assert_eq!(
+        eng.num_queries(),
+        0,
+        "the over-large group must not be stored"
+    );
+}
+
+#[test]
+fn oversize_tag_set_rejected_loudly_not_truncated() {
+    // The per-query tag count is a u16 column with no parse layer; a set above
+    // max_tags must be rejected loudly (TooManyTags) rather than truncated, on
+    // every live/build ingest path. A within-limit tagged query stays matchable.
+    let cfg = EngineConfig {
+        max_tags: 2,
+        ..EngineConfig::default()
+    };
+    let mut eng = engine_with(cfg);
+
+    let too_many: Vec<(String, String)> = vec![
+        ("k".into(), "a".into()),
+        ("k".into(), "b".into()),
+        ("k".into(), "c".into()), // 3 > 2
+    ];
+    let within: Vec<(String, String)> = vec![("k".into(), "a".into()), ("k".into(), "b".into())];
+
+    // Live insert: typed reject, nothing stored.
+    let before = eng.num_queries();
+    match eng
+        .try_insert_live_with_tags("scottie pippen", 1, 1, &too_many)
+        .unwrap_err()
+    {
+        WriteError::Parse(pe) => assert_eq!(pe.kind, ParseErrorKind::TooManyTags),
+        WriteError::Wal(e) => panic!("expected a parse error, got WAL error: {e}"),
+    }
+    assert_eq!(
+        eng.num_queries(),
+        before,
+        "the over-tagged query must not be stored"
+    );
+
+    // A within-limit tagged query is accepted and matchable.
+    let outcome = eng
+        .try_insert_live_with_tags("michael jordan", 2, 1, &within)
+        .unwrap();
+    assert!(matches!(outcome, InsertOutcome::Inserted(_)));
+    let snap = eng.snapshot();
+    let mut scratch = MatchScratch::new();
+    let mut out = Vec::new();
+    snap.match_title("michael jordan card", &mut scratch, &mut out, true);
+    assert!(out.contains(&2), "within-limit tagged query must match");
+
+    // Build path: the over-tagged item is reported as a parse reject, not stored.
+    let mut eng2 = engine_with(EngineConfig {
+        max_tags: 2,
+        ..EngineConfig::default()
+    });
+    let (report, items) = eng2
+        .try_bulk_ingest_detailed_with_tags(
+            &[(10, "michael jordan".to_string())],
+            std::slice::from_ref(&too_many),
+        )
+        .expect("in-memory ingest is durable");
+    assert_eq!(report.ingested, 0);
+    assert_eq!(report.rejected_parse, 1);
+    match &items[0] {
+        IngestItemStatus::RejectedParse(pe) => assert_eq!(pe.kind, ParseErrorKind::TooManyTags),
+        other => panic!("expected RejectedParse(TooManyTags), got {other:?}"),
+    }
+    assert_eq!(eng2.num_queries(), 0);
+}
+
+#[test]
+fn compiled_forbidden_column_over_u16_rejected_not_truncated() {
+    // The parser ceilings bound the AST per-clause, NOT the COMPILED columns: TWO
+    // negated any-of clauses `-(...) -(...)`, each within `max_anyof_group_size`
+    // (≤ u16::MAX, so validate() passes), flatten into ONE forbidden column. Their
+    // combined member count can exceed u16::MAX, overflowing the `forb_len` cast in
+    // ExactStore::push: a debug-mode panic, a release-mode truncation that silently
+    // DROPS forbidden features (a dropped MUST_NOT → a silent over-match). The
+    // front-door column guard must reject it loudly (CompiledColumnTooLarge) instead —
+    // and never store it. (This is exactly the scenario the per-knob validate ceilings
+    // do NOT cover; the structural guard is the backstop.)
+    let half = 35_000usize; // each group ≤ u16::MAX; 2 * 35000 = 70000 > u16::MAX
+    let cfg = EngineConfig {
+        max_query_clauses: 3,                 // a positive anchor + two negated groups
+        max_anyof_group_size: 40_000,         // ≤ u16::MAX, so validate() passes
+        max_query_length: 64 * 1_024 * 1_024, // the joined groups are large
+        ..EngineConfig::default()
+    };
+    assert!(
+        cfg.validate().is_empty(),
+        "per-knob ceilings still validate (the overflow is in the compiled column), got {:?}",
+        cfg.validate()
+    );
+    let mut eng = engine_with(cfg);
+
+    // Two negated groups with `half` distinct members each → one forbidden column of 2*half.
+    let mut group_a = String::with_capacity(half * 7);
+    let mut group_b = String::with_capacity(half * 7);
+    for i in 0..half {
+        if i > 0 {
+            group_a.push(',');
+            group_b.push(',');
+        }
+        group_a.push_str(&format!("fa{i}"));
+        group_b.push_str(&format!("fb{i}"));
+    }
+    let query = format!("anchorw -({group_a}) -({group_b})");
+
+    // Live insert: typed reject, nothing stored, no panic.
+    match eng.try_insert_live(&query, 1, 1).unwrap_err() {
+        WriteError::Parse(pe) => assert_eq!(pe.kind, ParseErrorKind::CompiledColumnTooLarge),
+        WriteError::Wal(e) => panic!("expected a parse error, got WAL error: {e}"),
+    }
+    assert_eq!(
+        eng.num_queries(),
+        0,
+        "the column-overflowing query must not be stored"
+    );
+
+    // Build path: reported as a parse reject, not stored.
+    let report = eng.build_from_queries(&[(2, query)]);
+    assert_eq!(report.ingested, 0);
+    assert_eq!(report.rejected_parse, 1);
+    assert_eq!(eng.num_queries(), 0);
+}
+
+#[test]
+fn compiled_column_within_u16_still_ingests_and_matches() {
+    // A large-but-within-u16 negated group must still ingest and forbid correctly —
+    // the guard rejects only true overflow, not large valid queries.
+    let n = 2_000usize; // well under u16::MAX
+    let cfg = EngineConfig {
+        max_anyof_group_size: n + 1,
+        max_query_length: 1_000_000,
+        ..EngineConfig::default()
+    };
+    assert!(cfg.validate().is_empty());
+    let mut eng = engine_with(cfg);
+
+    let mut members = String::new();
+    for i in 0..n {
+        if i > 0 {
+            members.push(',');
+        }
+        members.push_str(&format!("nope{i}"));
+    }
+    let query = format!("anchorw -({members})");
+    let report = eng.build_from_queries(&[(7, query)]);
+    assert_eq!(report.ingested, 1, "the within-u16 query must be stored");
+
+    let snap = eng.snapshot();
+    let mut scratch = MatchScratch::new();
+    // Title with the anchor but none of the forbidden terms: matches.
+    let mut out = Vec::new();
+    snap.match_title("anchorw clean", &mut scratch, &mut out, true);
+    assert!(
+        out.contains(&7),
+        "anchor without any forbidden term must match"
+    );
+    // Title carrying a high-index forbidden term: rejected (forbidden not truncated).
+    let mut out2 = Vec::new();
+    snap.match_title(
+        &format!("anchorw nope{}", n - 1),
+        &mut scratch,
+        &mut out2,
+        true,
+    );
+    assert!(
+        !out2.contains(&7),
+        "a high-index forbidden term must still suppress the match (no truncation)"
     );
 }
