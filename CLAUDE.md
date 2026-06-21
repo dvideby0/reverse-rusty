@@ -225,8 +225,10 @@ new `src/` file → update the module map above.
 
 This file is the *safety + orientation* layer, not a mirror of the docs. So:
 - **Inline here (safety — an agent must not have to hop to stay correct):** the correctness-contract
-  sentence and the critical-invariants list. Keep them byte-identical to
-  [`docs/design/README.md`](docs/design/README.md) §2.
+  sentence and the critical-invariants list. Keep the correctness-contract sentence byte-identical to
+  [`docs/design/README.md`](docs/design/README.md) §2. For the critical-invariants list, keep it
+  consistent with the invariants stated across the design docs (its canonical home is here + the
+  per-component design docs) — never weaken an invariant to "match" any single section.
 - **Never inline here (link the one canonical home instead):** performance numbers (→ `docs/performance/`),
   dependency versions (→ `engine/Cargo.toml`), implemented status (→ `docs/STATUS.md`) + the roadmap
   (→ `docs/roadmap.md`), per-component design (→ `docs/design/`), decision rationale

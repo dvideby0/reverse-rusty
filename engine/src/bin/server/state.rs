@@ -18,6 +18,7 @@ use arc_swap::ArcSwap;
 use axum::{extract::State, http::HeaderValue, middleware::Next, response::Response};
 use parking_lot::{Mutex, RwLock};
 use prometheus::IntGauge;
+use tracing::Instrument;
 
 use reverse_rusty::cluster::ClusterEngine;
 use reverse_rusty::segment::{Engine, EngineSnapshot};
@@ -114,9 +115,11 @@ pub(crate) async fn request_id_middleware<S: RequestCtx>(
     let _in_flight = InFlightGuard::new(&state.prom().in_flight_requests);
     let request_id = uuid::Uuid::new_v4().to_string();
     let span = tracing::info_span!("request", request_id = %request_id);
-    let _guard = span.enter();
 
-    let mut response = next.run(request).await;
+    // `.instrument()` attaches the span to the future for the duration of the
+    // await, rather than holding an `enter()` guard across the await point (which
+    // would mis-attribute the span once the task yields — the canonical footgun).
+    let mut response = next.run(request).instrument(span).await;
     if let Ok(val) = HeaderValue::from_str(&request_id) {
         response.headers_mut().insert("x-request-id", val);
     }
