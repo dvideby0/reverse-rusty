@@ -74,6 +74,15 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.logical(local_id),
         }
     }
+    /// The stored per-query version for a local id — read back for the cluster
+    /// rebuild gather (ADR-074) so a `set_vocab`/resize preserves a query's stored
+    /// version rather than resetting it to 1.
+    pub fn version_of(&self, local_id: u32) -> u32 {
+        match self {
+            BaseSegment::Memory(s) => s.exact.version(local_id),
+            BaseSegment::Mmap(s) => s.version(local_id),
+        }
+    }
     pub fn tombstone(&mut self, local_id: u32) {
         match self {
             BaseSegment::Memory(s) => s.tombstone(local_id),

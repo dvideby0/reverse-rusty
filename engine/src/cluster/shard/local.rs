@@ -443,9 +443,7 @@ impl Shard for LocalShard {
         Ok(self.lock().live_sources())
     }
 
-    fn live_sources_tagged(
-        &self,
-    ) -> Result<Vec<(u64, String, Vec<crate::tagdict::TagId>)>, ShardError> {
+    fn live_sources_tagged(&self) -> Result<Vec<super::LiveTaggedQuery>, ShardError> {
         Ok(self.lock().live_sources_tagged())
     }
 

@@ -254,18 +254,28 @@ impl ClusterEngine {
     /// of it — never a remove that lost its re-add. Returns the number of prior entries
     /// removed (0 ⇒ created, >0 ⇒ updated) plus where the new version landed. A
     /// rejected new version (parse / class D) **never deletes** — the prior version
-    /// stays live and matchable.
-    pub fn upsert_query(&self, id: u64, dsl: &str) -> Result<(usize, AddOutcome), ShardError> {
-        self.upsert_query_with_tags(id, dsl, &[])
+    /// stays live and matchable. `version` is the caller-supplied per-logical version
+    /// (default 1 from the REST layer); it rides the log frame so replay reproduces the
+    /// stored version — passing 1 keeps the in-process / RF=1 path byte-identical.
+    pub fn upsert_query(
+        &self,
+        id: u64,
+        dsl: &str,
+        version: u32,
+    ) -> Result<(usize, AddOutcome), ShardError> {
+        self.upsert_query_with_tags(id, dsl, version, &[])
     }
 
     /// [`upsert_query`](Self::upsert_query) carrying per-query metadata tags for the NEW
     /// version (ADR-055 semantics: raw tags ride the log frame and resolve read-only
-    /// against the shared frozen tag space on each target shard).
+    /// against the shared frozen tag space on each target shard). `version` is threaded
+    /// into [`ClusterMutation::Upsert`] so a `PUT /_doc/{id} {"version":N}` stores version
+    /// N and reopens to N (matching single-node `try_upsert_live_with_tags`).
     pub fn upsert_query_with_tags(
         &self,
         id: u64,
         dsl: &str,
+        version: u32,
         tags: &[(String, String)],
     ) -> Result<(usize, AddOutcome), ShardError> {
         // Reject malformed DSL up front: it carries no replayable mutation, so it must
@@ -298,7 +308,7 @@ impl ClusterEngine {
         }
         let m = ClusterMutation::Upsert {
             logical: id,
-            version: 1,
+            version,
             dsl: dsl.to_string(),
             tags: tags.to_vec(),
         };
@@ -310,7 +320,7 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_upsert(id, 1, dsl, tags)
+        self.apply_upsert(id, version, dsl, tags)
     }
 
     /// Apply an UPSERT to the shards — the state-machine `apply` for replace-by-id,

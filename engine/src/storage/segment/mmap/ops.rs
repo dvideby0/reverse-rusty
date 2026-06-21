@@ -264,6 +264,16 @@ impl MmapSegment {
         unsafe { *self.logical_arr.add(id as usize) }
     }
 
+    /// The stored per-query version for a local id — read back for the cluster
+    /// rebuild gather (ADR-074), so a `set_vocab`/resize re-places a query at the
+    /// version it was durably stored with rather than resetting it to 1.
+    #[inline]
+    pub(crate) fn version(&self, id: u32) -> u32 {
+        // SAFETY: same in-bounds argument as `logical` — `version_arr` is the
+        // `num_queries`-long u32 array parsed in `open`, and `id < num_queries`.
+        unsafe { *self.version_arr.add(id as usize) }
+    }
+
     /// The sorted `TagId` slice for a local id (ADR-049) — read back for the
     /// `set_vocab` recompile. Empty for a pre-tag (v1/v2) segment.
     #[inline]

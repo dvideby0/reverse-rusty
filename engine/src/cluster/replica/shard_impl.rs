@@ -57,9 +57,9 @@ impl Shard for ReplicatedShard {
 
     fn live_sources_tagged(
         &self,
-    ) -> Result<Vec<(u64, String, Vec<crate::tagdict::TagId>)>, ShardError> {
+    ) -> Result<Vec<crate::cluster::shard::LiveTaggedQuery>, ShardError> {
         // Same set-equal-copies argument as `live_sources`: identical op streams
-        // carry identical tags, so any in-sync copy yields the same tagged set.
+        // carry identical tags AND versions, so any in-sync copy yields the same set.
         self.read(|s| s.live_sources_tagged())
     }
 

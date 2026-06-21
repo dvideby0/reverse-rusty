@@ -125,6 +125,13 @@ impl Segment {
         self.exact.tags_of(local_id)
     }
 
+    /// The stored per-query version for a local id — read back for the cluster
+    /// rebuild gather (ADR-074) so a `set_vocab`/resize preserves a query's stored
+    /// version rather than resetting it to 1.
+    pub fn version_of(&self, local_id: u32) -> u32 {
+        self.exact.version(local_id)
+    }
+
     /// Whether a local id is alive (not tombstoned).
     #[inline]
     pub fn is_alive(&self, local_id: u32) -> bool {
