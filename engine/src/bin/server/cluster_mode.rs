@@ -521,7 +521,7 @@ fn connect_remote_cluster(
     security: reverse_rusty::cluster::ClientSecurity,
     control_endpoints: &[String],
 ) -> Result<ClusterEngine, ShardError> {
-    use reverse_rusty::cluster::{RemoteControlPlane, ShardGroup};
+    use reverse_rusty::cluster::{ControlPlane, RemoteControlPlane, ShardGroup};
 
     let groups: Vec<ShardGroup> = remote_groups
         .iter()
@@ -543,6 +543,9 @@ fn connect_remote_cluster(
     let (dict, tag_dict) = ClusterEngine::freeze_feature_space(&norm, queries, &[]);
     let norm = Arc::new(norm);
     let dict = Arc::new(dict);
+    // Captured before `dict` is moved into the connect call — used to validate the control-plane
+    // quorum's feature-model fingerprint matches this coordinator's (ADR-083 attach guard).
+    let dict_fp = dict.fingerprint();
     let tag_dict = Arc::new(tag_dict);
 
     let plain = groups.iter().all(|g| g.replicas.is_empty());
@@ -580,6 +583,39 @@ fn connect_remote_cluster(
                 RemoteControlPlane::connect(endpoint, handle.clone(), security).map_err(|e| {
                     ShardError::ControlPlane(format!("connect control plane {endpoint}: {e}"))
                 })?;
+            // Validate the quorum's committed document matches THIS coordinator's ring BEFORE
+            // attaching it (codex): `controlserver` seeds its genesis from `--shards`/`--vnodes`, so a
+            // mismatch would make `/_cluster/state` + rebalance operate on a wrong-sized assignment
+            // map. Fail loud rather than silently attach an inconsistent document. A transient "no
+            // leader yet" read also fails loud here; `restart: unless-stopped` retries, exactly like
+            // the shard connect race.
+            let doc = rcp.cluster_state().map_err(|e| {
+                ShardError::ControlPlane(format!(
+                    "read control-plane state from {endpoint} (is the quorum leader up?): {e}"
+                ))
+            })?;
+            if doc.num_shards != cfg.num_shards as u32 || doc.vnodes != cfg.vnodes {
+                return Err(ShardError::ControlPlane(format!(
+                    "control-plane quorum ring (num_shards={}, vnodes={}) does not match this \
+                     coordinator (num_shards={}, vnodes={}); seed controlserver with --shards {} \
+                     --vnodes {}",
+                    doc.num_shards,
+                    doc.vnodes,
+                    cfg.num_shards,
+                    cfg.vnodes,
+                    cfg.num_shards,
+                    cfg.vnodes
+                )));
+            }
+            if doc.dict_fingerprint != dict_fp {
+                warn!(
+                    "control-plane quorum feature-model fingerprint {} differs from this \
+                     coordinator's {} (seed controlserver with --fingerprint {}); routing is \
+                     unaffected (the coordinator routes by its own ring), but the cluster-state \
+                     model label is stale",
+                    doc.dict_fingerprint, dict_fp, dict_fp
+                );
+            }
             cluster.with_control_plane(Box::new(rcp))
         }
         None => cluster,

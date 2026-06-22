@@ -172,7 +172,13 @@ impl ControlService for ControlServer {
                 Ok(_) => ClientControlReply::State(Box::new(plane.local_state())),
                 Err(e) => ClientControlReply::Err(WireControlError::from(&map_check_leader(e))),
             },
-            ClientControlRequest::Version => ClientControlReply::Version(plane.local_state().epoch),
+            // Linearizable like GetState (codex): a follower forwards to the leader, so a `version()`
+            // right after a leader-forwarded `propose()` reflects the commit instead of the follower's
+            // possibly-stale local epoch.
+            ClientControlRequest::Version => match self.raft.ensure_linearizable().await {
+                Ok(_) => ClientControlReply::Version(plane.local_state().epoch),
+                Err(e) => ClientControlReply::Err(WireControlError::from(&map_check_leader(e))),
+            },
             ClientControlRequest::Propose(change) => match self.raft.client_write(change).await {
                 Ok(r) => ClientControlReply::Committed(r.data.version),
                 Err(e) => ClientControlReply::Err(WireControlError::from(&map_client_write(e))),
