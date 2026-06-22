@@ -11,6 +11,11 @@
 //! The `--bootstrap` node forms the initial cluster from itself + every `--peer` once the peers are
 //! listening; the others just serve and join. This is the manager-side analogue of `shardserver`
 //! (the data path stays on `ShardService`); consensus holds only the cluster-state document.
+//!
+//! When the bootstrap node binds a wildcard address (`0.0.0.0:port`, the usual containerized
+//! case) it must also pass `--advertise-url <URL>` — the routable address peers dial it on
+//! (e.g. `--advertise-url https://control0:50061`); otherwise it would commit the unreachable
+//! `0.0.0.0` URL into Raft membership and every peer→bootstrapper RPC would fail (ADR-082).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -33,6 +38,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut node_id: Option<u64> = None;
     let mut bind: Option<String> = None;
     let mut peers: Vec<(u64, String)> = Vec::new();
+    // The URL peers dial to reach THIS node — committed into Raft membership at bootstrap.
+    // Distinct from the bind address: a node binds `0.0.0.0:port` (every interface) but must
+    // advertise a routable host (e.g. `https://control0:50061`). Defaults to the bind address
+    // only when that is already routable (not a wildcard) — see the bootstrap block below.
+    let mut advertise_url: Option<String> = None;
     let mut shards = DEFAULT_SHARDS;
     let mut vnodes = DEFAULT_VNODES;
     let mut fingerprint: u64 = 0;
@@ -72,6 +82,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 token_flag = args.get(i + 1).cloned();
                 i += 1;
             }
+            "--advertise-url" => {
+                advertise_url = args.get(i + 1).cloned();
+                i += 1;
+            }
             "--peer" => {
                 // `--peer ID=http://host:port`
                 if let Some(spec) = args.get(i + 1) {
@@ -108,8 +122,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    let node_id = node_id
-        .ok_or("usage: controlserver <NODE_ID> <BIND_ADDR> [--peer ID=URL ...] [--bootstrap]")?;
+    let node_id = node_id.ok_or(
+        "usage: controlserver <NODE_ID> <BIND_ADDR> [--peer ID=URL ...] [--advertise-url URL] \
+         [--bootstrap]",
+    )?;
     let bind = bind.ok_or("missing BIND_ADDR")?;
     let addr: SocketAddr = bind.parse()?;
 
@@ -176,8 +192,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The self-URL scheme must match the transport peers dial back on: with a TLS
         // identity configured this node serves https, so registering an http:// URL would
         // fail every peer→bootstrapper Raft RPC at the handshake (review finding).
-        let scheme = if serves_tls { "https" } else { "http" };
-        let self_url = format!("{scheme}://{bind}");
+        // Resolve the routable self-URL committed into Raft membership; fail loud on a wildcard
+        // bind with no --advertise-url (peers could not dial it). See `bootstrap_self_url`.
+        let self_url = bootstrap_self_url(advertise_url.as_deref(), &addr, &bind, serves_tls)?;
+        if let Some(url) = &advertise_url {
+            // A scheme that disagrees with the TLS identity guarantees a peer handshake failure.
+            if url.starts_with("https://") != serves_tls {
+                let scheme = if serves_tls { "https" } else { "http" };
+                eprintln!(
+                    "WARNING: --advertise-url {url} scheme disagrees with this node's TLS \
+                     identity (serving {scheme}); peers may fail the Raft handshake"
+                );
+            }
+        }
         std::thread::sleep(Duration::from_secs(2));
         let mut members: Vec<(u64, String)> = vec![(node_id, self_url)];
         members.extend(peers.iter().cloned());
@@ -193,4 +220,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Serve until killed.
     rt.block_on(serve)??;
     Ok(())
+}
+
+/// Resolve the routable self-URL a bootstrap node commits into Raft membership (ADR-082).
+///
+/// Precedence: an explicit `--advertise-url` wins (used verbatim). Otherwise the bind address
+/// becomes the self-URL — but ONLY when it is already routable. A wildcard bind (`0.0.0.0` / `::`,
+/// the usual containerized case) is not dialable by peers, so refuse it rather than commit an
+/// unreachable address that would fail every peer→bootstrapper RPC. Pure + `Result` so the policy
+/// is unit-tested without standing up a node.
+fn bootstrap_self_url(
+    advertise_url: Option<&str>,
+    addr: &SocketAddr,
+    bind: &str,
+    serves_tls: bool,
+) -> Result<String, String> {
+    let scheme = if serves_tls { "https" } else { "http" };
+    match advertise_url {
+        Some(url) => Ok(url.to_string()),
+        None if addr.ip().is_unspecified() => Err(format!(
+            "--bootstrap on a wildcard bind ({bind}) needs --advertise-url: peers cannot dial \
+             {scheme}://{bind}. Pass --advertise-url {scheme}://<reachable-host>:{} (the address \
+             peers use to reach this node).",
+            addr.port()
+        )),
+        None => Ok(format!("{scheme}://{bind}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bootstrap_self_url;
+    use std::net::SocketAddr;
+
+    fn addr(s: &str) -> SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn explicit_advertise_url_wins_verbatim() {
+        // Even with a wildcard bind, an explicit advertise URL is honored as-is.
+        let got = bootstrap_self_url(
+            Some("https://control0:50061"),
+            &addr("0.0.0.0:50061"),
+            "0.0.0.0:50061",
+            true,
+        )
+        .unwrap();
+        assert_eq!(got, "https://control0:50061");
+    }
+
+    #[test]
+    fn routable_bind_derives_self_url_by_tls_scheme() {
+        assert_eq!(
+            bootstrap_self_url(None, &addr("127.0.0.1:50061"), "127.0.0.1:50061", false).unwrap(),
+            "http://127.0.0.1:50061"
+        );
+        assert_eq!(
+            bootstrap_self_url(None, &addr("10.0.0.5:50061"), "10.0.0.5:50061", true).unwrap(),
+            "https://10.0.0.5:50061"
+        );
+    }
+
+    #[test]
+    fn wildcard_bind_without_advertise_url_is_refused() {
+        // The bug ADR-082 fixes: committing https://0.0.0.0:port into Raft membership.
+        for bind in ["0.0.0.0:50061", "[::]:50061"] {
+            let err = bootstrap_self_url(None, &addr(bind), bind, true).unwrap_err();
+            assert!(err.contains("--advertise-url"), "got: {err}");
+            assert!(err.contains(bind), "error names the offending bind: {err}");
+        }
+    }
 }

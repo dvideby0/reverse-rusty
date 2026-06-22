@@ -109,6 +109,12 @@ curl -fsS -XPUT http://127.0.0.1:9200/_doc/1 -H "authorization: Bearer $RR_AUTH_
 # bulk: POST /_bulk (newline-delimited) — see docs/reference/api.md
 ```
 
+**Negation-only (class-D) queries.** To accept queries that are purely exclusions (e.g. `-reprint` —
+"match any title *without* reprint"), add `--accept-class-d` to the **coordinator** command (the
+`server …` service). The coordinator is the sole gate: a remote shard is coordinator-gated storage and
+accepts whatever the coordinator places, so there is no per-shard flag to set. Like every broad-lane
+query, an always-candidate is returned only when the request includes the broad lane (`include_broad`).
+
 ## 4. Health & readiness
 
 | Check | Endpoint | Meaning |
@@ -242,16 +248,12 @@ unreachable endpoint.
 - **Control-plane↔coordinator wiring** — the coordinator runs an in-memory control plane; the durable
   `controlserver` quorum is present but not yet consulted for routing (the follow-on is a
   `--control-endpoint` flag attaching the coordinator's `ControlPlane` to a `RaftControlPlane` client).
-  Relatedly, the bootstrap control node advertises its wildcard **bind** address (`0.0.0.0:50061`) into
-  Raft membership, which peers can't route — so a clean multi-node control quorum doesn't form yet (a
-  `controlserver` advertise-URL is part of this follow-on). Both are moot while the quorum is idle.
+  The bootstrap control node now advertises a routable self-URL via `--advertise-url` (ADR-082) rather
+  than the undialable wildcard bind, so a clean multi-node quorum forms once the wiring lands; until
+  then the quorum is durable but idle.
 - **Kubernetes manifests / Helm** — deferred; the deployment unit is Compose at v1. The shape is sketched
   in ADR-081 (StatefulSets for shards/control, a Deployment for the stateless coordinator).
 - **Online / cross-process resize** — `/_cluster/resize` is in-process only; the remote topology scales
   by redeploy ([§5](#5-scaling)).
 - **Custom vocabulary on the remote topology** — unsupported; remote shards run the default normalizer.
   Custom vocab is an in-process `--data-dir` cluster capability ([§8](#8-vocabulary)).
-- **Negation-only (class-D) queries on the remote topology** — `shardserver` has no `--accept-class-d`
-  (it always runs the default config), so a class-D-accepting coordinator would acknowledge writes every
-  shard drops. Use the in-process `--data-dir` cluster for class D; exposing the shard flag is a tracked
-  follow-on.

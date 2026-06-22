@@ -79,17 +79,13 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
     }
     let remote_groups: Vec<String> = cli.shard_endpoint.clone();
     let in_process = remote_groups.is_empty();
-    // accept_class_d now drives the cluster always-candidate lane (ADR-080): the coordinator
-    // places class-D on the broad lane (replicated to every shard). In REMOTE mode every shard
-    // server must ALSO run with --accept-class-d, else a class-D insert fanned to a shard whose
-    // engine rejects it is silently dropped (the operator contract; in-process has one config).
-    if !in_process && cli.accept_class_d {
-        warn!(
-            "--accept-class-d in remote cluster mode: every shard server must also run with \
-             --accept-class-d (ADR-080 operator contract), else class-D queries are dropped \
-             on a shard that rejects them"
-        );
-    }
+    // accept_class_d drives the cluster always-candidate lane (ADR-080): the coordinator places
+    // class-D on the broad lane (replicated to every shard). The COORDINATOR is the SOLE gate — a
+    // remote `ShardServer` is coordinator-gated storage (`LocalShard` forces accept_class_d on
+    // every shard it builds, so it stores whatever the coordinator places), and therefore needs no
+    // flag of its own. (An earlier warning here told operators to set a nonexistent `shardserver
+    // --accept-class-d`, describing a drop that LocalShard makes impossible — see the
+    // cluster_grpc_oracle class-D test, which proves a default-config shard still serves class-D.)
     if in_process
         && (cli.grpc_tls_ca.is_some()
             || cli.grpc_tls_domain.is_some()
