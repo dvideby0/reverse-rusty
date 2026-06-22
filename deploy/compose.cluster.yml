@@ -114,11 +114,10 @@ services:
       --grpc-tls-ca /certs/ca.crt
     # --include-broad makes broad-lane queries match by DEFAULT; broad is also a
     # per-request flag (`"include_broad": true` in the _search body), so leave it off
-    # here unless every request should include broad. NOTE: negation-only (class-D)
-    # queries are NOT supported on this remote topology in v1 — `shardserver` has no
-    # --accept-class-d, so a class-D-accepting coordinator would acknowledge writes
-    # every shard silently drops. Class D needs the in-process
-    # `server --cluster --data-dir` cluster (cluster-deployment.md §11).
+    # here unless every request should include broad. To accept negation-only
+    # (class-D) queries (e.g. `-reprint`), add `--accept-class-d` to THIS coordinator
+    # command: it is the sole gate — remote shards are coordinator-gated storage and
+    # accept whatever the coordinator places, no per-shard flag (cluster-deployment.md §3).
     environment:
       RR_CLUSTER_TOKEN: ${RR_CLUSTER_TOKEN:?set RR_CLUSTER_TOKEN}
       # The HTTP bearer gate (ADR-062) — REQUIRED: the server refuses to start on an

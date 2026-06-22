@@ -40,6 +40,10 @@ verifying them against the code corrected one outright:
 
 **Consequences.** A containerized control quorum now forms with routable membership (unblocking — not
 completing — the deferred `--control-endpoint` coordinator↔quorum wiring, which remains open as the next
-follow-on). The class-D operator story collapses to one knob on the coordinator, proven over the wire,
-with no per-shard parity. The default (non-`distributed`) build is byte-identical; the only behavior
-change is the deliberate, loud refusal of a `--bootstrap` on a wildcard bind without `--advertise-url`.
+follow-on). `--advertise-url` takes effect at the **first** bootstrap only (`Raft::initialize` is
+idempotent), so an existing ADR-081 deployment that already committed a wildcard-URL membership must
+reset its idle control-plane volumes to adopt the new URL — documented in the runbook; live membership
+repair is deferred to the wiring follow-on, harmless until then because the quorum is not yet consulted.
+The class-D operator story collapses to one knob on the coordinator, proven over the wire, with no
+per-shard parity. The default (non-`distributed`) build is byte-identical; the only behavior change is
+the deliberate, loud refusal of a `--bootstrap` on a wildcard bind without `--advertise-url`.

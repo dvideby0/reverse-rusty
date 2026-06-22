@@ -16,6 +16,11 @@
 //! case) it must also pass `--advertise-url <URL>` — the routable address peers dial it on
 //! (e.g. `--advertise-url https://control0:50061`); otherwise it would commit the unreachable
 //! `0.0.0.0` URL into Raft membership and every peer→bootstrapper RPC would fail (ADR-082).
+//!
+//! This URL is committed at the FIRST bootstrap only: `Raft::initialize` is idempotent, so an
+//! already-bootstrapped durable node (`--data-dir`) keeps its persisted membership on restart.
+//! To change the advertised URL on an existing deployment, reset its control-plane data volume
+//! (idle at v1, ADR-081) so the next start re-bootstraps with the new URL.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

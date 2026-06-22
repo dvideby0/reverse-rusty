@@ -250,7 +250,9 @@ unreachable endpoint.
   `--control-endpoint` flag attaching the coordinator's `ControlPlane` to a `RaftControlPlane` client).
   The bootstrap control node now advertises a routable self-URL via `--advertise-url` (ADR-082) rather
   than the undialable wildcard bind, so a clean multi-node quorum forms once the wiring lands; until
-  then the quorum is durable but idle.
+  then the quorum is durable but idle. (`--advertise-url` is committed at the *first* bootstrap only —
+  Raft `initialize` is idempotent — so an existing deployment whose quorum already bootstrapped the
+  wildcard URL must reset its idle `controlN-data` volumes to adopt the new URL.)
 - **Kubernetes manifests / Helm** — deferred; the deployment unit is Compose at v1. The shape is sketched
   in ADR-081 (StatefulSets for shards/control, a Deployment for the stateless coordinator).
 - **Online / cross-process resize** — `/_cluster/resize` is in-process only; the remote topology scales
