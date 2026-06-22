@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use openraft::raft::{AppendEntriesRequest, VoteRequest};
-use openraft::Snapshot;
+use openraft::{Raft, Snapshot};
 use tonic::{Request, Response, Status};
 
 use super::control::NodeId;
@@ -29,22 +29,39 @@ use super::proto::control_service_server::{ControlService, ControlServiceServer}
 use super::security::{MeshAuthVerify, ServerSecurity};
 use super::server::server_tls_config;
 
-/// Serves `ControlService` over a single manager node's [`RaftControlPlane`].
+/// Serves `ControlService` over a single manager node's [`Raft`] handle, plus — when a control plane
+/// is attached via [`with_client_plane`](Self::with_client_plane) — the coordinator-facing
+/// `ClientControl` op (ADR-083).
 pub struct ControlServer {
-    /// Shared (`Arc`) so the caller keeps the plane to `initialize` the cluster after peers listen.
-    plane: Arc<RaftControlPlane>,
+    raft: Raft<TypeConfig>,
+    /// `Some` ⇒ serve the client-facing `ClientControl` op against this plane (ADR-083); `None` ⇒
+    /// a Raft-only server (the historical ADR-038 shape), where `ClientControl` returns
+    /// `unimplemented` rather than a silently-wrong reply. The `Arc` is shared with the caller, who
+    /// keeps it to `initialize` the cluster after the peers are listening.
+    plane: Option<Arc<RaftControlPlane>>,
     /// Mesh security (ADR-071): TLS identity + expected cluster token. Default (none) ⇒ the
     /// historical plaintext/open behavior.
     security: ServerSecurity,
 }
 
 impl ControlServer {
-    /// Wrap a manager node's control plane as a gRPC server.
-    pub fn new(plane: Arc<RaftControlPlane>) -> Self {
+    /// Wrap a manager node's Raft handle as a gRPC server (Raft RPCs only). Attach a control plane
+    /// via [`with_client_plane`](Self::with_client_plane) to also serve the `ClientControl` op.
+    pub fn new(raft: Raft<TypeConfig>) -> Self {
         Self {
-            plane,
+            raft,
+            plane: None,
             security: ServerSecurity::default(),
         }
+    }
+
+    /// Enable the coordinator-facing `ClientControl` op (ADR-083) by attaching this node's control
+    /// plane — the same node the `raft` handle belongs to. Without it, `ClientControl` returns
+    /// `unimplemented` (a deployed `controlserver` always attaches it; the Raft-only oracle does not).
+    #[must_use]
+    pub fn with_client_plane(mut self, plane: Arc<RaftControlPlane>) -> Self {
+        self.plane = Some(plane);
+        self
     }
 
     /// Install mesh security (ADR-071), applied by every `serve*` method. Unset ⇒ byte-identical
@@ -103,7 +120,7 @@ impl ControlService for ControlServer {
     ) -> Result<Response<proto::RaftEnvelope>, Status> {
         let req: AppendEntriesRequest<TypeConfig> = decode(&request.into_inner().data)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let res = self.plane.raft().append_entries(req).await;
+        let res = self.raft.append_entries(req).await;
         let data = encode(&res).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::RaftEnvelope { data }))
     }
@@ -114,7 +131,7 @@ impl ControlService for ControlServer {
     ) -> Result<Response<proto::RaftEnvelope>, Status> {
         let req: VoteRequest<u64> = decode(&request.into_inner().data)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let res = self.plane.raft().vote(req).await;
+        let res = self.raft.vote(req).await;
         let data = encode(&res).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::RaftEnvelope { data }))
     }
@@ -130,8 +147,7 @@ impl ControlService for ControlServer {
             snapshot: Box::new(Cursor::new(env.data)),
         };
         let res = self
-            .plane
-            .raft()
+            .raft
             .install_full_snapshot(env.vote, snapshot)
             .await;
         let data = encode(&res).map_err(|e| Status::internal(e.to_string()))?;
@@ -147,30 +163,32 @@ impl ControlService for ControlServer {
         &self,
         request: Request<proto::RaftEnvelope>,
     ) -> Result<Response<proto::RaftEnvelope>, Status> {
+        let Some(plane) = &self.plane else {
+            return Err(Status::unimplemented(
+                "ClientControl is not enabled on this control server (Raft-only)",
+            ));
+        };
         let req: ClientControlRequest = decode(&request.into_inner().data)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        let raft = self.plane.raft();
         let reply = match req {
-            ClientControlRequest::GetState => match raft.ensure_linearizable().await {
-                Ok(_) => ClientControlReply::State(Box::new(self.plane.local_state())),
+            ClientControlRequest::GetState => match self.raft.ensure_linearizable().await {
+                Ok(_) => ClientControlReply::State(Box::new(plane.local_state())),
                 Err(e) => ClientControlReply::Err(WireControlError::from(&map_check_leader(e))),
             },
-            ClientControlRequest::Version => {
-                ClientControlReply::Version(self.plane.local_state().epoch)
-            }
-            ClientControlRequest::Propose(change) => match raft.client_write(change).await {
+            ClientControlRequest::Version => ClientControlReply::Version(plane.local_state().epoch),
+            ClientControlRequest::Propose(change) => match self.raft.client_write(change).await {
                 Ok(r) => ClientControlReply::Committed(r.data.version),
                 Err(e) => ClientControlReply::Err(WireControlError::from(&map_client_write(e))),
             },
             ClientControlRequest::ChangeMembership(voters) => {
                 let set: BTreeSet<u64> = voters.iter().map(|n| n.0).collect();
-                match raft.change_membership(set, false).await {
+                match self.raft.change_membership(set, false).await {
                     Ok(r) => ClientControlReply::Committed(r.data.version),
                     Err(e) => ClientControlReply::Err(WireControlError::from(&map_client_write(e))),
                 }
             }
             ClientControlRequest::Leader => {
-                ClientControlReply::Leader(self.plane.current_leader().map(NodeId))
+                ClientControlReply::Leader(plane.current_leader().map(NodeId))
             }
         };
         let data = encode(&reply).map_err(|e| Status::internal(e.to_string()))?;

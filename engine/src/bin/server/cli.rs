@@ -196,4 +196,15 @@ pub(crate) struct Cli {
     /// stories.
     #[arg(long)]
     pub(crate) cluster_token: Option<String>,
+
+    /// Durable control-plane quorum endpoint(s) for coordinator mode (ADR-083) — repeatable, the
+    /// `controlserver` `ControlService` URLs (e.g. `--control-endpoint https://control0:50061`).
+    /// When set, the coordinator attaches its cluster-state control plane to the quorum (so
+    /// membership / assignment / resize decisions are durable + HA across coordinator restarts)
+    /// instead of the default in-memory backend. It is a THIN CLIENT — the coordinator does not
+    /// join consensus, staying stateless. Requires `--shard-endpoint` (remote mode) and a
+    /// `--features distributed` build; rides the same mesh security
+    /// (`--grpc-tls-ca`/`--grpc-tls-domain`/`--cluster-token`) as the shard links.
+    #[arg(long)]
+    pub(crate) control_endpoint: Vec<String>,
 }

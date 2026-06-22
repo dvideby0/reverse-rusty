@@ -189,10 +189,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let serves_tls = server_tls.is_some();
-    let server = ControlServer::new(Arc::clone(&plane)).with_security(ServerSecurity {
-        tls: server_tls,
-        token,
-    });
+    // Attach the client plane (ADR-083) so the coordinator's `RemoteControlPlane` can read/propose
+    // against this node via `ClientControl`; `plane.raft()` is the same node's Raft handle.
+    let server = ControlServer::new(plane.raft())
+        .with_client_plane(Arc::clone(&plane))
+        .with_security(ServerSecurity {
+            tls: server_tls,
+            token,
+        });
     let serve = rt.spawn(server.serve(addr));
 
     if bootstrap {
