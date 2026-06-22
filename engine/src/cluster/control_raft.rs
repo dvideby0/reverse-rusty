@@ -184,7 +184,9 @@ impl ControlPlane for RaftControlPlane {
 
 /// Map a `client_write` / `change_membership` error onto [`ControlError`]; `ForwardToLeader` is
 /// preserved 1:1 (the variant ADR-037 baked in so this backend changes no call site).
-fn map_client_write(e: RaftError<u64, ClientWriteError<u64, BasicNode>>) -> ControlError {
+pub(crate) fn map_client_write(
+    e: RaftError<u64, ClientWriteError<u64, BasicNode>>,
+) -> ControlError {
     match e {
         RaftError::APIError(ClientWriteError::ForwardToLeader(f)) => {
             ControlError::ForwardToLeader {
@@ -200,7 +202,9 @@ fn map_client_write(e: RaftError<u64, ClientWriteError<u64, BasicNode>>) -> Cont
 }
 
 /// Map an `ensure_linearizable` error onto [`ControlError`] (`ForwardToLeader` / `NoQuorum`).
-fn map_check_leader(e: RaftError<u64, CheckIsLeaderError<u64, BasicNode>>) -> ControlError {
+pub(crate) fn map_check_leader(
+    e: RaftError<u64, CheckIsLeaderError<u64, BasicNode>>,
+) -> ControlError {
     match e {
         RaftError::APIError(CheckIsLeaderError::ForwardToLeader(f)) => {
             ControlError::ForwardToLeader {

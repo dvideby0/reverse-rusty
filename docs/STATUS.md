@@ -122,7 +122,8 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   translog, no-quiesce peer recovery, durable self-restart (ADR-039); retention leases + finalize
   (ADR-040) with lease TTL reaping (ADR-048).
 - **openraft control plane** — gRPC `ControlService`, survives leader kill (ADR-038); durable Raft
-  log + restart recovery (ADR-041).
+  log + restart recovery (ADR-041); coordinator-facing `ClientControl` op + a thin stateless
+  `RemoteControlPlane` client (`server --control-endpoint`, ADR-083 — off the matching hot path).
 - **Live data-moving handoff** — swappable shard backing (ADR-043); peer-recover → fence → drain →
   flip under concurrent writes (ADR-044); auto-unfence-on-abort + autoscaler-driven (ADR-048).
 - **Partial-apply repair** — typed `PartiallyApplied` + live `resync` (ADR-047).
@@ -169,8 +170,10 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   in-process / on localhost / in the containerized harness, but the Distributed-v1 graduation
   (ADR-065) is incomplete — one open criterion: the ≥20M scale proof (deployment packaging +
   operations runbook shipped, ADR-081; replicate-broad-to-all + the cluster class-D lane, ADR-080;
-  backup/restore, ADR-079). The deployed coordinator runs an in-memory control plane — the durable
-  `controlserver` quorum is shippable but not yet consulted for routing (ADR-081 deferral).
+  backup/restore, ADR-079). The coordinator can attach to the durable `controlserver` quorum via
+  `--control-endpoint` (ADR-083 — the cluster-state document becomes durable + HA across coordinator
+  restarts), though it still routes by its `--shard-endpoint` list rather than the committed assignments
+  (the default `compose.cluster.yml` leaves the coordinator unwired — opt in with the flag).
   Mesh TLS + token auth are
   **opt-in** (ADR-071) — enable both outside a trusted network. Remote-cluster vocabulary is
   deploy-time configuration, not live-shipped (decided, ADR-076).

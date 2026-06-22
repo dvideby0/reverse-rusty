@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::cluster::allocator;
 use crate::cluster::control::{
-    ClusterState, ClusterStateChange, NodeDescriptor, NodeId, ShardAssignment,
+    ClusterState, ClusterStateChange, ControlPlane, NodeDescriptor, NodeId, ShardAssignment,
 };
 use crate::cluster::shard::ShardError;
 use crate::config::EngineConfig;
@@ -15,6 +15,20 @@ use crate::events::EngineEvent;
 use super::{shard_dir, ClusterEngine, ClusterObserver};
 
 impl ClusterEngine {
+    /// Replace the control-plane backend (ADR-083), returning `self` for assembly-time chaining.
+    /// The default backend is the dependency-free [`InMemoryControlPlane`](crate::cluster::control::InMemoryControlPlane);
+    /// the coordinator-mode server swaps in a [`RemoteControlPlane`](crate::cluster::RemoteControlPlane)
+    /// over a durable openraft quorum here. Safe as a post-construction swap because the control
+    /// plane is read only at assembly/admin time, NEVER on the per-title matching hot path — so it
+    /// cannot affect a percolate's result (zero false-negative risk). The new backend must already
+    /// hold a document consistent with this cluster's ring (`num_shards`/`vnodes`) + dict
+    /// fingerprint; the coordinator seeds the quorum with those at deploy time.
+    #[must_use]
+    pub fn with_control_plane(mut self, control: Box<dyn ControlPlane>) -> Self {
+        self.control = control;
+        self
+    }
+
     /// A snapshot of the committed cluster-state document (membership + shard→node map +
     /// ring params + feature-model version + epoch — ADR-037), read from the control plane.
     /// An owned clone, so the caller holds a stable view. Distinct from [`Self::epoch`]

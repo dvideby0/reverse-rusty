@@ -39,11 +39,15 @@ mod control_server;
 #[cfg(feature = "distributed")]
 mod control_store;
 #[cfg(feature = "distributed")]
+mod control_wire;
+#[cfg(feature = "distributed")]
 mod handoff;
 #[cfg(feature = "distributed")]
 mod proto;
 #[cfg(feature = "distributed")]
 mod remote;
+#[cfg(feature = "distributed")]
+mod remote_control;
 #[cfg(feature = "distributed")]
 mod security;
 #[cfg(feature = "distributed")]
@@ -71,6 +75,8 @@ pub use control_server::ControlServer;
 pub use coordinator::ShardGroup;
 #[cfg(feature = "distributed")]
 pub use remote::RemoteShard;
+#[cfg(feature = "distributed")]
+pub use remote_control::RemoteControlPlane;
 #[cfg(feature = "distributed")]
 pub use security::{
     resolve_mesh_token, ClientSecurity, ServerSecurity, TlsClientConfig, TlsServerIdentity,

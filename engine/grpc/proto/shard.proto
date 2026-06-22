@@ -337,6 +337,11 @@ service ControlService {
   rpc AppendEntries (RaftEnvelope) returns (RaftEnvelope);
   rpc Vote          (RaftEnvelope) returns (RaftEnvelope);
   rpc Snapshot      (RaftEnvelope) returns (RaftEnvelope);
+  // Client-facing control-plane op (ADR-083): a coordinator's `RemoteControlPlane` calls this to
+  // read/propose against the quorum, instead of joining consensus. Same opaque-envelope pattern as
+  // the Raft RPCs above — `data` is a serde-encoded ClientControlRequest in, ClientControlReply out
+  // (incl. a ForwardToLeader redirect) — so the engine owns the schema and the wire is a byte pipe.
+  rpc ClientControl (RaftEnvelope) returns (RaftEnvelope);
 }
 
 // One serialized openraft message (request on the way in, response on the way out). The encoding

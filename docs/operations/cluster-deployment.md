@@ -245,14 +245,19 @@ unreachable endpoint.
 
 ## 11. Not covered in v1 (see ADR-081)
 
-- **Control-plane↔coordinator wiring** — the coordinator runs an in-memory control plane; the durable
-  `controlserver` quorum is present but not yet consulted for routing (the follow-on is a
-  `--control-endpoint` flag attaching the coordinator's `ControlPlane` to a `RaftControlPlane` client).
-  The bootstrap control node now advertises a routable self-URL via `--advertise-url` (ADR-082) rather
-  than the undialable wildcard bind, so a clean multi-node quorum forms once the wiring lands; until
-  then the quorum is durable but idle. (`--advertise-url` is committed at the *first* bootstrap only —
-  Raft `initialize` is idempotent — so an existing deployment whose quorum already bootstrapped the
-  wildcard URL must reset its idle `controlN-data` volumes to adopt the new URL.)
+- **Control-plane↔coordinator wiring (ADR-083) — now available.** Pass `--control-endpoint <URL>` to the
+  coordinator (e.g. `--control-endpoint https://control0:50061`) to attach its cluster-state control
+  plane to the durable `controlserver` quorum as a **thin client** (the coordinator does NOT join
+  consensus — it stays stateless). Membership / assignment / resize decisions then commit through the
+  quorum (durable + HA across coordinator restarts) instead of the in-memory backend; absent the flag,
+  the in-memory backend is used (byte-identical). The bootstrap control node must advertise a routable
+  self-URL via `--advertise-url` (ADR-082), committed at the *first* bootstrap only (Raft `initialize`
+  is idempotent — an existing deployment whose quorum already bootstrapped a wildcard URL resets its
+  idle `controlN-data` volumes to adopt the new one). **Still out of scope:** the coordinator routes by
+  its `--shard-endpoint` list, NOT by the committed shard→node assignments (membership-driven address
+  resolution is a separate follow-on); and the control connect uses the *first* endpoint then follows
+  `ForwardToLeader` (multi-endpoint failover is a follow-on). The default `compose.cluster.yml` leaves
+  the coordinator unwired (control plane durable but idle) — add the flag to opt in.
 - **Kubernetes manifests / Helm** — deferred; the deployment unit is Compose at v1. The shape is sketched
   in ADR-081 (StatefulSets for shards/control, a Deployment for the stateless coordinator).
 - **Online / cross-process resize** — `/_cluster/resize` is in-process only; the remote topology scales
