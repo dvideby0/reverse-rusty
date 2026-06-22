@@ -94,6 +94,7 @@ services:
     networks: [rrmesh]
     command: >
       controlserver 0 0.0.0.0:50061 --data-dir /data --bootstrap
+      --advertise-url https://control0:50061
       --peer 1=https://control1:50061 --peer 2=https://control2:50061
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     environment:
