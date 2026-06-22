@@ -343,7 +343,7 @@ impl RemoteShard {
 ///
 /// `Handle::try_current` only DETECTS the caller's context/flavor; the future is always driven
 /// on the passed `handle` (the shard's runtime), which may or may not be the current one.
-fn block_on_in_context<F>(handle: &Handle, fut: F) -> F::Output
+pub(crate) fn block_on_in_context<F>(handle: &Handle, fut: F) -> F::Output
 where
     F: Future + Send,
     F::Output: Send,

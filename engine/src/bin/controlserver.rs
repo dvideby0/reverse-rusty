@@ -24,6 +24,7 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use reverse_rusty::cluster::{
@@ -167,7 +168,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `--data-dir` makes this manager node DURABLE (ADR-041): it persists its Raft log/vote/
     // committed/snapshot and resumes its committed cluster-state document on restart. Without it the
     // node keeps the in-memory store (ADR-038) and starts fresh each launch.
-    let plane = start_grpc_node_with_security(
+    // `Arc` so the gRPC `ControlServer` (which serves the client-facing `ClientControl` op, ADR-083)
+    // and the bootstrap `initialize` below both hold the same plane.
+    let plane = Arc::new(start_grpc_node_with_security(
         node_id,
         shards,
         vnodes,
@@ -178,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tls: client_tls,
             token: token.clone(),
         },
-    )?;
+    )?);
     if let Some(dir) = &data_dir {
         println!(
             "controlserver: node {node_id} DURABLE (raft state under {})",
@@ -186,7 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let serves_tls = server_tls.is_some();
-    let server = ControlServer::new(plane.raft()).with_security(ServerSecurity {
+    let server = ControlServer::new(Arc::clone(&plane)).with_security(ServerSecurity {
         tls: server_tls,
         token,
     });
