@@ -576,8 +576,8 @@ fn connect_remote_cluster(
     let cluster = match control_endpoints.first() {
         Some(endpoint) => {
             info!(endpoint = %endpoint, "attaching coordinator to durable control-plane quorum");
-            let rcp = RemoteControlPlane::connect(endpoint, handle.clone(), security)
-                .map_err(|e| {
+            let rcp =
+                RemoteControlPlane::connect(endpoint, handle.clone(), security).map_err(|e| {
                     ShardError::ControlPlane(format!("connect control plane {endpoint}: {e}"))
                 })?;
             cluster.with_control_plane(Box::new(rcp))

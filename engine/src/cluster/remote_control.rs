@@ -75,7 +75,8 @@ impl RemoteControlPlane {
         client: &ControlServiceClient<MeshChannel>,
         req: &ClientControlRequest,
     ) -> Result<ClientControlReply, ControlError> {
-        let data = encode(req).map_err(|e| ControlError::Backend(format!("encode request: {e}")))?;
+        let data =
+            encode(req).map_err(|e| ControlError::Backend(format!("encode request: {e}")))?;
         let mut client = client.clone();
         let env = block_on_in_context(&self.handle, async move {
             client.client_control(proto::RaftEnvelope { data }).await
@@ -88,8 +89,8 @@ impl RemoteControlPlane {
     /// Call the control plane, following a single `ForwardToLeader` redirect: if the contacted node
     /// is a follower it returns the leader's address, and we redial + retry there once. A second
     /// forward (e.g. an election in flight) surfaces as the error rather than looping.
-    fn call(&self, req: ClientControlRequest) -> Result<ClientControlReply, ControlError> {
-        let reply = self.call_once(&self.client, &req)?;
+    fn call(&self, req: &ClientControlRequest) -> Result<ClientControlReply, ControlError> {
+        let reply = self.call_once(&self.client, req)?;
         if let ClientControlReply::Err(WireControlError::ForwardToLeader {
             addr: Some(leader_addr),
             ..
@@ -100,7 +101,7 @@ impl RemoteControlPlane {
                 connect_control_mesh(leader_addr, &self.security),
             )
             .map_err(|e| ControlError::Backend(format!("redial leader {leader_addr}: {e}")))?;
-            return self.call_once(&leader, &req);
+            return self.call_once(&leader, req);
         }
         Ok(reply)
     }
@@ -115,7 +116,7 @@ fn unexpected(op: &str) -> ControlError {
 
 impl ControlPlane for RemoteControlPlane {
     fn cluster_state(&self) -> Result<Arc<ClusterState>, ControlError> {
-        match self.call(ClientControlRequest::GetState)? {
+        match self.call(&ClientControlRequest::GetState)? {
             ClientControlReply::State(s) => Ok(Arc::new(*s)),
             ClientControlReply::Err(e) => Err(e.into()),
             _ => Err(unexpected("GetState")),
@@ -123,7 +124,7 @@ impl ControlPlane for RemoteControlPlane {
     }
 
     fn version(&self) -> Result<StateVersion, ControlError> {
-        match self.call(ClientControlRequest::Version)? {
+        match self.call(&ClientControlRequest::Version)? {
             ClientControlReply::Version(v) => Ok(StateVersion(v)),
             ClientControlReply::Err(e) => Err(e.into()),
             _ => Err(unexpected("Version")),
@@ -131,7 +132,7 @@ impl ControlPlane for RemoteControlPlane {
     }
 
     fn propose(&self, change: ClusterStateChange) -> Result<StateVersion, ControlError> {
-        match self.call(ClientControlRequest::Propose(change))? {
+        match self.call(&ClientControlRequest::Propose(change))? {
             ClientControlReply::Committed(v) => Ok(StateVersion(v)),
             ClientControlReply::Err(e) => Err(e.into()),
             _ => Err(unexpected("Propose")),
@@ -139,7 +140,7 @@ impl ControlPlane for RemoteControlPlane {
     }
 
     fn change_membership(&self, voters: Vec<NodeId>) -> Result<StateVersion, ControlError> {
-        match self.call(ClientControlRequest::ChangeMembership(voters))? {
+        match self.call(&ClientControlRequest::ChangeMembership(voters))? {
             ClientControlReply::Committed(v) => Ok(StateVersion(v)),
             ClientControlReply::Err(e) => Err(e.into()),
             _ => Err(unexpected("ChangeMembership")),
@@ -147,7 +148,7 @@ impl ControlPlane for RemoteControlPlane {
     }
 
     fn leader(&self) -> Result<Option<NodeId>, ControlError> {
-        match self.call(ClientControlRequest::Leader)? {
+        match self.call(&ClientControlRequest::Leader)? {
             ClientControlReply::Leader(l) => Ok(l),
             ClientControlReply::Err(e) => Err(e.into()),
             _ => Err(unexpected("Leader")),

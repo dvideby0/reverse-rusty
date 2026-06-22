@@ -146,10 +146,7 @@ impl ControlService for ControlServer {
             meta: env.meta,
             snapshot: Box::new(Cursor::new(env.data)),
         };
-        let res = self
-            .raft
-            .install_full_snapshot(env.vote, snapshot)
-            .await;
+        let res = self.raft.install_full_snapshot(env.vote, snapshot).await;
         let data = encode(&res).map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::RaftEnvelope { data }))
     }

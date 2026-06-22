@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use super::control::{ClusterState, ClusterStateChange, ControlError, NodeId};
 
 /// One client-facing control-plane operation — the [`ControlPlane`](super::control::ControlPlane)
-/// trait, projected onto the wire. `distributed`-gated like the rest of the gRPC transport. `Clone`
-/// so the client can replay the request once against the leader after a `ForwardToLeader`.
-#[derive(Clone, Serialize, Deserialize)]
+/// trait, projected onto the wire. `distributed`-gated like the rest of the gRPC transport. The
+/// client borrows it across the original call + a single `ForwardToLeader` retry (no clone needed).
+#[derive(Serialize, Deserialize)]
 pub(crate) enum ClientControlRequest {
     /// Linearizable read of the committed cluster-state document.
     GetState,
