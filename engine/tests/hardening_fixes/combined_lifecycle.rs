@@ -65,8 +65,15 @@ fn full_lifecycle_vocab_delete_persist_compact() {
         "not all segments+memtable should be stale — new ones are fresh"
     );
 
-    // Phase 6: compact everything
-    engine.compact_all();
+    // Phase 6: compact everything. Assert the result rather than discarding it:
+    // with ≥2 base segments this merge is guaranteed to run, so `None` would mean a
+    // durability write failed (a `DurabilityFailure` event was emitted). Fail loud
+    // with that cause instead of letting the staleness assertion below report a
+    // misleading symptom.
+    engine.compact_all().expect(
+        "compaction must run with ≥2 base segments; None ⇒ a DurabilityFailure during \
+         the segment/manifest write",
+    );
     // Merged segment inherits min epoch — still stale
     assert!(engine.has_stale_segments());
 
