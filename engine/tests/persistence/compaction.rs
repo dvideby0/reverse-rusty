@@ -40,8 +40,16 @@ fn compaction_with_mmap_segments() {
     let title = "1986 Fleer Michael Jordan Rookie Card PSA 10";
     let before = match_ids(&engine, title);
 
-    // Compact
-    engine.compact_all();
+    // Compact. Assert the result instead of discarding it: with two base segments
+    // this merge is contract-guaranteed, so `None` means a durability write (the
+    // merged segment or the manifest commit) failed and emitted a `DurabilityFailure`
+    // event. Surfacing that here turns a swallowed I/O error into a clear failure
+    // rather than the misleading "segment count" mismatch it used to cause under load.
+    let report = engine.compact_all().expect(
+        "compaction must merge the 2 base segments; None ⇒ a DurabilityFailure during \
+         the segment/manifest write",
+    );
+    assert_eq!(report.segments_merged, 2);
     assert_eq!(engine.num_segments(), 2); // 1 base + memtable
 
     // Verify matches unchanged
