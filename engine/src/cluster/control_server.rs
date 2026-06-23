@@ -42,6 +42,10 @@ pub struct ControlServer {
     /// Mesh security (ADR-071): TLS identity + expected cluster token. Default (none) ⇒ the
     /// historical plaintext/open behavior.
     security: ServerSecurity,
+    /// `Some` ⇒ also serve the standard `grpc.health.v1.Health` service on this SEPARATE
+    /// plaintext port for Kubernetes probes (ADR-084). `None` (default) ⇒ no second
+    /// listener, byte-identical to the historical single-port behavior.
+    health_addr: Option<SocketAddr>,
 }
 
 impl ControlServer {
@@ -52,6 +56,7 @@ impl ControlServer {
             raft,
             plane: None,
             security: ServerSecurity::default(),
+            health_addr: None,
         }
     }
 
@@ -72,6 +77,17 @@ impl ControlServer {
         self
     }
 
+    /// Also serve the standard `grpc.health.v1.Health` service on `addr` — a SEPARATE
+    /// plaintext port for Kubernetes liveness/readiness probes (ADR-084). Liveness
+    /// (`Check("")`) is SERVING once the gRPC server is up; readiness (`Check("ready")`)
+    /// tracks whether this raft node currently sees a leader (consensus is live + this node
+    /// participates). Unset ⇒ no second listener, byte-identical to the historical behavior.
+    #[must_use]
+    pub fn with_health_addr(mut self, addr: SocketAddr) -> Self {
+        self.health_addr = Some(addr);
+        self
+    }
+
     /// Build the tonic server (TLS when configured) + token-verified service — one assembly shared
     /// by every `serve*` flavor (mirrors `ShardServer`).
     fn secured_router(self) -> Result<tonic::transport::server::Router, tonic::transport::Error> {
@@ -84,9 +100,24 @@ impl ControlServer {
         Ok(builder.add_service(ControlServiceServer::with_interceptor(self, verify)))
     }
 
-    /// Serve `ControlService` on `addr` until the returned future completes.
+    /// Serve `ControlService` on `addr` until the returned future completes. When a
+    /// `--health-addr` was configured ([`with_health_addr`](Self::with_health_addr)), the
+    /// plaintext health service runs concurrently on its own port and a watcher tracks
+    /// readiness (this node sees a leader); the two servers are joined fail-loud (ADR-084).
     pub async fn serve(self, addr: SocketAddr) -> Result<(), tonic::transport::Error> {
-        self.secured_router()?.serve(addr).await
+        let Some(health_addr) = self.health_addr else {
+            return self.secured_router()?.serve(addr).await;
+        };
+        // Clone the (cheap, `Clone`) raft handle BEFORE `secured_router` consumes `self`;
+        // the watcher reads its metrics — no handler is touched.
+        let reporter = super::health::HealthReporter::serving();
+        let raft = self.raft.clone();
+        super::health::spawn_readiness_watcher(reporter.clone(), move || {
+            raft.metrics().borrow().current_leader.is_some()
+        });
+        let data = self.secured_router()?.serve(addr);
+        let health = super::health::serve_health(health_addr, reporter);
+        tokio::try_join!(data, health).map(|_| ())
     }
 
     /// Serve with a graceful-shutdown `signal` future — used by tests to stop cleanly.

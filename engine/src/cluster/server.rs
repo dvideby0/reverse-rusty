@@ -105,8 +105,9 @@ pub struct ShardServer {
     /// When set, `AdoptDict` builds a durable (segments-only) shard rather than an in-memory one.
     data_dir: Option<PathBuf>,
     /// `None` until a dict is adopted; reads against a pending server return
-    /// `failed_precondition`.
-    state: ArcSwapOption<ServerState>,
+    /// `failed_precondition`. Wrapped in an `Arc` so the readiness watcher (ADR-084) can
+    /// share the same cell and observe dict-adoption without touching any RPC handler.
+    state: Arc<ArcSwapOption<ServerState>>,
     /// The fence generation (ADR-044, step 6b): `0` ⇒ not fenced; `> 0` ⇒ this node has been
     /// demoted as the owner of its shard at that generation, so data-mutating writes
     /// (`insert`/`delete`/`ingest`) return `failed_precondition`. Reads + the recovery RPCs stay
@@ -121,6 +122,10 @@ pub struct ShardServer {
     /// dials OUT (the `RecoverFrom` handler's pull from a peer source). Default (none) ⇒
     /// plaintext, the historical behavior.
     client_security: ClientSecurity,
+    /// `Some` ⇒ also serve the standard `grpc.health.v1.Health` service on this SEPARATE
+    /// plaintext port for Kubernetes liveness/readiness probes (ADR-084). `None` (default)
+    /// ⇒ no second listener — byte-identical to the historical single-port behavior.
+    health_addr: Option<SocketAddr>,
 }
 
 impl ShardServer {
@@ -137,11 +142,11 @@ impl ShardServer {
             Arc::clone(&tag_dict),
             config.clone(),
         );
-        let state = ArcSwapOption::from(Some(Arc::new(ServerState {
+        let state = Arc::new(ArcSwapOption::from(Some(Arc::new(ServerState {
             dict,
             tag_dict,
             shard,
-        })));
+        }))));
         ShardServer {
             norm,
             config,
@@ -150,6 +155,7 @@ impl ShardServer {
             fenced_at_generation: AtomicU64::new(0),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
+            health_addr: None,
         }
     }
 
@@ -162,10 +168,11 @@ impl ShardServer {
             norm,
             config,
             data_dir: None,
-            state: ArcSwapOption::from(None),
+            state: Arc::new(ArcSwapOption::from(None)),
             fenced_at_generation: AtomicU64::new(0),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
+            health_addr: None,
         }
     }
 
@@ -216,11 +223,11 @@ impl ShardServer {
             Arc::clone(&tag_dict),
             sc,
         )?;
-        let state = ArcSwapOption::from(Some(Arc::new(ServerState {
+        let state = Arc::new(ArcSwapOption::from(Some(Arc::new(ServerState {
             dict,
             tag_dict,
             shard,
-        })));
+        }))));
         Ok(ShardServer {
             norm,
             config,
@@ -229,6 +236,7 @@ impl ShardServer {
             fenced_at_generation: AtomicU64::new(0),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
+            health_addr: None,
         })
     }
 
@@ -241,10 +249,11 @@ impl ShardServer {
             norm,
             config,
             data_dir: Some(data_dir),
-            state: ArcSwapOption::from(None),
+            state: Arc::new(ArcSwapOption::from(None)),
             fenced_at_generation: AtomicU64::new(0),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
+            health_addr: None,
         }
     }
 
@@ -266,11 +275,11 @@ impl ShardServer {
             Arc::clone(&tag_dict),
             sc,
         )?;
-        let state = ArcSwapOption::from(Some(Arc::new(ServerState {
+        let state = Arc::new(ArcSwapOption::from(Some(Arc::new(ServerState {
             dict,
             tag_dict,
             shard,
-        })));
+        }))));
         Ok(ShardServer {
             norm,
             config,
@@ -279,6 +288,7 @@ impl ShardServer {
             fenced_at_generation: AtomicU64::new(0),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
+            health_addr: None,
         })
     }
 
@@ -355,6 +365,17 @@ impl ShardServer {
         self
     }
 
+    /// Also serve the standard `grpc.health.v1.Health` service on `addr` — a SEPARATE
+    /// plaintext port for Kubernetes liveness/readiness probes (ADR-084). Liveness
+    /// (`Check("")`) is SERVING once the gRPC server is up; readiness (`Check("ready")`)
+    /// tracks dict-adoption — a `--pending` shard is live-but-not-ready until `AdoptDict`.
+    /// Unset ⇒ no second listener, byte-identical to the historical single-port behavior.
+    #[must_use]
+    pub fn with_health_addr(mut self, addr: SocketAddr) -> Self {
+        self.health_addr = Some(addr);
+        self
+    }
+
     /// Build the tonic server (TLS applied when configured) + the token-verified
     /// service — one assembly shared by every `serve*` flavor so they cannot drift.
     #[allow(clippy::type_complexity)]
@@ -370,9 +391,25 @@ impl ShardServer {
         Ok(builder.add_service(ShardServiceServer::with_interceptor(self, verify)))
     }
 
-    /// Serve `ShardService` on `addr` until the returned future completes.
+    /// Serve `ShardService` on `addr` until the returned future completes. When a
+    /// `--health-addr` was configured ([`with_health_addr`](Self::with_health_addr)), the
+    /// plaintext health service runs concurrently on its own port and a watcher tracks
+    /// readiness (dict-adoption); the two servers are joined fail-loud (ADR-084).
     pub async fn serve(self, addr: SocketAddr) -> Result<(), tonic::transport::Error> {
-        self.secured_router()?.serve(addr).await
+        let Some(health_addr) = self.health_addr else {
+            return self.secured_router()?.serve(addr).await;
+        };
+        // Capture a shared handle to the readiness cell BEFORE `secured_router` consumes
+        // `self`. The watcher flips `Check("ready")` to SERVING once a dict is adopted —
+        // no RPC handler is touched (the `Arc<ArcSwapOption>` is the shared seam).
+        let reporter = super::health::HealthReporter::serving();
+        let state = Arc::clone(&self.state);
+        super::health::spawn_readiness_watcher(reporter.clone(), move || {
+            state.load_full().is_some()
+        });
+        let data = self.secured_router()?.serve(addr);
+        let health = super::health::serve_health(health_addr, reporter);
+        tokio::try_join!(data, health).map(|_| ())
     }
 
     /// Serve with a graceful-shutdown `signal` future — used by tests to stop cleanly.

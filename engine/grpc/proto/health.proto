@@ -1,0 +1,33 @@
+// The standard gRPC health-checking service (grpc.health.v1), vendored verbatim so
+// the deployable shard/control servers can expose a native health surface for
+// Kubernetes `grpc` liveness/readiness probes (ADR-084) — WITHOUT adding the
+// `tonic-health` crate (lean-deps, ADR-028; this codegen already runs via protox).
+//
+// Compiled by grpc/build.rs alongside shard.proto into the same OUT_DIR and pulled in
+// by grpc/src/lib.rs as a namespaced `health` module. Only `Check` (unary) is served;
+// `Watch` returns `unimplemented` (Kubernetes + grpc_health_probe call `Check`).
+//
+// Upstream: https://github.com/grpc/grpc/blob/master/src/proto/grpc/health/v1/health.proto
+syntax = "proto3";
+
+package grpc.health.v1;
+
+message HealthCheckRequest {
+  string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3; // Used only by the Watch method.
+  }
+  ServingStatus status = 1;
+}
+
+service Health {
+  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+
+  rpc Watch(HealthCheckRequest) returns (stream HealthCheckResponse);
+}

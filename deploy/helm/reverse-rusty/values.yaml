@@ -1,0 +1,112 @@
+# Reverse Rusty Helm values (ADR-084). Defaults encode the SAME secure production
+# posture as deploy/compose.cluster.yml: mesh TLS on, REST bearer auth required,
+# durable per-pod volumes, native gRPC health probes.
+#
+# REQUIRED before install (operator-provided, never templated — too sensitive):
+#   - a mesh TLS Secret (kubernetes.io/tls + a ca.crt key) named per `tls.secretName`
+#   - a cluster-token Secret (key RR_CLUSTER_TOKEN) named per `clusterToken.secretName`
+#   - a REST auth-token Secret (key RR_AUTH_TOKEN) named per `auth.secretName`
+# See docs/operations/kubernetes-deployment.md for the cert SANs + secret recipes.
+
+nameOverride: ""
+fullnameOverride: ""
+# In-cluster DNS domain (the suffix after `<svc>.<ns>.svc.`). Override for clusters not
+# using the default.
+clusterDomain: cluster.local
+
+image:
+  repository: reverse-rusty
+  tag: "" # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Number of shard StatefulSet replicas (the data plane). Each shard is an
+# independent position; entity-anchor sharding fans a read to ~2-5 shards, never all N.
+shardCount: 3
+# RF>1 (a replica per shard position) is NOT modeled by this chart at v1 — it needs a
+# replica StatefulSet per position + the coordinator's --replication-factor. Documented
+# in the runbook; left at 1 here so the value isn't a silent no-op.
+replicationFactor: 1
+
+ports:
+  shardGrpc: 50051
+  shardHealth: 50052 # plaintext gRPC health (k8s probes, ADR-084)
+  controlGrpc: 50061
+  controlHealth: 50062
+  coordinatorHttp: 9200
+
+# Durable openraft control plane (ADR-038/041). When enabled AND wireToCoordinator,
+# the coordinator attaches to the quorum via --control-endpoint (ADR-083), so cluster
+# state survives a coordinator restart — the reason k8s was unblocked (vs ADR-081's
+# idle quorum). Disable for the stateless-coordinator topology (re-derives placement
+# from the frozen dict + ring on every start).
+controlPlane:
+  enabled: true
+  replicas: 3
+  wireToCoordinator: true
+
+coordinator:
+  replicas: 1 # stateless ⇒ safe to scale horizontally behind the Service
+  # Broad (class-C) queries match by default when true; also a per-request flag in the
+  # _search body, so leave off unless every request should include broad.
+  includeBroad: false
+  # Accept negation-only (class-D) queries (e.g. `-reprint`). The coordinator is the
+  # sole gate; remote shards accept whatever it places (no per-shard flag, ADR-080/082).
+  acceptClassD: false
+  service:
+    type: ClusterIP
+    annotations: {}
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    host: ""
+    tls: [] # [{secretName: rr-rest-tls, hosts: [rr.example.com]}]
+
+# Mesh TLS for the gRPC transports (ADR-071). The Secret is operator-provided
+# (cert-manager or deploy/gen-mesh-certs.sh adapted for pod FQDNs) — NEVER templated.
+# Disabling TLS makes the mesh plaintext (dev only); the cluster token then crosses
+# the wire in cleartext.
+tls:
+  enabled: true
+  secretName: reverse-rusty-mesh-tls
+  certFile: tls.crt
+  keyFile: tls.key
+  caFile: ca.crt
+
+# The mesh secret admitting a node to the cluster (ADR-071). Reference an existing
+# Secret; or set create=true + value for DEV ONLY (it lands in the release manifest).
+clusterToken:
+  secretName: reverse-rusty-cluster-token
+  secretKey: RR_CLUSTER_TOKEN
+  create: false
+  value: ""
+
+# The HTTP bearer gate on the coordinator's REST API (ADR-062). When enabled, the
+# server refuses to start on an empty token (fail-loud). Reference an existing Secret;
+# or create=true + value for DEV ONLY. Set enabled=false to run REST open on a trusted
+# network (the absent-var = auth-off path).
+auth:
+  enabled: true
+  secretName: reverse-rusty-auth-token
+  secretKey: RR_AUTH_TOKEN
+  create: false
+  value: ""
+
+# Per-pod durable volumes (--data-dir). Shards persist segments; control nodes persist
+# their Raft log/vote/committed/snapshot.
+persistence:
+  size: 10Gi
+  storageClass: "" # "" ⇒ the cluster's default StorageClass
+  accessModes:
+    - ReadWriteOnce
+
+# Resource requests/limits — set per workload in production (a 20M-shard needs real RAM).
+resources: {}
+
+# Scheduling controls applied to every workload.
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Spread shard pods across nodes by default (topologySpreadConstraints / podAntiAffinity
+# are left to the operator via `affinity`).

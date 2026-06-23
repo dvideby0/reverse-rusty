@@ -4,6 +4,11 @@
 //! Run: `cargo run --release --bin shardserver --features distributed -- [ADDR] [--pending]`
 //! (ADDR defaults to 127.0.0.1:50051).
 //!
+//! `--health-addr <ADDR>` (ADR-084) additionally serves the standard `grpc.health.v1.Health`
+//! service on a SEPARATE plaintext port for Kubernetes probes: liveness (`Check("")`) is
+//! SERVING once the gRPC server is up; readiness (`Check("ready")`) is NOT_SERVING until the
+//! node adopts a dict (a `--pending` shard is live-but-not-ready until `AdoptDict`).
+//!
 //! This is the single-node server building block. By default it stands up ONE shard over a
 //! self-contained synthetic corpus so the node serves something matchable. With `--pending`
 //! it starts **dict-less** — serving nothing until a coordinator ships its frozen dict via
@@ -39,11 +44,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tls_ca: Option<PathBuf> = None;
     let mut tls_domain: Option<String> = None;
     let mut token_flag: Option<String> = None;
+    // Optional SEPARATE plaintext port for the gRPC health service (k8s probes, ADR-084).
+    let mut health_addr: Option<SocketAddr> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--data-dir" => {
                 data_dir = args.get(i + 1).map(PathBuf::from);
+                i += 1;
+            }
+            "--health-addr" => {
+                if let Some(v) = args.get(i + 1) {
+                    health_addr = Some(v.parse().map_err(|e| format!("--health-addr {v}: {e}"))?);
+                }
                 i += 1;
             }
             "--tls-cert" => {
@@ -97,13 +110,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let durable = if data_dir.is_some() { ", DURABLE" } else { "" };
             format!("PENDING{durable} — awaiting AdoptDict")
         };
+        if let Some(ha) = health_addr {
+            println!("shardserver: health (grpc.health.v1) on {ha} (plaintext, k8s probes)");
+        }
         println!("shardserver: serving ShardService on {addr} ({state})");
-        rt.block_on(
-            server
-                .with_security(security)
-                .with_client_security(client_security)
-                .serve(addr),
-        )?;
+        rt.block_on(configure(server, security, client_security, health_addr).serve(addr))?;
         return Ok(());
     }
 
@@ -141,17 +152,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => ShardServer::new(Arc::clone(&norm), Arc::new(dict), EngineConfig::default()),
     };
     server.ingest_dsl(&queries);
+    if let Some(ha) = health_addr {
+        println!("shardserver: health (grpc.health.v1) on {ha} (plaintext, k8s probes)");
+    }
     println!(
         "shardserver: serving ShardService on {addr} ({} queries loaded)",
         queries.len()
     );
-    rt.block_on(
-        server
-            .with_security(security)
-            .with_client_security(client_security)
-            .serve(addr),
-    )?;
+    rt.block_on(configure(server, security, client_security, health_addr).serve(addr))?;
     Ok(())
+}
+
+/// Apply mesh security (ADR-071) + the optional plaintext health port (ADR-084) to a
+/// built server — shared by the pending and demo serve paths so they cannot drift.
+fn configure(
+    server: ShardServer,
+    security: ServerSecurity,
+    client_security: ClientSecurity,
+    health_addr: Option<SocketAddr>,
+) -> ShardServer {
+    let server = server
+        .with_security(security)
+        .with_client_security(client_security);
+    match health_addr {
+        Some(addr) => server.with_health_addr(addr),
+        None => server,
+    }
 }
 
 /// Resolve the node's mesh security (ADR-071) from `--tls-cert`/`--tls-key` +

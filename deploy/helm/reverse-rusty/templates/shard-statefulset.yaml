@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "reverse-rusty.shardName" . }}
+  labels:
+    {{- include "reverse-rusty.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shard
+spec:
+  # Headless service for stable per-pod DNS (the coordinator dials each ordinal).
+  serviceName: {{ include "reverse-rusty.shardName" . }}
+  replicas: {{ .Values.shardCount }}
+  # Shards are independent positions — bring them up in parallel (no ordinal ordering).
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "reverse-rusty.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: shard
+  template:
+    metadata:
+      labels:
+        {{- include "reverse-rusty.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: shard
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # The image runs as uid/gid 10001 (deploy/Dockerfile); fsGroup makes the PVC
+      # group-writable so the durable --data-dir store doesn't EACCES.
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: shard
+          image: {{ include "reverse-rusty.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # --pending: dict-less until the coordinator's AdoptDict at connect (ADR-034).
+          # --data-dir: durable, so the node serves/accepts peer recovery (ADR-035/036).
+          # --health-addr: the plaintext gRPC health port for k8s probes (ADR-084).
+          args:
+            - shardserver
+            - 0.0.0.0:{{ .Values.ports.shardGrpc }}
+            - --pending
+            - --data-dir
+            - /data
+            - --health-addr
+            - 0.0.0.0:{{ .Values.ports.shardHealth }}
+            {{- if .Values.tls.enabled }}
+            - --tls-cert
+            - /certs/{{ .Values.tls.certFile }}
+            - --tls-key
+            - /certs/{{ .Values.tls.keyFile }}
+            - --tls-ca
+            - /certs/{{ .Values.tls.caFile }}
+            {{- end }}
+          env:
+            # Read by the bin via resolve_mesh_token — never a flag, so it stays out of
+            # `kubectl describe`-visible process args.
+            - name: RR_CLUSTER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clusterToken.secretName }}
+                  key: {{ .Values.clusterToken.secretKey }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.ports.shardGrpc }}
+            - name: health
+              containerPort: {{ .Values.ports.shardHealth }}
+          # Liveness = the gRPC server is up (overall ""); readiness = a dict is adopted
+          # ("ready") — a --pending shard is live-but-not-ready until AdoptDict (ADR-084).
+          livenessProbe:
+            grpc:
+              port: {{ .Values.ports.shardHealth }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            grpc:
+              port: {{ .Values.ports.shardHealth }}
+              service: ready
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if .Values.tls.enabled }}
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+            {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        {{- if .Values.tls.enabled }}
+        - name: certs
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}

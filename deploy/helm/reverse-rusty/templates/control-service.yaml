@@ -1,0 +1,21 @@
+{{- if .Values.controlPlane.enabled }}
+# Headless Service for stable control-plane pod DNS (peers + the coordinator dial each
+# ordinal). publishNotReadyAddresses so peers can reach a node before it has a leader.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reverse-rusty.controlName" . }}
+  labels:
+    {{- include "reverse-rusty.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "reverse-rusty.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+  ports:
+    - name: grpc
+      port: {{ .Values.ports.controlGrpc }}
+      targetPort: grpc
+{{- end }}

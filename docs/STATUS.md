@@ -169,8 +169,10 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
 - **Not yet a hardened multi-machine deployment.** The distributed layers are oracle-proven
   in-process / on localhost / in the containerized harness, but the Distributed-v1 graduation
   (ADR-065) is incomplete — one open criterion: the ≥20M scale proof (deployment packaging +
-  operations runbook shipped, ADR-081; replicate-broad-to-all + the cluster class-D lane, ADR-080;
-  backup/restore, ADR-079). The coordinator can attach to the durable `controlserver` quorum via
+  operations runbook shipped, ADR-081; Kubernetes/Helm chart + native gRPC health/readiness probes,
+  ADR-084; replicate-broad-to-all + the cluster class-D lane, ADR-080; backup/restore, ADR-079). The
+  shard + control gRPC servers now expose the standard `grpc.health.v1.Health` service on an opt-in
+  plaintext `--health-addr` port for k8s probes (ADR-084). The coordinator can attach to the durable `controlserver` quorum via
   `--control-endpoint` (ADR-083 — the cluster-state document becomes durable + HA across coordinator
   restarts), though it still routes by its `--shard-endpoint` list rather than the committed assignments
   (the default `compose.cluster.yml` leaves the coordinator unwired — opt in with the flag).

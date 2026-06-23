@@ -58,6 +58,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tls_ca: Option<PathBuf> = None;
     let mut tls_domain: Option<String> = None;
     let mut token_flag: Option<String> = None;
+    // Optional SEPARATE plaintext port for the gRPC health service (k8s probes, ADR-084).
+    let mut health_addr: Option<SocketAddr> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -86,6 +88,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--cluster-token" => {
                 token_flag = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--health-addr" => {
+                if let Some(v) = args.get(i + 1) {
+                    health_addr = Some(v.parse()?);
+                }
                 i += 1;
             }
             "--advertise-url" => {
@@ -130,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let node_id = node_id.ok_or(
         "usage: controlserver <NODE_ID> <BIND_ADDR> [--peer ID=URL ...] [--advertise-url URL] \
-         [--bootstrap]",
+         [--health-addr ADDR] [--bootstrap]",
     )?;
     let bind = bind.ok_or("missing BIND_ADDR")?;
     let addr: SocketAddr = bind.parse()?;
@@ -191,12 +199,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let serves_tls = server_tls.is_some();
     // Attach the client plane (ADR-083) so the coordinator's `RemoteControlPlane` can read/propose
     // against this node via `ClientControl`; `plane.raft()` is the same node's Raft handle.
-    let server = ControlServer::new(plane.raft())
+    let mut server = ControlServer::new(plane.raft())
         .with_client_plane(Arc::clone(&plane))
         .with_security(ServerSecurity {
             tls: server_tls,
             token,
         });
+    if let Some(ha) = health_addr {
+        server = server.with_health_addr(ha);
+        println!("controlserver: health (grpc.health.v1) on {ha} (plaintext, k8s probes)");
+    }
     let serve = rt.spawn(server.serve(addr));
 
     if bootstrap {

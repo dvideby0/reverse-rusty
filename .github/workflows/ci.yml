@@ -133,3 +133,41 @@ jobs:
       # teardown and see nothing.
       - name: Run the harness
         run: ./deploy/harness.sh --prebuilt engine/target/release
+
+  # The Helm chart (deploy/helm/reverse-rusty, ADR-084): lint + render across a value
+  # matrix + validate every rendered manifest against the real Kubernetes 1.29 schemas
+  # with kubeconform -strict (rejects unknown fields — catches a mistyped probe/field).
+  # This is the authoritative gate for the chart: it is not Rust, so it lives here rather
+  # than in check.sh, and renders with no cluster (daemon-independent, like the compose lint).
+  helm-chart:
+    name: helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install helm + kubeconform
+        run: |
+          set -euo pipefail
+          curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          sudo mv kubeconform /usr/local/bin/kubeconform
+          helm version --short && kubeconform -v
+
+      - name: helm lint
+        run: helm lint deploy/helm/reverse-rusty
+
+      - name: helm template + kubeconform (value matrix)
+        run: |
+          set -euo pipefail
+          validate() {
+            echo "== helm template $* =="
+            helm template rr deploy/helm/reverse-rusty -n rrns "$@" \
+              | kubeconform -strict -summary -kubernetes-version 1.29.0
+          }
+          validate
+          validate --set shardCount=5
+          validate --set controlPlane.enabled=false
+          validate --set tls.enabled=false --set auth.enabled=false
+          validate --set clusterToken.create=true --set clusterToken.value=x \
+                   --set auth.create=true --set auth.value=y
