@@ -402,13 +402,20 @@ fn vocab_change_keeps_always_candidates() {
 }
 
 fn tempdir() -> std::path::PathBuf {
+    // A process-wide counter guarantees uniqueness even when two of these tests call
+    // tempdir() concurrently under a coarse system clock — `as_nanos()` alone can
+    // collide there, and a shared data dir corrupts both tests' segments/manifest
+    // (the "0 recovered" flake the parallel `--test oracle` run surfaced).
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
-        "rr-class-d-{}-{}",
+        "rr-class-d-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
-            .as_nanos()
+            .as_nanos(),
+        SEQ.fetch_add(1, Ordering::Relaxed),
     ));
     std::fs::create_dir_all(&dir).expect("create tempdir");
     dir
