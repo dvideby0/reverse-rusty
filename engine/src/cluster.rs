@@ -43,6 +43,8 @@ mod control_wire;
 #[cfg(feature = "distributed")]
 mod handoff;
 #[cfg(feature = "distributed")]
+mod health;
+#[cfg(feature = "distributed")]
 mod proto;
 #[cfg(feature = "distributed")]
 mod remote;

@@ -1,0 +1,112 @@
+{{- if .Values.controlPlane.enabled }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "reverse-rusty.controlName" . }}
+  labels:
+    {{- include "reverse-rusty.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+spec:
+  serviceName: {{ include "reverse-rusty.controlName" . }}
+  replicas: {{ .Values.controlPlane.replicas }}
+  # Parallel: node 0 forms the cluster from the peers' DNS once they listen; ordering is
+  # not required (the bootstrap waits for peers).
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "reverse-rusty.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: control
+  template:
+    metadata:
+      annotations:
+        # Roll the StatefulSet when the bootstrap script changes.
+        checksum/config: {{ include (print $.Template.BasePath "/control-configmap.yaml") . | sha256sum }}
+      labels:
+        {{- include "reverse-rusty.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: control
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: control
+          image: {{ include "reverse-rusty.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "/opt/rr/entrypoint.sh"]
+          env:
+            - name: RR_CLUSTER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clusterToken.secretName }}
+                  key: {{ .Values.clusterToken.secretKey }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.ports.controlGrpc }}
+            - name: health
+              containerPort: {{ .Values.ports.controlHealth }}
+          # Liveness = the ControlService is up; readiness = this node sees an elected
+          # leader (consensus live + this node participates) — ADR-084.
+          livenessProbe:
+            grpc:
+              port: {{ .Values.ports.controlHealth }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            grpc:
+              port: {{ .Values.ports.controlHealth }}
+              service: ready
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: entrypoint
+              mountPath: /opt/rr
+            {{- if .Values.tls.enabled }}
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+            {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: entrypoint
+          configMap:
+            name: {{ include "reverse-rusty.controlName" . }}-entrypoint
+        {{- if .Values.tls.enabled }}
+        - name: certs
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+{{- end }}

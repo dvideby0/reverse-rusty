@@ -40,7 +40,8 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
 ### Tier 3 — scale & production maturity
 
 - **Distributed v1 ([ADR-065](decisions/adr-065-distributed-v1-graduation.md)) — open criteria**
-  (1–11 shipped: ADR-070/071/072/074/075/076/077/078/079/080/081; see [`STATUS.md`](STATUS.md)):
+  (1–11 shipped: ADR-070/071/072/074/075/076/077/078/079/080/081, + follow-ons ADR-082/083/084; see
+  [`STATUS.md`](STATUS.md)):
   - **Criterion 12 — scale proof at target:** a multi-shard load test at ≥20M stored queries on
     real hardware (largest soak to date: 10M single-node), plus the **real-corpus FN/throughput
     audit** owed in [`STATUS.md`](STATUS.md) "Current limitations".
@@ -48,15 +49,14 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     autoscaler-driven resize (needs hysteresis to avoid thrash, since a resize is non-idempotent +
     `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
     live-handoff machinery; the v1 resize is in-process blue/green).
-  - *Packaging follow-ons (deferred, [ADR-081](decisions/adr-081-deployment-packaging-runbook.md) /
-    [ADR-083](decisions/adr-083-control-plane-coordinator-wiring.md)):* **k8s/Helm manifests** (the
-    `StatefulSet` shape is sketched in ADR-081; the control plane is now wireable — ADR-083 — so the
-    manifests can reference a real quorum rather than an idle one); and the **control-plane wiring
-    residue** beyond ADR-083's `--control-endpoint`: routing by the committed shard→node assignments
-    (the coordinator still routes by its `--shard-endpoint` list) + multi-control-endpoint failover
-    (the client uses the first endpoint then follows `ForwardToLeader`). (ADR-082 closed the
-    advertise-URL; the `shardserver --accept-class-d` item was a phantom — remote shards force-accept
-    class-D, the coordinator is the sole gate.)
+  - *Packaging follow-on (deferred):* the **control-plane wiring residue** beyond ADR-083's
+    `--control-endpoint` and ADR-084's k8s wiring: routing by the committed shard→node assignments
+    (the coordinator still routes by its `--shard-endpoint` list / the chart's fixed StatefulSet) +
+    multi-control-endpoint failover (the client uses the first endpoint then follows
+    `ForwardToLeader`). (k8s/Helm manifests + the gRPC health/readiness probes they need shipped —
+    [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the advertise-URL; the
+    `shardserver --accept-class-d` item was a phantom — remote shards force-accept class-D, the
+    coordinator is the sole gate.)
 - **Feature-model versioning + blue/green re-materialize** — frozen common-mask across minor
   versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
 - **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying

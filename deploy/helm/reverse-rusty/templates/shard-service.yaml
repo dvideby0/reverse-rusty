@@ -1,0 +1,19 @@
+# Headless Service giving each shard pod a stable DNS name
+# (<shard>-<ordinal>.<shard>.<ns>.svc.<clusterDomain>) the coordinator dials.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "reverse-rusty.shardName" . }}
+  labels:
+    {{- include "reverse-rusty.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shard
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true # so the coordinator can dial + AdoptDict a pending shard
+  selector:
+    {{- include "reverse-rusty.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: shard
+  ports:
+    - name: grpc
+      port: {{ .Values.ports.shardGrpc }}
+      targetPort: grpc

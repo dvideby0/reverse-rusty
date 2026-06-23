@@ -21,3 +21,10 @@
 )]
 
 tonic::include_proto!("reverse_rusty.shard.v1");
+
+/// The standard `grpc.health.v1` health-checking service (ADR-084), namespaced so its
+/// generic message names (`HealthCheckRequest`, etc.) don't collide with the shard
+/// types at the crate root. Served on a separate plaintext port for k8s probes.
+pub mod health {
+    tonic::include_proto!("grpc.health.v1");
+}

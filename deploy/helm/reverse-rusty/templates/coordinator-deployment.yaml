@@ -1,0 +1,137 @@
+{{- $scheme := include "reverse-rusty.scheme" . -}}
+{{- $shard := include "reverse-rusty.shardName" . -}}
+{{- $control := include "reverse-rusty.controlName" . -}}
+{{- $ns := .Release.Namespace -}}
+{{- $domain := .Values.clusterDomain -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "reverse-rusty.coordinatorName" . }}
+  labels:
+    {{- include "reverse-rusty.labels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator
+spec:
+  replicas: {{ .Values.coordinator.replicas }}
+  selector:
+    matchLabels:
+      {{- include "reverse-rusty.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: coordinator
+  template:
+    metadata:
+      labels:
+        {{- include "reverse-rusty.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: coordinator
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # k8s has no compose `depends_on`: wait for every shard's gRPC port to be OPEN
+      # (liveness, NOT readiness — shards stay pending until this coordinator adopts them)
+      # and, when wired, the control quorum's leader. Avoids a noisy connect crashloop.
+      initContainers:
+        - name: wait-for-mesh
+          image: {{ include "reverse-rusty.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -u
+              targets="{{ range $i := until (int .Values.shardCount) }}{{ printf "%s-%d.%s.%s.svc.%s:%v " $shard $i $shard $ns $domain $.Values.ports.shardGrpc }}{{ end }}{{ if and .Values.controlPlane.enabled .Values.controlPlane.wireToCoordinator }}{{ printf "%s-0.%s.%s.svc.%s:%v" $control $control $ns $domain $.Values.ports.controlGrpc }}{{ end }}"
+              for t in $targets; do
+                host="${t%:*}"; port="${t##*:}"
+                echo "waiting for ${host}:${port}"
+                until (exec 3<>/dev/tcp/${host}/${port}) 2>/dev/null; do sleep 2; done
+                echo "  ${host}:${port} is up"
+              done
+      containers:
+        - name: coordinator
+          image: {{ include "reverse-rusty.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - server
+            - --cluster
+            - --host
+            - 0.0.0.0
+            - --port
+            - {{ .Values.ports.coordinatorHttp | quote }}
+            {{- range $i := until (int .Values.shardCount) }}
+            - --shard-endpoint
+            - {{ printf "%s://%s-%d.%s.%s.svc.%s:%v" $scheme $shard $i $shard $ns $domain $.Values.ports.shardGrpc | quote }}
+            {{- end }}
+            {{- if .Values.tls.enabled }}
+            - --grpc-tls-ca
+            - /certs/{{ .Values.tls.caFile }}
+            {{- end }}
+            {{- if and .Values.controlPlane.enabled .Values.controlPlane.wireToCoordinator }}
+            # Attach to the durable openraft quorum (ADR-083) — cluster state survives a
+            # coordinator restart (the reason k8s was unblocked vs ADR-081's idle quorum).
+            - --control-endpoint
+            - {{ printf "%s://%s-0.%s.%s.svc.%s:%v" $scheme $control $control $ns $domain $.Values.ports.controlGrpc | quote }}
+            {{- end }}
+            {{- if .Values.coordinator.includeBroad }}
+            - --include-broad
+            {{- end }}
+            {{- if .Values.coordinator.acceptClassD }}
+            - --accept-class-d
+            {{- end }}
+          env:
+            - name: RR_CLUSTER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clusterToken.secretName }}
+                  key: {{ .Values.clusterToken.secretKey }}
+            {{- if .Values.auth.enabled }}
+            - name: RR_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.secretName }}
+                  key: {{ .Values.auth.secretKey }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.ports.coordinatorHttp }}
+          # /_health is an unauthenticated GET (ADR-062 default-deny is non-GET only).
+          livenessProbe:
+            httpGet:
+              path: /_health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /_health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          {{- if .Values.tls.enabled }}
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- if .Values.tls.enabled }}
+      volumes:
+        - name: certs
+          secret:
+            secretName: {{ .Values.tls.secretName }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

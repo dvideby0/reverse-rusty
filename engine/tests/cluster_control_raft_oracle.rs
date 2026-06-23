@@ -491,3 +491,103 @@ fn grpc_secured_control_plane_elects_and_commits() {
         doc.nodes
     );
 }
+
+/// Control-server health endpoint (ADR-084): a single manager node serves the standard
+/// `grpc.health.v1.Health` service on a SEPARATE plaintext `--health-addr` port (the
+/// deployable `serve()` two-port path). Liveness (`Check("")`) is SERVING once the server is
+/// up; readiness (`Check("ready")`) is NOT_SERVING until the node sees a leader, then flips to
+/// SERVING once it bootstraps a single-voter cluster and elects itself — exercising the
+/// raft-metrics readiness predicate the shard test cannot.
+#[test]
+fn grpc_control_server_health_liveness_and_readiness() {
+    use reverse_rusty_shard_proto as raw;
+
+    use raw::health::health_check_response::ServingStatus;
+    use raw::health::health_client::HealthClient;
+    use raw::health::HealthCheckRequest;
+
+    let rt = Runtime::new().expect("tokio runtime");
+
+    // Two distinct free ports (data + health), released for serve() to bind by address.
+    let (data_addr, health_addr) = {
+        let d = std::net::TcpListener::bind("127.0.0.1:0").expect("bind data port");
+        let h = std::net::TcpListener::bind("127.0.0.1:0").expect("bind health port");
+        (
+            d.local_addr().expect("data addr"),
+            h.local_addr().expect("health addr"),
+        )
+    };
+
+    // Build a single manager node (in-memory store) and serve it over its data + health ports.
+    let plane = {
+        let _enter = rt.enter();
+        start_grpc_node(0, NUM_SHARDS, VNODES, GENESIS_FP, rt.handle(), None)
+            .expect("start grpc manager node")
+    };
+    let server = ControlServer::new(plane.raft()).with_health_addr(health_addr);
+    rt.spawn(server.serve(data_addr));
+    wait_until_listening(data_addr);
+    wait_until_listening(health_addr);
+
+    // Before bootstrap: liveness up, but no leader ⇒ NOT ready.
+    rt.block_on(async {
+        let mut hc = HealthClient::connect(format!("http://{health_addr}"))
+            .await
+            .expect("connect health client");
+        assert_eq!(
+            hc.check(HealthCheckRequest {
+                service: String::new()
+            })
+            .await
+            .expect("check overall")
+            .into_inner()
+            .status(),
+            ServingStatus::Serving,
+            "liveness must be SERVING once the control server is up"
+        );
+        assert_eq!(
+            hc.check(HealthCheckRequest {
+                service: "ready".to_string()
+            })
+            .await
+            .expect("check ready before")
+            .into_inner()
+            .status(),
+            ServingStatus::NotServing,
+            "a control node with no elected leader is not ready"
+        );
+    });
+
+    // Bootstrap a single-voter cluster: node 0 elects itself leader.
+    plane
+        .initialize(&[(0, format!("http://{data_addr}"))])
+        .expect("bootstrap single-node control plane");
+
+    // Readiness flips to SERVING once a leader is known (the 250ms watcher).
+    let became_ready = rt.block_on(async {
+        let mut hc = HealthClient::connect(format!("http://{health_addr}"))
+            .await
+            .expect("reconnect health client");
+        for _ in 0..60 {
+            let status = hc
+                .check(HealthCheckRequest {
+                    service: "ready".to_string(),
+                })
+                .await
+                .expect("check ready after")
+                .into_inner()
+                .status();
+            if status == ServingStatus::Serving {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    });
+    assert!(
+        became_ready,
+        "control readiness must flip to SERVING once a leader is elected"
+    );
+    // Keep the plane (the raft core owner) alive until the assertions complete.
+    drop(plane);
+}
