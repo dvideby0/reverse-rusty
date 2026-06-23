@@ -31,10 +31,15 @@ data:
     done
     TLS="{{ if .Values.tls.enabled }}--tls-cert /certs/{{ .Values.tls.certFile }} --tls-key /certs/{{ .Values.tls.keyFile }} --tls-ca /certs/{{ .Values.tls.caFile }}{{ end }}"
     HEALTH="--health-addr 0.0.0.0:{{ .Values.ports.controlHealth }}"
+    # Seed the genesis ring with the CHART's shard count, not controlserver's built-in
+    # default (8): the coordinator validates the control quorum's num_shards against its
+    # own (= shardCount) on --control-endpoint attach and fails LOUD on a mismatch. vnodes
+    # is left at the shared 128 default both sides agree on.
+    RING="--shards {{ .Values.shardCount }}"
     echo "controlserver ord=${ORD} self=${SELF} peers=[${PEERS} ]"
     if [ "$ORD" = "0" ]; then
-      exec controlserver 0 "0.0.0.0:${PORT}" --data-dir /data --bootstrap --advertise-url "${SELF}" ${PEERS} ${TLS} ${HEALTH}
+      exec controlserver 0 "0.0.0.0:${PORT}" --data-dir /data --bootstrap --advertise-url "${SELF}" ${PEERS} ${RING} ${TLS} ${HEALTH}
     else
-      exec controlserver "${ORD}" "0.0.0.0:${PORT}" --data-dir /data ${PEERS} ${TLS} ${HEALTH}
+      exec controlserver "${ORD}" "0.0.0.0:${PORT}" --data-dir /data ${PEERS} ${RING} ${TLS} ${HEALTH}
     fi
 {{- end }}

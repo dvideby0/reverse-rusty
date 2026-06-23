@@ -85,10 +85,17 @@ on the shard/control binaries yet (health ≠ metrics — ADR-084 deferral b); s
 
 ## 5. Scaling, recovery, backup
 
-- **Scale shards:** `helm upgrade … --set shardCount=N`. This re-keys placement (the coordinator's
-  shard set changes) — treat it as the redeploy-style resize of [cluster-deployment.md §5](cluster-deployment.md),
-  not an online `_split` (ADR-078). Re-ingest after the change. **Update the cert SANs** to cover the
-  new pod FQDNs first.
+- **Scale shards — blue/green only, never in place.** Do **not** `helm upgrade --set shardCount=N` on
+  a live release: it re-keys the ring while the shard PVCs still hold data placed under the old ring,
+  the durable control quorum keeps its old `num_shards` (re-bootstrap is idempotent — the coordinator
+  then fails the ring-mismatch check, or with control wiring off routes against mis-placed data), and
+  `ingest` refuses a non-empty cluster. Instead, like [cluster-deployment.md §5](cluster-deployment.md):
+  1. `helm install` a **separate release** at the new `shardCount` (new name ⇒ fresh PVCs + DNS;
+     **mint certs whose SANs cover the new pod FQDNs** first).
+  2. Re-ingest the full corpus into the green coordinator and validate it.
+  3. Cut traffic over (swap the Service/Ingress upstream), then `helm uninstall` blue.
+
+  Cross-process / online resize is a deferred follow-on (ADR-078).
 - **RF>1:** not modeled by this chart at v1 (`replicationFactor` is documentation-only). A replica per
   position needs a second StatefulSet per shard + the coordinator's `--replication-factor`; see
   [cluster-deployment.md §5](cluster-deployment.md).

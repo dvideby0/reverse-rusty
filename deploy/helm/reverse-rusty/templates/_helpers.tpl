@@ -34,10 +34,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end -}}
 
-{{/* Per-component object names. */}}
-{{- define "reverse-rusty.shardName" -}}{{ include "reverse-rusty.fullname" . }}-shard{{- end -}}
-{{- define "reverse-rusty.controlName" -}}{{ include "reverse-rusty.fullname" . }}-control{{- end -}}
-{{- define "reverse-rusty.coordinatorName" -}}{{ include "reverse-rusty.fullname" . }}-coordinator{{- end -}}
+{{/*
+Per-component object names. The base is truncated to 51 (= 63 − len("-coordinator"))
+BEFORE the suffix so every name stays within the 63-char DNS-label limit AND the
+distinguishing suffix is never itself truncated away (which a trunc-after-suffix would
+do at the boundary, collapsing shard/control/coordinator onto the same name).
+*/}}
+{{- define "reverse-rusty.shardName" -}}{{ printf "%s-shard" (include "reverse-rusty.fullname" . | trunc 51 | trimSuffix "-") }}{{- end -}}
+{{- define "reverse-rusty.controlName" -}}{{ printf "%s-control" (include "reverse-rusty.fullname" . | trunc 51 | trimSuffix "-") }}{{- end -}}
+{{- define "reverse-rusty.coordinatorName" -}}{{ printf "%s-coordinator" (include "reverse-rusty.fullname" . | trunc 51 | trimSuffix "-") }}{{- end -}}
 
 {{/* http vs https for mesh URLs — must match the served transport (ADR-082). */}}
 {{- define "reverse-rusty.scheme" -}}
