@@ -118,6 +118,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **gRPC transport** — `ShardServer`/`RemoteShard` (ADR-029); dict fingerprint handshake
   (ADR-030); dict + tag-dict shipping at connect (ADR-034, ADR-055); tag-dict fingerprint on all
   six recovery RPCs (ADR-077).
+- **gRPC transport resilience** — client connect-timeout + per-call deadlines + HTTP/2 keepalive
+  (shared dial helper, so shard + control + Raft-peer links harden together), bounded fail-loud
+  retry of idempotent reads on a transient error, and per-RPC transport metrics on cluster-mode
+  `/_metrics`; a hung remote shard now fails the percolate loud (fail-closed, zero FN) instead of
+  blocking the coordinator's fan-out forever (ADR-085).
 - **Replication + recovery over gRPC** — `FetchSegments`/`RecoverFrom` (ADR-036); per-shard
   translog, no-quiesce peer recovery, durable self-restart (ADR-039); retention leases + finalize
   (ADR-040) with lease TTL reaping (ADR-048).

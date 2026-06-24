@@ -222,10 +222,12 @@ fn resolve_security(
         ServerSecurity {
             tls,
             token: token.clone(),
+            ..Default::default()
         },
         ClientSecurity {
             tls: client_tls,
             token,
+            ..Default::default()
         },
     ))
 }

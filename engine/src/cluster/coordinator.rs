@@ -76,6 +76,7 @@ use super::control::{ControlPlane, InMemoryControlPlane};
 use super::handoff::HandoffShard;
 use super::ring::{HashRing, DEFAULT_VNODES};
 use super::shard::{LocalShard, Shard, ShardError};
+use super::transport_metrics::TransportMetrics;
 
 /// Filename of the coordinator manifest (the cluster-state document) within `data_dir`.
 const CLUSTER_MANIFEST_FILE: &str = "cluster_manifest.bin";
@@ -314,6 +315,11 @@ pub struct ClusterEngine {
     /// feature-model version + epoch (ADR-037). Read at assembly / introspection time only,
     /// never on the per-title hot path. [`InMemoryControlPlane`] today; openraft-backed later.
     control: Box<dyn ControlPlane>,
+    /// Per-RPC gRPC transport metrics (ADR-085), shared (`Arc`) into every `RemoteShard`
+    /// so a percolate's per-shard RPC latency / errors / timeouts / retries aggregate
+    /// cluster-wide. All-zero on the in-process / RF=1 path (no `RemoteShard` is built), so
+    /// the default behavior is byte-identical. Read via [`Self::transport_metrics`].
+    transport_metrics: Arc<TransportMetrics>,
     /// Per-position handoff handles (ADR-043), index-aligned with `shards`. Empty on the
     /// in-process/default path (no position is handoff-wrapped ⇒ byte-identical to pre-6a);
     /// populated by the gRPC builders, which wrap each position's backing in a [`HandoffShard`]

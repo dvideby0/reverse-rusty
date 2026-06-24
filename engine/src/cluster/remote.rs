@@ -19,6 +19,8 @@
 //! optimization (ADR-029). See ADR-047 for the thread-context contract.
 
 use std::future::Future;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tonic::service::interceptor::InterceptedService;
@@ -31,8 +33,9 @@ use crate::segment::{IngestReport, MatchStats, PlacedQuery};
 use super::clog::{ClusterMutation, LogPos};
 use super::proto;
 use super::proto::shard_service_client::ShardServiceClient;
-use super::security::{configure_endpoint, ClientSecurity, MeshAuthInject};
+use super::security::{configure_endpoint, ClientSecurity, MeshAuthInject, MeshTransport};
 use super::shard::{Shard, ShardError};
+use super::transport_metrics::{RpcMethod, RpcOutcome, TransportMetrics};
 
 /// The mesh-aware client channel (ADR-071): every RPC flows through the
 /// [`MeshAuthInject`] interceptor, which attaches the cluster token when one is
@@ -49,7 +52,7 @@ pub(crate) async fn connect_mesh(
     endpoint: &str,
     security: &ClientSecurity,
 ) -> Result<ShardServiceClient<MeshChannel>, ShardError> {
-    let ep = configure_endpoint(endpoint, security.tls.as_ref())?;
+    let ep = configure_endpoint(endpoint, security.tls.as_ref(), &security.transport)?;
     let channel = ep
         .connect()
         .await
@@ -68,6 +71,12 @@ pub struct RemoteShard {
     /// The coordinator's frozen tag-dict fingerprint (ADR-077), verified at connect/adopt
     /// exactly like `dict_fp` and presented on every fingerprint-guarded recovery RPC.
     tag_dict_fp: u64,
+    /// Transport-resilience knobs (ADR-085): per-call deadlines + bounded read-retry,
+    /// cloned from the [`ClientSecurity`] this shard was connected with.
+    transport: MeshTransport,
+    /// Shared per-RPC metrics sink (ADR-085). A private throwaway by default; the gRPC
+    /// builders swap in the coordinator's shared collector via [`Self::with_metrics`].
+    metrics: Arc<TransportMetrics>,
 }
 
 /// Connect the mesh channel: configure the endpoint (TLS when the security config
@@ -145,6 +154,8 @@ impl RemoteShard {
             handle,
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
+            transport: security.transport.clone(),
+            metrics: Arc::new(TransportMetrics::new()),
         })
     }
 
@@ -246,6 +257,8 @@ impl RemoteShard {
             handle,
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
+            transport: security.transport.clone(),
+            metrics: Arc::new(TransportMetrics::new()),
         })
     }
 
@@ -261,6 +274,70 @@ impl RemoteShard {
         block_on_in_context(&self.handle, fut)
     }
 
+    /// Share the coordinator's transport-metrics collector (ADR-085) so this client's
+    /// per-RPC outcomes + latencies aggregate cluster-wide. Defaults to a private throwaway,
+    /// so a `RemoteShard` built without it still works (its stats are just unobserved); the
+    /// gRPC builders call this with the engine's shared `Arc`.
+    pub(crate) fn with_metrics(mut self, metrics: Arc<TransportMetrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    /// The single instrumented RPC seam (ADR-085): drive `mk`'s future with a per-call
+    /// deadline (unary reads/writes) and bounded fail-loud retry of IDEMPOTENT reads on a
+    /// transient error, recording the outcome + latency. `mk` is a FACTORY — a tonic call
+    /// future is single-use, so each attempt rebuilds it from a cloned client + request. A
+    /// timeout or exhausted retry surfaces as a loud [`ShardError`], never a dropped result,
+    /// so the coordinator's fan-out still fails closed (a swallowed shard = false negative).
+    fn call<R, Fut, MkFut>(
+        &self,
+        method: RpcMethod,
+        kind: CallKind,
+        mk: MkFut,
+    ) -> Result<R, ShardError>
+    where
+        MkFut: Fn() -> Fut + Send,
+        Fut: Future<Output = Result<R, tonic::Status>> + Send,
+        R: Send,
+    {
+        let deadline = match kind {
+            CallKind::Read => Some(self.transport.read_timeout),
+            CallKind::Write => Some(self.transport.write_timeout),
+            // Long-running / streaming: no per-call deadline — a dead peer is caught by the
+            // channel keepalive (configure_endpoint), which breaks the connection.
+            CallKind::Unbounded => None,
+        };
+        // Only idempotent READS retry; a retried write (ingest/insert/delete) could
+        // double-apply, so writes fail loud and converge via the coordinator's durable log.
+        let max_retries = match kind {
+            CallKind::Read => self.transport.read_retries,
+            CallKind::Write | CallKind::Unbounded => 0,
+        };
+        let started = Instant::now();
+        let (result, attempts, timed_out) =
+            self.block_on(run_with_retry(mk, deadline, max_retries));
+        let latency = started.elapsed();
+        let outcome = if result.is_ok() {
+            RpcOutcome::Ok
+        } else if timed_out {
+            RpcOutcome::Timeout
+        } else {
+            RpcOutcome::Error
+        };
+        self.metrics.record(method, outcome, latency, attempts);
+        result.map_err(|status| {
+            if timed_out {
+                ShardError::Remote(format!(
+                    "rpc timeout: {} exceeded {:?}",
+                    method.label(),
+                    deadline.unwrap_or_default()
+                ))
+            } else {
+                rpc_err(status)
+            }
+        })
+    }
+
     /// Drive this remote node's `RecoverFrom` RPC (ADR-036): it pulls `source_endpoint`'s sealed
     /// segments (via that peer's `FetchSegments`), writes them under its own data_dir, attaches
     /// them, and starts serving — the cross-node peer-recovery primitive. `dict_fp` must equal
@@ -273,16 +350,23 @@ impl RemoteShard {
         source_endpoint: &str,
         dict_fp: u64,
     ) -> Result<(u64, u64, u64), ShardError> {
-        let mut client = self.client.clone();
         let req = proto::RecoverFromRequest {
             tag_dict_fingerprint: self.tag_dict_fp,
             source_endpoint: source_endpoint.to_string(),
             dict_fingerprint: dict_fp,
         };
-        let reply = self
-            .block_on(async move { client.recover_from(req).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        // Long-running server-side pull — no per-call deadline (keepalive-guarded), no retry.
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::RecoverFrom, CallKind::Unbounded, move || {
+            let mut client = client.clone();
+            let req = req.clone();
+            async move {
+                client
+                    .recover_from(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
         Ok((
             reply.segments_attached,
             reply.num_queries,
@@ -297,16 +381,16 @@ impl RemoteShard {
     /// a no-op). Returns the server's fence generation after the call. Inherent (not a [`Shard`]
     /// method): only the handoff orchestrator fences a specific old owner, addressed by endpoint.
     pub fn fence(&self, generation: u64) -> Result<u64, ShardError> {
-        let mut client = self.client.clone();
         let req = proto::FenceRequest {
             tag_dict_fingerprint: self.tag_dict_fp,
             generation,
             dict_fingerprint: self.dict_fp,
         };
-        let reply = self
-            .block_on(async move { client.fence(req).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Fence, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move { client.fence(req).await.map(tonic::Response::into_inner) }
+        })?;
         Ok(reply.fenced_at_generation)
     }
 
@@ -317,16 +401,16 @@ impl RemoteShard {
     /// call (0 ⇒ un-fenced). Called by the handoff orchestrator when a handoff aborts after
     /// fencing, so the source self-heals instead of staying permanently write-quiesced.
     pub fn unfence(&self, generation: u64) -> Result<u64, ShardError> {
-        let mut client = self.client.clone();
         let req = proto::UnfenceRequest {
             tag_dict_fingerprint: self.tag_dict_fp,
             generation,
             dict_fingerprint: self.dict_fp,
         };
-        let reply = self
-            .block_on(async move { client.unfence(req).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Unfence, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move { client.unfence(req).await.map(tonic::Response::into_inner) }
+        })?;
         Ok(reply.fenced_at_generation)
     }
 }
@@ -367,6 +451,76 @@ fn rpc_err<E: std::fmt::Display>(e: E) -> ShardError {
     ShardError::Remote(e.to_string())
 }
 
+/// How [`RemoteShard::call`] treats an RPC (ADR-085): a unary read (deadline + bounded
+/// retry), a unary write (deadline, no retry — non-idempotent), or an unbounded
+/// long-running / streaming RPC (no deadline; a dead peer is caught by channel keepalive).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CallKind {
+    Read,
+    Write,
+    Unbounded,
+}
+
+/// The retry/timeout core of [`RemoteShard::call`] (ADR-085): drive `mk`'s future, applying
+/// `deadline` (when `Some`) and retrying up to `max_retries` times on a transient error or a
+/// timeout, with exponential backoff. Returns the final result, the retry attempts spent, and
+/// whether the final failure was a timeout (for metric classification + the error message).
+async fn run_with_retry<R, Fut, MkFut>(
+    mk: MkFut,
+    deadline: Option<Duration>,
+    max_retries: u32,
+) -> (Result<R, tonic::Status>, u32, bool)
+where
+    MkFut: Fn() -> Fut,
+    Fut: Future<Output = Result<R, tonic::Status>>,
+{
+    let mut attempts = 0u32;
+    loop {
+        let attempt = match deadline {
+            Some(d) => tokio::time::timeout(d, mk()).await,
+            None => Ok(mk().await),
+        };
+        match attempt {
+            Ok(Ok(v)) => return (Ok(v), attempts, false),
+            Ok(Err(status)) => {
+                if attempts < max_retries && is_transient(&status) {
+                    attempts += 1;
+                    tokio::time::sleep(backoff_delay(attempts)).await;
+                    continue;
+                }
+                return (Err(status), attempts, false);
+            }
+            // Our own per-call deadline fired. A timeout is transient too, so retry it
+            // (reads only — writes/unbounded pass `max_retries = 0`).
+            Err(_elapsed) => {
+                if attempts < max_retries {
+                    attempts += 1;
+                    tokio::time::sleep(backoff_delay(attempts)).await;
+                    continue;
+                }
+                return (
+                    Err(tonic::Status::deadline_exceeded("rpc timeout")),
+                    attempts,
+                    true,
+                );
+            }
+        }
+    }
+}
+
+/// Whether a gRPC status is worth retrying — only `Unavailable` (a transient connect /
+/// server-restarting / load-shed signal). Conservative on purpose: codes like
+/// `ResourceExhausted` or `Internal` are not retried, to avoid amplifying overload.
+fn is_transient(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Unavailable
+}
+
+/// Exponential backoff for retry attempt `n` (1-based): 50ms, 100ms, 200ms, … capped at 1s.
+fn backoff_delay(n: u32) -> Duration {
+    let shift = n.clamp(1, 6) - 1;
+    Duration::from_millis((50u64 << shift).min(1000))
+}
+
 /// The connect-time refusal when a shard server does not attest the ADR-080 replicate-to-all
 /// broad layout (`broad_replicate_all` false — a pre-ADR-080 server, where broad lived only on
 /// shard 0). This coordinator routes broad on a per-title broad-eval shard assuming EVERY shard
@@ -390,7 +544,6 @@ impl Shard for RemoteShard {
         include_broad: bool,
         pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
-        let mut client = self.client.clone();
         let req = proto::PercolateRequest {
             title: title.to_string(),
             include_broad,
@@ -398,10 +551,12 @@ impl Shard for RemoteShard {
             filter: proto::tag_predicate_to_proto(pred),
             rank: None,
         };
-        let reply = self
-            .block_on(async move { client.percolate(req).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Percolate, CallKind::Read, move || {
+            let mut client = client.clone();
+            let req = req.clone();
+            async move { client.percolate(req).await.map(tonic::Response::into_inner) }
+        })?;
         let stats = reply.stats.map(proto::stats_to_engine).unwrap_or_default();
         Ok((reply.ids, stats))
     }
@@ -413,7 +568,6 @@ impl Shard for RemoteShard {
         pred: &TagPredicate,
         spec: &crate::rank::CompiledRankSpec,
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
-        let mut client = self.client.clone();
         let req = proto::PercolateRequest {
             title: title.to_string(),
             include_broad,
@@ -422,10 +576,12 @@ impl Shard for RemoteShard {
             // key, exactly like the filter groups — the server never re-resolves strings.
             rank: Some(proto::rank_spec_to_proto(spec)),
         };
-        let reply = self
-            .block_on(async move { client.percolate(req).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::PercolateRanked, CallKind::Read, move || {
+            let mut client = client.clone();
+            let req = req.clone();
+            async move { client.percolate(req).await.map(tonic::Response::into_inner) }
+        })?;
         // Version-skew honesty: an older server ignores the `rank` field and leaves
         // `ranked` false — fail LOUD rather than fabricate scores or silently hand the
         // caller an unranked ordering it will present as ranked.
@@ -444,20 +600,30 @@ impl Shard for RemoteShard {
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {
-        let mut client = self.client.clone();
-        let reply = self
-            .block_on(async move { client.num_queries(proto::Empty {}).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::NumQueries, CallKind::Read, move || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .num_queries(proto::Empty {})
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
         Ok(reply.count as usize)
     }
 
     fn class_counts(&self) -> Result<[u64; 4], ShardError> {
-        let mut client = self.client.clone();
-        let reply = self
-            .block_on(async move { client.class_counts(proto::Empty {}).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::ClassCounts, CallKind::Read, move || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .class_counts(proto::Empty {})
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
         let c = reply.counts;
         if c.len() != 4 {
             return Err(ShardError::Remote(format!(
@@ -470,7 +636,6 @@ impl Shard for RemoteShard {
 
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         refuse_wire_tag_ids(items)?;
-        let mut client = self.client.clone();
         // Send raw DSL + raw tags, NOT the pre-extracted feature ids: the server re-compiles
         // read-only against its own frozen dict + resolves tags against its adopted frozen tag
         // space (dict-/tag-agnostic wire). The coordinator's `Extracted` was only for placement.
@@ -485,10 +650,17 @@ impl Shard for RemoteShard {
                 })
                 .collect(),
         };
-        let reply = self
-            .block_on(async move { client.ingest_extracted(req).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Ingest, CallKind::Write, move || {
+            let mut client = client.clone();
+            let req = req.clone();
+            async move {
+                client
+                    .ingest_extracted(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
         Ok(IngestReport {
             ingested: reply.ingested as usize,
             rejected_parse: reply.rejected_parse as usize,
@@ -504,7 +676,6 @@ impl Shard for RemoteShard {
         text: &str,
         tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError> {
-        let mut client = self.client.clone();
         let req = proto::InsertRequest {
             item: Some(proto::AddItem {
                 logical_id: logical,
@@ -513,29 +684,43 @@ impl Shard for RemoteShard {
                 tags: proto::tags_to_proto(tags),
             }),
         };
-        let reply = self
-            .block_on(async move { client.insert_extracted(req).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Insert, CallKind::Write, move || {
+            let mut client = client.clone();
+            let req = req.clone();
+            async move {
+                client
+                    .insert_extracted(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
         Ok(reply.present.then_some(reply.local_id))
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
-        let mut client = self.client.clone();
         let req = proto::DeleteRequest {
             logical_id: logical,
         };
-        let reply = self
-            .block_on(async move { client.delete(req).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Delete, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move { client.delete(req).await.map(tonic::Response::into_inner) }
+        })?;
         Ok(reply.removed as usize)
     }
 
     fn flush(&self) -> Result<(), ShardError> {
-        let mut client = self.client.clone();
-        self.block_on(async move { client.flush(proto::FlushRequest {}).await })
-            .map_err(rpc_err)?;
+        let client = self.client.clone();
+        self.call(RpcMethod::Flush, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .flush(proto::FlushRequest {})
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
         Ok(())
     }
 
@@ -568,31 +753,31 @@ impl Shard for RemoteShard {
         // Drain the source's `FetchTranslog` stream (ops > `from`) and decode each entry back
         // into a logical mutation. The coordinator replays these into the recovering target —
         // the no-quiesce catch-up (ADR-039). The tail is the small un-sealed delta.
-        let mut client = self.client.clone();
         let req = proto::FetchTranslogRequest {
             tag_dict_fingerprint: self.tag_dict_fp,
             after_seqno: from.0,
             dict_fingerprint: self.dict_fp,
         };
-        self.block_on(async move {
-            let mut stream = client
-                .fetch_translog(req)
-                .await
-                .map_err(rpc_err)?
-                .into_inner();
-            let mut out = Vec::new();
-            while let Some(entry) = stream.message().await.map_err(rpc_err)? {
-                if let Some(pm) = proto::translog_entry_to_mutation(entry) {
-                    out.push(pm);
+        // A long server-stream drain — no per-call deadline (keepalive-guarded), no retry
+        // (the catch-up loop is the coordinator's; re-streaming mid-recovery is unsafe).
+        let client = self.client.clone();
+        self.call(RpcMethod::Translog, CallKind::Unbounded, move || {
+            let mut client = client.clone();
+            async move {
+                let mut stream = client.fetch_translog(req).await?.into_inner();
+                let mut out = Vec::new();
+                while let Some(entry) = stream.message().await? {
+                    if let Some(pm) = proto::translog_entry_to_mutation(entry) {
+                        out.push(pm);
+                    }
                 }
+                Ok(out)
             }
-            Ok(out)
         })
     }
 
     // ---- translog retention leases (ADR-040) ----
     fn acquire_retention_lease(&self) -> Result<(u64, LogPos), ShardError> {
-        let mut client = self.client.clone();
         let req = proto::RetentionLeaseRequest {
             tag_dict_fingerprint: self.tag_dict_fp,
             op: 0,
@@ -600,15 +785,20 @@ impl Shard for RemoteShard {
             pos: 0,
             dict_fingerprint: self.dict_fp,
         };
-        let reply = self
-            .block_on(async move { client.retention_lease(req).await })
-            .map_err(rpc_err)?
-            .into_inner();
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::RetentionLease, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .retention_lease(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
         Ok((reply.lease_id, LogPos(reply.pos)))
     }
 
     fn renew_retention_lease(&self, lease: u64, to: LogPos) -> Result<(), ShardError> {
-        let mut client = self.client.clone();
         let req = proto::RetentionLeaseRequest {
             tag_dict_fingerprint: self.tag_dict_fp,
             op: 1,
@@ -616,13 +806,20 @@ impl Shard for RemoteShard {
             pos: to.0,
             dict_fingerprint: self.dict_fp,
         };
-        self.block_on(async move { client.retention_lease(req).await })
-            .map_err(rpc_err)?;
+        let client = self.client.clone();
+        self.call(RpcMethod::RetentionLease, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .retention_lease(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
         Ok(())
     }
 
     fn release_retention_lease(&self, lease: u64) -> Result<(), ShardError> {
-        let mut client = self.client.clone();
         let req = proto::RetentionLeaseRequest {
             tag_dict_fingerprint: self.tag_dict_fp,
             op: 2,
@@ -630,8 +827,16 @@ impl Shard for RemoteShard {
             pos: 0,
             dict_fingerprint: self.dict_fp,
         };
-        self.block_on(async move { client.retention_lease(req).await })
-            .map_err(rpc_err)?;
+        let client = self.client.clone();
+        self.call(RpcMethod::RetentionLease, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .retention_lease(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
         Ok(())
     }
 }
@@ -690,5 +895,139 @@ mod tests {
             format!("{err}").contains("process boundary"),
             "the refusal names the boundary: {err}"
         );
+    }
+
+    // ---- ADR-085 transport call-seam logic: bounded retry + per-call timeout ----
+
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn unavailable() -> tonic::Status {
+        tonic::Status::unavailable("transient")
+    }
+
+    #[tokio::test]
+    async fn retry_recovers_idempotent_read_after_transient_unavailable() {
+        // Two transient UNAVAILABLEs then success, 2 retries allowed → Ok, 2 attempts spent.
+        let calls = AtomicU32::new(0);
+        let (res, attempts, timed_out) = run_with_retry(
+            || {
+                let n = calls.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if n < 2 {
+                        Err::<u32, _>(unavailable())
+                    } else {
+                        Ok(42u32)
+                    }
+                }
+            },
+            None,
+            2,
+        )
+        .await;
+        assert_eq!(res.ok(), Some(42));
+        assert_eq!(attempts, 2);
+        assert!(!timed_out);
+        assert_eq!(calls.load(Ordering::Relaxed), 3, "1 initial + 2 retries");
+    }
+
+    #[tokio::test]
+    async fn retry_gives_up_after_max_and_fails_loud() {
+        // Always UNAVAILABLE, 2 retries → still Err (fail loud), 2 attempts spent.
+        let calls = AtomicU32::new(0);
+        let (res, attempts, timed_out) = run_with_retry(
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async { Err::<u32, _>(unavailable()) }
+            },
+            None,
+            2,
+        )
+        .await;
+        assert!(res.is_err());
+        assert_eq!(attempts, 2);
+        assert!(!timed_out);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn non_transient_error_is_not_retried() {
+        // A non-UNAVAILABLE status is permanent — no retry even with retries allowed.
+        let calls = AtomicU32::new(0);
+        let (res, attempts, _timed_out) = run_with_retry(
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async { Err::<u32, _>(tonic::Status::invalid_argument("permanent")) }
+            },
+            None,
+            5,
+        )
+        .await;
+        assert!(res.is_err());
+        assert_eq!(attempts, 0, "permanent errors do not retry");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn writes_pass_zero_retries_and_fail_loud_on_transient() {
+        // max_retries = 0 (the write path) → a transient error is NOT retried.
+        let calls = AtomicU32::new(0);
+        let (res, attempts, _) = run_with_retry(
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                async { Err::<u32, _>(unavailable()) }
+            },
+            None,
+            0,
+        )
+        .await;
+        assert!(res.is_err());
+        assert_eq!(attempts, 0);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn deadline_fires_on_a_hung_call_and_is_reported_as_timeout() {
+        // A future that never completes + a short deadline → loud timeout (not a hang).
+        let (res, attempts, timed_out) = run_with_retry(
+            std::future::pending::<Result<u32, tonic::Status>>,
+            Some(Duration::from_millis(50)),
+            0,
+        )
+        .await;
+        assert!(res.is_err());
+        assert!(timed_out, "a deadline-exceeded must classify as a timeout");
+        assert_eq!(attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn read_timeout_is_retried_then_fails_loud() {
+        // A hung read WITH retries: each attempt times out; after the budget it fails loud,
+        // still classified as a timeout. Proves a hung shard can never block forever.
+        let (res, attempts, timed_out) = run_with_retry(
+            std::future::pending::<Result<u32, tonic::Status>>,
+            Some(Duration::from_millis(20)),
+            2,
+        )
+        .await;
+        assert!(res.is_err());
+        assert!(timed_out);
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn backoff_is_exponential_and_capped() {
+        assert_eq!(backoff_delay(1), Duration::from_millis(50));
+        assert_eq!(backoff_delay(2), Duration::from_millis(100));
+        assert_eq!(backoff_delay(3), Duration::from_millis(200));
+        // Capped at 1s for large attempt counts.
+        assert_eq!(backoff_delay(20), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn only_unavailable_is_transient() {
+        assert!(is_transient(&tonic::Status::unavailable("x")));
+        assert!(!is_transient(&tonic::Status::invalid_argument("x")));
+        assert!(!is_transient(&tonic::Status::internal("x")));
+        assert!(!is_transient(&tonic::Status::deadline_exceeded("x")));
     }
 }

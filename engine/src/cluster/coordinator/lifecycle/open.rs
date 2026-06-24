@@ -74,6 +74,10 @@ impl ClusterEngine {
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
             control: durable.control,
+            // A fresh transport-metrics collector (ADR-085); the gRPC builders REPLACE it with
+            // the shared one they also hand to each `RemoteShard` (via `with_transport_metrics`),
+            // so remote per-RPC stats aggregate here. The in-process path keeps this empty one.
+            transport_metrics: Arc::new(crate::cluster::transport_metrics::TransportMetrics::new()),
             observer: Mutex::new(None),
             pending_events: Mutex::new(Vec::new()),
             pending_repair: Mutex::new(std::collections::BTreeMap::new()),

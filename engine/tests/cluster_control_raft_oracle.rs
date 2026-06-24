@@ -436,6 +436,7 @@ fn grpc_secured_control_plane_elects_and_commits() {
             domain: None,
         }),
         token: Some(token.clone()),
+        ..Default::default()
     };
     let mut planes: Vec<RaftControlPlane> = Vec::new();
     for &id in &ids {
@@ -461,6 +462,7 @@ fn grpc_secured_control_plane_elects_and_commits() {
                 key_pem: key_pem.clone(),
             }),
             token: Some(token.clone()),
+            ..Default::default()
         });
         servers.push(rt.spawn(server.serve_with_incoming(incoming)));
     }

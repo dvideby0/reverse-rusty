@@ -92,7 +92,11 @@ impl ControlServer {
     /// by every `serve*` flavor (mirrors `ShardServer`).
     fn secured_router(self) -> Result<tonic::transport::server::Router, tonic::transport::Error> {
         let security = self.security.clone();
-        let mut builder = tonic::transport::Server::builder();
+        // Server-side HTTP/2 keepalive (ADR-085): reclaim dead/half-open client connections
+        // instead of leaking them. Off any hot path; default-on via `ServerSecurity::default`.
+        let mut builder = tonic::transport::Server::builder()
+            .http2_keepalive_interval(Some(security.keepalive_interval))
+            .http2_keepalive_timeout(Some(security.keepalive_timeout));
         if let Some(tls) = &security.tls {
             builder = builder.tls_config(server_tls_config(tls))?;
         }

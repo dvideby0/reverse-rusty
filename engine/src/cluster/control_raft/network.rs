@@ -251,15 +251,19 @@ impl RaftNetworkFactory<TypeConfig> for GrpcControlNetworkFactory {
     async fn new_client(&mut self, target: u64, node: &BasicNode) -> Self::Network {
         // Lazy connect per the openraft contract; the TLS config and token interceptor
         // are applied here so every peer link is secured identically (ADR-071).
-        let client = configure_endpoint(&node.addr, self.security.tls.as_ref())
-            .ok()
-            .and_then(|ep| {
-                let inject = MeshAuthInject::new(self.security.token.as_deref()).ok()?;
-                Some(ControlServiceClient::with_interceptor(
-                    ep.connect_lazy(),
-                    inject,
-                ))
-            });
+        let client = configure_endpoint(
+            &node.addr,
+            self.security.tls.as_ref(),
+            &self.security.transport,
+        )
+        .ok()
+        .and_then(|ep| {
+            let inject = MeshAuthInject::new(self.security.token.as_deref()).ok()?;
+            Some(ControlServiceClient::with_interceptor(
+                ep.connect_lazy(),
+                inject,
+            ))
+        });
         GrpcControlNetwork { target, client }
     }
 }

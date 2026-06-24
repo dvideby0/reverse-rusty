@@ -4,7 +4,7 @@
 //! counters are incremented as events fire.
 
 use prometheus::{
-    Counter, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    Counter, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
     IntGaugeVec, Opts, Registry,
 };
 
@@ -62,6 +62,16 @@ pub(crate) struct PrometheusMetrics {
 
     // Slow query counter
     pub(crate) slow_queries_total: IntCounter,
+
+    // Cluster gRPC transport metrics (ADR-085), set on each /_metrics scrape from the
+    // coordinator's TransportMetrics snapshot; labeled by RPC `method`. Cumulative values in
+    // gauges (the pull-on-scrape pattern of the engine gauges above). All-zero in single-node
+    // mode and for an in-process cluster.
+    pub(crate) transport_rpc_calls: IntGaugeVec,
+    pub(crate) transport_rpc_errors: IntGaugeVec,
+    pub(crate) transport_rpc_timeouts: IntGaugeVec,
+    pub(crate) transport_rpc_retries: IntGaugeVec,
+    pub(crate) transport_rpc_latency_seconds: GaugeVec,
 }
 
 impl PrometheusMetrics {
@@ -271,6 +281,49 @@ impl PrometheusMetrics {
         ))
         .unwrap();
 
+        // --- Cluster gRPC transport metrics (ADR-085) ---
+
+        let transport_rpc_calls = IntGaugeVec::new(
+            Opts::new(
+                "transport_rpc_calls",
+                "Cluster gRPC RPC calls by method (cumulative; ADR-085)",
+            ),
+            &["method"],
+        )
+        .unwrap();
+        let transport_rpc_errors = IntGaugeVec::new(
+            Opts::new(
+                "transport_rpc_errors",
+                "Cluster gRPC RPC failures by method, including timeouts (cumulative)",
+            ),
+            &["method"],
+        )
+        .unwrap();
+        let transport_rpc_timeouts = IntGaugeVec::new(
+            Opts::new(
+                "transport_rpc_timeouts",
+                "Cluster gRPC RPC deadline-exceeded by method (cumulative)",
+            ),
+            &["method"],
+        )
+        .unwrap();
+        let transport_rpc_retries = IntGaugeVec::new(
+            Opts::new(
+                "transport_rpc_retries",
+                "Cluster gRPC idempotent-read retry attempts by method (cumulative)",
+            ),
+            &["method"],
+        )
+        .unwrap();
+        let transport_rpc_latency_seconds = GaugeVec::new(
+            Opts::new(
+                "transport_rpc_latency_seconds",
+                "Cumulative cluster gRPC RPC latency in seconds by method",
+            ),
+            &["method"],
+        )
+        .unwrap();
+
         // Register all
         registry.register(Box::new(total_queries.clone())).unwrap();
         registry.register(Box::new(base_segments.clone())).unwrap();
@@ -345,6 +398,21 @@ impl PrometheusMetrics {
         registry
             .register(Box::new(auth_failures_total.clone()))
             .unwrap();
+        registry
+            .register(Box::new(transport_rpc_calls.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(transport_rpc_errors.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(transport_rpc_timeouts.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(transport_rpc_retries.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(transport_rpc_latency_seconds.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -377,6 +445,11 @@ impl PrometheusMetrics {
             broad_queries_evaluated_total,
             broad_candidates_total,
             slow_queries_total,
+            transport_rpc_calls,
+            transport_rpc_errors,
+            transport_rpc_timeouts,
+            transport_rpc_retries,
+            transport_rpc_latency_seconds,
         }
     }
 
@@ -397,6 +470,32 @@ impl PrometheusMetrics {
             .set(m.filter_bytes as i64);
         self.wal_size_bytes.set(m.wal_size_bytes as i64);
         self.wal_pending_entries.set(m.wal_pending_entries as i64);
+    }
+
+    /// Refresh the cluster gRPC transport gauges (ADR-085) from a coordinator snapshot.
+    /// Called on each cluster-mode `/_metrics` scrape; a single-node server never calls it,
+    /// and an in-process cluster's snapshot is all-zero, so the series simply read 0.
+    pub(crate) fn observe_transport(
+        &self,
+        snap: &reverse_rusty::cluster::TransportMetricsSnapshot,
+    ) {
+        for m in &snap.methods {
+            self.transport_rpc_calls
+                .with_label_values(&[m.method])
+                .set(m.calls as i64);
+            self.transport_rpc_errors
+                .with_label_values(&[m.method])
+                .set(m.errors as i64);
+            self.transport_rpc_timeouts
+                .with_label_values(&[m.method])
+                .set(m.timeouts as i64);
+            self.transport_rpc_retries
+                .with_label_values(&[m.method])
+                .set(m.retries as i64);
+            self.transport_rpc_latency_seconds
+                .with_label_values(&[m.method])
+                .set(m.latency_nanos_total as f64 / 1e9);
+        }
     }
 
     /// Handle an EngineEvent — increment counters. Called from the observer.

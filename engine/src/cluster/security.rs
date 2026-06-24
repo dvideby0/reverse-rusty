@@ -17,6 +17,7 @@
 //! servers and protects the wire. mTLS / per-RPC authorization tiers are post-v1.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::service::Interceptor;
@@ -42,20 +43,98 @@ pub struct TlsClientConfig {
     pub domain: Option<String>,
 }
 
-/// Server-side mesh security: TLS identity + the expected mesh token. `Default`
-/// (both `None`) is the historical plaintext/unauthenticated behavior.
-#[derive(Clone, Default)]
+/// Transport-resilience knobs for a mesh CLIENT connection (ADR-085), applied at two
+/// layers so a hung/dead remote peer can never block a caller forever:
+/// - [`configure_endpoint`] sets the channel-level `connect_timeout` + HTTP/2 keepalive
+///   (a dead/half-open peer is detected and the connection broken, so in-flight RPCs
+///   error out fail-loud), shared by the shard, control-plane, and Raft-peer clients.
+/// - [`RemoteShard`](super::remote::RemoteShard) wraps each UNARY RPC in a per-call
+///   deadline (`read_timeout`/`write_timeout`) and does bounded fail-loud retry of
+///   IDEMPOTENT reads (`read_retries`) on transient errors. Streaming / long-pull
+///   recovery RPCs opt out of the per-call deadline and lean on keepalive instead.
+///
+/// [`Default`] is the conservative always-on profile; the historical (pre-ADR-085)
+/// behavior was no timeouts and no keepalive at all. A timeout only ever turns a hang
+/// into a loud `ShardError` — it never drops a shard from a percolate union (that would
+/// be a false negative); the cross-shard merge still fails closed.
+#[derive(Clone, Debug)]
+pub struct MeshTransport {
+    /// Max time for the TCP + TLS dial before failing the connect.
+    pub connect_timeout: Duration,
+    /// HTTP/2 (and TCP) keepalive PING interval — detects a dead/idle peer mid-call.
+    pub keepalive_interval: Duration,
+    /// How long to wait for a keepalive PING ack before dropping the connection.
+    pub keepalive_timeout: Duration,
+    /// Per-call deadline for unary READ RPCs (percolate, counts, fingerprint).
+    pub read_timeout: Duration,
+    /// Per-call deadline for unary WRITE RPCs (ingest, insert, delete, flush, fence, lease).
+    pub write_timeout: Duration,
+    /// Bounded retry attempts for IDEMPOTENT reads on a transient error (total tries =
+    /// `read_retries + 1`); `0` disables retry. Writes are never retried (non-idempotent).
+    pub read_retries: u32,
+}
+
+impl MeshTransport {
+    /// Default dial bound.
+    pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+    /// Default keepalive PING interval.
+    pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+    /// Default keepalive PING-ack timeout.
+    pub const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+    /// Default per-call deadline for unary reads (the latency-sensitive percolate path).
+    pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+    /// Default per-call deadline for unary writes (generous — a bulk ingest batch is large).
+    pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+    /// Default bounded read-retry count (3 total tries).
+    pub const DEFAULT_READ_RETRIES: u32 = 2;
+}
+
+impl Default for MeshTransport {
+    fn default() -> Self {
+        MeshTransport {
+            connect_timeout: Self::DEFAULT_CONNECT_TIMEOUT,
+            keepalive_interval: Self::DEFAULT_KEEPALIVE_INTERVAL,
+            keepalive_timeout: Self::DEFAULT_KEEPALIVE_TIMEOUT,
+            read_timeout: Self::DEFAULT_READ_TIMEOUT,
+            write_timeout: Self::DEFAULT_WRITE_TIMEOUT,
+            read_retries: Self::DEFAULT_READ_RETRIES,
+        }
+    }
+}
+
+/// Server-side mesh security: TLS identity + the expected mesh token, plus server-side
+/// HTTP/2 keepalive (ADR-085) so a dead/half-open CLIENT connection is reclaimed instead
+/// of leaked. `Default` (no TLS, no token) is the historical plaintext/unauthenticated
+/// behavior; the keepalive defaults are conservative and off any hot path.
+#[derive(Clone)]
 pub struct ServerSecurity {
     pub tls: Option<TlsServerIdentity>,
     pub token: Option<Vec<u8>>,
+    /// HTTP/2 keepalive PING interval the server applies to client connections.
+    pub keepalive_interval: Duration,
+    /// How long the server waits for a PING ack before dropping a client connection.
+    pub keepalive_timeout: Duration,
 }
 
-/// Client-side mesh security: TLS verification + the mesh token to present.
-/// `Default` (both `None`) is the historical plaintext behavior.
+impl Default for ServerSecurity {
+    fn default() -> Self {
+        ServerSecurity {
+            tls: None,
+            token: None,
+            keepalive_interval: MeshTransport::DEFAULT_KEEPALIVE_INTERVAL,
+            keepalive_timeout: MeshTransport::DEFAULT_KEEPALIVE_TIMEOUT,
+        }
+    }
+}
+
+/// Client-side mesh security: TLS verification + the mesh token to present + the
+/// [`MeshTransport`] resilience knobs (ADR-085). `Default` is the historical plaintext
+/// behavior for TLS/token, now with the always-on transport timeouts + keepalive.
 #[derive(Clone, Default)]
 pub struct ClientSecurity {
     pub tls: Option<TlsClientConfig>,
     pub token: Option<Vec<u8>>,
+    pub transport: MeshTransport,
 }
 
 /// Resolve the mesh token from a CLI flag and the `RR_CLUSTER_TOKEN` environment
@@ -91,9 +170,22 @@ pub fn resolve_mesh_token(
 pub(crate) fn configure_endpoint(
     endpoint: &str,
     tls: Option<&TlsClientConfig>,
+    transport: &MeshTransport,
 ) -> Result<Endpoint, ShardError> {
     let ep = Endpoint::from_shared(endpoint.to_string())
         .map_err(|e| ShardError::Remote(format!("invalid endpoint {endpoint:?}: {e}")))?;
+    // Transport resilience (ADR-085): bound the dial and enable HTTP/2 keepalive so a
+    // dead/half-open peer is detected — the connection is broken and in-flight RPCs error
+    // out fail-loud — instead of a call hanging forever. This is the SHARED endpoint
+    // builder for the shard client, the control-plane client, AND the Raft peer network,
+    // so all three harden in one place; it also covers the long streaming RPCs that opt
+    // out of the per-call deadline (they lean on keepalive to notice a dead peer).
+    let ep = ep
+        .connect_timeout(transport.connect_timeout)
+        .tcp_keepalive(Some(transport.keepalive_interval))
+        .http2_keep_alive_interval(transport.keepalive_interval)
+        .keep_alive_timeout(transport.keepalive_timeout)
+        .keep_alive_while_idle(true);
     match tls {
         // An https endpoint with NO client TLS config would die inside tonic as an
         // opaque "transport error" — name the misconfiguration instead (the node is

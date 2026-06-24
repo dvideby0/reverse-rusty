@@ -158,6 +158,11 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
                 std::process::exit(1);
             }
         },
+        connect_timeout_secs: cli.grpc_connect_timeout_secs,
+        read_timeout_secs: cli.grpc_read_timeout_secs,
+        write_timeout_secs: cli.grpc_write_timeout_secs,
+        keepalive_secs: cli.grpc_keepalive_secs,
+        read_retries: cli.grpc_read_retries,
     };
     if mesh.token.is_some() && mesh.ca.is_none() {
         warn!(
@@ -383,6 +388,19 @@ struct MeshClientParts {
     #[cfg_attr(not(feature = "distributed"), allow(dead_code))]
     domain: Option<String>,
     token: Option<Vec<u8>>,
+    /// Transport-resilience overrides (ADR-085) as plain values; the typed `MeshTransport`
+    /// is built inside the distributed-gated path. `None` ⇒ the MeshTransport default. All
+    /// consumed only there, hence the gated dead-code allowances.
+    #[cfg_attr(not(feature = "distributed"), allow(dead_code))]
+    connect_timeout_secs: Option<u64>,
+    #[cfg_attr(not(feature = "distributed"), allow(dead_code))]
+    read_timeout_secs: Option<u64>,
+    #[cfg_attr(not(feature = "distributed"), allow(dead_code))]
+    write_timeout_secs: Option<u64>,
+    #[cfg_attr(not(feature = "distributed"), allow(dead_code))]
+    keepalive_secs: Option<u64>,
+    #[cfg_attr(not(feature = "distributed"), allow(dead_code))]
+    read_retries: Option<u32>,
 }
 
 /// Assemble the `ClusterEngine` for the chosen backend: reopen an existing durable
@@ -477,6 +495,24 @@ fn assemble_cluster(
 
     #[cfg(feature = "distributed")]
     {
+        // Transport-resilience overrides (ADR-085): start from the always-on defaults and
+        // apply any operator flags.
+        let mut transport = reverse_rusty::cluster::MeshTransport::default();
+        if let Some(s) = mesh.connect_timeout_secs {
+            transport.connect_timeout = std::time::Duration::from_secs(s);
+        }
+        if let Some(s) = mesh.read_timeout_secs {
+            transport.read_timeout = std::time::Duration::from_secs(s);
+        }
+        if let Some(s) = mesh.write_timeout_secs {
+            transport.write_timeout = std::time::Duration::from_secs(s);
+        }
+        if let Some(s) = mesh.keepalive_secs {
+            transport.keepalive_interval = std::time::Duration::from_secs(s);
+        }
+        if let Some(n) = mesh.read_retries {
+            transport.read_retries = n;
+        }
         let security = reverse_rusty::cluster::ClientSecurity {
             tls: mesh
                 .ca
@@ -485,6 +521,7 @@ fn assemble_cluster(
                     domain: mesh.domain,
                 }),
             token: mesh.token,
+            transport,
         };
         connect_remote_cluster(
             remote_groups,

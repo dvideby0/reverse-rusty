@@ -35,7 +35,7 @@ async fn connect_control_mesh(
     endpoint: &str,
     security: &ClientSecurity,
 ) -> Result<ControlServiceClient<MeshChannel>, ShardError> {
-    let ep = configure_endpoint(endpoint, security.tls.as_ref())?;
+    let ep = configure_endpoint(endpoint, security.tls.as_ref(), &security.transport)?;
     let channel = ep
         .connect()
         .await

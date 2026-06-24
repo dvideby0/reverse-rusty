@@ -188,6 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ClientSecurity {
             tls: client_tls,
             token: token.clone(),
+            ..Default::default()
         },
     )?);
     if let Some(dir) = &data_dir {
@@ -204,6 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_security(ServerSecurity {
             tls: server_tls,
             token,
+            ..Default::default()
         });
     if let Some(ha) = health_addr {
         server = server.with_health_addr(ha);

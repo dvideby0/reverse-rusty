@@ -271,6 +271,13 @@ impl ClusterEngine {
         self.ring.num_shards()
     }
 
+    /// A point-in-time snapshot of the cluster gRPC transport metrics (ADR-085): per-RPC
+    /// call counts, errors, timeouts, retries, and summed latency. All-zero for an
+    /// in-process cluster (no remote RPCs). Off the hot path — introspection / scraping.
+    pub fn transport_metrics(&self) -> crate::cluster::TransportMetricsSnapshot {
+        self.transport_metrics.snapshot()
+    }
+
     /// Total physical query count across shards (a replicated/any-of query is
     /// counted once per shard holding it — physical, not distinct-logical).
     pub fn num_queries(&self) -> Result<usize, ShardError> {
