@@ -236,6 +236,8 @@ pub(crate) async fn cluster_metrics(State(state): State<Arc<ClusterAppState>>) -
         if let Ok(n) = cluster.num_queries() {
             state.prom.total_queries.set(n as i64);
         }
+        // Cluster gRPC transport metrics (ADR-085) — all-zero for an in-process cluster.
+        state.prom.observe_transport(&cluster.transport_metrics());
     }
     let encoder = TextEncoder::new();
     let metric_families = state.prom.registry.gather();

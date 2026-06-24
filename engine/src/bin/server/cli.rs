@@ -207,4 +207,30 @@ pub(crate) struct Cli {
     /// (`--grpc-tls-ca`/`--grpc-tls-domain`/`--cluster-token`) as the shard links.
     #[arg(long)]
     pub(crate) control_endpoint: Vec<String>,
+
+    /// Coordinator gRPC client connect timeout in seconds (ADR-085) — bounds the TCP+TLS
+    /// dial so an unreachable shard fails fast. Default: 5s.
+    #[arg(long)]
+    pub(crate) grpc_connect_timeout_secs: Option<u64>,
+
+    /// Per-call deadline in seconds for unary READ RPCs (percolate / counts) the coordinator
+    /// sends shard servers (ADR-085) — a hung shard fails loud instead of hanging the fan-out,
+    /// and idempotent reads retry on a transient error. Default: 10s.
+    #[arg(long)]
+    pub(crate) grpc_read_timeout_secs: Option<u64>,
+
+    /// Per-call deadline in seconds for unary WRITE RPCs (ingest / insert / delete / flush)
+    /// the coordinator sends shard servers (ADR-085); writes never retry. Default: 30s.
+    #[arg(long)]
+    pub(crate) grpc_write_timeout_secs: Option<u64>,
+
+    /// HTTP/2 keepalive PING interval in seconds for the coordinator's gRPC links (ADR-085) —
+    /// detects a dead/half-open peer so a stalled connection is broken. Default: 10s.
+    #[arg(long)]
+    pub(crate) grpc_keepalive_secs: Option<u64>,
+
+    /// Bounded retry attempts for IDEMPOTENT read RPCs on a transient (UNAVAILABLE) error
+    /// (ADR-085); writes never retry. Default: 2.
+    #[arg(long)]
+    pub(crate) grpc_read_retries: Option<u32>,
 }

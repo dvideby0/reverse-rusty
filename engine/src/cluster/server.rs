@@ -381,7 +381,12 @@ impl ShardServer {
     #[allow(clippy::type_complexity)]
     fn secured_router(self) -> Result<tonic::transport::server::Router, tonic::transport::Error> {
         let security = self.security.clone();
-        let mut builder = tonic::transport::Server::builder();
+        // Server-side HTTP/2 keepalive (ADR-085): PING idle/half-open CLIENT connections and
+        // drop the dead ones, so a crashed coordinator/peer can't leak server resources.
+        // Off any hot path; default-on via `ServerSecurity::default`.
+        let mut builder = tonic::transport::Server::builder()
+            .http2_keepalive_interval(Some(security.keepalive_interval))
+            .http2_keepalive_timeout(Some(security.keepalive_timeout));
         if let Some(tls) = &security.tls {
             builder = builder.tls_config(server_tls_config(tls))?;
         }

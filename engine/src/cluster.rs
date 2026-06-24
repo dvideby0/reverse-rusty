@@ -31,6 +31,7 @@ mod replica;
 mod ring;
 mod shard;
 mod translog;
+mod transport_metrics;
 
 #[cfg(feature = "distributed")]
 mod control_raft;
@@ -65,6 +66,7 @@ pub use coordinator::{
 };
 pub use ring::{HashRing, DEFAULT_VNODES};
 pub use shard::ShardError;
+pub use transport_metrics::{MethodStat, TransportMetrics, TransportMetricsSnapshot};
 
 #[cfg(feature = "distributed")]
 pub use control_raft::{
@@ -81,7 +83,8 @@ pub use remote::RemoteShard;
 pub use remote_control::RemoteControlPlane;
 #[cfg(feature = "distributed")]
 pub use security::{
-    resolve_mesh_token, ClientSecurity, ServerSecurity, TlsClientConfig, TlsServerIdentity,
+    resolve_mesh_token, ClientSecurity, MeshTransport, ServerSecurity, TlsClientConfig,
+    TlsServerIdentity,
 };
 #[cfg(feature = "distributed")]
 pub use server::ShardServer;

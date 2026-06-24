@@ -13,6 +13,7 @@ use crate::normalize::Normalizer;
 use crate::tagdict::TagDict;
 
 use crate::cluster::security::ClientSecurity;
+use crate::cluster::transport_metrics::TransportMetrics;
 
 use super::{ClusterConfig, ClusterDurable, ClusterEngine, ShardGroup};
 
@@ -50,6 +51,15 @@ impl ClusterEngine {
     /// Only the secure gRPC builders set it; the default stays empty (plaintext).
     fn with_client_security(mut self, security: ClientSecurity) -> Self {
         self.client_security = security;
+        self
+    }
+
+    /// Install the SHARED transport-metrics collector (ADR-085) the gRPC builders also handed
+    /// to each serving `RemoteShard`, so remote per-RPC stats aggregate on the engine (read via
+    /// [`Self::transport_metrics`]). Replaces the empty one `from_parts` created. Only the gRPC
+    /// builders call this; the in-process path keeps its all-zero collector.
+    fn with_transport_metrics(mut self, metrics: Arc<TransportMetrics>) -> Self {
+        self.transport_metrics = metrics;
         self
     }
 
@@ -138,6 +148,9 @@ impl ClusterEngine {
         // Wrap each remote position in a `HandoffShard` so it can be re-pointed at a new owner at
         // runtime (ADR-043); the typed handles are installed via `with_handoffs` below.
         let mut handoffs: Vec<Arc<HandoffShard>> = Vec::with_capacity(endpoints.len());
+        // ONE shared transport-metrics collector (ADR-085): every serving RemoteShard records
+        // into it and the engine reads it via `transport_metrics()` (installed below).
+        let metrics = Arc::new(TransportMetrics::new());
         for ep in endpoints {
             let remote = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
                 ep,
@@ -147,7 +160,8 @@ impl ClusterEngine {
                 tag_dict_bytes.clone(),
                 expected_tag,
                 &security,
-            )?;
+            )?
+            .with_metrics(Arc::clone(&metrics));
             let (boxed, h) = wrap_handoff(Box::new(remote), 0);
             shards.push(boxed);
             handoffs.push(h);
@@ -171,7 +185,8 @@ impl ClusterEngine {
         .with_handoffs(handoffs)
         .with_handoff_caps(config.handoff_drain_passes, config.handoff_final_drain_cap)
         .with_handle(handle.clone())
-        .with_client_security(security))
+        .with_client_security(security)
+        .with_transport_metrics(metrics))
     }
 
     /// Assemble a cluster whose K shard POSITIONS are each a [`ReplicatedShard`](crate::cluster::replica::ReplicatedShard)
@@ -231,6 +246,8 @@ impl ClusterEngine {
         // Each position (a bare remote or a ReplicatedShard group) is wrapped in a `HandoffShard`
         // so the whole group can be re-pointed at a new owner at runtime (ADR-043).
         let mut handoffs: Vec<Arc<HandoffShard>> = Vec::with_capacity(groups.len());
+        // ONE shared transport-metrics collector (ADR-085); see `connect_remote_with_security`.
+        let metrics = Arc::new(TransportMetrics::new());
         for g in groups {
             let primary = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
                 &g.primary,
@@ -240,7 +257,8 @@ impl ClusterEngine {
                 tag_dict_bytes.clone(),
                 expected_tag,
                 &security,
-            )?;
+            )?
+            .with_metrics(Arc::clone(&metrics));
             let mut replicas: Vec<Box<dyn Shard>> = Vec::with_capacity(g.replicas.len());
             for ep in &g.replicas {
                 let r = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
@@ -251,7 +269,8 @@ impl ClusterEngine {
                     tag_dict_bytes.clone(),
                     expected_tag,
                     &security,
-                )?;
+                )?
+                .with_metrics(Arc::clone(&metrics));
                 replicas.push(Box::new(r) as Box<dyn Shard>);
             }
             let shard: Box<dyn Shard> = if replicas.is_empty() {
@@ -282,7 +301,8 @@ impl ClusterEngine {
         .with_handoffs(handoffs)
         .with_handoff_caps(config.handoff_drain_passes, config.handoff_final_drain_cap)
         .with_handle(handle.clone())
-        .with_client_security(security))
+        .with_client_security(security)
+        .with_transport_metrics(metrics))
     }
 
     /// Cross-node peer recovery (ADR-036 + ADR-039 + ADR-040): bring a fresh, durable, **pending**
@@ -315,7 +335,8 @@ impl ClusterEngine {
             expected,
             expected_tag,
             &self.client_security,
-        )?;
+        )?
+        .with_metrics(Arc::clone(&self.transport_metrics));
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
         let recover = || -> Result<(u64, u64), ShardError> {
@@ -330,7 +351,8 @@ impl ClusterEngine {
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
                 &self.client_security,
-            )?;
+            )?
+            .with_metrics(Arc::clone(&self.transport_metrics));
             // Bulk copy: segments at snapshot position P (the source keeps serving + writing).
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
             // Tail replay + convergence: drain the source tail (> P) through the SAME apply funnel
@@ -386,14 +408,16 @@ impl ClusterEngine {
             expected,
             expected_tag,
             &self.client_security,
-        )?;
+        )?
+        .with_metrics(Arc::clone(&self.transport_metrics));
         let target = crate::cluster::remote::RemoteShard::connect_with_security(
             target_endpoint,
             handle.clone(),
             expected,
             expected_tag,
             &self.client_security,
-        )?;
+        )?
+        .with_metrics(Arc::clone(&self.transport_metrics));
         let hwm = crate::cluster::replica::catch_up_replica(
             &target,
             &source,
@@ -461,7 +485,8 @@ impl ClusterEngine {
             expected,
             expected_tag,
             &self.client_security,
-        )?;
+        )?
+        .with_metrics(Arc::clone(&self.transport_metrics));
         let (lease, _pinned) = source.acquire_retention_lease()?;
 
         let do_move = || -> Result<u64, ShardError> {
@@ -476,7 +501,8 @@ impl ClusterEngine {
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
                 &self.client_security,
-            )?;
+            )?
+            .with_metrics(Arc::clone(&self.transport_metrics));
             let (_segments, _nq, p) = target.recover_from(source_endpoint, expected)?;
             // Drain the tail (writes that landed during the copy), renewing the lease each pass.
             let mut hwm = LogPos(p);
@@ -492,7 +518,23 @@ impl ClusterEngine {
             }
             // FENCE the source: it stops accepting writes (the write-quiesce for `position` begins).
             // Reads + FetchTranslog stay served, so the catch-up below still works.
-            source.fence(new_gen)?;
+            // The fence RPC carries a write-deadline (ADR-085): a lost/slow response can return
+            // Err AFTER the server applied the fence. Attempt the CAS-safe unfence(new_gen) on
+            // failure (it lifts a fence the server DID apply at new_gen, no-op otherwise) so a
+            // failed handoff never strands the source rejecting writes.
+            if let Err(e) = source.fence(new_gen) {
+                if let Err(ue) = source.unfence(new_gen) {
+                    self.emit(EngineEvent::DurabilityFailure {
+                        op: DurabilityOp::ReplicaDesync,
+                        detail: "fence failed during handoff and the CAS-safe unfence cleanup \
+                                 also failed; if the server had applied the fence the source \
+                                 remains fenced and needs manual recovery"
+                            .into(),
+                        error: ue.to_string(),
+                    });
+                }
+                return Err(e);
+            }
             // From here the source is write-quiesced. Any failure BEFORE the flip must LIFT the
             // fence (ADR-048) so the source resumes serving — otherwise an aborted handoff leaves it
             // permanently quiesced (a write-rejecting node needing a manual restart). The

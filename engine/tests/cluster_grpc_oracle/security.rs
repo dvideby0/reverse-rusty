@@ -38,6 +38,7 @@ fn server_security(cert_pem: &[u8], key_pem: &[u8]) -> ServerSecurity {
             key_pem: key_pem.to_vec(),
         }),
         token: Some(MESH_TOKEN.to_vec()),
+        ..Default::default()
     }
 }
 
@@ -48,6 +49,7 @@ fn client_security(ca_pem: &[u8], token: Option<&[u8]>) -> ClientSecurity {
             domain: None, // endpoints are https://localhost — the SAN matches directly
         }),
         token: token.map(<[u8]>::to_vec),
+        ..Default::default()
     }
 }
 
@@ -219,6 +221,7 @@ fn grpc_plaintext_client_to_tls_server_fails_loud() {
             ClientSecurity {
                 tls: None,
                 token: Some(MESH_TOKEN.to_vec()),
+                ..Default::default()
             },
         )
         .is_err(),
