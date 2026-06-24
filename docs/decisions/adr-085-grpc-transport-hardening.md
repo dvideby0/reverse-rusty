@@ -42,7 +42,9 @@ byte-identical on the in-process path.
     `tonic::Request::set_timeout` (does not exist in tonic 0.14). `mk` is a **factory** because a
     tonic call future is single-use — each attempt rebuilds it from a cloned client + request.
   - **Bounded fail-loud retry of IDEMPOTENT reads** (percolate, counts, fingerprint) on a transient
-    error (gRPC `Unavailable`) or a timeout, with exponential backoff (50ms→1s cap). **Writes never
+    error (gRPC `Unavailable`, or the transport-readiness `Unknown` tonic's generated client raises
+    as "Service was not ready" when a channel can't reconnect) or a timeout, with exponential backoff
+    (50ms→1s cap). **Writes never
     retry** — `ingest`/`insert`/`delete` are non-idempotent (a retry could double-apply); they fail
     loud and converge via the coordinator's durable log + `resync` partial-apply repair
     ([ADR-047](adr-047-partial-apply-repair.md)).
@@ -72,10 +74,13 @@ byte-identical on the in-process path.
   2 read retries). The in-process / RF=1 path never builds a `RemoteShard`, so behavior and metrics
   are byte-identical; the plaintext gRPC path gains keepalive (a safe behavior change). A timeout only
   ever fails a percolate loud — it never drops a shard from the union.
-- **Recovery/handoff transient `RemoteShard`s** get the timeouts/keepalive/retry (via the shared
-  `call` seam + `configure_endpoint`) but their per-RPC **metrics are not aggregated** on the engine
-  in v1 (they record into a private throwaway collector). The serving shards — the percolate/ingest
-  hot path — aggregate fully. Wiring recovery/handoff metrics is a minor follow-up.
+- **Recovery/handoff transient `RemoteShard`s** also share the collector (the handoff *target*
+  becomes a serving shard once swapped into routing, so its metrics must aggregate), so the
+  peer-recovery / catch-up / handoff RPCs (`recover_from`, `translog`, `retention_lease`,
+  `fence`/`unfence`) are counted too. And because `fence` now carries a write-deadline, a fence that
+  times out *after* the server applied it would have stranded the source write-fenced; the handoff's
+  fence path now attempts the CAS-safe `unfence(new_gen)` cleanup on failure (lifts a real fence,
+  no-op otherwise). Both were codex-review findings on this change.
 - **Proven:** unit tests in `remote.rs` (`run_with_retry` timeout fires; transient retry recovers;
   non-transient + write paths do not retry; backoff bounds; `is_transient` only `Unavailable`) + a
   real-gRPC integration test (`cluster_grpc_oracle::transport`): metrics recorded on the happy path,

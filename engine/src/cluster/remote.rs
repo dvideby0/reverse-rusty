@@ -512,7 +512,16 @@ where
 /// server-restarting / load-shed signal). Conservative on purpose: codes like
 /// `ResourceExhausted` or `Internal` are not retried, to avoid amplifying overload.
 fn is_transient(status: &tonic::Status) -> bool {
-    status.code() == tonic::Code::Unavailable
+    match status.code() {
+        // Connection refused/reset, server load-shedding, or a GOAWAY mid-RPC.
+        tonic::Code::Unavailable => true,
+        // The generated tonic client maps a not-yet-ready channel (reconnect in progress /
+        // connect refused — the most common downed-shard failure) to UNKNOWN with a
+        // "Service was not ready: …" message. Treat THAT transport signal as transient, but
+        // not arbitrary application-level UNKNOWNs.
+        tonic::Code::Unknown => status.message().contains("not ready"),
+        _ => false,
+    }
 }
 
 /// Exponential backoff for retry attempt `n` (1-based): 50ms, 100ms, 200ms, … capped at 1s.
@@ -1024,8 +1033,14 @@ mod tests {
     }
 
     #[test]
-    fn only_unavailable_is_transient() {
+    fn transient_covers_unavailable_and_transport_not_ready() {
         assert!(is_transient(&tonic::Status::unavailable("x")));
+        // tonic's "channel not ready" transport failure surfaces as UNKNOWN — transient.
+        assert!(is_transient(&tonic::Status::unknown(
+            "Service was not ready: transport error"
+        )));
+        // An arbitrary application-level UNKNOWN is NOT retried.
+        assert!(!is_transient(&tonic::Status::unknown("app boom")));
         assert!(!is_transient(&tonic::Status::invalid_argument("x")));
         assert!(!is_transient(&tonic::Status::internal("x")));
         assert!(!is_transient(&tonic::Status::deadline_exceeded("x")));
