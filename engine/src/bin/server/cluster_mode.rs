@@ -47,6 +47,11 @@ use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
 use crate::{auth, shutdown_signal};
 
+/// Remote-coordinator assembly (connect + control-plane attach + route-by-assignments), split out to
+/// keep this file within the module-size budget (ADR-086).
+#[cfg(feature = "distributed")]
+mod remote_connect;
+
 /// Run the server in coordinator mode. Mirrors `main`'s single-node flow: build
 /// the cluster, wire observability, serve, shut down cleanly.
 pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
@@ -113,6 +118,16 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         error!(
             "--control-endpoint requires --shard-endpoint (remote mode): an in-process cluster uses \
              its own in-memory control plane"
+        );
+        std::process::exit(1);
+    }
+    // --route-by-assignments makes the committed quorum the topology source of truth (ADR-086), so it
+    // requires a control plane to read. (It also requires --shard-endpoint transitively, since
+    // --control-endpoint does.)
+    if cli.route_by_assignments && cli.control_endpoint.is_empty() {
+        error!(
+            "--route-by-assignments requires --control-endpoint: the committed quorum is the \
+             topology source of truth (ADR-086)"
         );
         std::process::exit(1);
     }
@@ -207,6 +222,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
     let data_dir = cluster_config.data_dir.clone();
     let cfg = cluster_config.clone();
     let control_endpoints: Vec<String> = cli.control_endpoint.clone();
+    let route_by_assignments = cli.route_by_assignments;
     let assemble = tokio::task::spawn_blocking(move || {
         assemble_cluster(
             in_process,
@@ -219,6 +235,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             &handle,
             mesh,
             &control_endpoints,
+            route_by_assignments,
         )
     });
     let cluster = match assemble.await.expect("cluster assembly task panicked") {
@@ -418,9 +435,11 @@ fn assemble_cluster(
     handle: &tokio::runtime::Handle,
     mesh: MeshClientParts,
     control_endpoints: &[String],
+    route_by_assignments: bool,
 ) -> Result<ClusterEngine, ShardError> {
     if in_process {
-        let _ = (handle, mesh, control_endpoints); // only the remote path connects on the runtime
+        // only the remote path connects on the runtime / consults the quorum
+        let _ = (handle, mesh, control_endpoints, route_by_assignments);
         if let Some(dir) = data_dir.filter(|d| ClusterEngine::cluster_exists(d)) {
             info!(data_dir = ?dir, "reopening durable cluster from manifest");
             // The manifest's persisted vocab is authoritative on a reopen (it matches
@@ -523,7 +542,7 @@ fn assemble_cluster(
             token: mesh.token,
             transport,
         };
-        connect_remote_cluster(
+        remote_connect::connect_remote_cluster(
             remote_groups,
             cfg,
             norm,
@@ -531,6 +550,7 @@ fn assemble_cluster(
             handle,
             security,
             control_endpoints,
+            route_by_assignments,
         )
     }
     #[cfg(not(feature = "distributed"))]
@@ -542,130 +562,4 @@ fn assemble_cluster(
                 .into(),
         ))
     }
-}
-
-/// Connect a coordinator over remote `shardserver` endpoints: mint + freeze the
-/// feature space over the load corpus (pass A of `build`, so a restart re-mints the
-/// identical dict and the ADR-034 fingerprint handshake holds), connect (the dict +
-/// tag space ship at connect), then bulk-load an empty cluster.
-#[cfg(feature = "distributed")]
-fn connect_remote_cluster(
-    remote_groups: &[String],
-    cfg: &ClusterConfig,
-    norm: Normalizer,
-    queries: &[(u64, String)],
-    handle: &tokio::runtime::Handle,
-    security: reverse_rusty::cluster::ClientSecurity,
-    control_endpoints: &[String],
-) -> Result<ClusterEngine, ShardError> {
-    use reverse_rusty::cluster::{ControlPlane, RemoteControlPlane, ShardGroup};
-
-    let groups: Vec<ShardGroup> = remote_groups
-        .iter()
-        .map(|g| {
-            let mut parts = g.split(',').map(str::trim).map(str::to_string);
-            let primary = parts.next().unwrap_or_default();
-            ShardGroup {
-                primary,
-                replicas: parts.collect(),
-            }
-        })
-        .collect();
-    if groups.iter().any(|g| g.primary.is_empty()) {
-        return Err(ShardError::Config(
-            "every --shard-endpoint needs a primary endpoint (got an empty one)".into(),
-        ));
-    }
-
-    let (dict, tag_dict) = ClusterEngine::freeze_feature_space(&norm, queries, &[]);
-    let norm = Arc::new(norm);
-    let dict = Arc::new(dict);
-    // Captured before `dict` is moved into the connect call — used to validate the control-plane
-    // quorum's feature-model fingerprint matches this coordinator's (ADR-083 attach guard).
-    let dict_fp = dict.fingerprint();
-    let tag_dict = Arc::new(tag_dict);
-
-    let plain = groups.iter().all(|g| g.replicas.is_empty());
-    let cluster = if plain && cfg.replication_factor == 1 {
-        let endpoints: Vec<String> = groups.into_iter().map(|g| g.primary).collect();
-        ClusterEngine::connect_remote_with_security(
-            norm,
-            dict,
-            tag_dict,
-            cfg,
-            &endpoints,
-            handle,
-            security.clone(),
-        )?
-    } else {
-        ClusterEngine::connect_replicated_with_security(
-            norm,
-            dict,
-            tag_dict,
-            cfg,
-            &groups,
-            handle,
-            security.clone(),
-        )?
-    };
-
-    // Attach the durable control-plane quorum (ADR-083) BEFORE any ingest: the coordinator becomes a
-    // thin `ControlService` client, so membership/assignment/resize decisions go through the quorum
-    // (durable + HA across coordinator restarts) instead of the in-memory backend. The control plane
-    // is off the matching hot path, so this never affects a percolate's result (zero FN risk).
-    let cluster = match control_endpoints.first() {
-        Some(endpoint) => {
-            info!(endpoint = %endpoint, "attaching coordinator to durable control-plane quorum");
-            let rcp =
-                RemoteControlPlane::connect(endpoint, handle.clone(), security).map_err(|e| {
-                    ShardError::ControlPlane(format!("connect control plane {endpoint}: {e}"))
-                })?;
-            // Validate the quorum's committed document matches THIS coordinator's ring BEFORE
-            // attaching it (codex): `controlserver` seeds its genesis from `--shards`/`--vnodes`, so a
-            // mismatch would make `/_cluster/state` + rebalance operate on a wrong-sized assignment
-            // map. Fail loud rather than silently attach an inconsistent document. A transient "no
-            // leader yet" read also fails loud here; `restart: unless-stopped` retries, exactly like
-            // the shard connect race.
-            let doc = rcp.cluster_state().map_err(|e| {
-                ShardError::ControlPlane(format!(
-                    "read control-plane state from {endpoint} (is the quorum leader up?): {e}"
-                ))
-            })?;
-            if doc.num_shards != cfg.num_shards as u32 || doc.vnodes != cfg.vnodes {
-                return Err(ShardError::ControlPlane(format!(
-                    "control-plane quorum ring (num_shards={}, vnodes={}) does not match this \
-                     coordinator (num_shards={}, vnodes={}); seed controlserver with --shards {} \
-                     --vnodes {}",
-                    doc.num_shards,
-                    doc.vnodes,
-                    cfg.num_shards,
-                    cfg.vnodes,
-                    cfg.num_shards,
-                    cfg.vnodes
-                )));
-            }
-            if doc.dict_fingerprint != dict_fp {
-                warn!(
-                    "control-plane quorum feature-model fingerprint {} differs from this \
-                     coordinator's {} (seed controlserver with --fingerprint {}); routing is \
-                     unaffected (the coordinator routes by its own ring), but the cluster-state \
-                     model label is stale",
-                    doc.dict_fingerprint, dict_fp, dict_fp
-                );
-            }
-            cluster.with_control_plane(Box::new(rcp))
-        }
-        None => cluster,
-    };
-
-    if !queries.is_empty() {
-        match cluster.num_queries()? {
-            0 => cluster.ingest(queries)?,
-            n => warn!(
-                existing = n,
-                "skipping --load-file: the remote cluster is already populated"
-            ),
-        }
-    }
-    Ok(cluster)
 }

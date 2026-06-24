@@ -129,6 +129,10 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **openraft control plane** — gRPC `ControlService`, survives leader kill (ADR-038); durable Raft
   log + restart recovery (ADR-041); coordinator-facing `ClientControl` op + a thin stateless
   `RemoteControlPlane` client (`server --control-endpoint`, ADR-083 — off the matching hot path).
+- **Coordinator routing by committed assignments + control failover** — opt-in
+  `--route-by-assignments` makes the quorum the topology source of truth (position-preserving seed +
+  fail-loud guard; resolve-only boot with just `--control-endpoint`); the control client fails over
+  across the whole `--control-endpoint` list (ADR-086). Data-moving live re-pointing deferred.
 - **Live data-moving handoff** — swappable shard backing (ADR-043); peer-recover → fence → drain →
   flip under concurrent writes (ADR-044); auto-unfence-on-abort + autoscaler-driven (ADR-048).
 - **Partial-apply repair** — typed `PartiallyApplied` + live `resync` (ADR-047).
@@ -177,11 +181,13 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   operations runbook shipped, ADR-081; Kubernetes/Helm chart + native gRPC health/readiness probes,
   ADR-084; replicate-broad-to-all + the cluster class-D lane, ADR-080; backup/restore, ADR-079). The
   shard + control gRPC servers now expose the standard `grpc.health.v1.Health` service on an opt-in
-  plaintext `--health-addr` port for k8s probes (ADR-084). The coordinator can attach to the durable `controlserver` quorum via
-  `--control-endpoint` (ADR-083 — the cluster-state document becomes durable + HA across coordinator
-  restarts), though it still routes by its `--shard-endpoint` list rather than the committed assignments
-  (the default `compose.cluster.yml` leaves the coordinator unwired — opt in with the flag).
-  Mesh TLS + token auth are
+  plaintext `--health-addr` port for k8s probes (ADR-084). The coordinator attaches to the durable
+  `controlserver` quorum via `--control-endpoint` (ADR-083 — the cluster-state document becomes
+  durable + HA across coordinator restarts), fails over across the whole endpoint list, and (opt-in
+  `--route-by-assignments`, ADR-086) routes by the committed shard→node assignments instead of its
+  static `--shard-endpoint` list — making the quorum the topology source of truth. **Data-moving
+  reassignment is still deferred:** a non-data-moving HRW `rebalance` must not be used to re-point
+  routing on a populated cluster (that needs live handoff). Mesh TLS + token auth are
   **opt-in** (ADR-071) — enable both outside a trusted network. Remote-cluster vocabulary is
   deploy-time configuration, not live-shipped (decided, ADR-076).
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at

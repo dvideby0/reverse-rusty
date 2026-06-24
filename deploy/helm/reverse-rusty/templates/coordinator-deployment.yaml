@@ -65,10 +65,20 @@ spec:
             - /certs/{{ .Values.tls.caFile }}
             {{- end }}
             {{- if and .Values.controlPlane.enabled .Values.controlPlane.wireToCoordinator }}
-            # Attach to the durable openraft quorum (ADR-083) — cluster state survives a
+            # Attach to the durable openraft quorum (ADR-083), listing ALL members for failover
+            # (ADR-086 — tried in order, ForwardToLeader followed). Cluster state survives a
             # coordinator restart (the reason k8s was unblocked vs ADR-081's idle quorum).
+            {{- range $i := until (int .Values.controlPlane.replicas) }}
             - --control-endpoint
-            - {{ printf "%s://%s-0.%s.%s.svc.%s:%v" $scheme $control $control $ns $domain $.Values.ports.controlGrpc | quote }}
+            - {{ printf "%s://%s-%d.%s.%s.svc.%s:%v" $scheme $control $i $control $ns $domain $.Values.ports.controlGrpc | quote }}
+            {{- end }}
+            {{- if .Values.coordinator.routeByAssignments }}
+            # Route by the committed shard->node assignments (ADR-086): the quorum is the topology
+            # source of truth (position-preserving seed + fail-loud guard). Data-moving live
+            # re-pointing is deferred — do not HRW-rebalance a populated cluster expecting routing
+            # to follow.
+            - --route-by-assignments
+            {{- end }}
             {{- end }}
             {{- if .Values.coordinator.includeBroad }}
             - --include-broad

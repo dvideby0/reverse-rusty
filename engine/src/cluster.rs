@@ -62,7 +62,8 @@ pub use control::{
     NodeDescriptor, NodeId, NodeRole, ShardAssignment, StateVersion,
 };
 pub use coordinator::{
-    recommended_shard_count, AddOutcome, ClusterConfig, ClusterEngine, ResyncReport,
+    recommended_shard_count, resolve_topology, seed_position_preserving, AddOutcome, ClusterConfig,
+    ClusterEngine, ResyncReport, ShardEndpoints,
 };
 pub use ring::{HashRing, DEFAULT_VNODES};
 pub use shard::ShardError;

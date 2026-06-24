@@ -35,11 +35,11 @@ ports:
   controlHealth: 50062
   coordinatorHttp: 9200
 
-# Durable openraft control plane (ADR-038/041). When enabled AND wireToCoordinator,
-# the coordinator attaches to the quorum via --control-endpoint (ADR-083), so cluster
-# state survives a coordinator restart — the reason k8s was unblocked (vs ADR-081's
-# idle quorum). Disable for the stateless-coordinator topology (re-derives placement
-# from the frozen dict + ring on every start).
+# Durable openraft control plane (ADR-038/041). When enabled AND wireToCoordinator, the
+# coordinator attaches to the quorum via --control-endpoint (ADR-083), listing ALL members
+# for failover (ADR-086), so cluster state survives a coordinator restart — the reason k8s
+# was unblocked (vs ADR-081's idle quorum). Disable for the stateless-coordinator topology
+# (re-derives placement from the frozen dict + ring on every start).
 controlPlane:
   enabled: true
   replicas: 3
@@ -53,6 +53,11 @@ coordinator:
   # Accept negation-only (class-D) queries (e.g. `-reprint`). The coordinator is the
   # sole gate; remote shards accept whatever it places (no per-shard flag, ADR-080/082).
   acceptClassD: false
+  # Route by the committed shard->node assignments instead of the static --shard-endpoint
+  # order (ADR-086): the coordinator seeds the quorum position-preservingly, then the durable
+  # document is the topology source of truth. Only takes effect with controlPlane.wireToCoordinator.
+  # A non-data-moving HRW rebalance must NOT be used to re-point routing (live handoff deferred).
+  routeByAssignments: true
   service:
     type: ClusterIP
     annotations: {}

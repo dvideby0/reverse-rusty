@@ -17,8 +17,9 @@
 //! an integration-test crate).
 
 use reverse_rusty::cluster::{
-    ClusterConfig, ClusterEngine, ClusterState, ClusterStateChange, ControlPlane,
-    InMemoryControlPlane, NodeDescriptor, NodeId, NodeRole, ShardAssignment,
+    resolve_topology, seed_position_preserving, ClusterConfig, ClusterEngine, ClusterState,
+    ClusterStateChange, ControlPlane, InMemoryControlPlane, NodeDescriptor, NodeId, NodeRole,
+    ShardAssignment, ShardEndpoints,
 };
 use reverse_rusty::compile::{extract, Extracted};
 use reverse_rusty::dict::Dict;
@@ -317,4 +318,117 @@ fn control_plane_backends_agree() {
             "control-plane backends diverged on the committed document"
         );
     }
+}
+
+/// ADR-086: `seed_position_preserving` + `resolve_topology` make the committed quorum the topology
+/// source of truth without a control-plane format change. Seeding a deploy topology overwrites the
+/// genesis "every position → addr-less NodeId(0)" map; resolving reads it back position-for-position;
+/// re-seeding is idempotent (no-op). Pure `ControlPlane` logic ⇒ lean-core testable.
+#[test]
+fn seed_and_resolve_topology_round_trips_position_preserving() {
+    for &(k, rf) in &[(1usize, 1usize), (3, 1), (4, 2)] {
+        let cp = InMemoryControlPlane::single_node(k as u32, 128, 0xABCD);
+
+        // A deploy topology: one primary per position + (rf-1) replicas on distinct URLs.
+        let topology: Vec<ShardEndpoints> = (0..k)
+            .map(|p| {
+                let primary = format!("https://shard{p}:50051");
+                let replicas: Vec<String> = (1..rf)
+                    .map(|r| format!("https://shard{p}-r{r}:50051"))
+                    .collect();
+                (primary, replicas)
+            })
+            .collect();
+
+        // Genesis assigns every position to the addr-less manager NodeId(0): resolution must FAIL
+        // LOUD rather than yield a silently-unrouted shard (a false negative).
+        assert!(
+            resolve_topology(&cp, k as u32).is_err(),
+            "k={k}: genesis (every position → addr-less NodeId(0)) cannot be routed by"
+        );
+
+        // Seed, then resolve: byte-identical to the deploy topology (position-preserving).
+        seed_position_preserving(&cp, &topology).expect("seed");
+        assert_eq!(
+            resolve_topology(&cp, k as u32).expect("resolve"),
+            topology,
+            "k={k} rf={rf}: resolved topology must equal the seeded deploy topology"
+        );
+
+        // The committed document is well-formed: a Data node per distinct URL, position-preserving
+        // assignments overwriting the genesis NodeId(0) map.
+        let st = cp.cluster_state().unwrap();
+        assert_eq!(st.assignments.len(), k);
+        for (p, a) in st.assignments.iter().enumerate() {
+            assert_eq!(a.position as usize, p);
+            assert_ne!(
+                a.primary,
+                NodeId(0),
+                "k={k}: genesis assignment must be overwritten"
+            );
+            assert_eq!(a.replicas.len(), rf - 1, "k={k}: replica count = rf-1");
+        }
+
+        // Idempotency: re-seeding the SAME topology commits nothing (version unchanged).
+        let v_before = cp.version().unwrap();
+        seed_position_preserving(&cp, &topology).expect("re-seed");
+        assert_eq!(
+            cp.version().unwrap(),
+            v_before,
+            "k={k}: re-seeding an unchanged topology must be a no-op"
+        );
+        assert_eq!(resolve_topology(&cp, k as u32).unwrap(), topology);
+    }
+}
+
+/// ADR-086 guard trigger: a MAP-ONLY reassignment (the HRW `rebalance` permutes position→node
+/// WITHOUT moving data) makes `resolve_topology` differ from the seeded deploy topology — exactly
+/// what the coordinator's boot guard refuses, since routing it would send a position's titles to a
+/// node holding a different shard (a shard-sized false negative).
+#[test]
+fn non_position_preserving_map_resolves_differently() {
+    let k = 3u32;
+    let cp = InMemoryControlPlane::single_node(k, 128, 0xABCD);
+    let topology: Vec<ShardEndpoints> = (0..k)
+        .map(|p| (format!("https://shard{p}:50051"), Vec::new()))
+        .collect();
+    seed_position_preserving(&cp, &topology).expect("seed");
+    assert_eq!(resolve_topology(&cp, k).unwrap(), topology);
+
+    // Swap positions 0 and 1's primaries WITHOUT moving data (a rebalance-style map change).
+    let st = cp.cluster_state().unwrap();
+    let n0 = st
+        .assignments
+        .iter()
+        .find(|a| a.position == 0)
+        .unwrap()
+        .primary;
+    let n1 = st
+        .assignments
+        .iter()
+        .find(|a| a.position == 1)
+        .unwrap()
+        .primary;
+    for (position, primary) in [(0u32, n1), (1u32, n0)] {
+        cp.propose(ClusterStateChange::AssignShard(ShardAssignment {
+            position,
+            primary,
+            replicas: vec![],
+        }))
+        .unwrap();
+    }
+
+    let resolved = resolve_topology(&cp, k).unwrap();
+    assert_ne!(
+        resolved, topology,
+        "a non-position-preserving map must resolve differently (the guard's trigger)"
+    );
+    assert_eq!(
+        resolved[0].0, topology[1].0,
+        "position 0 now resolves to shard1's endpoint"
+    );
+    assert_eq!(
+        resolved[1].0, topology[0].0,
+        "position 1 now resolves to shard0's endpoint"
+    );
 }

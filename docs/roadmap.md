@@ -49,14 +49,17 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     autoscaler-driven resize (needs hysteresis to avoid thrash, since a resize is non-idempotent +
     `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
     live-handoff machinery; the v1 resize is in-process blue/green).
-  - *Packaging follow-on (deferred):* the **control-plane wiring residue** beyond ADR-083's
-    `--control-endpoint` and ADR-084's k8s wiring: routing by the committed shard→node assignments
-    (the coordinator still routes by its `--shard-endpoint` list / the chart's fixed StatefulSet) +
-    multi-control-endpoint failover (the client uses the first endpoint then follows
-    `ForwardToLeader`). (k8s/Helm manifests + the gRPC health/readiness probes they need shipped —
-    [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the advertise-URL; the
-    `shardserver --accept-class-d` item was a phantom — remote shards force-accept class-D, the
-    coordinator is the sole gate.)
+  - *Live-handoff follow-on (deferred, [ADR-086](decisions/adr-086-control-plane-routing-and-failover.md)):*
+    **data-moving reassignment** — a committed assignment change *driving* `execute_handoff`
+    (peer-recovery + `HandoffShard` swap) so a reassignment moves data and routing re-points LIVE while
+    the coordinator runs. ADR-086 shipped the boot-time half — routing by the committed shard→node
+    assignments (opt-in `--route-by-assignments`, position-preserving + a fail-loud guard) +
+    multi-control-endpoint failover — so the deferred remainder is the runtime re-point loop with a
+    zero-FN proof under concurrent writes (until then a non-data-moving HRW `rebalance` must not be
+    used to re-point routing on a populated cluster). (k8s/Helm manifests + gRPC health/readiness
+    probes shipped — [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the
+    advertise-URL; the `shardserver --accept-class-d` item was a phantom — remote shards force-accept
+    class-D, the coordinator is the sole gate.)
 - **Feature-model versioning + blue/green re-materialize** — frozen common-mask across minor
   versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
 - **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying

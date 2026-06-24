@@ -245,21 +245,26 @@ unreachable endpoint.
 
 ## 11. Not covered in v1 (see ADR-081)
 
-- **Control-plane↔coordinator wiring (ADR-083) — now available.** Pass `--control-endpoint <URL>` to the
-  coordinator (e.g. `--control-endpoint https://control0:50061`) to attach its cluster-state control
-  plane to the durable `controlserver` quorum as a **thin client** (the coordinator does NOT join
-  consensus — it stays stateless). Membership / assignment / resize decisions then commit through the
-  quorum (durable + HA across coordinator restarts) instead of the in-memory backend; absent the flag,
-  the in-memory backend is used (byte-identical). The bootstrap control node must advertise a routable
-  self-URL via `--advertise-url` (ADR-082), committed at the *first* bootstrap only (Raft `initialize`
-  is idempotent — an existing deployment whose quorum already bootstrapped a wildcard URL resets its
-  idle `controlN-data` volumes to adopt the new one). **Still out of scope:** the coordinator routes by
-  its `--shard-endpoint` list, NOT by the committed shard→node assignments (membership-driven address
-  resolution is a separate follow-on); and the control connect uses the *first* endpoint then follows
-  `ForwardToLeader` (multi-endpoint failover is a follow-on). The default `compose.cluster.yml` leaves
-  the coordinator unwired (control plane durable but idle) — add the flag to opt in.
-- **Kubernetes manifests / Helm** — deferred; the deployment unit is Compose at v1. The shape is sketched
-  in ADR-081 (StatefulSets for shards/control, a Deployment for the stateless coordinator).
+- **Control-plane↔coordinator wiring (ADR-083/086) — wired by default.** Pass `--control-endpoint <URL>`
+  (repeatable — list **all** quorum members) to attach the coordinator's cluster-state control plane to
+  the durable `controlserver` quorum as a **thin client** (it does NOT join consensus — stays stateless).
+  The client tries the endpoints in order and follows a follower's `ForwardToLeader`, **failing over**
+  across the list (ADR-086) if a member is down; all-down fails loud. Add `--route-by-assignments`
+  (ADR-086) to make the committed shard→node assignments the **topology source of truth**: the coordinator
+  seeds the quorum position-preservingly from its `--shard-endpoint` list on first boot, then resolves its
+  shard topology from the durable document (so a coordinator can boot with only `--control-endpoint`); a
+  fail-loud guard refuses a committed map that is not position-preserving. Absent both flags, the in-memory
+  backend is used (byte-identical). The bootstrap control node must advertise a routable self-URL via
+  `--advertise-url` (ADR-082), committed at the *first* bootstrap only (Raft `initialize` is idempotent —
+  an existing deployment whose quorum already bootstrapped a wildcard URL resets its idle `controlN-data`
+  volumes to adopt the new one). **Still deferred (ADR-086):** *data-moving* reassignment — a committed
+  assignment change does NOT yet move data + re-point routing LIVE while the coordinator runs, so a
+  non-data-moving HRW `rebalance` must **not** be used to re-point routing on a populated cluster (that
+  needs live handoff). The default `compose.cluster.yml` now wires `--control-endpoint` +
+  `--route-by-assignments`.
+- **Kubernetes / Helm** — shipped (ADR-084): `deploy/helm/reverse-rusty/` (shard + control StatefulSets, a
+  stateless coordinator Deployment wiring `--control-endpoint` + `--route-by-assignments`, native gRPC
+  health probes). Compose remains the simplest single-host unit; Helm is the k8s analogue.
 - **Online / cross-process resize** — `/_cluster/resize` is in-process only; the remote topology scales
   by redeploy ([§5](#5-scaling)).
 - **Custom vocabulary on the remote topology** — unsupported; remote shards run the default normalizer.
