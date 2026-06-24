@@ -261,10 +261,11 @@ fn remote_control_plane_follows_forward_to_leader() {
 /// ADR-086 multi-control-endpoint failover: the coordinator's control client is given the WHOLE
 /// quorum endpoint list and tries them in order. (a) a dead leading endpoint is skipped at connect
 /// time (a read AND a propose still succeed via the survivor); (b) when the primary's NODE dies
-/// mid-session a call fails over to the surviving quorum leader — the primary is a throwaway node on
-/// its OWN runtime, dropped to kill it connection-and-all (aborting a serve task leaves the
-/// established connection alive, cf. `cluster_grpc_oracle::transport`); (c) all endpoints down fails
-/// loud (never a stale read). The main quorum leader stays up throughout, so the test is deterministic.
+/// mid-session an idempotent READ fails over to the surviving quorum leader, but a WRITE does NOT
+/// (ADR-085/086: a committed-but-lost non-idempotent write must not be resubmitted) — it surfaces
+/// loud. The primary is a throwaway node on its OWN runtime, dropped to kill it connection-and-all
+/// (aborting a serve task leaves the established connection alive, cf. `cluster_grpc_oracle::transport`).
+/// (c) all endpoints down fails loud (never a stale read). The main quorum leader stays up throughout.
 #[test]
 fn remote_control_plane_fails_over_across_endpoints() {
     const DEAD: &str = "http://127.0.0.1:1";
@@ -303,8 +304,8 @@ fn remote_control_plane_fails_over_across_endpoints() {
     );
 
     // (b) Per-call failover: the primary is a throwaway control node on its OWN runtime. Dropping that
-    // runtime kills it connection-and-all, so a subsequent call MUST fail over to the surviving quorum
-    // leader (and the propose can ONLY have committed there — the victim is dead).
+    // runtime kills it connection-and-all, so a subsequent READ fails over to the surviving quorum
+    // leader — while a WRITE fails loud (writes are not resubmitted to a fallback endpoint).
     let victim_rt = Runtime::new().expect("victim runtime");
     let victim_plane = Arc::new(
         start_grpc_node(99, NUM_SHARDS, VNODES, GENESIS_FP, victim_rt.handle(), None)
@@ -347,7 +348,7 @@ fn remote_control_plane_fails_over_across_endpoints() {
     drop(victim_rt); // then kill its server + connection (the reliable kill)
     wait_until_stopped(victim_ep.trim_start_matches("http://"));
 
-    // The call now fails over to the surviving quorum leader: a read AND a propose succeed there.
+    // A READ fails over to the surviving quorum leader (routing decisions stay available).
     assert_eq!(
         rcp_b
             .cluster_state()
@@ -355,25 +356,22 @@ fn remote_control_plane_fails_over_across_endpoints() {
             .num_shards,
         NUM_SHARDS
     );
-    rcp_b
-        .propose(ClusterStateChange::AddNode(data_node(9, 9)))
-        .expect("a propose fails over to the surviving leader");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if planes[leader]
+    // A WRITE does NOT fail over: a committed-but-lost non-idempotent write must not be resubmitted to
+    // a fallback endpoint, so with the primary dead it surfaces loud (the operator/restart reconnects).
+    assert!(
+        rcp_b
+            .propose(ClusterStateChange::AddNode(data_node(9, 9)))
+            .is_err(),
+        "a write must NOT fail over (no resubmit of a possibly-committed write)"
+    );
+    assert!(
+        !planes[leader]
             .local_state()
             .nodes
             .iter()
-            .any(|n| n.id == NodeId(9))
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "failed-over proposal never reached the surviving leader's committed document"
-        );
-        std::thread::sleep(Duration::from_millis(25));
-    }
+            .any(|n| n.id == NodeId(9)),
+        "the non-failing-over write must not have committed anywhere"
+    );
 
     // (c) All endpoints down ⇒ fail loud at connect (never a swallowed stale read).
     let all_dead = vec![DEAD.to_string(), "http://127.0.0.1:2".to_string()];

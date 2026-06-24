@@ -138,3 +138,52 @@ pub fn resolve_topology(
     }
     Ok(topology)
 }
+
+/// Decide the shard topology for a `--route-by-assignments` coordinator (ADR-086), reading the
+/// committed map FIRST so a populated (possibly rebalanced) quorum is never silently overwritten:
+///
+/// - a *genesis* (unseeded) quorum is seeded position-preservingly from `cli` — or fails loud when
+///   `cli` is empty (nothing to seed from, e.g. a resolve-only boot against an unseeded quorum);
+/// - a *populated* quorum is authoritative; when `cli` is non-empty the resolved map MUST be
+///   position-preserving (equal to `cli`), else this fails loud — a non-data-moving rebalance would
+///   route a position's titles to a node holding different data (a false negative);
+/// - with an empty `cli` (resolve-only boot) the committed map is trusted.
+///
+/// **Reading before any seed is load-bearing:** seeding first would overwrite a rebalanced map back to
+/// the CLI order and silently defeat the guard. Lean (`&dyn ControlPlane`), so the decision is
+/// unit-tested against `InMemoryControlPlane`.
+pub fn route_topology(
+    control: &dyn ControlPlane,
+    num_shards: u32,
+    cli: &[ShardEndpoints],
+) -> Result<Vec<ShardEndpoints>, ShardError> {
+    let state = control.cluster_state()?;
+    // "Seeded" = at least one position is placed on a node WITH an address. A fresh bootstrap is
+    // genesis (every position → the addr-less manager `NodeId(0)`), which is NOT seeded.
+    let seeded = state.assignments.iter().any(|a| {
+        state
+            .nodes
+            .iter()
+            .any(|n| n.id == a.primary && n.addr.is_some())
+    });
+    if !seeded {
+        if cli.is_empty() {
+            return Err(ShardError::ControlPlane(
+                "the control-plane quorum has no committed shard→node assignments (genesis) and no \
+                 --shard-endpoint to seed them from"
+                    .into(),
+            ));
+        }
+        seed_position_preserving(control, cli)?;
+    }
+    let resolved = resolve_topology(control, num_shards)?;
+    if !cli.is_empty() && resolved.as_slice() != cli {
+        return Err(ShardError::ControlPlane(format!(
+            "committed shard→node assignments differ from --shard-endpoint: the committed map is not \
+             position-preserving (a non-data-moving rebalance?). Routing it would send a position's \
+             titles to a node holding different data (a false negative). Re-seed the quorum or omit \
+             --route-by-assignments. resolved={resolved:?} cli={cli:?}"
+        )));
+    }
+    Ok(resolved)
+}

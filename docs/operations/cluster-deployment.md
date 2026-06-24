@@ -249,10 +249,14 @@ unreachable endpoint.
   (repeatable — list **all** quorum members) to attach the coordinator's cluster-state control plane to
   the durable `controlserver` quorum as a **thin client** (it does NOT join consensus — stays stateless).
   The client tries the endpoints in order and follows a follower's `ForwardToLeader`, **failing over**
-  across the list (ADR-086) if a member is down; all-down fails loud. Add `--route-by-assignments`
+  across the list (ADR-086) if a member is down; all-down fails loud. Failover covers idempotent
+  **reads** (routing decisions stay available); admin **writes** are not resubmitted on failover (a
+  committed-but-lost write must not double-apply), so while a coordinator's primary control node is down
+  an admin write fails loud until the coordinator restarts onto a live endpoint. Add `--route-by-assignments`
   (ADR-086) to make the committed shard→node assignments the **topology source of truth**: the coordinator
   seeds the quorum position-preservingly from its `--shard-endpoint` list on first boot, then resolves its
-  shard topology from the durable document (so a coordinator can boot with only `--control-endpoint`); a
+  shard topology from the durable document (so a coordinator can boot without `--shard-endpoint`, sizing
+  the ring from `--shards` and re-minting its dict from `--load-file`); a
   fail-loud guard refuses a committed map that is not position-preserving. Absent both flags, the in-memory
   backend is used (byte-identical). The bootstrap control node must advertise a routable self-URL via
   `--advertise-url` (ADR-082), committed at the *first* bootstrap only (Raft `initialize` is idempotent —

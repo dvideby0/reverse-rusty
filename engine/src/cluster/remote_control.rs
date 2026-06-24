@@ -146,15 +146,28 @@ impl RemoteControlPlane {
         Ok(reply)
     }
 
-    /// Call the control plane with two orthogonal resilience layers: try the primary client, and on
-    /// a transport/backend failure fail over to the remaining configured endpoints in order, each
-    /// redialed fresh (ADR-086). Within every attempt a follower's `ForwardToLeader` is followed
-    /// once ([`Self::call_via`]) — failover finds a *reachable* node, ForwardToLeader finds the
-    /// *leader* among reachable nodes. Bounded: each endpoint is tried at most once per call. Control
-    /// ops are off the matching hot path, so a per-call redial on failure is cheap. A single
-    /// configured endpoint ⇒ no fallbacks ⇒ the primary error surfaces (the ADR-083 behavior).
+    /// Call the control plane. Try the primary client; within that attempt a follower's
+    /// `ForwardToLeader` is followed once ([`Self::call_via`]). On a transport/backend failure,
+    /// **idempotent reads** then fail over to the remaining configured endpoints in order, each
+    /// redialed fresh (ADR-086) — failover finds a *reachable* node, ForwardToLeader finds the
+    /// *leader* among reachable nodes; bounded to one try per endpoint per call.
+    ///
+    /// **Writes (`Propose`/`ChangeMembership`) never fail over.** A write that reached the leader may
+    /// have COMMITTED before a transport error swallowed the response; resubmitting it to another
+    /// endpoint could double-apply a non-idempotent op (e.g. `BumpModelVersion` increments the model
+    /// version on every commit). So a failed write surfaces loud and converges via an
+    /// operator/restart retry — the same "writes never retry" stance as ADR-085's shard transport.
+    /// The single `ForwardToLeader` follow inside `call_via` stays safe: a follower redirects WITHOUT
+    /// applying, so the leader sees the first application.
     fn call(&self, req: &ClientControlRequest) -> Result<ClientControlReply, ControlError> {
-        let primary_err = match self.call_via(&self.client, req) {
+        let primary = self.call_via(&self.client, req);
+        if matches!(
+            req,
+            ClientControlRequest::Propose(_) | ClientControlRequest::ChangeMembership(_)
+        ) {
+            return primary; // a non-idempotent write must not be resubmitted to a fallback endpoint
+        }
+        let primary_err = match primary {
             Ok(reply) => return Ok(reply),
             Err(e) => e,
         };

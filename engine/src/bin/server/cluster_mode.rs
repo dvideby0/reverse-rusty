@@ -83,7 +83,13 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         std::process::exit(1);
     }
     let remote_groups: Vec<String> = cli.shard_endpoint.clone();
-    let in_process = remote_groups.is_empty();
+    // A coordinator routing by committed assignments with ONLY --control-endpoint (no --shard-endpoint)
+    // is a REMOTE cluster that resolves its shard endpoints from the durable quorum (ADR-086
+    // resolve-only boot — the quorum must already be seeded). Otherwise remote mode is defined by the
+    // presence of --shard-endpoint.
+    let resolve_only =
+        cli.route_by_assignments && remote_groups.is_empty() && !cli.control_endpoint.is_empty();
+    let in_process = remote_groups.is_empty() && !resolve_only;
     // accept_class_d drives the cluster always-candidate lane (ADR-080): the coordinator places
     // class-D on the broad lane (replicated to every shard). The COORDINATOR is the SOLE gate — a
     // remote `ShardServer` is coordinator-gated storage (`LocalShard` forces accept_class_d on
@@ -122,8 +128,8 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         std::process::exit(1);
     }
     // --route-by-assignments makes the committed quorum the topology source of truth (ADR-086), so it
-    // requires a control plane to read. (It also requires --shard-endpoint transitively, since
-    // --control-endpoint does.)
+    // requires a control plane to read. With --shard-endpoint it seeds + routes; with only
+    // --control-endpoint it resolves the topology from the quorum (resolve-only boot).
     if cli.route_by_assignments && cli.control_endpoint.is_empty() {
         error!(
             "--route-by-assignments requires --control-endpoint: the committed quorum is the \
@@ -132,7 +138,9 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         std::process::exit(1);
     }
 
-    let num_shards = if in_process {
+    // The ring size: --shards for an in-process OR a resolve-only-boot cluster (validated against the
+    // quorum's committed num_shards on attach), else the --shard-endpoint count.
+    let num_shards = if remote_groups.is_empty() {
         cli.shards
     } else {
         remote_groups.len()

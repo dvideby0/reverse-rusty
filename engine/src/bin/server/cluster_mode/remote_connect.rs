@@ -91,11 +91,16 @@ fn endpoints_to_groups(eps: Vec<ShardEndpoints>) -> Vec<ShardGroup> {
         .collect()
 }
 
-/// Decide the shard build groups. Under `--route-by-assignments` seed the quorum position-preserving
-/// (when CLI endpoints are given), resolve the topology from the committed document, and **guard**
-/// that the result is position-preserving — a committed map that no longer matches `--shard-endpoint`
-/// is a non-data-moving `rebalance` and routing it would be a false negative (ADR-086). Otherwise use
-/// the CLI groups unchanged (today's path, byte-identical).
+/// Decide the shard build groups under `--route-by-assignments` (ADR-086). The committed quorum is
+/// the source of truth, so we **read it first**: a genesis (unseeded) quorum is seeded
+/// position-preservingly from `--shard-endpoint`; a populated quorum is used as-is. When
+/// `--shard-endpoint` is also given, a **guard** requires the committed map to be position-preserving
+/// (equal to the CLI order) — a difference is a non-data-moving `rebalance` and routing it would be a
+/// false negative. With no CLI endpoints (resolve-only boot) the committed map is trusted. Without the
+/// flag, the CLI groups are used unchanged (today's path, byte-identical).
+///
+/// Reading before seeding is load-bearing: seeding first would overwrite a rebalanced map back to the
+/// CLI order and silently DEFEAT the guard.
 fn build_groups(
     route_by_assignments: bool,
     cli_groups: Vec<ShardGroup>,
@@ -112,22 +117,13 @@ fn build_groups(
                 .into(),
         ));
     };
+    // The read-first seed/resolve/guard decision is the lean `route_topology` (unit-tested vs
+    // `InMemoryControlPlane`); this is the `ShardGroup` adapter over it.
     let cli_eps = groups_to_endpoints(&cli_groups);
-    if !cli_eps.is_empty() {
-        reverse_rusty::cluster::seed_position_preserving(rcp, &cli_eps)?;
-    }
-    let resolved = reverse_rusty::cluster::resolve_topology(rcp, cfg.num_shards as u32)?;
-    if !cli_eps.is_empty() && resolved != cli_eps {
-        return Err(ShardError::ControlPlane(format!(
-            "committed shard→node assignments resolve to a topology that differs from \
-             --shard-endpoint: the committed map is not position-preserving (a non-data-moving \
-             rebalance?). Routing it would send a position's titles to a node holding different \
-             data (a false negative). Re-seed the quorum or omit --route-by-assignments. \
-             resolved={resolved:?} cli={cli_eps:?}"
-        )));
-    }
+    let resolved = reverse_rusty::cluster::route_topology(rcp, cfg.num_shards as u32, &cli_eps)?;
     info!(
         num_shards = cfg.num_shards,
+        resolve_only = cli_eps.is_empty(),
         "routing by committed shard→node assignments (ADR-086)"
     );
     Ok(endpoints_to_groups(resolved))

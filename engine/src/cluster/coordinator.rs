@@ -51,7 +51,7 @@ mod topology;
 mod vocab;
 
 pub use resize::recommended_shard_count;
-pub use topology::{resolve_topology, seed_position_preserving, ShardEndpoints};
+pub use topology::{resolve_topology, route_topology, seed_position_preserving, ShardEndpoints};
 
 #[cfg(feature = "distributed")]
 mod distributed;

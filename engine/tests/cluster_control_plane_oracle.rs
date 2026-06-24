@@ -17,9 +17,9 @@
 //! an integration-test crate).
 
 use reverse_rusty::cluster::{
-    resolve_topology, seed_position_preserving, ClusterConfig, ClusterEngine, ClusterState,
-    ClusterStateChange, ControlPlane, InMemoryControlPlane, NodeDescriptor, NodeId, NodeRole,
-    ShardAssignment, ShardEndpoints,
+    resolve_topology, route_topology, seed_position_preserving, ClusterConfig, ClusterEngine,
+    ClusterState, ClusterStateChange, ControlPlane, InMemoryControlPlane, NodeDescriptor, NodeId,
+    NodeRole, ShardAssignment, ShardEndpoints,
 };
 use reverse_rusty::compile::{extract, Extracted};
 use reverse_rusty::dict::Dict;
@@ -430,5 +430,77 @@ fn non_position_preserving_map_resolves_differently() {
     assert_eq!(
         resolved[1].0, topology[0].0,
         "position 1 now resolves to shard0's endpoint"
+    );
+}
+
+/// ADR-086 `route_topology` — the read-first seed/resolve/guard decision the coordinator boots with.
+/// Proves the load-bearing property (codex finding): a REBALANCED quorum is DETECTED and fails loud
+/// rather than being silently overwritten back to the CLI order (reading before seeding). Plus: a
+/// genesis quorum is seeded from CLI; a populated position-preserving one is idempotent; resolve-only
+/// trusts the committed map; and a genesis quorum with no CLI to seed from fails loud.
+#[test]
+fn route_topology_reads_first_then_seeds_or_guards() {
+    let k = 3u32;
+    let topo: Vec<ShardEndpoints> = (0..k)
+        .map(|p| (format!("https://shard{p}:50051"), Vec::new()))
+        .collect();
+
+    // (1) genesis + CLI ⇒ seed, then resolve == CLI.
+    let cp = InMemoryControlPlane::single_node(k, 128, 0xABCD);
+    assert_eq!(route_topology(&cp, k, &topo).expect("seed+resolve"), topo);
+
+    // (2) populated + CLI ⇒ idempotent (no re-seed), still == CLI, version unchanged.
+    let v = cp.version().unwrap();
+    assert_eq!(route_topology(&cp, k, &topo).expect("idempotent"), topo);
+    assert_eq!(
+        cp.version().unwrap(),
+        v,
+        "a populated position-preserving quorum is not re-seeded"
+    );
+
+    // (3) REBALANCED (swap positions 0/1's primaries, NO data move) + CLI ⇒ FAIL LOUD. Reading the
+    // committed map BEFORE any seed means the drift is detected, not clobbered back to the CLI order.
+    let st = cp.cluster_state().unwrap();
+    let n0 = st
+        .assignments
+        .iter()
+        .find(|a| a.position == 0)
+        .unwrap()
+        .primary;
+    let n1 = st
+        .assignments
+        .iter()
+        .find(|a| a.position == 1)
+        .unwrap()
+        .primary;
+    for (position, primary) in [(0u32, n1), (1u32, n0)] {
+        cp.propose(ClusterStateChange::AssignShard(ShardAssignment {
+            position,
+            primary,
+            replicas: vec![],
+        }))
+        .unwrap();
+    }
+    assert!(
+        route_topology(&cp, k, &topo).is_err(),
+        "a non-position-preserving committed map must fail loud, not be overwritten"
+    );
+    assert_ne!(
+        resolve_topology(&cp, k).unwrap(),
+        topo,
+        "the rebalanced map must be intact (route_topology did not clobber it back to CLI)"
+    );
+
+    // (4) resolve-only (empty CLI) trusts the committed (here rebalanced) map.
+    assert_eq!(
+        route_topology(&cp, k, &[]).unwrap(),
+        resolve_topology(&cp, k).unwrap()
+    );
+
+    // (5) genesis + empty CLI ⇒ fail loud (nothing to seed from).
+    let fresh = InMemoryControlPlane::single_node(k, 128, 0xABCD);
+    assert!(
+        route_topology(&fresh, k, &[]).is_err(),
+        "resolve-only against a genesis quorum fails loud"
     );
 }

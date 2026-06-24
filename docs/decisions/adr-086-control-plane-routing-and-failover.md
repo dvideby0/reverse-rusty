@@ -38,7 +38,15 @@ the non-opt-in remote paths stay byte-identical.
   finds the *leader* among reachable nodes. Control ops are off the matching hot path, so a per-call
   redial on failure is cheap; methods stay `&self` (no sticky-endpoint interior mutability). All
   endpoints down ⇒ fail loud, never a swallowed stale read. The coordinator's `--control-endpoint`
-  (already a `Vec`) now passes its full list instead of `.first()`.
+  (already a `Vec`) now passes its full list instead of `.first()`. **Only idempotent reads fail
+  over; writes (`Propose`/`ChangeMembership`) never do** — a write that reached the leader may have
+  committed before a lost response, and resubmitting it to a fallback endpoint could double-apply a
+  non-idempotent op (e.g. `BumpModelVersion` increments the model version per commit), so a failed
+  write surfaces loud and converges via an operator/restart retry (the same "writes never retry"
+  stance as ADR-085's shard transport). The single `ForwardToLeader` follow stays safe (a follower
+  redirects without applying). Consequence: while a coordinator's *primary* control node is down,
+  routing-relevant reads fail over but admin *writes* fail loud until the coordinator restarts onto a
+  live endpoint — acceptable since control writes are rare admin ops, not the hot path.
 
 - **Topology resolution + seeding (`coordinator/topology.rs`, lean core).** Two pure `ControlPlane`
   free functions — no `ClusterEngine`, no gRPC, no feature gate, so they unit-test against
@@ -54,13 +62,17 @@ the non-opt-in remote paths stay byte-identical.
     yielding a silently-unrouted shard.
 
 - **Coordinator boot reorder + `--route-by-assignments` (opt-in).** When the flag is set the
-  coordinator attaches the control plane (with failover) **before** building shards, seeds the quorum
-  from `--shard-endpoint` position-preservingly (when given), resolves the topology from the committed
-  document, and **guards** it: if `--shard-endpoint` was also given and the resolved topology differs,
-  it **fails loud** ("the committed map is not position-preserving — a non-data-moving rebalance?").
-  This defuses the HRW trap for the both-flags case; the resolve-only case (flag set, no
-  `--shard-endpoint`) trusts the quorum so a coordinator can boot with only `--control-endpoint`. The
-  unchanged shard builders consume the *resolved* groups instead of the CLI groups. The flag requires
+  coordinator attaches the control plane (with failover) **before** building shards, then decides the
+  shard groups by **reading the committed map first** (load-bearing — seeding first would overwrite a
+  rebalanced map and silently defeat the guard): a *genesis* (unseeded) quorum is seeded
+  position-preservingly from `--shard-endpoint`; a *populated* quorum is authoritative. It then
+  resolves the topology and **guards** it — if `--shard-endpoint` was also given and the resolved
+  topology differs, it **fails loud** ("the committed map is not position-preserving — a
+  non-data-moving rebalance?"). This defuses the HRW trap for the both-flags case. The resolve-only
+  case (flag set, no `--shard-endpoint`) trusts the committed map, so a coordinator can boot without
+  `--shard-endpoint` (it still sizes the ring from `--shards` and re-mints its dict from `--load-file`,
+  both validated against the quorum on attach; an unseeded quorum here fails loud). The unchanged shard
+  builders consume the *resolved* groups instead of the CLI groups. The flag requires
   `--control-endpoint`. (The remote-connect path moved to a new `cluster_mode/remote_connect.rs`
   submodule, keeping both files within the size budget.)
 
