@@ -230,6 +230,15 @@ pub fn full_reference(corpus: &Corpus) -> RefMatcher {
     RefMatcher::build(&corpus.queries, RefVocab::default_vocab())
 }
 
+/// The reference over only the first `n` queries — for a scenario whose writer
+/// inserts a BOUNDED slice (`--limit n`). A recovered id beyond that slice could
+/// never have been written, so it must be a false positive, not silently allowed by
+/// a full-corpus reference (the backup scenario, which seals a fixed `--limit`).
+pub fn full_reference_prefix(corpus: &Corpus, n: usize) -> RefMatcher {
+    let n = n.min(corpus.queries.len());
+    RefMatcher::build(&corpus.queries[..n], RefVocab::default_vocab())
+}
+
 /// Reopen the data dir in-process and assert the recovered engine is byte-identical
 /// to the INDEPENDENT reference over the acked set: zero false negatives (every
 /// acked query's matches present) + zero false positives (no match outside the full

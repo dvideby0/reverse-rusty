@@ -8,14 +8,19 @@
 use std::time::Duration;
 
 use crate::harness::{
-    crash_iters, full_reference, reopen_and_diff, spawn_and_kill, unique_dir, Corpus, Trigger,
+    crash_iters, full_reference_prefix, reopen_and_diff, spawn_and_kill, unique_dir, Corpus,
+    Trigger,
 };
 
 #[test]
 #[ignore = "crash-injection: spawns + SIGKILLs a real process; run via the check.sh crash lane or `cargo test --release --test crash_injection -- --ignored`"]
 fn backup_source_survives_sigkill_during_backup() {
+    // The writer seals only the first LIMIT queries, so the FP reference is bounded to
+    // that slice — a recovered id beyond it (which could never have been written) is a
+    // false positive, not silently allowed (codex review).
+    const LIMIT: usize = 6_000;
     let corpus = Corpus::generate("backup", 0xC0DE_0004, 16_000, 500);
-    let full = full_reference(&corpus);
+    let full = full_reference_prefix(&corpus, LIMIT);
     let iters = crash_iters();
     let mut exercised = 0usize;
     for i in 0..iters {
@@ -23,7 +28,7 @@ fn backup_source_survives_sigkill_during_backup() {
         let dest_root = unique_dir("backup_dest");
         let extra = vec![
             "--limit".to_string(),
-            "6000".to_string(),
+            LIMIT.to_string(),
             "--backup-dest".to_string(),
             dest_root.to_string_lossy().into_owned(),
         ];
