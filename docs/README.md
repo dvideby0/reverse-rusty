@@ -58,9 +58,14 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`reference/dsl.md`](reference/dsl.md) — the query DSL, normalization, and vocabulary.
 
 ### Operations
+- [`operations/build-and-smoke.md`](operations/build-and-smoke.md) — the **fresh-clone checklist**:
+  build + gate + image + Compose/harness smoke + Helm validation, with the exact command and what each
+  leg proves (the Tier 5 M0 "deploy-truth" acceptance recipe).
 - [`operations/cluster-deployment.md`](operations/cluster-deployment.md) — deploy + run a multi-node
   cluster from the container image: topology, bootstrap order, certs/tokens, scale, recover, monitor,
   the vocab-redeploy procedure ([`deploy/`](../deploy/) packaging + ADR-081).
+- [`operations/kubernetes-deployment.md`](operations/kubernetes-deployment.md) — the Helm chart
+  ([`deploy/helm/`](../deploy/helm/)): values, secrets, probes, and the k8s deploy procedure (ADR-084).
 - [`operations/backup-restore.md`](operations/backup-restore.md) — back up + restore a deployment
   (single-node or cluster); the safety guarantee + the FS-snapshot zero-stall path (ADR-079).
 - [`operations/threat-model.md`](operations/threat-model.md) — the **threat model**: trust boundaries,

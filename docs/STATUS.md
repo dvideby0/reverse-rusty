@@ -159,6 +159,12 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   engine is diffed against it (`tests/independent_oracle/`) over default/populated/alias corpora + a
   gotcha table + an env-gated real corpus. Closes the ADR-050 shared-front-end blind spot for the
   covered paths; zero FN/FP, no engine front-end bug found.
+- **Real-process SIGKILL crash injection** (Phase 0 item 3, ADR-088) — a `crashwriter` lean-core bin +
+  `tests/crash_injection/` spawn a real process and deliver a real external SIGKILL mid
+  durable-operation (WAL append / flush / compaction / backup / churn), reopen in-process, and diff the
+  recovered engine against the ADR-087 independent oracle: zero false negatives on every acked write, no
+  resurrection/corruption. Closes the real-kill-mid-syscall gap the chmod/torn-tail/CRC simulations
+  cannot reach; `#[ignore]`d behind a new `check.sh` crash lane (`RR_CRASH_ITERS`); mutation-validated 3/3.
 - **Drop-in parity audit** — empirical PoC against the documented reference workload: zero FN
   under the parity configuration (ADR-064; workload →
   [`research/percolator-workload.md`](research/percolator-workload.md)).

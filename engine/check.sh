@@ -94,6 +94,15 @@ if [ "$fast" -eq 0 ]; then
     # trips it.
     run "ref-matcher independence" bash -c \
         '! cargo tree -q -p reverse-rusty-ref-matcher --edges normal --prefix none 2>/dev/null | grep -q "^reverse-rusty "'
+    # Crash-injection lane (ADR-088, Phase 0 item 3): spawn the `crashwriter` bin,
+    # SIGKILL it mid durable-op (WAL append / flush / compaction / backup / churn),
+    # then diff the reopened engine against the front-end-independent oracle (zero
+    # false negatives on every acked write). The scenarios are `#[ignore]`d (they
+    # spawn + kill real processes and do real fsyncs) so the default `cargo test`
+    # stays fast; run them explicitly here. `--test-threads=1` keeps concurrent
+    # SIGKILLs from thrashing; `RR_CRASH_ITERS` (small default) scales the
+    # kill/reopen cycles — a nightly job can bump it.
+    run "crash injection" cargo test --release --test crash_injection -- --ignored --test-threads=1
 fi
 
 # Non-failing refactor nudge. Runs in --fast and full, so it shows on commit,

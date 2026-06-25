@@ -128,6 +128,14 @@ path = "src/bin/segbench.rs"
 name = "snapbench"
 path = "src/bin/snapbench.rs"
 
+# The crash-injection worker (ADR-088): a lean-core bin the parent integration test
+# (tests/crash_injection) spawns and SIGKILLs mid-write. Declared as a [[bin]] so the
+# test reaches it via env!("CARGO_BIN_EXE_crashwriter") with no hard-coded path. No
+# server/distributed deps — it drives the Engine directly.
+[[bin]]
+name = "crashwriter"
+path = "src/bin/crashwriter.rs"
+
 [[bin]]
 name = "server"
 path = "src/bin/server/main.rs"

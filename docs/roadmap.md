@@ -21,11 +21,15 @@ ADR-063). This phase proves which parts are real — under an *independent* chec
 before more is built on top. Goal: separate what's real from plausible-looking scaffolding. Tier work
 resumes once it passes.
 
-1. **Fresh-clone build & deploy smoke** — from a clean checkout, build + gate from `engine/`:
-   `cd engine && cargo build --release`, `./check.sh` (the full gate), `cargo test --features
-   distributed --release` (the gRPC/cluster oracles); then build the Docker image, run the Compose
-   harness (`deploy/harness.sh`, ADR-072), run the Helm smoke test. Mostly shipped paths — the
-   deliverable is a reproducible-from-zero checklist, not new code.
+1. **Fresh-clone build & deploy smoke — ✅ shipped
+   ([`operations/build-and-smoke.md`](operations/build-and-smoke.md)).** The reproducible-from-zero
+   checklist: `cargo build --release` + `./check.sh` (the full gate) + the Docker image + the
+   production-compose smoke (`deploy/cluster-smoke.sh`) + the multi-machine harness
+   (`deploy/harness.sh`, ADR-072) + Helm lint/kubeconform — every leg with the exact command and what
+   it proves (the Tier 5 M0 "deploy-truth" acceptance recipe). The run surfaced + fixed one real drift:
+   `cluster-smoke.sh` used a non-numeric `_doc/{id}` (the route extracts `Path<u64>` in both modes → a
+   400) and had never been run end-to-end. A *real-cluster* deploy proof stays item 4 (needs a real
+   cluster + corpus).
 2. **Independent correctness oracle — ✅ shipped ([ADR-087](decisions/adr-087-independent-correctness-oracle.md)).**
    A std-only, zero-dependency reference matcher (`reverse-rusty-ref-matcher`) reimplements the whole
    front end (parser/normalizer/extractor/predicate) from the spec, reusing none of the engine
@@ -33,10 +37,14 @@ resumes once it passes.
    (`tests/independent_oracle/`) over default/populated/alias corpora + a hand-written gotcha table +
    the env-gated `RR_ORACLE_CORPUS` real-corpus hook. Closes the ADR-050/063 shared-front-end blind
    spot for the covered paths — zero FN/FP, no engine front-end bug found.
-3. **Durability torture (net-new crash injection).** Actually kill the process mid-operation — during
-   WAL append, flush, compaction, backup, and shard handoff — then restart and diff against the
-   independent oracle. Today's coverage is fault-injection / torn-tail / fail-closed *simulation*; real
-   SIGKILL-mid-syscall is the gap.
+3. **Durability torture (crash injection) — ✅ shipped
+   ([ADR-088](decisions/adr-088-crash-injection-harness.md)).** A `crashwriter` lean-core bin + the
+   `tests/crash_injection/` suite spawn a real process, deliver a real external SIGKILL mid
+   durable-operation (WAL append / flush / compaction / backup / churn), reopen in-process, and diff
+   the recovered engine against the front-end-independent oracle (ADR-087) — zero false negatives on
+   every acked write, no resurrection/corruption. `#[ignore]`d behind a new `check.sh` crash lane
+   (`RR_CRASH_ITERS`); mutation-validated 3/3. *Deferred:* a **cluster** kill-*mid-write* leg (kill a
+   shard during a write loop, not between ops) + an upsert + a multi-reopen watermark scenario.
 4. **Deployment proof on real Kubernetes.** Deploy to a real cluster (not localhost Compose), ingest a
    **real corpus**, then restart every pod type, delete a shard pod, fill the disk, rotate secrets, and
    restore from backup — proving **no silent misses** at each step. This is the adversarial acceptance
