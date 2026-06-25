@@ -80,6 +80,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   coordinator mode** `--cluster`, in-process or remote, cluster-atomic upsert (ADR-070).
 - **Gate & CI** — `check.sh` is the one gate, CI runs it (ADR-024); lean-core feature gate
   (ADR-028).
+- **Security review** (Phase 0 item 5, ADR-089) — a [threat model](operations/threat-model.md) (trust
+  boundaries, assets, adversary model, controls mapped to code, explicit v1 non-goals) + a Trivy
+  container scan (`deploy/scan-image.sh`, triaged baseline: base-image CVEs only, none service-reachable)
+  + the `_backup` client-`dest` finding dispositioned (auth-gated, non-root operator responsibility). The
+  app deps stay `cargo audit`/`deny`-clean; no code-level vuln found.
 
 ### Vocabulary & aliases
 

@@ -63,6 +63,9 @@ Three levels, each giving *just enough* to decide whether to go deeper:
   the vocab-redeploy procedure ([`deploy/`](../deploy/) packaging + ADR-081).
 - [`operations/backup-restore.md`](operations/backup-restore.md) — back up + restore a deployment
   (single-node or cluster); the safety guarantee + the FS-snapshot zero-stall path (ADR-079).
+- [`operations/threat-model.md`](operations/threat-model.md) — the **threat model**: trust boundaries,
+  assets, adversary model, controls mapped to code, the v1 non-goals + operator checklist, and the
+  container-scan baseline (ADR-089).
 
 ### Performance
 - [`performance/README.md`](performance/README.md) — headline numbers + how to reproduce.
