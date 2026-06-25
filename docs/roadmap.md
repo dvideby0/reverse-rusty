@@ -9,7 +9,39 @@ component design → [`design/`](design/README.md).
 Priority follows the bottleneck analysis ([`performance/results.md`](performance/results.md) §9):
 the selective path is far past the spec target with a flat ~54 candidates/title, so the leverage is
 in the broad lane, memory/footprint, and the durability + scale story — not in shaving the
-selective candidate count further.
+selective candidate count further. **But before any tier work, Phase 0 (the reality / adversarial
+audit) runs first — it is the current top priority.**
+
+## Phase 0 — Reality / adversarial audit (do this first)
+
+**Top priority — precedes every tier below.** The engine is oracle-proven, but the in-tree differential
+oracle *shares the front-end* (normalizer, parser, extractor, dict) with the engine, so a front-end bug
+is structurally invisible to it (the reference-free `tests/adversarial.rs` only partly covers this —
+ADR-063). This phase proves which parts are real — under an *independent* check and under real failure —
+before more is built on top. Goal: separate what's real from plausible-looking scaffolding. Tier work
+resumes once it passes.
+
+1. **Fresh-clone build & deploy smoke** — from a clean checkout: `cargo build --release`,
+   `engine/check.sh` (the full gate), `cargo test --features distributed --release` (the gRPC/cluster
+   oracles), build the Docker image, run the Compose harness (`deploy/harness.sh`, ADR-072), run the
+   Helm smoke test. Mostly shipped paths — the deliverable is a reproducible-from-zero checklist, not
+   new code.
+2. **Independent correctness oracle (net-new, highest value).** A reference matcher written *outside
+   the crate* reusing **none** of the parser, normalizer, extractor, or feature dictionary; fed
+   generated + hand-written cases **and real titles + real saved searches**; the engine diffed against
+   it. This is the one check the in-tree oracle structurally cannot be — it closes the shared-front-end
+   blind spot (ADR-063). Likely warrants its own ADR on ship.
+3. **Durability torture (net-new crash injection).** Actually kill the process mid-operation — during
+   WAL append, flush, compaction, backup, and shard handoff — then restart and diff against the
+   independent oracle. Today's coverage is fault-injection / torn-tail / fail-closed *simulation*; real
+   SIGKILL-mid-syscall is the gap.
+4. **Deployment proof on real Kubernetes.** Deploy to a real cluster (not localhost Compose), ingest a
+   **real corpus**, then restart every pod type, delete a shard pod, fill the disk, rotate secrets, and
+   restore from backup — proving **no silent misses** at each step. This is the adversarial acceptance
+   run for Tier 5 M2 + Tier 3 criterion 12 (real corpus).
+5. **Security review.** Auth boundaries (ADR-062), backup-path write access, TLS/SAN assumptions +
+   token handling (ADR-071), a dependency audit (`cargo audit`/`deny` — already in check.sh), a
+   **container image scan**, and a **basic threat model** (net-new — no threat-model doc today).
 
 ### Tier 0 — Cluster v1 acceptance gate — ✅ complete
 
@@ -64,6 +96,12 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
   versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
 - **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying
   only on title parsing; higher feature quality, larger domain integration.
+- **Memory headroom at scale (the documented production changes)** — two items the bottleneck
+  analysis ([`performance/results.md`](performance/results.md) §9) still flags open: **dictionary
+  string interning** (the dict retains per-feature `String`s, inflating bytes/query — interning +
+  segment mmap is the named fix) and **memory-bandwidth mitigation** as the index leaves cache
+  (tighter SoA packing; sharding already buys cache residency). Gates an honest 100M memory
+  extrapolation; pairs with criterion 12's real-corpus audit.
 
 ### Tier 4 — ES/OS percolator parity — small residue
 
@@ -80,6 +118,58 @@ behind a shipped seam:
   `WordDelimiterGraphFilter`); pure recall gain behind the ADR-058 `PunctClass` seam.
 - **Columnar two-view broad lane** — the broad lane drops to the inline path while multi-word
   aliases are active; a perf follow-on, not correctness (ADR-061).
+
+### Tier 5 — deployability & operational maturity
+
+The engine + distributed layers are built and oracle-proven; what's missing is a **named, documented
+deployable contract** distinct from the scale proof. Today everything deployment-shaped is folded into
+Distributed-v1 criterion 12 (Tier 3) — there is no "deployable feature complete" gate separate from
+"production-proven at scale." This tier defines that gate and the operational hardening above it
+(source: external deployability review, 2026-06-24). The review positions M0–M2 as the **highest-ROI
+next work, ahead of more algorithm work** — promote this tier above the research tiers if that matches
+your priority.
+
+- **M0 — deploy-truth (mostly docs).** One canonical **deployment matrix** (single-node · in-process
+  cluster · remote Compose · remote Helm) + a "known-supported deployment" page with exact commands
+  per mode, and the v1 **non-goals** (RF>1 in Helm, online/remote resize, remote custom vocab,
+  cross-shard backup barrier) surfaced together as explicit named constraints — each is documented
+  today but scattered across the two runbooks + ADR-079. (The acute drift this review found — the
+  `/_metrics` scrape path and the stale "control-plane idle / no wiring flag" wording — is already
+  fixed; this item is the broader consolidation.)
+- **M1 — Deployable Feature Complete: single-node + in-process cluster.** A "works-by-assumption"
+  badge, no scale proof required: a tiny end-to-end **smoke script** (build → run → ingest → search →
+  restart → search again) wired into CI as the acceptance gate for these two modes (extends the
+  compose harness, ADR-072), plus a documented supported surface
+  (`_doc`/`_bulk`/`_search`/`_mpercolate`/`_health`/`_stats`/`_metrics`/`_backup` + restart-reopen)
+  and the auth posture (loopback open; non-loopback requires `RR_AUTH_TOKEN`, ADR-062).
+- **M2 — Deployable Feature Complete: remote static cluster (static-K, RF=1).** A Helm smoke test + a
+  Compose smoke test in the release gate; **a versioned image + release pipeline** — publish to a
+  registry tagged by git SHA + semver (no image-publishing pipeline exists today; the chart already
+  expects `image.repository`/`tag`), ending `:latest`-only; and a check that Compose and Helm
+  represent the *same* topology. (Scale proof stays Tier 3 criterion 12, not a blocker here.)
+- **M3 — production hardening (safe with on-call ownership).** **Shard/control-local Prometheus
+  metrics** — only the coordinator exposes `/_metrics` today (ADR-084 deferral b); add per-shard /
+  per-control stored-query count, memory, WAL lag, compaction backlog, p95/p99, broad-lane cost (the
+  prerequisite for any autoscaling signal). Plus the operational docs above the shipped ADR-081
+  runbook: **DR runbook, rolling-upgrade procedure, resource-sizing guide, alert examples, a
+  backup/restore rehearsal**. Promote **cooperative cancellation / bounded concurrency** (the ADR-052
+  deferral now in the Robustness backlog) here.
+- **M4 — commercial-service operations (API-driven, not runbook-driven).** The bar past "cloud
+  deployable": backups, scaling, restore, and rollout become controllers/APIs, not manual procedures.
+  Larger, later, and partly **in tension with the shared-nothing / no-object-store stance
+  ([ADR-033](decisions/adr-033-shared-nothing-storage.md))** — resolve that first.
+  - **Backup-as-a-service** — a `POST /_cluster/backup|restore` API + a coordinator-driven cross-shard
+    **consistency barrier** (the no-quiesce backup the v1 runbook lacks), scheduled backups, retention,
+    manifest + checksums, automated restore verification, stated RPO/RTO. *Object-storage (S3/GCS)
+    targets revisit ADR-033 — decide whether to relax shared-nothing for backup export only.*
+  - **Automated blue/green resize controller** — drive the existing manual blue/green path from
+    metrics + `recommended_shard_count` with hysteresis (green cluster → rehydrate → validate → cut
+    traffic → GC blue). True online/data-moving resize stays the deferred ADR-078/086 follow-on in
+    Tier 3.
+  - **Kubernetes Operator / CRD** (`ReverseRustyCluster`) — owns StatefulSets, backup schedules,
+    restore jobs, blue/green resizes, coordinator HPA, rollout safety: the lifecycle layer above Helm.
+  - **RF>1 Helm topology** — a replica StatefulSet per position + the coordinator's
+    `--replication-factor` (the engine's RF is built; the chart value is documentation-only today).
 
 ### Evaluated & declined
 
