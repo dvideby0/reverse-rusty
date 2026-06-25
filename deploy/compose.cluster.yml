@@ -29,8 +29,9 @@
 # then routes by the committed assignments (a fail-loud guard refuses a non-position-preserving map).
 # So the cluster-state document is durable + HA across coordinator restarts. The bootstrap control
 # node binds 0.0.0.0 but advertises a ROUTABLE self-URL into Raft membership via --advertise-url
-# (ADR-082). NOTE: a non-data-moving HRW `rebalance` must NOT be used to re-point routing on a
-# populated cluster — data-moving live re-pointing is the deferred ADR-086 follow-on. To run WITHOUT
+# (ADR-082). NOTE: to re-point routing on a populated cluster use the data-moving path (POST
+# /_cluster/reassign or rebalance {move:true}, ADR-090); the bare map-only HRW `rebalance` must NOT be
+# used alone for that. To run WITHOUT
 # the quorum, drop the coordinator's --control-endpoint/--route-by-assignments lines AND control0..2
 # (the in-memory backend is used, routing byte-identical).
 

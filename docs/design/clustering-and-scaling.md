@@ -361,7 +361,13 @@ without operator action. The defaults are the product.
   so an in-flight probe never hits the fence), drains the fenced tail to convergence, then flips. Writes are
   fail-closed in the brief fence→flip window (rejected + retryable, never lost); a write that passed the fence
   check just before it took effect is captured by the convergence loop. **Epoch fencing is the
-  multi-coordinator guard** — with one coordinator the flip is serialized.
+  multi-coordinator guard** — with one coordinator the flip is serialized. **A committed reassignment now
+  drives the move** (ADR-090): `reassign_and_move`/`rebalance_and_move` run `execute_handoff` and only
+  THEN commit the new owner into the control document (**move-then-commit**), so a coordinator restart
+  resolves the new physical reality. The flip-before-commit crash window is read-safe because the fenced
+  old owner keeps serving reads + holds the data until the commit lands — so the committed map always
+  resolves to a data-holding, reads-serving node (zero false negatives). The data-moving ops serialize
+  against each other (and the autoscaler-driven handoff) on an engine-level guard.
 - **Hot keys** (a viral player) — that shard gets more *replicas* (throughput), and if its corpus grows
   too large it auto-splits; the broad lane absorbs the truly non-selective anchors.
 

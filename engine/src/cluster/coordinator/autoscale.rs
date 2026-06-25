@@ -94,13 +94,16 @@ impl ClusterEngine {
     }
 
     /// Drive an autoscaler-recommended [`Handoff`](ScalingAction::Handoff) through
-    /// [`execute_handoff`](Self::execute_handoff) (ADR-048, closing ADR-045's advisory-only gap).
-    /// Best-effort and side-effecting only: it never fails the enclosing `tick`. Skips silently when
-    /// the cluster has no runtime handle (an in-process cluster can't hand off to a remote node) or
-    /// when the recommendation is stale (a concurrent change moved `position` off `from`); surfaces
-    /// a missing endpoint or a failed move as an event so the operator can see why a recommended
-    /// move did or didn't happen. A failed move leaves routing unchanged and the source unfenced
-    /// (ADR-048), so the next tick can retry.
+    /// [`reassign_and_move`](Self::reassign_and_move) (ADR-090, evolving ADR-048's
+    /// `execute_handoff`-only wiring): the move now ALSO commits the new owner into the cluster-state
+    /// document, so an autoscaler-driven move keeps the committed map consistent with the live routing
+    /// (and rides the shared `reassign_serial` guard). Best-effort and side-effecting only: it never
+    /// fails the enclosing `tick`. Skips silently when the cluster has no runtime handle (an
+    /// in-process cluster can't hand off to a remote node) or when the recommendation is stale (a
+    /// concurrent change moved `position` off `from`). A move that can't be performed (e.g. a node
+    /// without a registered endpoint) or whose commit fails surfaces as an event so the operator can
+    /// see why; routing/the durable map stay reconcilable (auto-unfence on a failed move; the source
+    /// still serves reads on an uncommitted one), so the next tick can retry.
     #[cfg(feature = "distributed")]
     pub(in crate::cluster::coordinator) fn drive_autoscaled_handoff(
         &self,
@@ -109,21 +112,18 @@ impl ClusterEngine {
         from: NodeId,
         to: NodeId,
     ) {
-        // A degenerate self-handoff (`from == to`) would fence the source and then flip routing
-        // onto itself — a needless write-fence window for no movement. Skip it silently like the
-        // stale-recommendation case below; the endpoint-level check (`src_ep == tgt_ep`) catches
-        // the case where two distinct ids resolve to the SAME endpoint. Checked before the handle
-        // resolve so it is the unambiguous reason a self-handoff is a no-op.
+        // A degenerate self-handoff (`from == to`) is nothing to move; skip it silently (the
+        // endpoint-level no-op for two distinct ids on one endpoint lives in `reassign_and_move`).
         if from.0 == to.0 {
             return;
         }
-        // Only a gRPC-built cluster carries a runtime handle (and only it has remote endpoints to
-        // move between). An in-process cluster has neither, so there is nothing to do.
+        // Only a gRPC-built cluster carries a runtime handle (and remote endpoints to move between).
+        // An in-process cluster has neither, so there is nothing to do.
         let Some(handle) = self.handle.clone() else {
             return;
         };
-        // Re-validate against the CURRENT assignment: skip a recommendation whose source no longer
-        // owns the position rather than mis-targeting a move.
+        // Re-validate against the snapshot: skip a stale recommendation whose source no longer owns
+        // the position rather than driving a move off the wrong owner.
         let owns_position = snapshot
             .assignments
             .iter()
@@ -131,37 +131,18 @@ impl ClusterEngine {
         if !owns_position {
             return;
         }
-        // Resolve node ids → gRPC endpoints from the membership snapshot.
-        let endpoint = |id: NodeId| -> Option<String> {
-            snapshot
-                .nodes
-                .iter()
-                .find(|n| n.id.0 == id.0)
-                .and_then(|n| n.addr.clone())
-        };
-        let (Some(src_ep), Some(tgt_ep)) = (endpoint(from), endpoint(to)) else {
+        // Drive the move + commit through `reassign_and_move` (ADR-090): it resolves endpoints from
+        // membership (fail-closed), runs `execute_handoff`, then commits `AssignShard{to}`. A missing
+        // endpoint or a failed move surfaces as an Err we report as a skip; an `Ok` degraded outcome
+        // (`MovedButNotCommitted`) already emitted its own event. Routing stays correct or reconcilable
+        // either way (zero false negatives), so the next tick can retry.
+        if let Err(e) = self.reassign_and_move(position as usize, to, &handle) {
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::ReplicaDesync,
                 detail: format!(
-                    "autoscaler recommended moving shard {position} from node {} to node {}, but a \
-                     node has no registered endpoint; skipping (the decision still reports it)",
-                    from.0, to.0
-                ),
-                error: "missing node endpoint for an autoscaled handoff".into(),
-            });
-            return;
-        };
-        // Distinct ids may still resolve to the SAME endpoint (a self-handoff in disguise): skip
-        // rather than fence-then-flip onto itself.
-        if src_ep == tgt_ep {
-            return;
-        }
-        if let Err(e) = self.execute_handoff(position as usize, &src_ep, &tgt_ep, &handle) {
-            self.emit(EngineEvent::DurabilityFailure {
-                op: DurabilityOp::ReplicaDesync,
-                detail: format!(
-                    "autoscaler-driven handoff of shard {position} from node {} to node {} failed; \
-                     the source auto-unfenced and routing is unchanged (retried next tick)",
+                    "autoscaler-driven handoff of shard {position} from node {} to node {} could not be \
+                     performed (e.g. a node has no registered endpoint); skipping (the decision still \
+                     reports it, retried next tick)",
                     from.0, to.0
                 ),
                 error: e.to_string(),
