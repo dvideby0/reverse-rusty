@@ -113,16 +113,26 @@ fn upsert_acked_replace_whole_or_not_at_all_under_sigkill() {
                 HashSet::from([x]),
                 "[upsert/iter={i}] id {x}'s both-title matched a stranger {both:?} (corruption)"
             );
-            // (2) Stronger check for ids whose ACK the parent actually recorded — the
-            // new version is DEFINITELY durable: new-only matches, old-only does not.
+            // (2) Race-immune no-DUPLICATE: an id is its old XOR its new version, never
+            // BOTH live at once. The both-title above cannot see this — match_title dedups
+            // a logical id to {x} however many physical copies survive — so probe the
+            // version-distinguishing titles directly (old-only matches ONLY a live old
+            // copy, new-only ONLY a live new copy; any stranger is already caught above).
+            let old_live = hits(&old_dsl(x)).contains(&x);
+            let new_live = hits(&new_dsl(x)).contains(&x);
+            assert!(
+                !(old_live && new_live),
+                "[upsert/iter={i}] id {x} has BOTH its old and new versions live (non-atomic replace — tombstone-half lost)"
+            );
+            // (3) Stronger winner check for ids whose ACK the parent actually recorded —
+            // the new version is DEFINITELY durable: new present, old gone.
             if acked.contains(&x) {
-                assert_eq!(
-                    hits(&new_dsl(x)),
-                    HashSet::from([x]),
+                assert!(
+                    new_live,
                     "[upsert/iter={i}] acked id {x}'s NEW version missing after kill+reopen (FN)"
                 );
                 assert!(
-                    hits(&old_dsl(x)).is_empty(),
+                    !old_live,
                     "[upsert/iter={i}] acked id {x}'s OLD version survived the replace (stale half / non-atomic)"
                 );
             }

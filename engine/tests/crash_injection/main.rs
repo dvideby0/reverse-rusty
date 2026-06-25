@@ -44,11 +44,13 @@
 //!    `kill()` (or force `fire = false`) → the `res.killed` assert fires, proving
 //!    the suite exercises a real SIGKILL, not a graceful round-trip (the exact
 //!    weakness this item removes).
-//! 4. **Upsert insert-half neutered** (vanish / cardinal-sin check) — in
-//!    `replay_upsert` (`segment/ingest.rs`) tombstone the prior copies but skip the
-//!    insert (`apply_delete_by_logical(logical)` instead of `apply_upsert`) → the
-//!    `upsert` scenario fires "id VANISHED" on the both-title. Skipping the whole
-//!    replay instead → "acked id's NEW version missing" (the version check).
+//! 4. **Upsert half-states** (`upsert` scenario, ADR-067) — three bites in
+//!    `apply_upsert` / `replay_upsert` (`segment/ingest.rs`): tombstone the prior
+//!    copies but skip the insert → "id VANISHED" (both-title); skip the prior-copy
+//!    tombstone loop (insert new, keep old) → "BOTH its old and new versions live"
+//!    (the race-immune duplicate check — catches the unrecorded-ACK case the
+//!    both-title's logical-id dedup hides); skip the whole replay → "acked id's NEW
+//!    version missing" (the recorded-ACK winner check).
 //! 5. **Watermark re-pin neutered** (multi-reopen resurrection) — make
 //!    `Wal::ensure_seq_after` (`wal.rs`) a no-op → the `watermark` scenario's canary
 //!    delete is skipped on the SECOND reopen and resurrects (FP), while the
