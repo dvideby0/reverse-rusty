@@ -49,9 +49,14 @@ resumes once it passes.
    **real corpus**, then restart every pod type, delete a shard pod, fill the disk, rotate secrets, and
    restore from backup — proving **no silent misses** at each step. This is the adversarial acceptance
    run for Tier 5 M2 + Tier 3 criterion 12 (real corpus).
-5. **Security review.** Auth boundaries (ADR-062), backup-path write access, TLS/SAN assumptions +
-   token handling (ADR-071), a dependency audit (`cargo audit`/`deny` — already in check.sh), a
-   **container image scan**, and a **basic threat model** (net-new — no threat-model doc today).
+5. **Security review — ✅ shipped ([ADR-089](decisions/adr-089-security-review.md)).** A
+   [threat-model doc](operations/threat-model.md) (the 4 trust boundaries, assets, adversary model,
+   controls mapped to code, the explicit v1 non-goals + operator checklist), a **container image scan**
+   (`deploy/scan-image.sh`, Trivy) with a triaged baseline (234 base-image CVEs, 2 CRITICAL / 14 HIGH —
+   all Debian-base, none reachable by the service; the app deps are `cargo audit`/`deny`-clean), and the
+   `_backup` client-`dest` path-traversal finding dispositioned (auth-gated + non-root operator
+   responsibility; an optional config jail deferred). Docs + tooling only; no code-level vuln found.
+   *Deferred:* a distroless/curl-free base, the `_backup` jail, mTLS + per-RPC authz (ADR-071 post-v1).
 
 ### Tier 0 — Cluster v1 acceptance gate — ✅ complete
 
