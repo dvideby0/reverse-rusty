@@ -56,8 +56,13 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
 - **Constant-time comparison.** `ct_eq` (`auth.rs`) compares with no data-dependent branch, so only
   the token *length* is observable. The token is never logged (failures log `reason=missing|invalid`
   + a metric, not the value).
-- **Network exposure.** Both Compose and Helm **bind the REST port to loopback by default**; widening
-  to a routable interface is an explicit operator step and is documented to require `RR_AUTH_TOKEN`.
+- **Network exposure differs by deployment.** **Compose** binds the REST port to **loopback**
+  (`RR_PORT=127.0.0.1:9200`) by default — not reachable off-box. **Helm** does NOT: the coordinator pod
+  listens on `0.0.0.0` and the default Service is **`ClusterIP`**, so the REST API is reachable by other
+  pods in the cluster even with no Ingress. A Helm (or any non-loopback) deployment therefore relies on
+  `RR_AUTH_TOKEN` for the mutation gate and should add a **NetworkPolicy** (and/or an authenticating
+  proxy / `--auth-protect-reads`) to restrict in-cluster reach — loopback isolation is a Compose-only
+  default, not a property of the service.
 - **Threats addressed:** unauthorized writes/admin (insert/delete/`_bulk`/`_flush`/`_compact`/`_backup`/
   `_settings`/vocab), credential brute-force timing, accidental open-by-default.
 - **Residual:** a single shared token (no per-principal identity, no scopes); reads are open unless
@@ -182,15 +187,17 @@ cd engine && cargo audit && cargo deny --all-features check
 
 # Container image scan (Trivy via its official image; needs the built image):
 docker build -f deploy/Dockerfile -t reverse-rusty:latest .
-deploy/scan-image.sh reverse-rusty:latest          # HIGH/CRITICAL, fails non-zero on findings
-deploy/scan-image.sh reverse-rusty:latest --full   # full table, all severities
+deploy/scan-image.sh reverse-rusty:latest            # HIGH/CRITICAL summary (advisory; exits 0)
+deploy/scan-image.sh reverse-rusty:latest --strict   # same, but FAIL non-zero on a HIGH/CRITICAL hit
+deploy/scan-image.sh reverse-rusty:latest --full     # full table, all severities (advisory)
 ```
 
 ## Operator security checklist
 
 1. Set a strong `RR_AUTH_TOKEN` (`openssl rand -hex 32`); the server refuses to start on an empty one.
-2. Keep the REST port loopback-bound (the default) or behind an authenticating reverse proxy; only
-   widen with a token set.
+2. Restrict REST reach: Compose binds loopback by default; on Helm/k8s (a `ClusterIP` Service,
+   in-cluster reachable) add a NetworkPolicy and/or an authenticating reverse proxy. Always set the
+   token before any non-loopback exposure.
 3. On any non-trusted network, enable the mesh **TLS + token** (both knobs) for every node; rotate the
    secret + certs out of band.
 4. Run the node as **non-root** with write access limited to its data + backup volumes; never as root.
