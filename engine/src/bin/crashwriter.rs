@@ -21,7 +21,8 @@
 //! ## Protocol (one line each; stdout flushed after EVERY line)
 //! ```text
 //!   READY            engine open — the parent may begin its kill countdown
-//!   ACK <id>         <id> durably inserted (its WAL sync returned) — MUST survive
+//!   ACK <id>         <id> durably inserted/upserted (its WAL sync returned) — MUST survive
+//!   TOMB <id>        <id> durably inserted-then-deleted (or deleted) — MUST be ABSENT
 //!   SKIP <id>        <id> rejected (class-D / parse) — not stored, don't-care
 //!   FLUSHED          the backup workload's ingest phase is sealed — kill now lands
 //!                    in a backup copy, not in the ingest
@@ -32,10 +33,16 @@
 //! ## Usage
 //! ```text
 //!   crashwriter --data-dir DIR --queries TSV
-//!               [--workload wal_append|flush|compact|backup]
-//!               [--offset N] [--limit M] [--backup-dest DIR]
+//!               [--workload wal_append|flush|compact|backup|churn|upsert|watermark]
+//!               [--offset N] [--limit M] [--backup-dest DIR] [--delete-prefix N]
 //!   env RR_CRASH_FSYNC=1   -> wal_sync_on_write=true (power-loss durable)
 //! ```
+//! The `upsert` workload replaces each id via [`Engine::try_upsert_live`] (ADR-067's
+//! atomic replace — both halves recover or neither). The `watermark` workload opens
+//! an already-populated + flushed dir (so recovery runs `ensure_seq_after`, ADR-066),
+//! deletes each `--queries` id, then churns non-matching throwaways so the post-reopen
+//! delete sits in the WAL tail at the kill — the parent's SECOND reopen proves that
+//! delete is replayed (not skipped), the watermark re-pin the simulation cannot reach.
 //! `--queries` is a `id<TAB>dsl` file (one query per line) the parent writes once
 //! and both sides read, so the writer and the reference oracle see byte-identical
 //! queries with no regeneration drift.
@@ -45,7 +52,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use reverse_rusty::config::EngineConfig;
-use reverse_rusty::segment::{Engine, InsertOutcome};
+use reverse_rusty::segment::{Engine, InsertOutcome, UpsertOutcome};
 use reverse_rusty::{Normalizer, WriteError};
 
 fn main() -> ExitCode {
@@ -112,6 +119,8 @@ fn main() -> ExitCode {
     match workload.as_str() {
         "backup" => run_backup(&mut engine, slice, backup_dest, &mut out),
         "churn" => run_churn(&mut engine, slice, delete_prefix, &mut out),
+        "upsert" => run_upserts(&mut engine, slice, &mut out),
+        "watermark" => run_watermark(&mut engine, slice, &mut out),
         // wal_append / flush / compact share ONE insert loop; the kill is steered
         // into a different durable window entirely by the EngineConfig (flush
         // threshold + compaction policy) chosen in `workload_config`.
@@ -179,6 +188,63 @@ fn run_churn(
     ExitCode::SUCCESS
 }
 
+/// Atomic replace-by-id (`try_upsert_live`, ADR-067) of each slice id, emitting a
+/// flushed `ACK` per durable upsert. The id's NEW version must recover whole — a
+/// crash mid-upsert recovers BOTH halves (old tombstoned + new live) or NEITHER
+/// (old left untouched), never a half-state. The parent pre-populates the dir with
+/// the OLD versions (a flushed base segment), reads this ACK stream, and reopens to
+/// assert each acked id matches its NEW version while every un-acked id keeps its OLD
+/// one. A class-D NEW version is `SKIP`ped (the prior copy is left intact — "a failed
+/// replace never deletes"), so the parent correctly keeps it as the old version.
+fn run_upserts(engine: &mut Engine, slice: &[(u64, String)], out: &mut impl Write) -> ExitCode {
+    for (id, dsl) in slice {
+        // version 2: the new copy supersedes the version-1 base (newest-copy wins),
+        // though the upsert tombstones all priors so exactly one copy survives anyway.
+        match engine.try_upsert_live(dsl, *id, 2) {
+            Ok(UpsertOutcome::Created(_) | UpsertOutcome::Updated { .. }) => emit(out, "ACK", *id),
+            Ok(UpsertOutcome::RejectedClassD) | Err(WriteError::Parse(_)) => emit(out, "SKIP", *id),
+            Err(WriteError::Wal(_)) => {
+                emit(out, "WALERR", *id);
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+/// The multi-reopen watermark probe (ADR-066 `ensure_seq_after`). The dir is opened
+/// AFTER a parent flush set `manifest.wal_seq_watermark = W` and reset the WAL, so
+/// recovery re-pins `next_seq` past `W`. We then delete each slice id (the parent's
+/// canary), emitting `TOMB` once durable — these deletes are the FIRST post-reopen
+/// WAL frames, so their seq MUST exceed `W` or the parent's SECOND reopen skips them
+/// (a resurrected delete). After the canary deletes we churn non-matching throwaways
+/// (a token in no corpus title, so a throwaway whose delete the kill tears can never
+/// be a false positive) purely to keep this process durably busy until the parent
+/// SIGKILLs it — leaving the canary delete unsealed in the WAL tail at the kill.
+fn run_watermark(engine: &mut Engine, slice: &[(u64, String)], out: &mut impl Write) -> ExitCode {
+    for (id, _dsl) in slice {
+        if engine.delete_by_logical_id(*id).is_ok() {
+            emit(out, "TOMB", *id);
+        } else {
+            emit(out, "WALERR", *id);
+            return ExitCode::FAILURE;
+        }
+    }
+    let mut k: u64 = 0;
+    loop {
+        // 8_000_000+ collides with neither the gen ids (0..) nor the canaries
+        // (9_000_000+); `zzthrowaway` matches no generated title.
+        let tid = 8_000_000 + k;
+        if matches!(
+            engine.try_insert_live("zzthrowaway", tid, 1),
+            Ok(InsertOutcome::Inserted(_))
+        ) {
+            let _ = engine.delete_by_logical_id(tid);
+        }
+        k += 1;
+    }
+}
+
 /// Durably ingest the slice (each ACKed) + seal it, signal `FLUSHED`, then loop
 /// backups to fresh dirs forever so the process is ALWAYS inside a backup copy when
 /// the parent kills it. The SOURCE `--data-dir` is what recovery reopens; a torn
@@ -228,8 +294,10 @@ fn workload_config(workload: &str, data_dir: &Path, fsync: bool) -> EngineConfig
     match workload {
         // Pure WAL growth: no auto-flush, no compaction — the kill can only tear a
         // WAL append. `churn` rides the same config so its inserts AND its
-        // `DeleteByLogical` frames stay in the WAL tail (a clean delete-replay test).
-        "wal_append" | "churn" => {
+        // `DeleteByLogical` frames stay in the WAL tail (a clean delete-replay test);
+        // `upsert` keeps its atomic-replace frames in the tail; `watermark` keeps the
+        // post-reopen canary delete unsealed so the second reopen replays it.
+        "wal_append" | "churn" | "upsert" | "watermark" => {
             cfg.memtable_flush_threshold = usize::MAX;
             cfg.auto_compact_on_flush = false;
             cfg.auto_compact_on_ingest = false;

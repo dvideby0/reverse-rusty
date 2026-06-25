@@ -120,9 +120,12 @@ impl Corpus {
 /// When the parent fires the SIGKILL.
 #[derive(Clone, Copy)]
 pub enum Trigger {
-    /// After READY and at least N ACKs (the insert scenarios — kill lands in the
-    /// insert/flush/compaction window).
+    /// After READY and at least N ACKs (the insert/upsert scenarios — kill lands in
+    /// the insert/flush/compaction/upsert window).
     Acks(usize),
+    /// After READY and at least N TOMBs (the watermark scenario — kill lands after
+    /// the post-reopen canary delete is durable, leaving it unsealed in the WAL tail).
+    Tombs(usize),
     /// After the writer signals FLUSHED (the backup scenario — kill lands in a
     /// backup copy, not in the ingest phase).
     Flushed,
@@ -206,6 +209,7 @@ pub fn spawn_and_kill(
         }
         let fire = match trigger {
             Trigger::Acks(k) => ready && acked.len() >= k,
+            Trigger::Tombs(k) => ready && tombed.len() >= k,
             Trigger::Flushed => flushed,
         };
         if fire {
@@ -344,4 +348,30 @@ pub fn reopen_and_diff(
         "[{label}] false positives — engine matched what no real query allows (corruption)"
     );
     acked_truth_total
+}
+
+/// Build a durable base `data_dir` in-process: insert each query (class-D / parse
+/// rejects silently dropped, exactly as a default engine does) then `flush()` —
+/// sealing one base segment AND committing the manifest's `wal_seq_watermark` (the
+/// last WAL seq) while resetting the WAL. The shared setup for the upsert + watermark
+/// scenarios: it puts the OLD versions (upsert) / the to-be-deleted canary
+/// (watermark) on disk as a flushed base BEFORE the crash-tested worker runs, and —
+/// for watermark — leaves a non-zero watermark the worker's post-reopen delete must
+/// out-rank. The flush resets the WAL, so the worker reopens onto a clean tail.
+pub fn build_base(data_dir: &Path, queries: &[(u64, String)]) {
+    let cfg = EngineConfig {
+        data_dir: Some(data_dir.to_path_buf()),
+        memtable_flush_threshold: usize::MAX, // one memtable, one explicit flush
+        auto_compact_on_flush: false,
+        auto_compact_on_ingest: false,
+        ..EngineConfig::default()
+    };
+    let mut engine =
+        Engine::open(Normalizer::default_vocab().expect("vocab"), cfg).expect("build_base: open");
+    for (id, dsl) in queries {
+        // Ignore the outcome: a class-D / parse reject is dropped here exactly as the
+        // independent reference (`RefMatcher::build`) drops it, so both sides agree.
+        let _ = engine.try_insert_live(dsl, *id, 1);
+    }
+    engine.flush(); // seal the base + commit wal_seq_watermark + reset the WAL
 }

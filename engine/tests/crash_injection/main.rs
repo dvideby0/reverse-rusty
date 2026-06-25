@@ -17,6 +17,10 @@
 //! - `backup` — staging + atomic rename (the source must stay intact)
 //! - `churn` — insert + interleaved delete (the `DeleteByLogical` recovery path; a
 //!   resurrected delete is a false positive)
+//! - `upsert` — atomic replace-by-id (ADR-067); a crash recovers both halves or
+//!   neither, never a half-state (vanished id / stale old version)
+//! - `watermark` — the multi-reopen `ensure_seq_after` hazard (ADR-066): a delete
+//!   appended after a checkpoint-and-reopen must survive a SECOND reopen
 //!
 //! These tests are `#[ignore]`d (they spawn + SIGKILL real processes and do real
 //! fsyncs). Run them via the `check.sh` crash lane or directly:
@@ -40,6 +44,16 @@
 //!    `kill()` (or force `fire = false`) → the `res.killed` assert fires, proving
 //!    the suite exercises a real SIGKILL, not a graceful round-trip (the exact
 //!    weakness this item removes).
+//! 4. **Upsert insert-half neutered** (vanish / cardinal-sin check) — in
+//!    `replay_upsert` (`segment/ingest.rs`) tombstone the prior copies but skip the
+//!    insert (`apply_delete_by_logical(logical)` instead of `apply_upsert`) → the
+//!    `upsert` scenario fires "id VANISHED" on the both-title. Skipping the whole
+//!    replay instead → "acked id's NEW version missing" (the version check).
+//! 5. **Watermark re-pin neutered** (multi-reopen resurrection) — make
+//!    `Wal::ensure_seq_after` (`wal.rs`) a no-op → the `watermark` scenario's canary
+//!    delete is skipped on the SECOND reopen and resurrects (FP), while the
+//!    single-reopen `churn` scenario stays GREEN under the same mutation — proving
+//!    the watermark scenario covers a hazard churn structurally cannot.
 //!
 //! (An "ACK before the durable write" mutation is NOT a reliable bite for this
 //! design: the writer's loop is sequential — `write_all` of the WAL frame is the
@@ -51,4 +65,6 @@ mod churn;
 mod compaction;
 mod flush;
 mod harness;
+mod upsert;
 mod wal_append;
+mod watermark;

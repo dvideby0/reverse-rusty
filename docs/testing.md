@@ -41,7 +41,7 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 | **Differential oracle** | `tests/oracle.rs` | The **correctness contract** — brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing test; never weaken it. Includes the **messy-corpus** passes (`messy.rs` — the same contract over `gen::messify_dataset`'s adversarial surfaces, per-title + batch, ADR-063) and the **degenerate-input** differential (`degenerate.rs` — grammar/feature-model edges, engine ≡ brute on both ingest paths). |
 | **Adversarial properties** | `tests/adversarial/` | **Reference-free** correctness properties that don't share code with the engine (ADR-063): the self-match diagonal (a query must match a title built from its own positive terms — clean, messy-query×clean-title, clean-query×perturbed-title), metamorphic set-identity under surface noise, the ADR-054/058/060/061 cross-form matrices (incl. the codex-R11 whitespace-run regression), and unicode-soup fuzz (no-panic, determinism, `P(T) ⊇ N(T)`, `match_features == N(T)`). These cover the front-end divergence the differential oracle is structurally blind to. |
 | **Independent oracle** | `tests/independent_oracle/` | **Front-end-INDEPENDENT differential** (Phase 0 item 2, ADR-087): the engine diffed against `reverse-rusty-ref-matcher` — a std-only, zero-dependency reimplementation of the parser/normalizer/extractor/predicate from the spec that shares NO front-end code (independence enforced by a `check.sh` `cargo tree` lane). Zero FN/FP over generated default (clean + messy), populated graders/phrases, the multi-word alias two-view (controlled + ~989k-match at-scale), a hand-written **gotcha** table (asserted against both sides), and the env-gated `RR_ORACLE_CORPUS` real corpus (schema below). The differential the in-tree oracle structurally cannot be — closes the ADR-050 blind spot for the covered paths. |
-| **Crash injection** | `tests/crash_injection/` | **Real-process SIGKILL** durability torture (Phase 0 item 3, ADR-088): spawns the `crashwriter` bin, delivers a real external SIGKILL mid durable-op (WAL append / flush / compaction / backup / churn), reopens in-process, and diffs the recovered engine against the ADR-087 independent oracle — zero FN on every ACKed write, no resurrection/corruption. The real-kill-mid-syscall check the chmod/torn-tail/CRC *simulations* cannot be. **`#[ignore]`d** (spawns + kills real processes, real fsyncs) behind a new `check.sh` `crash injection` lane — see [Crash injection](#crash-injection). |
+| **Crash injection** | `tests/crash_injection/` | **Real-process SIGKILL** durability torture (Phase 0 item 3, ADR-088): spawns the `crashwriter` bin, delivers a real external SIGKILL mid durable-op (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**), reopens in-process, and diffs the recovered engine against the ADR-087 independent oracle — zero FN on every ACKed write, no resurrection/corruption. `upsert` proves ADR-067 atomic replace (race-immune); `watermark` proves the ADR-066 `ensure_seq_after` re-pin across a second reopen; the **cluster** mid-write analogue is `deploy/harness.sh` leg 3b. The real-kill-mid-syscall check the chmod/torn-tail/CRC *simulations* cannot be. **`#[ignore]`d** (spawns + kills real processes, real fsyncs) behind a `check.sh` `crash injection` lane — see [Crash injection](#crash-injection). |
 | **Broad-lane batch** | `tests/broad_batch.rs` | Broad-lane **batch ≡ scalar** equivalence matrix — the load-bearing batch-correctness deliverable ([`design/matching.md`](design/matching.md) §4). |
 | Ranking | `tests/ranking.rs` | Engine-level ranking (ADR-059): additive scoring, newest-live-copy tag precedence, and the ranked-set ≡ unranked-set recall guard ([`design/matching.md`](design/matching.md) §5.4). |
 | Unit tests | `src/*.rs` | DSL parsing, vocab, WAL framing, loader, anchor filter (inline `#[cfg(test)]` modules). |
@@ -146,6 +146,18 @@ against the front-end-independent oracle (ADR-087) — proving every acknowledge
 (zero false negatives) with no resurrection or corruption. It is the real-kill-mid-syscall check the
 existing chmod / torn-tail / CRC *simulations* structurally cannot be.
 
+The seven scenarios are `--workload`s steering the kill into one durable window: `wal_append`, `flush`,
+`compaction`, `backup`, `churn` (delete-recovery), **`upsert`** (ADR-067 atomic replace), and
+**`watermark`** (ADR-066 `ensure_seq_after` across a *second* reopen). The `upsert` check is
+**race-immune** — the worker races upserts ahead of the parent's ACK stream through the stdout pipe
+buffer, so the reference cannot assume "unrecorded ⇒ still old"; instead each id carries `qstem`/`qold`/
+`qnew` tokens and a `both`-title that matches whichever version survived (`match(both_X) == {X}` catches
+a vanish or corruption regardless of the race), with the stronger new-present/old-gone check applied
+only to ids whose ACK the parent actually recorded. Its **cluster** analogue lives in the multi-machine
+harness ([`deploy/harness.sh`](../deploy/harness.sh) leg 3b): SIGKILL a `shardserver` mid-write-loop,
+restart it, converge the queued partial-applies with `POST /_cluster/resync` (ADR-047), and assert every
+acknowledged (2xx) write is matchable — zero FN across a real kill mid-write.
+
 The scenarios are `#[ignore]`d (they spawn + kill real processes and do real fsyncs) and run by the
 full `check.sh` gate's `crash injection` lane. Run them explicitly with:
 
@@ -155,9 +167,10 @@ RR_CRASH_ITERS=20 cargo test --release --test crash_injection -- --ignored --tes
 ```
 
 `RR_CRASH_ITERS` (default 3) scales the kill/reopen cycles per scenario; a nightly job can bump it. To
-confirm the harness still BITES, the suite's module header documents three mutations (drop recovered
-inserts → FN; skip delete replay → FP; don't kill → the killed-assert fires) — all verified RED during
-development.
+confirm the harness still BITES, the suite's module header documents five mutations (drop recovered
+inserts → FN; skip delete replay → FP; don't kill → the killed-assert fires; neuter the upsert
+insert-half → "id VANISHED"; neuter `ensure_seq_after` → the watermark canary resurrects while churn
+stays green) — all verified RED during development.
 
 ## Benchmarks
 
