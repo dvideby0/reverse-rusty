@@ -12,11 +12,13 @@ license = "MIT"
 publish = false
 
 # `engine` is the workspace root package; `grpc` is the generated gRPC proto crate
-# (reverse-rusty-shard-proto), pulled in only under the `distributed` feature. The
-# root package + every documented command stay unchanged — the member is built only
-# when something activates the optional dependency on it.
+# (reverse-rusty-shard-proto), pulled in only under the `distributed` feature; `ref-matcher`
+# is the front-end-independent correctness reference (reverse-rusty-ref-matcher, ADR-087), a
+# std-only crate built ONLY as a `[dev-dependencies]` of this package — so the lean core, the
+# server build, and the distributed build never compile it. The root package + every documented
+# command stay unchanged — both members are built only when something pulls them in.
 [workspace]
-members = ["grpc"]
+members = ["grpc", "ref-matcher"]
 
 [dependencies]
 # ---- Core library (always compiled; this is the lean `--no-default-features` build) ----
@@ -153,6 +155,11 @@ required-features = ["distributed"]
 # test-only, so no key material is checked into the repo and the runtime tree is
 # untouched.
 rcgen = "0.13"
+# The front-end-INDEPENDENT correctness reference (ADR-087), consumed only by the
+# `independent_oracle` test suite. std-only (zero deps), so it adds nothing to the lean
+# core / server / distributed builds; its independence from `reverse-rusty` is enforced by
+# the `ref-matcher independence` lane in check.sh.
+reverse-rusty-ref-matcher = { path = "ref-matcher" }
 
 [profile.release]
 opt-level = 3

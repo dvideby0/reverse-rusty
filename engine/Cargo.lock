@@ -1542,6 +1542,7 @@ dependencies = [
  "prometheus",
  "rayon",
  "rcgen",
+ "reverse-rusty-ref-matcher",
  "reverse-rusty-shard-proto",
  "roaring",
  "serde",
@@ -1554,6 +1555,10 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
 ]
+
+[[package]]
+name = "reverse-rusty-ref-matcher"
+version = "0.1.0"
 
 [[package]]
 name = "reverse-rusty-shard-proto"
