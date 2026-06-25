@@ -279,3 +279,37 @@ fn multiword_alias_scale_differential() {
     );
     oracle.assert_matches(&titles, "alias/scale");
 }
+
+/// OVERLAPPING equivalence declarations must merge into one transitive class (ADR-054 / codex
+/// review): `ny ≡ new york` and `big apple ≡ new york` share `new york`, so the engine's
+/// `resolve_equivalences` merges them to `{ny, new york, big apple}` — and the reference must too.
+/// The load-bearing case is `ny mets` reaching a `big apple mets` title, which is possible ONLY
+/// transitively (ny ≡ new york ≡ big apple). A reference that widened only the shared member would
+/// reject it — a spurious divergence that the disjoint-group alias tests above cannot catch.
+#[test]
+fn transitive_equivalence_differential() {
+    let queries: Vec<(u64, String)> = vec![(1, "ny mets".into()), (2, "big apple yankees".into())];
+    let titles: Vec<String> = [
+        "new york mets",  // q1 via ny ≡ new york
+        "big apple mets", // q1 via ny ≡ big apple — TRANSITIVE through new york
+        "ny yankees",     // q2 via big apple ≡ ny — transitive
+        "new york yankees",
+        "boston mets", // no match
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
+
+    let ref_vocab = RefVocab::default_vocab()
+        .phrase("new york", "term:new_york", PhraseMode::Alias)
+        .phrase("big apple", "term:big_apple", PhraseMode::Alias)
+        .equivalence(&["new york", "ny"])
+        .equivalence(&["big apple", "new york"]);
+
+    let oracle = RefOracle::build_with_alias_import(
+        &queries,
+        "ny => new york\nbig apple => new york",
+        ref_vocab,
+    );
+    oracle.assert_matches(&titles, "alias/transitive-equiv");
+}

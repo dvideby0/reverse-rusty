@@ -101,15 +101,20 @@ impl RefMatcher {
     }
 }
 
-/// Resolve the vocabulary's equivalence groups (surface forms) into a feature->group map (ADR-054).
-/// A form participates only if it resolves to exactly one feature (the conservative single-entity
-/// rule); a group needs >=2 such features to be an equivalence. Empty when no equivalences are
-/// declared, so the default / grader phases pass an empty map (expansion is a no-op).
+/// Resolve the vocabulary's equivalence groups (surface forms) into a feature->group map (ADR-054),
+/// reproducing `Vocab::resolve_equivalences`: (1) resolve each declared group's forms to a feature
+/// set — a form participates only if it resolves to exactly one feature (the conservative
+/// single-entity rule), and a group needs >=2 such features; (2) **merge overlapping groups
+/// transitively** so `[a,b]` + `[b,c]` collapse into one class `{a,b,c}` (an equivalence is
+/// transitive, NOT an order-dependent overwrite of the shared member); (3) map each member to its
+/// full merged group. Empty when no equivalences are declared, so the default / grader phases pass
+/// an empty map (expansion is a no-op).
 fn build_equiv_map(vocab: &RefVocab) -> EquivMap {
     if vocab.equivalences.is_empty() {
         return HashMap::new();
     }
-    let mut map: HashMap<Feature, BTreeSet<Feature>> = HashMap::new();
+    // 1. Resolve each declared group to a feature set.
+    let mut groups: Vec<BTreeSet<Feature>> = Vec::new();
     for group in &vocab.equivalences {
         let mut feats: BTreeSet<Feature> = BTreeSet::new();
         for form in group {
@@ -120,16 +125,41 @@ fn build_equiv_map(vocab: &RefVocab) -> EquivMap {
                 feats.insert(f.into_iter().next().expect("len==1"));
             }
         }
-        if feats.len() < 2 {
-            continue;
-        }
-        for f in &feats {
-            map.entry(f.clone())
-                .or_default()
-                .extend(feats.iter().cloned());
+        if feats.len() >= 2 {
+            groups.push(feats);
         }
     }
-    map.into_iter()
-        .map(|(k, v)| (k, v.into_iter().collect()))
-        .collect()
+    // 2. Merge groups that share any feature into one transitive class (connected components).
+    let merged = merge_overlapping_groups(groups);
+    // 3. Map each member -> its full (merged, sorted) group.
+    let mut map: EquivMap = HashMap::new();
+    for g in &merged {
+        let group: Vec<Feature> = g.iter().cloned().collect();
+        for f in g {
+            map.insert(f.clone(), group.clone());
+        }
+    }
+    map
+}
+
+/// Merge any feature-sets that share a member into one (connected components), so an equivalence is
+/// transitive. Mirrors `vocab::methods::merge_overlapping_groups`; the resulting partition is
+/// order-independent.
+fn merge_overlapping_groups(groups: Vec<BTreeSet<Feature>>) -> Vec<BTreeSet<Feature>> {
+    let mut result: Vec<BTreeSet<Feature>> = Vec::new();
+    for g in groups {
+        // Absorb every existing class g overlaps (g may chain several together).
+        let mut acc = g;
+        let mut i = 0;
+        while i < result.len() {
+            if result[i].iter().any(|f| acc.contains(f)) {
+                let other = result.swap_remove(i); // order-independent; re-check this slot
+                acc.extend(other);
+            } else {
+                i += 1;
+            }
+        }
+        result.push(acc);
+    }
+    result
 }

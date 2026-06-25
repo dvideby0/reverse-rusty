@@ -89,7 +89,7 @@ impl RefOracle {
         report.assert_clean(label, &self.dsl);
     }
 
-    /// Diff every title, returning the tallies + a sample of divergences.
+    /// Diff every title, returning the tallies + a bounded sample of divergences.
     pub fn diff(&self, titles: &[String]) -> DiffReport {
         let mut s = MatchScratch::new();
         let mut out = Vec::new();
@@ -102,22 +102,32 @@ impl RefOracle {
             report.total_truth += truth.len();
             report.total_engine += engine_set.len();
 
+            // Exact counts are unbounded (cheap usize); the stored title/query samples are CAPPED —
+            // a broad regression can diverge on millions of pairs, and cloning every title would OOM
+            // before the counts are ever printed (only the first few samples are shown anyway).
             for &t in &truth {
                 if !engine_set.contains(&t) {
                     report.false_neg += 1;
-                    report.sample_fn.push((title.clone(), t));
+                    if report.sample_fn.len() < SAMPLE_CAP {
+                        report.sample_fn.push((title.clone(), t));
+                    }
                 }
             }
             for &e in &engine_set {
                 if !truth.contains(&e) {
                     report.false_pos += 1;
-                    report.sample_fp.push((title.clone(), e));
+                    if report.sample_fp.len() < SAMPLE_CAP {
+                        report.sample_fp.push((title.clone(), e));
+                    }
                 }
             }
         }
         report
     }
 }
+
+/// How many divergent (title, query) pairs to retain for diagnostics (> the 10 printed).
+const SAMPLE_CAP: usize = 16;
 
 #[derive(Default)]
 pub struct DiffReport {
