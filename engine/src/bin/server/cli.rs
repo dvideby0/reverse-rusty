@@ -202,11 +202,21 @@ pub(crate) struct Cli {
     /// When set, the coordinator attaches its cluster-state control plane to the quorum (so
     /// membership / assignment / resize decisions are durable + HA across coordinator restarts)
     /// instead of the default in-memory backend. It is a THIN CLIENT — the coordinator does not
-    /// join consensus, staying stateless. Requires `--shard-endpoint` (remote mode) and a
-    /// `--features distributed` build; rides the same mesh security
-    /// (`--grpc-tls-ca`/`--grpc-tls-domain`/`--cluster-token`) as the shard links.
+    /// join consensus, staying stateless. List ALL quorum members for failover (ADR-086): the
+    /// client tries them in order and follows a follower's `ForwardToLeader` redirect. Requires
+    /// `--shard-endpoint` (remote mode) and a `--features distributed` build; rides the same mesh
+    /// security (`--grpc-tls-ca`/`--grpc-tls-domain`/`--cluster-token`) as the shard links.
     #[arg(long)]
     pub(crate) control_endpoint: Vec<String>,
+
+    /// Route by the committed shard→node assignments instead of the static `--shard-endpoint`
+    /// order (ADR-086). The coordinator seeds the quorum from `--shard-endpoint` (position-
+    /// preserving) and then resolves its shard topology from the durable document, so the quorum —
+    /// not per-coordinator flags — is the topology source of truth (a coordinator can boot with
+    /// only `--control-endpoint`). Requires `--control-endpoint`. Fails loud if the committed map
+    /// is not position-preserving (a non-data-moving `rebalance`) — see ADR-086.
+    #[arg(long, default_value_t = false)]
+    pub(crate) route_by_assignments: bool,
 
     /// Coordinator gRPC client connect timeout in seconds (ADR-085) — bounds the TCP+TLS
     /// dial so an unreachable shard fails fast. Default: 5s.

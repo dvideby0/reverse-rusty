@@ -71,8 +71,16 @@ fn wait_for_leader(planes: &[Arc<RaftControlPlane>]) -> u64 {
 
 /// Stand up `ids.len()` real `ControlServer`s on localhost (client plane attached), bootstrap from
 /// node 0 with the REAL addresses (so a `ForwardToLeader` carries a dialable URL), and wait for a
-/// leader. Returns the planes + their endpoint URLs (index-aligned with `ids`).
-fn stand_up_quorum(rt: &Runtime, ids: &[u64]) -> (Vec<Arc<RaftControlPlane>>, Vec<String>) {
+/// leader. Returns the planes + their endpoint URLs + the serve-task handles, all index-aligned with
+/// `ids`. Hold a handle to `abort()` a node's server mid-test (dropping it does NOT stop the task).
+fn stand_up_quorum(
+    rt: &Runtime,
+    ids: &[u64],
+) -> (
+    Vec<Arc<RaftControlPlane>>,
+    Vec<String>,
+    Vec<tokio::task::JoinHandle<()>>,
+) {
     let mut incomings = Vec::new();
     let mut addrs = Vec::new();
     {
@@ -93,9 +101,12 @@ fn stand_up_quorum(rt: &Runtime, ids: &[u64]) -> (Vec<Arc<RaftControlPlane>>, Ve
             )
         })
         .collect();
+    let mut handles = Vec::with_capacity(ids.len());
     for (i, inc) in incomings.into_iter().enumerate() {
         let server = ControlServer::new(planes[i].raft()).with_client_plane(Arc::clone(&planes[i]));
-        rt.spawn(server.serve_with_incoming(inc));
+        handles.push(rt.spawn(async move {
+            let _ = server.serve_with_incoming(inc).await;
+        }));
     }
     for a in &addrs {
         wait_until_listening(*a);
@@ -107,7 +118,7 @@ fn stand_up_quorum(rt: &Runtime, ids: &[u64]) -> (Vec<Arc<RaftControlPlane>>, Ve
     planes[0].initialize(&members).expect("bootstrap quorum");
     wait_for_leader(&planes);
     let endpoints = addrs.iter().map(|a| format!("http://{a}")).collect();
-    (planes, endpoints)
+    (planes, endpoints, handles)
 }
 
 fn sorted_percolate(cluster: &ClusterEngine, title: &str) -> Vec<u64> {
@@ -119,7 +130,7 @@ fn sorted_percolate(cluster: &ClusterEngine, title: &str) -> Vec<u64> {
 #[test]
 fn remote_control_plane_round_trips_and_drives_coordinator() {
     let rt = Runtime::new().expect("tokio runtime");
-    let (planes, endpoints) = stand_up_quorum(&rt, &[0]);
+    let (planes, endpoints, _handles) = stand_up_quorum(&rt, &[0]);
 
     let rcp = RemoteControlPlane::connect(
         &endpoints[0],
@@ -200,7 +211,7 @@ fn remote_control_plane_round_trips_and_drives_coordinator() {
 fn remote_control_plane_follows_forward_to_leader() {
     let rt = Runtime::new().expect("tokio runtime");
     let ids = [0u64, 1, 2];
-    let (planes, endpoints) = stand_up_quorum(&rt, &ids);
+    let (planes, endpoints, _handles) = stand_up_quorum(&rt, &ids);
     let leader = wait_for_leader(&planes);
     let follower = *ids
         .iter()
@@ -245,4 +256,149 @@ fn remote_control_plane_follows_forward_to_leader() {
     for p in &planes {
         p.shutdown();
     }
+}
+
+/// ADR-086 multi-control-endpoint failover: the coordinator's control client is given the WHOLE
+/// quorum endpoint list and tries them in order. (a) a dead leading endpoint is skipped at connect
+/// time (a read AND a propose still succeed via the survivor); (b) when the primary's NODE dies
+/// mid-session an idempotent READ fails over to the surviving quorum leader, but a WRITE does NOT
+/// (ADR-085/086: a committed-but-lost non-idempotent write must not be resubmitted) — it surfaces
+/// loud. The primary is a throwaway node on its OWN runtime, dropped to kill it connection-and-all
+/// (aborting a serve task leaves the established connection alive, cf. `cluster_grpc_oracle::transport`).
+/// (c) all endpoints down fails loud (never a stale read). The main quorum leader stays up throughout.
+#[test]
+fn remote_control_plane_fails_over_across_endpoints() {
+    const DEAD: &str = "http://127.0.0.1:1";
+
+    let rt = Runtime::new().expect("tokio runtime");
+    let ids = [0u64, 1, 2];
+    let (planes, endpoints, _handles) = stand_up_quorum(&rt, &ids);
+    let leader = wait_for_leader(&planes) as usize;
+
+    // (a) Connect-time failover: a dead leading endpoint is skipped; the survivor answers a read AND
+    // a propose (committed via the leader — by forwarding if the survivor is a follower).
+    let list_a = vec![DEAD.to_string(), endpoints[leader].clone()];
+    let rcp_a = RemoteControlPlane::connect_failover(
+        &list_a,
+        rt.handle().clone(),
+        ClientSecurity::default(),
+    )
+    .expect("connect_failover skips the dead leading endpoint");
+    assert_eq!(
+        rcp_a
+            .cluster_state()
+            .expect("read via the survivor")
+            .num_shards,
+        NUM_SHARDS
+    );
+    rcp_a
+        .propose(ClusterStateChange::AddNode(data_node(7, 7)))
+        .expect("propose via the survivor");
+    assert!(
+        planes[leader]
+            .local_state()
+            .nodes
+            .iter()
+            .any(|n| n.id == NodeId(7)),
+        "the connect-failover propose committed through the leader"
+    );
+
+    // (b) Per-call failover: the primary is a throwaway control node on its OWN runtime. Dropping that
+    // runtime kills it connection-and-all, so a subsequent READ fails over to the surviving quorum
+    // leader — while a WRITE fails loud (writes are not resubmitted to a fallback endpoint).
+    let victim_rt = Runtime::new().expect("victim runtime");
+    let victim_plane = Arc::new(
+        start_grpc_node(99, NUM_SHARDS, VNODES, GENESIS_FP, victim_rt.handle(), None)
+            .expect("start victim node"),
+    );
+    let victim_ep = {
+        let _enter = victim_rt.enter();
+        let inc = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind victim");
+        let addr = inc.local_addr().expect("victim addr");
+        let server =
+            ControlServer::new(victim_plane.raft()).with_client_plane(Arc::clone(&victim_plane));
+        victim_rt.spawn(async move {
+            let _ = server.serve_with_incoming(inc).await;
+        });
+        format!("http://{addr}")
+    };
+    wait_until_listening(victim_ep.trim_start_matches("http://").parse().unwrap());
+    victim_plane
+        .initialize(&[(99, victim_ep.clone())])
+        .expect("bootstrap victim single-node");
+    wait_for_leader(&[Arc::clone(&victim_plane)]);
+
+    let list_b = vec![victim_ep.clone(), endpoints[leader].clone()];
+    let rcp_b = RemoteControlPlane::connect_failover(
+        &list_b,
+        rt.handle().clone(),
+        ClientSecurity::default(),
+    )
+    .expect("connect_failover to the victim primary");
+    // While the victim is up it answers from its own single-node genesis (the primary path).
+    assert_eq!(
+        rcp_b
+            .cluster_state()
+            .expect("read via the victim")
+            .num_shards,
+        NUM_SHARDS
+    );
+
+    victim_plane.shutdown(); // stop the victim raft while its runtime is still alive
+    drop(victim_rt); // then kill its server + connection (the reliable kill)
+    wait_until_stopped(victim_ep.trim_start_matches("http://"));
+
+    // A READ fails over to the surviving quorum leader (routing decisions stay available).
+    assert_eq!(
+        rcp_b
+            .cluster_state()
+            .expect("a read fails over from the dead victim to the surviving leader")
+            .num_shards,
+        NUM_SHARDS
+    );
+    // A WRITE does NOT fail over: a committed-but-lost non-idempotent write must not be resubmitted to
+    // a fallback endpoint, so with the primary dead it surfaces loud (the operator/restart reconnects).
+    assert!(
+        rcp_b
+            .propose(ClusterStateChange::AddNode(data_node(9, 9)))
+            .is_err(),
+        "a write must NOT fail over (no resubmit of a possibly-committed write)"
+    );
+    assert!(
+        !planes[leader]
+            .local_state()
+            .nodes
+            .iter()
+            .any(|n| n.id == NodeId(9)),
+        "the non-failing-over write must not have committed anywhere"
+    );
+
+    // (c) All endpoints down ⇒ fail loud at connect (never a swallowed stale read).
+    let all_dead = vec![DEAD.to_string(), "http://127.0.0.1:2".to_string()];
+    assert!(
+        RemoteControlPlane::connect_failover(
+            &all_dead,
+            rt.handle().clone(),
+            ClientSecurity::default()
+        )
+        .is_err(),
+        "connect_failover with all endpoints down must fail loud"
+    );
+
+    for p in &planes {
+        p.shutdown();
+    }
+}
+
+/// Block until `addr` (a `host:port`) stops accepting TCP, or time out — the inverse of
+/// [`wait_until_listening`], so an aborted server is provably unreachable before we assert failover.
+fn wait_until_stopped(addr: &str) {
+    let sa: SocketAddr = addr.parse().expect("parse addr");
+    for _ in 0..300 {
+        if TcpStream::connect_timeout(&sa, Duration::from_millis(100)).is_err() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("server at {addr} never stopped listening");
 }

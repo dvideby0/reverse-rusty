@@ -22,16 +22,17 @@
 # long-lived deployment: durable volumes, no baked data, conservative health probes,
 # loopback-published API, auth expected.
 #
-# IMPORTANT — the control plane is present but not yet load-bearing at v1. A remote
-# coordinator runs its OWN in-memory control plane and re-derives placement
-# deterministically from the frozen dict + ring on every (re)start; it does not yet
-# consult the controlserver quorum (no --control-endpoint wiring exists — ADR-072
-# §Scope, ADR-081). The quorum is included so the durable placement-state tier is
-# production-shaped and ready when the wiring lands; today it is durable but idle.
-# You may omit control0..2 entirely at v1 with no behavioral change. The bootstrap node
-# binds 0.0.0.0 (every interface) but advertises a ROUTABLE self-URL into Raft membership
-# via --advertise-url (ADR-082) — so when the --control-endpoint wiring lands, a real
-# multi-node quorum forms cleanly instead of committing an undialable 0.0.0.0 address.
+# The control plane is now WIRED and load-bearing (ADR-083/086). The coordinator attaches to the
+# durable controlserver quorum via --control-endpoint (failing over across all three members), and
+# --route-by-assignments makes the committed shard->node map the topology source of truth: the
+# coordinator seeds the quorum position-preservingly from its --shard-endpoint list on first boot,
+# then routes by the committed assignments (a fail-loud guard refuses a non-position-preserving map).
+# So the cluster-state document is durable + HA across coordinator restarts. The bootstrap control
+# node binds 0.0.0.0 but advertises a ROUTABLE self-URL into Raft membership via --advertise-url
+# (ADR-082). NOTE: a non-data-moving HRW `rebalance` must NOT be used to re-point routing on a
+# populated cluster — data-moving live re-pointing is the deferred ADR-086 follow-on. To run WITHOUT
+# the quorum, drop the coordinator's --control-endpoint/--route-by-assignments lines AND control0..2
+# (the in-memory backend is used, routing byte-identical).
 
 # Shared shard definition (the three primaries differ only in name + volume).
 x-shard-base: &shard-base
@@ -111,6 +112,10 @@ services:
       --shard-endpoint https://shard0:50051
       --shard-endpoint https://shard1:50051
       --shard-endpoint https://shard2:50051
+      --control-endpoint https://control0:50061
+      --control-endpoint https://control1:50061
+      --control-endpoint https://control2:50061
+      --route-by-assignments
       --grpc-tls-ca /certs/ca.crt
     # --include-broad makes broad-lane queries match by DEFAULT; broad is also a
     # per-request flag (`"include_broad": true` in the _search body), so leave it off
@@ -135,6 +140,12 @@ services:
       shard0: {condition: service_healthy}
       shard1: {condition: service_healthy}
       shard2: {condition: service_healthy}
+      # The coordinator reads the committed cluster-state at boot (--route-by-assignments), so it
+      # needs the quorum listening; if a leader is still electing it fails loud and the restart
+      # policy retries (same as the shard connect race below).
+      control0: {condition: service_healthy}
+      control1: {condition: service_healthy}
+      control2: {condition: service_healthy}
     # unless-stopped also covers the connect race: if the coordinator starts before a
     # shard's first listen, the connect fails non-zero and it is restarted (the shard
     # depends_on healthcheck makes this rare). It is not restarted after a clean
@@ -149,9 +160,9 @@ services:
       start_period: 15s
 
   # --- Control plane: durable openraft quorum (ADR-038/041). -------------------
-  # Present but NOT yet wired to the coordinator at v1 (see the header note). Shipped
-  # so the durable placement tier is production-shaped; safe to omit at v1. Node 0
-  # bootstraps the cluster from the --peer members once they listen.
+  # WIRED to the coordinator (ADR-083/086 — see the header note): it holds the durable, HA
+  # cluster-state document the coordinator routes by. Node 0 bootstraps the cluster from the
+  # --peer members once they listen.
   control0:
     image: ${RR_IMAGE:-reverse-rusty:latest}
     networks: [rrmesh]

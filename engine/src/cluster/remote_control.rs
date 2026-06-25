@@ -46,27 +46,63 @@ async fn connect_control_mesh(
 
 /// A [`ControlPlane`] served by a remote `ControlService` quorum node.
 pub struct RemoteControlPlane {
+    /// The eagerly-connected primary client (the first reachable endpoint at connect time) — the
+    /// happy path for every call.
     client: ControlServiceClient<MeshChannel>,
+    /// The full configured endpoint list, retained for per-call failover when the primary's node is
+    /// unreachable (ADR-086): a control op redials the remaining endpoints in order.
+    endpoints: Vec<String>,
     handle: Handle,
-    /// Retained so a `ForwardToLeader` redirect can redial the leader over the same mesh security.
+    /// Retained so a `ForwardToLeader` redirect (or a failover redial) can reconnect over the same
+    /// mesh security.
     security: ClientSecurity,
 }
 
 impl RemoteControlPlane {
-    /// Connect to a `ControlService` at `endpoint` (e.g. `"https://control0:50061"`), driving the
-    /// async connect on `handle`. A bad endpoint/handshake fails here, not on the first op.
+    /// Connect to a single `ControlService` at `endpoint` (e.g. `"https://control0:50061"`). A
+    /// one-element [`Self::connect_failover`]; the coordinator-mode binary passes the whole
+    /// `--control-endpoint` list to `connect_failover` for multi-endpoint failover (ADR-086).
     pub fn connect(
         endpoint: &str,
         handle: Handle,
         security: ClientSecurity,
     ) -> Result<Self, ControlError> {
-        let client = block_on_in_context(&handle, connect_control_mesh(endpoint, &security))
-            .map_err(|e| ControlError::Backend(format!("connect {endpoint}: {e}")))?;
-        Ok(Self {
-            client,
-            handle,
-            security,
-        })
+        let endpoints = [endpoint.to_string()];
+        Self::connect_failover(&endpoints, handle, security)
+    }
+
+    /// Connect to the first reachable endpoint in `endpoints`, retaining the full list for per-call
+    /// failover (ADR-086). Tries each in order; the first that dials becomes the primary client. All
+    /// endpoints unreachable ⇒ fail loud (the coordinator refuses to boot against a dead quorum,
+    /// like a dead shard connect). A bad endpoint/handshake fails here, not on the first op.
+    pub fn connect_failover(
+        endpoints: &[String],
+        handle: Handle,
+        security: ClientSecurity,
+    ) -> Result<Self, ControlError> {
+        if endpoints.is_empty() {
+            return Err(ControlError::Backend(
+                "connect_failover: no control-plane endpoints given".into(),
+            ));
+        }
+        let mut last_err = String::new();
+        for endpoint in endpoints {
+            match block_on_in_context(&handle, connect_control_mesh(endpoint, &security)) {
+                Ok(client) => {
+                    return Ok(Self {
+                        client,
+                        endpoints: endpoints.to_vec(),
+                        handle,
+                        security,
+                    });
+                }
+                Err(e) => last_err = format!("connect {endpoint}: {e}"),
+            }
+        }
+        Err(ControlError::Backend(format!(
+            "all {} control-plane endpoints unreachable (last: {last_err})",
+            endpoints.len(),
+        )))
     }
 
     /// Drive ONE `ClientControl` RPC over `client`, returning the decoded reply.
@@ -86,11 +122,15 @@ impl RemoteControlPlane {
         decode(&env.data).map_err(|e| ControlError::Backend(format!("decode reply: {e}")))
     }
 
-    /// Call the control plane, following a single `ForwardToLeader` redirect: if the contacted node
-    /// is a follower it returns the leader's address, and we redial + retry there once. A second
-    /// forward (e.g. an election in flight) surfaces as the error rather than looping.
-    fn call(&self, req: &ClientControlRequest) -> Result<ClientControlReply, ControlError> {
-        let reply = self.call_once(&self.client, req)?;
+    /// Drive a request over one specific client, following a single `ForwardToLeader` redirect: if
+    /// the contacted node is a follower it returns the leader's address, and we redial + retry there
+    /// once. A second forward (e.g. an election in flight) surfaces as the error rather than looping.
+    fn call_via(
+        &self,
+        client: &ControlServiceClient<MeshChannel>,
+        req: &ClientControlRequest,
+    ) -> Result<ClientControlReply, ControlError> {
+        let reply = self.call_once(client, req)?;
         if let ClientControlReply::Err(WireControlError::ForwardToLeader {
             addr: Some(leader_addr),
             ..
@@ -104,6 +144,44 @@ impl RemoteControlPlane {
             return self.call_once(&leader, req);
         }
         Ok(reply)
+    }
+
+    /// Call the control plane. Try the primary client; within that attempt a follower's
+    /// `ForwardToLeader` is followed once ([`Self::call_via`]). On a transport/backend failure,
+    /// **idempotent reads** then fail over to the remaining configured endpoints in order, each
+    /// redialed fresh (ADR-086) — failover finds a *reachable* node, ForwardToLeader finds the
+    /// *leader* among reachable nodes; bounded to one try per endpoint per call.
+    ///
+    /// **Writes (`Propose`/`ChangeMembership`) never fail over.** A write that reached the leader may
+    /// have COMMITTED before a transport error swallowed the response; resubmitting it to another
+    /// endpoint could double-apply a non-idempotent op (e.g. `BumpModelVersion` increments the model
+    /// version on every commit). So a failed write surfaces loud and converges via an
+    /// operator/restart retry — the same "writes never retry" stance as ADR-085's shard transport.
+    /// The single `ForwardToLeader` follow inside `call_via` stays safe: a follower redirects WITHOUT
+    /// applying, so the leader sees the first application.
+    fn call(&self, req: &ClientControlRequest) -> Result<ClientControlReply, ControlError> {
+        let primary = self.call_via(&self.client, req);
+        if matches!(
+            req,
+            ClientControlRequest::Propose(_) | ClientControlRequest::ChangeMembership(_)
+        ) {
+            return primary; // a non-idempotent write must not be resubmitted to a fallback endpoint
+        }
+        let primary_err = match primary {
+            Ok(reply) => return Ok(reply),
+            Err(e) => e,
+        };
+        for endpoint in &self.endpoints {
+            let Ok(client) =
+                block_on_in_context(&self.handle, connect_control_mesh(endpoint, &self.security))
+            else {
+                continue; // this endpoint is down too — try the next
+            };
+            if let Ok(reply) = self.call_via(&client, req) {
+                return Ok(reply);
+            }
+        }
+        Err(primary_err)
     }
 }
 

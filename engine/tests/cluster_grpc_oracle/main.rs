@@ -31,5 +31,6 @@ mod legacy_layout;
 mod partial_apply;
 mod recovery;
 mod replication;
+mod routing;
 mod security;
 mod transport;
