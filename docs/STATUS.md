@@ -137,9 +137,13 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **Coordinator routing by committed assignments + control failover** — opt-in
   `--route-by-assignments` makes the quorum the topology source of truth (position-preserving seed +
   fail-loud guard; resolve-only boot with just `--control-endpoint`); the control client fails over
-  across the whole `--control-endpoint` list (ADR-086). Data-moving live re-pointing deferred.
+  across the whole `--control-endpoint` list (ADR-086).
 - **Live data-moving handoff** — swappable shard backing (ADR-043); peer-recover → fence → drain →
   flip under concurrent writes (ADR-044); auto-unfence-on-abort + autoscaler-driven (ADR-048).
+- **Data-moving reassignment** — `reassign_and_move`/`rebalance_and_move` move a shard's data via
+  `execute_handoff` then commit the new owner (move-then-commit), so a reassignment moves data and
+  routing follows live + across a resolve-only restart; REST `POST /_cluster/reassign` +
+  `rebalance {move:true}` (ADR-090). Closes the ADR-086 deferral.
 - **Partial-apply repair** — typed `PartiallyApplied` + live `resync` (ADR-047).
 - **Mesh security** — opt-in TLS + shared cluster token, constant-time default-deny interceptor on
   both planes (ADR-071).
@@ -203,8 +207,10 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   durable + HA across coordinator restarts), fails over across the whole endpoint list, and (opt-in
   `--route-by-assignments`, ADR-086) routes by the committed shard→node assignments instead of its
   static `--shard-endpoint` list — making the quorum the topology source of truth. **Data-moving
-  reassignment is still deferred:** a non-data-moving HRW `rebalance` must not be used to re-point
-  routing on a populated cluster (that needs live handoff). Mesh TLS + token auth are
+  reassignment is built** (ADR-090): `POST /_cluster/reassign` (or `rebalance` with `{move:true}`)
+  moves a shard's data + re-points routing live (move-then-commit); the bare map-only HRW `rebalance`
+  stays map-only and must not be used alone to re-point a populated remote cluster. Mesh TLS + token
+  auth are
   **opt-in** (ADR-071) — enable both outside a trusted network. Remote-cluster vocabulary is
   deploy-time configuration, not live-shipped (decided, ADR-076).
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at

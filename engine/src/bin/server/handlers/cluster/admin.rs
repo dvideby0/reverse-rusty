@@ -447,23 +447,133 @@ pub(crate) async fn cluster_deregister_node(
     }
 }
 
+#[derive(Deserialize, Default)]
+#[cfg_attr(not(feature = "distributed"), allow(dead_code))]
+pub(crate) struct RebalanceBody {
+    /// When true, MOVE each reassigned position's data via live handoff and commit the new owner —
+    /// the data-moving rebalance (ADR-090, `distributed` only). Default false = the map-only HRW
+    /// rebalance (ADR-042), byte-identical to the prior behavior (an empty body decodes to false, so
+    /// existing no-body callers are unaffected).
+    #[serde(default, rename = "move")]
+    do_move: bool,
+}
+
 /// POST /_cluster/rebalance — recompute the desired shard→node map from membership
-/// (rendezvous/HRW, ADR-042) and commit only the changed positions.
+/// (rendezvous/HRW, ADR-042) and commit only the changed positions. With `{"move": true}` (ADR-090,
+/// `distributed` only) it additionally MOVES each reassigned position's data via live handoff so
+/// routing follows the new map live and across a restart; without it (the default, and any empty
+/// body) it stays map-only — which must NOT be used alone to re-point a populated remote cluster.
 #[instrument(skip_all)]
-pub(crate) async fn cluster_rebalance(State(state): State<Arc<ClusterAppState>>) -> Response {
-    let result = {
-        let cluster = state.cluster.read();
-        let rf = cluster.replication_factor();
-        cluster.rebalance(rf)
-    };
-    match result {
-        Ok(reassigned) => {
-            info!(reassigned, "rebalance committed");
-            Json(serde_json::json!({"acknowledged": true, "reassigned": reassigned}))
+pub(crate) async fn cluster_rebalance(
+    State(state): State<Arc<ClusterAppState>>,
+    body: axum::body::Bytes,
+) -> Response {
+    // Parse leniently: an empty body (the common no-arg call) is map-only, preserving the prior
+    // signature; a present-but-invalid body is a clean 400.
+    let do_move = if body.is_empty() {
+        false
+    } else {
+        match serde_json::from_slice::<RebalanceBody>(&body) {
+            Ok(b) => b.do_move,
+            Err(e) => {
+                return ApiError::response(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    format!("invalid rebalance body: {e}"),
+                )
                 .into_response()
+            }
         }
-        Err(e) => shard_error_response("rebalance failed", &e),
+    };
+
+    if !do_move {
+        // Map-only HRW rebalance (ADR-042) — unchanged; works in-process and remote.
+        let result = {
+            let cluster = state.cluster.read();
+            let rf = cluster.replication_factor();
+            cluster.rebalance(rf)
+        };
+        return match result {
+            Ok(reassigned) => {
+                info!(reassigned, "rebalance committed (map-only)");
+                Json(serde_json::json!({
+                    "acknowledged": true, "reassigned": reassigned, "moved_data": false
+                }))
+                .into_response()
+            }
+            Err(e) => shard_error_response("rebalance failed", &e),
+        };
     }
+
+    // Data-moving rebalance (ADR-090) — distributed only.
+    rebalance_move(state).await
+}
+
+/// The `{"move": true}` arm of [`cluster_rebalance`]: drive a data-moving rebalance on the blocking
+/// pool (the move uses the sync→async bridge). A per-position failure stops the sweep fail-forward;
+/// the report names what moved, what failed, and what was not attempted, so an operator can resume.
+#[cfg(feature = "distributed")]
+async fn rebalance_move(state: Arc<ClusterAppState>) -> Response {
+    let handle = tokio::runtime::Handle::current();
+    let state_inner = Arc::clone(&state);
+    let result = tokio::task::spawn_blocking(move || {
+        let cluster = state_inner.cluster.read();
+        let rf = cluster.replication_factor();
+        cluster.rebalance_and_move(rf, &handle)
+    })
+    .await;
+    match result {
+        Ok(Ok(report)) => {
+            let moved_count = report.moved.len();
+            if let Some((pos, why)) = &report.failed {
+                error!(
+                    position = *pos,
+                    reason = %why,
+                    moved = moved_count,
+                    "data-moving rebalance stopped at a position (resumable)"
+                );
+            } else {
+                info!(moved = moved_count, "data-moving rebalance complete");
+            }
+            let acknowledged = report.failed.is_none();
+            let failed_json = report
+                .failed
+                .map(|(p, why)| serde_json::json!({"position": p, "reason": why}));
+            Json(serde_json::json!({
+                "acknowledged": acknowledged,
+                "moved_data": true,
+                "moved": report.moved,
+                "failed": failed_json,
+                "not_attempted": report.not_attempted,
+            }))
+            .into_response()
+        }
+        Ok(Err(e)) => shard_error_response("data-moving rebalance failed", &e),
+        Err(e) => {
+            error!(error = %e, "rebalance task panicked");
+            ApiError::response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "rebalance_error",
+                "internal rebalance task failed",
+            )
+            .into_response()
+        }
+    }
+}
+
+/// The non-`distributed` build cannot drive a data move (the gRPC transport is compiled out) — the
+/// map-only rebalance still runs; `{"move":true}` answers a 501-with-reason instead of silently
+/// ignoring the flag.
+// `async` (with no await) to match the distributed signature so `cluster_rebalance` can `.await` it
+// uniformly across both builds.
+#[cfg(not(feature = "distributed"))]
+#[allow(clippy::unused_async)]
+async fn rebalance_move(_state: Arc<ClusterAppState>) -> Response {
+    not_in_cluster_mode(
+        "POST /_cluster/rebalance {\"move\":true}",
+        "a data-moving rebalance needs the gRPC transport — rebuild the server with --features \
+         distributed, or omit \"move\" for the map-only rebalance",
+    )
 }
 
 #[derive(Deserialize)]
@@ -537,6 +647,119 @@ pub(crate) async fn cluster_handoff(Json(_body): Json<HandoffBody>) -> Response 
     not_in_cluster_mode(
         "POST /_cluster/handoff",
         "a live handoff needs the gRPC transport — rebuild the server with \
+         --features distributed",
+    )
+}
+
+#[derive(Deserialize)]
+// The non-`distributed` build's reassign handler 501s and ignores the body — gate the dead-code lint.
+#[cfg_attr(not(feature = "distributed"), allow(dead_code))]
+pub(crate) struct ReassignBody {
+    /// The shard position to move.
+    position: usize,
+    /// The new owner's logical node id (its endpoint is resolved from membership).
+    node: u64,
+}
+
+/// POST /_cluster/reassign — data-moving reassignment (ADR-090): MOVE shard `position`'s data to
+/// node `node` via live handoff, then commit the new owner (move-then-commit). The map-aware,
+/// higher-level companion to `/_cluster/handoff` (which takes raw source/target endpoints): this
+/// resolves the target endpoint from membership and keeps the committed shard→node map consistent
+/// with the live routing, so a coordinator restart (resolve-only) routes to the new owner. Runs on
+/// the blocking pool (the move uses the sync→async bridge); does NOT hold `write_serial` — a move
+/// runs concurrently with ingestion by design (its own fence + retention lease + the engine-level
+/// reassign guard provide concurrency safety). Fail-closed: a failed move moves nothing and commits
+/// nothing; a move whose commit fails still serves (zero false negatives) and reports
+/// `committed:false` for the operator to retry. Requires a `--features distributed` build; else 501.
+#[cfg(feature = "distributed")]
+#[instrument(skip_all)]
+pub(crate) async fn cluster_reassign(
+    State(state): State<Arc<ClusterAppState>>,
+    Json(body): Json<ReassignBody>,
+) -> Response {
+    use reverse_rusty::cluster::ReassignOutcome;
+    let handle = tokio::runtime::Handle::current();
+    let state_inner = Arc::clone(&state);
+    let result = tokio::task::spawn_blocking(move || {
+        let cluster = state_inner.cluster.read();
+        cluster.reassign_and_move(body.position, NodeId(body.node), &handle)
+    })
+    .await;
+    match result {
+        Ok(Ok(ReassignOutcome::NoChange { position })) => {
+            info!(
+                position,
+                "reassign: no change (position already on the target)"
+            );
+            Json(serde_json::json!({
+                "acknowledged": true, "moved": false, "committed": false, "position": position
+            }))
+            .into_response()
+        }
+        Ok(Ok(ReassignOutcome::Moved {
+            position,
+            from,
+            to,
+            generation,
+        })) => {
+            info!(
+                position,
+                from = from.0,
+                to = to.0,
+                generation,
+                "reassign: data moved and committed"
+            );
+            Json(serde_json::json!({
+                "acknowledged": true, "moved": true, "committed": true,
+                "position": position, "node": to.0, "generation": generation
+            }))
+            .into_response()
+        }
+        Ok(Ok(ReassignOutcome::MovedButNotCommitted {
+            position,
+            from,
+            to,
+            generation,
+        })) => {
+            // Zero-FN safe: the data moved + routing flipped, but the durable map still names the
+            // (reads-serving) source. Report 200 with committed:false so the operator retries.
+            error!(
+                position,
+                from = from.0,
+                to = to.0,
+                "reassign: data moved but commit failed (still serving; re-run to reconcile)"
+            );
+            Json(serde_json::json!({
+                "acknowledged": true, "moved": true, "committed": false,
+                "position": position, "node": to.0, "generation": generation,
+                "warning": "data moved and routing flipped, but committing the new owner failed; \
+                            re-run to reconcile the durable map"
+            }))
+            .into_response()
+        }
+        Ok(Err(e)) => {
+            error!(error = %e, "reassign failed (no data moved; cluster unchanged)");
+            shard_error_response("reassign failed", &e)
+        }
+        Err(e) => {
+            error!(error = %e, "reassign task panicked");
+            ApiError::response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reassign_error",
+                "internal reassign task failed",
+            )
+            .into_response()
+        }
+    }
+}
+
+/// The non-`distributed` build cannot drive a cross-node data move (the gRPC transport is compiled
+/// out) — answer the standard 501-with-reason instead of a silent 404.
+#[cfg(not(feature = "distributed"))]
+pub(crate) async fn cluster_reassign(Json(_body): Json<ReassignBody>) -> Response {
+    not_in_cluster_mode(
+        "POST /_cluster/reassign",
+        "a data-moving reassignment needs the gRPC transport — rebuild the server with \
          --features distributed",
     )
 }

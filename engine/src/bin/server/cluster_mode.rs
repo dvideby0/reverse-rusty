@@ -39,7 +39,7 @@ use crate::handlers::{
     cluster_flush, cluster_get_aliases, cluster_get_doc, cluster_get_settings, cluster_get_vocab,
     cluster_handoff, cluster_health, cluster_import_aliases, cluster_learn_aliases,
     cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_metrics, cluster_mpercolate,
-    cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_rebalance,
+    cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
     cluster_register_node, cluster_resize, cluster_resync, cluster_root, cluster_search,
     cluster_state, cluster_stats,
 };
@@ -337,6 +337,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             axum::routing::delete(cluster_deregister_node),
         )
         .route("/_cluster/rebalance", post(cluster_rebalance))
+        .route("/_cluster/reassign", post(cluster_reassign))
         .route("/_cluster/resize", post(cluster_resize))
         .route("/_cluster/resync", post(cluster_resync))
         .route("/_cluster/handoff", post(cluster_handoff))

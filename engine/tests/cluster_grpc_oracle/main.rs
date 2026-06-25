@@ -29,6 +29,7 @@ mod handoff;
 mod health;
 mod legacy_layout;
 mod partial_apply;
+mod reassign;
 mod recovery;
 mod replication;
 mod routing;

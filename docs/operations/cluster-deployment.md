@@ -16,8 +16,8 @@ running cluster has its own doc: [backup-restore.md](backup-restore.md).
 > thin client (it does **not** join consensus — it stays stateless) and treats the committed shard→node
 > assignments as the routing source of truth. Drop both flags to fall back to the in-memory control
 > plane (placement re-derived deterministically from the frozen dict + ring on every start) —
-> byte-identical, the quorum then idle. Full wiring detail + the still-deferred *data-moving*
-> reassignment are in [§11](#11-not-covered-in-v1-see-adr-081).
+> byte-identical, the quorum then idle. Full wiring detail + *data-moving* reassignment (now available,
+> ADR-090 — [§5](#5-scaling)) are in [§11](#11-not-covered-in-v1-see-adr-081).
 
 ## 1. Topology
 
@@ -156,6 +156,22 @@ is still placed under the old one — searches in that window silently miss quer
 Do **not** add a shard to the live cluster and re-ingest in place. Cross-process / online resize is a
 deferred follow-on (ADR-078, ADR-081 §Deferred).
 
+**Move a single shard to another node** (without changing K) — data-moving reassignment (ADR-090, a
+`--features distributed` coordinator):
+
+```sh
+curl -fsS -XPOST http://127.0.0.1:9200/_cluster/reassign -H "authorization: Bearer $RR_AUTH_TOKEN" \
+  -H 'content-type: application/json' -d '{"position": 0, "node": 2}'
+```
+
+This peer-recovers the target, fences + drains the source, flips routing, then commits the new owner
+(**move-then-commit**) — so a coordinator restarted **resolve-only** (`--route-by-assignments` +
+`--control-endpoint`, dropping the now-stale `--shard-endpoint`) routes to the new owner. To move every
+reassigned position at once, `POST /_cluster/rebalance -d '{"move": true}'`. Fail-closed: a failed move
+commits nothing and auto-unfences the source; a `committed:false` reply means the data moved but the
+durable-map commit failed — re-run to reconcile (still zero-FN). The bare map-only `rebalance` (no
+`move`) must **not** be used alone to re-point a populated cluster.
+
 ## 6. Recovery
 
 The cluster is shard-authoritative and **fails loud** — a degraded read returns `502`, never a silently
@@ -264,11 +280,12 @@ unreachable endpoint.
   backend is used (byte-identical). The bootstrap control node must advertise a routable self-URL via
   `--advertise-url` (ADR-082), committed at the *first* bootstrap only (Raft `initialize` is idempotent —
   an existing deployment whose quorum already bootstrapped a wildcard URL resets its idle `controlN-data`
-  volumes to adopt the new one). **Still deferred (ADR-086):** *data-moving* reassignment — a committed
-  assignment change does NOT yet move data + re-point routing LIVE while the coordinator runs, so a
-  non-data-moving HRW `rebalance` must **not** be used to re-point routing on a populated cluster (that
-  needs live handoff). The default `compose.cluster.yml` now wires `--control-endpoint` +
-  `--route-by-assignments`.
+  volumes to adopt the new one). **Data-moving reassignment is available (ADR-090):**
+  `POST /_cluster/reassign {position, node}` (or `rebalance` with `{move:true}`) moves a shard's data
+  via live handoff THEN commits the new owner ([§5](#5-scaling)), so routing follows live + across a
+  resolve-only restart; the bare map-only HRW `rebalance` (no `move`) stays map-only and must **not** be
+  used alone to re-point a populated cluster. The default `compose.cluster.yml` now wires
+  `--control-endpoint` + `--route-by-assignments`.
 - **Kubernetes / Helm** — shipped (ADR-084): `deploy/helm/reverse-rusty/` (shard + control StatefulSets, a
   stateless coordinator Deployment wiring `--control-endpoint` + `--route-by-assignments`, native gRPC
   health probes). Compose remains the simplest single-host unit; Helm is the k8s analogue.

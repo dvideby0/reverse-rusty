@@ -77,7 +77,7 @@ pub use control_raft::{
 #[cfg(feature = "distributed")]
 pub use control_server::ControlServer;
 #[cfg(feature = "distributed")]
-pub use coordinator::ShardGroup;
+pub use coordinator::{ReassignOutcome, RebalanceMoveReport, ShardGroup};
 #[cfg(feature = "distributed")]
 pub use remote::RemoteShard;
 #[cfg(feature = "distributed")]

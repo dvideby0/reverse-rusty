@@ -96,14 +96,15 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     autoscaler-driven resize (needs hysteresis to avoid thrash, since a resize is non-idempotent +
     `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
     live-handoff machinery; the v1 resize is in-process blue/green).
-  - *Live-handoff follow-on (deferred, [ADR-086](decisions/adr-086-control-plane-routing-and-failover.md)):*
-    **data-moving reassignment** — a committed assignment change *driving* `execute_handoff`
-    (peer-recovery + `HandoffShard` swap) so a reassignment moves data and routing re-points LIVE while
-    the coordinator runs. ADR-086 shipped the boot-time half — routing by the committed shard→node
-    assignments (opt-in `--route-by-assignments`, position-preserving + a fail-loud guard) +
-    multi-control-endpoint failover — so the deferred remainder is the runtime re-point loop with a
-    zero-FN proof under concurrent writes (until then a non-data-moving HRW `rebalance` must not be
-    used to re-point routing on a populated cluster). (k8s/Helm manifests + gRPC health/readiness
+  - *Live-handoff follow-on (the [ADR-086](decisions/adr-086-control-plane-routing-and-failover.md)
+    deferral — data-moving reassignment itself **shipped** in
+    [ADR-090](decisions/adr-090-data-moving-reassignment.md): `reassign_and_move`/`rebalance_and_move`
+    move data via `execute_handoff` then commit the new owner (move-then-commit), so a reassignment
+    moves data and routing follows live under concurrent writes + across a resolve-only restart,
+    zero-FN proven):* the remaining open work is **parallel multi-position moves**
+    (`rebalance_and_move` is sequential today) and an automated **assignment-watch → re-point
+    controller** that reconciles the committed map to physical reality unattended (today's path is
+    operator/autoscaler-driven + manually triggered). (k8s/Helm manifests + gRPC health/readiness
     probes shipped — [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the
     advertise-URL; the `shardserver --accept-class-d` item was a phantom — remote shards force-accept
     class-D, the coordinator is the sole gate.)

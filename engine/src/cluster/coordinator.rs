@@ -55,6 +55,10 @@ pub use topology::{resolve_topology, route_topology, seed_position_preserving, S
 
 #[cfg(feature = "distributed")]
 mod distributed;
+#[cfg(feature = "distributed")]
+mod reassign;
+#[cfg(feature = "distributed")]
+pub use reassign::{ReassignOutcome, RebalanceMoveReport};
 
 #[cfg(test)]
 mod tests;
@@ -350,6 +354,16 @@ pub struct ClusterEngine {
     /// in-process path ⇒ byte-identical.
     #[cfg(feature = "distributed")]
     client_security: super::security::ClientSecurity,
+    /// Serializes every DATA-MOVING map mutation against each other (ADR-090): an operator
+    /// `reassign_and_move`/`rebalance_and_move` and the autoscaler-driven handoff
+    /// (`drive_autoscaled_handoff`) all hold this for the whole move-then-commit, so two
+    /// concurrent moves of the same position can't interleave their `execute_handoff` flip and
+    /// `AssignShard` commit and invert committed-map vs live-routing. It does NOT guard the hot
+    /// path (percolate/ingest never touch it) — only the rare admin/autoscaler move path — so a
+    /// long segment copy here never stalls reads or writes. Gated, so the lean struct is
+    /// unchanged; the in-process path has no `execute_handoff` to serialize.
+    #[cfg(feature = "distributed")]
+    reassign_serial: Mutex<()>,
 }
 
 /// Observer callback for cluster durability events — the `Arc` analogue of the
