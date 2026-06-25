@@ -21,11 +21,11 @@ ADR-063). This phase proves which parts are real — under an *independent* chec
 before more is built on top. Goal: separate what's real from plausible-looking scaffolding. Tier work
 resumes once it passes.
 
-1. **Fresh-clone build & deploy smoke** — from a clean checkout: `cargo build --release`,
-   `engine/check.sh` (the full gate), `cargo test --features distributed --release` (the gRPC/cluster
-   oracles), build the Docker image, run the Compose harness (`deploy/harness.sh`, ADR-072), run the
-   Helm smoke test. Mostly shipped paths — the deliverable is a reproducible-from-zero checklist, not
-   new code.
+1. **Fresh-clone build & deploy smoke** — from a clean checkout, build + gate from `engine/`:
+   `cd engine && cargo build --release`, `./check.sh` (the full gate), `cargo test --features
+   distributed --release` (the gRPC/cluster oracles); then build the Docker image, run the Compose
+   harness (`deploy/harness.sh`, ADR-072), run the Helm smoke test. Mostly shipped paths — the
+   deliverable is a reproducible-from-zero checklist, not new code.
 2. **Independent correctness oracle (net-new, highest value).** A reference matcher written *outside
    the crate* reusing **none** of the parser, normalizer, extractor, or feature dictionary; fed
    generated + hand-written cases **and real titles + real saved searches**; the engine diffed against

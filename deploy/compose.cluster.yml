@@ -87,8 +87,10 @@ services:
   # To ADD a shard (remote add-a-shard is a redeploy, not an online resize — ADR-078
   # resize is in-process only): copy a shard block, bump the name + volume, add a
   # matching `--shard-endpoint https://shard3:50051` line to the coordinator below,
-  # add `shard3` to the cert SANs (deploy/gen-mesh-certs.sh ... shard3), and declare
-  # `shard3-data:` under volumes. See cluster-deployment.md §5.
+  # bump `--shards` on control0..2 to the new count (the quorum's genesis ring must match the
+  # coordinator's shard count, or attach fails loud), add `shard3` to the cert SANs
+  # (deploy/gen-mesh-certs.sh ... shard3), and declare `shard3-data:` under volumes.
+  # See cluster-deployment.md §5.
   #
   # For RF=2 (a replica per position), run a second node per shard (e.g. shard0r),
   # list it INSIDE the coordinator's endpoint group comma-separated, AND set
@@ -163,11 +165,14 @@ services:
   # WIRED to the coordinator (ADR-083/086 — see the header note): it holds the durable, HA
   # cluster-state document the coordinator routes by. Node 0 bootstraps the cluster from the
   # --peer members once they listen.
+  # --shards MUST match the coordinator's shard count (3 here): the bootstrap node seeds the genesis
+  # ring with it, and the coordinator fails LOUD on a num_shards mismatch at attach (controlserver's
+  # built-in default is 8 ≠ 3 ⇒ crashloop). vnodes defaults match, so no --vnodes needed.
   control0:
     image: ${RR_IMAGE:-reverse-rusty:latest}
     networks: [rrmesh]
     command: >
-      controlserver 0 0.0.0.0:50061 --data-dir /data --bootstrap
+      controlserver 0 0.0.0.0:50061 --data-dir /data --bootstrap --shards 3
       --advertise-url https://control0:50061
       --peer 1=https://control1:50061 --peer 2=https://control2:50061
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
@@ -188,7 +193,7 @@ services:
     image: ${RR_IMAGE:-reverse-rusty:latest}
     networks: [rrmesh]
     command: >
-      controlserver 1 0.0.0.0:50061 --data-dir /data
+      controlserver 1 0.0.0.0:50061 --data-dir /data --shards 3
       --peer 0=https://control0:50061 --peer 2=https://control2:50061
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     environment:
@@ -208,7 +213,7 @@ services:
     image: ${RR_IMAGE:-reverse-rusty:latest}
     networks: [rrmesh]
     command: >
-      controlserver 2 0.0.0.0:50061 --data-dir /data
+      controlserver 2 0.0.0.0:50061 --data-dir /data --shards 3
       --peer 0=https://control0:50061 --peer 1=https://control1:50061
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     environment:
