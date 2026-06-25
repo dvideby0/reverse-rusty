@@ -10,11 +10,14 @@ running cluster has its own doc: [backup-restore.md](backup-restore.md).
 > [`deploy/gen-mesh-certs.sh`](../../deploy/gen-mesh-certs.sh), set `RR_CLUSTER_TOKEN` + `RR_AUTH_TOKEN`,
 > and keep the REST port loopback-bound until both are in place.
 
-> **At v1 the control-plane quorum is durable but not yet load-bearing.** A remote coordinator runs its
-> own *in-memory* control plane and re-derives shard placement deterministically from the frozen dict +
-> ring on every start; it does not yet consult the `controlserver` quorum (no wiring flag exists —
-> [ADR-072](../decisions/adr-072-multi-machine-harness.md) §Scope, ADR-081). Ship the quorum so the
-> durable placement tier is production-shaped, or omit `control0..2` at v1 with no behavioral change.
+> **The control-plane quorum is wired by default (ADR-083/086).** The default
+> [`compose.cluster.yml`](../../deploy/compose.cluster.yml) passes `--control-endpoint` +
+> `--route-by-assignments`, so the remote coordinator attaches to the durable `controlserver` quorum as a
+> thin client (it does **not** join consensus — it stays stateless) and treats the committed shard→node
+> assignments as the routing source of truth. Drop both flags to fall back to the in-memory control
+> plane (placement re-derived deterministically from the frozen dict + ring on every start) —
+> byte-identical, the quorum then idle. Full wiring detail + the still-deferred *data-moving*
+> reassignment are in [§11](#11-not-covered-in-v1-see-adr-081).
 
 ## 1. Topology
 
@@ -24,7 +27,7 @@ One image, three roles chosen by command (ADR-072):
 |---|---|---|---|---|
 | **Coordinator** | `server --cluster` | 9200 (HTTP) | No — **stateless** | The REST API over the cluster (ADR-070). In remote mode it holds no data; durability lives on the shards. A restart reconnects and re-ships the re-minted dict. |
 | **Shard** | `shardserver` | 50051 (gRPC) | Yes (`--data-dir`) | A data node. `--pending` starts dict-less and adopts the coordinator's dict at connect. |
-| **Control** | `controlserver` | 50061 (gRPC) | Yes (`--data-dir`) | The openraft placement-state quorum (ADR-038/041). Present-but-idle at v1 (see above). |
+| **Control** | `controlserver` | 50061 (gRPC) | Yes (`--data-dir`) | The openraft placement-state quorum (ADR-038/041). Wired into the coordinator by default (ADR-083/086, see above). |
 
 The shipped compose is **K=3 shards, RF=1**. Scaling K and RF: [§5](#5-scaling).
 
@@ -163,7 +166,7 @@ short result (ADR-072).
 | **A shard crashes/restarts** | Durable self-restore from its `--data-dir` (segments + translog, ADR-039); reads that route to it return `502` until it's back. | `rrc restart shardN` (or let `unless-stopped` do it). Matches resume automatically. |
 | **Rolling shard restart** | One shard at a time; the others keep serving (reads to the down shard fail loud meanwhile). | `rrc restart shardN` sequentially; wait for `/_health` green between each. |
 | **Coordinator restart** | Stateless: reconnects to the same endpoints, re-mints + re-ships the dict, re-derives placement. No data loss. | `rrc restart coordinator`; wait for green. |
-| **Control-plane restart** | Each node resumes from its durable Raft log/vote (ADR-041). | Restart control nodes; quorum re-forms. (Idle at v1 — no data-path impact.) |
+| **Control-plane restart** | Each node resumes from its durable Raft log/vote (ADR-041). | Restart control nodes; quorum re-forms. With control wiring on (compose/Helm default), the coordinator's thin client fails **reads** over to a live endpoint meanwhile — but admin **writes** are not retried across endpoints (a committed-but-lost write must not double-apply), so if the coordinator's connected node is the one down, writes fail loud until the coordinator reconnects to a live endpoint (a restart) — even while quorum is otherwise available (ADR-085/086). |
 | **Replica failover** (RF>1) | Reads fail over to an in-sync replica; the primary stays authoritative for writes (ADR-035). | None — automatic. |
 | **Replica replacement** (RF>1) | A replacement reusing the **same durable volume** self-restores from its own segments + translog. A **fresh-volume** replica simply listed in the endpoint group is assembled as *in-sync without recovery* — reads could then serve it empty (silent FN). | Prefer same-volume restart. A fresh replica must complete an explicit peer recovery (`RecoverFrom`, ADR-036) **before** it serves reads — not a plain "start it"; treat fresh-volume replica replacement as a care-needed v1 operation. |
 

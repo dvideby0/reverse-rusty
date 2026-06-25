@@ -81,7 +81,7 @@ plaintext** port (`ports.shardHealth` / `ports.controlHealth`) — the chart wir
 
 `kubectl get pods -n rr` readiness reflects real serving state. There is **no Prometheus `/_metrics`**
 on the shard/control binaries yet (health ≠ metrics — ADR-084 deferral b); scrape the coordinator's
-`/metrics` for cluster-level counters.
+`/_metrics` for cluster-level counters.
 
 ## 5. Scaling, recovery, backup
 
@@ -108,8 +108,11 @@ on the shard/control binaries yet (health ≠ metrics — ADR-084 deferral b); s
 
 With `controlPlane.enabled` + `controlPlane.wireToCoordinator` (both default true) the coordinator
 attaches to the durable quorum via `--control-endpoint` (ADR-083), so the cluster-state document is
-durable + HA. It still **routes by the chart's fixed StatefulSet ordinals**, not the committed
-assignments (ADR-083/084 residue) — fine for a fixed `shardCount`. Set `controlPlane.enabled=false`
+durable + HA (all members listed for failover, ADR-086). With `coordinator.routeByAssignments` (default
+true) it **routes by the committed shard→node assignments** (ADR-086) — seeded position-preservingly from
+the StatefulSet ordinals on first boot, so for a fixed `shardCount` the placement equals the ordinal
+order while the durable document becomes the source of truth; *data-moving* live re-pointing is still
+deferred (don't HRW-`rebalance` a populated cluster expecting routing to follow). Set `controlPlane.enabled=false`
 for the stateless-coordinator topology (placement re-derived from the frozen dict + ring on every
 start). Other v1 limits (remote vocab is deploy-time, no online resize, no gRPC `SIGTERM` drain) are
 unchanged — see [cluster-deployment.md](cluster-deployment.md) and ADR-084.
