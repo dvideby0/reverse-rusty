@@ -37,10 +37,14 @@ resumes once it passes.
    (`tests/independent_oracle/`) over default/populated/alias corpora + a hand-written gotcha table +
    the env-gated `RR_ORACLE_CORPUS` real-corpus hook. Closes the ADR-050/063 shared-front-end blind
    spot for the covered paths — zero FN/FP, no engine front-end bug found.
-3. **Durability torture (net-new crash injection).** Actually kill the process mid-operation — during
-   WAL append, flush, compaction, backup, and shard handoff — then restart and diff against the
-   independent oracle. Today's coverage is fault-injection / torn-tail / fail-closed *simulation*; real
-   SIGKILL-mid-syscall is the gap.
+3. **Durability torture (crash injection) — ✅ shipped
+   ([ADR-088](decisions/adr-088-crash-injection-harness.md)).** A `crashwriter` lean-core bin + the
+   `tests/crash_injection/` suite spawn a real process, deliver a real external SIGKILL mid
+   durable-operation (WAL append / flush / compaction / backup / churn), reopen in-process, and diff
+   the recovered engine against the front-end-independent oracle (ADR-087) — zero false negatives on
+   every acked write, no resurrection/corruption. `#[ignore]`d behind a new `check.sh` crash lane
+   (`RR_CRASH_ITERS`); mutation-validated 3/3. *Deferred:* a **cluster** kill-*mid-write* leg (kill a
+   shard during a write loop, not between ops) + an upsert + a multi-reopen watermark scenario.
 4. **Deployment proof on real Kubernetes.** Deploy to a real cluster (not localhost Compose), ingest a
    **real corpus**, then restart every pod type, delete a shard pod, fill the disk, rotate secrets, and
    restore from backup — proving **no silent misses** at each step. This is the adversarial acceptance

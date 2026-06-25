@@ -41,6 +41,7 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 | **Differential oracle** | `tests/oracle.rs` | The **correctness contract** — brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing test; never weaken it. Includes the **messy-corpus** passes (`messy.rs` — the same contract over `gen::messify_dataset`'s adversarial surfaces, per-title + batch, ADR-063) and the **degenerate-input** differential (`degenerate.rs` — grammar/feature-model edges, engine ≡ brute on both ingest paths). |
 | **Adversarial properties** | `tests/adversarial/` | **Reference-free** correctness properties that don't share code with the engine (ADR-063): the self-match diagonal (a query must match a title built from its own positive terms — clean, messy-query×clean-title, clean-query×perturbed-title), metamorphic set-identity under surface noise, the ADR-054/058/060/061 cross-form matrices (incl. the codex-R11 whitespace-run regression), and unicode-soup fuzz (no-panic, determinism, `P(T) ⊇ N(T)`, `match_features == N(T)`). These cover the front-end divergence the differential oracle is structurally blind to. |
 | **Independent oracle** | `tests/independent_oracle/` | **Front-end-INDEPENDENT differential** (Phase 0 item 2, ADR-087): the engine diffed against `reverse-rusty-ref-matcher` — a std-only, zero-dependency reimplementation of the parser/normalizer/extractor/predicate from the spec that shares NO front-end code (independence enforced by a `check.sh` `cargo tree` lane). Zero FN/FP over generated default (clean + messy), populated graders/phrases, the multi-word alias two-view (controlled + ~989k-match at-scale), a hand-written **gotcha** table (asserted against both sides), and the env-gated `RR_ORACLE_CORPUS` real corpus (schema below). The differential the in-tree oracle structurally cannot be — closes the ADR-050 blind spot for the covered paths. |
+| **Crash injection** | `tests/crash_injection/` | **Real-process SIGKILL** durability torture (Phase 0 item 3, ADR-088): spawns the `crashwriter` bin, delivers a real external SIGKILL mid durable-op (WAL append / flush / compaction / backup / churn), reopens in-process, and diffs the recovered engine against the ADR-087 independent oracle — zero FN on every ACKed write, no resurrection/corruption. The real-kill-mid-syscall check the chmod/torn-tail/CRC *simulations* cannot be. **`#[ignore]`d** (spawns + kills real processes, real fsyncs) behind a new `check.sh` `crash injection` lane — see [Crash injection](#crash-injection). |
 | **Broad-lane batch** | `tests/broad_batch.rs` | Broad-lane **batch ≡ scalar** equivalence matrix — the load-bearing batch-correctness deliverable ([`design/matching.md`](design/matching.md) §4). |
 | Ranking | `tests/ranking.rs` | Engine-level ranking (ADR-059): additive scoring, newest-live-copy tag precedence, and the ranked-set ≡ unranked-set recall guard ([`design/matching.md`](design/matching.md) §5.4). |
 | Unit tests | `src/*.rs` | DSL parsing, vocab, WAL framing, loader, anchor filter (inline `#[cfg(test)]` modules). |
@@ -135,6 +136,28 @@ cargo test --release --test stress ten_million_queries_mixed_ops -- --ignored --
 ```
 
 In CI the soak runs only on a manual `workflow_dispatch` with `run_soak = true`.
+
+## Crash injection
+
+[`tests/crash_injection/`](../engine/tests/crash_injection/) (ADR-088, Phase 0 item 3) is the
+**real-process SIGKILL** durability torture: it spawns the `crashwriter` bin, delivers a real external
+SIGKILL while a durable op is in flight, reopens the data dir in-process, and diffs the recovered engine
+against the front-end-independent oracle (ADR-087) — proving every acknowledged write survives a crash
+(zero false negatives) with no resurrection or corruption. It is the real-kill-mid-syscall check the
+existing chmod / torn-tail / CRC *simulations* structurally cannot be.
+
+The scenarios are `#[ignore]`d (they spawn + kill real processes and do real fsyncs) and run by the
+full `check.sh` gate's `crash injection` lane. Run them explicitly with:
+
+```
+cargo test --release --test crash_injection -- --ignored --test-threads=1
+RR_CRASH_ITERS=20 cargo test --release --test crash_injection -- --ignored --test-threads=1   # a deeper soak
+```
+
+`RR_CRASH_ITERS` (default 3) scales the kill/reopen cycles per scenario; a nightly job can bump it. To
+confirm the harness still BITES, the suite's module header documents three mutations (drop recovered
+inserts → FN; skip delete replay → FP; don't kill → the killed-assert fires) — all verified RED during
+development.
 
 ## Benchmarks
 
