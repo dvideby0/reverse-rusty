@@ -59,14 +59,21 @@ crash after the commit but before the move points routing at an empty `to` — a
 | post-commit | `to` | `to` | No |
 
 **Fail-closed at every step.** A failed move propagates `Err` and commits nothing (the source
-auto-unfenced, routing + the committed map untouched — a consistent rollback). A failed commit AFTER a
-successful flip returns `MovedButNotCommitted` (NOT a bare `Err` — the data did move) and emits a
-`DurabilityFailure` event; the committed map still names the data-holding, reads-serving source, so a
-restart is still correct, and re-running `reassign_and_move` is idempotent (a fenced source still
-serves the read-only recovery RPCs, so the retry re-converges the already-populated target and
-re-commits). A multi-position `rebalance_and_move` stops on the first failure and reports
+auto-unfenced, routing + the committed map untouched — a consistent rollback). The commit is
+**bounded-retried** (a transient quorum blip self-heals; the in-memory control plane commits first
+try); on persistent failure (only reachable with a real quorum that has lost majority — a cluster-down
+condition) it returns `MovedButNotCommitted` (NOT a bare `Err` — the data did move), emits a loud
+`DurabilityFailure`, and **keeps live routing on the authoritative target** (so no acked write is lost
+on the live path — routing on `to`, which holds every acked write, is never a false negative) while
+the committed map still names the reads-serving source. Re-running `reassign_and_move` is idempotent (a
+fenced source still serves the read-only recovery RPCs, so the retry re-converges the already-populated
+target and re-commits). A multi-position `rebalance_and_move` stops on the first failure and reports
 `{moved, failed, not_attempted}` — each already-moved position is individually consistent, so a partial
-rebalance is a valid, resumable state (fail-forward, no auto-rollback).
+rebalance is a valid, resumable state (fail-forward, no auto-rollback). **RF>1 is rejected** (a move
+swaps the position to a single `RemoteShard`, dropping the replica group; committing the old replica
+set would advertise replicas that no longer receive writes — reject loudly rather than de-replicate).
+`rebalance_and_move` plans only over **data nodes with a registered address** (so HRW never picks the
+addr-less control-plane manager as a target).
 
 **Serialization (the concurrency guard).** `reassign_and_move`, `rebalance_and_move`, AND the
 autoscaler-driven handoff all hold a new engine-level `reassign_serial: Mutex<()>` (gated) for the
@@ -111,6 +118,13 @@ ADR-086 guard correctly fails loud on a *stale* CLI.
   commit, a coordinator resolving the still-old map reads zero-FN from the fenced (reads-serving)
   source; fail-closed — a forced abort moves nothing, commits nothing, auto-unfences. Plus lean unit
   tests for the `rebalance_targets` diff/ordering. The full `distributed` oracle stays green.
-- **Explicitly deferred:** **parallel** multi-position moves (today sequential), and an **automated
-  assignment-watch → re-point controller** that reconciles the committed map to physical reality
-  unattended (this increment is operator/autoscaler-driven and manually triggered).
+- **Supported topology: a single active coordinator** (the v1 Compose/Helm deployment). The
+  `reassign_serial` guard serializes this coordinator's moves; the durable-map consistency guarantee
+  holds for a reliable commit (the in-memory control plane, or a healthy quorum).
+- **Explicitly deferred:** **parallel** multi-position moves (today sequential); **RF>1** reassignment
+  (needs the target replica group re-recovered); **cross-coordinator atomicity** of the primary-check +
+  commit (needs a control-plane **conditional-propose** / compare-and-set `AssignShard` primitive — the
+  best-effort CAS here guards a second coordinator but is not atomic); and an **automated
+  assignment-watch → re-point controller** that reconciles the committed map unattended (this increment
+  is operator/autoscaler-driven and manually triggered). The conditional-propose primitive + the
+  controller together would also close the persistent-commit-failure restart residual above.

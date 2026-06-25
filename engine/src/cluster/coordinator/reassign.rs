@@ -25,25 +25,33 @@
 //! The opposite order (commit-then-move) is unsafe: a crash after the commit but before the move
 //! points routing at an empty `to` — a silent false negative.
 //!
-//! ## Serialization
-//! Every data-moving op here — plus the autoscaler-driven handoff
+//! ## Serialization & supported topology
+//! **The supported topology is a single active coordinator** (the v1 deployment — Compose/Helm run
+//! one coordinator). Every data-moving op here — plus the autoscaler-driven handoff
 //! ([`drive_autoscaled_handoff`](super::ClusterEngine::drive_autoscaled_handoff)) — holds
-//! `reassign_serial` for the whole move-then-commit, so two concurrent moves of one position cannot
-//! interleave their flip + commit and invert the map vs routing. A compare-and-set on the committed
-//! primary just before the commit is defense-in-depth for a future multi-coordinator shared control
-//! plane. The whole module is `distributed`-gated; the in-process/default path never compiles it and
-//! is byte-identical.
+//! `reassign_serial` for the whole move-then-commit, so two moves of one position on this coordinator
+//! cannot interleave their flip + commit and invert the map vs routing. A compare-and-set on the
+//! committed primary just before the commit is a best-effort guard against a *second* coordinator;
+//! making it truly atomic across horizontally-scaled stateless coordinators needs a control-plane
+//! **conditional-propose** (compare-and-set `AssignShard`) primitive — which, with an unattended
+//! assignment-watch → re-point controller, is the deferred follow-on (ADR-090). The whole module is
+//! `distributed`-gated; the in-process/default path never compiles it and is byte-identical.
 
 use std::sync::PoisonError;
 
 use tokio::runtime::Handle;
 
 use crate::cluster::allocator;
-use crate::cluster::control::{ClusterState, NodeId, ShardAssignment};
+use crate::cluster::control::{ClusterState, NodeId, NodeRole, ShardAssignment};
 use crate::cluster::shard::ShardError;
 use crate::events::{DurabilityOp, EngineEvent};
 
 use super::ClusterEngine;
+
+/// Bounded retries of the `AssignShard` commit after a successful move, so a transient control-plane
+/// blip (e.g. a real quorum mid-leader-change) doesn't strand a successful move uncommitted. The
+/// in-memory control plane commits on the first attempt.
+const COMMIT_ATTEMPTS: usize = 3;
 
 /// Outcome of a [`ClusterEngine::reassign_and_move`] (ADR-090).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,7 +103,16 @@ pub struct RebalanceMoveReport {
 /// unit-tested directly. Replica-only diffs are intentionally excluded — they are not a data move
 /// (the map-only `rebalance` handles them); the RF=1 remote path has no replicas anyway.
 fn rebalance_targets(state: &ClusterState, rf: usize) -> Vec<(u32, NodeId)> {
-    let nodes: Vec<NodeId> = state.nodes.iter().map(|n| n.id).collect();
+    // Plan ONLY over data nodes with a registered endpoint. The genesis/control-plane manager
+    // (`NodeId(0)`, typically addr-less) is not a data placement target; including it would let HRW
+    // pick it as a desired primary, producing a move-to-the-manager that fails on the missing endpoint
+    // instead of balancing across data nodes.
+    let nodes: Vec<NodeId> = state
+        .nodes
+        .iter()
+        .filter(|n| n.role == NodeRole::Data && n.addr.is_some())
+        .map(|n| n.id)
+        .collect();
     if nodes.is_empty() {
         return Vec::new();
     }
@@ -127,16 +144,19 @@ impl ClusterEngine {
     /// Fail-closed and zero-FN at every step (see the module docs for the crash-window argument):
     /// - a failed move propagates `Err` and commits nothing (the source auto-unfenced, routing + the
     ///   committed map untouched — a consistent rollback);
-    /// - a failed commit AFTER a successful flip returns [`ReassignOutcome::MovedButNotCommitted`]
-    ///   (not `Err` — the data did move) and emits a durability event; the committed map still names
-    ///   the data-holding, reads-serving source, so a restart is still correct, and a re-run
-    ///   reconciles the durable map.
+    /// - the commit is bounded-retried (a transient quorum blip self-heals; the in-memory control
+    ///   plane commits first try); on persistent failure it returns
+    ///   [`ReassignOutcome::MovedButNotCommitted`] (not `Err` — the data did move) and emits a loud
+    ///   durability event, keeping live routing on the authoritative target (no acked write is lost on
+    ///   the live path) while the committed map still names the reads-serving source — so a re-run
+    ///   reconciles the durable map (idempotent).
     ///
-    /// Holds the `reassign_serial` guard for the whole operation, serializing it against
-    /// `rebalance_and_move` and the autoscaler-driven handoff. Requires a handoff-capable cluster
-    /// (built via [`connect_remote`](Self::connect_remote)/[`connect_replicated`](Self::connect_replicated));
-    /// an in-process cluster has one node owning every position, so `from == to` short-circuits to a
-    /// no-op.
+    /// **Supported topology: a single active coordinator** (the v1 deployment). The `reassign_serial`
+    /// guard serializes this coordinator's moves; cross-coordinator atomicity of the primary check +
+    /// commit needs a control-plane conditional-propose primitive (deferred — see the module docs).
+    /// **RF>1 is rejected** (a replicated position's move would de-replicate it — deferred). Requires a
+    /// handoff-capable cluster (built via [`connect_remote`](Self::connect_remote)); an in-process
+    /// cluster has one node owning every position, so `from == to` short-circuits to a no-op.
     pub fn reassign_and_move(
         &self,
         position: usize,
@@ -150,6 +170,20 @@ impl ClusterEngine {
             .reassign_serial
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+
+        // Data-moving reassignment of a REPLICATED position is not yet supported (ADR-090): the move
+        // (`execute_handoff`) swaps the position to a SINGLE `RemoteShard` for `to`, dropping the
+        // replica group, while the committed map would still advertise the old replicas — so a
+        // failover could read a replica that no longer receives writes (stale). Reject loudly rather
+        // than silently de-replicate; RF>1 reassignment needs the target group re-recovered (deferred).
+        if self.replication_factor > 1 {
+            return Err(ShardError::Config(format!(
+                "reassign_and_move: data-moving reassignment of a replicated cluster \
+                 (replication_factor = {}) is not yet supported (ADR-090); RF>1 needs the target \
+                 replica group re-recovered first",
+                self.replication_factor
+            )));
+        }
 
         let state = self.control_state()?;
         let pos = position as u32;
@@ -223,39 +257,61 @@ impl ClusterEngine {
             });
         }
 
-        // COMMIT: name the new owner, PRESERVING the existing replicas (an `AssignShard` replaces the
-        // whole entry, so a primary-only assignment would silently drop the committed replica set).
-        match self.reassign_shard(ShardAssignment {
-            position: pos,
-            primary: to,
-            replicas: prev_replicas,
-        }) {
-            Ok(()) => Ok(ReassignOutcome::Moved {
+        // COMMIT (move-then-commit): name the new owner, PRESERVING the existing replicas (an
+        // `AssignShard` replaces the whole entry, so a primary-only assignment would silently drop the
+        // committed replica set). Bounded-retry the proposal so a transient control-plane blip (e.g. a
+        // real quorum mid-leader-change) doesn't strand a successful move uncommitted; the in-memory
+        // control plane commits on the first attempt (no behavior change).
+        let mut last_err: Option<ShardError> = None;
+        for attempt in 0..COMMIT_ATTEMPTS {
+            match self.reassign_shard(ShardAssignment {
                 position: pos,
-                from,
-                to,
-                generation,
-            }),
-            Err(e) => {
-                self.emit(EngineEvent::DurabilityFailure {
-                    op: DurabilityOp::ReplicaDesync,
-                    detail: format!(
-                        "reassign_and_move moved shard {position} to node {} and flipped routing, but \
-                         committing the new owner failed; the committed map still names node {} (which \
-                         holds the data and serves reads — zero false negatives). Re-run to reconcile \
-                         the durable map.",
-                        to.0, from.0
-                    ),
-                    error: e.to_string(),
-                });
-                Ok(ReassignOutcome::MovedButNotCommitted {
-                    position: pos,
-                    from,
-                    to,
-                    generation,
-                })
+                primary: to,
+                replicas: prev_replicas.clone(),
+            }) {
+                Ok(()) => {
+                    return Ok(ReassignOutcome::Moved {
+                        position: pos,
+                        from,
+                        to,
+                        generation,
+                    })
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt + 1 < COMMIT_ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
             }
         }
+        // Persistent commit failure (only reachable with a real quorum that has lost majority — a
+        // cluster-down condition; the in-memory backend never gets here). The move already succeeded,
+        // so `to` is authoritative: KEEP live routing on it (so no acked write is lost on the live
+        // path — routing on `to`, which holds every acked write, is never a false negative), and
+        // surface a loud event. The committed map still names the reads-serving source, so the v1
+        // single-coordinator deployment stays zero-FN; the operator (or the autoscaler's next tick)
+        // re-runs to reconcile the durable map (idempotent — a fenced source still serves the
+        // read-only recovery RPCs). The narrow residual — a coordinator restart while the quorum is
+        // still down, before that reconcile — is the boundary the deferred assignment-watch controller
+        // closes (with a conditional-propose / 2-phase commit primitive).
+        self.emit(EngineEvent::DurabilityFailure {
+            op: DurabilityOp::ReplicaDesync,
+            detail: format!(
+                "reassign_and_move moved shard {position} to node {} and flipped routing, but \
+                 committing the new owner failed after {COMMIT_ATTEMPTS} attempts; live routing stays \
+                 on node {} (which holds every acked write) and the committed map still names the \
+                 reads-serving source node {} — re-run to reconcile the durable map (idempotent).",
+                to.0, to.0, from.0
+            ),
+            error: last_err.map(|e| e.to_string()).unwrap_or_default(),
+        });
+        Ok(ReassignOutcome::MovedButNotCommitted {
+            position: pos,
+            from,
+            to,
+            generation,
+        })
     }
 
     /// Data-moving analogue of [`rebalance`](Self::rebalance) (ADR-090): recompute the desired HRW
@@ -411,6 +467,44 @@ mod tests {
             if !targets.iter().any(|(p, _)| *p == a.position) {
                 assert_eq!(a.primary, NodeId(1), "unmoved positions stayed on node 1");
             }
+        }
+    }
+
+    /// Targets are planned only over data nodes WITH an address: the addr-less control-plane manager
+    /// (`NodeId(0)`) and any addr-less data node are never picked as a move destination (HRW must not
+    /// produce a move-to-the-manager that then fails on the missing endpoint).
+    #[test]
+    fn excludes_manager_and_addrless_nodes() {
+        let manager = NodeDescriptor {
+            id: NodeId(0),
+            addr: None,
+            role: NodeRole::Manager,
+        };
+        let addrless_data = NodeDescriptor {
+            id: NodeId(9),
+            addr: None,
+            role: NodeRole::Data,
+        };
+        let nodes = vec![manager, node(1), node(2), addrless_data];
+        let num_shards = 8u32;
+        let current: Vec<ShardAssignment> = (0..num_shards)
+            .map(|p| ShardAssignment {
+                position: p,
+                primary: NodeId(1),
+                replicas: Vec::new(),
+            })
+            .collect();
+        let st = state_with(nodes, num_shards, current);
+        let targets = rebalance_targets(&st, 1);
+        assert!(
+            !targets.is_empty(),
+            "HRW over the 2 eligible data nodes still moves some positions off node 1"
+        );
+        for (_pos, to) in &targets {
+            assert!(
+                *to == NodeId(1) || *to == NodeId(2),
+                "only addr'd data nodes are targets, got {to:?}"
+            );
         }
     }
 }
