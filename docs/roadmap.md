@@ -21,11 +21,15 @@ ADR-063). This phase proves which parts are real — under an *independent* chec
 before more is built on top. Goal: separate what's real from plausible-looking scaffolding. Tier work
 resumes once it passes.
 
-1. **Fresh-clone build & deploy smoke** — from a clean checkout, build + gate from `engine/`:
-   `cd engine && cargo build --release`, `./check.sh` (the full gate), `cargo test --features
-   distributed --release` (the gRPC/cluster oracles); then build the Docker image, run the Compose
-   harness (`deploy/harness.sh`, ADR-072), run the Helm smoke test. Mostly shipped paths — the
-   deliverable is a reproducible-from-zero checklist, not new code.
+1. **Fresh-clone build & deploy smoke — ✅ shipped
+   ([`operations/build-and-smoke.md`](operations/build-and-smoke.md)).** The reproducible-from-zero
+   checklist: `cargo build --release` + `./check.sh` (the full gate) + the Docker image + the
+   production-compose smoke (`deploy/cluster-smoke.sh`) + the multi-machine harness
+   (`deploy/harness.sh`, ADR-072) + Helm lint/kubeconform — every leg with the exact command and what
+   it proves (the Tier 5 M0 "deploy-truth" acceptance recipe). The run surfaced + fixed one real drift:
+   `cluster-smoke.sh` used a non-numeric `_doc/{id}` (the route extracts `Path<u64>` in both modes → a
+   400) and had never been run end-to-end. A *real-cluster* deploy proof stays item 4 (needs a real
+   cluster + corpus).
 2. **Independent correctness oracle — ✅ shipped ([ADR-087](decisions/adr-087-independent-correctness-oracle.md)).**
    A std-only, zero-dependency reference matcher (`reverse-rusty-ref-matcher`) reimplements the whole
    front end (parser/normalizer/extractor/predicate) from the spec, reusing none of the engine
