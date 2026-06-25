@@ -85,6 +85,15 @@ if [ "$fast" -eq 0 ]; then
     # --all-features so the license/ban policy covers the DISTRIBUTED dependency graph
     # (the tonic TLS stack, ADR-071) — not just the default-feature tree.
     run "cargo deny"           cargo deny --all-features check
+    # Independence gate (ADR-087): the front-end-INDEPENDENT correctness reference
+    # (reverse-rusty-ref-matcher, used only by tests/independent_oracle) must reuse NONE of the
+    # engine — that is the whole point. If `reverse-rusty` appears in its normal-dependency tree
+    # the contract is broken, so fail loud. `--prefix none` prints each crate flush-left as
+    # `name version (src)`; the anchored `^reverse-rusty ` (trailing space) matches the engine crate
+    # EXACTLY, so neither the reference's own `reverse-rusty-ref-matcher` name nor the checkout path
+    # trips it.
+    run "ref-matcher independence" bash -c \
+        '! cargo tree -q -p reverse-rusty-ref-matcher --edges normal --prefix none 2>/dev/null | grep -q "^reverse-rusty "'
 fi
 
 # Non-failing refactor nudge. Runs in --fast and full, so it shows on commit,

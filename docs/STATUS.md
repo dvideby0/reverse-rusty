@@ -148,6 +148,12 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   [`../CLAUDE.md`](../CLAUDE.md) + [`testing.md`](testing.md).
 - **Deterministic generation + messy mode** (ADR-008, ADR-063); golden front-end pins (ADR-050);
   reference-free adversarial property suites (ADR-063).
+- **Front-end-independent oracle** (Phase 0 item 2, ADR-087) — a std-only, zero-dependency reference
+  matcher (`reverse-rusty-ref-matcher`) reimplements the parser/normalizer/extractor/predicate from
+  the SPEC, reusing none of the engine (independence enforced by a `check.sh` `cargo tree` lane); the
+  engine is diffed against it (`tests/independent_oracle/`) over default/populated/alias corpora + a
+  gotcha table + an env-gated real corpus. Closes the ADR-050 shared-front-end blind spot for the
+  covered paths; zero FN/FP, no engine front-end bug found.
 - **Drop-in parity audit** — empirical PoC against the documented reference workload: zero FN
   under the parity configuration (ADR-064; workload →
   [`research/percolator-workload.md`](research/percolator-workload.md)).

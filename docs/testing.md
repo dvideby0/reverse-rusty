@@ -40,6 +40,7 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 |---|---|---|
 | **Differential oracle** | `tests/oracle.rs` | The **correctness contract** — brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing test; never weaken it. Includes the **messy-corpus** passes (`messy.rs` — the same contract over `gen::messify_dataset`'s adversarial surfaces, per-title + batch, ADR-063) and the **degenerate-input** differential (`degenerate.rs` — grammar/feature-model edges, engine ≡ brute on both ingest paths). |
 | **Adversarial properties** | `tests/adversarial/` | **Reference-free** correctness properties that don't share code with the engine (ADR-063): the self-match diagonal (a query must match a title built from its own positive terms — clean, messy-query×clean-title, clean-query×perturbed-title), metamorphic set-identity under surface noise, the ADR-054/058/060/061 cross-form matrices (incl. the codex-R11 whitespace-run regression), and unicode-soup fuzz (no-panic, determinism, `P(T) ⊇ N(T)`, `match_features == N(T)`). These cover the front-end divergence the differential oracle is structurally blind to. |
+| **Independent oracle** | `tests/independent_oracle/` | **Front-end-INDEPENDENT differential** (Phase 0 item 2, ADR-087): the engine diffed against `reverse-rusty-ref-matcher` — a std-only, zero-dependency reimplementation of the parser/normalizer/extractor/predicate from the spec that shares NO front-end code (independence enforced by a `check.sh` `cargo tree` lane). Zero FN/FP over generated default (clean + messy), populated graders/phrases, the multi-word alias two-view (controlled + ~989k-match at-scale), a hand-written **gotcha** table (asserted against both sides), and the env-gated `RR_ORACLE_CORPUS` real corpus (schema below). The differential the in-tree oracle structurally cannot be — closes the ADR-050 blind spot for the covered paths. |
 | **Broad-lane batch** | `tests/broad_batch.rs` | Broad-lane **batch ≡ scalar** equivalence matrix — the load-bearing batch-correctness deliverable ([`design/matching.md`](design/matching.md) §4). |
 | Ranking | `tests/ranking.rs` | Engine-level ranking (ADR-059): additive scoring, newest-live-copy tag precedence, and the ranked-set ≡ unranked-set recall guard ([`design/matching.md`](design/matching.md) §5.4). |
 | Unit tests | `src/*.rs` | DSL parsing, vocab, WAL framing, loader, anchor filter (inline `#[cfg(test)]` modules). |
@@ -76,6 +77,30 @@ fails them directly. The oracle's corpora also now include adversarial surfaces:
 re-runs the differential over `gen::messify_dataset` output (case noise, whitespace runs, punctuation,
 unicode junk, out-of-dict tokens), and `tests/oracle/degenerate.rs` pins grammar/feature-model edge
 inputs. When adding corpus-driven tests, prefer running them messy unless there's a reason not to.
+
+The **third layer (ADR-087)** is the one the blind-spot statement above could not have: a *differential*
+against a front-end-INDEPENDENT reference. `tests/independent_oracle/` diffs the engine against
+`reverse-rusty-ref-matcher` — a std-only crate that reimplements the parser, normalizer, extractor, and
+predicate from the spec, depending on nothing in `reverse-rusty` (enforced by the `ref-matcher
+independence` `check.sh` lane). So a parser/normalizer/extractor bug no longer corrupts both sides; it
+shows up as a divergence. It runs over the same default vocab the in-tree oracle uses *and* populated
+grader/phrase + multi-word-alias-two-view vocabularies, plus a hand-written gotcha table whose
+expectations are the human tiebreaker. It does not replace the golden tests or the in-tree oracle — it
+is the differential complement they structurally cannot be (full rationale, incl. why this revisits
+ADR-050's declined "independent extractor", → [`DECISIONS.md`](DECISIONS.md) ADR-087).
+
+**Real-corpus hook.** `tests/independent_oracle/corpus.rs` runs the same engine-vs-reference diff over a
+user-supplied corpus when `RR_ORACLE_CORPUS` points at a JSONL file, and is skipped (passing) when the
+variable is unset — so CI and the public repo never see real data (it stays entirely outside the tree).
+Each line is one JSON object, two shapes (other keys ignored):
+
+```jsonl
+{"query": "1994 upper deck michael jordan -reprint"}   # a saved search (numbered in file order)
+{"title": "1994 Upper Deck Michael Jordan SP PSA 10"}  # a listing title
+```
+
+It runs under the default vocabulary (the front-end check that needs no domain config). Run it with
+`RR_ORACLE_CORPUS=/path/to/corpus.jsonl cargo test --release --test independent_oracle corpus`.
 
 ### The Cluster-v1 acceptance gate
 

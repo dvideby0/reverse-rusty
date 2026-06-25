@@ -1,0 +1,28 @@
+[package]
+name = "reverse-rusty-ref-matcher"
+version = "0.1.0"
+edition = "2021"
+description = "Front-end-INDEPENDENT reference matcher for reverse-rusty's correctness oracle (ADR-087). Reimplements the DSL parser, normalizer, extractor, and match predicate from the SPEC, reusing NONE of the engine — so a front-end bug the in-tree oracle shares (ADR-050 blind spot) is caught by diffing the engine against this. std-only by design: zero dependencies (no daachorse, no serde, no reverse-rusty) makes the independence mechanically provable via `cargo tree`, and naive from-scratch algorithms are maximally adversarial."
+license = "MIT"
+publish = false
+
+# INDEPENDENCE CONTRACT (enforced by the `ref-matcher independence` lane in check.sh):
+# this section MUST stay empty. A dependency on `reverse-rusty` (directly or transitively)
+# would defeat the entire purpose — the reference must reuse none of the engine front end.
+[dependencies]
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# The reference deliberately mirrors the engine's parallel naming for paired concepts
+# (req/forb, pos/neg, N(T)/P(T)) so a divergence reads as a string diff; the "names too
+# similar" heuristic is noise here, exactly as in the engine crate.
+similar_names = "allow"
+# This is a spec reimplementation; per-fn # Errors/# Panics docs add churn without safety.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# `emit` mirrors the engine's long two-phase pipeline verbatim; splitting it would obscure the
+# correspondence the reference exists to preserve.
+too_many_lines = "allow"
+# Domain/identifier names (psa, bgs, anyof, ...) trip backtick pedantry without value.
+doc_markdown = "allow"

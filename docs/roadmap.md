@@ -26,11 +26,13 @@ resumes once it passes.
    distributed --release` (the gRPC/cluster oracles); then build the Docker image, run the Compose
    harness (`deploy/harness.sh`, ADR-072), run the Helm smoke test. Mostly shipped paths — the
    deliverable is a reproducible-from-zero checklist, not new code.
-2. **Independent correctness oracle (net-new, highest value).** A reference matcher written *outside
-   the crate* reusing **none** of the parser, normalizer, extractor, or feature dictionary; fed
-   generated + hand-written cases **and real titles + real saved searches**; the engine diffed against
-   it. This is the one check the in-tree oracle structurally cannot be — it closes the shared-front-end
-   blind spot (ADR-063). Likely warrants its own ADR on ship.
+2. **Independent correctness oracle — ✅ shipped ([ADR-087](decisions/adr-087-independent-correctness-oracle.md)).**
+   A std-only, zero-dependency reference matcher (`reverse-rusty-ref-matcher`) reimplements the whole
+   front end (parser/normalizer/extractor/predicate) from the spec, reusing none of the engine
+   (independence enforced by a `check.sh` `cargo tree` lane); the engine is diffed against it
+   (`tests/independent_oracle/`) over default/populated/alias corpora + a hand-written gotcha table +
+   the env-gated `RR_ORACLE_CORPUS` real-corpus hook. Closes the ADR-050/063 shared-front-end blind
+   spot for the covered paths — zero FN/FP, no engine front-end bug found.
 3. **Durability torture (net-new crash injection).** Actually kill the process mid-operation — during
    WAL append, flush, compaction, backup, and shard handoff — then restart and diff against the
    independent oracle. Today's coverage is fault-injection / torn-tail / fail-closed *simulation*; real
