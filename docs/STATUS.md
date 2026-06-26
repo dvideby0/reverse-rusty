@@ -165,10 +165,15 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   covered paths; zero FN/FP, no engine front-end bug found.
 - **Real-process SIGKILL crash injection** (Phase 0 item 3, ADR-088) — a `crashwriter` lean-core bin +
   `tests/crash_injection/` spawn a real process and deliver a real external SIGKILL mid
-  durable-operation (WAL append / flush / compaction / backup / churn), reopen in-process, and diff the
-  recovered engine against the ADR-087 independent oracle: zero false negatives on every acked write, no
-  resurrection/corruption. Closes the real-kill-mid-syscall gap the chmod/torn-tail/CRC simulations
-  cannot reach; `#[ignore]`d behind a new `check.sh` crash lane (`RR_CRASH_ITERS`); mutation-validated 3/3.
+  durable-operation (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**),
+  reopen in-process, and diff the recovered engine against the ADR-087 independent oracle: zero false
+  negatives on every acked write, no resurrection/corruption. The `upsert` leg proves ADR-067 atomic
+  replace (race-immune both-version construction); the `watermark` leg proves the ADR-066
+  `ensure_seq_after` re-pin across a SECOND reopen (non-redundant vs the single-reopen churn). Its
+  **cluster** analogue is `deploy/harness.sh` leg 3b (kill a `shardserver` mid-write-loop; every 2xx-acked
+  write matchable after restart + `/_cluster/resync`, ADR-047). Closes the real-kill-mid-syscall gap the
+  chmod/torn-tail/CRC simulations cannot reach; `#[ignore]`d behind a `check.sh` crash lane
+  (`RR_CRASH_ITERS`); mutation-validated.
 - **Drop-in parity audit** — empirical PoC against the documented reference workload: zero FN
   under the parity configuration (ADR-064; workload →
   [`research/percolator-workload.md`](research/percolator-workload.md)).

@@ -110,9 +110,28 @@
   - **In-process power-loss emulation** (out of scope): SIGKILL cannot drop the page cache, so true
     power loss is not reproducible here; it stays covered by the torn-tail / CRC simulations.
 
-- **Deferred follow-ons.** A **cluster** real-SIGKILL-mid-write leg (kill a `shardserver` *during* a
-  write loop, not between ops, in `deploy/harness.sh`); an **upsert** crash scenario (ADR-067's atomic
-  replace); and a **crash-loop / multi-reopen** scenario that would exercise the ADR-066 `ensure_seq_after`
-  watermark under repeated real kills (the single-reopen churn scenario covers `DeleteByLogical` replay,
-  but the post-reopen-append watermark hazard needs a second reopen — today covered by the simulation
-  oracle).
+- **Deferred follow-ons — shipped (follow-up, 2026-06-25).** All three deferred legs are now built and
+  passing:
+  - **`upsert` scenario** (`tests/crash_injection/upsert.rs`, ADR-067 atomic replace): the worker
+    replaces each id via `try_upsert_live` (one WAL frame) and is SIGKILLed mid-loop; on reopen no id is
+    a half-state (vanished, or stale-old-survived). The verification is **race-immune** — the crashwriter
+    races thousands of upserts ahead of the parent's recorded ACK stream through the stdout pipe buffer,
+    so "not recorded as acked" does NOT mean "still old". Each id `X` carries a unique stem plus an `old`
+    and a `new` token, so the `both`-title (`qstem{X} qold{X} qnew{X}`) matches whichever version
+    survived: `match(both_X) == {X}` for every id catches a vanish (FN) or corruption (FP) independent of
+    the race; ids the parent *did* record an ACK for get the stronger unambiguous check (new-only matches,
+    old-only does not). Mutation-validated: neutering the upsert insert-half on replay → "id VANISHED";
+    skipping the replay → "acked id's NEW version missing".
+  - **`watermark` scenario** (`tests/crash_injection/watermark.rs`, ADR-066 `ensure_seq_after`): a parent
+    flush sets `wal_seq_watermark = N` and resets the WAL; the worker reopens (re-pinning `next_seq` past
+    `N`), deletes a self-matching canary (`seq = N+1`), and is SIGKILLed leaving that delete unsealed in
+    the WAL tail; the parent's SECOND reopen must replay it. Mutation-validated: neutering
+    `ensure_seq_after` resurrects the canary (FP) on the second reopen — and the existing single-reopen
+    `churn` scenario stays green under the same mutation, proving the watermark scenario is non-redundant.
+  - **Cluster mid-write leg** (`deploy/harness.sh` leg 3b): a concurrent writer streams docs while a
+    `shardserver` is SIGKILLed mid-loop; a write that routed to the dead shard returns `200 "partial"`
+    (durably logged + queued, ADR-047) and one that applied cleanly returns `201`. After the shard
+    restarts and `POST /_cluster/resync` converges the queued repairs, EVERY acknowledged (2xx) id is
+    matchable — zero false negatives across a real kill mid-write, with the documented repair path.
+  - *Still deferred:* a cluster-coordinator (not shard) mid-write kill, and a power-loss (page-cache-drop)
+    leg, which SIGKILL structurally cannot reproduce (the torn-tail / CRC simulations keep that domain).

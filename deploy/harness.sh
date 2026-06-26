@@ -244,6 +244,58 @@ assert_equals_baseline "$WORK/baseline.txt" "after coordinator restart"
 echo "    reconnected to populated shards; all probes ≡ baseline (incl. the live write)"
 
 # ---------------------------------------------------------------------------
+step "leg 3b — SIGKILL a shard MID-WRITE: every acknowledged in-flight write survives"
+# The single-node real-SIGKILL crash suite (engine/tests/crash_injection, ADR-088)
+# proves an acked write survives a kill BETWEEN ops; this is its cluster analogue —
+# kill a shard while writes are STREAMING through it. A write that routed to the dead
+# shard returns 200 "partial" (durably logged at the coordinator + queued for repair,
+# ADR-047); one that applied cleanly returns 201. EVERY acknowledged (2xx) id must be
+# matchable after the shard restarts and we converge the queued repairs with
+# /_cluster/resync — zero false negatives across a real kill mid-write.
+kw="$WORK/killwrite"
+: > "$kw.accepted"
+(
+  set +e # a write landing in the dead window may fail; record only the acknowledged ones
+  for i in $(seq 0 199); do
+    code=$(put_doc $((9300 + i)) "zzkill$i unique$i")
+    [[ "$code" == "201" || "$code" == "200" ]] && echo "$((9300 + i))" >> "$kw.accepted"
+    sleep 0.05
+  done
+) &
+kw_pid=$!
+sleep 1.5 # let a batch of writes land cleanly before the kill
+docker kill -s KILL "$(compose ps -q shard0)" >/dev/null
+echo "    SIGKILLed shard0 mid-write loop"
+sleep 2 # a window of writes streams at the dead shard (logged + queued, ADR-047)
+compose start shard0 >/dev/null # restart promptly, while the writer is still streaming
+wait "$kw_pid" # the writer finishes its loop across the kill + restart
+# Converge the partial-applies that queued while shard0 was down (ADR-047 repair path).
+# /_health stays YELLOW (not green) while repairs are pending, so resync BEFORE the
+# green gate; the retry loop also rides out shard0's restart — a resync only converges
+# once shard0 is reachable again (its re-driven writes land).
+converged=0 resync=""
+for _ in $(seq 1 60); do
+  resync=$(rqcurl -X POST "$BASE/_cluster/resync" -H 'content-type: application/json' -d '{}')
+  echo "$resync" | jq -e '.still_pending == 0' >/dev/null 2>&1 && { converged=1; break; }
+  sleep 1
+done
+[[ "$converged" -eq 1 ]] || fail "partial-apply repairs never converged after restart: $resync"
+wait_for_green "after mid-write kill"
+accepted=$(grep -c . "$kw.accepted" || true)
+[[ "$accepted" -gt 0 ]] || fail "no writes were acknowledged around the mid-write kill window"
+# Every acknowledged write must now be matchable (recall of acknowledged writes).
+miss=0
+while IFS= read -r id; do
+  i=$((id - 9300))
+  r=$(percolate "zzkill$i unique$i")
+  [[ "$r" == HTTP:* ]] && fail "post-recovery percolate failed: $r"
+  echo "$r" | jq -e --argjson id "$id" 'index($id) != null' >/dev/null || miss=$((miss + 1))
+done < "$kw.accepted"
+[[ $miss -eq 0 ]] || fail "$miss acknowledged writes unmatchable after the mid-write kill+restart+resync (FN!)"
+assert_equals_baseline "$WORK/baseline.txt" "after mid-write kill"
+echo "    $accepted acked writes; zero FN after kill+restart+resync ($resync); probes ≡ baseline"
+
+# ---------------------------------------------------------------------------
 step "leg 4 — live handoff under load (position 1: shard1 → target)"
 writer_log="$WORK/writer.log"
 : > "$writer_log.accepted"
