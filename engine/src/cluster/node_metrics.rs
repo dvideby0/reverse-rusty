@@ -17,7 +17,7 @@
 //! engine-gauge names a single-node server already emits — so existing dashboards work per-pod —
 //! plus a few shard extras; control nodes emit `reverse_rusty_control_*` Raft gauges.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -33,6 +33,11 @@ const ACCEPT_POLL: Duration = Duration::from_millis(20);
 /// Per-connection read timeout: a scrape is a tiny request line + headers; bound a slow/garbage
 /// client so it can never wedge the single-threaded accept loop.
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+/// Hard cap on the bytes read for the request line. The port is plaintext + network-facing, so an
+/// unbounded read would let a client trickle a newline-less line to grow memory without bound (the
+/// per-read timeout only fires when NO bytes arrive). 8 KiB is far above any real GET line (a scrape
+/// is < 200 bytes); an over-long / newline-less line just fails `is_metrics_get` and gets a 404.
+const MAX_REQUEST_BYTES: u64 = 8 * 1024;
 
 // ---- text-exposition writer --------------------------------------------------------------------
 
@@ -383,7 +388,11 @@ fn handle_conn(stream: TcpStream, render: &impl Fn() -> String) -> io::Result<()
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
-    reader.read_line(&mut request_line)?;
+    // Bounded read (see `MAX_REQUEST_BYTES`): `Take` caps the bytes `read_line` will accumulate, so a
+    // trickled newline-less line can neither grow memory without bound nor loop past the cap.
+    (&mut reader)
+        .take(MAX_REQUEST_BYTES)
+        .read_line(&mut request_line)?;
     let is_metrics_get = is_metrics_get(&request_line);
     let mut stream = reader.into_inner();
     if is_metrics_get {
@@ -556,6 +565,34 @@ mod tests {
             "got: {missing}"
         );
 
+        handle.shutdown();
+    }
+
+    #[test]
+    fn oversized_request_line_does_not_wedge_the_listener() {
+        // A newline-less line far larger than the cap must NOT grow memory unbounded or block the
+        // single metrics thread forever — the DoS-hardening regression (codex). The bounded read
+        // returns and the connection is closed; we tolerate any outcome on this bad connection (the
+        // server closes with bytes still unread, which surfaces as a connection reset). The real
+        // assertion is that a NORMAL scrape still succeeds afterward — one bad client didn't wedge it.
+        let handle = serve_metrics("127.0.0.1:0".parse().unwrap(), || {
+            "reverse_rusty_test 1\n".to_string()
+        })
+        .unwrap();
+        let addr = handle.addr();
+        {
+            let mut bad = TcpStream::connect(addr).unwrap();
+            let huge = vec![b'A'; super::MAX_REQUEST_BYTES as usize + 2000];
+            let _ = bad.write_all(&huge);
+            let mut sink = Vec::new();
+            let _ = bad.read_to_end(&mut sink);
+        }
+        let ok = http_get(addr, "/_metrics");
+        assert!(
+            ok.starts_with("HTTP/1.1 200 OK"),
+            "listener wedged; got: {ok}"
+        );
+        assert!(ok.contains("reverse_rusty_test 1"));
         handle.shutdown();
     }
 }
