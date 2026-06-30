@@ -9,6 +9,11 @@
 //! SERVING once the gRPC server is up; readiness (`Check("ready")`) is NOT_SERVING until the
 //! node adopts a dict (a `--pending` shard is live-but-not-ready until `AdoptDict`).
 //!
+//! `--metrics-addr <ADDR>` (ADR-091) additionally serves this shard's Prometheus `/_metrics` on a
+//! SEPARATE plaintext port for scraping — per-shard stored-query count, memory, compaction backlog,
+//! and cost-class distribution. Same posture as `--health-addr`: plaintext, pod-local, never the
+//! TLS + token mesh data port. Unset ⇒ no listener.
+//!
 //! This is the single-node server building block. By default it stands up ONE shard over a
 //! self-contained synthetic corpus so the node serves something matchable. With `--pending`
 //! it starts **dict-less** — serving nothing until a coordinator ships its frozen dict via
@@ -22,8 +27,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use reverse_rusty::cluster::{
-    resolve_mesh_token, ClientSecurity, ServerSecurity, ShardServer, TlsClientConfig,
-    TlsServerIdentity,
+    resolve_mesh_token, serve_metrics, ClientSecurity, ServerSecurity, ShardServer,
+    TlsClientConfig, TlsServerIdentity,
 };
 use reverse_rusty::compile::extract;
 use reverse_rusty::config::EngineConfig;
@@ -46,6 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut token_flag: Option<String> = None;
     // Optional SEPARATE plaintext port for the gRPC health service (k8s probes, ADR-084).
     let mut health_addr: Option<SocketAddr> = None;
+    // Optional SEPARATE plaintext port for the Prometheus `/_metrics` endpoint (ADR-091).
+    let mut metrics_addr: Option<SocketAddr> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -56,6 +63,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--health-addr" => {
                 if let Some(v) = args.get(i + 1) {
                     health_addr = Some(v.parse().map_err(|e| format!("--health-addr {v}: {e}"))?);
+                }
+                i += 1;
+            }
+            "--metrics-addr" => {
+                if let Some(v) = args.get(i + 1) {
+                    metrics_addr = Some(v.parse().map_err(|e| format!("--metrics-addr {v}: {e}"))?);
                 }
                 i += 1;
             }
@@ -114,7 +127,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("shardserver: health (grpc.health.v1) on {ha} (plaintext, k8s probes)");
         }
         println!("shardserver: serving ShardService on {addr} ({state})");
-        rt.block_on(configure(server, security, client_security, health_addr).serve(addr))?;
+        run(
+            server,
+            security,
+            client_security,
+            health_addr,
+            metrics_addr,
+            addr,
+            &rt,
+        )?;
         return Ok(());
     }
 
@@ -159,6 +180,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "shardserver: serving ShardService on {addr} ({} queries loaded)",
         queries.len()
     );
+    run(
+        server,
+        security,
+        client_security,
+        health_addr,
+        metrics_addr,
+        addr,
+        &rt,
+    )?;
+    Ok(())
+}
+
+/// Spawn the optional plaintext Prometheus `/_metrics` listener (ADR-091) — captured BEFORE `serve`
+/// consumes the server — then serve `ShardService` (with mesh security + the optional health port)
+/// until exit. A `--metrics-addr` bind failure is fatal (an explicit observability request should not
+/// start silently); the std listener thread serves for the process lifetime.
+fn run(
+    server: ShardServer,
+    security: ServerSecurity,
+    client_security: ClientSecurity,
+    health_addr: Option<SocketAddr>,
+    metrics_addr: Option<SocketAddr>,
+    addr: SocketAddr,
+    rt: &tokio::runtime::Runtime,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _metrics = match metrics_addr {
+        Some(maddr) => {
+            let src = server.metrics_source();
+            println!("shardserver: metrics (prometheus /_metrics) on {maddr} (plaintext)");
+            Some(
+                serve_metrics(maddr, move || src.render())
+                    .map_err(|e| format!("--metrics-addr {maddr}: {e}"))?,
+            )
+        }
+        None => None,
+    };
     rt.block_on(configure(server, security, client_security, health_addr).serve(addr))?;
     Ok(())
 }

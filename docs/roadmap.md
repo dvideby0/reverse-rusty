@@ -169,12 +169,15 @@ your priority.
   expects `image.repository`/`tag`), ending `:latest`-only; and a check that Compose and Helm
   represent the *same* topology. (Scale proof stays Tier 3 criterion 12, not a blocker here.)
 - **M3 — production hardening (safe with on-call ownership).** **Shard/control-local Prometheus
-  metrics** — only the coordinator exposes `/_metrics` today (ADR-084 deferral b); add per-shard /
-  per-control stored-query count, memory, WAL lag, compaction backlog, p95/p99, broad-lane cost (the
-  prerequisite for any autoscaling signal). Plus the operational docs above the shipped ADR-081
-  runbook: **DR runbook, rolling-upgrade procedure, resource-sizing guide, alert examples, a
-  backup/restore rehearsal**. Promote **cooperative cancellation / bounded concurrency** (the ADR-052
-  deferral now in the Robustness backlog) here.
+  metrics shipped** ([ADR-091](decisions/adr-091-shard-control-metrics.md), closing ADR-084 deferral
+  b): per-node `/_metrics` on `shardserver`/`controlserver` (stored-query count, memory, compaction
+  backlog, cost-class; per-control Raft term/leader/log/membership) + a coordinator per-shard query
+  gauge — the autoscaling-signal prerequisite. *Residual:* **per-shard p95/p99 latency** (needs a
+  hot-path timing hook; the coordinator already has RPC latency via ADR-085) and per-shard broad-lane
+  cost stay open. Plus the operational docs above the shipped ADR-081 runbook: **DR runbook,
+  rolling-upgrade procedure, resource-sizing guide, alert examples, a backup/restore rehearsal**.
+  Promote **cooperative cancellation / bounded concurrency** (the ADR-052 deferral now in the
+  Robustness backlog) here.
 - **M4 — commercial-service operations (API-driven, not runbook-driven).** The bar past "cloud
   deployable": backups, scaling, restore, and rollout become controllers/APIs, not manual procedures.
   Larger, later, and partly **in tension with the shared-nothing / no-object-store stance

@@ -79,9 +79,13 @@ plaintext** port (`ports.shardHealth` / `ports.controlHealth`) — the chart wir
 | readinessProbe (control) | `ready` | this node currently sees an elected leader |
 | liveness+readiness (coordinator) | — | HTTP `GET /_health` (200) |
 
-`kubectl get pods -n rr` readiness reflects real serving state. There is **no Prometheus `/_metrics`**
-on the shard/control binaries yet (health ≠ metrics — ADR-084 deferral b); scrape the coordinator's
-`/_metrics` for cluster-level counters.
+`kubectl get pods -n rr` readiness reflects real serving state. Each shard / control pod ALSO serves
+its own Prometheus `/_metrics` on a plaintext `--metrics-addr` port (ADR-091, closing ADR-084 deferral
+b); with `metrics.enabled` (default on) the chart sets `prometheus.io/scrape|port|path` pod annotations
+(shard port `ports.shardMetrics`, control `ports.controlMetrics`) so a Prometheus running pod-annotation
+discovery scrapes them directly — per-shard query count / memory / compaction backlog / cost-class, and
+per-control Raft term/leader/log/membership. The coordinator's `/_metrics` still carries the
+cluster-level counters + a per-shard `reverse_rusty_cluster_shard_queries{shard="N"}` gauge.
 
 ## 5. Scaling, recovery, backup
 

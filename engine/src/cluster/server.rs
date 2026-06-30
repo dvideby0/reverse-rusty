@@ -298,6 +298,17 @@ impl ShardServer {
         self.state.load_full().is_some()
     }
 
+    /// A cloneable handle that renders this shard's `/_metrics` body on demand (ADR-091). The
+    /// deploy bin captures it BEFORE `serve` consumes the server, then hands it to
+    /// [`serve_metrics`](super::node_metrics::serve_metrics) on the plaintext `--metrics-addr` port.
+    /// It shares the server's swappable state, so it reports live numbers across the pending→adopted
+    /// flip and never touches the engine write lock.
+    pub fn metrics_source(&self) -> ShardMetricsSource {
+        ShardMetricsSource {
+            state: Arc::clone(&self.state),
+        }
+    }
+
     /// The adopted state, or `failed_precondition` if the server is still pending.
     fn loaded(&self) -> Result<Arc<ServerState>, Status> {
         self.state
@@ -466,4 +477,32 @@ fn finalized_empty_tag_dict() -> TagDict {
     let mut td = TagDict::new();
     td.mark_finalized();
     td
+}
+
+/// A render handle for a [`ShardServer`]'s `/_metrics` endpoint (ADR-091). Holds a shared clone of
+/// the server's swappable state, so it renders live numbers (including the pending→adopted flip) and
+/// outlives the `serve` call that consumes the server. `Send + 'static` so the deploy bin can move it
+/// into the metrics listener's render closure.
+pub struct ShardMetricsSource {
+    state: Arc<ArcSwapOption<ServerState>>,
+}
+
+impl ShardMetricsSource {
+    /// Render the current Prometheus exposition body for this shard. Reads ONE lock-free snapshot
+    /// (metrics + segment infos + class counts from the same point-in-time) off the engine write
+    /// lock; a pending (not-yet-adopted) server reports only `reverse_rusty_shard_ready 0`.
+    pub fn render(&self) -> String {
+        match self.state.load_full() {
+            Some(st) => {
+                let snap = st.shard.metrics_snapshot();
+                super::node_metrics::render_shard(
+                    &snap.metrics(),
+                    &snap.segment_infos(),
+                    snap.class_counts(),
+                    true,
+                )
+            }
+            None => super::node_metrics::render_shard_pending(),
+        }
+    }
 }

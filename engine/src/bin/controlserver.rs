@@ -12,6 +12,10 @@
 //! listening; the others just serve and join. This is the manager-side analogue of `shardserver`
 //! (the data path stays on `ShardService`); consensus holds only the cluster-state document.
 //!
+//! `--metrics-addr <ADDR>` (ADR-091) additionally serves this node's Prometheus `/_metrics` (Raft
+//! term / leader / log indices / membership) on a SEPARATE plaintext port — same posture as
+//! `--health-addr`: plaintext, pod-local, never the mesh data port. Unset ⇒ no listener.
+//!
 //! When the bootstrap node binds a wildcard address (`0.0.0.0:port`, the usual containerized
 //! case) it must also pass `--advertise-url <URL>` — the routable address peers dial it on
 //! (e.g. `--advertise-url https://control0:50061`); otherwise it would commit the unreachable
@@ -28,8 +32,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reverse_rusty::cluster::{
-    resolve_mesh_token, start_grpc_node_with_security, ClientSecurity, ControlServer,
-    ServerSecurity, TlsClientConfig, TlsServerIdentity,
+    resolve_mesh_token, serve_metrics, start_grpc_node_with_security, ClientSecurity,
+    ControlServer, ServerSecurity, TlsClientConfig, TlsServerIdentity,
 };
 
 /// Ring/model params the genesis document is seeded with. A real deployment derives these from the
@@ -60,6 +64,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut token_flag: Option<String> = None;
     // Optional SEPARATE plaintext port for the gRPC health service (k8s probes, ADR-084).
     let mut health_addr: Option<SocketAddr> = None;
+    // Optional SEPARATE plaintext port for the Prometheus `/_metrics` endpoint (ADR-091).
+    let mut metrics_addr: Option<SocketAddr> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -93,6 +99,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--health-addr" => {
                 if let Some(v) = args.get(i + 1) {
                     health_addr = Some(v.parse()?);
+                }
+                i += 1;
+            }
+            "--metrics-addr" => {
+                if let Some(v) = args.get(i + 1) {
+                    metrics_addr = Some(v.parse()?);
                 }
                 i += 1;
             }
@@ -138,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let node_id = node_id.ok_or(
         "usage: controlserver <NODE_ID> <BIND_ADDR> [--peer ID=URL ...] [--advertise-url URL] \
-         [--health-addr ADDR] [--bootstrap]",
+         [--health-addr ADDR] [--metrics-addr ADDR] [--bootstrap]",
     )?;
     let bind = bind.ok_or("missing BIND_ADDR")?;
     let addr: SocketAddr = bind.parse()?;
@@ -211,6 +223,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         server = server.with_health_addr(ha);
         println!("controlserver: health (grpc.health.v1) on {ha} (plaintext, k8s probes)");
     }
+    // Spawn the optional plaintext Prometheus `/_metrics` listener (ADR-091) — capture the source
+    // BEFORE `serve` consumes the server. A bind failure is fatal (an explicit observability request
+    // should not start silently); the std listener thread serves for the process lifetime.
+    let _metrics = match metrics_addr {
+        Some(maddr) => {
+            let src = server.metrics_source();
+            println!("controlserver: metrics (prometheus /_metrics) on {maddr} (plaintext)");
+            Some(
+                serve_metrics(maddr, move || src.render())
+                    .map_err(|e| format!("--metrics-addr {maddr}: {e}"))?,
+            )
+        }
+        None => None,
+    };
     let serve = rt.spawn(server.serve(addr));
 
     if bootstrap {

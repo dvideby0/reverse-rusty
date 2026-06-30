@@ -46,6 +46,8 @@ mod handoff;
 #[cfg(feature = "distributed")]
 mod health;
 #[cfg(feature = "distributed")]
+mod node_metrics;
+#[cfg(feature = "distributed")]
 mod proto;
 #[cfg(feature = "distributed")]
 mod remote;
@@ -75,9 +77,11 @@ pub use control_raft::{
     RaftControlPlane, TypeConfig,
 };
 #[cfg(feature = "distributed")]
-pub use control_server::ControlServer;
+pub use control_server::{ControlMetricsSource, ControlServer};
 #[cfg(feature = "distributed")]
 pub use coordinator::{ReassignOutcome, RebalanceMoveReport, ShardGroup};
+#[cfg(feature = "distributed")]
+pub use node_metrics::{serve_metrics, MetricsHandle};
 #[cfg(feature = "distributed")]
 pub use remote::RemoteShard;
 #[cfg(feature = "distributed")]
@@ -88,4 +92,4 @@ pub use security::{
     TlsServerIdentity,
 };
 #[cfg(feature = "distributed")]
-pub use server::ShardServer;
+pub use server::{ShardMetricsSource, ShardServer};

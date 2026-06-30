@@ -20,6 +20,12 @@ spec:
       labels:
         {{- include "reverse-rusty.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: shard
+      {{- if .Values.metrics.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.ports.shardMetrics | quote }}
+        prometheus.io/path: /_metrics
+      {{- end }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -36,6 +42,7 @@ spec:
           # --pending: dict-less until the coordinator's AdoptDict at connect (ADR-034).
           # --data-dir: durable, so the node serves/accepts peer recovery (ADR-035/036).
           # --health-addr: the plaintext gRPC health port for k8s probes (ADR-084).
+          # --metrics-addr: the plaintext Prometheus /_metrics port for scraping (ADR-091).
           args:
             - shardserver
             - 0.0.0.0:{{ .Values.ports.shardGrpc }}
@@ -44,6 +51,10 @@ spec:
             - /data
             - --health-addr
             - 0.0.0.0:{{ .Values.ports.shardHealth }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-addr
+            - 0.0.0.0:{{ .Values.ports.shardMetrics }}
+            {{- end }}
             {{- if .Values.tls.enabled }}
             - --tls-cert
             - /certs/{{ .Values.tls.certFile }}
@@ -65,6 +76,10 @@ spec:
               containerPort: {{ .Values.ports.shardGrpc }}
             - name: health
               containerPort: {{ .Values.ports.shardHealth }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.ports.shardMetrics }}
+            {{- end }}
           # Liveness = the gRPC server is up (overall ""); readiness = a dict is adopted
           # ("ready") — a --pending shard is live-but-not-ready until AdoptDict (ADR-084).
           livenessProbe:

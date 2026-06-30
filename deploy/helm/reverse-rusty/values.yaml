@@ -31,9 +31,20 @@ replicationFactor: 1
 ports:
   shardGrpc: 50051
   shardHealth: 50052 # plaintext gRPC health (k8s probes, ADR-084)
+  shardMetrics: 9100 # plaintext Prometheus /_metrics (ADR-091)
   controlGrpc: 50061
   controlHealth: 50062
+  controlMetrics: 9101 # plaintext Prometheus /_metrics (ADR-091)
   coordinatorHttp: 9200
+
+# Per-node Prometheus /_metrics (ADR-091) on a SEPARATE plaintext port, so Prometheus scrapes each
+# shard / control pod directly (per-shard stored-query count, memory, compaction backlog, cost-class
+# distribution; per-control Raft term/leader/membership). Same posture as the health port: plaintext,
+# pod-local, never the TLS + token mesh data port. The coordinator's own /_metrics is always on its
+# REST port. When enabled, shard + control pods get a --metrics-addr flag, a containerPort, and
+# prometheus.io scrape annotations.
+metrics:
+  enabled: true
 
 # Durable openraft control plane (ADR-038/041). When enabled AND wireToCoordinator, the
 # coordinator attaches to the quorum via --control-endpoint (ADR-083), listing ALL members
