@@ -128,6 +128,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   retry of idempotent reads on a transient error, and per-RPC transport metrics on cluster-mode
   `/_metrics`; a hung remote shard now fails the percolate loud (fail-closed, zero FN) instead of
   blocking the coordinator's fan-out forever (ADR-085).
+- **Per-node Prometheus metrics** — opt-in `--metrics-addr` plaintext `/_metrics` on `shardserver` /
+  `controlserver` (a lean std-only renderer + listener, no new dep): per-shard query count / memory /
+  compaction backlog / cost-class, per-control Raft term/leader/log/membership; the coordinator adds a
+  per-shard query gauge. Reads the lock-free snapshot / Raft handle ⇒ off every hot path; default-off
+  ⇒ byte-identical. Helm + Compose wired (ADR-091).
 - **Replication + recovery over gRPC** — `FetchSegments`/`RecoverFrom` (ADR-036); per-shard
   translog, no-quiesce peer recovery, durable self-restart (ADR-039); retention leases + finalize
   (ADR-040) with lease TTL reaping (ADR-048).

@@ -21,6 +21,11 @@ spec:
       annotations:
         # Roll the StatefulSet when the bootstrap script changes.
         checksum/config: {{ include (print $.Template.BasePath "/control-configmap.yaml") . | sha256sum }}
+        {{- if .Values.metrics.enabled }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ .Values.ports.controlMetrics | quote }}
+        prometheus.io/path: /_metrics
+        {{- end }}
       labels:
         {{- include "reverse-rusty.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: control
@@ -47,6 +52,10 @@ spec:
               containerPort: {{ .Values.ports.controlGrpc }}
             - name: health
               containerPort: {{ .Values.ports.controlHealth }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.ports.controlMetrics }}
+            {{- end }}
           # Liveness = the ControlService is up; readiness = this node sees an elected
           # leader (consensus live + this node participates) — ADR-084.
           livenessProbe:

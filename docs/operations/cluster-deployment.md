@@ -233,10 +233,15 @@ This is the deployment-level realization of ADR-076's "vocab is deploy-time" dec
 
 ## 9. Monitoring & observability
 
-`GET /_metrics` on the **coordinator** exposes Prometheus text with the `reverse_rusty_` prefix. (The
-`shardserver` is gRPC-only — it has **no HTTP `/_metrics`** in v1, so shard-local engine metrics aren't
-scrapable; watch shard liveness via the coordinator's `/_health`, which fails loud on an unreachable
-shard, and the shard containers' structured logs.) High-signal coordinator alerts:
+`GET /_metrics` on the **coordinator** exposes Prometheus text with the `reverse_rusty_` prefix,
+including a per-shard `reverse_rusty_cluster_shard_queries{shard="N"}` gauge. Each `shardserver` /
+`controlserver` ALSO exposes its own `/_metrics` on the plaintext `--metrics-addr` port (ADR-091) —
+the production compose binds shards on `9100` and control nodes on `9101` on the `rrmesh` network
+(not published to the host; scrape from a Prometheus on that network). Shard nodes report
+`reverse_rusty_total_queries`, `reverse_rusty_memory_bytes{component=…}`,
+`reverse_rusty_tombstoned_entries` (compaction backlog), `reverse_rusty_class_queries{class=…}`, and
+`reverse_rusty_shard_ready`; control nodes report `reverse_rusty_control_{term,is_leader,state,
+last_log_index,last_applied,voters}`. High-signal coordinator alerts:
 
 | Metric | Alert when |
 |---|---|

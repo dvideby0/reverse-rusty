@@ -72,6 +72,11 @@ pub(crate) struct PrometheusMetrics {
     pub(crate) transport_rpc_timeouts: IntGaugeVec,
     pub(crate) transport_rpc_retries: IntGaugeVec,
     pub(crate) transport_rpc_latency_seconds: GaugeVec,
+
+    // Per-shard stored-query count, labeled by `shard` ordinal (ADR-091). Set on each cluster-mode
+    // `/_metrics` scrape from `ClusterEngine::shard_query_counts`, so the coordinator exposes the
+    // cluster-wide per-shard distribution without scraping each shard pod. Absent in single-node mode.
+    pub(crate) cluster_shard_queries: IntGaugeVec,
 }
 
 impl PrometheusMetrics {
@@ -324,6 +329,16 @@ impl PrometheusMetrics {
         )
         .unwrap();
 
+        // Per-shard stored-query count (ADR-091), labeled by shard ordinal.
+        let cluster_shard_queries = IntGaugeVec::new(
+            Opts::new(
+                "cluster_shard_queries",
+                "Stored queries per shard by ordinal (coordinator view; ADR-091)",
+            ),
+            &["shard"],
+        )
+        .unwrap();
+
         // Register all
         registry.register(Box::new(total_queries.clone())).unwrap();
         registry.register(Box::new(base_segments.clone())).unwrap();
@@ -413,6 +428,9 @@ impl PrometheusMetrics {
         registry
             .register(Box::new(transport_rpc_latency_seconds.clone()))
             .unwrap();
+        registry
+            .register(Box::new(cluster_shard_queries.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -450,6 +468,7 @@ impl PrometheusMetrics {
             transport_rpc_timeouts,
             transport_rpc_retries,
             transport_rpc_latency_seconds,
+            cluster_shard_queries,
         }
     }
 
@@ -495,6 +514,16 @@ impl PrometheusMetrics {
             self.transport_rpc_latency_seconds
                 .with_label_values(&[m.method])
                 .set(m.latency_nanos_total as f64 / 1e9);
+        }
+    }
+
+    /// Refresh the per-shard stored-query gauge (ADR-091) from `ClusterEngine::shard_query_counts`.
+    /// Called on each cluster-mode `/_metrics` scrape; `counts[i]` is shard `i`'s query count.
+    pub(crate) fn observe_shard_queries(&self, counts: &[usize]) {
+        for (shard, count) in counts.iter().enumerate() {
+            self.cluster_shard_queries
+                .with_label_values(&[&shard.to_string()])
+                .set(*count as i64);
         }
     }
 

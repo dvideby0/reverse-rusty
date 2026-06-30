@@ -88,6 +88,17 @@ impl ControlServer {
         self
     }
 
+    /// A cloneable handle that renders this control node's `/_metrics` body on demand (ADR-091). The
+    /// deploy bin captures it BEFORE `serve` consumes the server, then hands it to
+    /// [`serve_metrics`](super::node_metrics::serve_metrics) on the plaintext `--metrics-addr` port.
+    /// It holds a cheap-clone Raft handle, so it reports live consensus state (term / leader / log
+    /// indices) and never touches a hot path.
+    pub fn metrics_source(&self) -> ControlMetricsSource {
+        ControlMetricsSource {
+            raft: self.raft.clone(),
+        }
+    }
+
     /// Build the tonic server (TLS when configured) + token-verified service — one assembly shared
     /// by every `serve*` flavor (mirrors `ShardServer`).
     fn secured_router(self) -> Result<tonic::transport::server::Router, tonic::transport::Error> {
@@ -144,6 +155,23 @@ impl ControlServer {
         incoming: tonic::transport::server::TcpIncoming,
     ) -> Result<(), tonic::transport::Error> {
         self.secured_router()?.serve_with_incoming(incoming).await
+    }
+}
+
+/// A render handle for a [`ControlServer`]'s `/_metrics` endpoint (ADR-091). Holds a cheap-clone
+/// Raft handle so it renders live consensus metrics and outlives the `serve` call that consumes the
+/// server. `Send + 'static` so the deploy bin can move it into the metrics listener's render closure.
+pub struct ControlMetricsSource {
+    raft: Raft<TypeConfig>,
+}
+
+impl ControlMetricsSource {
+    /// Render the current Prometheus exposition body for this control node from its live
+    /// `RaftMetrics` (term, server state, leader, log indices, membership).
+    pub fn render(&self) -> String {
+        let metrics = self.raft.metrics();
+        let view = super::node_metrics::control_view(&metrics.borrow());
+        super::node_metrics::render_control(&view)
     }
 }
 

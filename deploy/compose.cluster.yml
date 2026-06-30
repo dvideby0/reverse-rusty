@@ -60,10 +60,13 @@ services:
   # connect (the real multi-node flow). `--data-dir /data` makes the node durable —
   # /data MUST be the mount point so the named volume inherits the image's uid-10001
   # ownership (deploy/Dockerfile), else the durable store fails EACCES.
+  # `--metrics-addr 0.0.0.0:9100` serves each shard's Prometheus /_metrics (ADR-091) on the rrmesh
+  # network (control nodes use :9101); not published to the host — scrape from a Prometheus on rrmesh.
   shard0:
     <<: *shard-base
     command: >
       shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --metrics-addr 0.0.0.0:9100
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     volumes:
       - ${RR_CERT_DIR:?set RR_CERT_DIR}:/certs:ro
@@ -72,6 +75,7 @@ services:
     <<: *shard-base
     command: >
       shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --metrics-addr 0.0.0.0:9100
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     volumes:
       - ${RR_CERT_DIR}:/certs:ro
@@ -80,6 +84,7 @@ services:
     <<: *shard-base
     command: >
       shardserver 0.0.0.0:50051 --pending --data-dir /data
+      --metrics-addr 0.0.0.0:9100
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     volumes:
       - ${RR_CERT_DIR}:/certs:ro
@@ -174,6 +179,7 @@ services:
     networks: [rrmesh]
     command: >
       controlserver 0 0.0.0.0:50061 --data-dir /data --bootstrap --shards 3
+      --metrics-addr 0.0.0.0:9101
       --advertise-url https://control0:50061
       --peer 1=https://control1:50061 --peer 2=https://control2:50061
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
@@ -195,6 +201,7 @@ services:
     networks: [rrmesh]
     command: >
       controlserver 1 0.0.0.0:50061 --data-dir /data --shards 3
+      --metrics-addr 0.0.0.0:9101
       --peer 0=https://control0:50061 --peer 2=https://control2:50061
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     environment:
@@ -215,6 +222,7 @@ services:
     networks: [rrmesh]
     command: >
       controlserver 2 0.0.0.0:50061 --data-dir /data --shards 3
+      --metrics-addr 0.0.0.0:9101
       --peer 0=https://control0:50061 --peer 1=https://control1:50061
       --tls-cert /certs/node.crt --tls-key /certs/node.key --tls-ca /certs/ca.crt
     environment:

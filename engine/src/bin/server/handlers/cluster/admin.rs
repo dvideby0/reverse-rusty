@@ -245,6 +245,11 @@ pub(crate) async fn cluster_metrics(State(state): State<Arc<ClusterAppState>>) -
         }
         // Cluster gRPC transport metrics (ADR-085) — all-zero for an in-process cluster.
         state.prom.observe_transport(&cluster.transport_metrics());
+        // Per-shard stored-query distribution (ADR-091) — best-effort; a transient shard error
+        // (e.g. a remote shard mid-handoff) just leaves the prior gauge values in place.
+        if let Ok(counts) = cluster.shard_query_counts() {
+            state.prom.observe_shard_queries(&counts);
+        }
     }
     let encoder = TextEncoder::new();
     let metric_families = state.prom.registry.gather();

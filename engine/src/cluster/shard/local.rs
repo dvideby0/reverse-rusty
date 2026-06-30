@@ -383,6 +383,16 @@ impl LocalShard {
         self.snapshot.load_full()
     }
 
+    /// The current lock-free read snapshot, for the local node's `/_metrics` renderer (ADR-091):
+    /// one consistent point-in-time view to read `metrics()` / `segment_infos()` / `class_counts()`
+    /// from, off the engine write lock. Visible to the `ShardServer` (same crate) that hosts the
+    /// metrics endpoint — which is `distributed`-only, so gate it to avoid a dead-code warning in
+    /// the lean / server builds.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn metrics_snapshot(&self) -> Arc<EngineSnapshot> {
+        self.snapshot.load_full()
+    }
+
     /// Whether this shard's engine has had every best-effort durability write succeed
     /// ([`Engine::persistence_healthy`]) — checked by the cluster's durable build
     /// before its manifest commit (codex retro-review, ADR-074).
