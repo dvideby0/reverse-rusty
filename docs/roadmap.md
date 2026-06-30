@@ -102,17 +102,18 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
     live-handoff machinery; the v1 resize is in-process blue/green).
   - *Live-handoff follow-on (the [ADR-086](decisions/adr-086-control-plane-routing-and-failover.md)
-    deferral — data-moving reassignment itself **shipped** in
-    [ADR-090](decisions/adr-090-data-moving-reassignment.md): `reassign_and_move`/`rebalance_and_move`
-    move data via `execute_handoff` then commit the new owner (move-then-commit), so a reassignment
-    moves data and routing follows live under concurrent writes + across a resolve-only restart,
-    zero-FN proven):* the remaining open work is **parallel multi-position moves**
-    (`rebalance_and_move` is sequential today) and an automated **assignment-watch → re-point
-    controller** that reconciles the committed map to physical reality unattended (today's path is
-    operator/autoscaler-driven + manually triggered). (k8s/Helm manifests + gRPC health/readiness
-    probes shipped — [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the
-    advertise-URL; the `shardserver --accept-class-d` item was a phantom — remote shards force-accept
-    class-D, the coordinator is the sole gate.)
+    deferral — data-moving reassignment **shipped** in
+    [ADR-090](decisions/adr-090-data-moving-reassignment.md), and the unattended **assignment-watch →
+    re-point controller** in [ADR-092](decisions/adr-092-unattended-reconciler.md): `reconcile` + the
+    opt-in `--reconcile-interval-secs` loop converge the committed map to the HRW-desired placement by
+    moving data, automatically + idempotently + zero-FN, and the autoscaler's membership-drift arm is
+    now data-moving on a remote cluster too):* the remaining open work is **parallel multi-position
+    moves** (`rebalance_and_move`/`reconcile` are sequential today — safe parallelism is a
+    conflict-graph rework of `reassign_serial` into a busy-node guard; a throughput optimization, not a
+    capability gain). (k8s/Helm manifests + gRPC health/readiness probes shipped —
+    [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the advertise-URL; the
+    `shardserver --accept-class-d` item was a phantom — remote shards force-accept class-D, the
+    coordinator is the sole gate.)
 - **Feature-model versioning + blue/green re-materialize** — frozen common-mask across minor
   versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
 - **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying

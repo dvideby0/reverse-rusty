@@ -30,6 +30,7 @@ mod health;
 mod legacy_layout;
 mod partial_apply;
 mod reassign;
+mod reconcile;
 mod recovery;
 mod replication;
 mod routing;

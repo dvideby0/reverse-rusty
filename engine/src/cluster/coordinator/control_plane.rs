@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::cluster::allocator;
 use crate::cluster::control::{
     ClusterState, ClusterStateChange, ControlPlane, NodeDescriptor, NodeId, ShardAssignment,
+    StateVersion,
 };
 use crate::cluster::shard::ShardError;
 use crate::config::EngineConfig;
@@ -35,6 +36,15 @@ impl ClusterEngine {
     /// (the local checkpoint generation): [`ClusterState::epoch`] is the control-plane term.
     pub fn control_state(&self) -> Result<ClusterState, ShardError> {
         Ok((*self.control.cluster_state()?).clone())
+    }
+
+    /// The committed cluster-state version ([`ClusterState::epoch`]) WITHOUT cloning the whole
+    /// document — a cheap "did the map move?" probe for the unattended reconcile driver (ADR-092),
+    /// which polls it each tick and only runs a reconcile pass when the epoch advanced. A
+    /// pass-through to [`ControlPlane::version`]; off the matching hot path (the control plane is
+    /// read only at admin time), so it cannot affect a percolate result.
+    pub fn control_version(&self) -> Result<StateVersion, ShardError> {
+        Ok(self.control.version()?)
     }
 
     /// The node assignment for one shard POSITION (the ring's output index). Errors loudly
