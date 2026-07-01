@@ -209,4 +209,93 @@ mod tests {
         r2.failed.push((4, "boom".into()));
         assert!(!r2.is_converged(), "a failed position ⇒ not converged");
     }
+
+    /// The UNATTENDED semantics: `reconcile` records EVERY per-position failure and keeps going —
+    /// unlike `rebalance_and_move`, which stops at the first for a human to resume. Registering
+    /// addr'd data nodes on an in-process cluster makes every position a target (the committed
+    /// primary is the addr-less manager `NodeId(0)` ⇒ diverged from HRW-over-data-nodes), and each
+    /// move fails INSTANTLY + network-free at the source-endpoint resolution (the manager has no
+    /// addr) — so all K land in `failed`, proving the loop continued past the first error rather
+    /// than aborting the pass.
+    #[test]
+    fn reconcile_continues_past_per_position_failures() {
+        use crate::cluster::control::{NodeDescriptor, NodeRole};
+        use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
+        use crate::normalize::Normalizer;
+
+        let k = 3usize;
+        let cfg = ClusterConfig {
+            num_shards: k,
+            ..ClusterConfig::default()
+        };
+        let queries: Vec<(u64, String)> = vec![
+            (1, "+nike +shoe".into()),
+            (2, "+sony +tv".into()),
+            (3, "+lego +set".into()),
+        ];
+        let cluster =
+            ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), &cfg, &queries)
+                .expect("in-process cluster");
+        // Two addr'd data nodes (never connected — the failures below fire before any network op).
+        for id in [1u64, 2] {
+            cluster
+                .register_node(NodeDescriptor {
+                    id: NodeId(id),
+                    addr: Some(format!("http://127.0.0.1:{id}")),
+                    role: NodeRole::Data,
+                })
+                .expect("register node");
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let report = cluster.reconcile(1, rt.handle()).expect("reconcile pass");
+        assert_eq!(
+            report.failed.len(),
+            k,
+            "every position's failure is recorded — the pass did NOT stop at the first: {report:?}"
+        );
+        assert!(
+            report.reconciled.is_empty()
+                && report.skipped.is_empty()
+                && report.uncommitted.is_empty(),
+            "nothing moved or committed: {report:?}"
+        );
+        assert!(!report.is_converged(), "failed positions ⇒ not converged");
+        for (_, msg) in &report.failed {
+            assert!(
+                msg.contains("has no registered endpoint"),
+                "each failure is the pre-network endpoint-resolution check: {msg}"
+            );
+        }
+    }
+
+    /// RF>1 is rejected up front (ADR-090/092): a replicated position's single-`RemoteShard` move
+    /// would de-replicate it. Controller-level, so the driver loop gets ONE clear error rather than
+    /// K per-position rejects.
+    #[test]
+    fn reconcile_rejects_replicated_cluster() {
+        use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
+        use crate::cluster::shard::ShardError;
+        use crate::normalize::Normalizer;
+
+        let cfg = ClusterConfig {
+            num_shards: 2,
+            replication_factor: 2,
+            ..ClusterConfig::default()
+        };
+        let queries: Vec<(u64, String)> = vec![(1, "+nike +shoe".into()), (2, "+sony +tv".into())];
+        let cluster =
+            ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), &cfg, &queries)
+                .expect("in-process replicated cluster");
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        match cluster.reconcile(2, rt.handle()) {
+            Err(ShardError::Config(msg)) => {
+                assert!(
+                    msg.contains("replicated") && msg.contains("reconcile"),
+                    "the reject names the operation and the reason: {msg}"
+                );
+            }
+            other => panic!("RF>1 reconcile must be rejected with Config, got {other:?}"),
+        }
+    }
 }

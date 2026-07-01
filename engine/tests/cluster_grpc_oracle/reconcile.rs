@@ -5,11 +5,17 @@
 //! manual `reassign_and_move` primitive, this proves the UNATTENDED controller (and the autoscaler
 //! safety fix) built on it.
 //!
-//! Two proofs:
+//! Three proofs:
 //!  - `grpc_reconcile_moves_to_desired_under_writes_and_restart_routes_zero_fn` — the headline: a
 //!    diverged committed map converges to the HRW-desired owner under a concurrent writer, a second pass
 //!    is a no-op (idempotence / no-thrash), and a fresh coordinator routing by the committed map is
 //!    zero-FN.
+//!  - `grpc_reconcile_colocated_packing_converges_zero_fn` — the UNATTENDED controller on the packed
+//!    K>N multi-shard topology (ADR-093): the exact scenario that PARKED the reconciler (HRW packs
+//!    several positions onto one node; pre-Stage-1 a one-shard `RecoverFrom` clobbered the earlier
+//!    move). `reconcile` now converges the whole packed map — no slot lost, ≥2 positions co-located on
+//!    a destination, zero-FN, idempotent (epoch-invariant) second pass, restart routes zero-FN. The
+//!    manual-sweep analogue is `rebalance.rs`; THIS is the proof the reconciler itself is collision-safe.
 //!  - `grpc_autoscaler_tick_drives_data_moving_rebalance_zero_fn` — the ADR-086 safety fix: on a remote
 //!    cluster the autoscaler's `tick` drives the DATA-MOVING rebalance (not the map-only one that would
 //!    manufacture a false negative), so a membership change converges routing automatically, zero-FN.
@@ -26,7 +32,7 @@ use reverse_rusty::dict::Dict;
 use reverse_rusty::normalize::Normalizer;
 
 use crate::harness::*;
-use crate::relocation::primary_endpoints;
+use crate::relocation::{owner, primary_endpoints, seed_map, spin_n_servers};
 
 /// Mirror `allocator::hrw_weight` (the stable rendezvous hash) so the test can compute the HRW-desired
 /// primary and deterministically seed the OPPOSITE node — guaranteeing a real move regardless of which
@@ -354,4 +360,145 @@ fn grpc_autoscaler_tick_drives_data_moving_rebalance_zero_fn() {
 
     let _ = std::fs::remove_dir_all(&d.nodes.src_dir);
     let _ = std::fs::remove_dir_all(&d.nodes.tgt_dir);
+}
+
+/// The UNATTENDED controller on the packed K>N multi-shard topology — the exact scenario that parked
+/// the reconciler (codex P1): the HRW-desired map packs several positions onto shared destination
+/// nodes, and pre-ADR-093 a one-shard `RecoverFrom` clobbered the earlier move (a shard-sized false
+/// negative). The parked oracle was `num_shards: 1`, so it could never see this; here `reconcile`
+/// drives the same packed convergence `rebalance.rs` proves for the MANUAL sweep — through the
+/// reconciler's own report + idempotence contract.
+#[test]
+fn grpc_reconcile_colocated_packing_converges_zero_fn() {
+    let (queries, titles) = build_corpus();
+    let oracle = build_oracle(&queries, &titles);
+
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let k = 6usize;
+    let cfg = ClusterConfig {
+        num_shards: k,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    // Three nodes; ALL six positions packed on node A (index 0) — a deliberately non-HRW committed
+    // map. The unattended pass must spread them, co-locating moves on the destinations.
+    let nodes = spin_n_servers(&rt, &norm, "reconcile_pack", 3);
+    let endpoints = vec![nodes[0].ep.clone(); k];
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        empty_tag_dict(),
+        &cfg,
+        &endpoints,
+        rt.handle(),
+    )
+    .expect("connect packed cluster (all positions on node A)");
+    cluster.ingest(&queries).expect("ingest corpus over gRPC");
+    seed_map(&cluster, &nodes, &vec![0usize; k]); // committed: every position → node A (id 1)
+
+    let counts0 = cluster.shard_query_counts().expect("per-shard counts");
+    assert_eq!(counts0.len(), k, "one count per position: {counts0:?}");
+    assert!(
+        counts0.iter().all(|&c| c > 0),
+        "all six co-located slots populated on the packed node: {counts0:?}"
+    );
+
+    // ONE unattended pass converges the whole packed map, sequentially, continuing past nothing
+    // (every move must succeed here) — reported through the reconciler's own vocabulary.
+    let report = cluster.reconcile(1, rt.handle()).expect("reconcile");
+    assert!(
+        report.reconciled.len() >= 2,
+        "HRW must move ≥2 positions off the packed node (co-locating on destinations): {report:?}"
+    );
+    assert!(
+        report.is_converged() && report.skipped.is_empty(),
+        "a clean pass: no failed / uncommitted / concurrently-resolved positions: {report:?}"
+    );
+
+    converge_repairs(&cluster);
+
+    // Convergence: NO slot lost + zero false negatives across the whole reconciled cluster. A clobber
+    // (the pre-ADR-093 failure) would empty a co-located slot and drop its queries' matches.
+    let counts1 = cluster
+        .shard_query_counts()
+        .expect("per-shard counts after reconcile");
+    assert_eq!(counts1.len(), k);
+    assert!(
+        counts1.iter().all(|&c| c > 0),
+        "no slot lost after the unattended pass (a clobber would empty one): {counts1:?}"
+    );
+    for (i, title) in titles.iter().enumerate() {
+        let got: HashSet<u64> = cluster
+            .percolate(title)
+            .expect("percolate after reconcile")
+            .into_iter()
+            .collect();
+        assert_eq!(got, oracle[i], "reconciled cluster vs brute on {title:?}");
+    }
+
+    // Packing proof: at least one DESTINATION node (≠ the packed origin A = NodeId 1) now owns ≥2
+    // co-located positions — a move landed a second shard on a node that already received one, the
+    // exact former clobber case, now per-slot-isolated.
+    let state = cluster.control_state().expect("control state");
+    let mut per_node: HashMap<NodeId, usize> = HashMap::new();
+    for pos in 0..k {
+        if let Some(n) = owner(&state, pos) {
+            *per_node.entry(n).or_default() += 1;
+        }
+    }
+    assert!(
+        per_node.len() >= 2,
+        "positions must spread across multiple nodes after reconcile: {per_node:?}"
+    );
+    assert!(
+        per_node.iter().any(|(&n, &c)| n != NodeId(1) && c >= 2),
+        "a destination node (≠ the packed origin) must own ≥2 co-located positions: {per_node:?}"
+    );
+
+    // IDEMPOTENCE (the controller-level hysteresis the driver loop relies on): a second pass over the
+    // now-HRW-optimal map moves nothing, commits nothing (epoch invariant), re-flips nothing.
+    let epoch_before = state.epoch;
+    let gens_before = cluster.handoff_generations();
+    let report2 = cluster.reconcile(1, rt.handle()).expect("second reconcile");
+    assert!(
+        report2.is_converged() && report2.moved_count() == 0 && report2.skipped.is_empty(),
+        "a converged packed map reconciles to a no-op: {report2:?}"
+    );
+    assert_eq!(
+        cluster.control_state().expect("state").epoch,
+        epoch_before,
+        "a no-op reconcile commits nothing (epoch invariant)"
+    );
+    assert_eq!(
+        cluster.handoff_generations(),
+        gens_before,
+        "a no-op reconcile does not re-flip any position's routing"
+    );
+
+    // Resolve-only restart: a fresh coordinator routed purely by the committed map is zero-FN.
+    let resolved = primary_endpoints(&state);
+    let coord2 = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        empty_tag_dict(),
+        &cfg,
+        &resolved,
+        rt.handle(),
+    )
+    .expect("fresh coordinator over the resolved committed map");
+    for (i, title) in titles.iter().enumerate() {
+        let got: HashSet<u64> = coord2
+            .percolate(title)
+            .expect("percolate via restart coordinator")
+            .into_iter()
+            .collect();
+        assert_eq!(got, oracle[i], "restart coordinator vs brute on {title:?}");
+    }
+
+    for n in &nodes {
+        let _ = std::fs::remove_dir_all(&n.dir);
+    }
 }
