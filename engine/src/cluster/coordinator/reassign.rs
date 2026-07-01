@@ -332,11 +332,25 @@ impl ClusterEngine {
     /// in the report. Replica-only diffs are not a data move and stay with the map-only `rebalance`
     /// (the RF=1 remote path — the only one [`connect_remote`](Self::connect_remote) supports — has no
     /// replicas, so every changed position is a primary move there).
+    ///
+    /// **`rf > 1` is rejected up front** (like a replicated cluster): the sweep moves only PRIMARY
+    /// diffs and each move preserves the committed replica list, so an `rf > 1` request would plan
+    /// replica placements it never creates and still report convergence — a silent contract
+    /// violation, not a partial success. RF>1 data-moving needs the target replica group
+    /// re-recovered first (the ADR-090 deferral).
     pub fn rebalance_and_move(
         &self,
         rf: usize,
         handle: &Handle,
     ) -> Result<RebalanceMoveReport, ShardError> {
+        if rf > 1 || self.replication_factor > 1 {
+            return Err(ShardError::Config(format!(
+                "rebalance_and_move: data-moving rebalance at replication factor > 1 is not yet \
+                 supported (ADR-090): requested rf = {rf}, cluster replication_factor = {}; the \
+                 sweep would converge primaries but silently skip the planned replica placements",
+                self.replication_factor
+            )));
+        }
         let state = self.control_state()?;
         if state.nodes.is_empty() {
             return Err(ShardError::ControlPlane(
@@ -510,6 +524,37 @@ mod tests {
                 *to == NodeId(1) || *to == NodeId(2),
                 "only addr'd data nodes are targets, got {to:?}"
             );
+        }
+    }
+
+    /// `rebalance_and_move(rf > 1)` is rejected up front even on a bare (RF=1) cluster: the sweep
+    /// moves only PRIMARY diffs and preserves committed replica lists, so an rf>1 request would
+    /// plan replica placements it never creates and still report convergence — reject the request
+    /// rather than silently honor half of it (codex-flagged; the ADR-090 deferral).
+    #[test]
+    fn rebalance_and_move_rejects_rf_parameter_above_one() {
+        use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
+        use crate::normalize::Normalizer;
+
+        let queries: Vec<(u64, String)> = vec![(1, "+nike +shoe".into()), (2, "+sony +tv".into())];
+        let cluster = ClusterEngine::build(
+            Normalizer::default_vocab().expect("vocab"),
+            &ClusterConfig {
+                num_shards: 2,
+                ..ClusterConfig::default()
+            },
+            &queries,
+        )
+        .expect("in-process bare cluster");
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        match cluster.rebalance_and_move(2, rt.handle()) {
+            Err(ShardError::Config(msg)) => {
+                assert!(
+                    msg.contains("rebalance_and_move") && msg.contains("replication factor > 1"),
+                    "the reject names the operation and the reason: {msg}"
+                );
+            }
+            other => panic!("rf=2 rebalance_and_move must be rejected with Config, got {other:?}"),
         }
     }
 }

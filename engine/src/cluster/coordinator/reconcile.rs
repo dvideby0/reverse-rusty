@@ -128,14 +128,17 @@ impl ClusterEngine {
     /// de-replicate — deferred, ADR-090). Fails closed only on a control-plane READ failure (the driver
     /// logs + retries next pass); per-position move failures land in the report, not as an `Err`.
     pub fn reconcile(&self, rf: usize, handle: &Handle) -> Result<ReconcileReport, ShardError> {
-        // Data-moving reconciliation of a REPLICATED cluster is not supported (same reason as
-        // reassign_and_move: a single-`RemoteShard` move would de-replicate the position). Fail fast
-        // with a clear controller-level message rather than letting every per-position move reject.
-        if self.replication_factor > 1 {
+        // Data-moving reconciliation at replication factor > 1 is not supported — neither of a
+        // REPLICATED cluster (same reason as reassign_and_move: a single-`RemoteShard` move would
+        // de-replicate the position) nor of an `rf > 1` REQUEST on a bare cluster (the pass would
+        // plan replica placements it never creates — only primaries move — and still report
+        // convergence: a silent contract violation). Fail fast with a clear controller-level
+        // message rather than letting every per-position move reject.
+        if rf > 1 || self.replication_factor > 1 {
             return Err(ShardError::Config(format!(
-                "reconcile: data-moving reconciliation of a replicated cluster \
-                 (replication_factor = {}) is not yet supported (ADR-090/092); RF>1 needs the target \
-                 replica group re-recovered first",
+                "reconcile: data-moving reconciliation at replication factor > 1 is not yet \
+                 supported (ADR-090/092): requested rf = {rf}, cluster replication_factor = {}; \
+                 RF>1 needs the target replica group re-recovered first",
                 self.replication_factor
             )));
         }
@@ -269,33 +272,54 @@ mod tests {
         }
     }
 
-    /// RF>1 is rejected up front (ADR-090/092): a replicated position's single-`RemoteShard` move
-    /// would de-replicate it. Controller-level, so the driver loop gets ONE clear error rather than
-    /// K per-position rejects.
+    /// RF>1 is rejected up front (ADR-090/092), BOTH ways round: a replicated cluster's
+    /// single-`RemoteShard` move would de-replicate it, and an `rf > 1` REQUEST on a bare cluster
+    /// would plan replica placements the primary-only sweep never creates while still reporting
+    /// convergence (the codex-flagged silent contract violation). Controller-level, so the driver
+    /// loop gets ONE clear error rather than K per-position rejects.
     #[test]
-    fn reconcile_rejects_replicated_cluster() {
+    fn reconcile_rejects_rf_above_one_cluster_and_parameter() {
         use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
         use crate::cluster::shard::ShardError;
         use crate::normalize::Normalizer;
 
+        let queries: Vec<(u64, String)> = vec![(1, "+nike +shoe".into()), (2, "+sony +tv".into())];
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let expect_reject = |cluster: &ClusterEngine, rf: usize, case: &str| match cluster
+            .reconcile(rf, rt.handle())
+        {
+            Err(ShardError::Config(msg)) => {
+                assert!(
+                    msg.contains("reconcile") && msg.contains("replication factor > 1"),
+                    "{case}: the reject names the operation and the reason: {msg}"
+                );
+            }
+            other => panic!("{case}: must be rejected with Config, got {other:?}"),
+        };
+
+        // A replicated CLUSTER is rejected regardless of the requested rf.
         let cfg = ClusterConfig {
             num_shards: 2,
             replication_factor: 2,
             ..ClusterConfig::default()
         };
-        let queries: Vec<(u64, String)> = vec![(1, "+nike +shoe".into()), (2, "+sony +tv".into())];
-        let cluster =
+        let replicated =
             ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), &cfg, &queries)
                 .expect("in-process replicated cluster");
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        match cluster.reconcile(2, rt.handle()) {
-            Err(ShardError::Config(msg)) => {
-                assert!(
-                    msg.contains("replicated") && msg.contains("reconcile"),
-                    "the reject names the operation and the reason: {msg}"
-                );
-            }
-            other => panic!("RF>1 reconcile must be rejected with Config, got {other:?}"),
-        }
+        expect_reject(&replicated, 2, "replicated cluster, rf=2");
+        expect_reject(&replicated, 1, "replicated cluster, rf=1");
+
+        // An rf>1 REQUEST is rejected even on a bare (RF=1) cluster — the pass would otherwise
+        // converge primaries and silently skip the planned replicas.
+        let bare = ClusterEngine::build(
+            Normalizer::default_vocab().expect("vocab"),
+            &ClusterConfig {
+                num_shards: 2,
+                ..ClusterConfig::default()
+            },
+            &queries,
+        )
+        .expect("in-process bare cluster");
+        expect_reject(&bare, 2, "bare cluster, rf=2");
     }
 }
