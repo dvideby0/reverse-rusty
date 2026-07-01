@@ -20,9 +20,15 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
-# Number of shard StatefulSet replicas (the data plane). Each shard is an
-# independent position; entity-anchor sharding fans a read to ~2-5 shards, never all N.
+# Number of shard StatefulSet replicas (the data plane). Each pod hosts ONE position by
+# default (1:1); entity-anchor sharding fans a read to ~2-5 shards, never all N.
 shardCount: 3
+# FEWER PODS THAN SHARDS (co-location, ADR-093): a pod can host many positions keyed by
+# shard-id, so K positions run on N<K pods — expressed by REPEATING a shard endpoint in
+# the coordinator's --shard-endpoint list. This chart models 1:1 at v1 (shardCount pods =
+# positions); to co-locate, run fewer shard pods and give the coordinator extra repeated
+# --shard-endpoint args (positions-per-pod), with control --shards = the POSITION count.
+# Documented in the runbook; the default stays 1:1 so shardCount isn't a silent half-knob.
 # RF>1 (a replica per shard position) is NOT modeled by this chart at v1 — it needs a
 # replica StatefulSet per position + the coordinator's --replication-factor. Documented
 # in the runbook; left at 1 here so the value isn't a silent no-op.

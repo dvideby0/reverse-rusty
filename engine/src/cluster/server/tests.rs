@@ -453,7 +453,53 @@ fn metrics_render_the_hosted_nonzero_slot() {
 
     let body = srv.metrics_source().render();
     assert!(
-        body.contains("reverse_rusty_shard_ready 1"),
-        "a node hosting a non-zero slot must report ready + real metrics; got:\n{body}"
+        body.contains("reverse_rusty_shard_ready{shard=\"2\"} 1"),
+        "a node hosting a non-zero slot must report ready + real metrics for THAT slot (ADR-093 \
+         Stage 3: series are per-shard labeled); got:\n{body}"
+    );
+}
+
+/// ADR-093 Stage 3: a CO-LOCATED node (many slots) renders one `{shard="<id>"}` series per hosted
+/// slot in ONE exposition — each family header written once. A Stage-1 slot-scoped `/_metrics` would
+/// have reported only one of the node's shards.
+#[test]
+fn metrics_aggregate_over_colocated_slots() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let d = frozen_dict(&["1994 upper deck", "psa 10"], &n);
+    let (fp, tag_fp) = (d.fingerprint(), empty_tag_fp());
+
+    // This node hosts slots {0, 5}: slot 0 ships the dict, slot 5 is co-located via AddShard.
+    let srv = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
+    rt.block_on(srv.adopt_dict(adopt_req_shard(&d, 0)))
+        .expect("adopt slot 0");
+    rt.block_on(srv.add_shard(add_shard_req(5, fp, tag_fp)))
+        .expect("add co-located slot 5");
+    rt.block_on(srv.insert_extracted(insert_req(0, 10, "psa 10")))
+        .expect("write slot 0");
+    rt.block_on(srv.insert_extracted(insert_req(5, 15, "psa 10")))
+        .expect("write slot 5");
+
+    let body = srv.metrics_source().render();
+    // Both co-located slots report ready + their own series (sorted: 0 then 5).
+    assert!(
+        body.contains("reverse_rusty_shard_ready{shard=\"0\"} 1"),
+        "slot 0 missing; got:\n{body}"
+    );
+    assert!(
+        body.contains("reverse_rusty_shard_ready{shard=\"5\"} 1"),
+        "co-located slot 5 missing (a slot-scoped renderer would drop it); got:\n{body}"
+    );
+    assert_eq!(
+        body.matches("reverse_rusty_shard_ready{shard=").count(),
+        2,
+        "exactly two labeled ready series (one per co-located slot); got:\n{body}"
+    );
+    // The family header is emitted exactly once across both slots (valid grouped exposition).
+    assert_eq!(
+        body.matches("# TYPE reverse_rusty_total_queries gauge")
+            .count(),
+        1,
+        "each family header must appear once, not once per slot; got:\n{body}"
     );
 }

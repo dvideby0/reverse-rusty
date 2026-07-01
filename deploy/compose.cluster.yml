@@ -106,6 +106,21 @@ services:
   #     --shard-endpoint https://shard0:50051,https://shard0r:50051
   # NOTE: a fresh replica is assembled as in-sync without recovery — bring replicas up
   # from a recovered/same volume, not an empty one (cluster-deployment.md §6).
+  #
+  # FEWER PODS THAN SHARDS (co-location, ADR-093 Stage 2/3): a node hosts MANY shards
+  # keyed by shard-id (= position), so K positions can run on N<K pods — express it by
+  # REPEATING a shard endpoint in the coordinator's --shard-endpoint list (no CLI/image
+  # change; the coordinator adopts the node dict once and adds the extra slots). E.g.
+  # K=4 positions on the 2 pods shard0 + shard1:
+  #   server --cluster ... \
+  #     --shard-endpoint https://shard0:50051   # position 0
+  #     --shard-endpoint https://shard1:50051   # position 1
+  #     --shard-endpoint https://shard0:50051   # position 2 -> co-located on shard0
+  #     --shard-endpoint https://shard1:50051   # position 3 -> co-located on shard1
+  # control0..2 --shards must equal the POSITION count (4 here), not the pod count. Each
+  # co-located slot is independently fenced/relocatable, so an HRW rebalance moves one
+  # position without touching the pod's others (ADR-093 Stage 3). Its /_metrics reports
+  # one series per hosted slot, labeled shard="<id>" (ADR-091 + ADR-093).
 
   # --- The coordinator: the REST API over the cluster (ADR-070). ---------------
   # A REMOTE coordinator is STATELESS — durability lives on the shard nodes — so it

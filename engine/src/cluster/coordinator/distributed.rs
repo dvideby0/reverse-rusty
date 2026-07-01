@@ -268,24 +268,19 @@ impl ClusterEngine {
         let mut handoffs: Vec<Arc<HandoffShard>> = Vec::with_capacity(groups.len());
         // ONE shared transport-metrics collector (ADR-085); see `connect_remote_with_security`.
         let metrics = Arc::new(TransportMetrics::new());
+        // CO-LOCATION (ADR-093 Stage 3): a primary and/or replicas of different positions may share
+        // one endpoint (fewer pods than shards × RF). The FIRST connection to each distinct endpoint
+        // ships+adopts the node dict; every LATER slot on that node reuses it via a lightweight
+        // `AddShard` (no dict re-ship / re-deserialize). This set spans BOTH primaries and replicas
+        // across all groups, so a node hosting e.g. pos-0's primary and pos-1's replica adopts once
+        // and gains its second slot via `AddShard` (which keys on the node dict, not the shard-id).
+        let mut adopted: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (position, g) in groups.iter().enumerate() {
             // A replica hosts the SAME global position (shard-id) as its primary (ADR-093).
             let shard_id = position as u32;
-            let primary = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
-                &g.primary,
-                handle.clone(),
-                dict_bytes.clone(),
-                expected,
-                tag_dict_bytes.clone(),
-                expected_tag,
-                shard_id,
-                &security,
-            )?
-            .with_metrics(Arc::clone(&metrics));
-            let mut replicas: Vec<Box<dyn Shard>> = Vec::with_capacity(g.replicas.len());
-            for ep in &g.replicas {
-                let r = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
-                    ep,
+            let primary = if adopted.insert(g.primary.as_str()) {
+                crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                    &g.primary,
                     handle.clone(),
                     dict_bytes.clone(),
                     expected,
@@ -294,6 +289,40 @@ impl ClusterEngine {
                     shard_id,
                     &security,
                 )?
+            } else {
+                crate::cluster::remote::RemoteShard::connect_and_add_shard_with_security(
+                    &g.primary,
+                    handle.clone(),
+                    expected,
+                    expected_tag,
+                    shard_id,
+                    &security,
+                )?
+            }
+            .with_metrics(Arc::clone(&metrics));
+            let mut replicas: Vec<Box<dyn Shard>> = Vec::with_capacity(g.replicas.len());
+            for ep in &g.replicas {
+                let r = if adopted.insert(ep.as_str()) {
+                    crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                        ep,
+                        handle.clone(),
+                        dict_bytes.clone(),
+                        expected,
+                        tag_dict_bytes.clone(),
+                        expected_tag,
+                        shard_id,
+                        &security,
+                    )?
+                } else {
+                    crate::cluster::remote::RemoteShard::connect_and_add_shard_with_security(
+                        ep,
+                        handle.clone(),
+                        expected,
+                        expected_tag,
+                        shard_id,
+                        &security,
+                    )?
+                }
                 .with_metrics(Arc::clone(&metrics));
                 replicas.push(Box::new(r) as Box<dyn Shard>);
             }

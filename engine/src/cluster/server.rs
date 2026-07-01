@@ -647,10 +647,9 @@ fn finalized_empty_tag_dict() -> TagDict {
 /// outlives the `serve` call that consumes the server. `Send + 'static` so the deploy bin can move it
 /// into the metrics listener's render closure.
 pub struct ShardMetricsSource {
-    /// A shared clone of the server's shard map. Stage 1 hosts exactly one slot per node — its position,
-    /// which is NOT necessarily 0 (a node serving position 3 hosts slot 3, not slot 0) — so metrics
-    /// render THAT slot. A per-node aggregate over co-located slots is an explicit ADR-093 Stage 2
-    /// follow-on, not this PR.
+    /// A shared clone of the server's shard map. A node may host many co-located slots (ADR-093), so
+    /// `render` emits one `{shard="<id>"}`-labeled series per LOADED slot (Stage 3). A node serving a
+    /// single non-zero position renders exactly that slot; a pending node renders the not-ready body.
     shards: ShardMap,
 }
 
@@ -659,25 +658,34 @@ impl ShardMetricsSource {
     /// (metrics + segment infos + class counts from the same point-in-time) off the engine write
     /// lock; a pending (not-yet-adopted) server reports only `reverse_rusty_shard_ready 0`.
     pub fn render(&self) -> String {
-        // The hosted slot (any loaded one — in the 1:1 deployment there is exactly one, at this node's
-        // position, which may be non-zero). Looking up slot 0 specifically would report a non-zero
-        // position node as pending even while it serves traffic (codex review).
-        let slot = self
-            .shards
-            .read()
-            .ok()
-            .and_then(|m| m.values().find_map(|s| s.state.load_full()));
-        match slot {
-            Some(st) => {
-                let snap = st.shard.metrics_snapshot();
-                super::node_metrics::render_shard(
-                    &snap.metrics(),
-                    &snap.segment_infos(),
-                    snap.class_counts(),
-                    true,
-                )
+        // ALL loaded slots this node hosts (ADR-093 multi-shard): a co-located node renders one
+        // `{shard="<id>"}` series per slot. Collect an `Arc<ServerState>` handle to each loaded slot
+        // under the map read-lock, then DROP the lock before snapshotting — mirroring the RPC
+        // handlers, which never hold the map lock across engine work. Sorted by shard-id so the
+        // exposition is deterministic across scrapes. A poisoned lock ⇒ the pending body.
+        let loaded: Vec<(u32, Arc<ServerState>)> = match self.shards.read() {
+            Ok(map) => {
+                let mut v: Vec<(u32, Arc<ServerState>)> = map
+                    .iter()
+                    .filter_map(|(&id, slot)| slot.state.load_full().map(|st| (id, st)))
+                    .collect();
+                v.sort_unstable_by_key(|(id, _)| *id);
+                v
             }
-            None => super::node_metrics::render_shard_pending(),
-        }
+            Err(_) => return super::node_metrics::render_shard_pending(),
+        };
+        let samples: Vec<super::node_metrics::ShardSample> = loaded
+            .into_iter()
+            .map(|(id, st)| {
+                let snap = st.shard.metrics_snapshot();
+                super::node_metrics::ShardSample {
+                    shard_id: id,
+                    metrics: snap.metrics(),
+                    segments: snap.segment_infos(),
+                    class: snap.class_counts(),
+                }
+            })
+            .collect();
+        super::node_metrics::render_shards(&samples)
     }
 }

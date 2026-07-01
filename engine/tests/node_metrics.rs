@@ -50,21 +50,25 @@ fn populated_shard_metrics_report_real_numbers() {
 
     let body = server.metrics_source().render();
 
-    // Adopted/serving, and total_queries reflects every ingested query — the numbers are REAL.
+    // Adopted/serving, and total_queries reflects every ingested query — the numbers are REAL. This
+    // node hosts slot 0, so series carry the ADR-093 per-shard label `shard="0"`.
     assert!(
-        body.contains("reverse_rusty_shard_ready 1"),
+        body.contains("reverse_rusty_shard_ready{shard=\"0\"} 1"),
         "expected ready; got:\n{body}"
     );
     assert!(
-        body.contains(&format!("reverse_rusty_total_queries {}\n", queries.len())),
+        body.contains(&format!(
+            "reverse_rusty_total_queries{{shard=\"0\"}} {}\n",
+            queries.len()
+        )),
         "expected total_queries={}; got:\n{body}",
         queries.len()
     );
     // Every cost-class series is present (the broad lane is class c).
-    assert!(body.contains("reverse_rusty_class_queries{class=\"c\"}"));
+    assert!(body.contains("reverse_rusty_class_queries{shard=\"0\",class=\"c\"}"));
     // Memory + feature gauges are present and non-trivial.
-    assert!(body.contains("reverse_rusty_memory_bytes{component=\"exact\"}"));
-    assert!(body.contains("reverse_rusty_dict_features"));
+    assert!(body.contains("reverse_rusty_memory_bytes{shard=\"0\",component=\"exact\"}"));
+    assert!(body.contains("reverse_rusty_dict_features{shard=\"0\"}"));
     assert!(body.contains("# TYPE reverse_rusty_total_queries gauge"));
 }
 
