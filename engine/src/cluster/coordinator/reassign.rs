@@ -41,12 +41,16 @@ use std::sync::PoisonError;
 
 use tokio::runtime::Handle;
 
-use crate::cluster::allocator;
-use crate::cluster::control::{ClusterState, NodeId, NodeRole, ShardAssignment};
+use crate::cluster::control::{NodeId, ShardAssignment};
 use crate::cluster::shard::ShardError;
 use crate::events::{DurabilityOp, EngineEvent};
 
 use super::ClusterEngine;
+
+/// Group-aware (RF>1) data-moving reassignment — `rebalance_group_targets` +
+/// `ClusterEngine::reassign_group_and_move` (ADR-094).
+mod group;
+pub(in crate::cluster::coordinator) use group::rebalance_group_targets;
 
 /// Bounded retries of the `AssignShard` commit after a successful move, so a transient control-plane
 /// blip (e.g. a real quorum mid-leader-change) doesn't strand a successful move uncommitted. The
@@ -97,47 +101,6 @@ pub struct RebalanceMoveReport {
     pub not_attempted: Vec<u32>,
 }
 
-/// The positions a [`ClusterEngine::rebalance_and_move`] (and the unattended
-/// [`reconcile`](ClusterEngine::reconcile), ADR-092) must MOVE: those whose **primary** differs
-/// between the committed map and the HRW desired map (a data move), in ascending position order.
-/// Pure over the cluster-state document + `rf` (no gRPC, no engine handle), so the diff/ordering is
-/// unit-tested directly. Replica-only diffs are intentionally excluded — they are not a data move
-/// (the map-only `rebalance` handles them); the RF=1 remote path has no replicas anyway. Empty for an
-/// in-process / genesis cluster (no addr'd data nodes) — the byte-identical no-op for those paths.
-pub(in crate::cluster::coordinator) fn rebalance_targets(
-    state: &ClusterState,
-    rf: usize,
-) -> Vec<(u32, NodeId)> {
-    // Plan ONLY over data nodes with a registered endpoint. The genesis/control-plane manager
-    // (`NodeId(0)`, typically addr-less) is not a data placement target; including it would let HRW
-    // pick it as a desired primary, producing a move-to-the-manager that fails on the missing endpoint
-    // instead of balancing across data nodes.
-    let nodes: Vec<NodeId> = state
-        .nodes
-        .iter()
-        .filter(|n| n.role == NodeRole::Data && n.addr.is_some())
-        .map(|n| n.id)
-        .collect();
-    if nodes.is_empty() {
-        return Vec::new();
-    }
-    let desired = allocator::plan_assignments(&nodes, state.num_shards, rf);
-    let current_primary = |pos: u32| -> Option<NodeId> {
-        state
-            .assignments
-            .iter()
-            .find(|a| a.position == pos)
-            .map(|a| a.primary)
-    };
-    let mut targets: Vec<(u32, NodeId)> = desired
-        .iter()
-        .filter(|a| current_primary(a.position) != Some(a.primary))
-        .map(|a| (a.position, a.primary))
-        .collect();
-    targets.sort_by_key(|(pos, _)| *pos);
-    targets
-}
-
 impl ClusterEngine {
     /// Move shard `position`'s data to node `to` AND commit the new owner — the data-moving analogue
     /// of [`reassign_shard`](Self::reassign_shard) (ADR-090). Resolves `from` (the current committed
@@ -159,7 +122,9 @@ impl ClusterEngine {
     /// **Supported topology: a single active coordinator** (the v1 deployment). The `reassign_serial`
     /// guard serializes this coordinator's moves; cross-coordinator atomicity of the primary check +
     /// commit needs a control-plane conditional-propose primitive (deferred — see the module docs).
-    /// **RF>1 is rejected** (a replicated position's move would de-replicate it — deferred). Requires a
+    /// **A position with committed replicas is rejected** (a single-target move would de-replicate
+    /// it) — the group-aware [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094)
+    /// moves a replicated position. Requires a
     /// handoff-capable cluster (built via [`connect_remote`](Self::connect_remote)); an in-process
     /// cluster has one node owning every position, so `from == to` short-circuits to a no-op.
     pub fn reassign_and_move(
@@ -176,20 +141,6 @@ impl ClusterEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
 
-        // Data-moving reassignment of a REPLICATED position is not yet supported (ADR-090): the move
-        // (`execute_handoff`) swaps the position to a SINGLE `RemoteShard` for `to`, dropping the
-        // replica group, while the committed map would still advertise the old replicas — so a
-        // failover could read a replica that no longer receives writes (stale). Reject loudly rather
-        // than silently de-replicate; RF>1 reassignment needs the target group re-recovered (deferred).
-        if self.replication_factor > 1 {
-            return Err(ShardError::Config(format!(
-                "reassign_and_move: data-moving reassignment of a replicated cluster \
-                 (replication_factor = {}) is not yet supported (ADR-090); RF>1 needs the target \
-                 replica group re-recovered first",
-                self.replication_factor
-            )));
-        }
-
         let state = self.control_state()?;
         let pos = position as u32;
         let assignment = state
@@ -203,6 +154,21 @@ impl ClusterEngine {
             })?;
         let from = assignment.primary;
         let prev_replicas = assignment.replicas.clone();
+        // A single-target move of a REPLICATED position is ambiguous and unsafe (ADR-090/094): the
+        // move (`execute_handoff`) swaps the position to a SINGLE `RemoteShard` for `to`, dropping
+        // the replica group, while the committed map would still advertise the old replicas — so a
+        // failover could read a replica that no longer receives writes (stale). The guard is
+        // PER-POSITION (the committed entry, not the cluster's replication factor): a bare position
+        // on a replicated cluster is a plain single-shard move, and a replicated position has the
+        // group-aware [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094).
+        if !prev_replicas.is_empty() {
+            return Err(ShardError::Config(format!(
+                "reassign_and_move: shard position {position} has {} committed replica(s); a \
+                 single-target move would de-replicate it — use reassign_group_and_move (or \
+                 rebalance_and_move / reconcile, which dispatch group moves) instead (ADR-094)",
+                prev_replicas.len()
+            )));
+        }
 
         // Resolve node ids → endpoints. Fail-closed (never silently skip an unroutable node — that
         // would route a title nowhere). Mirrors `resolve_topology`'s stance.
@@ -319,9 +285,14 @@ impl ClusterEngine {
         })
     }
 
-    /// Data-moving analogue of [`rebalance`](Self::rebalance) (ADR-090): recompute the desired HRW
-    /// shard→node map at replication factor `rf`, then [`reassign_and_move`](Self::reassign_and_move)
-    /// each position whose **primary** changes — **sequentially**, in position order.
+    /// Data-moving analogue of [`rebalance`](Self::rebalance) (ADR-090/094): recompute the desired
+    /// HRW shard→node map at replication factor `rf`, then move each position whose **group**
+    /// (primary or replica set) changes — **sequentially**, in position order. Dispatch is by
+    /// SHAPE: a bare→bare change runs the proven single-shard
+    /// [`reassign_and_move`](Self::reassign_and_move) byte-identically (the RF=1 path); any change
+    /// touching replicas runs the group-aware
+    /// [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094), so an `rf > 1` sweep
+    /// creates the replica placements it plans — closing the ADR-090 RF>1 deferral.
     ///
     /// Sequential is required: an HRW reshuffle can chain (position `p`: F→T while position `q`: T→U),
     /// and running them concurrently would have T serve as a handoff target and source at once — the
@@ -329,44 +300,41 @@ impl ClusterEngine {
     /// returns a [`RebalanceMoveReport`] (fail-forward / resume — already-moved positions are each
     /// consistent, so a partial rebalance is a valid resumable state, never a false negative). A hard
     /// pre-flight error (no nodes, control-plane read failure) is an `Err`; per-position failures land
-    /// in the report. Replica-only diffs are not a data move and stay with the map-only `rebalance`
-    /// (the RF=1 remote path — the only one [`connect_remote`](Self::connect_remote) supports — has no
-    /// replicas, so every changed position is a primary move there).
-    ///
-    /// **`rf > 1` is rejected up front** (like a replicated cluster): the sweep moves only PRIMARY
-    /// diffs and each move preserves the committed replica list, so an `rf > 1` request would plan
-    /// replica placements it never creates and still report convergence — a silent contract
-    /// violation, not a partial success. RF>1 data-moving needs the target replica group
-    /// re-recovered first (the ADR-090 deferral).
+    /// in the report.
     pub fn rebalance_and_move(
         &self,
         rf: usize,
         handle: &Handle,
     ) -> Result<RebalanceMoveReport, ShardError> {
-        if rf > 1 || self.replication_factor > 1 {
-            return Err(ShardError::Config(format!(
-                "rebalance_and_move: data-moving rebalance at replication factor > 1 is not yet \
-                 supported (ADR-090): requested rf = {rf}, cluster replication_factor = {}; the \
-                 sweep would converge primaries but silently skip the planned replica placements",
-                self.replication_factor
-            )));
-        }
         let state = self.control_state()?;
         if state.nodes.is_empty() {
             return Err(ShardError::ControlPlane(
                 "rebalance_and_move: the cluster has no nodes to place shards on".into(),
             ));
         }
-        // Positions whose PRIMARY moves (a data move), in deterministic position order.
-        let targets = rebalance_targets(&state, rf);
+        // Positions whose GROUP moves (a data move), in deterministic position order.
+        let targets = rebalance_group_targets(&state, rf);
 
         let mut report = RebalanceMoveReport::default();
-        for (i, (pos, to)) in targets.iter().enumerate() {
+        for (i, (pos, desired)) in targets.iter().enumerate() {
             let stop = |report: &mut RebalanceMoveReport, reason: String| {
                 report.failed = Some((*pos, reason));
                 report.not_attempted = targets[i + 1..].iter().map(|(p, _)| *p).collect();
             };
-            match self.reassign_and_move(*pos as usize, *to, handle) {
+            // Dispatch by shape: both committed and desired bare ⇒ the proven single-shard path;
+            // anything touching replicas ⇒ the group move.
+            let committed_bare = state
+                .assignments
+                .iter()
+                .find(|a| a.position == *pos)
+                .map(|a| a.replicas.is_empty())
+                .unwrap_or(true);
+            let outcome = if committed_bare && desired.replicas.is_empty() {
+                self.reassign_and_move(*pos as usize, desired.primary, handle)
+            } else {
+                self.reassign_group_and_move(*pos as usize, desired.clone(), handle)
+            };
+            match outcome {
                 Ok(ReassignOutcome::Moved { .. }) => report.moved.push(*pos),
                 // Resolved equal under us (a concurrent move already placed it): not a failure.
                 Ok(ReassignOutcome::NoChange { .. }) => {}
@@ -396,7 +364,8 @@ impl ClusterEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::control::{NodeDescriptor, NodeRole};
+    use crate::cluster::allocator;
+    use crate::cluster::control::{ClusterState, NodeDescriptor, NodeRole};
 
     fn node(id: u64) -> NodeDescriptor {
         NodeDescriptor {
@@ -433,7 +402,7 @@ mod tests {
         let desired = allocator::plan_assignments(&node_ids, num_shards, 1);
         let st = state_with(nodes, num_shards, desired);
         assert!(
-            rebalance_targets(&st, 1).is_empty(),
+            rebalance_group_targets(&st, 1).is_empty(),
             "an already-HRW-balanced map needs no moves"
         );
     }
@@ -442,7 +411,7 @@ mod tests {
     #[test]
     fn empty_membership_yields_no_targets() {
         let st = state_with(Vec::new(), 4, Vec::new());
-        assert!(rebalance_targets(&st, 1).is_empty());
+        assert!(rebalance_group_targets(&st, 1).is_empty());
     }
 
     /// Targets are exactly the positions whose PRIMARY changes, named with the HRW desired owner,
@@ -460,7 +429,10 @@ mod tests {
             })
             .collect();
         let st = state_with(nodes.clone(), num_shards, current);
-        let targets = rebalance_targets(&st, 1);
+        let targets: Vec<(u32, NodeId)> = rebalance_group_targets(&st, 1)
+            .into_iter()
+            .map(|(p, d)| (p, d.primary))
+            .collect();
         assert!(
             !targets.is_empty(),
             "HRW over 3 nodes must move some positions off node 1"
@@ -514,7 +486,10 @@ mod tests {
             })
             .collect();
         let st = state_with(nodes, num_shards, current);
-        let targets = rebalance_targets(&st, 1);
+        let targets: Vec<(u32, NodeId)> = rebalance_group_targets(&st, 1)
+            .into_iter()
+            .map(|(p, d)| (p, d.primary))
+            .collect();
         assert!(
             !targets.is_empty(),
             "HRW over the 2 eligible data nodes still moves some positions off node 1"
@@ -527,12 +502,14 @@ mod tests {
         }
     }
 
-    /// `rebalance_and_move(rf > 1)` is rejected up front even on a bare (RF=1) cluster: the sweep
-    /// moves only PRIMARY diffs and preserves committed replica lists, so an rf>1 request would
-    /// plan replica placements it never creates and still report convergence — reject the request
-    /// rather than silently honor half of it (codex-flagged; the ADR-090 deferral).
+    /// An `rf > 1` sweep is no longer rejected up front (ADR-094 replaces the ADR-092-landing
+    /// guard): `rebalance_and_move(2, ..)` computes GROUP targets and dispatches each replicated
+    /// placement to `reassign_group_and_move`. Here the first group move fails cleanly +
+    /// network-free (the committed primary is the addr-less manager) and the sweep stops-on-first
+    /// as documented — proving the rf=2 request flows down the group path rather than erroring
+    /// the whole call.
     #[test]
-    fn rebalance_and_move_rejects_rf_parameter_above_one() {
+    fn rebalance_and_move_rf2_dispatches_group_moves() {
         use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
         use crate::normalize::Normalizer;
 
@@ -546,15 +523,34 @@ mod tests {
             &queries,
         )
         .expect("in-process bare cluster");
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        match cluster.rebalance_and_move(2, rt.handle()) {
-            Err(ShardError::Config(msg)) => {
-                assert!(
-                    msg.contains("rebalance_and_move") && msg.contains("replication factor > 1"),
-                    "the reject names the operation and the reason: {msg}"
-                );
-            }
-            other => panic!("rf=2 rebalance_and_move must be rejected with Config, got {other:?}"),
+        for id in [1u64, 2] {
+            cluster
+                .register_node(NodeDescriptor {
+                    id: NodeId(id),
+                    addr: Some(format!("http://127.0.0.1:{id}")),
+                    role: NodeRole::Data,
+                })
+                .expect("register node");
         }
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let report = cluster
+            .rebalance_and_move(2, rt.handle())
+            .expect("rf=2 sweep runs (per-position failures land in the report)");
+        let (pos, msg) = report
+            .failed
+            .as_ref()
+            .expect("the first group move fails loudly");
+        assert!(
+            msg.contains("reassign_group_and_move"),
+            "an rf=2 target with replicas dispatches to the GROUP move: {msg}"
+        );
+        assert!(
+            report.moved.is_empty(),
+            "nothing moved (the manager primary has no endpoint): {report:?}"
+        );
+        assert!(
+            report.not_attempted.iter().all(|p| p != pos),
+            "stop-on-first: the failed position is not also listed as not-attempted"
+        );
     }
 }

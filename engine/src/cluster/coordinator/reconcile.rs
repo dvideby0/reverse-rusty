@@ -34,7 +34,7 @@ use tokio::runtime::Handle;
 use crate::cluster::control::NodeId;
 use crate::cluster::shard::ShardError;
 
-use super::reassign::{rebalance_targets, ReassignOutcome};
+use super::reassign::{rebalance_group_targets, ReassignOutcome};
 use super::ClusterEngine;
 
 /// One [`ClusterEngine::reconcile`] pass's outcome (ADR-092). Every position is independent and
@@ -77,8 +77,9 @@ impl ReconcileReport {
 pub struct ReconcileConfig {
     /// Master switch. `false` (the default) ⇒ no reconcile loop runs.
     pub enabled: bool,
-    /// The replication factor passed to [`ClusterEngine::reconcile`] (→ HRW `plan_assignments`). The
-    /// RF=1 remote path is the only supported one today.
+    /// The replication factor passed to [`ClusterEngine::reconcile`] (→ HRW `plan_assignments`).
+    /// The server wires the cluster's real `replication_factor`; at rf>1 each diverging position's
+    /// whole GROUP is converged via the ADR-094 group move.
     pub rf: usize,
     /// Wall-clock minimum between reconcile passes — the THRASH GUARD. Each move is `O(corpus)`, so a
     /// membership-flap storm must not re-move on every edge; the loop sleeps at least this long between
@@ -98,12 +99,17 @@ impl Default for ReconcileConfig {
 }
 
 impl ClusterEngine {
-    /// Reconcile the committed shard→node map to the desired HRW placement by **moving data** (ADR-092
-    /// — the unattended controller's primitive). Reads the committed state + membership, computes the
-    /// positions whose **primary** diverges from the HRW-desired map ([`rebalance_targets`]), and drives
-    /// the data-moving [`reassign_and_move`](Self::reassign_and_move) for each — SEQUENTIALLY in
-    /// position order (the same chained-reshuffle constraint `rebalance_and_move` obeys: a node cannot be
-    /// a fenced source and a recovery target at once).
+    /// Reconcile the committed shard→node map to the desired HRW placement by **moving data**
+    /// (ADR-092/094 — the unattended controller's primitive). Reads the committed state +
+    /// membership, computes the positions whose **group** (primary or replica set) diverges from
+    /// the HRW-desired map ([`rebalance_group_targets`]), and drives the data-moving move for
+    /// each — SEQUENTIALLY in position order (the same chained-reshuffle constraint
+    /// `rebalance_and_move` obeys: a node cannot be a fenced source and a recovery target at
+    /// once). Dispatch is by SHAPE: a bare→bare change runs the proven single-shard
+    /// [`reassign_and_move`](Self::reassign_and_move) byte-identically; any change touching
+    /// replicas runs the group-aware
+    /// [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094), so an `rf > 1`
+    /// reconcile creates and converges the replica placements it plans.
     ///
     /// ## Idempotent + unattended (differs from [`rebalance_and_move`](Self::rebalance_and_move))
     /// - **Idempotent / no-thrash:** a converged map yields an empty target set ⇒ zero moves ⇒ the
@@ -124,33 +130,32 @@ impl ClusterEngine {
     /// (the next pass re-targets the still-diverged position and re-drives the idempotent move).
     ///
     /// Returns an empty report (a clean no-op) for an in-process / genesis cluster — no addr'd data
-    /// nodes to place on, so `rebalance_targets` is empty. **RF>1 is rejected** (a replicated move would
-    /// de-replicate — deferred, ADR-090). Fails closed only on a control-plane READ failure (the driver
-    /// logs + retries next pass); per-position move failures land in the report, not as an `Err`.
+    /// nodes to place on, so [`rebalance_group_targets`] is empty. Fails closed only on a
+    /// control-plane READ failure (the driver logs + retries next pass); per-position move failures
+    /// land in the report, not as an `Err`.
     pub fn reconcile(&self, rf: usize, handle: &Handle) -> Result<ReconcileReport, ShardError> {
-        // Data-moving reconciliation at replication factor > 1 is not supported — neither of a
-        // REPLICATED cluster (same reason as reassign_and_move: a single-`RemoteShard` move would
-        // de-replicate the position) nor of an `rf > 1` REQUEST on a bare cluster (the pass would
-        // plan replica placements it never creates — only primaries move — and still report
-        // convergence: a silent contract violation). Fail fast with a clear controller-level
-        // message rather than letting every per-position move reject.
-        if rf > 1 || self.replication_factor > 1 {
-            return Err(ShardError::Config(format!(
-                "reconcile: data-moving reconciliation at replication factor > 1 is not yet \
-                 supported (ADR-090/092): requested rf = {rf}, cluster replication_factor = {}; \
-                 RF>1 needs the target replica group re-recovered first",
-                self.replication_factor
-            )));
-        }
-
         let state = self.control_state()?;
-        // Positions whose PRIMARY diverges from the HRW-desired placement (a data move), position
+        // Positions whose GROUP diverges from the HRW-desired placement (a data move), position
         // order. Empty for an in-process / genesis cluster (no addr'd data nodes) ⇒ a clean no-op.
-        let targets = rebalance_targets(&state, rf);
+        let targets = rebalance_group_targets(&state, rf);
 
         let mut report = ReconcileReport::default();
-        for (pos, to) in targets {
-            match self.reassign_and_move(pos as usize, to, handle) {
+        for (pos, desired) in targets {
+            let to = desired.primary;
+            // Dispatch by shape: both committed and desired bare ⇒ the proven single-shard path
+            // (byte-identical to the RF=1 reconcile); anything touching replicas ⇒ the group move.
+            let committed_bare = state
+                .assignments
+                .iter()
+                .find(|a| a.position == pos)
+                .map(|a| a.replicas.is_empty())
+                .unwrap_or(true);
+            let outcome = if committed_bare && desired.replicas.is_empty() {
+                self.reassign_and_move(pos as usize, to, handle)
+            } else {
+                self.reassign_group_and_move(pos as usize, desired, handle)
+            };
+            match outcome {
                 Ok(ReassignOutcome::Moved { .. }) => report.reconciled.push(pos),
                 // Resolved equal under us (a concurrent move already placed it) — not a failure.
                 Ok(ReassignOutcome::NoChange { .. }) => report.skipped.push(pos),
@@ -272,54 +277,62 @@ mod tests {
         }
     }
 
-    /// RF>1 is rejected up front (ADR-090/092), BOTH ways round: a replicated cluster's
-    /// single-`RemoteShard` move would de-replicate it, and an `rf > 1` REQUEST on a bare cluster
-    /// would plan replica placements the primary-only sweep never creates while still reporting
-    /// convergence (the codex-flagged silent contract violation). Controller-level, so the driver
-    /// loop gets ONE clear error rather than K per-position rejects.
+    /// An `rf > 1` reconcile is no longer rejected up front (ADR-094 replaces the ADR-092-landing
+    /// guard): the pass computes GROUP targets and dispatches each replicated placement to
+    /// `reassign_group_and_move`. Here every group move fails cleanly + network-free (the committed
+    /// primary is the addr-less manager), proving (a) rf=2 requests flow down the group path
+    /// rather than erroring the controller, and (b) the continue-past-failure semantics hold at
+    /// RF>1 — all K failures recorded, the pass never aborts.
     #[test]
-    fn reconcile_rejects_rf_above_one_cluster_and_parameter() {
+    fn reconcile_rf2_dispatches_group_moves_and_continues_past_failures() {
+        use crate::cluster::control::{NodeDescriptor, NodeRole};
         use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
-        use crate::cluster::shard::ShardError;
         use crate::normalize::Normalizer;
 
-        let queries: Vec<(u64, String)> = vec![(1, "+nike +shoe".into()), (2, "+sony +tv".into())];
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let expect_reject = |cluster: &ClusterEngine, rf: usize, case: &str| match cluster
-            .reconcile(rf, rt.handle())
-        {
-            Err(ShardError::Config(msg)) => {
-                assert!(
-                    msg.contains("reconcile") && msg.contains("replication factor > 1"),
-                    "{case}: the reject names the operation and the reason: {msg}"
-                );
-            }
-            other => panic!("{case}: must be rejected with Config, got {other:?}"),
-        };
-
-        // A replicated CLUSTER is rejected regardless of the requested rf.
-        let cfg = ClusterConfig {
-            num_shards: 2,
-            replication_factor: 2,
-            ..ClusterConfig::default()
-        };
-        let replicated =
-            ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), &cfg, &queries)
-                .expect("in-process replicated cluster");
-        expect_reject(&replicated, 2, "replicated cluster, rf=2");
-        expect_reject(&replicated, 1, "replicated cluster, rf=1");
-
-        // An rf>1 REQUEST is rejected even on a bare (RF=1) cluster — the pass would otherwise
-        // converge primaries and silently skip the planned replicas.
-        let bare = ClusterEngine::build(
+        let k = 3usize;
+        let queries: Vec<(u64, String)> = vec![
+            (1, "+nike +shoe".into()),
+            (2, "+sony +tv".into()),
+            (3, "+lego +set".into()),
+        ];
+        let cluster = ClusterEngine::build(
             Normalizer::default_vocab().expect("vocab"),
             &ClusterConfig {
-                num_shards: 2,
+                num_shards: k,
                 ..ClusterConfig::default()
             },
             &queries,
         )
-        .expect("in-process bare cluster");
-        expect_reject(&bare, 2, "bare cluster, rf=2");
+        .expect("in-process cluster");
+        for id in [1u64, 2] {
+            cluster
+                .register_node(NodeDescriptor {
+                    id: NodeId(id),
+                    addr: Some(format!("http://127.0.0.1:{id}")),
+                    role: NodeRole::Data,
+                })
+                .expect("register node");
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let report = cluster.reconcile(2, rt.handle()).expect("rf=2 pass runs");
+        assert_eq!(
+            report.failed.len(),
+            k,
+            "every rf=2 group move fails at the addr-less committed primary and is RECORDED — \
+             the pass continued past each: {report:?}"
+        );
+        assert!(
+            report.reconciled.is_empty()
+                && report.skipped.is_empty()
+                && report.uncommitted.is_empty(),
+            "nothing moved or committed: {report:?}"
+        );
+        for (_, msg) in &report.failed {
+            assert!(
+                msg.contains("reassign_group_and_move"),
+                "an rf=2 target with replicas dispatches to the GROUP move: {msg}"
+            );
+        }
     }
 }
