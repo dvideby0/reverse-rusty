@@ -27,7 +27,11 @@ pub(crate) struct Server {
     pub(crate) dir: PathBuf,
 }
 
-pub(crate) fn spin_durable(rt: &tokio::runtime::Runtime, norm: &Arc<Normalizer>, tag: &str) -> Server {
+pub(crate) fn spin_durable(
+    rt: &tokio::runtime::Runtime,
+    norm: &Arc<Normalizer>,
+    tag: &str,
+) -> Server {
     let dir = server_dir(tag);
     let (addr, jh) = {
         let _enter = rt.enter();
@@ -92,7 +96,11 @@ pub(crate) fn hrw_group(position: u32, nodes: &[u64], rf: usize) -> (u64, Vec<u6
 
 /// Register `servers[i]` as data node `i + 1`, then commit the position-preserving replicated map:
 /// `plan[pos] = (primary index, replica indexes)` into `servers` — where the data physically lives.
-pub(crate) fn seed_group_map(cluster: &ClusterEngine, servers: &[Server], plan: &[(usize, Vec<usize>)]) {
+pub(crate) fn seed_group_map(
+    cluster: &ClusterEngine,
+    servers: &[Server],
+    plan: &[(usize, Vec<usize>)],
+) {
     for (i, s) in servers.iter().enumerate() {
         cluster
             .register_node(NodeDescriptor {
@@ -161,7 +169,12 @@ pub(crate) fn converge_repairs(cluster: &ClusterEngine) {
     assert_eq!(cluster.pending_repairs(), 0, "fence-window writes converge");
 }
 
-pub(crate) fn assert_matches_oracle(cluster: &ClusterEngine, titles: &[String], oracle: &[HashSet<u64>], ctx: &str) {
+pub(crate) fn assert_matches_oracle(
+    cluster: &ClusterEngine,
+    titles: &[String],
+    oracle: &[HashSet<u64>],
+    ctx: &str,
+) {
     for (i, title) in titles.iter().enumerate() {
         let got: HashSet<u64> = cluster
             .percolate(title)
@@ -250,4 +263,3 @@ pub(crate) fn one_position_rf2(tag: &str, rt: &tokio::runtime::Runtime, cap0: bo
     seed_group_map(&cluster, &servers, &[(0usize, vec![1usize])]);
     (cluster, servers, titles, oracle, queries)
 }
-

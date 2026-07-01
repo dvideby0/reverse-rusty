@@ -327,12 +327,11 @@ impl ClusterEngine {
                 .assignments
                 .iter()
                 .find(|a| a.position == *pos)
-                .map(|a| a.replicas.is_empty())
-                .unwrap_or(true);
+                .is_none_or(|a| a.replicas.is_empty());
             let outcome = if committed_bare && desired.replicas.is_empty() {
                 self.reassign_and_move(*pos as usize, desired.primary, handle)
             } else {
-                self.reassign_group_and_move(*pos as usize, desired.clone(), handle)
+                self.reassign_group_and_move(*pos as usize, desired, handle)
             };
             match outcome {
                 Ok(ReassignOutcome::Moved { .. }) => report.moved.push(*pos),

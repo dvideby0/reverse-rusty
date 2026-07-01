@@ -96,7 +96,10 @@ fn replica_set_eq(a: &[NodeId], b: &[NodeId]) -> bool {
 }
 
 /// Group equality for placement purposes: primary by identity, replicas as a SET.
-pub(in crate::cluster::coordinator) fn groups_equal(a: &ShardAssignment, b: &ShardAssignment) -> bool {
+pub(in crate::cluster::coordinator) fn groups_equal(
+    a: &ShardAssignment,
+    b: &ShardAssignment,
+) -> bool {
     a.primary == b.primary && replica_set_eq(&a.replicas, &b.replicas)
 }
 
@@ -151,7 +154,7 @@ impl ClusterEngine {
     pub fn reassign_group_and_move(
         &self,
         position: usize,
-        desired: ShardAssignment,
+        desired: &ShardAssignment,
         handle: &Handle,
     ) -> Result<ReassignOutcome, ShardError> {
         // Serialize against every other data-moving op for the whole move-then-commit (the same
@@ -183,7 +186,7 @@ impl ClusterEngine {
             })?;
 
         // The idempotent no-op: the committed group already IS the desired placement.
-        if groups_equal(&committed, &desired) {
+        if groups_equal(&committed, desired) {
             return Ok(ReassignOutcome::NoChange { position: pos });
         }
 
@@ -261,9 +264,10 @@ impl ClusterEngine {
             // ---- Phase 2 (pre-fence): establish FRESH members, writes still flowing ----
             // `(node id, connection, member high-water)` for every D member established so far.
             let mut established: Vec<(u64, RemoteShard, LogPos)> = Vec::new();
-            for (nid, ep) in d_members.iter().filter(|(nid, _)| {
-                !committed_ids.contains(&nid.0)
-            }) {
+            for (nid, ep) in d_members
+                .iter()
+                .filter(|(nid, _)| !committed_ids.contains(&nid.0))
+            {
                 let t = RemoteShard::connect_and_adopt_with_security(
                     ep,
                     handle.clone(),
@@ -342,7 +346,7 @@ impl ClusterEngine {
                 }
 
                 // ---- Phase 5: drain FRESH members to the frozen tail ----
-                for (_, t, hwm) in established.iter_mut() {
+                for (_, t, hwm) in &mut established {
                     let mut converged = false;
                     for _ in 0..final_drain_cap.max(1) {
                         let next = catch_up_replica(t, &source, &self.norm, &self.dict, *hwm)?;
@@ -415,7 +419,13 @@ impl ClusterEngine {
                     Ok(Box::new(t))
                 };
                 let mut members = d_members.iter();
-                let (p_id, p_ep) = members.next().expect("D has a primary");
+                // Structurally non-empty (built primary-first above); fail typed, never panic
+                // (the no-`unwrap()`-in-library-code invariant).
+                let Some((p_id, p_ep)) = members.next() else {
+                    return Err(ShardError::Config(
+                        "reassign_group_and_move: desired group has no primary".into(),
+                    ));
+                };
                 let primary_conn = conn_of(*p_id, p_ep)?;
                 let mut replica_conns: Vec<Box<dyn Shard>> = Vec::new();
                 for (r_id, r_ep) in members {

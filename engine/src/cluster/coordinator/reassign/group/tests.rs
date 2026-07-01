@@ -2,7 +2,6 @@
 //! split from `group.rs` to keep it under the file-size goal.
 
 use super::*;
-use super::*;
 use crate::cluster::control::NodeDescriptor;
 
 fn node(id: u64) -> NodeDescriptor {
@@ -100,7 +99,11 @@ fn targets_cover_primary_replica_and_both_divergence() {
     let st = state_with(nodes, 6, committed);
     let targets = rebalance_group_targets(&st, 2);
     let target_positions: Vec<u32> = targets.iter().map(|(p, _)| *p).collect();
-    for expect in [desired[0].position, desired[1].position, desired[2].position] {
+    for expect in [
+        desired[0].position,
+        desired[1].position,
+        desired[2].position,
+    ] {
         assert!(
             target_positions.contains(&expect),
             "position {expect} diverges and must be a target: {target_positions:?}"
@@ -158,8 +161,14 @@ fn rf_clamps_to_addrd_node_count() {
 #[test]
 fn groups_equal_semantics() {
     let a = assign(0, 1, &[2, 3]);
-    assert!(groups_equal(&a, &assign(0, 1, &[3, 2])), "order-insensitive");
+    assert!(
+        groups_equal(&a, &assign(0, 1, &[3, 2])),
+        "order-insensitive"
+    );
     assert!(!groups_equal(&a, &assign(0, 2, &[1, 3])), "primary differs");
-    assert!(!groups_equal(&a, &assign(0, 1, &[2])), "replica set differs");
+    assert!(
+        !groups_equal(&a, &assign(0, 1, &[2])),
+        "replica set differs"
+    );
     assert!(groups_equal(&assign(0, 1, &[]), &assign(0, 1, &[])), "bare");
 }

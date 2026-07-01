@@ -35,7 +35,6 @@ use std::time::Duration;
 use reverse_rusty::cluster::{
     ClusterConfig, ClusterEngine, NodeDescriptor, NodeId, NodeRole, ShardAssignment, ShardGroup,
 };
-use reverse_rusty::normalize::Normalizer;
 
 use crate::harness::*;
 
@@ -100,7 +99,10 @@ fn grpc_reconcile_rf2_packed_converges_groups_failover_and_restart_zero_fn() {
     for p in 0..k as u32 {
         let (want_p, want_r) = hrw_group(p, &node_ids, 2);
         let (got_p, got_r) = group_of(&state, p);
-        assert_eq!(got_p, want_p, "position {p}: committed primary = HRW desired");
+        assert_eq!(
+            got_p, want_p,
+            "position {p}: committed primary = HRW desired"
+        );
         assert_eq!(
             got_r,
             want_r.into_iter().collect::<BTreeSet<u64>>(),
@@ -117,7 +119,10 @@ fn grpc_reconcile_rf2_packed_converges_groups_failover_and_restart_zero_fn() {
     // Unmoved positions keep their exact count (sibling-intactness across co-located moves).
     for p in 0..k {
         if !report.reconciled.contains(&(p as u32)) {
-            assert_eq!(counts1[p], counts0[p], "unmoved position {p} byte-identical");
+            assert_eq!(
+                counts1[p], counts0[p],
+                "unmoved position {p} byte-identical"
+            );
         }
     }
     assert_matches_oracle(&cluster, &titles, &oracle, "reconciled live cluster");
@@ -282,7 +287,7 @@ fn grpc_group_move_replica_only_zero_fn() {
         replicas: vec![NodeId(3)],
     };
     let outcome = cluster
-        .reassign_group_and_move(0, desired, rt.handle())
+        .reassign_group_and_move(0, &desired, rt.handle())
         .expect("replica-only group move");
     assert!(
         matches!(
@@ -329,7 +334,7 @@ fn grpc_group_move_promotion_zero_fn() {
         replicas: vec![NodeId(1)],
     };
     let outcome = cluster
-        .reassign_group_and_move(0, desired, rt.handle())
+        .reassign_group_and_move(0, &desired, rt.handle())
         .expect("promotion group move");
     assert!(
         matches!(
@@ -376,7 +381,12 @@ fn grpc_group_move_promotion_zero_fn() {
             s
         })
         .collect();
-    assert_matches_oracle(&cluster, &titles, &oracle_after, "post-promotion write visible");
+    assert_matches_oracle(
+        &cluster,
+        &titles,
+        &oracle_after,
+        "post-promotion write visible",
+    );
 
     // Kill the new primary B: the retained replica A must serve everything INCLUDING the post-move
     // write — proving A was re-established, unfenced, and receiving fan-out (a still-fenced A would
@@ -406,7 +416,7 @@ fn grpc_group_move_abort_rolls_back() {
     let err = cluster
         .reassign_group_and_move(
             0,
-            ShardAssignment {
+            &ShardAssignment {
                 position: 0,
                 primary: NodeId(1),
                 replicas: vec![NodeId(3)],
@@ -498,11 +508,16 @@ fn grpc_reconcile_rf2_continues_past_downed_target() {
     let victim = [2u64, 3, 4]
         .into_iter()
         .find(|&v| {
-            diverging.iter().any(|&p| in_group(p, v))
-                && diverging.iter().any(|&p| !in_group(p, v))
+            diverging.iter().any(|&p| in_group(p, v)) && diverging.iter().any(|&p| !in_group(p, v))
         })
-        .expect("setup: some non-source node must split the diverging targets (allocator changed?)");
-    let needs_victim: Vec<u32> = diverging.iter().copied().filter(|&p| in_group(p, victim)).collect();
+        .expect(
+            "setup: some non-source node must split the diverging targets (allocator changed?)",
+        );
+    let needs_victim: Vec<u32> = diverging
+        .iter()
+        .copied()
+        .filter(|&p| in_group(p, victim))
+        .collect();
     let victim_free: Vec<u32> = diverging
         .iter()
         .copied()
