@@ -6,9 +6,15 @@ proto `shard_id`, a shard-keyed `ShardServer` slot map, and per-shard fence/reco
 storage — fixing the codex P1, with the 1:1 deployment preserved. **Stage 2 (co-location) is built**
 (2026-07-01, branch `feat/multi-shard-stage2`): the `AddShard` RPC + a per-endpoint adoption dedup in
 `connect_remote` let several positions share one endpoint (fewer pods than shards) without re-shipping
-the dict — oracle-proven K-positions-on-N&lt;K-servers ≡ single-node ≡ brute. Stages 3–4 remain staged.
-ADR-092 (the unattended reconciler) is **parked** on the `feat/unattended-reconciler` branch — it is
-*not* on `main`, so it is referenced here as plain text, not a link, until it lands (Stage 4).
+the dict — oracle-proven K-positions-on-N&lt;K-servers ≡ single-node ≡ brute. **Stage 3 (per-shard
+relocation + RF&gt;1 failover) is built** (branch `feat/multi-shard-stage3`): the relocation *mechanics*
+were already threaded by Stages 1–2, so Stage 3 is the `connect_replicated` co-location dedup + the
+oracle that PROVES the no-clobber property — relocating one co-located shard leaves the node's others
+intact, HRW `rebalance_and_move` converges across a packed topology, and RF&gt;1 failover works across
+multi-shard nodes (all zero-FN) — plus per-node `/_metrics` slot-aggregation and a fewer-pods deploy
+example. Only Stage 4 remains staged. ADR-092 (the unattended reconciler) is **parked** on the
+`feat/unattended-reconciler` branch — it is *not* on `main`, so it is referenced here as plain text, not
+a link, until it lands (Stage 4).
 
 ## Context
 
@@ -148,10 +154,20 @@ fields stay (node-wide, carried on the recovery RPCs for content verification).
    `connect_replicated` (RF&gt;1) co-location + its replica-promotion oracle are deferred to Stage 3;
    per-node `/_metrics` aggregation over co-located slots and a Compose/Helm worked example are small
    follow-ons.
-3. **Per-shard relocation + failover.** `execute_handoff` moves one slot between nodes without touching
-   the node's other shards ⇒ `rebalance_and_move`/HRW become **safe** (the collision codex flagged is
-   gone — every move targets a distinct slot); RF&gt;1 replica promotion across multi-shard nodes. gRPC
-   oracle: relocate one of several co-located shards, assert the others are untouched + zero-FN.
+3. **Per-shard relocation + failover. ✅ BUILT (2026-07-01).** `execute_handoff` moves one slot between
+   nodes without touching the node's other shards ⇒ `rebalance_and_move`/HRW become **safe** (the
+   collision codex flagged is gone — every move targets a distinct slot); RF&gt;1 replica recovery across
+   multi-shard nodes. **Key finding:** the relocation mechanics were ALREADY threaded by Stages 1–2
+   (`execute_handoff` carries `shard_id = position` through every fence/recover/lease RPC; the server
+   recovers per-slot into `shard_<id>/`), so Stage 3's *code* delta is small — the `connect_replicated`
+   co-location dedup (mirror of `connect_remote`, so RF&gt;1 replicas co-locate without re-shipping the
+   dict) + per-node `/_metrics` slot-aggregation (`{shard="<id>"}`-labeled, one series per hosted slot).
+   The load-bearing work is the gRPC oracle that PROVES it: (a) relocate one of several co-located
+   shards, assert the sibling's count is byte-identical + zero-FN + a resolve-only restart + an
+   `open_durable` restart re-attaches both slots; (b) a full HRW `rebalance_and_move` over a packed
+   K=6/N=3 topology converges (no slot lost, fixpoint, zero-FN); (c) RF&gt;1 cross-replication (2 slots
+   per node) survives a whole-node loss (read failover) + peer-recovers a position onto a fresh node.
+   Parallel multi-position moves stay a follow-on (`rebalance_and_move` is sequential).
 4. **Rebase the reconciler (ADR-092, the parked branch) + the autoscaler** onto the
    now-safe foundation — the parked branch returns, correct, with the route-by-assignments gate (its P2)
    and no collision hazard (its P1, now structurally impossible).

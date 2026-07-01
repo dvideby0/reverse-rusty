@@ -116,100 +116,180 @@ fn push_escaped(out: &mut String, value: &str) {
 
 // ---- shard rendering ---------------------------------------------------------------------------
 
-/// Render a shard node's `/_metrics` body from a consistent engine snapshot. `class` is
-/// `[A, B, C, D]` stored-query counts; `ready` is whether the shard has adopted a dict.
+/// One hosted shard's live numbers for the per-node exposition (ADR-093). A co-located node passes
+/// one of these per LOADED slot to [`render_shards`]; `class` is `[A, B, C, D]` stored-query counts.
+pub(crate) struct ShardSample {
+    pub shard_id: u32,
+    pub metrics: EngineMetrics,
+    pub segments: Vec<SegmentInfo>,
+    pub class: [u64; 4],
+}
+
+/// Render a shard node's `/_metrics` body over ALL the node's loaded slots (ADR-093 multi-shard). A
+/// co-located node hosts many shards, so each `reverse_rusty_*` family emits its `# HELP`/`# TYPE`
+/// header ONCE, then one `{shard="<id>"}`-labeled series per hosted slot — valid *grouped* exposition
+/// (duplicating the header per slot would be malformed). A 1:1 node emits exactly one labeled series
+/// per family; dashboards keying on the bare metric name still match (the `shard` label is additive).
+/// No loaded slot ⇒ [`render_shard_pending`].
 ///
 /// Cluster shards are segments-only (no WAL), so `wal_*` read 0 — that is correct, not a bug; the
 /// live LSM-pressure signal on a shard is `tombstoned_entries` (compaction backlog) + `stale_segments`.
-pub(crate) fn render_shard(
-    m: &EngineMetrics,
-    segments: &[SegmentInfo],
-    class: [u64; 4],
-    ready: bool,
-) -> String {
+pub(crate) fn render_shards(samples: &[ShardSample]) -> String {
+    if samples.is_empty() {
+        return render_shard_pending();
+    }
     let mut e = Exposition::new();
-    e.gauge(
+    // `sample()` takes `&str`; pre-stringify each slot's shard-id label once (sorted by the caller).
+    let sids: Vec<String> = samples.iter().map(|s| s.shard_id.to_string()).collect();
+
+    e.header(
         "reverse_rusty_total_queries",
         "Stored queries on this shard (incl. tombstoned), like single-node total_queries.",
-        m.total_queries,
     );
-    e.gauge(
+    for (s, sid) in samples.iter().zip(&sids) {
+        e.sample(
+            "reverse_rusty_total_queries",
+            &[("shard", sid)],
+            s.metrics.total_queries,
+        );
+    }
+
+    e.header(
         "reverse_rusty_base_segments",
         "Sealed immutable base segments on this shard.",
-        m.base_segments,
     );
-    e.gauge(
+    for (s, sid) in samples.iter().zip(&sids) {
+        e.sample(
+            "reverse_rusty_base_segments",
+            &[("shard", sid)],
+            s.metrics.base_segments,
+        );
+    }
+
+    e.header(
         "reverse_rusty_memtable_entries",
         "Entries in the mutable memtable on this shard.",
-        m.memtable_entries,
     );
-    e.gauge(
+    for (s, sid) in samples.iter().zip(&sids) {
+        e.sample(
+            "reverse_rusty_memtable_entries",
+            &[("shard", sid)],
+            s.metrics.memtable_entries,
+        );
+    }
+
+    e.header(
         "reverse_rusty_dict_features",
         "Distinct features in the shared frozen dictionary.",
-        m.dict_features,
     );
+    for (s, sid) in samples.iter().zip(&sids) {
+        e.sample(
+            "reverse_rusty_dict_features",
+            &[("shard", sid)],
+            s.metrics.dict_features,
+        );
+    }
 
     e.header(
         "reverse_rusty_memory_bytes",
         "Resident heap memory by component on this shard.",
     );
-    for (component, bytes) in [
-        ("exact", m.exact_bytes),
-        ("index", m.index_bytes),
-        ("filter", m.filter_bytes),
-        ("dict", m.dict_bytes),
-        ("query_store", m.query_store_bytes),
-        ("logical_index", m.logical_index_bytes),
-        ("alive", m.alive_bytes),
-    ] {
+    for (s, sid) in samples.iter().zip(&sids) {
+        for (component, bytes) in [
+            ("exact", s.metrics.exact_bytes),
+            ("index", s.metrics.index_bytes),
+            ("filter", s.metrics.filter_bytes),
+            ("dict", s.metrics.dict_bytes),
+            ("query_store", s.metrics.query_store_bytes),
+            ("logical_index", s.metrics.logical_index_bytes),
+            ("alive", s.metrics.alive_bytes),
+        ] {
+            e.sample(
+                "reverse_rusty_memory_bytes",
+                &[("shard", sid), ("component", component)],
+                bytes,
+            );
+        }
+    }
+
+    e.header(
+        "reverse_rusty_wal_size_bytes",
+        "WAL size in bytes (0 on a segments-only cluster shard).",
+    );
+    for (s, sid) in samples.iter().zip(&sids) {
         e.sample(
-            "reverse_rusty_memory_bytes",
-            &[("component", component)],
-            bytes,
+            "reverse_rusty_wal_size_bytes",
+            &[("shard", sid)],
+            s.metrics.wal_size_bytes,
         );
     }
 
-    e.gauge(
-        "reverse_rusty_wal_size_bytes",
-        "WAL size in bytes (0 on a segments-only cluster shard).",
-        m.wal_size_bytes,
-    );
-    e.gauge(
+    e.header(
         "reverse_rusty_wal_pending_entries",
         "Un-checkpointed WAL entries (0 on a segments-only cluster shard).",
-        m.wal_pending_entries,
     );
-    e.gauge(
+    for (s, sid) in samples.iter().zip(&sids) {
+        e.sample(
+            "reverse_rusty_wal_pending_entries",
+            &[("shard", sid)],
+            s.metrics.wal_pending_entries,
+        );
+    }
+
+    e.header(
         "reverse_rusty_stale_segments",
         "Segments compiled against an older vocab epoch (vocab drift).",
-        m.stale_segments,
     );
+    for (s, sid) in samples.iter().zip(&sids) {
+        e.sample(
+            "reverse_rusty_stale_segments",
+            &[("shard", sid)],
+            s.metrics.stale_segments,
+        );
+    }
 
-    let tombstoned: usize = segments.iter().map(|s| s.deleted).sum();
-    e.gauge(
+    e.header(
         "reverse_rusty_tombstoned_entries",
         "Tombstoned (deleted-but-not-compacted) entries — compaction backlog.",
-        tombstoned,
     );
+    for (s, sid) in samples.iter().zip(&sids) {
+        let tombstoned: usize = s.segments.iter().map(|x| x.deleted).sum();
+        e.sample(
+            "reverse_rusty_tombstoned_entries",
+            &[("shard", sid)],
+            tombstoned,
+        );
+    }
 
     e.header(
         "reverse_rusty_class_queries",
         "Stored queries by cost class (c is the broad lane).",
     );
-    for (label, count) in [
-        ("a", class[0]),
-        ("b", class[1]),
-        ("c", class[2]),
-        ("d", class[3]),
-    ] {
-        e.sample("reverse_rusty_class_queries", &[("class", label)], count);
+    for (s, sid) in samples.iter().zip(&sids) {
+        for (label, count) in [
+            ("a", s.class[0]),
+            ("b", s.class[1]),
+            ("c", s.class[2]),
+            ("d", s.class[3]),
+        ] {
+            e.sample(
+                "reverse_rusty_class_queries",
+                &[("shard", sid), ("class", label)],
+                count,
+            );
+        }
     }
 
-    e.gauge(
+    // Every slot handed to this renderer holds a serving `ServerState` (the caller filters to loaded
+    // slots), so each is ready=1; a node with NO loaded slot took the `render_shard_pending` path.
+    e.header(
         "reverse_rusty_shard_ready",
         "1 if this shard has adopted a dict and is serving, else 0.",
-        u8::from(ready),
     );
+    for sid in &sids {
+        e.sample("reverse_rusty_shard_ready", &[("shard", sid)], 1u8);
+    }
+
     e.into_string()
 }
 
@@ -435,164 +515,4 @@ fn write_response(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        is_metrics_get, render_control, render_shard, render_shard_pending, serve_metrics,
-        ControlMetricsView,
-    };
-    use crate::events::{EngineMetrics, SegmentInfo, SegmentKind};
-    use std::io::{Read, Write};
-    use std::net::TcpStream;
-
-    fn sample_metrics() -> EngineMetrics {
-        EngineMetrics {
-            total_queries: 7,
-            base_segments: 2,
-            memtable_entries: 3,
-            segment_sizes: vec![4, 1],
-            segment_holes: vec![0.0, 0.5],
-            rejected_parse: 0,
-            rejected_class_d: 0,
-            dict_features: 99,
-            exact_bytes: 11,
-            index_bytes: 22,
-            filter_bytes: 33,
-            stale_segments: 1,
-            dict_bytes: 44,
-            query_store_bytes: 55,
-            logical_index_bytes: 66,
-            alive_bytes: 77,
-            wal_size_bytes: 0,
-            wal_pending_entries: 0,
-        }
-    }
-
-    fn seg(deleted: usize) -> SegmentInfo {
-        SegmentInfo {
-            ordinal: 0,
-            kind: SegmentKind::Mmap,
-            entries: 10,
-            alive: 10 - deleted,
-            deleted,
-            holes_ratio: 0.0,
-            vocab_epoch: 0,
-            stale: false,
-            resident_bytes: 0,
-            overhead_bytes: 0,
-        }
-    }
-
-    #[test]
-    fn render_shard_emits_named_gauges() {
-        let out = render_shard(&sample_metrics(), &[seg(3), seg(2)], [1, 2, 3, 4], true);
-        assert!(out.contains("# TYPE reverse_rusty_total_queries gauge"));
-        assert!(out.contains("\nreverse_rusty_total_queries 7\n"));
-        assert!(out.contains("reverse_rusty_dict_features 99"));
-        assert!(out.contains("reverse_rusty_memory_bytes{component=\"exact\"} 11"));
-        assert!(out.contains("reverse_rusty_memory_bytes{component=\"filter\"} 33"));
-        // c is the broad lane; 3rd class slot.
-        assert!(out.contains("reverse_rusty_class_queries{class=\"c\"} 3"));
-        // tombstoned = sum of segment `deleted` (3 + 2).
-        assert!(out.contains("reverse_rusty_tombstoned_entries 5"));
-        assert!(out.contains("reverse_rusty_shard_ready 1"));
-    }
-
-    #[test]
-    fn pending_shard_reports_not_ready() {
-        let out = render_shard_pending();
-        assert!(out.contains("reverse_rusty_shard_ready 0"));
-        assert!(!out.contains("reverse_rusty_total_queries"));
-    }
-
-    #[test]
-    fn render_control_emits_state_and_indices() {
-        let view = ControlMetricsView {
-            term: 5,
-            state: "leader",
-            is_leader: true,
-            leader_known: true,
-            last_log_index: Some(42),
-            last_applied: Some(40),
-            voters: 3,
-            snapshot_last_index: Some(30),
-        };
-        let out = render_control(&view);
-        assert!(out.contains("reverse_rusty_control_term 5"));
-        assert!(out.contains("reverse_rusty_control_is_leader 1"));
-        assert!(out.contains("reverse_rusty_control_state{state=\"leader\"} 1"));
-        assert!(out.contains("reverse_rusty_control_last_applied 40"));
-        assert!(out.contains("reverse_rusty_control_voters 3"));
-    }
-
-    #[test]
-    fn request_line_parsing() {
-        assert!(is_metrics_get("GET /_metrics HTTP/1.1\r\n"));
-        assert!(is_metrics_get("GET /metrics HTTP/1.1\r\n"));
-        assert!(is_metrics_get("GET /_metrics?foo=bar HTTP/1.1\r\n"));
-        assert!(!is_metrics_get("GET /healthz HTTP/1.1\r\n"));
-        assert!(!is_metrics_get("POST /_metrics HTTP/1.1\r\n"));
-    }
-
-    fn http_get(addr: std::net::SocketAddr, path: &str) -> String {
-        let mut stream = TcpStream::connect(addr).unwrap();
-        stream
-            .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
-            .unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        response
-    }
-
-    #[test]
-    fn http_roundtrip_serves_metrics_and_404s() {
-        let handle = serve_metrics("127.0.0.1:0".parse().unwrap(), || {
-            "reverse_rusty_test 1\n".to_string()
-        })
-        .unwrap();
-        let addr = handle.addr();
-
-        let ok = http_get(addr, "/_metrics");
-        assert!(ok.starts_with("HTTP/1.1 200 OK"), "got: {ok}");
-        assert!(ok.contains("text/plain; version=0.0.4"));
-        assert!(ok.contains("reverse_rusty_test 1"));
-
-        let alias = http_get(addr, "/metrics");
-        assert!(alias.contains("reverse_rusty_test 1"));
-
-        let missing = http_get(addr, "/nope");
-        assert!(
-            missing.starts_with("HTTP/1.1 404 Not Found"),
-            "got: {missing}"
-        );
-
-        handle.shutdown();
-    }
-
-    #[test]
-    fn oversized_request_line_does_not_wedge_the_listener() {
-        // A newline-less line far larger than the cap must NOT grow memory unbounded or block the
-        // single metrics thread forever — the DoS-hardening regression (codex). The bounded read
-        // returns and the connection is closed; we tolerate any outcome on this bad connection (the
-        // server closes with bytes still unread, which surfaces as a connection reset). The real
-        // assertion is that a NORMAL scrape still succeeds afterward — one bad client didn't wedge it.
-        let handle = serve_metrics("127.0.0.1:0".parse().unwrap(), || {
-            "reverse_rusty_test 1\n".to_string()
-        })
-        .unwrap();
-        let addr = handle.addr();
-        {
-            let mut bad = TcpStream::connect(addr).unwrap();
-            let huge = vec![b'A'; super::MAX_REQUEST_BYTES as usize + 2000];
-            let _ = bad.write_all(&huge);
-            let mut sink = Vec::new();
-            let _ = bad.read_to_end(&mut sink);
-        }
-        let ok = http_get(addr, "/_metrics");
-        assert!(
-            ok.starts_with("HTTP/1.1 200 OK"),
-            "listener wedged; got: {ok}"
-        );
-        assert!(ok.contains("reverse_rusty_test 1"));
-        handle.shutdown();
-    }
-}
+mod tests;
