@@ -223,17 +223,19 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   auth are
   **opt-in** (ADR-071) — enable both outside a trusted network. Remote-cluster vocabulary is
   deploy-time configuration, not live-shipped (decided, ADR-076).
-- **One shard per `ShardServer` process (multi-shard-per-node Stage 1 BUILT; co-location/relocation
-  staged).** A code review found the HRW data-moving *rebalance* (`rebalance_and_move`, ADR-090) and the
-  unattended *reconciler* (ADR-092, **parked**) silently overwrite — HRW packs several positions onto one
-  node, but a one-shard server can hold only one. [ADR-093](decisions/adr-093-multi-shard-per-node.md)
-  is the staged fix. **Stage 1 (foundation) is built:** the transport carries a `shard_id`, a
-  `ShardServer` is a shard-keyed slot map, and fence/recovery/storage (`shard_<id>/`) are **per-shard** —
-  fixing the codex P1 (fencing one shard no longer quiesces a co-located one). The **deploy stays 1:1**
-  (each node still hosts its position); co-location (>1 slot/node) is Stage 2, cross-node relocation +
-  RF>1 failover Stage 3, and rebasing the reconciler Stage 4. Until Stage 3 lands, only single-shard
-  `reassign_and_move` (one position → an empty node) is collision-safe; general HRW rebalance + the
-  reconciler + RF>1 failover wait on it.
+- **Multi-shard-per-node Stage 1+2 BUILT; cross-node relocation staged.** A code review found the HRW
+  data-moving *rebalance* (`rebalance_and_move`, ADR-090) and the unattended *reconciler* (ADR-092,
+  **parked**) silently overwrite — HRW packs several positions onto one node, but a one-shard server can
+  hold only one. [ADR-093](decisions/adr-093-multi-shard-per-node.md) is the staged fix. **Stage 1
+  (foundation) is built:** the transport carries a `shard_id`, a `ShardServer` is a shard-keyed slot map,
+  and fence/recovery/storage (`shard_<id>/`) are **per-shard** — fixing the codex P1 (fencing one shard no
+  longer quiesces a co-located one). **Stage 2 (co-location) is built:** the `AddShard` RPC + a
+  per-endpoint adoption dedup in `connect_remote` let several positions share one endpoint (fewer pods
+  than shards, expressed by repeating an endpoint) without re-shipping the dict — oracle-proven K
+  positions on N&lt;K servers ≡ single-node ≡ brute. Cross-node relocation + RF>1 failover is Stage 3, and
+  rebasing the reconciler Stage 4. Until Stage 3 lands, only single-shard `reassign_and_move` (one
+  position → an empty node) is collision-safe; general HRW rebalance + the reconciler + RF>1 failover
+  wait on it.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at
   runtime via `Vocab`/`NormalizerBuilder` (learning: ADR-015/053; aliases: ADR-054/060/061).
 - **Validated on synthetic + pinned-pair data, not a real corpus.** The oracle and benchmarks run

@@ -22,6 +22,7 @@ use crate::segment::PlacedQuery;
 
 use super::{compile_item, ShardServer};
 
+mod add_shard;
 mod dict_adopt;
 mod leases;
 mod recovery;
@@ -139,6 +140,15 @@ impl ShardService for ShardServer {
         request: Request<proto::AdoptDictRequest>,
     ) -> Result<Response<proto::AdoptDictReply>, Status> {
         dict_adopt::adopt_dict(self, request)
+    }
+
+    /// Create a co-located slot on a node that has already adopted the dict (ADR-093 Stage 2) —
+    /// reuses the node-scope frozen space by `Arc`, no dict re-ship.
+    async fn add_shard(
+        &self,
+        request: Request<proto::AddShardRequest>,
+    ) -> Result<Response<proto::AddShardReply>, Status> {
+        add_shard::add_shard(self, request)
     }
 
     async fn ingest_extracted(

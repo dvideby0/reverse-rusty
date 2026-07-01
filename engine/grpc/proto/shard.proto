@@ -37,6 +37,14 @@ service ShardService {
   // Empty shard => adopt; same fingerprint => idempotent no-op; non-empty shard whose
   // fingerprint differs => the server refuses (re-basing loaded data is unsafe).
   rpc AdoptDict (AdoptDictRequest) returns (AdoptDictReply);
+  // ---- co-location: add a slot without re-shipping the dict (ADR-093 Stage 2) ----
+  // Create a NEW shard slot on a node that has ALREADY adopted the dict (via a prior AdoptDict for
+  // an earlier position). The dict/tag-dict are node-scope — deserialized once and shared by `Arc`
+  // into every slot — so a co-located position needs only to NAME its shard_id + attest the node's
+  // fingerprints, never re-ship/re-deserialize the (large) dict bytes. Fingerprint mismatch, or no
+  // prior AdoptDict on the node, => FailedPrecondition (loud, never a silent slot under a divergent
+  // space). Idempotent when the slot already serves this fingerprint.
+  rpc AddShard (AddShardRequest) returns (AddShardReply);
   // ---- peer recovery (ADR-035/036, clustering build-path step 4b) ----
   // Server-streams this shard's sealed durable state (committed .seg files + the sources.dat
   // blob) so a fresh replica can materialize a byte-identical base. The source seals a
@@ -237,6 +245,22 @@ message AdoptDictReply {
   // ADR-080 layout attestation — see `DictFingerprintReply.broad_replicate_all`. Carried here too
   // so the adopt path (which trusts the reply instead of a separate fingerprint probe) refuses a
   // populated pre-ADR-080 server whose idempotent no-op adopt would otherwise pass unchecked.
+  bool broad_replicate_all = 3;
+}
+
+// Create a co-located slot on a node that has ALREADY adopted the dict (ADR-093 Stage 2). No dict
+// bytes: the node-scope space is reused by `Arc`. The fingerprints ATTEST the coordinator's frozen
+// space equals the node's adopted one — a mismatch (or no prior AdoptDict) => FailedPrecondition.
+message AddShardRequest {
+  uint32 shard_id = 1;
+  uint64 dict_fingerprint = 2;
+  uint64 tag_dict_fingerprint = 3;
+}
+// The node's frozen-dict + tag-dict fingerprints after the slot is created (equal the request's on
+// success). `broad_replicate_all` mirrors `AdoptDictReply` for a symmetric client-side attestation.
+message AddShardReply {
+  uint64 dict_fingerprint = 1;
+  uint64 tag_dict_fingerprint = 2;
   bool broad_replicate_all = 3;
 }
 
