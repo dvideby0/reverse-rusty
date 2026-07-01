@@ -151,19 +151,36 @@ impl ClusterEngine {
         // ONE shared transport-metrics collector (ADR-085): every serving RemoteShard records
         // into it and the engine reads it via `transport_metrics()` (installed below).
         let metrics = Arc::new(TransportMetrics::new());
+        // CO-LOCATION (ADR-093 Stage 2): several positions may share one endpoint (fewer pods than
+        // shards, expressed by repeating an endpoint in the list). `endpoints[i]` is still position
+        // `i`'s endpoint (the len check holds), but the FIRST position on each distinct endpoint
+        // ships+adopts the node dict; every LATER position on that node reuses it via a lightweight
+        // `AddShard` (no dict re-ship / re-deserialize). Routing stays position-indexed, so
+        // co-location is transparent to it.
+        let mut adopted: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (position, ep) in endpoints.iter().enumerate() {
-            let remote = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
-                ep,
-                handle.clone(),
-                dict_bytes.clone(),
-                expected,
-                tag_dict_bytes.clone(),
-                expected_tag,
-                // Stage 1 keeps the 1:1 deployment: endpoint i serves the sole slot at shard-id i
-                // (ADR-093); the server names the slot on adopt.
-                position as u32,
-                &security,
-            )?
+            let shard_id = position as u32;
+            let remote = if adopted.insert(ep.as_str()) {
+                crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                    ep,
+                    handle.clone(),
+                    dict_bytes.clone(),
+                    expected,
+                    tag_dict_bytes.clone(),
+                    expected_tag,
+                    shard_id,
+                    &security,
+                )?
+            } else {
+                crate::cluster::remote::RemoteShard::connect_and_add_shard_with_security(
+                    ep,
+                    handle.clone(),
+                    expected,
+                    expected_tag,
+                    shard_id,
+                    &security,
+                )?
+            }
             .with_metrics(Arc::clone(&metrics));
             let (boxed, h) = wrap_handoff(Box::new(remote), 0);
             shards.push(boxed);

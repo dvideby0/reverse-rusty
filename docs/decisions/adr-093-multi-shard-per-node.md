@@ -3,9 +3,12 @@
 **Status:** Accepted (2026-06-30) — design of record (direction decided); implementation is staged
 (Stages 1–4 below). **Stage 1 (foundation) is built** (2026-06-30, branch `feat/multi-shard-stage1`):
 proto `shard_id`, a shard-keyed `ShardServer` slot map, and per-shard fence/recovery/`shard_<id>/`
-storage — fixing the codex P1, with the 1:1 deployment preserved. Stages 2–4 remain staged. ADR-092
-(the unattended reconciler) is **parked** on the `feat/unattended-reconciler` branch — it is *not* on
-`main`, so it is referenced here as plain text, not a link, until it lands (Stage 4).
+storage — fixing the codex P1, with the 1:1 deployment preserved. **Stage 2 (co-location) is built**
+(2026-07-01, branch `feat/multi-shard-stage2`): the `AddShard` RPC + a per-endpoint adoption dedup in
+`connect_remote` let several positions share one endpoint (fewer pods than shards) without re-shipping
+the dict — oracle-proven K-positions-on-N&lt;K-servers ≡ single-node ≡ brute. Stages 3–4 remain staged.
+ADR-092 (the unattended reconciler) is **parked** on the `feat/unattended-reconciler` branch — it is
+*not* on `main`, so it is referenced here as plain text, not a link, until it lands (Stage 4).
 
 ## Context
 
@@ -133,9 +136,18 @@ fields stay (node-wide, carried on the recovery RPCs for content verification).
    tests now address shard-ids; added a `per_shard_fence_isolation` unit. One in-flight adjustment vs
    the plan: `peer_recover_replica`/`catch_up_recovered_replica` took a `shard_id` **parameter** (not a
    hardcoded 0) — the replication oracle recovers position 1, so the caller must name the slot.
-2. **Co-location.** Builders let several positions share one endpoint; a node hosts many slots; add
-   `AddShard` (no dict re-ship). Compose/Helm can run fewer pods than shards. gRPC oracle: K positions on
-   N&lt;K servers ≡ single-node ≡ brute.
+2. **Co-location. ✅ BUILT (2026-07-01).** Builders let several positions share one endpoint; a node
+   hosts many slots; the new `AddShard` RPC creates a co-located slot over the node's already-adopted
+   dict (no dict re-ship / re-deserialize). Compose/Helm can run fewer pods than shards (expressed by
+   repeating an endpoint — no CLI change). gRPC oracle (`colocation.rs`): K=4 positions on N=2 servers ≡
+   single-node ≡ brute, both broad on/off, + `shard_query_counts` proving all K co-located slots are
+   independently populated; four `add_shard` server unit tests (no-adopt / after-adopt / wrong-fp /
+   idempotent). **Key finding:** RF=1 co-location already worked via repeated `AdoptDict` (the
+   `endpoints.len() == num_shards` check means "one entry per position", repeats allowed — it stays), so
+   the delta was purely the `AddShard` optimization + per-endpoint dedup + the oracle, not a rewrite.
+   `connect_replicated` (RF&gt;1) co-location + its replica-promotion oracle are deferred to Stage 3;
+   per-node `/_metrics` aggregation over co-located slots and a Compose/Helm worked example are small
+   follow-ons.
 3. **Per-shard relocation + failover.** `execute_handoff` moves one slot between nodes without touching
    the node's other shards ⇒ `rebalance_and_move`/HRW become **safe** (the collision codex flagged is
    gone — every move targets a distinct slot); RF&gt;1 replica promotion across multi-shard nodes. gRPC

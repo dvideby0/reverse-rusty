@@ -22,6 +22,7 @@ mod harness;
 
 mod block_on;
 mod class_d;
+mod colocation;
 mod core;
 mod dict_shipping;
 mod filtered;

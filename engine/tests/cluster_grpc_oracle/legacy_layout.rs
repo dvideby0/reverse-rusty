@@ -59,6 +59,12 @@ impl ShardService for LegacyLayoutServer {
     }
 
     // ---- never reached on the connect path: stub everything else out. ----
+    async fn add_shard(
+        &self,
+        _req: Request<raw::AddShardRequest>,
+    ) -> Result<Response<raw::AddShardReply>, Status> {
+        Err(Status::unimplemented("legacy mock"))
+    }
     async fn percolate(
         &self,
         _req: Request<raw::PercolateRequest>,
