@@ -331,3 +331,27 @@ fn per_shard_fence_isolation() {
     rt.block_on(srv.insert_extracted(insert_req(0, 14, "psa 10")))
         .expect("slot 0 writable after unfence");
 }
+
+/// Regression (codex review, ADR-093): a node hosting a NON-ZERO position slot must report its real
+/// `/_metrics` — `metrics_source().render()` reads the hosted slot, not slot 0. In the 1:1 deployment a
+/// node serving position N hosts ONLY slot N, so a slot-0-specific lookup would show a live position-N
+/// node as `reverse_rusty_shard_ready 0` while it serves traffic.
+#[test]
+fn metrics_render_the_hosted_nonzero_slot() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let d = frozen_dict(&["1994 upper deck", "psa 10"], &n);
+
+    let srv = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
+    // This node hosts ONLY shard-id 2 (a non-zero position) — there is no slot 0.
+    rt.block_on(srv.adopt_dict(adopt_req_shard(&d, 2)))
+        .expect("adopt slot 2");
+    rt.block_on(srv.insert_extracted(insert_req(2, 20, "psa 10")))
+        .expect("write slot 2");
+
+    let body = srv.metrics_source().render();
+    assert!(
+        body.contains("reverse_rusty_shard_ready 1"),
+        "a node hosting a non-zero slot must report ready + real metrics; got:\n{body}"
+    );
+}

@@ -647,8 +647,10 @@ fn finalized_empty_tag_dict() -> TagDict {
 /// outlives the `serve` call that consumes the server. `Send + 'static` so the deploy bin can move it
 /// into the metrics listener's render closure.
 pub struct ShardMetricsSource {
-    /// A shared clone of the server's shard map. Stage 1 renders slot 0 (the pre-built / 1:1 position);
-    /// a per-node aggregate over every slot is an explicit ADR-093 follow-on, not this PR.
+    /// A shared clone of the server's shard map. Stage 1 hosts exactly one slot per node — its position,
+    /// which is NOT necessarily 0 (a node serving position 3 hosts slot 3, not slot 0) — so metrics
+    /// render THAT slot. A per-node aggregate over co-located slots is an explicit ADR-093 Stage 2
+    /// follow-on, not this PR.
     shards: ShardMap,
 }
 
@@ -657,8 +659,15 @@ impl ShardMetricsSource {
     /// (metrics + segment infos + class counts from the same point-in-time) off the engine write
     /// lock; a pending (not-yet-adopted) server reports only `reverse_rusty_shard_ready 0`.
     pub fn render(&self) -> String {
-        let slot0 = self.shards.read().ok().and_then(|m| m.get(&0).cloned());
-        match slot0.and_then(|s| s.state.load_full()) {
+        // The hosted slot (any loaded one — in the 1:1 deployment there is exactly one, at this node's
+        // position, which may be non-zero). Looking up slot 0 specifically would report a non-zero
+        // position node as pending even while it serves traffic (codex review).
+        let slot = self
+            .shards
+            .read()
+            .ok()
+            .and_then(|m| m.values().find_map(|s| s.state.load_full()));
+        match slot {
             Some(st) => {
                 let snap = st.shard.metrics_snapshot();
                 super::node_metrics::render_shard(
