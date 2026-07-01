@@ -37,7 +37,7 @@ impl ShardService for ShardServer {
         // unfiltered. The ids are authoritative-from-coordinator, so the server never re-resolves
         // strings — immune to any server-side tag-space skew on reads.
         let pred = proto::tag_predicate_from_proto(req.filter);
-        let st = self.loaded()?;
+        let st = self.loaded_slot(req.shard_id)?.1;
         // A `rank` spec (ADR-075) rides the same already-compiled-ids pattern: score this
         // shard's matched ids and echo `ranked = true` so the client can tell a scored reply
         // from an old server that silently ignored the field. Absent ⇒ the pre-rank wire.
@@ -69,10 +69,11 @@ impl ShardService for ShardServer {
 
     async fn num_queries(
         &self,
-        _request: Request<proto::Empty>,
+        request: Request<proto::ShardRef>,
     ) -> Result<Response<proto::CountReply>, Status> {
         let count = self
-            .loaded()?
+            .loaded_slot(request.into_inner().shard_id)?
+            .1
             .shard
             .num_queries()
             .map_err(|e| Status::internal(e.to_string()))? as u64;
@@ -81,10 +82,11 @@ impl ShardService for ShardServer {
 
     async fn class_counts(
         &self,
-        _request: Request<proto::Empty>,
+        request: Request<proto::ShardRef>,
     ) -> Result<Response<proto::ClassCountsReply>, Status> {
         let counts = self
-            .loaded()?
+            .loaded_slot(request.into_inner().shard_id)?
+            .1
             .shard
             .class_counts()
             .map_err(|e| Status::internal(e.to_string()))?;
@@ -97,14 +99,20 @@ impl ShardService for ShardServer {
         &self,
         _request: Request<proto::Empty>,
     ) -> Result<Response<proto::DictFingerprintReply>, Status> {
-        let st = self.loaded()?;
+        // Node-level (ADR-093): the dict/tag-dict fingerprints are a node-wide content invariant, read
+        // from the node-scope adopted space (not any slot). A truly pending node — no adopt yet — is
+        // not-ready, matching the pre-ADR-093 `loaded()?` failing on a pending server.
+        let space = self
+            .node_dict
+            .load_full()
+            .ok_or_else(|| Status::failed_precondition("shard has not adopted a dict yet"))?;
         Ok(Response::new(proto::DictFingerprintReply {
-            fingerprint: st.dict.fingerprint(),
+            fingerprint: space.dict.fingerprint(),
             // ADR-077: the probe carries the tag-space identity too, so a bare
             // `connect` (no adopt) verifies BOTH dicts. A stale server omits this
             // (proto3 zero), which can never equal a real fingerprint — loud, not
             // silently unverified.
-            tag_dict_fingerprint: st.tag_dict.fingerprint(),
+            tag_dict_fingerprint: space.tag_dict.fingerprint(),
             // ADR-080: this binary serves the replicate-to-all broad layout. A pre-ADR-080
             // server omits the field (proto3 false), so a replicate-all coordinator refuses it.
             broad_replicate_all: true,
@@ -137,9 +145,10 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::IngestRequest>,
     ) -> Result<Response<proto::IngestReply>, Status> {
-        self.check_not_fenced()?;
-        let st = self.loaded()?;
-        let items = request.into_inner().items;
+        let req = request.into_inner();
+        let (slot, st) = self.loaded_slot(req.shard_id)?;
+        slot.check_not_fenced()?;
+        let items = req.items;
         let mut lc = String::new();
         let mut rejected_parse = 0u64;
         let mut extracted: Vec<PlacedQuery> = Vec::with_capacity(items.len());
@@ -176,10 +185,10 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::InsertRequest>,
     ) -> Result<Response<proto::InsertReply>, Status> {
-        self.check_not_fenced()?;
-        let st = self.loaded()?;
-        let item = request
-            .into_inner()
+        let req = request.into_inner();
+        let (slot, st) = self.loaded_slot(req.shard_id)?;
+        slot.check_not_fenced()?;
+        let item = req
             .item
             .ok_or_else(|| Status::invalid_argument("InsertRequest.item is required"))?;
         let mut lc = String::new();
@@ -209,20 +218,22 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::DeleteRequest>,
     ) -> Result<Response<proto::DeleteReply>, Status> {
-        self.check_not_fenced()?;
-        let removed = self
-            .loaded()?
+        let req = request.into_inner();
+        let (slot, st) = self.loaded_slot(req.shard_id)?;
+        slot.check_not_fenced()?;
+        let removed = st
             .shard
-            .delete_by_logical_id(request.into_inner().logical_id)
+            .delete_by_logical_id(req.logical_id)
             .map_err(|e| Status::internal(e.to_string()))? as u64;
         Ok(Response::new(proto::DeleteReply { removed }))
     }
 
     async fn flush(
         &self,
-        _request: Request<proto::FlushRequest>,
+        request: Request<proto::FlushRequest>,
     ) -> Result<Response<proto::FlushReply>, Status> {
-        self.loaded()?
+        self.loaded_slot(request.into_inner().shard_id)?
+            .1
             .shard
             .flush()
             .map_err(|e| Status::internal(e.to_string()))?;

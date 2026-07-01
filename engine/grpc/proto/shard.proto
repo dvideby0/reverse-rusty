@@ -14,9 +14,14 @@ package reverse_rusty.shard.v1;
 
 service ShardService {
   // ---- reads ----
+  // Every per-shard RPC carries a `shard_id` (= the global shard position) so ONE node/`ShardServer`
+  // can host many independently-fenced, independently-recoverable shards (ADR-093). proto3 defaults
+  // the field to 0, so the 1:1 deployment (position 0 the sole slot) and a pre-ADR-093 peer stay
+  // wire-decodable. Node-level RPCs (`DictFingerprint`, `AdoptDict`'s reply) carry no `shard_id` — the
+  // dict/tag-dict fingerprints are a node-wide content invariant, shared across every slot.
   rpc Percolate   (PercolateRequest) returns (PercolateReply);
-  rpc NumQueries  (Empty)            returns (CountReply);
-  rpc ClassCounts (Empty)            returns (ClassCountsReply);
+  rpc NumQueries  (ShardRef)         returns (CountReply);
+  rpc ClassCounts (ShardRef)         returns (ClassCountsReply);
   // ---- writes ----
   rpc IngestExtracted (IngestRequest) returns (IngestReply);
   rpc InsertExtracted (InsertRequest) returns (InsertReply);
@@ -82,6 +87,11 @@ service ShardService {
 
 message Empty {}
 
+// A bare shard selector (ADR-093): the `shard_id` (= global shard position) a per-shard read with no
+// other request fields targets. Used by `NumQueries`/`ClassCounts`; requests that already carry a body
+// embed the `shard_id` field directly instead.
+message ShardRef { uint32 shard_id = 1; }
+
 // One per-query metadata tag (ADR-049/055): a raw `(key, value)` pair carried on the wire
 // alongside the DSL, re-resolved to a `TagId` read-only against the server's adopted frozen
 // tag space — the tags-on-wire analogue of raw DSL.
@@ -110,6 +120,7 @@ message PercolateRequest {
   // coordinator against the shared frozen tag space (the same `get_or_synthetic` resolution as
   // the filter groups). Absent ⇒ an unranked probe (byte-identical to the pre-rank wire).
   RankSpec rank = 4;
+  uint32 shard_id = 5; // ADR-093: the slot to probe on this node (0 in the 1:1 deployment).
 }
 // A compiled ranking request (ADR-059/075): the shard scores each matched query as
 // `Σ(weight of each boost tag the query carries) + numeric value of its priority-key tag`.
@@ -163,7 +174,7 @@ message AddItem {
   repeated TagKv tags = 4;
 }
 
-message IngestRequest { repeated AddItem items = 1; }
+message IngestRequest { repeated AddItem items = 1; uint32 shard_id = 2; } // ADR-093
 // Mirrors engine IngestReport { ingested, rejected_parse, rejected_class_d }.
 message IngestReply {
   uint64 ingested = 1;
@@ -171,17 +182,17 @@ message IngestReply {
   uint64 rejected_class_d = 3;
 }
 
-message InsertRequest { AddItem item = 1; }
+message InsertRequest { AddItem item = 1; uint32 shard_id = 2; } // ADR-093
 // Option<u32>: present => Some(local_id); !present => None (class-D rejection).
 message InsertReply {
   bool present = 1;
   uint32 local_id = 2;
 }
 
-message DeleteRequest { uint64 logical_id = 1; }
+message DeleteRequest { uint64 logical_id = 1; uint32 shard_id = 2; } // ADR-093
 message DeleteReply   { uint64 removed = 1; }  // # tombstones written (usize)
 
-message FlushRequest {}
+message FlushRequest { uint32 shard_id = 1; } // ADR-093
 message FlushReply   {}
 
 message CountReply       { uint64 count = 1; }            // usize num_queries
@@ -214,6 +225,10 @@ message AdoptDictRequest {
   // own `TagDict::fingerprint`; the server recomputes it and rejects a mismatch.
   bytes tag_dict = 3;
   uint64 tag_dict_fingerprint = 4;
+  // ADR-093: the slot to create on this node. The dict/tag-dict are adopted at NODE scope (deserialized
+  // once, shared by every slot); this names which shard-id's `LocalShard` to build over that shared
+  // space. proto3 default 0 = the sole slot of the 1:1 deployment.
+  uint32 shard_id = 5;
 }
 // The server's frozen-dict + tag-dict fingerprints AFTER adoption (equal the request's on success).
 message AdoptDictReply {
@@ -233,6 +248,7 @@ message FetchSegmentsRequest {
   // The frozen tag-dict fingerprint (ADR-077): the shipped segments' tag columns hold
   // resolved `TagId`s, so a divergent tag space silently mis-filters — refused like the dict.
   uint64 tag_dict_fingerprint = 2;
+  uint32 shard_id = 3; // ADR-093: the slot to stream (the recovering node pulls the SAME position).
 }
 // First stream frame: the snapshot manifest — the COMPLETE file set + the seg-id cursor — so
 // the receiver can pre-validate completeness and reject a truncated stream (never attach a
@@ -267,6 +283,7 @@ message RecoverFromRequest {
   string source_endpoint = 1;  // the peer to pull from (e.g. "http://127.0.0.1:50051")
   uint64 dict_fingerprint = 2; // must match this node's adopted dict
   uint64 tag_dict_fingerprint = 3; // ADR-077: refused on mismatch, like dict_fingerprint
+  uint32 shard_id = 4; // ADR-093: recover INTO this slot; the handler pulls the source's same position.
 }
 message RecoverFromReply {
   uint64 segments_attached = 1;
@@ -280,6 +297,7 @@ message FetchTranslogRequest {
   uint64 after_seqno = 1;      // stream only ops with position strictly after this (the snapshot P)
   uint64 dict_fingerprint = 2; // the source refuses a mismatch (never ships ops for a divergent space)
   uint64 tag_dict_fingerprint = 3; // ADR-077: refused on mismatch, like dict_fingerprint
+  uint32 shard_id = 4; // ADR-093: the slot whose translog tail to stream.
 }
 // One un-sealed translog entry: its position + the logical mutation. Mirrors engine
 // `clog::ClusterMutation` 1:1 — the Add arm REUSES `AddItem {logical_id, dsl, version}` (the
@@ -299,6 +317,7 @@ message RetentionLeaseRequest {
   uint64 pos = 3;              // renew: the new retained position (the consumer's high-water)
   uint64 dict_fingerprint = 4; // the source refuses a mismatch (divergent feature space)
   uint64 tag_dict_fingerprint = 5; // ADR-077: refused on mismatch, like dict_fingerprint
+  uint32 shard_id = 6; // ADR-093: the slot whose translog retention this lease pins.
 }
 message RetentionLeaseReply {
   uint64 lease_id = 1;         // acquire: the newly assigned lease id (0 for renew/release)
@@ -310,6 +329,7 @@ message FenceRequest {
   uint64 generation = 1;       // the control-plane epoch the new owner is taking over under (> 0)
   uint64 dict_fingerprint = 2; // the source refuses a mismatch (divergent feature space)
   uint64 tag_dict_fingerprint = 3; // ADR-077: refused on mismatch, like dict_fingerprint
+  uint32 shard_id = 4; // ADR-093: fence THIS slot only — a co-located shard on the same node is untouched.
 }
 message FenceReply {
   uint64 fenced_at_generation = 1; // the server's fence generation after this call (monotonic max)
@@ -320,6 +340,7 @@ message UnfenceRequest {
   uint64 generation = 1;       // CAS target: lift the fence only if it currently equals this gen
   uint64 dict_fingerprint = 2; // the source refuses a mismatch (divergent feature space)
   uint64 tag_dict_fingerprint = 3; // ADR-077: refused on mismatch, like dict_fingerprint
+  uint32 shard_id = 4; // ADR-093: un-fence THIS slot only.
 }
 message UnfenceReply {
   uint64 fenced_at_generation = 1; // the server's fence generation after this call (0 ⇒ un-fenced)

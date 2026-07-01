@@ -71,6 +71,11 @@ pub struct RemoteShard {
     /// The coordinator's frozen tag-dict fingerprint (ADR-077), verified at connect/adopt
     /// exactly like `dict_fp` and presented on every fingerprint-guarded recovery RPC.
     tag_dict_fp: u64,
+    /// The global shard position this client addresses (ADR-093). ONE `ShardServer` may host many
+    /// shards keyed by this id, so every per-shard request stamps `shard_id: self.shard_id` to route
+    /// to the right slot. In the 1:1 deployment this is the endpoint's position. It flows via `self`
+    /// (never through the `call` seam), so the ADR-085 instrumentation is unchanged.
+    shard_id: u32,
     /// Transport-resilience knobs (ADR-085): per-call deadlines + bounded read-retry,
     /// cloned from the [`ClientSecurity`] this shard was connected with.
     transport: MeshTransport,
@@ -104,12 +109,14 @@ impl RemoteShard {
         handle: Handle,
         expected_fp: u64,
         expected_tag_fp: u64,
+        shard_id: u32,
     ) -> Result<Self, ShardError> {
         Self::connect_with_security(
             endpoint,
             handle,
             expected_fp,
             expected_tag_fp,
+            shard_id,
             &ClientSecurity::default(),
         )
     }
@@ -117,11 +124,13 @@ impl RemoteShard {
     /// [`connect`](Self::connect) over a secured mesh link (ADR-071): TLS per the
     /// client config, the mesh token attached to every RPC. A default (empty)
     /// security config is byte-identical to the plaintext path.
+    #[allow(clippy::too_many_arguments)]
     pub fn connect_with_security(
         endpoint: &str,
         handle: Handle,
         expected_fp: u64,
         expected_tag_fp: u64,
+        shard_id: u32,
         security: &ClientSecurity,
     ) -> Result<Self, ShardError> {
         let client = connect_channel(endpoint, &handle, security)?;
@@ -154,6 +163,7 @@ impl RemoteShard {
             handle,
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
+            shard_id,
             transport: security.transport.clone(),
             metrics: Arc::new(TransportMetrics::new()),
         })
@@ -169,6 +179,7 @@ impl RemoteShard {
     /// server holds data under a **different** dict it refuses (`FailedPrecondition`), which
     /// we surface as [`ShardError::DictMismatch`] (reading back its actual fingerprint) — a
     /// divergent populated server fails loud instead of dropping matches silently.
+    #[allow(clippy::too_many_arguments)]
     pub fn connect_and_adopt(
         endpoint: &str,
         handle: Handle,
@@ -176,6 +187,7 @@ impl RemoteShard {
         expected_fp: u64,
         tag_dict_bytes: Vec<u8>,
         expected_tag_fp: u64,
+        shard_id: u32,
     ) -> Result<Self, ShardError> {
         Self::connect_and_adopt_with_security(
             endpoint,
@@ -184,6 +196,7 @@ impl RemoteShard {
             expected_fp,
             tag_dict_bytes,
             expected_tag_fp,
+            shard_id,
             &ClientSecurity::default(),
         )
     }
@@ -198,17 +211,20 @@ impl RemoteShard {
         expected_fp: u64,
         tag_dict_bytes: Vec<u8>,
         expected_tag_fp: u64,
+        shard_id: u32,
         security: &ClientSecurity,
     ) -> Result<Self, ShardError> {
         let client = connect_channel(endpoint, &handle, security)?;
         let mut shipper = client.clone();
         // Ship the dict AND the frozen tag space (ADR-049/055) in one atomic adopt — never a window
-        // where the server has the dict but not the tag space.
+        // where the server has the dict but not the tag space. `shard_id` names the slot to create
+        // on the node (ADR-093); the node-scope dict is deserialized once and shared across slots.
         let req = proto::AdoptDictRequest {
             dict: dict_bytes,
             fingerprint: expected_fp,
             tag_dict: tag_dict_bytes,
             tag_dict_fingerprint: expected_tag_fp,
+            shard_id,
         };
         let (adopted, adopted_tag, adopted_replicate_all) =
             match block_on_in_context(&handle, async move { shipper.adopt_dict(req).await }) {
@@ -257,6 +273,7 @@ impl RemoteShard {
             handle,
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
+            shard_id,
             transport: security.transport.clone(),
             metrics: Arc::new(TransportMetrics::new()),
         })
@@ -354,6 +371,7 @@ impl RemoteShard {
             tag_dict_fingerprint: self.tag_dict_fp,
             source_endpoint: source_endpoint.to_string(),
             dict_fingerprint: dict_fp,
+            shard_id: self.shard_id,
         };
         // Long-running server-side pull — no per-call deadline (keepalive-guarded), no retry.
         let client = self.client.clone();
@@ -385,6 +403,7 @@ impl RemoteShard {
             tag_dict_fingerprint: self.tag_dict_fp,
             generation,
             dict_fingerprint: self.dict_fp,
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Fence, CallKind::Write, move || {
@@ -405,6 +424,7 @@ impl RemoteShard {
             tag_dict_fingerprint: self.tag_dict_fp,
             generation,
             dict_fingerprint: self.dict_fp,
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Unfence, CallKind::Write, move || {
@@ -559,6 +579,7 @@ impl Shard for RemoteShard {
             // Ship the ALREADY-RESOLVED `TagId` groups (ADR-055); empty ⇒ unfiltered.
             filter: proto::tag_predicate_to_proto(pred),
             rank: None,
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Percolate, CallKind::Read, move || {
@@ -584,6 +605,7 @@ impl Shard for RemoteShard {
             // The ALREADY-COMPILED spec (ADR-075): resolved `TagId` boosts + the priority
             // key, exactly like the filter groups — the server never re-resolves strings.
             rank: Some(proto::rank_spec_to_proto(spec)),
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::PercolateRanked, CallKind::Read, move || {
@@ -610,11 +632,12 @@ impl Shard for RemoteShard {
 
     fn num_queries(&self) -> Result<usize, ShardError> {
         let client = self.client.clone();
+        let shard_id = self.shard_id;
         let reply = self.call(RpcMethod::NumQueries, CallKind::Read, move || {
             let mut client = client.clone();
             async move {
                 client
-                    .num_queries(proto::Empty {})
+                    .num_queries(proto::ShardRef { shard_id })
                     .await
                     .map(tonic::Response::into_inner)
             }
@@ -624,11 +647,12 @@ impl Shard for RemoteShard {
 
     fn class_counts(&self) -> Result<[u64; 4], ShardError> {
         let client = self.client.clone();
+        let shard_id = self.shard_id;
         let reply = self.call(RpcMethod::ClassCounts, CallKind::Read, move || {
             let mut client = client.clone();
             async move {
                 client
-                    .class_counts(proto::Empty {})
+                    .class_counts(proto::ShardRef { shard_id })
                     .await
                     .map(tonic::Response::into_inner)
             }
@@ -658,6 +682,7 @@ impl Shard for RemoteShard {
                     tags: proto::tags_to_proto(&q.tags),
                 })
                 .collect(),
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Ingest, CallKind::Write, move || {
@@ -692,6 +717,7 @@ impl Shard for RemoteShard {
                 version,
                 tags: proto::tags_to_proto(tags),
             }),
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Insert, CallKind::Write, move || {
@@ -710,6 +736,7 @@ impl Shard for RemoteShard {
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
         let req = proto::DeleteRequest {
             logical_id: logical,
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Delete, CallKind::Write, move || {
@@ -721,11 +748,12 @@ impl Shard for RemoteShard {
 
     fn flush(&self) -> Result<(), ShardError> {
         let client = self.client.clone();
+        let shard_id = self.shard_id;
         self.call(RpcMethod::Flush, CallKind::Write, move || {
             let mut client = client.clone();
             async move {
                 client
-                    .flush(proto::FlushRequest {})
+                    .flush(proto::FlushRequest { shard_id })
                     .await
                     .map(tonic::Response::into_inner)
             }
@@ -766,6 +794,7 @@ impl Shard for RemoteShard {
             tag_dict_fingerprint: self.tag_dict_fp,
             after_seqno: from.0,
             dict_fingerprint: self.dict_fp,
+            shard_id: self.shard_id,
         };
         // A long server-stream drain — no per-call deadline (keepalive-guarded), no retry
         // (the catch-up loop is the coordinator's; re-streaming mid-recovery is unsafe).
@@ -793,6 +822,7 @@ impl Shard for RemoteShard {
             lease_id: 0,
             pos: 0,
             dict_fingerprint: self.dict_fp,
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::RetentionLease, CallKind::Write, move || {
@@ -814,6 +844,7 @@ impl Shard for RemoteShard {
             lease_id: lease,
             pos: to.0,
             dict_fingerprint: self.dict_fp,
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         self.call(RpcMethod::RetentionLease, CallKind::Write, move || {
@@ -835,6 +866,7 @@ impl Shard for RemoteShard {
             lease_id: lease,
             pos: 0,
             dict_fingerprint: self.dict_fp,
+            shard_id: self.shard_id,
         };
         let client = self.client.clone();
         self.call(RpcMethod::RetentionLease, CallKind::Write, move || {

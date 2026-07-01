@@ -13,6 +13,7 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
 use crate::cluster::clog::LogPos;
+use crate::cluster::coordinator::shard_dir;
 use crate::cluster::proto;
 use crate::cluster::shard::{LocalShard, Shard};
 
@@ -30,14 +31,16 @@ pub(super) fn fetch_segments(
     server: &ShardServer,
     request: Request<proto::FetchSegmentsRequest>,
 ) -> Result<Response<FetchSegmentsStream>, Status> {
-    let st = server.loaded()?;
-    let Some(dir) = server.data_dir.clone() else {
+    let req = request.into_inner();
+    let (_slot, st) = server.loaded_slot(req.shard_id)?;
+    let Some(root) = server.data_dir.clone() else {
         return Err(Status::failed_precondition(
             "shard is not durable; cannot stream segments for peer recovery",
         ));
     };
+    // This slot's segments live under its per-shard subdir (ADR-093).
+    let dir = shard_dir(&root, req.shard_id as usize);
     let fp = st.dict.fingerprint();
-    let req = request.into_inner();
     if req.dict_fingerprint != fp {
         return Err(Status::failed_precondition(
             "FetchSegments dict-fingerprint mismatch (divergent feature space)",
@@ -105,13 +108,17 @@ pub(super) async fn recover_from(
     server: &ShardServer,
     request: Request<proto::RecoverFromRequest>,
 ) -> Result<Response<proto::RecoverFromReply>, Status> {
-    let st = server.loaded()?;
-    let Some(dir) = server.data_dir.clone() else {
+    let req = request.into_inner();
+    // `loaded_slot` returns owned `Arc`s (the map guard is already dropped), so holding `slot` across
+    // the peer dial + stream `.await`s below never holds the std `RwLock`.
+    let (slot, st) = server.loaded_slot(req.shard_id)?;
+    let Some(root) = server.data_dir.clone() else {
         return Err(Status::failed_precondition(
             "shard is not durable; cannot accept peer recovery",
         ));
     };
-    let req = request.into_inner();
+    // Recover INTO this slot's per-shard subdir (ADR-093) — never clobber the node's other shards.
+    let dir = shard_dir(&root, req.shard_id as usize);
     let dict_fp = st.dict.fingerprint();
     if req.dict_fingerprint != dict_fp {
         return Err(Status::failed_precondition(
@@ -141,6 +148,9 @@ pub(super) async fn recover_from(
         .fetch_segments(proto::FetchSegmentsRequest {
             dict_fingerprint: dict_fp,
             tag_dict_fingerprint: tag_fp,
+            // A relocation/replication keeps the SAME global position, so pull the source's slot of
+            // the same shard-id we're recovering into (ADR-093).
+            shard_id: req.shard_id,
         })
         .await?
         .into_inner();
@@ -169,7 +179,9 @@ pub(super) async fn recover_from(
         .num_queries()
         .map_err(|e| Status::internal(e.to_string()))? as u64;
     let segments_attached = files.len() as u64;
-    server.state.store(Some(Arc::new(ServerState {
+    // Store into THIS slot's state cell (preserving its fence generation) — never a node-wide swap,
+    // so a recovery never clobbers a co-located shard (ADR-093, the codex-P1 fix's read side).
+    slot.state.store(Some(Arc::new(ServerState {
         dict: Arc::clone(&st.dict),
         tag_dict: Arc::clone(&st.tag_dict),
         shard,
@@ -186,8 +198,8 @@ pub(super) fn fetch_translog(
     server: &ShardServer,
     request: Request<proto::FetchTranslogRequest>,
 ) -> Result<Response<FetchTranslogStream>, Status> {
-    let st = server.loaded()?;
     let req = request.into_inner();
+    let (_slot, st) = server.loaded_slot(req.shard_id)?;
     let fp = st.dict.fingerprint();
     if req.dict_fingerprint != fp {
         return Err(Status::failed_precondition(

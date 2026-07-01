@@ -134,7 +134,7 @@ fn grpc_peer_recovery_without_quiescing() {
     // (1) SNAPSHOT: recover the fresh target from the source. The bulk copy is at position P; the
     // initial tail is empty (no post-snapshot writes yet), so hwm == P.
     let (_n, hwm) = cluster
-        .peer_recover_replica(&src_ep, &tgt_ep, rt.handle())
+        .peer_recover_replica(0, &src_ep, &tgt_ep, rt.handle())
         .expect("peer recovery");
 
     // A verify cluster over the recovered target alone, to read its state directly.
@@ -175,7 +175,7 @@ fn grpc_peer_recovery_without_quiescing() {
     let mut cursor = hwm;
     loop {
         let next = cluster
-            .catch_up_recovered_replica(&src_ep, &tgt_ep, cursor, rt.handle())
+            .catch_up_recovered_replica(0, &src_ep, &tgt_ep, cursor, rt.handle())
             .expect("catch up tail");
         if next == cursor {
             break;
@@ -326,7 +326,7 @@ fn grpc_peer_recovery_converges_under_sustained_writes() {
         // The recovery runs while the writer is mid-stream — its retention lease keeps the racing
         // writes safe and its convergence loop drains what it can.
         let (_n, hwm) = cluster
-            .peer_recover_replica(&src_ep, &tgt_ep, rt.handle())
+            .peer_recover_replica(0, &src_ep, &tgt_ep, rt.handle())
             .expect("peer recovery under writes");
         writer.join().expect("writer thread");
         hwm
@@ -337,7 +337,7 @@ fn grpc_peer_recovery_converges_under_sustained_writes() {
     let mut cursor = hwm;
     loop {
         let next = cluster
-            .catch_up_recovered_replica(&src_ep, &tgt_ep, cursor, rt.handle())
+            .catch_up_recovered_replica(0, &src_ep, &tgt_ep, cursor, rt.handle())
             .expect("final catch up");
         if next == cursor {
             break;

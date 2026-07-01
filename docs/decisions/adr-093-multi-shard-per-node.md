@@ -1,9 +1,11 @@
 # ADR-093: Multi-shard-per-node (a node hosts many shards)
 
 **Status:** Accepted (2026-06-30) — design of record (direction decided); implementation is staged
-(Stages 1–4 below) and begins in a later session. ADR-092 (the unattended reconciler) is **parked** on
-the `feat/unattended-reconciler` branch — it is *not* on `main`, so it is referenced here as plain text,
-not a link, until it lands (Stage 4).
+(Stages 1–4 below). **Stage 1 (foundation) is built** (2026-06-30, branch `feat/multi-shard-stage1`):
+proto `shard_id`, a shard-keyed `ShardServer` slot map, and per-shard fence/recovery/`shard_<id>/`
+storage — fixing the codex P1, with the 1:1 deployment preserved. Stages 2–4 remain staged. ADR-092
+(the unattended reconciler) is **parked** on the `feat/unattended-reconciler` branch — it is *not* on
+`main`, so it is referenced here as plain text, not a link, until it lands (Stage 4).
 
 ## Context
 
@@ -123,12 +125,14 @@ fields stay (node-wide, carried on the recovery RPCs for content verification).
 
 ## Staged implementation (each stage ships green; lean/default builds untouched throughout)
 
-1. **Foundation.** Proto `shard_id`; `RemoteShard(endpoint, shard_id)`; `ShardServer` shard-keyed map
-   with **per-shard fence/recovery/storage** + node-scope dict; `AdoptDict(shard_id)` slot creation;
-   builders send `shard_id = position`. **The 1:1 deployment is preserved** — each node still hosts one
-   slot (its position). This alone **fixes codex P1's root cause** (per-shard fence) and is the
-   load-bearing transport PR. gRPC oracle: the existing K-servers tests now address shard-ids; add a
-   per-shard-fence-isolation unit.
+1. **Foundation. ✅ BUILT (2026-06-30).** Proto `shard_id`; `RemoteShard(endpoint, shard_id)`;
+   `ShardServer` shard-keyed map with **per-shard fence/recovery/storage** + node-scope dict;
+   `AdoptDict(shard_id)` slot creation; builders send `shard_id = position`. **The 1:1 deployment is
+   preserved** — each node still hosts one slot (its position). This alone **fixes codex P1's root
+   cause** (per-shard fence) and is the load-bearing transport PR. gRPC oracle: the existing K-servers
+   tests now address shard-ids; added a `per_shard_fence_isolation` unit. One in-flight adjustment vs
+   the plan: `peer_recover_replica`/`catch_up_recovered_replica` took a `shard_id` **parameter** (not a
+   hardcoded 0) — the replication oracle recovers position 1, so the caller must name the slot.
 2. **Co-location.** Builders let several positions share one endpoint; a node hosts many slots; add
    `AddShard` (no dict re-ship). Compose/Helm can run fewer pods than shards. gRPC oracle: K positions on
    N&lt;K servers ≡ single-node ≡ brute.
