@@ -223,6 +223,15 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   auth are
   **opt-in** (ADR-071) — enable both outside a trusted network. Remote-cluster vocabulary is
   deploy-time configuration, not live-shipped (decided, ADR-076).
+- **One shard per `ShardServer` process (the multi-shard-per-node foundation is designed, not built).**
+  A `ShardServer` hosts exactly one shard today, so a code review found the HRW data-moving *rebalance*
+  (`rebalance_and_move`, ADR-090) and the unattended *reconciler* (ADR-092, **parked**) silently
+  overwrite — HRW packs several positions onto one node, but a one-shard server can hold only one.
+  [ADR-093](decisions/adr-093-multi-shard-per-node.md) (Proposed) designs the fix — a node hosting many
+  shards keyed by `shard_id`, with per-shard fence/recovery/storage — concentrated in the
+  proto+transport+`ShardServer` (the allocator/control-plane/durable-layout are already multi-shard
+  aware). Until it lands, only single-shard `reassign_and_move` (one position → an empty node) is
+  collision-safe; general HRW rebalance + the reconciler + RF>1 failover wait on it.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at
   runtime via `Vocab`/`NormalizerBuilder` (learning: ADR-015/053; aliases: ADR-054/060/061).
 - **Validated on synthetic + pinned-pair data, not a real corpus.** The oracle and benchmarks run
