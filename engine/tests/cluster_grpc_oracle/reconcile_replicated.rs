@@ -6,7 +6,7 @@
 //! de-replication trap is dead), fence-window writes re-drive into the NEW group, and a coordinator
 //! restart boots RF=2 from the committed map.
 //!
-//! Six proofs:
+//! Seven proofs:
 //!  - `grpc_reconcile_rf2_packed_converges_groups_failover_and_restart_zero_fn` — the headline: a
 //!    packed RF=2 committed map (every primary on node A, every replica on B, C empty) converges to
 //!    the HRW-desired groups (set-compare), zero-FN, idempotent second pass (epoch + generations
@@ -16,6 +16,10 @@
 //!  - `grpc_reconcile_rf2_under_concurrent_writer_zero_fn` — the same convergence under a firehose
 //!    writer; fence-window writes converge via `resync` and are then served by the NEW group's
 //!    replicas after the new primary dies (they re-drove through the swapped backing).
+//!  - `grpc_group_move_reentering_dropped_primary_accepts_writes_zero_fn` — a node dropped as
+//!    PRIMARY (left fenced, serve-then-drop) later re-enters as the new primary and must accept
+//!    writes (the codex-P1 stale-fence-clear proof); kill it ⇒ the retained replica serves the
+//!    post-re-entry write.
 //!  - `grpc_group_move_replica_only_zero_fn` — {A;[B]} → {A;[C]}: the replica-only shape (no
 //!    primary move, F = the fresh C, cp retained ⇒ fenced-then-unfenced); kill A ⇒ C serves.
 //!  - `grpc_group_move_promotion_zero_fn` — {A;[B]} → {B;[A]}: the pure promotion (F = ∅, the
@@ -267,6 +271,109 @@ fn grpc_reconcile_rf2_under_concurrent_writer_zero_fn() {
         &titles,
         &oracle_final,
         "final live set after the new primary died (fence-window writes on the new replicas)",
+    );
+
+    teardown(&servers);
+}
+
+/// A node dropped as PRIMARY (⇒ left fenced, serve-then-drop) that later RE-ENTERS the group must
+/// accept writes again (the codex P1 on ADR-094: `RecoverFrom` preserves the slot's fence, so
+/// without the member-entry stale-fence clear, move 2 commits a new primary that rejects every
+/// write). Chain: {A;[B]} →(move 1) {B;[C]} (A dropped + fenced) →(move 2) {A;[C]} (A re-enters as
+/// the new PRIMARY). A post-move-2 write must land on A and fan to the retained C — kill A ⇒ C
+/// serves it.
+#[test]
+fn grpc_group_move_reentering_dropped_primary_accepts_writes_zero_fn() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let (cluster, servers, titles, oracle, queries) = one_position_rf2("rf2_reentry", &rt, false);
+
+    // Move 1: {A;[B]} → {B;[C]} — cp = A is dropped from the group and stays FENCED forever.
+    let outcome1 = cluster
+        .reassign_group_and_move(
+            0,
+            &ShardAssignment {
+                position: 0,
+                primary: NodeId(2),
+                replicas: vec![NodeId(3)],
+            },
+            rt.handle(),
+        )
+        .expect("move 1: drop A");
+    assert!(
+        matches!(
+            outcome1,
+            reverse_rusty::cluster::ReassignOutcome::Moved { .. }
+        ),
+        "move 1 commits {{B;[C]}}: {outcome1:?}"
+    );
+    converge_repairs(&cluster);
+    assert_matches_oracle(&cluster, &titles, &oracle, "after move 1 (A dropped)");
+
+    // Move 2: {B;[C]} → {A;[C]} — the fenced A RE-ENTERS as the new primary. Without the
+    // member-entry stale-fence clear this commits a write-broken position.
+    let outcome2 = cluster
+        .reassign_group_and_move(
+            0,
+            &ShardAssignment {
+                position: 0,
+                primary: NodeId(1),
+                replicas: vec![NodeId(3)],
+            },
+            rt.handle(),
+        )
+        .expect("move 2: A re-enters as primary");
+    assert!(
+        matches!(
+            outcome2,
+            reverse_rusty::cluster::ReassignOutcome::Moved { .. }
+        ),
+        "move 2 commits {{A;[C]}}: {outcome2:?}"
+    );
+    let state = cluster.control_state().expect("state");
+    assert_eq!(
+        group_of(&state, 0),
+        (1, BTreeSet::from([3])),
+        "committed group re-pointed to {{A;[C]}}"
+    );
+    converge_repairs(&cluster);
+    assert_matches_oracle(&cluster, &titles, &oracle, "after move 2 (A re-entered)");
+
+    // THE P1 PROOF: a write to the re-entered primary A succeeds (a still-fenced A would reject
+    // it), fans to the retained replica C — kill A ⇒ C serves it.
+    let (donor_id, donor_dsl) = {
+        let matched = oracle
+            .iter()
+            .flat_map(|s| s.iter().copied())
+            .next()
+            .expect("some matching query");
+        let dsl = queries
+            .iter()
+            .find(|(id, _)| *id == matched)
+            .map(|(_, d)| d.clone())
+            .expect("donor DSL");
+        (matched, dsl)
+    };
+    let new_id = 9_000_004u64;
+    cluster
+        .add_query(new_id, &donor_dsl)
+        .expect("the re-entered primary accepts writes (its stale fence was cleared)");
+    let oracle_after: Vec<HashSet<u64>> = oracle
+        .iter()
+        .map(|s| {
+            let mut s = s.clone();
+            if s.contains(&donor_id) {
+                s.insert(new_id);
+            }
+            s
+        })
+        .collect();
+    servers[0].jh.abort();
+    wait_until_not_listening(servers[0].addr);
+    assert_matches_oracle(
+        &cluster,
+        &titles,
+        &oracle_after,
+        "the retained replica C serves the post-re-entry write after A died",
     );
 
     teardown(&servers);

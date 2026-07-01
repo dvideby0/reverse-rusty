@@ -11,7 +11,14 @@
 //!
 //! ## The algorithm (one position; C = committed group, D = desired group)
 //! Everything below runs under `reassign_serial` (moves stay sequential — the chained-reshuffle
-//! constraint) and under ONE retention lease on the source, exactly like `execute_handoff`:
+//! constraint) and under ONE retention lease on the source, exactly like `execute_handoff` — with
+//! two member-entry disciplines the multi-member shape adds (both codex findings on this ADR):
+//! **stale fences are cleared on every member entering the group** (serve-then-drop leaves a
+//! dropped primary fenced forever, and `RecoverFrom` preserves the fence — a re-entering member
+//! would otherwise reject writes / desync on first fan-out; see [`clear_stale_fence`]), and **the
+//! lease is renewed only to the MINIMUM outstanding member cursor** (a later member's
+//! `RecoverFrom` re-seals the source and trims to the lease floor, so advancing it past a lagging
+//! member would trim tail entries that member still needs — a false negative):
 //!
 //! 1. **Plan.** Fail-closed endpoint resolution for `cp` (= C.primary, the ONLY supported recovery
 //!    source: it is write-authoritative, so it alone provably holds every acked write without
@@ -84,6 +91,29 @@ use crate::cluster::shard::{Shard, ShardError};
 use crate::events::{DurabilityOp, EngineEvent};
 
 use super::{ClusterEngine, ReassignOutcome, COMMIT_ATTEMPTS};
+
+/// Clear a STALE fence on a member (re-)entering a group (codex P1 on this ADR): serve-then-drop
+/// deliberately leaves a dropped PRIMARY's slot fenced forever, and `RecoverFrom` preserves the
+/// slot's fence — so a later move that brings the same node back would commit a member that
+/// rejects every write (a fenced new primary write-breaks the position; a fenced new replica
+/// silently desyncs on its first fan-out). The server fence is a monotonic `fetch_max`, so
+/// `fence(0)` is a pure PROBE reporting the current generation; `unfence(probe)` then CAS-clears
+/// exactly that generation. Safe under the documented single-active-coordinator topology (there is
+/// no other orchestrator whose live fence this could trample); fails loud if the CAS loses a race.
+fn clear_stale_fence(member: &RemoteShard, ctx: &str) -> Result<(), ShardError> {
+    let stale = member.fence(0)?;
+    if stale == 0 {
+        return Ok(());
+    }
+    let now = member.unfence(stale)?;
+    if now != 0 {
+        return Err(ShardError::Remote(format!(
+            "{ctx}: clearing a stale fence (generation {stale}) on a group member failed — the \
+             slot is still fenced at generation {now} (a concurrent handoff?)"
+        )));
+    }
+    Ok(())
+}
 
 /// Set-equality of two replica lists. Replica ORDER is composite failover try-order — an artifact
 /// of how the group was seeded/planned — never placement, so a target computation that compared
@@ -255,6 +285,11 @@ impl ClusterEngine {
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
+        // A stale fence on the SOURCE (cp was dropped from this position's group by an earlier
+        // move and later became its committed primary again) means the position is ALREADY
+        // write-broken; clearing it at move start is the repair, and lets phase 3's fence(new_gen)
+        // + the phase-8 unfence CAS operate on OUR generation.
+        clear_stale_fence(&source, "reassign_group_and_move: source")?;
         let (lease, pinned) = source.acquire_retention_lease()?;
 
         let do_move = || -> Result<u64, ShardError> {
@@ -263,7 +298,20 @@ impl ClusterEngine {
 
             // ---- Phase 2 (pre-fence): establish FRESH members, writes still flowing ----
             // `(node id, connection, member high-water)` for every D member established so far.
+            // LEASE DISCIPLINE (codex P2 on this ADR): the ONE source lease is renewed only to the
+            // MINIMUM outstanding member cursor — never to the current member's own high-water. A
+            // later member's `RecoverFrom` re-SEALS the source (baking the tail into segments and
+            // trimming the translog down to the lease floor), so advancing the floor past a
+            // lagging member would trim entries that member still needs — an unrecoverable gap ⇒
+            // a false negative. Members established LATER never constrain the floor: their bulk
+            // copy is taken at a FRESH seal, so they depend only on the tail past their own `P`.
             let mut established: Vec<(u64, RemoteShard, LogPos)> = Vec::new();
+            let floor_with = |established: &[(u64, RemoteShard, LogPos)], candidate: LogPos| {
+                established
+                    .iter()
+                    .map(|(_, _, h)| *h)
+                    .fold(candidate, std::cmp::Ord::min)
+            };
             for (nid, ep) in d_members
                 .iter()
                 .filter(|(nid, _)| !committed_ids.contains(&nid.0))
@@ -279,11 +327,15 @@ impl ClusterEngine {
                     &self.client_security,
                 )?
                 .with_metrics(Arc::clone(&self.transport_metrics));
+                // A fresh member may RE-ENTER a group it was dropped from (its slot preserved a
+                // stale fence through RecoverFrom) — clear it or the committed member would
+                // reject every write / desync on first fan-out.
+                clear_stale_fence(&t, "reassign_group_and_move: fresh member")?;
                 let (_segments, _nq, p) = t.recover_from(&cp_ep, expected)?;
                 let mut hwm = LogPos(p);
                 for _ in 0..drain_passes {
                     let next = catch_up_replica(&t, &source, &self.norm, &self.dict, hwm)?;
-                    source.renew_retention_lease(lease, next)?;
+                    source.renew_retention_lease(lease, floor_with(&established, next))?;
                     if next == hwm {
                         break;
                     }
@@ -331,7 +383,11 @@ impl ClusterEngine {
                             break;
                         }
                         Some(max_pos) => {
-                            source.renew_retention_lease(lease, cursor)?;
+                            // Renew at the FLOOR (min outstanding member cursor; the pin when no
+                            // member is established — promotion/replica-only) — a TTL refresh that
+                            // never lets a trim outrun a lagging member's pending tail.
+                            source
+                                .renew_retention_lease(lease, floor_with(&established, pinned))?;
                             cursor = max_pos.max(cursor);
                         }
                     }
@@ -346,16 +402,22 @@ impl ClusterEngine {
                 }
 
                 // ---- Phase 5: drain FRESH members to the frozen tail ----
-                for (_, t, hwm) in &mut established {
+                // Indexed so the lease floor can be computed over EVERY member (the one being
+                // drained at its just-advanced cursor, the others at theirs).
+                for i in 0..established.len() {
                     let mut converged = false;
                     for _ in 0..final_drain_cap.max(1) {
-                        let next = catch_up_replica(t, &source, &self.norm, &self.dict, *hwm)?;
-                        source.renew_retention_lease(lease, next)?;
-                        if next == *hwm {
+                        let hwm = established[i].2;
+                        let next = {
+                            let (_, t, _) = &established[i];
+                            catch_up_replica(t, &source, &self.norm, &self.dict, hwm)?
+                        };
+                        established[i].2 = next;
+                        source.renew_retention_lease(lease, floor_with(&established, next))?;
+                        if next == hwm {
                             converged = true;
                             break;
                         }
-                        *hwm = next;
                     }
                     if !converged {
                         return Err(ShardError::Remote(format!(
@@ -383,6 +445,12 @@ impl ClusterEngine {
                         &self.client_security,
                     )?
                     .with_metrics(Arc::clone(&self.transport_metrics));
+                    // Same stale-fence hazard as a fresh member: a committed replica can carry a
+                    // fence from a move that dropped it as this position's PRIMARY long ago (map
+                    // edits can re-add it replica-first). Clear it — post-swap it must accept
+                    // fan-out. Group writes are quiesced here (cp is fenced), so no write races
+                    // the clear.
+                    clear_stale_fence(&t, "reassign_group_and_move: retained member")?;
                     let (_segments, _nq, p) = t.recover_from(&cp_ep, expected)?;
                     // Verify: the copy of a frozen source must have NO tail past its seal point.
                     let verify = catch_up_replica(&t, &source, &self.norm, &self.dict, LogPos(p))?;
