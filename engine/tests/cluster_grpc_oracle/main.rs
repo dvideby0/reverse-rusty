@@ -33,6 +33,7 @@ mod partial_apply;
 mod reassign;
 mod rebalance;
 mod reconcile;
+mod reconcile_replicated;
 mod recovery;
 mod relocation;
 mod replication;

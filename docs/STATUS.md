@@ -153,7 +153,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   converges the committed shard→node map to the HRW-desired placement automatically; the autoscaler's
   membership-drift arm drives the data-moving rebalance on a remote cluster (closing a latent ADR-086
   false negative); opt-in `--reconcile-interval-secs` loop + REST `POST /_cluster/reconcile`. Sequential
-  moves; default-off ⇒ byte-identical (ADR-092). Parallel multi-position moves still deferred.
+  moves; default-off ⇒ byte-identical (ADR-092). **RF>1 group reconciliation** — a replicated
+  position's whole group moves via `reassign_group_and_move` (fence the primary → freeze → re-establish
+  every non-source member from the frozen source → swap the group composite → commit), dispatched by
+  shape from `reconcile`/`rebalance_and_move` (ADR-094; the de-replication trap is oracle-proven dead).
+  Parallel multi-position moves still deferred.
 - **Partial-apply repair** — typed `PartiallyApplied` + live `resync` (ADR-047).
 - **Mesh security** — opt-in TLS + shared cluster token, constant-time default-deny interceptor on
   both planes (ADR-071).
@@ -245,8 +249,8 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   collision-safe.** **Stage 4 (the reconciler, ADR-092):** the parked unattended controller landed on
   this foundation, with the packed-K>N gRPC oracle proving the *reconciler itself* converges the exact
   topology that parked it — no slot lost, zero-FN, epoch-invariant idempotence, restart routes zero-FN.
-  Parallel multi-position moves (`rebalance_and_move`/`reconcile` are sequential) and RF>1 data-moving
-  reconciliation (a replicated position's group move) remain follow-ons.
+  Parallel multi-position moves (`rebalance_and_move`/`reconcile` are sequential) remain a follow-on;
+  RF>1 data-moving reconciliation shipped as ADR-094 (the group move).
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at
   runtime via `Vocab`/`NormalizerBuilder` (learning: ADR-015/053; aliases: ADR-054/060/061).
 - **Validated on synthetic + pinned-pair data, not a real corpus.** The oracle and benchmarks run

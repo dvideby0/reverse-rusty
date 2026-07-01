@@ -69,9 +69,11 @@ the committed map still names the reads-serving source. Re-running `reassign_and
 fenced source still serves the read-only recovery RPCs, so the retry re-converges the already-populated
 target and re-commits). A multi-position `rebalance_and_move` stops on the first failure and reports
 `{moved, failed, not_attempted}` — each already-moved position is individually consistent, so a partial
-rebalance is a valid, resumable state (fail-forward, no auto-rollback). **RF>1 is rejected** (a move
+rebalance is a valid, resumable state (fail-forward, no auto-rollback). **A position with committed replicas is rejected** (a single-target move
 swaps the position to a single `RemoteShard`, dropping the replica group; committing the old replica
-set would advertise replicas that no longer receive writes — reject loudly rather than de-replicate).
+set would advertise replicas that no longer receive writes — reject loudly rather than de-replicate;
+replicated positions move via the group-aware
+[ADR-094](adr-094-replicated-group-reassignment.md) `reassign_group_and_move`).
 `rebalance_and_move` plans only over **data nodes with a registered address** (so HRW never picks the
 addr-less control-plane manager as a target).
 
@@ -121,8 +123,9 @@ ADR-086 guard correctly fails loud on a *stale* CLI.
 - **Supported topology: a single active coordinator** (the v1 Compose/Helm deployment). The
   `reassign_serial` guard serializes this coordinator's moves; the durable-map consistency guarantee
   holds for a reliable commit (the in-memory control plane, or a healthy quorum).
-- **Explicitly deferred:** **parallel** multi-position moves (today sequential); **RF>1** reassignment
-  (needs the target replica group re-recovered); **cross-coordinator atomicity** of the primary-check +
+- **Explicitly deferred:** **parallel** multi-position moves (today sequential); ~~**RF>1** reassignment
+  (needs the target replica group re-recovered)~~ — **shipped as
+  [ADR-094](adr-094-replicated-group-reassignment.md)**; **cross-coordinator atomicity** of the primary-check +
   commit (needs a control-plane **conditional-propose** / compare-and-set `AssignShard` primitive — the
   best-effort CAS here guards a second coordinator but is not atomic). The **automated assignment-watch →
   re-point controller** that reconciles the committed map unattended SHIPPED as **[ADR-092](adr-092-unattended-reconciler.md)**

@@ -430,12 +430,14 @@ fn grpc_reassign_and_move_aborts_clean_and_does_not_commit() {
     let _ = std::fs::remove_dir_all(&nodes.tgt_dir);
 }
 
-/// RF>1 reject (ADR-090): a data-moving reassignment of a REPLICATED cluster would de-replicate the
-/// position — the move swaps it to a single `RemoteShard` while the committed map still advertises the
-/// replicas. `reassign_and_move` rejects it loudly (a config error) rather than silently dropping the
-/// replica set. Uses an in-process RF=2 cluster (no servers needed — the guard fires before any move).
+/// Replicated-position reject (ADR-090, narrowed by ADR-094): a SINGLE-target `reassign_and_move`
+/// of a position whose COMMITTED assignment carries replicas would de-replicate it — the move swaps
+/// the position to one `RemoteShard` while the committed map still advertises the replicas. The
+/// guard is per-position (the committed entry, not the cluster's replication factor) and points at
+/// the group-aware `reassign_group_and_move`. Uses an in-process cluster with a seeded replicated
+/// assignment (no servers needed — the guard fires before any move).
 #[test]
-fn grpc_reassign_and_move_rejects_replicated_cluster() {
+fn grpc_reassign_and_move_rejects_replicated_position() {
     let queries = vec![(1u64, "1994 upper deck rareplayer0".to_string())];
     let cfg = ClusterConfig {
         num_shards: 1,
@@ -445,12 +447,23 @@ fn grpc_reassign_and_move_rejects_replicated_cluster() {
     };
     let cluster =
         ClusterEngine::build(vocab(), &cfg, &queries).expect("build RF=2 in-process cluster");
+    // Commit a REPLICATED assignment for position 0 — the per-position condition the guard reads.
+    cluster
+        .reassign_shard(reverse_rusty::cluster::ShardAssignment {
+            position: 0,
+            primary: NodeId(1),
+            replicas: vec![NodeId(2)],
+        })
+        .expect("seed a replicated committed assignment");
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let err = cluster
-        .reassign_and_move(0, NodeId(1), rt.handle())
-        .expect_err("RF>1 data-moving reassignment must be rejected");
-    assert!(
-        matches!(err, ShardError::Config(_)),
-        "RF>1 reject surfaces as a config error, got {err:?}"
-    );
+        .reassign_and_move(0, NodeId(2), rt.handle())
+        .expect_err("a single-target move of a replicated position must be rejected");
+    match &err {
+        ShardError::Config(msg) => assert!(
+            msg.contains("committed replica") && msg.contains("reassign_group_and_move"),
+            "the reject names the per-position reason and the group-aware alternative: {msg}"
+        ),
+        other => panic!("replicated-position reject surfaces as a config error, got {other:?}"),
+    }
 }
