@@ -239,6 +239,7 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
         rt.handle().clone(),
         dict_fp,
         wrong_tag_fp,
+        0,
     ) {
         Err(e) => assert!(
             e.to_string().contains("tag-dict"),
@@ -247,8 +248,14 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
         Ok(_) => panic!("connect SUCCEEDED against a divergent tag dict"),
     }
     // Control: the correct pair connects.
-    reverse_rusty::cluster::RemoteShard::connect(&endpoint, rt.handle().clone(), dict_fp, tag_fp)
-        .expect("connect with the matching tag fingerprint");
+    reverse_rusty::cluster::RemoteShard::connect(
+        &endpoint,
+        rt.handle().clone(),
+        dict_fp,
+        tag_fp,
+        0,
+    )
+    .expect("connect with the matching tag fingerprint");
 
     // 2. Raw RPCs with the RIGHT dict fingerprint but a WRONG tag fingerprint: each
     // guarded handler refuses with failed_precondition naming the tag space.
@@ -262,6 +269,7 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 generation: 1,
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: wrong_tag_fp,
+                shard_id: 0,
             })
             .await
             .expect_err("Fence must refuse a divergent tag dict");
@@ -273,6 +281,7 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 generation: 1,
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: wrong_tag_fp,
+                shard_id: 0,
             })
             .await
             .expect_err("Unfence must refuse a divergent tag dict");
@@ -285,6 +294,7 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 pos: 0,
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: wrong_tag_fp,
+                shard_id: 0,
             })
             .await
             .expect_err("RetentionLease must refuse a divergent tag dict");
@@ -295,6 +305,7 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 after_seqno: 0,
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: wrong_tag_fp,
+                shard_id: 0,
             })
             .await
             .expect_err("FetchTranslog must refuse a divergent tag dict");
@@ -306,6 +317,7 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 generation: 1,
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: tag_fp,
+                shard_id: 0,
             })
             .await
             .expect("fence with the matching tag fingerprint")

@@ -174,7 +174,9 @@ fn grpc_replicated_failover_and_peer_recovery() {
     let src_ep = format!("http://{}", all_addrs[1][0]); // position 1's live primary (durable)
     let tgt_ep = format!("http://{fresh_addr}");
     let (recovered_n, _hwm) = cluster
-        .peer_recover_replica(&src_ep, &tgt_ep, rt.handle())
+        // Position 1's primary hosts slot 1; recover it into the fresh node's slot 1 (ADR-093), so
+        // the verify cluster below can address the recovered node as shard-id 1.
+        .peer_recover_replica(1, &src_ep, &tgt_ep, rt.handle())
         .expect("peer recovery over gRPC");
 
     // Parity: the recovered node holds exactly position 1's query count.

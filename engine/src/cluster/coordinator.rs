@@ -92,7 +92,10 @@ const CLUSTER_LOG_FILE: &str = "cluster.log";
 /// Directory holding shard `i`'s durable compiled segments (under the cluster `data_dir`).
 /// Zero-padded so the dirs sort in shard order. Each is a segments-only engine `data_dir`
 /// (`shard_<i>/segments/seg_*.seg` + `shard_<i>/sources.dat`), no per-shard WAL/manifest.
-fn shard_dir(base: &Path, shard: usize) -> PathBuf {
+///
+/// `pub(crate)` so the multi-shard `ShardServer` (ADR-093) roots each hosted slot's per-shard subdir
+/// with the SAME `shard_<NNN>` naming — one source of truth for the on-disk layout.
+pub(crate) fn shard_dir(base: &Path, shard: usize) -> PathBuf {
     base.join(format!("shard_{shard:03}"))
 }
 

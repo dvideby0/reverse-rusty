@@ -101,8 +101,8 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     autoscaler-driven resize (needs hysteresis to avoid thrash, since a resize is non-idempotent +
     `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
     live-handoff machinery; the v1 resize is in-process blue/green).
-  - **Multi-shard-per-node ([ADR-093](decisions/adr-093-multi-shard-per-node.md)) — the foundation
-    (design accepted; staged build in a later session).** The distributed deployment is one shard per
+  - **Multi-shard-per-node ([ADR-093](decisions/adr-093-multi-shard-per-node.md)) — Stage 1
+    (foundation) BUILT; co-location + relocation staged.** The distributed deployment is one shard per
     `ShardServer` process today, but the allocator/control-plane/durable-layout are already
     multi-shard-per-node aware — so a code review found that the HRW data-moving rebalance
     (`rebalance_and_move`, [ADR-090](decisions/adr-090-data-moving-reassignment.md)) and the unattended
@@ -111,8 +111,9 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     earlier move). The fix is to make a node host MANY shards (keyed by `shard_id` = position) with
     per-shard fence/recovery/storage — concentrated in the proto + transport + `ShardServer` (the rest
     is unchanged). This **unblocks** safe rebalancing, the reconciler, RF>1 failover, and fewer-pods-
-    than-shards topologies. Staged: foundation → co-location → per-shard relocation+failover → rebase
-    the reconciler. **Parallel multi-position moves** (`rebalance_and_move` is sequential) ride on top,
+    than-shards topologies. Staged: **Stage 1 foundation (proto `shard_id`, shard-keyed `ShardServer`
+    map, per-shard fence/recovery/`shard_<id>/` storage — BUILT, fixes the codex P1; the 1:1 deploy is
+    preserved)** → co-location → per-shard relocation+failover → rebase the reconciler. **Parallel multi-position moves** (`rebalance_and_move` is sequential) ride on top,
     once relocation is collision-safe. (k8s/Helm manifests + gRPC health/readiness probes shipped —
     [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the advertise-URL; the
     `shardserver --accept-class-d` item was a phantom — remote shards force-accept class-D, the

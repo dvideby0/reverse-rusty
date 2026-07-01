@@ -151,7 +151,7 @@ impl ClusterEngine {
         // ONE shared transport-metrics collector (ADR-085): every serving RemoteShard records
         // into it and the engine reads it via `transport_metrics()` (installed below).
         let metrics = Arc::new(TransportMetrics::new());
-        for ep in endpoints {
+        for (position, ep) in endpoints.iter().enumerate() {
             let remote = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
                 ep,
                 handle.clone(),
@@ -159,6 +159,9 @@ impl ClusterEngine {
                 expected,
                 tag_dict_bytes.clone(),
                 expected_tag,
+                // Stage 1 keeps the 1:1 deployment: endpoint i serves the sole slot at shard-id i
+                // (ADR-093); the server names the slot on adopt.
+                position as u32,
                 &security,
             )?
             .with_metrics(Arc::clone(&metrics));
@@ -248,7 +251,9 @@ impl ClusterEngine {
         let mut handoffs: Vec<Arc<HandoffShard>> = Vec::with_capacity(groups.len());
         // ONE shared transport-metrics collector (ADR-085); see `connect_remote_with_security`.
         let metrics = Arc::new(TransportMetrics::new());
-        for g in groups {
+        for (position, g) in groups.iter().enumerate() {
+            // A replica hosts the SAME global position (shard-id) as its primary (ADR-093).
+            let shard_id = position as u32;
             let primary = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
                 &g.primary,
                 handle.clone(),
@@ -256,6 +261,7 @@ impl ClusterEngine {
                 expected,
                 tag_dict_bytes.clone(),
                 expected_tag,
+                shard_id,
                 &security,
             )?
             .with_metrics(Arc::clone(&metrics));
@@ -268,6 +274,7 @@ impl ClusterEngine {
                     expected,
                     tag_dict_bytes.clone(),
                     expected_tag,
+                    shard_id,
                     &security,
                 )?
                 .with_metrics(Arc::clone(&metrics));
@@ -319,6 +326,7 @@ impl ClusterEngine {
     /// lease keeps the tail safe — only the residual size does.
     pub fn peer_recover_replica(
         &self,
+        shard_id: u32,
         source_endpoint: &str,
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
@@ -329,11 +337,14 @@ impl ClusterEngine {
         let expected_tag = self.tag_dict.fingerprint();
         // Pin the source's tail BEFORE the segment-copy seal trims it (ADR-040). Held across the
         // whole recovery; released below whether it converges or errors.
+        // Recover the source's slot `shard_id` into the target's slot `shard_id` (ADR-093): a
+        // relocation/replication keeps the SAME global position (e.g. position 1's primary hosts slot 1).
         let source = crate::cluster::remote::RemoteShard::connect_with_security(
             source_endpoint,
             handle.clone(),
             expected,
             expected_tag,
+            shard_id,
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
@@ -350,6 +361,7 @@ impl ClusterEngine {
                 expected,
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
+                shard_id,
                 &self.client_security,
             )?
             .with_metrics(Arc::clone(&self.transport_metrics));
@@ -395,6 +407,7 @@ impl ClusterEngine {
     /// window where a final quiesce would shrink to the residual delta).
     pub fn catch_up_recovered_replica(
         &self,
+        shard_id: u32,
         source_endpoint: &str,
         target_endpoint: &str,
         after: u64,
@@ -402,11 +415,13 @@ impl ClusterEngine {
     ) -> Result<u64, ShardError> {
         let expected = self.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
+        // Catch up the target's slot `shard_id` from the source's same slot (ADR-093).
         let source = crate::cluster::remote::RemoteShard::connect_with_security(
             source_endpoint,
             handle.clone(),
             expected,
             expected_tag,
+            shard_id,
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
@@ -415,6 +430,7 @@ impl ClusterEngine {
             handle.clone(),
             expected,
             expected_tag,
+            shard_id,
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
@@ -484,6 +500,8 @@ impl ClusterEngine {
             handle.clone(),
             expected,
             expected_tag,
+            // Fence/recover/lease the RIGHT slot: this handoff moves shard `position` (ADR-093).
+            position as u32,
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
@@ -500,6 +518,7 @@ impl ClusterEngine {
                 expected,
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
+                position as u32,
                 &self.client_security,
             )?
             .with_metrics(Arc::clone(&self.transport_metrics));

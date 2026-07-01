@@ -293,14 +293,14 @@ fn grpc_secured_peer_recovery_pulls_through_the_mesh() {
     // recovery fails loud (UNAUTHENTICATED at the source), never a silent empty shard.
     assert!(
         cluster
-            .peer_recover_replica(&src_ep, &bad_ep, rt.handle())
+            .peer_recover_replica(0, &src_ep, &bad_ep, rt.handle())
             .is_err(),
         "a target without the mesh client half must fail the pull loudly"
     );
 
     // The properly configured target completes the recovery THROUGH the mesh.
     let (n, _hwm) = cluster
-        .peer_recover_replica(&src_ep, &tgt_ep, rt.handle())
+        .peer_recover_replica(0, &src_ep, &tgt_ep, rt.handle())
         .expect("secured peer recovery");
     assert!(n > 0, "the recovered target holds the corpus");
 

@@ -67,13 +67,13 @@ impl ShardService for LegacyLayoutServer {
     }
     async fn num_queries(
         &self,
-        _req: Request<raw::Empty>,
+        _req: Request<raw::ShardRef>,
     ) -> Result<Response<raw::CountReply>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
     async fn class_counts(
         &self,
-        _req: Request<raw::Empty>,
+        _req: Request<raw::ShardRef>,
     ) -> Result<Response<raw::ClassCountsReply>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
@@ -178,7 +178,7 @@ fn grpc_connect_refuses_a_pre_adr080_broad_layout() {
     };
 
     // 1. The bare `connect` handshake refuses the legacy layout, naming the cause.
-    match RemoteShard::connect(&legacy_ep, rt.handle().clone(), dict_fp, tag_fp) {
+    match RemoteShard::connect(&legacy_ep, rt.handle().clone(), dict_fp, tag_fp, 0) {
         Err(e) => assert!(
             names_the_layout(&e),
             "connect refusal must name the layout: {e}"
@@ -197,6 +197,7 @@ fn grpc_connect_refuses_a_pre_adr080_broad_layout() {
         dict_fp,
         tag_bytes,
         tag_fp,
+        0,
     ) {
         Err(e) => assert!(
             names_the_layout(&e),
@@ -220,6 +221,6 @@ fn grpc_connect_refuses_a_pre_adr080_broad_layout() {
     };
     wait_until_listening(real_addr);
     let real_ep = format!("http://{real_addr}");
-    RemoteShard::connect(&real_ep, rt.handle().clone(), dict_fp, tag_fp)
+    RemoteShard::connect(&real_ep, rt.handle().clone(), dict_fp, tag_fp, 0)
         .expect("a real ADR-080 server attests the replicate-to-all layout");
 }

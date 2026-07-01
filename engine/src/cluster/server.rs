@@ -7,14 +7,17 @@
 //! Placement + routing stay the coordinator's job; the server is a dumb executor of
 //! `percolate` / `ingest` / `insert` / `delete` / `flush`.
 
+use std::collections::HashMap;
+use std::ffi::OsStr;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use arc_swap::ArcSwapOption;
 use tonic::Status;
 
+use crate::cluster::coordinator::shard_dir;
 use crate::compile::{extract_readonly, Extracted};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
@@ -24,7 +27,7 @@ use crate::tagdict::TagDict;
 
 use super::proto::shard_service_server::ShardServiceServer;
 use super::security::{ClientSecurity, MeshAuthVerify, ServerSecurity, TlsServerIdentity};
-use super::shard::{LocalShard, ShardError};
+use super::shard::{LocalShard, Shard, ShardError};
 
 mod service;
 
@@ -84,9 +87,133 @@ struct ServerState {
     /// The frozen per-query tag space (ADR-049/055), shipped by the coordinator via `AdoptDict`
     /// alongside the dict. Held so the server resolves ingested tags read-only against the same
     /// space the coordinator's filter `TagId`s came from. Empty until adopted (a pre-built `new`
-    /// server starts empty; the coordinator's adopt installs the real one).
+    /// server starts empty; the coordinator's adopt installs the real one). An `Arc` clone of the
+    /// node-scope [`AdoptedSpace`] — every slot on the node shares the one deserialized dict/tag pair.
     tag_dict: Arc<TagDict>,
     shard: LocalShard,
+}
+
+/// One hosted shard on a multi-shard node (ADR-093): its swappable engine state + its OWN fence
+/// generation. Keying the fence PER SLOT is the codex-P1 fix — fencing one shard for a handoff no
+/// longer write-quiesces a co-located shard on the same node (a shared `AtomicU64` could not do this).
+struct ShardSlot {
+    /// `None` until this slot adopts a dict; reads/writes against a pending slot return
+    /// `failed_precondition`.
+    state: ArcSwapOption<ServerState>,
+    /// The fence generation for THIS slot (ADR-044 semantics, now per-shard, ADR-093): `0` ⇒ not
+    /// fenced; `> 0` ⇒ this slot has been demoted at that generation, so its data-mutating writes
+    /// return `failed_precondition`. Set monotonically by `Fence`, CAS-cleared by `Unfence`.
+    fenced_at_generation: AtomicU64,
+}
+
+impl ShardSlot {
+    /// A slot holding an already-built [`ServerState`], not fenced.
+    fn loaded(state: ServerState) -> Arc<Self> {
+        Arc::new(ShardSlot {
+            state: ArcSwapOption::from(Some(Arc::new(state))),
+            fenced_at_generation: AtomicU64::new(0),
+        })
+    }
+
+    /// This slot's adopted state, or `failed_precondition` if the slot has not adopted a dict yet.
+    fn loaded_state(&self) -> Result<Arc<ServerState>, Status> {
+        self.state
+            .load_full()
+            .ok_or_else(|| Status::failed_precondition("shard has not adopted a dict yet"))
+    }
+
+    /// Reject a data-mutating write if this slot has been fenced (demoted by a live handoff,
+    /// ADR-044). Called by `insert`/`delete`/`ingest` only — reads + the recovery RPCs deliberately
+    /// do NOT call it, so a demoted owner keeps serving them until the coordinator stops routing to it
+    /// (serve-then-drop), and an in-flight read never hits the fence.
+    fn check_not_fenced(&self) -> Result<(), Status> {
+        let gen = self.fenced_at_generation.load(Ordering::Acquire);
+        if gen > 0 {
+            return Err(Status::failed_precondition(format!(
+                "shard is fenced at generation {gen} (demoted by a handoff); writes are rejected"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// The node-scope adopted feature space (ADR-093): ONE frozen dict + tag dict, deserialized once per
+/// node and shared by `Arc` into every slot's [`ServerState`], so co-locating N shards on a node never
+/// deserializes N dicts. The node-level `DictFingerprint` handshake reads this, independent of any slot.
+struct AdoptedSpace {
+    dict: Arc<Dict>,
+    tag_dict: Arc<TagDict>,
+}
+
+/// The map of shards this node hosts, keyed by `shard_id` (= global position, ADR-093).
+type ShardMap = Arc<RwLock<HashMap<u32, Arc<ShardSlot>>>>;
+
+/// Parse a `shard_<NNN>` directory name back to its `shard_id`, mirroring [`shard_dir`]'s `{:03}`
+/// zero-padded scheme. Any other name (e.g. `feature_space.bin`, a legacy root `segments/`) ⇒ `None`.
+fn parse_shard_subdir(name: &OsStr) -> Option<u32> {
+    name.to_str()?.strip_prefix("shard_")?.parse().ok()
+}
+
+/// A node-scope adopted-space cell holding the given (already-deserialized) dict + tag space.
+fn node_space_cell(dict: Arc<Dict>, tag_dict: Arc<TagDict>) -> Arc<ArcSwapOption<AdoptedSpace>> {
+    Arc::new(ArcSwapOption::from(Some(Arc::new(AdoptedSpace {
+        dict,
+        tag_dict,
+    }))))
+}
+
+/// A shard map holding one slot at shard-id 0 — the pre-built / 1:1 deployment.
+fn single_slot(slot: Arc<ShardSlot>) -> ShardMap {
+    let mut map = HashMap::new();
+    map.insert(0, slot);
+    Arc::new(RwLock::new(map))
+}
+
+/// Restore every durable slot a node previously hosted (ADR-093): scan `data_dir` for `shard_<NNN>/`
+/// subdirs and reopen each `LocalShard` over the node-shared dict/tag space (self-restoring from that
+/// subdir's checkpoint sidecar + translog tail). A fresh dir (no subdirs) ⇒ an empty map (the node
+/// adopts on connect). Fails LOUD on a corrupt subdir dict (fingerprint mismatch) — never serves a slot
+/// compiled against a divergent feature space. No in-place migration of a legacy root `segments/`
+/// layout (the distributed shard store holds no production data yet — ADR-093 §Backward-compat).
+fn restore_durable_slots(
+    data_dir: &Path,
+    norm: &Arc<Normalizer>,
+    dict: &Arc<Dict>,
+    tag_dict: &Arc<TagDict>,
+    config: &EngineConfig,
+) -> Result<HashMap<u32, Arc<ShardSlot>>, ShardError> {
+    let mut slots = HashMap::new();
+    let entries = match std::fs::read_dir(data_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(slots),
+        Err(e) => {
+            return Err(ShardError::Log(format!(
+                "scanning {}: {e}",
+                data_dir.display()
+            )))
+        }
+    };
+    for entry in entries {
+        let entry =
+            entry.map_err(|e| ShardError::Log(format!("reading {}: {e}", data_dir.display())))?;
+        let Some(shard_id) = parse_shard_subdir(&entry.file_name()) else {
+            continue; // feature_space.bin, a legacy root dir, etc.
+        };
+        let subdir = shard_dir(data_dir, shard_id as usize);
+        let mut sc = config.clone();
+        sc.data_dir = Some(subdir);
+        let shard =
+            LocalShard::new_durable(Arc::clone(norm), Arc::clone(dict), Arc::clone(tag_dict), sc)?;
+        slots.insert(
+            shard_id,
+            ShardSlot::loaded(ServerState {
+                dict: Arc::clone(dict),
+                tag_dict: Arc::clone(tag_dict),
+                shard,
+            }),
+        );
+    }
+    Ok(slots)
 }
 
 /// A gRPC server wrapping ONE in-process shard.
@@ -104,17 +231,17 @@ pub struct ShardServer {
     /// `RecoverFrom` (pull a peer's segments + attach). `None` ⇒ in-memory (today's default).
     /// When set, `AdoptDict` builds a durable (segments-only) shard rather than an in-memory one.
     data_dir: Option<PathBuf>,
-    /// `None` until a dict is adopted; reads against a pending server return
-    /// `failed_precondition`. Wrapped in an `Arc` so the readiness watcher (ADR-084) can
-    /// share the same cell and observe dict-adoption without touching any RPC handler.
-    state: Arc<ArcSwapOption<ServerState>>,
-    /// The fence generation (ADR-044, step 6b): `0` ⇒ not fenced; `> 0` ⇒ this node has been
-    /// demoted as the owner of its shard at that generation, so data-mutating writes
-    /// (`insert`/`delete`/`ingest`) return `failed_precondition`. Reads + the recovery RPCs stay
-    /// served (serve-then-drop). Set monotonically by the `Fence` RPC (a stale lower-gen Fence
-    /// never un-fences). A live handoff fences the old owner, drains its tail to the new owner, then
-    /// flips routing — the fence holds a brief write-quiesce across that flip.
-    fenced_at_generation: AtomicU64,
+    /// The shards this node hosts, keyed by `shard_id` (= global position, ADR-093). ONE process can
+    /// host many, each independently adopted / fenced / recovered; the 1:1 deployment holds exactly one
+    /// slot (its position). A std `RwLock` keeps the lean dependency tree (no `dashmap`); the read path
+    /// clones the slot `Arc` out and drops the guard immediately, so it is NEVER held across an
+    /// RPC/`await` (the `recover_from` handler dials a peer). Empty ⇒ pending (awaiting `AdoptDict`).
+    shards: ShardMap,
+    /// The node-scope adopted dict/tag space (ADR-093): deserialized ONCE, its `Arc`s shared into every
+    /// slot's [`ServerState`]. `None` until the first adopt (or, for a durable node, until
+    /// `open_durable` reads it back). The node-level `DictFingerprint` handshake reads this — the
+    /// dict/tag-dict fingerprints are a node-wide content invariant, independent of any slot.
+    node_dict: Arc<ArcSwapOption<AdoptedSpace>>,
     /// Mesh security (ADR-071): TLS identity + expected cluster token, applied by the
     /// `serve*` methods. Default (none) ⇒ the historical plaintext/open behavior.
     security: ServerSecurity,
@@ -134,7 +261,8 @@ impl ShardServer {
     pub fn new(norm: Arc<Normalizer>, dict: Arc<Dict>, config: EngineConfig) -> Self {
         // Pre-built path: starts with an empty tag space; a tagged deployment ships the real one
         // via `AdoptDict` (which rebuilds the shard over it). Empty + finalized so the read-only
-        // tag-resolution invariant holds even before an adopt.
+        // tag-resolution invariant holds even before an adopt. The node hosts its sole slot at
+        // shard-id 0 (ADR-093: the pre-built path is the 1:1 position-0 deployment).
         let tag_dict = Arc::new(finalized_empty_tag_dict());
         let shard = LocalShard::new(
             Arc::clone(&norm),
@@ -142,17 +270,18 @@ impl ShardServer {
             Arc::clone(&tag_dict),
             config.clone(),
         );
-        let state = Arc::new(ArcSwapOption::from(Some(Arc::new(ServerState {
+        let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
+        let shards = single_slot(ShardSlot::loaded(ServerState {
             dict,
             tag_dict,
             shard,
-        }))));
+        }));
         ShardServer {
             norm,
             config,
             data_dir: None,
-            state,
-            fenced_at_generation: AtomicU64::new(0),
+            shards,
+            node_dict,
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
@@ -168,8 +297,8 @@ impl ShardServer {
             norm,
             config,
             data_dir: None,
-            state: Arc::new(ArcSwapOption::from(None)),
-            fenced_at_generation: AtomicU64::new(0),
+            shards: Arc::new(RwLock::new(HashMap::new())),
+            node_dict: Arc::new(ArcSwapOption::from(None)),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
@@ -208,32 +337,20 @@ impl ShardServer {
                 ))
             })?,
         );
-        let mut sc = config.clone();
-        sc.data_dir = Some(data_dir.clone());
-        // `new_durable` self-restores via the checkpoint sidecar when one exists
-        // (segments attached + translog tail replayed, fingerprint-checked). A
-        // fingerprint mismatch here means the durable state was built under a dict that
-        // no longer matches the persisted one — a corpus/coordinator change across the
-        // restart (ADR-034 divergence). It fails LOUD (DictMismatch); the remedy is to
-        // wipe this node's data dir and let the coordinator re-seed it (a node that
-        // crashed mid-adopt holds no data the cluster's source of truth relies on).
-        let shard = LocalShard::new_durable(
-            Arc::clone(&norm),
-            Arc::clone(&dict),
-            Arc::clone(&tag_dict),
-            sc,
-        )?;
-        let state = Arc::new(ArcSwapOption::from(Some(Arc::new(ServerState {
-            dict,
-            tag_dict,
-            shard,
-        }))));
+        // Restore every slot this node previously hosted from its `shard_<id>/` subdir (ADR-093).
+        // Each `new_durable` self-restores via that subdir's checkpoint sidecar (segments attached +
+        // translog tail replayed, fingerprint-checked). A fingerprint mismatch fails LOUD
+        // (DictMismatch): the durable state was built under a dict that no longer matches the
+        // persisted one (a corpus/coordinator change across the restart, ADR-034 divergence); the
+        // remedy is to wipe this node's data dir and let the coordinator re-seed it.
+        let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
+        let slots = restore_durable_slots(&data_dir, &norm, &dict, &tag_dict, &config)?;
         Ok(ShardServer {
             norm,
             config,
             data_dir: Some(data_dir),
-            state,
-            fenced_at_generation: AtomicU64::new(0),
+            shards: Arc::new(RwLock::new(slots)),
+            node_dict,
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
@@ -249,8 +366,8 @@ impl ShardServer {
             norm,
             config,
             data_dir: Some(data_dir),
-            state: Arc::new(ArcSwapOption::from(None)),
-            fenced_at_generation: AtomicU64::new(0),
+            shards: Arc::new(RwLock::new(HashMap::new())),
+            node_dict: Arc::new(ArcSwapOption::from(None)),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
@@ -266,8 +383,10 @@ impl ShardServer {
         config: EngineConfig,
         data_dir: PathBuf,
     ) -> Result<Self, ShardError> {
+        // The sole pre-built slot (shard-id 0) roots its segments at `data_dir/shard_000/` (ADR-093:
+        // the per-shard subdir the coordinator's durable layout already uses), not the data_dir root.
         let mut sc = config.clone();
-        sc.data_dir = Some(data_dir.clone());
+        sc.data_dir = Some(shard_dir(&data_dir, 0));
         let tag_dict = Arc::new(finalized_empty_tag_dict());
         let shard = LocalShard::new_durable(
             Arc::clone(&norm),
@@ -275,17 +394,18 @@ impl ShardServer {
             Arc::clone(&tag_dict),
             sc,
         )?;
-        let state = Arc::new(ArcSwapOption::from(Some(Arc::new(ServerState {
+        let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
+        let shards = single_slot(ShardSlot::loaded(ServerState {
             dict,
             tag_dict,
             shard,
-        }))));
+        }));
         Ok(ShardServer {
             norm,
             config,
             data_dir: Some(data_dir),
-            state,
-            fenced_at_generation: AtomicU64::new(0),
+            shards,
+            node_dict,
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
@@ -295,7 +415,9 @@ impl ShardServer {
     /// Whether this server currently holds an adopted/restored state (false ⇒ pending,
     /// awaiting `AdoptDict`). Introspection for the deployable bin's startup banner.
     pub fn is_serving(&self) -> bool {
-        self.state.load_full().is_some()
+        self.shards
+            .read()
+            .is_ok_and(|m| m.values().any(|s| s.state.load_full().is_some()))
     }
 
     /// A cloneable handle that renders this shard's `/_metrics` body on demand (ADR-091). The
@@ -305,29 +427,66 @@ impl ShardServer {
     /// flip and never touches the engine write lock.
     pub fn metrics_source(&self) -> ShardMetricsSource {
         ShardMetricsSource {
-            state: Arc::clone(&self.state),
+            shards: Arc::clone(&self.shards),
         }
     }
 
-    /// The adopted state, or `failed_precondition` if the server is still pending.
-    fn loaded(&self) -> Result<Arc<ServerState>, Status> {
-        self.state
-            .load_full()
-            .ok_or_else(|| Status::failed_precondition("shard has not adopted a dict yet"))
+    /// The slot hosting `shard_id` on this node, or `not_found` (ADR-093). Clones the slot `Arc` out
+    /// and DROPS the map read-guard before returning, so no caller (notably the async `recover_from`)
+    /// holds the std `RwLock` across an RPC/`await`.
+    fn slot(&self, shard_id: u32) -> Result<Arc<ShardSlot>, Status> {
+        let map = self
+            .shards
+            .read()
+            .map_err(|_| Status::internal("shard map lock poisoned"))?;
+        map.get(&shard_id).cloned().ok_or_else(|| {
+            Status::not_found(format!("shard {shard_id} is not hosted on this node"))
+        })
     }
 
-    /// Reject a data-mutating write if this node has been fenced (demoted by a live handoff,
-    /// ADR-044). Called by `insert`/`delete`/`ingest` only — reads + the recovery RPCs deliberately
-    /// do NOT call it, so the demoted owner keeps serving them until the coordinator stops routing
-    /// to it (serve-then-drop), and an in-flight read never hits the fence.
-    fn check_not_fenced(&self) -> Result<(), Status> {
-        let gen = self.fenced_at_generation.load(Ordering::Acquire);
-        if gen > 0 {
-            return Err(Status::failed_precondition(format!(
-                "shard is fenced at generation {gen} (demoted by a handoff); writes are rejected"
-            )));
-        }
+    /// The slot + its adopted [`ServerState`] for `shard_id` — `not_found` if the slot is absent,
+    /// `failed_precondition` if present-but-pending. The per-shard handlers' one-line replacement for
+    /// the old node-wide `loaded()`.
+    fn loaded_slot(&self, shard_id: u32) -> Result<(Arc<ShardSlot>, Arc<ServerState>), Status> {
+        let slot = self.slot(shard_id)?;
+        let st = slot.loaded_state()?;
+        Ok((slot, st))
+    }
+
+    /// Install (or replace) the slot for `shard_id`; the write-guard is released immediately.
+    fn insert_slot(&self, shard_id: u32, slot: Arc<ShardSlot>) -> Result<(), Status> {
+        self.shards
+            .write()
+            .map_err(|_| Status::internal("shard map lock poisoned"))?
+            .insert(shard_id, slot);
         Ok(())
+    }
+
+    /// Whether ANY hosted slot currently holds ≥1 query (ADR-093). The `AdoptDict` divergence guard:
+    /// the dict is node-shared, so re-basing onto a divergent feature space is refused while any slot
+    /// holds data. Snapshots the slot `Arc`s under the lock then queries them lock-free (no guard held
+    /// across the engine reads).
+    fn any_slot_populated(&self) -> Result<bool, Status> {
+        let slots: Vec<Arc<ShardSlot>> = {
+            let map = self
+                .shards
+                .read()
+                .map_err(|_| Status::internal("shard map lock poisoned"))?;
+            map.values().cloned().collect()
+        };
+        for slot in slots {
+            if let Some(st) = slot.state.load_full() {
+                if st
+                    .shard
+                    .num_queries()
+                    .map_err(|e| Status::internal(e.to_string()))?
+                    > 0
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Compile + bulk-load raw `(id, DSL)` queries into this shard before serving —
@@ -335,7 +494,9 @@ impl ShardServer {
     /// adopted frozen dict; parse failures are skipped (like `build`/`ingest`). No-op on a
     /// pending (not-yet-adopted) server.
     pub fn ingest_dsl(&self, items: &[(u64, String)]) {
-        let Some(st) = self.state.load_full() else {
+        // Standalone/pre-built preload path (bin demo, node_metrics, dict-shipping setup, unit tests):
+        // targets the sole pre-built slot 0. No-op on a pending (not-yet-adopted) node.
+        let Ok((_, st)) = self.loaded_slot(0) else {
             return;
         };
         let mut lc = String::new();
@@ -415,13 +576,15 @@ impl ShardServer {
         let Some(health_addr) = self.health_addr else {
             return self.secured_router()?.serve(addr).await;
         };
-        // Capture a shared handle to the readiness cell BEFORE `secured_router` consumes
-        // `self`. The watcher flips `Check("ready")` to SERVING once a dict is adopted —
-        // no RPC handler is touched (the `Arc<ArcSwapOption>` is the shared seam).
+        // Capture a shared handle to the shard map BEFORE `secured_router` consumes `self`. The
+        // watcher flips `Check("ready")` to SERVING once any slot adopts a dict — no RPC handler is
+        // touched (the shared `Arc<RwLock<…>>` shard map is the seam).
         let reporter = super::health::HealthReporter::serving();
-        let state = Arc::clone(&self.state);
+        let shards = Arc::clone(&self.shards);
         super::health::spawn_readiness_watcher(reporter.clone(), move || {
-            state.load_full().is_some()
+            shards
+                .read()
+                .is_ok_and(|m| m.values().any(|s| s.state.load_full().is_some()))
         });
         let data = self.secured_router()?.serve(addr);
         let health = super::health::serve_health(health_addr, reporter);
@@ -484,7 +647,11 @@ fn finalized_empty_tag_dict() -> TagDict {
 /// outlives the `serve` call that consumes the server. `Send + 'static` so the deploy bin can move it
 /// into the metrics listener's render closure.
 pub struct ShardMetricsSource {
-    state: Arc<ArcSwapOption<ServerState>>,
+    /// A shared clone of the server's shard map. Stage 1 hosts exactly one slot per node — its position,
+    /// which is NOT necessarily 0 (a node serving position 3 hosts slot 3, not slot 0) — so metrics
+    /// render THAT slot. A per-node aggregate over co-located slots is an explicit ADR-093 Stage 2
+    /// follow-on, not this PR.
+    shards: ShardMap,
 }
 
 impl ShardMetricsSource {
@@ -492,7 +659,15 @@ impl ShardMetricsSource {
     /// (metrics + segment infos + class counts from the same point-in-time) off the engine write
     /// lock; a pending (not-yet-adopted) server reports only `reverse_rusty_shard_ready 0`.
     pub fn render(&self) -> String {
-        match self.state.load_full() {
+        // The hosted slot (any loaded one — in the 1:1 deployment there is exactly one, at this node's
+        // position, which may be non-zero). Looking up slot 0 specifically would report a non-zero
+        // position node as pending even while it serves traffic (codex review).
+        let slot = self
+            .shards
+            .read()
+            .ok()
+            .and_then(|m| m.values().find_map(|s| s.state.load_full()));
+        match slot {
             Some(st) => {
                 let snap = st.shard.metrics_snapshot();
                 super::node_metrics::render_shard(

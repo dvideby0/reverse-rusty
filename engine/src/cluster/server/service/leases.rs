@@ -17,8 +17,8 @@ pub(super) fn retention_lease(
     server: &ShardServer,
     request: Request<proto::RetentionLeaseRequest>,
 ) -> Result<Response<proto::RetentionLeaseReply>, Status> {
-    let st = server.loaded()?;
     let req = request.into_inner();
+    let (_slot, st) = server.loaded_slot(req.shard_id)?;
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(
             "RetentionLease dict-fingerprint mismatch (divergent feature space)",
@@ -63,8 +63,8 @@ pub(super) fn fence(
     server: &ShardServer,
     request: Request<proto::FenceRequest>,
 ) -> Result<Response<proto::FenceReply>, Status> {
-    let st = server.loaded()?;
     let req = request.into_inner();
+    let (slot, st) = server.loaded_slot(req.shard_id)?;
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(
             "Fence dict-fingerprint mismatch (divergent feature space)",
@@ -75,9 +75,10 @@ pub(super) fn fence(
             "Fence tag-dict-fingerprint mismatch (divergent tag space)",
         ));
     }
-    // Monotonic max: a later, lower-generation Fence (a stale/duplicate message) never lowers
-    // the fence. `fetch_max` returns the previous value; the stored value becomes the max.
-    let prev = server
+    // Monotonic max on THIS slot's fence (ADR-093 — the codex-P1 fix): fencing this shard for a
+    // handoff never write-quiesces a co-located shard on the same node. A later, lower-generation
+    // Fence (a stale/duplicate) never lowers the fence; `fetch_max` returns the previous value.
+    let prev = slot
         .fenced_at_generation
         .fetch_max(req.generation, Ordering::AcqRel);
     Ok(Response::new(proto::FenceReply {
@@ -90,8 +91,8 @@ pub(super) fn unfence(
     server: &ShardServer,
     request: Request<proto::UnfenceRequest>,
 ) -> Result<Response<proto::UnfenceReply>, Status> {
-    let st = server.loaded()?;
     let req = request.into_inner();
+    let (slot, st) = server.loaded_slot(req.shard_id)?;
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(
             "Unfence dict-fingerprint mismatch (divergent feature space)",
@@ -102,10 +103,10 @@ pub(super) fn unfence(
             "Unfence tag-dict-fingerprint mismatch (divergent tag space)",
         ));
     }
-    // CAS from the exact generation this handoff fenced at. If the node is at 0 (not fenced)
-    // or at a higher generation (a newer handoff re-fenced it), the swap fails and the fence
-    // is left as-is — we report its current value.
-    let now_gen = match server.fenced_at_generation.compare_exchange(
+    // CAS from the exact generation this handoff fenced at, on THIS slot's fence (ADR-093). If the
+    // slot is at 0 (not fenced) or at a higher generation (a newer handoff re-fenced it), the swap
+    // fails and the fence is left as-is — we report its current value.
+    let now_gen = match slot.fenced_at_generation.compare_exchange(
         req.generation,
         0,
         Ordering::AcqRel,
