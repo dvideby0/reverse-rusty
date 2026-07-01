@@ -101,25 +101,22 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     autoscaler-driven resize (needs hysteresis to avoid thrash, since a resize is non-idempotent +
     `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
     live-handoff machinery; the v1 resize is in-process blue/green).
-  - **Multi-shard-per-node ([ADR-093](decisions/adr-093-multi-shard-per-node.md)) — Stage 1+2+3 BUILT;
-    only the reconciler rebase (Stage 4) staged.** The allocator/control-plane/durable-layout are already
-    multi-shard-per-node aware — so a code review found that the HRW data-moving rebalance
-    (`rebalance_and_move`, [ADR-090](decisions/adr-090-data-moving-reassignment.md)) and the unattended
-    reconciler (ADR-092, **parked** on `feat/unattended-reconciler`, not yet on `main`) silently OVERWRITE
-    (HRW packs several positions onto one node; a one-shard server's `RecoverFrom` clobbers the
-    earlier move). The fix is to make a node host MANY shards (keyed by `shard_id` = position) with
-    per-shard fence/recovery/storage — concentrated in the proto + transport + `ShardServer` (the rest
-    is unchanged). This **unblocks** safe rebalancing, the reconciler, RF>1 failover, and fewer-pods-
-    than-shards topologies. Staged: **Stage 1 foundation (proto `shard_id`, shard-keyed `ShardServer`
-    map, per-shard fence/recovery/`shard_<id>/` storage — BUILT, fixes the codex P1)** → **Stage 2
-    co-location (the `AddShard` RPC + per-endpoint adoption dedup — several positions share one endpoint,
-    fewer pods than shards, no dict re-ship — BUILT, oracle-proven K-on-N&lt;K)** → **Stage 3 per-shard
-    relocation + RF&gt;1 failover (the `connect_replicated` co-location dedup + per-node `/_metrics`
-    slot-aggregation + the oracle proving a co-located relocation leaves siblings intact, HRW
-    `rebalance_and_move` converges over a packed topology, and RF&gt;1 cross-replication survives a node
-    loss — all zero-FN — BUILT; general HRW rebalance is now collision-safe)** → rebase the reconciler
-    (Stage 4). **Parallel multi-position moves** (`rebalance_and_move` is sequential) ride on top, now
-    that relocation is collision-safe. (k8s/Helm manifests + gRPC health/readiness probes shipped —
+  - *Live-handoff follow-on (the [ADR-086](decisions/adr-086-control-plane-routing-and-failover.md)
+    deferral — data-moving reassignment **shipped** in
+    [ADR-090](decisions/adr-090-data-moving-reassignment.md); the multi-shard-per-node foundation
+    **shipped** as [ADR-093](decisions/adr-093-multi-shard-per-node.md) Stages 1–3, making HRW
+    rebalancing collision-safe; and the unattended **assignment-watch → re-point controller** in
+    [ADR-092](decisions/adr-092-unattended-reconciler.md), rebased onto that foundation as Stage 4:
+    `reconcile` + the opt-in `--reconcile-interval-secs` loop converge the committed map to the
+    HRW-desired placement by moving data, automatically + idempotently + zero-FN — proven on the
+    packed K&gt;N multi-shard topology that was the original clobber bug — and the autoscaler's
+    membership-drift arm is now data-moving on a remote cluster too):* the remaining open work is
+    **RF&gt;1 data-moving reconciliation** (a replicated position's whole GROUP must move — recover the
+    target replica group from the fenced source, then commit; today `reassign_and_move`/`reconcile`
+    reject `replication_factor &gt; 1`, the ADR-090/092 deferral) and **parallel multi-position
+    moves** (`rebalance_and_move`/`reconcile` are sequential today — safe parallelism is a
+    conflict-graph rework of `reassign_serial` into a busy-node guard; a throughput optimization, not a
+    capability gain). (k8s/Helm manifests + gRPC health/readiness probes shipped —
     [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the advertise-URL; the
     `shardserver --accept-class-d` item was a phantom — remote shards force-accept class-D, the
     coordinator is the sole gate.)

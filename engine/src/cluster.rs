@@ -79,7 +79,9 @@ pub use control_raft::{
 #[cfg(feature = "distributed")]
 pub use control_server::{ControlMetricsSource, ControlServer};
 #[cfg(feature = "distributed")]
-pub use coordinator::{ReassignOutcome, RebalanceMoveReport, ShardGroup};
+pub use coordinator::{
+    ReassignOutcome, RebalanceMoveReport, ReconcileConfig, ReconcileReport, ShardGroup,
+};
 #[cfg(feature = "distributed")]
 pub use node_metrics::{serve_metrics, MetricsHandle};
 #[cfg(feature = "distributed")]

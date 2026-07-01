@@ -40,8 +40,8 @@ use crate::handlers::{
     cluster_handoff, cluster_health, cluster_import_aliases, cluster_learn_aliases,
     cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_metrics, cluster_mpercolate,
     cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
-    cluster_register_node, cluster_resize, cluster_resync, cluster_root, cluster_search,
-    cluster_state, cluster_stats,
+    cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync, cluster_root,
+    cluster_search, cluster_state, cluster_stats,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -51,6 +51,11 @@ use crate::{auth, shutdown_signal};
 /// keep this file within the module-size budget (ADR-086).
 #[cfg(feature = "distributed")]
 mod remote_connect;
+
+/// The unattended re-point reconcile loop (ADR-092), split out to keep this file within the
+/// module-size budget. `distributed`-gated: it drives the data-moving reconcile.
+#[cfg(feature = "distributed")]
+mod reconcile_loop;
 
 /// Run the server in coordinator mode. Mirrors `main`'s single-node flow: build
 /// the cluster, wire observability, serve, shut down cleanly.
@@ -134,6 +139,18 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         error!(
             "--route-by-assignments requires --control-endpoint: the committed quorum is the \
              topology source of truth (ADR-086)"
+        );
+        std::process::exit(1);
+    }
+    // --reconcile-interval-secs runs the unattended reconciler (ADR-092), which re-points routing by
+    // MOVING data to the committed map's owner. It is only safe + meaningful when the coordinator
+    // actually ROUTES by that committed map — otherwise a converged map would not change routing.
+    // Require --route-by-assignments (which itself requires --control-endpoint), so a misconfiguration
+    // refuses startup rather than running a loop that moves data the coordinator then ignores.
+    if cli.reconcile_interval_secs.is_some() && !cli.route_by_assignments {
+        error!(
+            "--reconcile-interval-secs requires --route-by-assignments: the reconciler converges the \
+             committed shard→node map the coordinator routes by (ADR-092/086)"
         );
         std::process::exit(1);
     }
@@ -338,6 +355,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         )
         .route("/_cluster/rebalance", post(cluster_rebalance))
         .route("/_cluster/reassign", post(cluster_reassign))
+        .route("/_cluster/reconcile", post(cluster_reconcile))
         .route("/_cluster/resize", post(cluster_resize))
         .route("/_cluster/resync", post(cluster_resync))
         .route("/_cluster/handoff", post(cluster_handoff))
@@ -375,6 +393,21 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         warn!(drain_timeout, "drain timeout exceeded, forcing shutdown");
     };
 
+    // ADR-092: the opt-in unattended reconcile loop (distributed-only — it drives the data-moving
+    // reconcile). Spawned only when --reconcile-interval-secs is set (the guard above already required
+    // --route-by-assignments); held so it can be aborted at the start of the shutdown sequence, before
+    // the durability flush, so a pass never starts racing the checkpoint. Default (unset) ⇒ never
+    // spawned ⇒ byte-identical.
+    #[cfg(feature = "distributed")]
+    let reconcile_task = cli.reconcile_interval_secs.map(|secs| {
+        let cfg = reverse_rusty::cluster::ReconcileConfig {
+            enabled: true,
+            rf: cli.replication_factor,
+            min_interval: std::time::Duration::from_secs(secs.max(1)),
+        };
+        reconcile_loop::spawn_reconcile_loop(Arc::clone(&state), &cfg)
+    });
+
     tokio::select! {
         result = server_fut => {
             if let Err(e) = result {
@@ -382,6 +415,15 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             }
         }
         () = drain_deadline => {}
+    }
+
+    // Stop the reconcile loop before the durability flush: a pass already on the blocking pool finishes
+    // its current move-then-commit safely (handoff tolerates concurrent flushes, ADR-044), but no new
+    // pass starts racing the checkpoint.
+    #[cfg(feature = "distributed")]
+    if let Some(task) = reconcile_task {
+        info!("stopping reconcile loop");
+        task.abort();
     }
 
     info!("connection drain complete, running cluster shutdown sequence");

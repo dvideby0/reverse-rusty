@@ -32,6 +32,7 @@ mod legacy_layout;
 mod partial_apply;
 mod reassign;
 mod rebalance;
+mod reconcile;
 mod recovery;
 mod relocation;
 mod replication;

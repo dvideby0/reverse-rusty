@@ -124,7 +124,8 @@ ADR-086 guard correctly fails loud on a *stale* CLI.
 - **Explicitly deferred:** **parallel** multi-position moves (today sequential); **RF>1** reassignment
   (needs the target replica group re-recovered); **cross-coordinator atomicity** of the primary-check +
   commit (needs a control-plane **conditional-propose** / compare-and-set `AssignShard` primitive — the
-  best-effort CAS here guards a second coordinator but is not atomic); and an **automated
-  assignment-watch → re-point controller** that reconciles the committed map unattended (this increment
-  is operator/autoscaler-driven and manually triggered). The conditional-propose primitive + the
-  controller together would also close the persistent-commit-failure restart residual above.
+  best-effort CAS here guards a second coordinator but is not atomic). The **automated assignment-watch →
+  re-point controller** that reconciles the committed map unattended SHIPPED as **[ADR-092](adr-092-unattended-reconciler.md)**
+  (the `reconcile` controller + the opt-in `--reconcile-interval-secs` loop, built on this primitive;
+  moves stay sequential, so parallel multi-position remains deferred). The conditional-propose primitive
+  would also close the persistent-commit-failure restart residual above.

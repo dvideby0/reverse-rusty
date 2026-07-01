@@ -9,11 +9,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use reverse_rusty::cluster::{ClusterEngine, ShardError, ShardServer};
 use reverse_rusty::compile::{extract, Extracted};
+use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::Dict;
 use reverse_rusty::gen::{generate, GenConfig, BRANDS};
 use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::tagdict::TagDict;
+use tonic::transport::server::TcpIncoming;
 
 pub(crate) fn vocab() -> Normalizer {
     Normalizer::default_vocab().expect("built-in vocab")
@@ -254,4 +257,69 @@ pub(crate) fn server_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rr_grpc_rep_{}_{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
+}
+
+// ---- shared two-node move helpers (ADR-090 reassign + ADR-092 reconcile) ----
+
+/// A source + target durable shard server (A, B) over the SAME frozen dict/norm, so either can serve
+/// position 0. Returns their endpoints + data dirs (for teardown). Shared by the `reassign` and
+/// `reconcile` gRPC oracles.
+pub(crate) struct TwoNode {
+    pub(crate) src_ep: String,
+    pub(crate) tgt_ep: String,
+    pub(crate) src_dir: PathBuf,
+    pub(crate) tgt_dir: PathBuf,
+}
+
+pub(crate) fn spin_two_servers(
+    rt: &tokio::runtime::Runtime,
+    norm: &Arc<Normalizer>,
+    tag: &str,
+) -> TwoNode {
+    let src_dir = server_dir(&format!("{tag}_src"));
+    let tgt_dir = server_dir(&format!("{tag}_tgt"));
+    let (src_addr, tgt_addr) = {
+        let _enter = rt.enter();
+        let si = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind src");
+        let sa = si.local_addr().expect("src addr");
+        rt.spawn(
+            ShardServer::pending_durable(
+                Arc::clone(norm),
+                EngineConfig::default(),
+                src_dir.clone(),
+            )
+            .serve_with_incoming(si),
+        );
+        let ti = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind tgt");
+        let ta = ti.local_addr().expect("tgt addr");
+        rt.spawn(
+            ShardServer::pending_durable(
+                Arc::clone(norm),
+                EngineConfig::default(),
+                tgt_dir.clone(),
+            )
+            .serve_with_incoming(ti),
+        );
+        (sa, ta)
+    };
+    wait_until_listening(src_addr);
+    wait_until_listening(tgt_addr);
+    TwoNode {
+        src_ep: format!("http://{src_addr}"),
+        tgt_ep: format!("http://{tgt_addr}"),
+        src_dir,
+        tgt_dir,
+    }
+}
+
+/// The writer's per-add loop: an add routes to position 0's CURRENT backing (source pre-flip, target
+/// post-flip) and is briefly REJECTED in the fence→flip window (durably logged + queued for repair).
+pub(crate) fn stream_add(cluster: &ClusterEngine, id: u64, dsl: &str) {
+    loop {
+        match cluster.add_query(id, dsl) {
+            Ok(_) | Err(ShardError::PartiallyApplied { .. }) => break,
+            Err(ShardError::Remote(_)) => std::thread::sleep(Duration::from_millis(2)),
+            Err(e) => panic!("unexpected writer error: {e}"),
+        }
+    }
 }

@@ -149,6 +149,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   `execute_handoff` then commit the new owner (move-then-commit), so a reassignment moves data and
   routing follows live + across a resolve-only restart; REST `POST /_cluster/reassign` +
   `rebalance {move:true}` (ADR-090). Closes the ADR-086 deferral.
+- **Unattended re-point reconciler** — `reconcile` (idempotent, data-moving, continue-past-failure)
+  converges the committed shard→node map to the HRW-desired placement automatically; the autoscaler's
+  membership-drift arm drives the data-moving rebalance on a remote cluster (closing a latent ADR-086
+  false negative); opt-in `--reconcile-interval-secs` loop + REST `POST /_cluster/reconcile`. Sequential
+  moves; default-off ⇒ byte-identical (ADR-092). Parallel multi-position moves still deferred.
 - **Partial-apply repair** — typed `PartiallyApplied` + live `resync` (ADR-047).
 - **Mesh security** — opt-in TLS + shared cluster token, constant-time default-deny interceptor on
   both planes (ADR-071).
@@ -223,10 +228,10 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   auth are
   **opt-in** (ADR-071) — enable both outside a trusted network. Remote-cluster vocabulary is
   deploy-time configuration, not live-shipped (decided, ADR-076).
-- **Multi-shard-per-node Stage 1+2+3 BUILT; only the reconciler rebase (Stage 4) staged.** A code review
-  found the HRW data-moving *rebalance* (`rebalance_and_move`, ADR-090) and the unattended *reconciler*
-  (ADR-092, **parked**) silently overwrite — HRW packs several positions onto one node, but a one-shard
-  server can hold only one. [ADR-093](decisions/adr-093-multi-shard-per-node.md) is the staged fix.
+- **Multi-shard-per-node: all four ADR-093 stages BUILT.** A code review found the HRW data-moving
+  *rebalance* (`rebalance_and_move`, ADR-090) and the unattended *reconciler* (ADR-092) silently
+  overwrite — HRW packs several positions onto one node, but a one-shard server could hold only one.
+  [ADR-093](decisions/adr-093-multi-shard-per-node.md) is the staged fix.
   **Stage 1 (foundation):** the transport carries a `shard_id`, a `ShardServer` is a shard-keyed slot map,
   and fence/recovery/storage (`shard_<id>/`) are **per-shard** — fixing the codex P1. **Stage 2
   (co-location):** the `AddShard` RPC + a per-endpoint adoption dedup in `connect_remote` let several
@@ -237,8 +242,11 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   byte-identical + zero-FN (+ resolve-only and `open_durable` restarts), a full HRW `rebalance_and_move`
   over a packed K=6/N=3 topology converges (no slot lost, fixpoint), and RF>1 cross-replication (2 slots
   per node) survives a whole-node loss + peer-recovers onto a fresh node. **General HRW rebalance is now
-  collision-safe**, unblocking the reconciler rebase (Stage 4). Parallel multi-position moves
-  (`rebalance_and_move` is sequential) remain a follow-on.
+  collision-safe.** **Stage 4 (the reconciler, ADR-092):** the parked unattended controller landed on
+  this foundation, with the packed-K>N gRPC oracle proving the *reconciler itself* converges the exact
+  topology that parked it — no slot lost, zero-FN, epoch-invariant idempotence, restart routes zero-FN.
+  Parallel multi-position moves (`rebalance_and_move`/`reconcile` are sequential) and RF>1 data-moving
+  reconciliation (a replicated position's group move) remain follow-ons.
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at
   runtime via `Vocab`/`NormalizerBuilder` (learning: ADR-015/053; aliases: ADR-054/060/061).
 - **Validated on synthetic + pinned-pair data, not a real corpus.** The oracle and benchmarks run

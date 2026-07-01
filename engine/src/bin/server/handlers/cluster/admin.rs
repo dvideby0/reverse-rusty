@@ -10,7 +10,7 @@ mod ops;
 
 pub(crate) use ops::{
     cluster_deregister_node, cluster_handoff, cluster_reassign, cluster_rebalance,
-    cluster_register_node, cluster_resize, cluster_resync, cluster_state,
+    cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync, cluster_state,
 };
 
 use std::sync::Arc;
