@@ -36,7 +36,9 @@ RF=1 path is byte-identical.
   retrying next pass — each position is independent and individually move-then-commit, so making maximum
   safe progress beats stalling), and it returns a richer `ReconcileReport { reconciled, skipped,
   uncommitted, failed }`. Empty (a clean no-op) for an in-process / genesis cluster (no addr'd data
-  nodes). **RF>1 rejected** (same reason as ADR-090).
+  nodes). **RF>1 rejected** (same reason as ADR-090) — later lifted by
+  [ADR-094](adr-094-replicated-group-reassignment.md), which dispatches replicated positions to the
+  group-aware `reassign_group_and_move`.
 
 - **Autoscaler fix.** `tick`'s membership-drift `Rebalance` arm now drives the **data-moving**
   `rebalance_and_move` when `self.handle.is_some()` (a gRPC-built remote cluster), and keeps the map-only
@@ -100,5 +102,5 @@ observability only.
   fix — `tick` on a remote cluster drives a data-moving rebalance (the generation bumps — not a map-only
   rebalance) and stays zero-FN live + across a restart. `tests/cluster_reconcile_oracle.rs` (in-process):
   `reconcile` is a clean no-op, percolate byte-identical (broad on + off), epoch invariant, idempotent.
-  Plus `reconcile.rs` unit tests (the report helpers + the disabled-by-default config + continue-past-per-position-failure + the RF>1 up-front reject). The full
+  Plus `reconcile.rs` unit tests (the report helpers + the disabled-by-default config + continue-past-per-position-failure + the rf>1 request reject — the latter replaced by ADR-094's group-move dispatch). The full
   `distributed` oracle + the existing autoscale oracle stay green.

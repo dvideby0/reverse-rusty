@@ -110,13 +110,14 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     `reconcile` + the opt-in `--reconcile-interval-secs` loop converge the committed map to the
     HRW-desired placement by moving data, automatically + idempotently + zero-FN — proven on the
     packed K&gt;N multi-shard topology that was the original clobber bug — and the autoscaler's
-    membership-drift arm is now data-moving on a remote cluster too):* the remaining open work is
-    **RF&gt;1 data-moving reconciliation** (a replicated position's whole GROUP must move — recover the
-    target replica group from the fenced source, then commit; today `reassign_and_move`/`reconcile`
-    reject `replication_factor &gt; 1`, the ADR-090/092 deferral) and **parallel multi-position
+    membership-drift arm is now data-moving on a remote cluster too; **RF&gt;1 data-moving
+    reconciliation shipped** as [ADR-094](decisions/adr-094-replicated-group-reassignment.md) — a
+    replicated position's whole GROUP moves via `reassign_group_and_move`, closing the ADR-090 RF&gt;1
+    deferral):* the remaining open work is **parallel multi-position
     moves** (`rebalance_and_move`/`reconcile` are sequential today — safe parallelism is a
     conflict-graph rework of `reassign_serial` into a busy-node guard; a throughput optimization, not a
-    capability gain). (k8s/Helm manifests + gRPC health/readiness probes shipped —
+    capability gain), plus the ADR-094 cost deferrals (skip provably-complete retained members;
+    server-side staged recovery out of the fence window) and orphan-slot GC. (k8s/Helm manifests + gRPC health/readiness probes shipped —
     [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the advertise-URL; the
     `shardserver --accept-class-d` item was a phantom — remote shards force-accept class-D, the
     coordinator is the sole gate.)
