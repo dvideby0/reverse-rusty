@@ -1,6 +1,11 @@
 # ADR-092: Unattended re-point reconciler (`reconcile` + `--reconcile-interval-secs`)
 
-**Status:** Accepted (2026-06-30)
+**Status:** Accepted (2026-06-30); **landed 2026-07-01 as [ADR-093](adr-093-multi-shard-per-node.md)
+Stage 4.** The original build was parked by a review finding (its P1): HRW packs several positions onto
+one node, and the pre-093 one-shard-per-process `ShardServer`'s `RecoverFrom` REPLACED the whole node
+state, so the second co-located move silently clobbered the first. ADR-093 Stages 1–3 (shard-keyed
+slots, per-shard fence/recovery/`shard_<id>/` storage) made that structurally impossible; this ADR
+landed unchanged on that foundation, with the oracle extended to the packed K&gt;N topology (see Proven).
 
 **Context.** [ADR-090](adr-090-data-moving-reassignment.md) shipped data-moving reassignment
 (`reassign_and_move` / `rebalance_and_move`, move-then-commit, zero-FN), but it must be **manually
@@ -87,9 +92,13 @@ observability only.
   (ADR-090).
 - **Proven.** `cluster_grpc_oracle::reconcile` (real gRPC servers): the headline — a diverged committed
   map converges to the HRW-desired owner under a concurrent writer, a second pass is a no-op (idempotence /
-  epoch invariant), and a fresh coordinator routing by the committed map is zero-FN; plus the autoscaler
+  epoch invariant), and a fresh coordinator routing by the committed map is zero-FN; **the packed K&gt;N
+  convergence** (`grpc_reconcile_colocated_packing_converges_zero_fn`) — the reconciler itself spreads a
+  K=6/N=3 all-packed map (the exact scenario that parked this ADR): ≥2 positions moved+committed, no
+  co-located slot lost, ≥2 positions co-located on a destination, zero-FN vs brute, an epoch-invariant
+  second pass, and a resolve-only restart routes zero-FN; plus the autoscaler
   fix — `tick` on a remote cluster drives a data-moving rebalance (the generation bumps — not a map-only
   rebalance) and stays zero-FN live + across a restart. `tests/cluster_reconcile_oracle.rs` (in-process):
   `reconcile` is a clean no-op, percolate byte-identical (broad on + off), epoch invariant, idempotent.
-  Plus `reconcile.rs` unit tests (the report helpers + the disabled-by-default config). The full
+  Plus `reconcile.rs` unit tests (the report helpers + the disabled-by-default config + continue-past-per-position-failure + the RF>1 up-front reject). The full
   `distributed` oracle + the existing autoscale oracle stay green.

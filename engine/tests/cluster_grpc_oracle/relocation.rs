@@ -103,7 +103,8 @@ pub(crate) fn seed_map(cluster: &ClusterEngine, nodes: &[Node], plan: &[usize]) 
 }
 
 /// Resolve each position's primary endpoint from the committed document — what a resolve-only
-/// coordinator restart (`--route-by-assignments`) does on boot. Copy of reassign.rs's helper.
+/// coordinator restart (`--route-by-assignments`) does on boot. The canonical copy — `reassign`,
+/// `rebalance`, and `reconcile` all import it from here.
 pub(crate) fn primary_endpoints(state: &ClusterState) -> Vec<String> {
     (0..state.num_shards)
         .map(|pos| {

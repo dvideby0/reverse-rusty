@@ -12,9 +12,11 @@ were already threaded by Stages 1–2, so Stage 3 is the `connect_replicated` co
 oracle that PROVES the no-clobber property — relocating one co-located shard leaves the node's others
 intact, HRW `rebalance_and_move` converges across a packed topology, and RF&gt;1 failover works across
 multi-shard nodes (all zero-FN) — plus per-node `/_metrics` slot-aggregation and a fewer-pods deploy
-example. Only Stage 4 remains staged. ADR-092 (the unattended reconciler) is **parked** on the
-`feat/unattended-reconciler` branch — it is *not* on `main`, so it is referenced here as plain text, not
-a link, until it lands (Stage 4).
+example. **Stage 4 (the reconciler) is built**: the parked
+[ADR-092](adr-092-unattended-reconciler.md) unattended controller landed on this foundation, its gRPC
+oracle extended to the packed K&gt;N topology that parked it (the reconciler itself converges a K=6/N=3
+packed map — no slot lost, zero-FN, epoch-invariant idempotence, restart routes zero-FN). The program
+is complete.
 
 ## Context
 
@@ -35,7 +37,7 @@ This collides with the rest of the stack, which is **already multi-shard-per-nod
 
 So a code review (codex, on the parked reconciler branch) correctly flagged that any HRW-driven
 data-moving rebalance — `rebalance_and_move` (ADR-090) and the unattended reconciler
-(ADR-092, parked on `feat/unattended-reconciler`, not yet on `main`) — **silently overwrites data**: HRW packs several
+([ADR-092](adr-092-unattended-reconciler.md), then parked pending this fix) — **silently overwrites data**: HRW packs several
 positions onto one node, but a one-shard `ShardServer` can only hold one, and the second `RecoverFrom`
 clobbers the first. And at RF=1 a node loss is unrecoverable (no replica), so the genuinely useful
 unattended scenarios (failover, rebalance) have no safe home today.
@@ -168,9 +170,11 @@ fields stay (node-wide, carried on the recovery RPCs for content verification).
    K=6/N=3 topology converges (no slot lost, fixpoint, zero-FN); (c) RF&gt;1 cross-replication (2 slots
    per node) survives a whole-node loss (read failover) + peer-recovers a position onto a fresh node.
    Parallel multi-position moves stay a follow-on (`rebalance_and_move` is sequential).
-4. **Rebase the reconciler (ADR-092, the parked branch) + the autoscaler** onto the
+4. **Rebase the reconciler ([ADR-092](adr-092-unattended-reconciler.md)) + the autoscaler** onto the
    now-safe foundation — the parked branch returns, correct, with the route-by-assignments gate (its P2)
-   and no collision hazard (its P1, now structurally impossible).
+   and no collision hazard (its P1, now structurally impossible). ✅ Landed with the packed-K&gt;N
+   reconcile oracle (`grpc_reconcile_colocated_packing_converges_zero_fn`) — the reconciler-driven
+   analogue of Stage 3's `rebalance.rs` proof.
 
 ## Backward-compat / migration
 
@@ -221,9 +225,9 @@ fields stay (node-wide, carried on the recovery RPCs for content verification).
 
 - **Constrain the reconciler/rebalance to empty-destination moves** (the collision guard). Rejected as
   the *primary* path: it makes the unattended controller refuse realistic HRW reshuffles (it would be a
-  near-no-op), and leaves the underlying model mismatch in place. (A fail-loud guard is still worth
-  adding to ADR-090's `rebalance_and_move` as defense-in-depth until Stage 3 lands — see the parked
-  reconciler review.)
+  near-no-op), and leaves the underlying model mismatch in place. (A fail-loud guard was mooted as
+  defense-in-depth until Stage 3 landed; Stages 1–3 made the collision structurally impossible, so no
+  guard was added.)
 - **Keep one-shard-per-node, lean on k8s StatefulSet identity + RF&gt;1 + resize** for all operations.
   Viable for node *replacement* (StatefulSets already handle it), but it forecloses cross-node
   rebalancing and shrinking node count — capabilities the allocator already models and a commercial
