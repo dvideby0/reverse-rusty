@@ -218,6 +218,16 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = false)]
     pub(crate) route_by_assignments: bool,
 
+    /// Run the unattended re-point reconciler every N seconds (ADR-092): periodically reconcile the
+    /// committed shard→node map to the desired HRW placement by MOVING data (the data-moving path, not
+    /// the map-only `rebalance`), so a membership change converges routing automatically with no
+    /// operator action. Idempotent — a converged map moves nothing — and it shares the engine's
+    /// move-serialization guard with `/_cluster/reassign` and the autoscaler, so passes never overlap a
+    /// manual move. Requires `--route-by-assignments` (and therefore `--control-endpoint`) and a
+    /// `--features distributed` build. Unset (default) ⇒ no reconciler runs (byte-identical).
+    #[arg(long)]
+    pub(crate) reconcile_interval_secs: Option<u64>,
+
     /// Coordinator gRPC client connect timeout in seconds (ADR-085) — bounds the TCP+TLS
     /// dial so an unreachable shard fails fast. Default: 5s.
     #[arg(long)]

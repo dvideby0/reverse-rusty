@@ -149,6 +149,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   `execute_handoff` then commit the new owner (move-then-commit), so a reassignment moves data and
   routing follows live + across a resolve-only restart; REST `POST /_cluster/reassign` +
   `rebalance {move:true}` (ADR-090). Closes the ADR-086 deferral.
+- **Unattended re-point reconciler** — `reconcile` (idempotent, data-moving, continue-past-failure)
+  converges the committed shard→node map to the HRW-desired placement automatically; the autoscaler's
+  membership-drift arm drives the data-moving rebalance on a remote cluster (closing a latent ADR-086
+  false negative); opt-in `--reconcile-interval-secs` loop + REST `POST /_cluster/reconcile`. Sequential
+  moves; default-off ⇒ byte-identical (ADR-092). Parallel multi-position moves still deferred.
 - **Partial-apply repair** — typed `PartiallyApplied` + live `resync` (ADR-047).
 - **Mesh security** — opt-in TLS + shared cluster token, constant-time default-deny interceptor on
   both planes (ADR-071).

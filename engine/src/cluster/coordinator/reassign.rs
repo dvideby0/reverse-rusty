@@ -97,12 +97,17 @@ pub struct RebalanceMoveReport {
     pub not_attempted: Vec<u32>,
 }
 
-/// The positions a [`ClusterEngine::rebalance_and_move`] must MOVE: those whose **primary** differs
+/// The positions a [`ClusterEngine::rebalance_and_move`] (and the unattended
+/// [`reconcile`](ClusterEngine::reconcile), ADR-092) must MOVE: those whose **primary** differs
 /// between the committed map and the HRW desired map (a data move), in ascending position order.
 /// Pure over the cluster-state document + `rf` (no gRPC, no engine handle), so the diff/ordering is
 /// unit-tested directly. Replica-only diffs are intentionally excluded — they are not a data move
-/// (the map-only `rebalance` handles them); the RF=1 remote path has no replicas anyway.
-fn rebalance_targets(state: &ClusterState, rf: usize) -> Vec<(u32, NodeId)> {
+/// (the map-only `rebalance` handles them); the RF=1 remote path has no replicas anyway. Empty for an
+/// in-process / genesis cluster (no addr'd data nodes) — the byte-identical no-op for those paths.
+pub(in crate::cluster::coordinator) fn rebalance_targets(
+    state: &ClusterState,
+    rf: usize,
+) -> Vec<(u32, NodeId)> {
     // Plan ONLY over data nodes with a registered endpoint. The genesis/control-plane manager
     // (`NodeId(0)`, typically addr-less) is not a data placement target; including it would let HRW
     // pick it as a desired primary, producing a move-to-the-manager that fails on the missing endpoint

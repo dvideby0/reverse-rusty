@@ -43,8 +43,10 @@ impl ClusterEngine {
 
     /// One autoscaler cycle: validate the config (fail-closed), collect the snapshot, run the
     /// policy, **execute the executable subset** (each [`Rebalance`](ScalingAction::Rebalance)
-    /// dispatches to the idempotent [`Self::rebalance`] — a no-op when already balanced), and
-    /// return the full [`AutoscaleDecision`] including the advisories
+    /// reconciles placement, idempotently — a no-op when already balanced; on a remote cluster routed
+    /// by the committed map it drives the DATA-MOVING [`rebalance_and_move`](Self::rebalance_and_move)
+    /// so routing follows the new map without manufacturing the ADR-086 false negative, ADR-090/092),
+    /// and return the full [`AutoscaleDecision`] including the advisories
     /// ([`Handoff`](ScalingAction::Handoff)/[`RecommendSplit`](ScalingAction::RecommendSplit)/…)
     /// for the caller to log or act on. A disabled config yields an empty decision ⇒ a no-op
     /// tick, so a default-config caller is byte-identical to no autoscaler at all.
@@ -66,6 +68,43 @@ impl ClusterEngine {
         // when already balanced).
         for action in &decision.actions {
             if let ScalingAction::Rebalance { rf } = action {
+                #[cfg(feature = "distributed")]
+                if let Some(handle) = self.handle.clone() {
+                    // A REMOTE cluster routed by the committed map: a MAP-ONLY `rebalance` would
+                    // re-point routing at nodes holding DIFFERENT data — the ADR-086 false negative
+                    // (the boot guard refuses such a map). Drive the DATA-MOVING rebalance instead, so
+                    // data follows the new map (ADR-090/092). It rides the shared `reassign_serial`
+                    // guard (so it never interleaves a manual move or the reconcile loop) and is
+                    // best-effort — a partial/failed sweep is surfaced as an event and retried by the
+                    // next tick or the reconcile loop, never failing the enclosing `tick` (mirroring
+                    // `drive_autoscaled_handoff`). The `handle.is_some()` gate keeps the in-process /
+                    // lean path byte-identical: only a gRPC-built cluster carries a runtime handle.
+                    match self.rebalance_and_move(*rf, &handle) {
+                        Ok(report) => {
+                            if let Some((pos, reason)) = report.failed {
+                                self.emit(EngineEvent::DurabilityFailure {
+                                    op: DurabilityOp::ReplicaDesync,
+                                    detail: format!(
+                                        "autoscaler data-moving rebalance stopped at shard {pos}; \
+                                         already-moved positions are consistent, the rest are retried \
+                                         next tick / by the reconcile loop"
+                                    ),
+                                    error: reason,
+                                });
+                            }
+                        }
+                        Err(e) => self.emit(EngineEvent::DurabilityFailure {
+                            op: DurabilityOp::ReplicaDesync,
+                            detail: "autoscaler data-moving rebalance failed pre-flight; \
+                                     retried next tick"
+                                .into(),
+                            error: e.to_string(),
+                        }),
+                    }
+                    continue;
+                }
+                // In-process (or lean build): map-only rebalance is correct — the advisory map; the
+                // local shards do not move. Unchanged, byte-identical.
                 self.rebalance(*rf)?;
             }
         }

@@ -58,7 +58,11 @@ mod distributed;
 #[cfg(feature = "distributed")]
 mod reassign;
 #[cfg(feature = "distributed")]
+mod reconcile;
+#[cfg(feature = "distributed")]
 pub use reassign::{ReassignOutcome, RebalanceMoveReport};
+#[cfg(feature = "distributed")]
+pub use reconcile::{ReconcileConfig, ReconcileReport};
 
 #[cfg(test)]
 mod tests;

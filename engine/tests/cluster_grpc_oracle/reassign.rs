@@ -15,65 +15,15 @@
 //!    nothing, commits nothing, and auto-unfences the source.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use reverse_rusty::cluster::{
-    ClusterConfig, ClusterEngine, ClusterState, NodeDescriptor, NodeId, NodeRole, ReassignOutcome,
-    ShardError, ShardServer,
+    ClusterConfig, ClusterEngine, NodeDescriptor, NodeId, NodeRole, ReassignOutcome, ShardError,
 };
-use reverse_rusty::config::EngineConfig;
-use reverse_rusty::normalize::Normalizer;
-use tonic::transport::server::TcpIncoming;
 
 use crate::harness::*;
-
-/// A source + target durable shard server (A, B) over the SAME frozen dict/norm, so either can serve
-/// position 0. Returns their endpoints + data dirs (for teardown).
-struct TwoNode {
-    src_ep: String,
-    tgt_ep: String,
-    src_dir: PathBuf,
-    tgt_dir: PathBuf,
-}
-
-fn spin_two_servers(rt: &tokio::runtime::Runtime, norm: &Arc<Normalizer>, tag: &str) -> TwoNode {
-    let src_dir = server_dir(&format!("{tag}_src"));
-    let tgt_dir = server_dir(&format!("{tag}_tgt"));
-    let (src_addr, tgt_addr) = {
-        let _enter = rt.enter();
-        let si = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind src");
-        let sa = si.local_addr().expect("src addr");
-        rt.spawn(
-            ShardServer::pending_durable(
-                Arc::clone(norm),
-                EngineConfig::default(),
-                src_dir.clone(),
-            )
-            .serve_with_incoming(si),
-        );
-        let ti = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind tgt");
-        let ta = ti.local_addr().expect("tgt addr");
-        rt.spawn(
-            ShardServer::pending_durable(
-                Arc::clone(norm),
-                EngineConfig::default(),
-                tgt_dir.clone(),
-            )
-            .serve_with_incoming(ti),
-        );
-        (sa, ta)
-    };
-    wait_until_listening(src_addr);
-    wait_until_listening(tgt_addr);
-    TwoNode {
-        src_ep: format!("http://{src_addr}"),
-        tgt_ep: format!("http://{tgt_addr}"),
-        src_dir,
-        tgt_dir,
-    }
-}
+use crate::relocation::primary_endpoints;
 
 /// Register source = node 1 (the src endpoint) and target = node 2 (the tgt endpoint), and commit a
 /// position-preserving map: position 0 → node 1 (where the data physically lives after ingest). This
@@ -100,41 +50,6 @@ fn seed_committed_map(cluster: &ClusterEngine, src_ep: &str, tgt_ep: &str) {
             replicas: Vec::new(),
         })
         .expect("seed committed map: position 0 → source node");
-}
-
-/// Resolve each position's primary endpoint from the committed document — what a resolve-only
-/// coordinator restart (`--route-by-assignments`, no `--shard-endpoint`) does on boot.
-fn primary_endpoints(state: &ClusterState) -> Vec<String> {
-    (0..state.num_shards)
-        .map(|pos| {
-            let a = state
-                .assignments
-                .iter()
-                .find(|a| a.position == pos)
-                .expect("an assignment for every position");
-            let node = state
-                .nodes
-                .iter()
-                .find(|n| n.id == a.primary)
-                .expect("a node for the primary");
-            node.addr
-                .clone()
-                .expect("the primary node has a registered addr")
-        })
-        .collect()
-}
-
-/// The writer's per-add loop: an add routes to position 0's CURRENT backing (source pre-flip, target
-/// post-flip) and is briefly REJECTED in the fence→flip window (durably logged + queued for repair).
-/// Identical to `handoff.rs`'s firehose so the concurrency surface matches.
-fn stream_add(cluster: &ClusterEngine, id: u64, dsl: &str) {
-    loop {
-        match cluster.add_query(id, dsl) {
-            Ok(_) | Err(ShardError::PartiallyApplied { .. }) => break,
-            Err(ShardError::Remote(_)) => std::thread::sleep(Duration::from_millis(2)),
-            Err(e) => panic!("unexpected writer error: {e}"),
-        }
-    }
 }
 
 /// The primary proof: a data-moving reassignment under a concurrent writer commits the new owner WITH

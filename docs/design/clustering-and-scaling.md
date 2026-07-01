@@ -367,7 +367,15 @@ without operator action. The defaults are the product.
   resolves the new physical reality. The flip-before-commit crash window is read-safe because the fenced
   old owner keeps serving reads + holds the data until the commit lands — so the committed map always
   resolves to a data-holding, reads-serving node (zero false negatives). The data-moving ops serialize
-  against each other (and the autoscaler-driven handoff) on an engine-level guard.
+  against each other (and the autoscaler-driven handoff) on an engine-level guard. **An unattended
+  reconciler** (ADR-092) drives this automatically: `reconcile` is an idempotent, data-moving pass that
+  converges the committed map to the HRW-desired placement (reusing the per-position `reassign_and_move`),
+  continuing past per-position failures and retrying next pass; it runs as an opt-in coordinator-server
+  loop (`--reconcile-interval-secs`) whose wall-clock min-interval is the thrash guard (each move is
+  `O(corpus)`) while controller idempotence keeps a converged map a no-op. The same fix makes the
+  autoscaler's membership-drift rebalance data-moving on a remote cluster, so it no longer permutes the
+  committed map without moving data (the ADR-086 false-negative trap). Moves stay sequential; safe
+  parallelism (a conflict-graph rework of the engine guard) is the next increment.
 - **Hot keys** (a viral player) — that shard gets more *replicas* (throughput), and if its corpus grows
   too large it auto-splits; the broad lane absorbs the truly non-selective anchors.
 
