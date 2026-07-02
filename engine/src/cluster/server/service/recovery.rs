@@ -387,7 +387,12 @@ pub(super) fn content_fingerprint(
             "ContentFingerprint tag-dict-fingerprint mismatch (divergent tag space)",
         ));
     }
-    let (fp_lo, fp_hi, live_count) = st.shard.content_fingerprint128();
+    // A refused fingerprint (a source-less/partial store) surfaces as failed_precondition: the
+    // caller's skip check treats any error as "not provable" and falls back to the re-copy.
+    let (fp_lo, fp_hi, live_count) = st
+        .shard
+        .content_fingerprint128()
+        .map_err(|e| Status::failed_precondition(e.to_string()))?;
     Ok(Response::new(proto::ContentFingerprintReply {
         fp_lo,
         fp_hi,

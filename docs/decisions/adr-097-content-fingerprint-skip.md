@@ -23,7 +23,13 @@ quiescent. All `distributed`-gated; behavior on divergent content is byte-identi
   length-prefixed dsl/tags), the encodings sorted (the multiset canon — no `Ord` on entry types
   needed), then folded through two independently-seeded FNV-1a streams. Insertion order, flush
   boundaries, segment layout, and compaction history cannot change it; a version, tag, or
-  live-set change must.
+  live-set change must. **Completeness guard** (a codex P1 on this ADR): the fingerprint is
+  REFUSED (fail-toward-copy) unless the enumeration covers the index-side live count (the new
+  `Engine::num_live_queries` — tombstone-aware `alive_count`s, unlike the physical
+  `num_queries`). A slot restored over a missing/partial `sources.dat` (the store's open is
+  legacy-tolerant: missing ⇒ empty) still SERVES queries the enumeration cannot name —
+  fingerprinting that partial view could equate divergent shards and wrongly skip the heal;
+  refusing routes the caller to the proven re-copy.
 - **`ContentFingerprint` RPC** (additive; guarded by the dict/tag fingerprints like every
   recovery RPC; deliberately fence-transparent — the caller's whole point is asking while the
   group is write-quiesced). An old peer answers `Unimplemented`.
@@ -54,5 +60,8 @@ through a second coordinator fingerprint-mismatches, is re-copied — `recover_f
 and the rogue entry is healed away: the promoted primary serves exactly the source's live set,
 ≡ brute). Unit: order/layout independence + memtable inclusion (reverse-order memtable-only copy
 ≡ flushed copy), version sensitivity, tag sensitivity, delete sensitivity/history-freedom (a
-delete restores the smaller set's fingerprint). Full 53-test distributed oracle green
+delete restores the smaller set's fingerprint), and the completeness-guard refusal (seal → sever
+`sources.dat` → reopen: the segments serve, the enumeration cannot name the query, the
+fingerprint errs — the translog-replay self-heal path is deliberately trimmed away first, since
+an untrimmed tail legitimately reconstructs the store). Full 53-test distributed oracle green
 (ADR-094's suite unperturbed — the heal path is byte-identical).

@@ -410,8 +410,13 @@ impl LocalShard {
     /// folded through two independently-seeded FNV-1a streams. Takes the engine lock (the same
     /// enumeration `set_vocab` trusts for completeness); called off the hot path — the ADR-094
     /// fence window, where the alternative is an `O(corpus)` network copy. `distributed`-only.
+    /// Errs (fail-toward-copy) when the source enumeration does not cover the engine's live
+    /// query count — a source-less / partial store (e.g. a legacy restore whose segments serve
+    /// queries `sources.dat` no longer names; codex P1 on this ADR): fingerprinting the partial
+    /// enumeration could make divergent shards compare equal and wrongly skip the healing
+    /// re-copy, so the caller must fall back to it instead.
     #[cfg(feature = "distributed")]
-    pub(crate) fn content_fingerprint128(&self) -> (u64, u64, u64) {
+    pub(crate) fn content_fingerprint128(&self) -> Result<(u64, u64, u64), ShardError> {
         const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
         // A second, independent stream seed (the golden-ratio constant XOR'd in) so the two
         // 64-bit halves never collide in lockstep.
@@ -424,7 +429,23 @@ impl LocalShard {
             }
             h
         }
-        let entries = self.lock().live_sources_tagged();
+        let (entries, live) = {
+            let eng = self.lock();
+            // One lock hold = one point-in-time: the enumeration and the live count must agree
+            // about the same instant for the completeness cross-check below to mean anything.
+            // `num_live_queries` (index-side, tombstone-aware) — NOT `num_queries`, which counts
+            // physical entries including dead copies and would spuriously refuse after any
+            // in-memtable delete.
+            (eng.live_sources_tagged(), eng.num_live_queries())
+        };
+        if entries.len() != live {
+            return Err(ShardError::Config(format!(
+                "content fingerprint refused: the source enumeration covers {} of {live} live \
+                 queries (a source-less or partial store); a fingerprint over it could equate \
+                 divergent shards — fall back to the re-copy",
+                entries.len()
+            )));
+        }
         let mut encoded: Vec<Vec<u8>> = entries
             .iter()
             .map(|(logical, dsl, version, tags)| {
@@ -449,7 +470,7 @@ impl LocalShard {
             lo = fnv1a64_seeded(lo, e);
             hi = fnv1a64_seeded(hi, e);
         }
-        (lo, hi, encoded.len() as u64)
+        Ok((lo, hi, encoded.len() as u64))
     }
 
     /// Whether any UNEXPIRED peer-recovery retention lease is held (ADR-096) — the `DropShard`
