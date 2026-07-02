@@ -1,6 +1,7 @@
 # The versioned release pipeline (Tier 5 M2, ADR-098): build the distributed bins, wrap
 # the runtime image, smoke the EXACT candidate on Compose + kind/Helm + the topology-parity
-# tripwire, and only then publish to GHCR tagged {vX.Y.Z, sha-<short>}.
+# tripwire, and only then publish to GHCR tagged {vX.Y.Z, X.Y.Z, sha-<short>} (the bare
+# form is what the Helm chart's default image.tag = Chart.appVersion pulls).
 #
 # The image is the ONLY published artifact (ADR-098: the repo may go private later — no
 # crates.io publish, no GitHub-Release binary tarballs, and no `:latest` tag, so an
@@ -41,11 +42,15 @@ jobs:
 
       # Step 0 — fail loud on a version mismatch BEFORE spending minutes compiling:
       # the tag must equal engine/Cargo.toml [package].version AND the chart appVersion.
+      # `inputs.version` reaches the shell ONLY via `env:` (never raw `${{ }}` inside
+      # `run:`) — a dispatch input is attacker-shaped text and raw interpolation would be
+      # a shell-injection path into a job holding `packages: write` (codex).
       - name: Version preflight (tag == Cargo.toml == Chart appVersion)
+        env:
+          RAW_VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
         run: |
-          VERSION="${{ github.event_name == 'push' && github.ref_name || inputs.version }}"
-          ./deploy/check-versions.sh "$VERSION"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          ./deploy/check-versions.sh "$RAW_VERSION"
+          echo "VERSION=$RAW_VERSION" >> "$GITHUB_ENV"
 
       - name: Install pinned toolchain
         working-directory: engine
@@ -97,16 +102,19 @@ jobs:
         run: ./deploy/check-topology-parity.sh
 
       # Publish — tag pushes only (a dispatch run is the no-publish rehearsal).
-      # Lowercase the owner (GHCR requires it; GitHub orgs/users may be mixed-case).
-      - name: Publish to GHCR ({vX.Y.Z, sha-<short>} — never :latest)
+      # Three tags, one digest: `vX.Y.Z` (the git-tag form), `X.Y.Z` (what the Helm
+      # chart's default `image.tag` = Chart.appVersion pulls — codex: publishing only
+      # the v-form would break a default `helm install` against GHCR), and
+      # `sha-<short>`. Never `:latest`. Lowercase the owner (GHCR requires it).
+      - name: Publish to GHCR ({vX.Y.Z, X.Y.Z, sha-<short>} — never :latest)
         if: github.event_name == 'push'
         run: |
           set -euo pipefail
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/reverse-rusty"
           short=$(git rev-parse --short HEAD)
-          docker tag reverse-rusty:candidate "$image:$VERSION"
-          docker tag reverse-rusty:candidate "$image:sha-$short"
-          docker push "$image:$VERSION"
-          docker push "$image:sha-$short"
-          echo "published $image:{$VERSION, sha-$short}"
+          for tag in "$VERSION" "${VERSION#v}" "sha-$short"; do
+            docker tag reverse-rusty:candidate "$image:$tag"
+            docker push "$image:$tag"
+          done
+          echo "published $image:{$VERSION, ${VERSION#v}, sha-$short}"

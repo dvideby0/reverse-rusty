@@ -181,7 +181,7 @@ and `release.yml` publishes the smoke-gated GHCR image per `v*` tag.
   [`release.yml`](../.github/workflows/release.yml): on a `v*` tag — version preflight (tag ==
   crate == chart appVersion, `deploy/check-versions.sh`) → build → **smoke the exact candidate
   image** (Compose `cluster-smoke.sh` + kind `k8s-smoke.sh`, now fixed + passing end-to-end, +
-  `deploy/check-topology-parity.sh`) → publish `ghcr.io/<owner>/reverse-rusty:{vX.Y.Z,
+  `deploy/check-topology-parity.sh`) → publish `ghcr.io/<owner>/reverse-rusty:{vX.Y.Z, X.Y.Z,
   sha-<short>}` (**the image is the only published artifact; no `:latest`** — ADR-098);
   `workflow_dispatch` = the no-publish rehearsal. Per-PR: the compose smoke rides the harness
   job's image; the parity + version tripwires ride the helm-chart job. (Scale proof stays Tier 3

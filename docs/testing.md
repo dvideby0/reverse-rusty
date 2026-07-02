@@ -219,7 +219,7 @@ In-progress runs are cancelled when a newer commit lands on the same ref.
 The `helm chart` job additionally runs the compose↔chart **topology-parity** and **version-drift**
 tripwires (`deploy/check-topology-parity.sh`, `deploy/check-versions.sh` — ADR-098). A `v*` tag
 triggers [`release.yml`](../.github/workflows/release.yml): version preflight → build → smoke the
-exact candidate image (Compose + kind/Helm + parity) → publish to GHCR (`vX.Y.Z` + `sha-<short>`,
+exact candidate image (Compose + kind/Helm + parity) → publish to GHCR (`vX.Y.Z` + `X.Y.Z` — the chart's default `image.tag` — + `sha-<short>`,
 never `:latest`); a `workflow_dispatch` run is the same pipeline with publishing skipped — the
 no-tag rehearsal.
 

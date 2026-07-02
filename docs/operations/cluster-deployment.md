@@ -40,7 +40,7 @@ docker build -f deploy/Dockerfile -t reverse-rusty:latest .   # from the repo ro
 ```
 
 Or pull a released image (ADR-098 — published by `release.yml` after the candidate passes the
-Compose + kind smokes; tagged `vX.Y.Z` + `sha-<short>`, deliberately never `:latest`):
+Compose + kind smokes; tagged `vX.Y.Z` / `X.Y.Z` / `sha-<short>`, deliberately never `:latest`):
 
 ```sh
 docker pull ghcr.io/<owner>/reverse-rusty:v0.1.0
