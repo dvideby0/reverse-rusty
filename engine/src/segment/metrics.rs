@@ -67,6 +67,16 @@ impl Engine {
     pub fn num_queries(&self) -> usize {
         self.segments.iter().map(|s| s.len()).sum::<usize>() + self.memtable.len()
     }
+
+    /// Live (non-tombstoned) entries across the memtable + every base segment — one per live
+    /// LOGICAL id (an upsert kills the superseded copy; a delete kills the last), unlike
+    /// [`Self::num_queries`], which counts physical entries including dead copies. The
+    /// index-side live count the content fingerprint's completeness cross-check compares
+    /// against (ADR-097): it equals the live source enumeration's length exactly when the
+    /// source store covers every query the index still serves.
+    pub fn num_live_queries(&self) -> usize {
+        self.segments.iter().map(|s| s.alive_count()).sum::<usize>() + self.memtable.alive_count()
+    }
     pub fn num_segments(&self) -> usize {
         // base segments + the memtable as one logical segment
         self.segments.len() + 1

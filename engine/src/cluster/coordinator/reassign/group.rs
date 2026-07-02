@@ -69,14 +69,17 @@
 //!    `AssignShard(desired)` with bounded retries. Outcomes reuse [`ReassignOutcome`] (`from`/`to`
 //!    = the primaries); `MovedButNotCommitted` re-drives idempotently on the next pass.
 //!
-//! ## Cost (deliberate, recorded in ADR-094)
-//! The fence window includes an `O(corpus)` re-copy per RETAINED member — the price of provable
-//! completeness without in-sync introspection (a pure promotion re-copies a member that is almost
-//! certainly already complete). Writes during the window are never lost: they return
-//! `PartiallyApplied` and re-drive via `resync` into the NEW group. Deferred optimizations: an
-//! in-sync-snapshot + content-fingerprint protocol to skip provably-complete members, and a
-//! server-side staged recovery (shadow install) that moves retained-member copies out of the
-//! fence window.
+//! ## Cost (ADR-094, mitigated by ADR-097)
+//! The fence window included an `O(corpus)` re-copy per RETAINED member — the price of provable
+//! completeness without in-sync introspection. ADR-097 removes it for the COMMON case: a
+//! retained member whose order-independent live-set `ContentFingerprint` equals the frozen
+//! source's (both sides quiescent at phase 6) is provably complete and skips the copy — a pure
+//! promotion's fence window collapses to freeze-probe + two fingerprint RPCs + swap. A mismatch
+//! (a silently-desynced replica) or an old peer falls back to the proven re-copy, so the heal
+//! path is unchanged. Writes during the window are never lost: they return `PartiallyApplied`
+//! and re-drive via `resync` into the NEW group. Still deferred: a server-side staged recovery
+//! (shadow install, atomic promote) that would move even the genuinely-desynced member's copy
+//! out of the fence window.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, PoisonError};
@@ -95,7 +98,7 @@ use super::{ClusterEngine, ReassignOutcome, COMMIT_ATTEMPTS, PLAN_ATTEMPTS};
 /// The pure planning layer: target computation, group equality, the stale-fence clear, and the
 /// validated plan type (split for the <650-line budget).
 mod plan;
-use plan::{clear_stale_fence, PlannedGroupMove};
+use plan::{clear_stale_fence, retained_member_is_complete, PlannedGroupMove};
 pub(in crate::cluster::coordinator) use plan::{groups_equal, rebalance_group_targets};
 
 impl ClusterEngine {
@@ -413,6 +416,11 @@ impl ClusterEngine {
                 // ---- Phase 6: re-establish RETAINED members from the frozen source ----
                 // (`D ∩ C` minus the source itself.) The bulk copy is complete-at-install now:
                 // the source seals BEFORE streaming and nothing new can land past the probe.
+                // ADR-097: the frozen source's content fingerprint, computed ONCE — a retained
+                // member whose fingerprint equals it provably already holds the source's exact
+                // live set (both sides are quiescent here), so its O(corpus) re-copy is skipped.
+                // Any failure (an old peer, an RPC error) falls back to the proven re-copy.
+                let src_fp = source.content_fingerprint().ok();
                 for (nid, ep) in d_members
                     .iter()
                     .filter(|(nid, _)| committed_ids.contains(&nid.0) && *nid != cp)
@@ -434,6 +442,13 @@ impl ClusterEngine {
                     // fan-out. Group writes are quiesced here (cp is fenced), so no write races
                     // the clear.
                     clear_stale_fence(&t, "reassign_group_and_move: retained member")?;
+                    if retained_member_is_complete(src_fp, &t) {
+                        // Provably complete — no copy. Cursor 0 can only DRAG a hypothetical
+                        // later lease floor DOWN (over-retention, the safe direction); no
+                        // renewal runs after the freeze anyway (phases 2/4/5 are behind us).
+                        established.push((nid.0, t, LogPos(0)));
+                        continue;
+                    }
                     let (_segments, _nq, p) = t.recover_from(&cp_ep, expected)?;
                     // Verify: the copy of a frozen source must have NO tail past its seal point.
                     let verify = catch_up_replica(&t, &source, &self.norm, &self.dict, LogPos(p))?;

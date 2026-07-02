@@ -161,6 +161,12 @@ impl ShardService for LegacyLayoutServer {
     ) -> Result<Response<raw::DropShardReply>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
+    async fn content_fingerprint(
+        &self,
+        _req: Request<raw::ContentFingerprintRequest>,
+    ) -> Result<Response<raw::ContentFingerprintReply>, Status> {
+        Err(Status::unimplemented("legacy mock"))
+    }
 }
 
 /// Both connect paths refuse a server that does not attest the replicate-to-all broad layout;

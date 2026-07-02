@@ -257,7 +257,9 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   topology that parked it — no slot lost, zero-FN, epoch-invariant idempotence, restart routes zero-FN.
   RF>1 data-moving reconciliation shipped as ADR-094 (the group move); parallel multi-position
   moves shipped as ADR-095 (the busy-endpoint ledger + waves, default sequential); orphan-slot GC
-  shipped as ADR-096 (the moved-away slots are reclaimed, opt-in).
+  shipped as ADR-096 (the moved-away slots are reclaimed, opt-in); the retained-member re-copy is
+  fingerprint-skipped when provably complete as ADR-097 (staged recovery stays the one open
+  fence-window deferral).
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at
   runtime via `Vocab`/`NormalizerBuilder` (learning: ADR-015/053; aliases: ADR-054/060/061).
 - **Validated on synthetic + pinned-pair data, not a real corpus.** The oracle and benchmarks run

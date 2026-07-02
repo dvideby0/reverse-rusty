@@ -26,6 +26,7 @@ mod colocation;
 mod core;
 mod dict_shipping;
 mod filtered;
+mod fingerprint;
 mod gc;
 mod handoff;
 mod health;

@@ -116,11 +116,15 @@ Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-
     deferral; and **parallel multi-position moves shipped** as
     [ADR-095](decisions/adr-095-parallel-multi-position-moves.md) — the busy-endpoint move ledger +
     conflict-free waves, opt-in via `max_parallel_moves`/`--reconcile-max-parallel`, default
-    sequential byte-identical; and **orphan-slot GC shipped** as
+    sequential byte-identical; **orphan-slot GC shipped** as
     [ADR-096](decisions/adr-096-orphan-slot-gc.md) — `ListShards`/`DropShard` + the ledger-reserved
-    coordinator sweep, opt-in via `--reconcile-gc-orphans`/`POST /_cluster/gc`):* the remaining
-    open work is the ADR-094 cost deferrals (skip provably-complete retained members;
-    server-side staged recovery out of the fence window). (k8s/Helm manifests + gRPC health/readiness probes shipped —
+    coordinator sweep, opt-in via `--reconcile-gc-orphans`/`POST /_cluster/gc`; and the
+    **content-fingerprint skip shipped** as
+    [ADR-097](decisions/adr-097-content-fingerprint-skip.md) — a provably-complete retained member
+    keeps its data, collapsing a pure promotion's fence window):* the remaining open work is the
+    last ADR-094 cost deferral — server-side staged recovery (shadow install, atomic promote) out
+    of the fence window, now valuable only for the rare genuinely-desynced member
+    (ADR-097 §Consequences). (k8s/Helm manifests + gRPC health/readiness probes shipped —
     [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the advertise-URL; the
     `shardserver --accept-class-d` item was a phantom — remote shards force-accept class-D, the
     coordinator is the sole gate.)
