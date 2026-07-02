@@ -43,6 +43,7 @@ fn state_with(eng: Engine, include_broad: bool) -> Arc<AppState> {
         engine: parking_lot::Mutex::new(eng),
         snapshot: arc_swap::ArcSwap::new(snap),
         pool,
+        search_permits: None,
         include_broad,
         prom: PrometheusMetrics::new(),
         slow_query_threshold_ms: 0,
@@ -547,4 +548,127 @@ async fn unanswerable_filter_values_are_400_not_silently_dropped() {
         let err = search_ids(&state, body).await.expect_err(label);
         assert_eq!(err, axum::http::StatusCode::BAD_REQUEST, "{label}");
     }
+}
+
+// ---- cooperative cancellation + bounded concurrency (ADR-099) ----------------
+
+/// Poll a counter until it reaches `want` (the cancellation is recorded inside the
+/// blocking closure, which may finish AFTER the handler already answered 408).
+async fn wait_for_count(
+    counter: &prometheus::core::GenericCounter<prometheus::core::AtomicU64>,
+    want: u64,
+) {
+    for _ in 0..200 {
+        if counter.get() >= want {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!(
+        "cancellation counter never reached {want} (got {}) — the armed work did not record stopping",
+        counter.get()
+    );
+}
+
+#[tokio::test]
+async fn explicit_zero_timeout_cancels_work_and_408s() {
+    let (eng, titles) = corpus();
+    let state = state_with(eng, false);
+
+    // An explicit timeout_ms arms cooperative cancellation (ADR-099); 0ms is expired
+    // by the time the blocking closure runs, so its FIRST deadline check fires —
+    // deterministic, no timing sensitivity.
+    let req: SearchBody = serde_json::from_value(serde_json::json!({
+        "document": {"title": titles[0]},
+        "include_source": false,
+        "timeout_ms": 0,
+    }))
+    .expect("valid SearchBody");
+    let err = search(State(Arc::clone(&state)), Json(req))
+        .await
+        .err()
+        .expect("a zero timeout must 408");
+    assert_eq!(err.0, axum::http::StatusCode::REQUEST_TIMEOUT);
+
+    // The work actually stopped AND recorded it (the closure-side counter).
+    let counter = state
+        .prom
+        .match_cancellations_total
+        .with_label_values(&["search"]);
+    wait_for_count(&counter, 1).await;
+}
+
+#[tokio::test]
+async fn mpercolate_explicit_zero_timeout_cancels_and_408s() {
+    let (eng, titles) = corpus();
+    let state = state_with(eng, false);
+    let mut b = body(
+        Some(titles.iter().take(8).map(String::as_str).collect()),
+        None,
+        false,
+    );
+    b.timeout_ms = Some(0);
+    let err = mpercolate(State(Arc::clone(&state)), Json(b))
+        .await
+        .err()
+        .expect("a zero timeout must 408");
+    assert_eq!(err.0, axum::http::StatusCode::REQUEST_TIMEOUT);
+    let counter = state
+        .prom
+        .match_cancellations_total
+        .with_label_values(&["mpercolate"]);
+    wait_for_count(&counter, 1).await;
+}
+
+#[tokio::test]
+async fn no_explicit_timeout_stays_unarmed() {
+    let (eng, titles) = corpus();
+    let state = state_with(eng, false);
+    let req: SearchBody = serde_json::from_value(serde_json::json!({
+        "document": {"title": titles[0]},
+        "include_source": false,
+    }))
+    .expect("valid SearchBody");
+    let resp = search(State(Arc::clone(&state)), Json(req)).await;
+    assert!(resp.is_ok(), "the unarmed default path must serve normally");
+    assert_eq!(
+        state
+            .prom
+            .match_cancellations_total
+            .with_label_values(&["search"])
+            .get(),
+        0,
+        "no explicit timeout_ms ⇒ never armed ⇒ never cancelled"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_permit_serializes_but_both_searches_succeed() {
+    let (eng, titles) = corpus();
+    let mut state_arc = state_with(eng, false);
+    {
+        // A single permit: two concurrent searches must queue, not fail — the
+        // semaphore wait sits inside each request's own timeout budget.
+        let state = Arc::get_mut(&mut state_arc).expect("sole owner");
+        state.search_permits = Some(std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+    }
+    let state = state_arc;
+
+    let mk = |t: &str| -> SearchBody {
+        serde_json::from_value(serde_json::json!({
+            "document": {"title": t},
+            "include_source": false,
+        }))
+        .expect("valid SearchBody")
+    };
+    let (a, b) = tokio::join!(
+        search(State(Arc::clone(&state)), Json(mk(&titles[0]))),
+        search(State(Arc::clone(&state)), Json(mk(&titles[1]))),
+    );
+    assert!(a.is_ok() && b.is_ok(), "both queued searches must succeed");
+    assert_eq!(
+        state.prom.search_permits_in_use.get(),
+        0,
+        "all permits released after the work completed"
+    );
 }

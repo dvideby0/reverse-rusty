@@ -59,7 +59,8 @@ curl -X PUT localhost:9200/_settings \
   `max_query_clauses`, `max_anyof_group_size`, `holes_ratio_threshold`, `compaction_fixed_cost`,
   `auto_compact_on_flush`, `auto_compact_on_ingest`, `compaction_reanchor` (re-anchor drifted queries
   on the next merge, ADR-056), the broad-lane batch knobs `broad_batch_size`, `max_percolate_batch`,
-  `broad_columnar`, `broad_materialize` (ADR-026), and `accept_class_d` (store negation-only queries
+  `broad_columnar`, `broad_materialize` (ADR-026), `cooperative_cancel` (stop armed match work at
+  its deadline, ADR-099), and `accept_class_d` (store negation-only queries
   as broad-lane always-candidates instead of rejecting them, ADR-068 — gates **acceptance only**:
   already-stored entries stay matchable when toggled off, and WAL replay / the vocab recompile
   deliberately ignore it, so an acknowledged write is never dropped by a flipped knob).

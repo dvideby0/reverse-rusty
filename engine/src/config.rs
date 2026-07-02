@@ -213,6 +213,21 @@ pub struct EngineConfig {
     /// Default: `true`
     pub broad_materialize: bool,
 
+    /// Cooperative match cancellation (ADR-099): when a search request sets an
+    /// EXPLICIT `timeout_ms`, the match work re-checks the deadline at coarse
+    /// (per-segment / per-title) boundaries and abandons itself once expired —
+    /// instead of burning the rayon pool to completion after the client already
+    /// got its 408. Never changes any result: a non-expired armed search is
+    /// byte-identical, and a cancelled one returns the same 408 the response
+    /// deadline produced before this knob existed. The kill-switch is dynamic
+    /// (`PUT /_settings`) so cancellation can be disabled without a restart.
+    /// Requests without an explicit `timeout_ms` are never armed (the implicit
+    /// 30 s response deadline stays response-only) — the default path carries
+    /// zero deadline reads.
+    ///
+    /// Default: `true`
+    pub cooperative_cancel: bool,
+
     /// Maximum number of documents accepted in a single `POST /_mpercolate` batch.
     /// Requests above this are rejected with `400` before any work is scheduled,
     /// bounding per-request memory and latency.
@@ -274,6 +289,7 @@ impl Default for EngineConfig {
             broad_batch_size: 256,
             broad_columnar: true,
             broad_materialize: true,
+            cooperative_cancel: true,
             max_percolate_batch: 10_000,
             accept_class_d: false,
             retention_lease_ttl_secs: 1800,

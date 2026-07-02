@@ -16,6 +16,7 @@
 
 mod harness;
 
+mod cancellation;
 mod doc_store;
 mod interleaved;
 mod oracle_lifecycle;

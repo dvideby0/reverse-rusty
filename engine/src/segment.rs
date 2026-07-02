@@ -139,6 +139,78 @@ impl Default for BatchMatchOptions {
     }
 }
 
+/// A batch match's per-title results paired with the aggregate [`MatchStats`] — the
+/// return shape of the `match_titles_batch_with_stats*` family.
+pub type BatchResultsWithStats = (Vec<(usize, Vec<u64>)>, MatchStats);
+
+/// Typed cancellation (ADR-099): a cooperative deadline expired at a segment/title
+/// boundary and the match was abandoned. On this error NO partial results escape —
+/// every cancelled path clears its output buffer before returning, so a cancelled
+/// match can never masquerade as a successful empty/short result (the zero-FN /
+/// fail-loud posture). Only the `try_*` matchers armed with an explicit deadline can
+/// produce it; the plain matchers are statically infallible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchCancelled;
+
+impl std::fmt::Display for MatchCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("match cancelled: cooperative deadline expired")
+    }
+}
+
+impl std::error::Error for MatchCancelled {}
+
+/// The compile-time deadline seam (ADR-099). The match bodies are generic over this,
+/// so the unarmed monomorph ([`NoDeadline`], whose error is [`Infallible`]) compiles
+/// to literally no check — the byte-identical-default claim is structural, not
+/// empirical — while the armed monomorph ([`DeadlineAt`]) reads the clock at COARSE
+/// boundaries only (per segment / per title, never per candidate; the hot-path
+/// invariant). This is bounded staleness, not preemption: worst case, a cancelled
+/// match runs one segment's work past its deadline before observing it.
+pub(in crate::segment) trait DeadlineCheck: Copy {
+    type Cancelled: Send;
+    fn check(self) -> Result<(), Self::Cancelled>;
+}
+
+/// The unarmed deadline: `check` is `Ok(())` with an uninhabited error, so the
+/// compiler erases both the check and every `Err` arm from this monomorph.
+#[derive(Clone, Copy)]
+pub(in crate::segment) struct NoDeadline;
+
+impl DeadlineCheck for NoDeadline {
+    type Cancelled = std::convert::Infallible;
+    #[inline]
+    fn check(self) -> Result<(), Self::Cancelled> {
+        Ok(())
+    }
+}
+
+/// An armed deadline: cancelled once `Instant::now()` reaches the given instant.
+#[derive(Clone, Copy)]
+pub(in crate::segment) struct DeadlineAt(pub(in crate::segment) std::time::Instant);
+
+impl DeadlineCheck for DeadlineAt {
+    type Cancelled = MatchCancelled;
+    #[inline]
+    fn check(self) -> Result<(), Self::Cancelled> {
+        if std::time::Instant::now() >= self.0 {
+            Err(MatchCancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Unwrap a result whose error is uninhabited — the no-`unwrap()`-compliant way to
+/// consume the [`NoDeadline`] monomorphs behind the existing infallible signatures.
+#[inline]
+pub(in crate::segment) fn infallible<T>(r: Result<T, std::convert::Infallible>) -> T {
+    match r {
+        Ok(v) => v,
+        Err(never) => match never {},
+    }
+}
+
 /// One immutable (or, for the memtable, mutable) slice of the index. Owns the
 /// per-segment SoA + candidate indexes + liveness; the shared dict/norm stay on
 /// the Engine. Local ids are segment-local (indexes into this segment's SoA).

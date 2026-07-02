@@ -27,6 +27,7 @@ Options:
 | `--load-file` | — | Pre-load queries from a CSV or JSONL file at startup |
 | `--vocab-file` | — | Load vocabulary from a JSON file at startup |
 | `--threads` | *(physical cores)* | Number of rayon worker threads |
+| `--max-concurrent-searches` | 0 *(unbounded)* | Max `/_search`+`/_mpercolate` requests occupying the match pool at once; excess queue within their own `timeout_ms` (ADR-099) |
 | `--include-broad` | false | Include broad-lane (class C) queries in results |
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |

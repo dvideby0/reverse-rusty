@@ -192,8 +192,10 @@ the same ADR.
   gRPC handler boundary — p95/p99 via `histogram_quantile()`. *Residual:* per-shard broad-lane
   cost stays open. Plus the operational docs above the shipped ADR-081 runbook: **DR runbook,
   rolling-upgrade procedure, resource-sizing guide, alert examples, a backup/restore rehearsal**.
-  Promote **cooperative cancellation / bounded concurrency** (the ADR-052 deferral now in the
-  Robustness backlog) here.
+  **Cooperative cancellation / bounded concurrency shipped**
+  ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md)): an explicit
+  `timeout_ms` now stops the match work at coarse boundaries (not just the response), and
+  `--max-concurrent-searches` bounds pool occupancy — both defaults byte-identical.
 - **M4 — commercial-service operations (API-driven, not runbook-driven).** The bar past "cloud
   deployable": backups, scaling, restore, and rollout become controllers/APIs, not manual procedures.
   Larger, later, and partly **in tension with the shared-nothing / no-object-store stance
@@ -262,6 +264,7 @@ Low-priority polish and micro-optimizations — none are production blockers.
 - **Durable-ingest segment-write failures surface as `ingest_rollback`, not `segment_write`** —
   emit `SegmentWrite`/`SegmentMmap` from inside `build_durable_base` for symmetric labeling (the
   OS error is already visible; low priority).
-- **Cooperative cancellation on the match path** (ADR-052 deferral) — `timeout_ms` is a response
-  deadline only; timed-out work runs to completion. Weigh a coarse per-segment deadline check
-  against simply bounding concurrency.
+- ~~Cooperative cancellation on the match path~~ — **✅ shipped
+  ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md))**: the
+  monomorphized coarse-boundary deadline seam (armed by an explicit `timeout_ms`) + the
+  `--max-concurrent-searches` semaphore, both defaults byte-identical.

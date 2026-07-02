@@ -77,7 +77,10 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **HTTP server** (`bin/server/`) — ES-style REST ([`reference/api.md`](reference/api.md));
   production hardening (ADR-052); tag-value coercion + `maybe_flush` on PUT + per-request
   `include_broad` (ADR-073); opt-in bearer auth, default-deny on mutations (ADR-062); **cluster
-  coordinator mode** `--cluster`, in-process or remote, cluster-atomic upsert (ADR-070).
+  coordinator mode** `--cluster`, in-process or remote, cluster-atomic upsert (ADR-070);
+  **cooperative match cancellation + bounded search concurrency** — an explicit `timeout_ms`
+  stops the work at coarse boundaries, `--max-concurrent-searches` bounds pool occupancy, both
+  defaults byte-identical (ADR-099).
 - **Gate & CI** — `check.sh` is the one gate, CI runs it (ADR-024); lean-core feature gate
   (ADR-028).
 - **Security review** (Phase 0 item 5, ADR-089) — a [threat model](operations/threat-model.md) (trust

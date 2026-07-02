@@ -158,26 +158,69 @@ pub(crate) async fn search(
             let snap = Arc::clone(&state.snapshot.load());
             let pred = snap.compile_tag_predicate(&filter_spec);
             let state_inner = Arc::clone(&state);
+            // ADR-099: arm cooperative cancellation only for an EXPLICIT timeout_ms
+            // (the implicit 30s default stays a response deadline — zero deadline
+            // reads on the unarmed hot path), gated by the dynamic kill-switch.
+            let deadline = (body.timeout_ms.is_some() && snap.config().cooperative_cancel)
+                .then(|| start + timeout);
 
-            let search_fut = tokio::task::spawn_blocking(move || {
-                state_inner.pool.install(|| {
-                    SCRATCH.with(|cell| {
-                        let mut scratch = cell.borrow_mut();
-                        let mut out = Vec::new();
-                        let stats = snap.match_title_filtered(
-                            &title,
-                            &mut scratch,
-                            &mut out,
-                            include_broad,
-                            &pred,
-                        );
-                        (out, stats)
+            let search_fut = async {
+                // The permit wait sits INSIDE the timeout race below, and the permit
+                // moves into the closure — released when the blocking work ends.
+                let permit = crate::state::acquire_search_permit(
+                    state.search_permits.as_ref(),
+                    &state.prom.search_permits_in_use,
+                )
+                .await;
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    state_inner.pool.install(|| {
+                        SCRATCH.with(|cell| {
+                            let mut scratch = cell.borrow_mut();
+                            let mut out = Vec::new();
+                            let r = snap
+                                .try_match_title_filtered(
+                                    &title,
+                                    &mut scratch,
+                                    &mut out,
+                                    include_broad,
+                                    &pred,
+                                    deadline,
+                                )
+                                .map(|stats| (out, stats));
+                            if r.is_err() {
+                                // Counted in the closure so an already-408'd request
+                                // still records that its work actually stopped.
+                                state_inner
+                                    .prom
+                                    .match_cancellations_total
+                                    .with_label_values(&["search"])
+                                    .inc();
+                            }
+                            r
+                        })
                     })
                 })
-            });
+                .await
+            };
 
             let (ids, stats) = match tokio::time::timeout(timeout, search_fut).await {
-                Ok(Ok(result)) => result,
+                Ok(Ok(Ok(result))) => result,
+                // Cooperative cancellation racing ahead of the tokio timer is the SAME
+                // outcome as the response deadline: the existing 408, results discarded
+                // — never an empty 200 (ADR-099).
+                Ok(Ok(Err(_cancelled))) => {
+                    state
+                        .prom
+                        .http_requests_total
+                        .with_label_values(&["search", "408"])
+                        .inc();
+                    return Err(ApiError::response(
+                        StatusCode::REQUEST_TIMEOUT,
+                        "timeout",
+                        format!("search timed out after {}ms", timeout.as_millis()),
+                    ));
+                }
                 Ok(Err(e)) => {
                     eprintln!("search task panicked: {e}");
                     state
@@ -280,15 +323,52 @@ pub(crate) async fn search(
             let titles: Vec<String> = docs.into_iter().map(|d| d.title).collect();
             let pred = snap.compile_tag_predicate(&filter_spec);
             let state_inner = Arc::clone(&state);
+            // ADR-099: see the single-document arm.
+            let deadline = (body.timeout_ms.is_some() && snap.config().cooperative_cancel)
+                .then(|| start + timeout);
 
-            let search_fut = tokio::task::spawn_blocking(move || {
-                state_inner
-                    .pool
-                    .install(|| snap.match_titles_par_filtered(&titles, include_broad, &pred))
-            });
+            let search_fut = async {
+                let permit = crate::state::acquire_search_permit(
+                    state.search_permits.as_ref(),
+                    &state.prom.search_permits_in_use,
+                )
+                .await;
+                tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    state_inner.pool.install(|| {
+                        let r = snap.try_match_titles_par_filtered(
+                            &titles,
+                            include_broad,
+                            &pred,
+                            deadline,
+                        );
+                        if r.is_err() {
+                            state_inner
+                                .prom
+                                .match_cancellations_total
+                                .with_label_values(&["search"])
+                                .inc();
+                        }
+                        r
+                    })
+                })
+                .await
+            };
 
             let results = match tokio::time::timeout(timeout, search_fut).await {
-                Ok(Ok(result)) => result,
+                Ok(Ok(Ok(result))) => result,
+                Ok(Ok(Err(_cancelled))) => {
+                    state
+                        .prom
+                        .http_requests_total
+                        .with_label_values(&["search", "408"])
+                        .inc();
+                    return Err(ApiError::response(
+                        StatusCode::REQUEST_TIMEOUT,
+                        "timeout",
+                        format!("search timed out after {}ms", timeout.as_millis()),
+                    ));
+                }
                 Ok(Err(e)) => {
                     eprintln!("search task panicked: {e}");
                     state

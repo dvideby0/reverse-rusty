@@ -174,14 +174,49 @@ pub(crate) async fn mpercolate(
 
     let pred = snap.compile_tag_predicate(&filter_spec);
     let state_inner = Arc::clone(&state);
-    let search_fut = tokio::task::spawn_blocking(move || {
-        state_inner
-            .pool
-            .install(|| snap.match_titles_batch_with_stats_filtered(&titles, opts, &pred))
-    });
+    // ADR-099: arm cooperative cancellation only for an EXPLICIT timeout_ms, gated by
+    // the dynamic kill-switch. On expiry the WHOLE batch 408s — never a partially
+    // filled responses[] (a missing slot is indistinguishable from an empty match set).
+    let deadline = (body.timeout_ms.is_some() && cfg.cooperative_cancel).then(|| start + timeout);
+    let search_fut = async {
+        // Permit wait inside the timeout race; the permit rides the closure (ADR-099).
+        let permit = crate::state::acquire_search_permit(
+            state.search_permits.as_ref(),
+            &state.prom.search_permits_in_use,
+        )
+        .await;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            state_inner.pool.install(|| {
+                let r =
+                    snap.try_match_titles_batch_with_stats_filtered(&titles, opts, &pred, deadline);
+                if r.is_err() {
+                    state_inner
+                        .prom
+                        .match_cancellations_total
+                        .with_label_values(&["mpercolate"])
+                        .inc();
+                }
+                r
+            })
+        })
+        .await
+    };
 
     let (results, stats) = match tokio::time::timeout(timeout, search_fut).await {
-        Ok(Ok(r)) => r,
+        Ok(Ok(Ok(r))) => r,
+        Ok(Ok(Err(_cancelled))) => {
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["mpercolate", "408"])
+                .inc();
+            return Err(ApiError::response(
+                StatusCode::REQUEST_TIMEOUT,
+                "timeout",
+                format!("mpercolate timed out after {}ms", timeout.as_millis()),
+            ));
+        }
         Ok(Err(e)) => {
             eprintln!("mpercolate task panicked: {e}");
             state

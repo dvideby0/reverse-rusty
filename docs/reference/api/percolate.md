@@ -26,7 +26,7 @@ Optional request fields:
 
 | Field | Default | Description |
 |---|---|---|
-| `timeout_ms` | 30000 | Per-request **response** timeout in ms; returns 408 on expiry. In-flight matching is not cancelled — see note. |
+| `timeout_ms` | 30000 | Per-request timeout in ms; returns 408 on expiry. Set explicitly, it also arms **cooperative cancellation** of the in-flight match work (ADR-099) — see note. |
 | `size` | 1000 | Maximum number of hits to return (per slot in multi-doc mode) |
 | `from` | 0 | Offset into the result set for pagination |
 | `rank` | – | Optional ranking block (ADR-059) — order hits by a priority tag and/or request boosts before `from`/`size`. See [Ranking](#ranking-adr-059). |
@@ -36,14 +36,17 @@ Optional request fields:
 `total` always reflects the full match count; `hits` is the paginated window. Set
 `include_source: false` to skip query text lookup for faster responses.
 
-> **`timeout_ms` is a response deadline, not a compute budget.** On expiry the request
-> returns `408`, but the matching work already dispatched to the blocking/Rayon pool
-> runs to completion in the background — it is not interrupted (there is no
-> cooperative cancellation on the match path, which is kept branch-predictable and
-> allocation-free by design). So `timeout_ms` bounds *when the client gets a
-> response*, not how long the server spends. Under a flood of slow titles with a short
-> timeout, abandoned work can still occupy worker threads; bound load with a modest
-> request-concurrency limit rather than relying on `timeout_ms` to shed CPU. The same
+> **An explicit `timeout_ms` is also a compute budget (ADR-099).** On expiry the
+> request returns `408` as always, and — when the request set `timeout_ms`
+> explicitly — the dispatched match work now **cancels itself cooperatively** at
+> coarse (per-segment / per-title) boundaries instead of burning the Rayon pool to
+> completion. Results are never partial: a cancelled match returns nothing (the same
+> 408), never a truncated union. Requests that omit `timeout_ms` keep the implicit
+> 30 s **response** deadline only (the unarmed hot path carries zero deadline reads);
+> the kill-switch is the dynamic `cooperative_cancel` setting. To bound *how many*
+> searches occupy the pool at once, start the server with
+> `--max-concurrent-searches N` (excess requests queue within their own timeout).
+> Cancellations are counted in `match_cancellations_total{endpoint}`. The same
 > applies to `/_mpercolate`.
 
 Match multiple titles in a single request:
@@ -252,7 +255,7 @@ Optional request fields:
 | `size` | 1000 | Maximum hits per document |
 | `from` | 0 | Per-document offset into each document's hits for pagination |
 | `rank` | – | Optional ranking block (ADR-059), applied per document — see [Ranking](#ranking-adr-059) |
-| `timeout_ms` | 30000 | Per-request **response** timeout in ms; returns 408 on expiry. In-flight matching is not cancelled — see note. |
+| `timeout_ms` | 30000 | Per-request timeout in ms; returns 408 on expiry. Set explicitly, it also arms **cooperative cancellation** of the in-flight match work (ADR-099) — see note. |
 | `profile` | false | Include the top-level `broad` summary |
 
 Each per-document result is **byte-identical** to calling `/_search` with that single title (for the
