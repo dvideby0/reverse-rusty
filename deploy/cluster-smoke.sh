@@ -4,6 +4,8 @@
 # title percolates to it, then tear down. This is NOT the lifecycle harness — the
 # kill/restart/handoff/recover legs live in deploy/harness.sh (ADR-072). This only
 # answers "does the shipped production compose come up green and serve a match?".
+# CI runs it per-PR on the harness job's prebuilt image, and the release gate runs it
+# against the exact candidate image before publishing (ADR-098).
 #
 # Usage:
 #   deploy/cluster-smoke.sh                 # build the image from source, then smoke

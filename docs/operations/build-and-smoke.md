@@ -119,13 +119,16 @@ acceptance run and needs a real cluster + corpus — out of scope for this check
 
 ## What CI already enforces
 
-[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs legs 1, 2, 5, and 6 on every PR
-and push: the `gate` job runs `check.sh`, then the **local deploy smoke** (`local-smoke.sh
---prebuilt`, the M1 gate — ADR-098), then benchmarks (the 10M soak is on-demand via `run_soak`);
-the `harness` job lints `compose.cluster.yml` and runs `harness.sh --prebuilt`; and the `helm
-chart` job runs the lint + kubeconform matrix. So a green CI ≈ legs 1/2/5/6; **legs 3 and 4 (image
-build + the production-compose smoke) are the parts a fresh-clone operator should run locally**
-before a first deploy. They were previously unproven end-to-end — see the finding below.
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) now runs **every leg but the image
+build** on each PR and push: the `gate` job runs `check.sh`, then the **local deploy smoke**
+(`local-smoke.sh --prebuilt`, the M1 gate — ADR-098), then benchmarks (the 10M soak is on-demand
+via `run_soak`); the `harness` job lints `compose.cluster.yml`, runs `harness.sh --prebuilt`, then
+runs the **production-compose smoke** (leg 4) on the same prebuilt image; and the `helm chart` job
+runs the lint + kubeconform matrix plus the **topology-parity** and **version-drift** tripwires
+(ADR-098). Releases add the rest: [`release.yml`](../../.github/workflows/release.yml) builds the
+candidate image (leg 3), re-runs the compose smoke against it, runs the **kind Helm smoke**
+(`k8s-smoke.sh`) against it, and only then publishes to GHCR — so a tagged image has passed every
+leg of this checklist by construction.
 
 ## Findings from the verification run (2026-06-25)
 
@@ -136,6 +139,9 @@ before a first deploy. They were previously unproven end-to-end — see the find
   ADR-081 shipped), never run end-to-end, so the latent bug shipped; CI stayed green because
   `harness.sh` uses numeric ids. **Fixed** to use a numeric id and assert `hits=[1]`. This is exactly
   the class of drift this checklist exists to surface.
+- **(2026-07-02, ADR-098)** `deploy/k8s-smoke.sh` carried the SAME latent bug (`PUT /_doc/smoke1`)
+  and had likewise never passed end-to-end — found while wiring it into the release gate, fixed the
+  same way, and it now runs against every release candidate so it cannot rot again.
 
 ## Last verified
 

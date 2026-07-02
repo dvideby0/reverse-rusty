@@ -132,8 +132,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: engine
-          # Separate cache key from the gate job (different feature set).
-          key: harness-distributed
+          # Separate cache from the gate job (different feature set). `shared-key`
+          # (not `key`) so the RELEASE workflow — which builds the same distributed
+          # bins — restores the cache this job saves on `main` pushes (ADR-098).
+          shared-key: distributed
 
       - name: Build node binaries (distributed)
         working-directory: engine
@@ -146,6 +148,13 @@ jobs:
       # teardown and see nothing.
       - name: Run the harness
         run: ./deploy/harness.sh --prebuilt engine/target/release
+
+      # The production-compose smoke (ADR-098): behavioral coverage for
+      # compose.cluster.yml on every PR (the lint above is parse-only). Reuses the
+      # prebuilt image the harness just built — ~30-60s. The harness's EXIT trap has
+      # already torn its stack down, so the ports are free.
+      - name: Production-compose smoke (same prebuilt image)
+        run: RR_IMAGE=reverse-rusty-harness:dev ./deploy/cluster-smoke.sh
 
   # The Helm chart (deploy/helm/reverse-rusty, ADR-084): lint + render across a value
   # matrix + validate every rendered manifest against the real Kubernetes 1.29 schemas
@@ -184,3 +193,12 @@ jobs:
           validate --set tls.enabled=false --set auth.enabled=false
           validate --set clusterToken.create=true --set clusterToken.value=x \
                    --set auth.create=true --set auth.value=y
+
+      # Drift tripwires (Tier 5 M2, ADR-098): compose ≡ rendered chart on the
+      # load-bearing topology facts, and crate version ≡ chart appVersion (the
+      # release preflight adds the tag to this equation).
+      - name: Topology parity (compose ≡ rendered chart)
+        run: ./deploy/check-topology-parity.sh
+
+      - name: Version drift (Cargo.toml == Chart appVersion)
+        run: ./deploy/check-versions.sh

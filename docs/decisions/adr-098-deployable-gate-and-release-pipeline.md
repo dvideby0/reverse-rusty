@@ -2,11 +2,14 @@
 
 > [Back to the decisions index](../DECISIONS.md)
 
-- **Status:** **Accepted (2026-07-02).** M0 + M1 shipped (this PR):
+- **Status:** **Done (2026-07-02).** M0 + M1 shipped first (PR #96):
   [`operations/deployment-modes.md`](../operations/deployment-modes.md) +
   [`deploy/local-smoke.sh`](../../deploy/local-smoke.sh) wired into the required CI gate job.
-  **M2 (the release pipeline + remote smoke gates) lands in the follow-up PR** — the staged
-  single-ADR pattern ADR-093 used.
+  **M2 shipped in the follow-up PR** (the staged single-ADR pattern ADR-093 used):
+  [`release.yml`](../../.github/workflows/release.yml) (tag-triggered, smoke-the-candidate-first,
+  GHCR `{vX.Y.Z, X.Y.Z, sha-<short>}` — the bare form is the chart's default `image.tag` = appVersion), the `check-versions.sh` + `check-topology-parity.sh` guards
+  wired per-PR, the production-compose smoke on the harness job's image per-PR, and the
+  `k8s-smoke.sh` u64-id fix + its first end-to-end PASS.
 
 - **Context:** The engine + distributed layers are built and oracle-proven, but everything
   deployment-shaped was folded into Distributed-v1 criterion 12 (the ≥20M scale proof, ADR-065) —
@@ -45,7 +48,8 @@
      topology parity) → only then publish. A `workflow_dispatch` run is the full dry-run rehearsal
      (build + smoke, never push).
   4. **(M2) The image is the ONLY published artifact**: `ghcr.io/<owner>/reverse-rusty` tagged
-     `vX.Y.Z` + `sha-<short>`. **No `:latest`** (an unpinned pull fails loud instead of silently
+     `vX.Y.Z` + `X.Y.Z` (the Helm chart's default `image.tag` is `Chart.appVersion` — the bare
+     form — so a default `helm install` pulls a published tag; codex) + `sha-<short>`. **No `:latest`** (an unpinned pull fails loud instead of silently
      floating — and it ends the ":latest-only" state the review flagged). **No crates.io publish**
      (`publish = false` stays) and **no GitHub-Release binary artifacts** — the repo may go
      private later (user decision, 2026-07-02); GHCR packages pushed from Actions inherit the

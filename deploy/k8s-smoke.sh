@@ -4,9 +4,10 @@
 # simplicity), wait for the coordinator to be Ready, ingest one query over REST, prove a
 # title percolates to it, then tear down. The k8s analogue of deploy/cluster-smoke.sh.
 #
-# NOT run in CI — CI validates the chart structurally (helm lint + helm template +
-# kubeconform -strict, see .github/workflows/ci.yml `helm-chart`). This needs a real
-# cluster, so it is an operator/dev convenience.
+# Runs in the RELEASE gate (ADR-098): .github/workflows/release.yml executes this against
+# the exact candidate image before anything is published. Per-PR CI still validates the
+# chart structurally only (helm lint + helm template + kubeconform -strict, the
+# `helm-chart` job) — kind is deliberately not in the per-PR path.
 #
 # Usage:
 #   deploy/k8s-smoke.sh                                   # create kind cluster, build+load the image
@@ -82,13 +83,15 @@ done
 [[ "$(curl -fs "$BASE/_health" | jq -r '.status')" == "green" ]] || fail "coordinator never went green"
 
 echo "==> ingest one query (auth-gated write) and percolate a matching title"
-code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/_doc/smoke1" \
+# Document ids are u64 logical ids in BOTH modes (the REST `_doc/{id}` route extracts
+# `Path<u64>`), so the id must be numeric — a non-numeric id is a 400 at the router.
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/_doc/1" \
   -H "authorization: Bearer $AUTH" -H 'content-type: application/json' \
   -d '{"query":"1990 topps smokeplayer"}')
 [[ "$code" == "201" || "$code" == "200" ]] || fail "ingest rejected (HTTP $code)"
 
 hits=$(curl -s -X POST "$BASE/_search" -H 'content-type: application/json' \
   -d '{"document":{"title":"1990 topps smokeplayer psa 10"},"size":10}' | jq -c '[.hits.hits[]._id]|sort')
-[[ "$hits" == '["smoke1"]' ]] || fail "percolate did not return the ingested query (got $hits)"
+[[ "$hits" == '[1]' ]] || fail "percolate did not return the ingested query (got $hits)"
 
 echo "PASS: Helm chart came up on kind and served a match (hits=$hits)"
