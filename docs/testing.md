@@ -216,6 +216,13 @@ manual dispatch. One job on `ubuntu-latest`:
 
 In-progress runs are cancelled when a newer commit lands on the same ref.
 
+The `helm chart` job additionally runs the compose↔chart **topology-parity** and **version-drift**
+tripwires (`deploy/check-topology-parity.sh`, `deploy/check-versions.sh` — ADR-098). A `v*` tag
+triggers [`release.yml`](../.github/workflows/release.yml): version preflight → build → smoke the
+exact candidate image (Compose + kind/Helm + parity) → publish to GHCR (`vX.Y.Z` + `X.Y.Z` — the chart's default `image.tag` — + `sha-<short>`,
+never `:latest`); a `workflow_dispatch` run is the same pipeline with publishing skipped — the
+no-tag rehearsal.
+
 ## The multi-machine harness (ADR-072)
 
 The compose-based lifecycle suite — the analogue of the localhost oracles across **real container
@@ -231,7 +238,8 @@ Requires Docker (compose v2), `curl`, `jq`, `openssl`. Generates an ephemeral CA
 (nothing committed), brings up `deploy/compose.harness.yml` (3 durable shard nodes + a handoff
 target + the REST coordinator + a 3-node control-plane quorum), runs the assertion legs, and tears
 everything down — exit 0 ⇔ PASS. CI runs it on every PR as the `multi-machine harness` job
-(natively built bins wrapped via `deploy/Dockerfile.prebuilt`). Its assertions are black-box REST
+(natively built bins wrapped via `deploy/Dockerfile.prebuilt`), followed by the production-compose
+smoke (`deploy/cluster-smoke.sh`) on the same image (ADR-098). Its assertions are black-box REST
 invariants: a dead shard **fails loud** (502, never a silently truncated result), every lifecycle
 event lands **≡ the percolate baseline**, and every acknowledged write stays matchable across a
 live cross-node handoff.

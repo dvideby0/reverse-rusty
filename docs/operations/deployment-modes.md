@@ -10,8 +10,9 @@ auth posture, and — in one place — the **v1 non-goals** as named constraints
 
 > TL;DR: four supported modes. The two **local** modes are CI-gated on every PR
 > (`deploy/local-smoke.sh` runs inside the required `gate + benchmarks` job); the two **remote**
-> modes are smoke-gated by their own scripts (`cluster-smoke.sh`, `k8s-smoke.sh`) and the
-> lifecycle harness. "Deployable feature complete" here is deliberately distinct from the scale
+> modes are smoke-gated per PR (the compose smoke + the lifecycle harness + the compose↔chart
+> topology-parity tripwire) and per release (`release.yml` runs both `cluster-smoke.sh` and the
+> kind `k8s-smoke.sh` against the exact candidate image before it is published). "Deployable feature complete" here is deliberately distinct from the scale
 > proof — the ≥20M-query soak stays open as Tier 3 criterion 12 (ADR-065).
 
 ## 1. The matrix
@@ -20,7 +21,7 @@ auth posture, and — in one place — the **v1 non-goals** as named constraints
 |---|---|---|---|---|
 | **Single-node** | `cd engine && cargo build --release` | `server --port 9200 --data-dir ./data` | WAL + segments; restart-reopen; `POST /_backup` → restore by `--data-dir` | [`local-smoke.sh`](../../deploy/local-smoke.sh) — **CI, every PR** |
 | **In-process cluster** | same binary | `server --cluster --shards K --data-dir ./data` | coordinator log + manifest + per-shard segments; checkpoint + reopen; `POST /_backup` | [`local-smoke.sh`](../../deploy/local-smoke.sh) — **CI, every PR** |
-| **Remote Compose** (K=3, RF=1) | `deploy/Dockerfile` (`--features distributed`) | `deploy/gen-mesh-certs.sh` + env (`RR_CLUSTER_TOKEN`, `RR_AUTH_TOKEN`) + `docker compose -f deploy/compose.cluster.yml up -d` — full procedure: [runbook §2](cluster-deployment.md) | per-shard translog + segments on named volumes; durable Raft control plane | [`cluster-smoke.sh`](../../deploy/cluster-smoke.sh) + the 6-leg [`harness.sh`](../../deploy/harness.sh) — **harness in CI, every PR** |
+| **Remote Compose** (K=3, RF=1) | `deploy/Dockerfile`, or pull `ghcr.io/<owner>/reverse-rusty:vX.Y.Z` (released images are smoke-gated, never `:latest` — ADR-098) | `deploy/gen-mesh-certs.sh` + env (`RR_CLUSTER_TOKEN`, `RR_AUTH_TOKEN`) + `docker compose -f deploy/compose.cluster.yml up -d` — full procedure: [runbook §2](cluster-deployment.md) | per-shard translog + segments on named volumes; durable Raft control plane | [`cluster-smoke.sh`](../../deploy/cluster-smoke.sh) + the 6-leg [`harness.sh`](../../deploy/harness.sh) — **harness in CI, every PR** |
 | **Remote Helm** (K=3, RF=1) | same image | Secrets (TLS + tokens) + `helm install rr deploy/helm/reverse-rusty` — full procedure: [runbook §3](kubernetes-deployment.md) | per-pod PVCs (shards + control); stateless coordinator Deployment | [`k8s-smoke.sh`](../../deploy/k8s-smoke.sh) (kind) + `helm lint`/`kubeconform` — **static validation in CI, every PR** |
 
 The two local modes need only the Rust toolchain, `curl`, and `jq`. The two remote modes are the

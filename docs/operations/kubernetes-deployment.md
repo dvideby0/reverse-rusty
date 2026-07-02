@@ -126,4 +126,6 @@ unchanged — see [cluster-deployment.md](cluster-deployment.md) and ADR-084.
 With a cluster + `helm` + `kubectl`: [`deploy/k8s-smoke.sh`](../../deploy/k8s-smoke.sh) installs the
 chart (dev secrets, TLS off), waits for readiness, ingests one query over REST, percolates, asserts
 the match, and tears down. CI validates the chart structurally (`helm lint` + `helm template` +
-`kubeconform -strict`) on every PR.
+`kubeconform -strict`) plus the compose↔chart **topology-parity tripwire** on every PR, and
+**behaviorally in the release gate** (ADR-098): `release.yml` runs this script on a kind cluster
+against the exact candidate image before anything is published to GHCR.
