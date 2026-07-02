@@ -212,6 +212,11 @@ pub(crate) async fn cluster_search(
             }
         };
 
+    // ADR-099: arm cooperative (per-title) cancellation only for an EXPLICIT
+    // timeout_ms. Lock-free here — the dynamic kill-switch is resolved INSIDE the
+    // blocking task (under the timeout race), so a held cluster write lock (e.g. a
+    // vocab rebuild) can never stall this async handler past its own deadline (codex).
+    let deadline = body.timeout_ms.is_some().then(|| start + timeout);
     let results = percolate_blocking(
         &state,
         titles,
@@ -219,6 +224,7 @@ pub(crate) async fn cluster_search(
         include_broad,
         rank_spec,
         timeout,
+        deadline,
         "search",
     )
     .await?;
@@ -376,6 +382,9 @@ pub(crate) async fn cluster_mpercolate(
         ));
     }
 
+    // ADR-099: see cluster_search above (lock-free; the kill-switch resolves in the
+    // blocking task).
+    let deadline = body.timeout_ms.is_some().then(|| start + timeout);
     let results = percolate_blocking(
         &state,
         titles,
@@ -383,6 +392,7 @@ pub(crate) async fn cluster_mpercolate(
         include_broad,
         rank_spec,
         timeout,
+        deadline,
         "mpercolate",
     )
     .await?;
@@ -426,6 +436,17 @@ pub(crate) async fn cluster_mpercolate(
 /// submission order. With a `rank` spec each row carries its shard-computed score
 /// (ADR-075); without one, scores are `None` and the rows are byte-identical to the
 /// pre-rank path.
+/// How a `percolate_blocking` title evaluation failed: a shard probe failure (the
+/// fail-loud 502 — never a silently shrunken union) or a cooperative-deadline
+/// cancellation (ADR-099 — the same 408 the response deadline produces; a shard
+/// failure is never masked by a concurrent cancellation because each title maps to
+/// its own variant and `Shard` short-circuits identically either way).
+enum PercFail {
+    Shard(ShardError),
+    Cancelled,
+}
+
+#[allow(clippy::too_many_arguments)] // the request knobs of two endpoints funnel here
 async fn percolate_blocking(
     state: &Arc<ClusterAppState>,
     titles: Vec<String>,
@@ -433,21 +454,42 @@ async fn percolate_blocking(
     include_broad: bool,
     rank: Option<reverse_rusty::RankSpec>,
     timeout: tokio::time::Duration,
+    requested_deadline: Option<Instant>,
     endpoint: &'static str,
 ) -> Result<Vec<(ScoredIds, MatchStats)>, Reject> {
     let state_inner = Arc::clone(state);
-    let fut = tokio::task::spawn_blocking(move || {
-        state_inner.pool.install(|| {
-            use rayon::prelude::*;
-            // The read guard is taken PER TITLE, not hoisted over the batch: the
-            // RwLock is fair, so one long-held batch guard would let a queued vocab
-            // writer stall every subsequent read for the whole batch duration
-            // (review finding). Each title still evaluates under one consistent
-            // engine view; a concurrent vocab rebuild may split a batch across
-            // vocab epochs — the same visibility a single-node client gets when a
-            // PUT /_vocab lands between two requests.
-            let one =
-                |cluster: &ClusterEngine, t: &str| -> Result<(ScoredIds, MatchStats), ShardError> {
+    let fut = async {
+        // ADR-099: the permit wait sits inside the timeout race; the permit rides the
+        // blocking closure so it is released when the match work actually ends.
+        let permit = crate::state::acquire_search_permit(
+            state.search_permits.as_ref(),
+            &state.prom.search_permits_in_use,
+        )
+        .await;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            state_inner.pool.install(|| {
+                use rayon::prelude::*;
+                // Resolve the dynamic kill-switch HERE — on a rayon thread, inside the
+                // timeout race — so a held cluster write lock stalls only this blocking
+                // task (which the client can time out on), never the async handler.
+                let deadline = requested_deadline.filter(|_| {
+                    state_inner
+                        .cluster
+                        .read()
+                        .per_shard_config()
+                        .cooperative_cancel
+                });
+                // The read guard is taken PER TITLE, not hoisted over the batch: the
+                // RwLock is fair, so one long-held batch guard would let a queued vocab
+                // writer stall every subsequent read for the whole batch duration
+                // (review finding). Each title still evaluates under one consistent
+                // engine view; a concurrent vocab rebuild may split a batch across
+                // vocab epochs — the same visibility a single-node client gets when a
+                // PUT /_vocab lands between two requests.
+                let one = |cluster: &ClusterEngine,
+                           t: &str|
+                 -> Result<(ScoredIds, MatchStats), ShardError> {
                     if let Some(spec) = &rank {
                         let (rows, st) =
                             cluster.percolate_filtered_ranked(t, &filter, include_broad, spec)?;
@@ -458,15 +500,49 @@ async fn percolate_blocking(
                         Ok((ids.into_iter().map(|id| (id, None)).collect(), st))
                     }
                 };
-            titles
-                .par_iter()
-                .map(|t| one(&state_inner.cluster.read(), t))
-                .collect::<Result<Vec<_>, ShardError>>()
+                let r = titles
+                    .par_iter()
+                    .map(|t| {
+                        // Cooperative TITLE boundary (ADR-099): expired work stops
+                        // between titles instead of running the batch to completion.
+                        // (Within one title, the in-shard match is bounded by the
+                        // per-RPC deadline on a remote cluster — the stated ADR-099
+                        // deferral for shard-side cancellation.)
+                        if deadline.is_some_and(|d| Instant::now() >= d) {
+                            return Err(PercFail::Cancelled);
+                        }
+                        one(&state_inner.cluster.read(), t).map_err(PercFail::Shard)
+                    })
+                    .collect::<Result<Vec<_>, PercFail>>();
+                if matches!(r, Err(PercFail::Cancelled)) {
+                    state_inner
+                        .prom
+                        .match_cancellations_total
+                        .with_label_values(&[endpoint])
+                        .inc();
+                }
+                r
+            })
         })
-    });
+        .await
+    };
     match tokio::time::timeout(timeout, fut).await {
         Ok(Ok(Ok(results))) => Ok(results),
-        Ok(Ok(Err(e))) => {
+        Ok(Ok(Err(PercFail::Cancelled))) => {
+            // The cooperative deadline fired before the tokio timer: same contract as
+            // the response deadline — 408, results discarded, never an empty 200.
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&[endpoint, "408"])
+                .inc();
+            Err(ApiError::response(
+                StatusCode::REQUEST_TIMEOUT,
+                "timeout",
+                format!("percolate timed out after {}ms", timeout.as_millis()),
+            ))
+        }
+        Ok(Ok(Err(PercFail::Shard(e)))) => {
             // A failed shard probe fails the percolate rather than shrinking the
             // union (the zero-false-negative posture) — surface it.
             state

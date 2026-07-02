@@ -30,6 +30,12 @@ pub(crate) struct AppState {
     pub(crate) engine: Mutex<Engine>,
     pub(crate) snapshot: ArcSwap<EngineSnapshot>,
     pub(crate) pool: rayon::ThreadPool,
+    /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
+    /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,
+    /// and the permit is moved INTO the closure — released when the blocking work
+    /// actually ends (not when an abandoned join handle drops at timeout), so the
+    /// semaphore reflects true pool occupancy. `None` ⇒ unbounded (default).
+    pub(crate) search_permits: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,
     pub(crate) slow_query_threshold_ms: u64,
@@ -54,6 +60,12 @@ pub(crate) struct ClusterAppState {
     /// bulk batches don't interleave their per-item apply order. Reads never take it.
     pub(crate) write_serial: Mutex<()>,
     pub(crate) pool: rayon::ThreadPool,
+    /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
+    /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,
+    /// and the permit is moved INTO the closure — released when the blocking work
+    /// actually ends (not when an abandoned join handle drops at timeout), so the
+    /// semaphore reflects true pool occupancy. `None` ⇒ unbounded (default).
+    pub(crate) search_permits: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,
     pub(crate) slow_query_threshold_ms: u64,
@@ -84,6 +96,44 @@ impl RequestCtx for ClusterAppState {
     }
     fn auth(&self) -> Option<&AuthConfig> {
         self.auth.as_ref()
+    }
+}
+
+/// A held search-concurrency permit (ADR-099): the semaphore permit plus the
+/// `search_permits_in_use` gauge, both released/decremented together on drop. Moved
+/// INTO the `spawn_blocking` closure so release tracks the blocking work's real end
+/// (an abandoned join handle dropping at response-timeout does NOT release it), and
+/// dropped correctly if the request is cancelled between acquire and spawn.
+pub(crate) struct SearchPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    gauge: IntGauge,
+}
+
+impl Drop for SearchPermit {
+    fn drop(&mut self) {
+        self.gauge.dec();
+    }
+}
+
+/// Acquire a search permit if `--max-concurrent-searches` bounded the pool
+/// (`None` config ⇒ `None` permit, unbounded). WAITS for a permit — the wait sits
+/// inside the caller's `tokio::time::timeout` race, so a request that never gets one
+/// 408s at its own deadline and its dropped acquire consumes nothing.
+pub(crate) async fn acquire_search_permit(
+    sem: Option<&std::sync::Arc<tokio::sync::Semaphore>>,
+    gauge: &IntGauge,
+) -> Option<SearchPermit> {
+    match sem {
+        None => None,
+        Some(s) => {
+            // `acquire_owned` errs only on a closed semaphore; ours is never closed.
+            let permit = std::sync::Arc::clone(s).acquire_owned().await.ok()?;
+            gauge.inc();
+            Some(SearchPermit {
+                _permit: permit,
+                gauge: gauge.clone(),
+            })
+        }
     }
 }
 

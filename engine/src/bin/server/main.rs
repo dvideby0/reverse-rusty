@@ -372,6 +372,8 @@ async fn main() {
         engine: Mutex::new(engine),
         snapshot: ArcSwap::new(initial_snapshot),
         pool,
+        search_permits: (cli.max_concurrent_searches > 0)
+            .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
         include_broad: cli.include_broad,
         prom,
         slow_query_threshold_ms: slow_threshold,

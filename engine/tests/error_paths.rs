@@ -429,3 +429,114 @@ fn compiled_column_within_u16_still_ingests_and_matches() {
         "a high-index forbidden term must still suppress the match (no truncation)"
     );
 }
+
+// ---- cooperative cancellation (ADR-099) ----------------------------------------
+//
+// The `try_*` matchers with an armed-but-unexpired deadline must be BYTE-IDENTICAL
+// to the infallible paths (the zero-FN guard: arming costs nothing and changes
+// nothing), and an already-expired deadline must fail typed-and-fast with an EMPTY
+// output (the anti-partial guarantee).
+
+mod cancellation {
+    use reverse_rusty::exact::TagPredicate;
+    use reverse_rusty::gen::{generate, GenConfig};
+    use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy, MatchScratch};
+    use reverse_rusty::{Engine, Normalizer};
+    use std::time::{Duration, Instant};
+
+    fn snapshot_over_generated() -> (Engine, Vec<String>) {
+        let cfg = GenConfig {
+            num_queries: 2_000,
+            num_titles: 80,
+            broad_query_frac: 0.3,
+            ..GenConfig::default()
+        };
+        let data = generate(&cfg);
+        let mut eng = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+        eng.build_from_queries(&data.queries);
+        (eng, data.titles)
+    }
+
+    #[test]
+    fn armed_unexpired_deadline_is_byte_identical() {
+        let (eng, titles) = snapshot_over_generated();
+        let snap = eng.snapshot();
+        let pred = TagPredicate::empty();
+        let far = Some(Instant::now() + Duration::from_hours(1));
+
+        for include_broad in [false, true] {
+            // per-title: ids AND stats identical
+            let mut s1 = MatchScratch::new();
+            let mut s2 = MatchScratch::new();
+            for t in &titles {
+                let mut o1 = Vec::new();
+                let mut o2 = Vec::new();
+                let st1 = snap.match_title_filtered(t, &mut s1, &mut o1, include_broad, &pred);
+                let st2 = snap
+                    .try_match_title_filtered(t, &mut s2, &mut o2, include_broad, &pred, far)
+                    .expect("a far-future deadline never cancels");
+                assert_eq!(o1, o2, "armed ids diverged (broad={include_broad})");
+                assert_eq!(st1, st2, "armed stats diverged (broad={include_broad})");
+            }
+
+            // parallel
+            let r1 = snap.match_titles_par_filtered(&titles, include_broad, &pred);
+            let r2 = snap
+                .try_match_titles_par_filtered(&titles, include_broad, &pred, far)
+                .expect("a far-future deadline never cancels");
+            assert_eq!(r1, r2, "armed par results diverged (broad={include_broad})");
+
+            // batch (columnar broad lane)
+            let opts = BatchMatchOptions {
+                include_broad,
+                broad_strategy: BroadStrategy::Columnar,
+                ..BatchMatchOptions::default()
+            };
+            let b1 = snap.match_titles_batch_with_stats_filtered(&titles, opts, &pred);
+            let b2 = snap
+                .try_match_titles_batch_with_stats_filtered(&titles, opts, &pred, far)
+                .expect("a far-future deadline never cancels");
+            assert_eq!(
+                b1, b2,
+                "armed batch results diverged (broad={include_broad})"
+            );
+        }
+    }
+
+    #[test]
+    fn expired_deadline_errs_fast_with_no_partials() {
+        let (eng, titles) = snapshot_over_generated();
+        let snap = eng.snapshot();
+        let pred = TagPredicate::empty();
+        // A deadline of NOW is already expired by the first boundary check (the
+        // check is `now >= deadline`, and time has passed since this capture).
+        let expired = Some(Instant::now());
+
+        let started = Instant::now();
+        let mut scratch = MatchScratch::new();
+        let mut out = vec![42]; // pre-seeded junk must be cleared, not returned
+        let r =
+            snap.try_match_title_filtered(&titles[0], &mut scratch, &mut out, true, &pred, expired);
+        assert!(r.is_err(), "expired deadline must cancel");
+        assert!(
+            out.is_empty(),
+            "a cancelled match must leak NO ids (got {out:?})"
+        );
+
+        let rp = snap.try_match_titles_par_filtered(&titles, true, &pred, expired);
+        assert!(rp.is_err(), "expired par must cancel");
+
+        let opts = BatchMatchOptions {
+            include_broad: true,
+            ..BatchMatchOptions::default()
+        };
+        let rb = snap.try_match_titles_batch_with_stats_filtered(&titles, opts, &pred, expired);
+        assert!(rb.is_err(), "expired batch must cancel");
+
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "expired-at-entry cancellation must be near-immediate (took {:?})",
+            started.elapsed()
+        );
+    }
+}

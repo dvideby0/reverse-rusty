@@ -63,6 +63,15 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) threads: Option<usize>,
 
+    /// Bound concurrent search work (ADR-099): at most this many `/_search` /
+    /// `/_mpercolate` requests occupy the match pool at once; excess requests
+    /// queue on a semaphore (bounded by their own `timeout_ms`, so a queued
+    /// request that never gets a permit times out with the usual 408 — never
+    /// unbounded pile-up on the pool). 0 = unbounded (the default, byte-identical
+    /// to before this flag). Size it around the rayon worker count.
+    #[arg(long, default_value_t = 0)]
+    pub(crate) max_concurrent_searches: usize,
+
     /// Graceful shutdown drain timeout in seconds.
     #[arg(long, default_value_t = 30)]
     pub(crate) drain_timeout: u64,

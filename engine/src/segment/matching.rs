@@ -6,7 +6,7 @@
 //! drift.
 
 use super::snapshot::MatchView;
-use super::{BatchMatchOptions, Engine, MatchScratch, MatchStats};
+use super::{infallible, BatchMatchOptions, Engine, MatchScratch, MatchStats, NoDeadline};
 use crate::exact::TagPredicate;
 
 impl Engine {
@@ -36,14 +36,16 @@ impl Engine {
         include_broad: bool,
         pred: &TagPredicate,
     ) -> MatchStats {
-        MatchView {
-            norm: &self.norm,
-            dict: &self.dict,
-            segments: &self.segments,
-            memtable: &self.memtable,
-            pred,
-        }
-        .match_title(title, s, out, include_broad)
+        infallible(
+            MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+                pred,
+            }
+            .match_title(title, s, out, include_broad, NoDeadline),
+        )
     }
 
     /// Parallel matching: match a batch of titles across all available cores.

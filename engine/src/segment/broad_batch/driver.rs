@@ -10,7 +10,10 @@
 use super::kernel::eval_one_segment;
 use crate::dict::FeatureId;
 use crate::segment::snapshot::MatchView;
-use crate::segment::{BaseSegment, BatchMatchOptions, BroadStrategy, MatchScratch, MatchStats};
+use crate::segment::{
+    infallible, BaseSegment, BatchMatchOptions, BroadStrategy, DeadlineAt, DeadlineCheck,
+    MatchCancelled, MatchScratch, MatchStats, NoDeadline,
+};
 use crate::util::{fast_map, FastMap};
 use rayon::prelude::*;
 
@@ -93,7 +96,12 @@ impl BroadBatchScratch {
 
 /// Match one chunk of titles: selective lane per title (unchanged), broad lane
 /// once over the chunk (columnar), merged into per-title `outs`.
-fn match_batch_chunk(
+/// Errs only under an armed cooperative deadline ([`DeadlineAt`], ADR-099) — checked at
+/// each Phase-0 title boundary and each Phase-1/2 segment block, never per candidate.
+/// On Err the chunk's `outs` are cleared (no partial escape); the unarmed monomorph
+/// ([`NoDeadline`]) compiles the checks away.
+#[allow(clippy::too_many_arguments)] // mirrors the scratch-threading style of eval_one_segment
+fn match_batch_chunk<D: DeadlineCheck>(
     view: &MatchView,
     titles: &[impl AsRef<str>],
     opts: BatchMatchOptions,
@@ -101,7 +109,8 @@ fn match_batch_chunk(
     bs: &mut BroadBatchScratch,
     outs: &mut Vec<Vec<u64>>,
     stats: &mut MatchStats,
-) {
+    dl: D,
+) -> Result<(), D::Cancelled> {
     let b = titles.len();
     if outs.len() < b {
         outs.resize_with(b, Vec::new);
@@ -110,7 +119,7 @@ fn match_batch_chunk(
         v.clear();
     }
     if b == 0 {
-        return;
+        return Ok(());
     }
     let words = b.div_ceil(64);
     // ADR-061: the columnar broad kernel is single-view, so while multi-word aliases are
@@ -135,6 +144,14 @@ fn match_batch_chunk(
 
     // ---- Phase 0: per-title normalize + selective lane + build feat bitmaps ----
     for (ti, title) in titles.iter().enumerate() {
+        // Cooperative-deadline title boundary (ADR-099): clear the chunk's outputs
+        // before abandoning so nothing partial can be read.
+        if let Err(c) = dl.check() {
+            for v in outs.iter_mut().take(b) {
+                v.clear();
+            }
+            return Err(c);
+        }
         // per-title epoch bump for the selective lane's cross-signature dedup
         ms.epoch = ms.epoch.wrapping_add(1);
         if ms.epoch == 0 {
@@ -237,7 +254,7 @@ fn match_batch_chunk(
     }
 
     if !columnar {
-        return;
+        return Ok(());
     }
     stats.broad_batches += 1;
 
@@ -259,6 +276,13 @@ fn match_batch_chunk(
     let materialize = opts.broad_materialize;
 
     for (si, base) in view.segments.iter().enumerate() {
+        // Cooperative-deadline segment boundary in the columnar broad pass (ADR-099).
+        if let Err(c) = dl.check() {
+            for v in outs.iter_mut().take(b) {
+                v.clear();
+            }
+            return Err(c);
+        }
         *broad_epoch = (*broad_epoch).wrapping_add(1);
         if *broad_epoch == 0 {
             for buf in broad_seen.iter_mut() {
@@ -311,6 +335,12 @@ fn match_batch_chunk(
     }
     // memtable last (its broad_seen buffer is at index n_base)
     {
+        if let Err(c) = dl.check() {
+            for v in outs.iter_mut().take(b) {
+                v.clear();
+            }
+            return Err(c);
+        }
         *broad_epoch = (*broad_epoch).wrapping_add(1);
         if *broad_epoch == 0 {
             for buf in broad_seen.iter_mut() {
@@ -347,6 +377,7 @@ fn match_batch_chunk(
         v.sort_unstable();
         v.dedup();
     }
+    Ok(())
 }
 
 /// Sum two `MatchStats` field-by-field (for the parallel stats reduce).
@@ -402,7 +433,9 @@ pub(in crate::segment) fn batch_results_with_stats(
             },
             |(ms, bs, outs), (ci, ct)| {
                 let mut st = MatchStats::default();
-                match_batch_chunk(view, ct, opts, ms, bs, outs, &mut st);
+                infallible(match_batch_chunk(
+                    view, ct, opts, ms, bs, outs, &mut st, NoDeadline,
+                ));
                 let base = ci * chunk;
                 let results: Vec<(usize, Vec<u64>)> = (0..ct.len())
                     .map(|ti| (base + ti, std::mem::take(&mut outs[ti])))
@@ -421,6 +454,54 @@ pub(in crate::segment) fn batch_results_with_stats(
         stats = add_stats(stats, st);
     }
     (all, stats)
+}
+
+/// [`batch_results_with_stats`] with an optional cooperative deadline (ADR-099).
+/// `None` delegates to the unarmed path (byte-identical). Armed, each chunk's
+/// [`match_batch_chunk`] checks per title + per segment block, and the `Result`
+/// collect short-circuits: the FIRST cancelled chunk abandons the whole batch (rayon
+/// stops scheduling remaining chunks best-effort; in-flight chunks self-cancel at
+/// their next boundary). All-or-nothing — never a partially-filled result set.
+pub(in crate::segment) fn try_batch_results_with_stats(
+    view: &MatchView,
+    titles: &[impl AsRef<str> + Sync],
+    opts: BatchMatchOptions,
+    deadline: Option<std::time::Instant>,
+) -> Result<BatchResults, MatchCancelled> {
+    let Some(d) = deadline else {
+        return Ok(batch_results_with_stats(view, titles, opts));
+    };
+    let chunk = opts.broad_batch_size.max(1);
+    let per_chunk: Vec<BatchResults> = titles
+        .par_chunks(chunk)
+        .enumerate()
+        .map_init(
+            || {
+                (
+                    MatchScratch::new(),
+                    BroadBatchScratch::new(),
+                    Vec::<Vec<u64>>::new(),
+                )
+            },
+            |(ms, bs, outs), (ci, ct)| {
+                let mut st = MatchStats::default();
+                match_batch_chunk(view, ct, opts, ms, bs, outs, &mut st, DeadlineAt(d))?;
+                let base = ci * chunk;
+                let results: Vec<(usize, Vec<u64>)> = (0..ct.len())
+                    .map(|ti| (base + ti, std::mem::take(&mut outs[ti])))
+                    .collect();
+                st.matches += results.iter().map(|(_, v)| v.len() as u32).sum::<u32>();
+                Ok((results, st))
+            },
+        )
+        .collect::<Result<Vec<_>, MatchCancelled>>()?;
+    let mut all = Vec::with_capacity(titles.len());
+    let mut stats = MatchStats::default();
+    for (mut chunk_results, st) in per_chunk {
+        all.append(&mut chunk_results);
+        stats = add_stats(stats, st);
+    }
+    Ok((all, stats))
 }
 
 /// Batch match returning only aggregate [`MatchStats`] (for benchmarks).
@@ -442,7 +523,9 @@ pub(in crate::segment) fn batch_stats(
             },
             |(ms, bs, outs), ct| {
                 let mut st = MatchStats::default();
-                match_batch_chunk(view, ct, opts, ms, bs, outs, &mut st);
+                infallible(match_batch_chunk(
+                    view, ct, opts, ms, bs, outs, &mut st, NoDeadline,
+                ));
                 st.matches += outs
                     .iter()
                     .take(ct.len())

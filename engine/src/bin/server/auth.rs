@@ -337,6 +337,7 @@ mod tests {
             engine: parking_lot::Mutex::new(eng),
             snapshot: arc_swap::ArcSwap::new(snap),
             pool,
+            search_permits: None,
             include_broad: false,
             prom: PrometheusMetrics::new(),
             slow_query_threshold_ms: 0,

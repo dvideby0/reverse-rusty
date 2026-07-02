@@ -62,6 +62,15 @@ pub(crate) struct PrometheusMetrics {
 
     // Slow query counter
     pub(crate) slow_queries_total: IntCounter,
+    /// Cooperative match cancellations (ADR-099), by endpoint — incremented inside the
+    /// blocking closure when armed match work abandons itself at a deadline boundary,
+    /// so it counts even after the handler already answered 408. The "work actually
+    /// stopped" signal, distinct from `http_requests_total{status="408"}` (which also
+    /// counts un-armed response-deadline timeouts).
+    pub(crate) match_cancellations_total: IntCounterVec,
+    /// Search permits currently held (ADR-099) — 0 permanently when
+    /// `--max-concurrent-searches` is unset.
+    pub(crate) search_permits_in_use: IntGauge,
 
     // Cluster gRPC transport metrics (ADR-085), set on each /_metrics scrape from the
     // coordinator's TransportMetrics snapshot; labeled by RPC `method`. Cumulative values in
@@ -260,6 +269,20 @@ impl PrometheusMetrics {
         ))
         .unwrap();
 
+        let match_cancellations_total = IntCounterVec::new(
+            Opts::new(
+                "match_cancellations_total",
+                "Cooperatively cancelled match work (deadline expired mid-match), by endpoint",
+            ),
+            &["endpoint"],
+        )
+        .unwrap();
+        let search_permits_in_use = IntGauge::with_opts(Opts::new(
+            "search_permits_in_use",
+            "Search-concurrency permits currently held (--max-concurrent-searches)",
+        ))
+        .unwrap();
+
         // --- Broad-lane batch metrics (POST /_mpercolate) ---
 
         let broad_batches_total = IntCounter::with_opts(Opts::new(
@@ -397,6 +420,12 @@ impl PrometheusMetrics {
         registry
             .register(Box::new(slow_queries_total.clone()))
             .unwrap();
+        registry
+            .register(Box::new(match_cancellations_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(search_permits_in_use.clone()))
+            .unwrap();
         registry.register(Box::new(wal_size_bytes.clone())).unwrap();
         registry
             .register(Box::new(wal_pending_entries.clone()))
@@ -463,6 +492,8 @@ impl PrometheusMetrics {
             broad_queries_evaluated_total,
             broad_candidates_total,
             slow_queries_total,
+            match_cancellations_total,
+            search_permits_in_use,
             transport_rpc_calls,
             transport_rpc_errors,
             transport_rpc_timeouts,

@@ -34,6 +34,7 @@ fn test_state(queries: &[(u64, String)]) -> Arc<ClusterAppState> {
         cluster: RwLock::new(cluster),
         write_serial: Mutex::new(()),
         pool,
+        search_permits: None,
         include_broad: true,
         prom: PrometheusMetrics::new(),
         slow_query_threshold_ms: 0,
@@ -647,4 +648,69 @@ async fn checkpoint_acknowledges_and_bumps_epoch() {
     assert_eq!(body["acknowledged"], true);
     let (status, body) = send(&state, req_empty("POST", "/_flush")).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+}
+
+// ---- cooperative cancellation (ADR-099, cluster mode) --------------------------
+
+#[tokio::test]
+async fn cluster_search_explicit_zero_timeout_cancels_and_408s() {
+    let state = test_state(&[(1, "michael jordan".to_string())]);
+
+    // An explicit timeout_ms arms the per-title cooperative check in
+    // percolate_blocking; 0ms is expired before the first title evaluates, so the
+    // request 408s deterministically and the cancellation is RECORDED (the counter
+    // lives in the blocking closure, so it counts even after the 408 went out).
+    let (code, body) = send(
+        &state,
+        req(
+            "POST",
+            "/_search",
+            &serde_json::json!({
+                "documents": [{"title": "michael jordan rookie"}, {"title": "some other"}],
+                "include_source": false,
+                "timeout_ms": 0,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(code, StatusCode::REQUEST_TIMEOUT, "got body: {body}");
+
+    for _ in 0..200 {
+        if state
+            .prom
+            .match_cancellations_total
+            .with_label_values(&["search"])
+            .get()
+            >= 1
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        state
+            .prom
+            .match_cancellations_total
+            .with_label_values(&["search"])
+            .get()
+            >= 1,
+        "the cancelled cluster percolate must record that its work stopped"
+    );
+
+    // A shard failure is a 502, never masked by cancellation: the un-armed default
+    // path still serves fine (sanity that the seam did not disturb normal serving).
+    let (ok_code, ok_body) = send(
+        &state,
+        req(
+            "POST",
+            "/_search",
+            &serde_json::json!({
+                "document": {"title": "michael jordan rookie"},
+                "include_source": false,
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(ok_code, StatusCode::OK, "unarmed serving intact: {ok_body}");
+    assert_eq!(ok_body["hits"]["total"], 1);
 }

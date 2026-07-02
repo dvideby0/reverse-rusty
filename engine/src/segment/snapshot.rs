@@ -2,13 +2,17 @@
 //! lock-free read view and THE HOT PATH (`match_title` and the rayon-parallel
 //! batch matchers). Type definitions live in the `segment` module root.
 
-use super::{BaseSegment, BatchMatchOptions, EngineSnapshot, MatchScratch, MatchStats, Segment};
+use super::{
+    infallible, BaseSegment, BatchMatchOptions, DeadlineAt, DeadlineCheck, EngineSnapshot,
+    MatchCancelled, MatchScratch, MatchStats, NoDeadline, Segment,
+};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::exact::TagPredicate;
 use crate::normalize::Normalizer;
 use crate::vocab::Vocab;
 use std::sync::Arc;
+use std::time::Instant;
 
 impl MatchScratch {
     pub fn new() -> Self {
@@ -77,13 +81,14 @@ impl MatchView<'_> {
     /// duplicated (no call overhead, no dynamic dispatch). Allocation-free:
     /// scratch is reused via [`MatchScratch`].
     #[inline]
-    pub(in crate::segment) fn match_title(
+    pub(in crate::segment) fn match_title<D: DeadlineCheck>(
         &self,
         title: &str,
         s: &mut MatchScratch,
         out: &mut Vec<u64>,
         include_broad: bool,
-    ) -> MatchStats {
+        dl: D,
+    ) -> Result<MatchStats, D::Cancelled> {
         // per-segment seen-buffer sizing (base segments first, memtable last)
         let segments = self.segments;
         let n_base = segments.len();
@@ -101,6 +106,11 @@ impl MatchView<'_> {
         }
         let epoch = s.epoch;
         out.clear();
+
+        // Cooperative-deadline entry check (ADR-099): a match that spent its whole
+        // budget queued on the rayon pool dies here, before doing any work. The
+        // unarmed monomorph compiles this away.
+        dl.check()?;
 
         // 1) normalize -> the title feature view(s) (ADR-061). The default (no active multi-word
         // alias) takes the **single-view fast path** — one feature set, one mask, no second copy —
@@ -138,8 +148,16 @@ impl MatchView<'_> {
 
         let mut stats = MatchStats::default();
 
-        // 3) probe every base segment, each with its own seen buffer
+        // 3) probe every base segment, each with its own seen buffer. The cooperative
+        // deadline is re-checked at each SEGMENT boundary (coarse — never per candidate,
+        // the hot-path invariant); on expiry we fall through to the shared buffer-restore
+        // epilogue and return Err with the output cleared (ADR-099).
+        let mut cancelled = None;
         for (i, base) in segments.iter().enumerate() {
+            if let Err(c) = dl.check() {
+                cancelled = Some(c);
+                break;
+            }
             base.match_into(
                 &view,
                 self.dict,
@@ -151,16 +169,21 @@ impl MatchView<'_> {
                 &mut stats,
             );
         }
-        self.memtable.match_into(
-            &view,
-            self.dict,
-            epoch,
-            &mut s.seen[n_base],
-            out,
-            include_broad,
-            self.pred,
-            &mut stats,
-        );
+        if cancelled.is_none() {
+            match dl.check() {
+                Err(c) => cancelled = Some(c),
+                Ok(()) => self.memtable.match_into(
+                    &view,
+                    self.dict,
+                    epoch,
+                    &mut s.seen[n_base],
+                    out,
+                    include_broad,
+                    self.pred,
+                    &mut stats,
+                ),
+            }
+        }
 
         // 4) dedup logical ids across segments (a logical id can live in more
         // than one segment, e.g. base + an updated copy in a later segment).
@@ -172,8 +195,14 @@ impl MatchView<'_> {
         if dual {
             s.feats_pos = feats_pos;
         }
+        if let Some(c) = cancelled {
+            // Anti-partial guarantee at the lowest level: a cancelled match returns
+            // NO ids, never a truncated union (ADR-099).
+            out.clear();
+            return Err(c);
+        }
         stats.matches = out.len() as u32;
-        stats
+        Ok(stats)
     }
 
     /// The title's common-mask word for a feature view: bit `mask_bit(f)` set for each
@@ -379,14 +408,50 @@ impl EngineSnapshot {
         include_broad: bool,
         pred: &TagPredicate,
     ) -> MatchStats {
-        MatchView {
+        infallible(
+            MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+                pred,
+            }
+            .match_title(title, s, out, include_broad, NoDeadline),
+        )
+    }
+
+    /// [`match_title_filtered`](Self::match_title_filtered) with an optional cooperative
+    /// deadline (ADR-099). `None` delegates to the unarmed path (byte-identical);
+    /// `Some(d)` re-checks the clock at entry and at each segment boundary, and once
+    /// `Instant::now() >= d` abandons the match with [`MatchCancelled`] — `out` is
+    /// cleared, so no partial result escapes. Cancellation is bounded staleness, not
+    /// preemption: at most one segment's work runs past the deadline.
+    pub fn try_match_title_filtered(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        out: &mut Vec<u64>,
+        include_broad: bool,
+        pred: &TagPredicate,
+        deadline: Option<Instant>,
+    ) -> Result<MatchStats, MatchCancelled> {
+        let view = MatchView {
             norm: &self.norm,
             dict: &self.dict,
             segments: &self.segments,
             memtable: &self.memtable,
             pred,
+        };
+        match deadline {
+            Some(d) => view.match_title(title, s, out, include_broad, DeadlineAt(d)),
+            None => Ok(infallible(view.match_title(
+                title,
+                s,
+                out,
+                include_broad,
+                NoDeadline,
+            ))),
         }
-        .match_title(title, s, out, include_broad)
     }
 
     /// Compile a request filter — a conjunction of `(key, [values])` groups — into a
@@ -496,6 +561,48 @@ impl EngineSnapshot {
                         pred,
                     );
                     (idx, out.clone(), stats)
+                },
+            )
+            .collect()
+    }
+
+    /// [`match_titles_par_filtered`](Self::match_titles_par_filtered) with an optional
+    /// cooperative deadline (ADR-099). `None` delegates unarmed (byte-identical). Armed,
+    /// every in-flight title self-checks per segment and the `Result` collect
+    /// short-circuits the batch: the FIRST cancellation abandons the whole request —
+    /// per-title results are all-or-nothing, never a partially-filled batch.
+    pub fn try_match_titles_par_filtered(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        include_broad: bool,
+        pred: &TagPredicate,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<(usize, Vec<u64>, MatchStats)>, MatchCancelled> {
+        use rayon::prelude::*;
+        let Some(d) = deadline else {
+            return Ok(self.match_titles_par_filtered(titles, include_broad, pred));
+        };
+        let view = MatchView {
+            norm: &self.norm,
+            dict: &self.dict,
+            segments: &self.segments,
+            memtable: &self.memtable,
+            pred,
+        };
+        titles
+            .par_iter()
+            .enumerate()
+            .map_init(
+                || (MatchScratch::new(), Vec::new()),
+                |(scratch, out), (idx, title)| {
+                    let stats = view.match_title(
+                        title.as_ref(),
+                        scratch,
+                        out,
+                        include_broad,
+                        DeadlineAt(d),
+                    )?;
+                    Ok((idx, out.clone(), stats))
                 },
             )
             .collect()
@@ -613,6 +720,32 @@ impl EngineSnapshot {
             },
             titles,
             opts,
+        )
+    }
+
+    /// [`match_titles_batch_with_stats_filtered`](Self::match_titles_batch_with_stats_filtered)
+    /// with an optional cooperative deadline (ADR-099). `None` delegates unarmed
+    /// (byte-identical). Armed, each chunk checks per title (Phase 0) and per segment
+    /// block (the columnar broad pass), and the first cancellation abandons the whole
+    /// batch — never a partially-filled `responses[]`.
+    pub fn try_match_titles_batch_with_stats_filtered(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        opts: BatchMatchOptions,
+        pred: &TagPredicate,
+        deadline: Option<Instant>,
+    ) -> Result<super::BatchResultsWithStats, MatchCancelled> {
+        super::broad_batch::try_batch_results_with_stats(
+            &MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+                pred,
+            },
+            titles,
+            opts,
+            deadline,
         )
     }
 }
