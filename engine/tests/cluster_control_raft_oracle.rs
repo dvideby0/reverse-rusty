@@ -87,6 +87,31 @@ fn leader_index(planes: &[RaftControlPlane]) -> usize {
     }
 }
 
+/// Poll until `plane` (the leader) has APPLIED the bootstrap membership entry. `initialize`
+/// returns once the entry is appended, and a leader is *known* the moment the election is won —
+/// but openraft refuses `change_membership` while the effective membership (here the bootstrap
+/// entry at log index 0) is still uncommitted, so a reconfiguration issued straight after the
+/// election races the bootstrap commit on slow runners. Apply trails commit, so
+/// applied ≥ the effective membership's log index ⇒ that membership is committed.
+fn wait_initial_membership_committed(plane: &RaftControlPlane) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let metrics = plane.raft().metrics().borrow().clone();
+        let membership = metrics.membership_config.log_id().as_ref().map(|l| l.index);
+        let applied = metrics.last_applied.as_ref().map(|l| l.index);
+        if let (Some(m), Some(a)) = (membership, applied) {
+            if a >= m {
+                return;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "bootstrap membership never committed: membership log {membership:?}, applied {applied:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// Poll until every node's committed document is identical (replication caught up), then return it.
 fn wait_converged(planes: &[RaftControlPlane]) -> ClusterState {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -170,6 +195,9 @@ fn change_membership_routes_to_raft() {
         .expect("bootstrap 3-node raft control plane");
 
     let leader = leader_index(&planes);
+    // A known leader ≠ a committed bootstrap membership; openraft rejects a reconfiguration
+    // while the previous membership entry is uncommitted, so wait out the bootstrap commit.
+    wait_initial_membership_committed(&planes[leader]);
     let drop_follower = (leader + 1) % planes.len();
     let target: Vec<NodeId> = (0..planes.len())
         .filter(|&i| i != drop_follower)
