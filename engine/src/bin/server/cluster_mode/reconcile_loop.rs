@@ -34,6 +34,7 @@ pub(crate) fn spawn_reconcile_loop(
     let rf = cfg.rf;
     let min_interval = cfg.min_interval;
     let max_parallel_moves = cfg.max_parallel_moves.max(1);
+    let gc_orphans = cfg.gc_orphans;
     tokio::spawn(async move {
         if !enabled {
             return;
@@ -42,6 +43,7 @@ pub(crate) fn spawn_reconcile_loop(
             min_interval_secs = min_interval.as_secs(),
             rf,
             max_parallel_moves,
+            gc_orphans,
             "reconcile loop started (ADR-092): watching the committed map for divergence"
         );
 
@@ -100,6 +102,38 @@ pub(crate) fn spawn_reconcile_loop(
                             converged = report.is_converged(),
                             "reconcile pass"
                         );
+                    }
+                    // Opt-in orphan-slot GC epilogue (ADR-096): only after a pass that left the
+                    // map fully CONVERGED (never while positions are uncommitted/failed — belt on
+                    // top of the sweep's own keep-set), on the blocking pool like the pass itself.
+                    if gc_orphans && report.is_converged() {
+                        let handle = tokio::runtime::Handle::current();
+                        let st = Arc::clone(&state);
+                        match tokio::task::spawn_blocking(move || {
+                            let cluster = st.cluster.read();
+                            cluster.gc_orphan_slots(&handle)
+                        })
+                        .await
+                        {
+                            Ok(Ok(gc)) => {
+                                if !gc.dropped.is_empty() || !gc.is_clean() {
+                                    info!(
+                                        dropped = gc.dropped.len(),
+                                        kept_live_routed = gc.kept_live_routed.len(),
+                                        skipped_unassigned = gc.skipped_unassigned.len(),
+                                        failed = gc.failed.len(),
+                                        skipped_nodes = gc.skipped_nodes.len(),
+                                        "orphan-slot GC sweep"
+                                    );
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                warn!(error = %e, "orphan-slot GC sweep failed (retried after the next converged pass)");
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "orphan-slot GC task panicked (retried after the next converged pass)");
+                            }
+                        }
                     }
                 }
                 Ok(Err(e)) => {

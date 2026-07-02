@@ -399,6 +399,23 @@ impl LocalShard {
     pub(crate) fn persistence_healthy(&self) -> bool {
         self.lock().persistence_healthy()
     }
+
+    /// Whether any UNEXPIRED peer-recovery retention lease is held (ADR-096) — the `DropShard`
+    /// guard: a slot pinned as an in-flight recovery's source is never destroyed. Reaps expired
+    /// leases first (mirroring the seal path, so a crashed recovery's stale lease cannot block a
+    /// GC drop forever), then reports the survivors. `distributed`-only (its sole caller is the
+    /// gRPC `ShardServer`), gated to avoid a dead-code warning in the lean/server builds.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn has_unexpired_retention_leases(&self) -> bool {
+        let mut held = self
+            .retention
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(ttl) = self.retention_lease_ttl {
+            held.reap_expired(Instant::now(), ttl);
+        }
+        held.floor().is_some()
+    }
 }
 
 impl Shard for LocalShard {

@@ -8,9 +8,8 @@
 //! `percolate` / `ingest` / `insert` / `delete` / `flush`.
 
 use std::collections::HashMap;
-use std::ffi::OsStr;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -29,58 +28,13 @@ use super::proto::shard_service_server::ShardServiceServer;
 use super::security::{ClientSecurity, MeshAuthVerify, ServerSecurity, TlsServerIdentity};
 use super::shard::{LocalShard, Shard, ShardError};
 
+mod durable;
 mod service;
+
+use durable::{read_adopted_space, restore_durable_slots, sweep_dropped_trash};
 
 #[cfg(test)]
 mod tests;
-
-/// The adopted feature space (dict + tag dict), persisted by a durable `AdoptDict`
-/// so a restarted node self-restores without a coordinator (ADR-072). The dict and
-/// tag dict are written as ONE length-framed blob under one atomic rename, so the
-/// pair can never desync — a crash leaves the whole prior file or the whole new one,
-/// never a new dict beside a stale/absent tag space (which would silently mis-filter
-/// tagged reads after restart; review finding).
-const ADOPTED_SPACE_FILE: &str = "feature_space.bin";
-
-/// Persist the adopted (already fingerprint-verified) dict + tag-space bytes under
-/// `dir` as one atomically-renamed blob: `dict_len u64 | dict | tag_dict`.
-fn persist_adopted_space(dir: &Path, dict_bytes: &[u8], tag_bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let mut blob = Vec::with_capacity(8 + dict_bytes.len() + tag_bytes.len());
-    blob.extend_from_slice(&(dict_bytes.len() as u64).to_le_bytes());
-    blob.extend_from_slice(dict_bytes);
-    blob.extend_from_slice(tag_bytes);
-    let tmp = dir.join(format!("{ADOPTED_SPACE_FILE}.tmp"));
-    std::fs::write(&tmp, &blob)?;
-    std::fs::File::open(&tmp)?.sync_all()?;
-    std::fs::rename(&tmp, dir.join(ADOPTED_SPACE_FILE))?;
-    Ok(())
-}
-
-/// The persisted dict + tag-space bytes, as read back from the feature-space blob.
-type AdoptedSpaceBytes = (Vec<u8>, Vec<u8>);
-
-/// Read back the persisted feature-space blob: `Some((dict_bytes, tag_bytes))` when
-/// present + well-framed, `None` when absent (a never-adopted durable node), an error
-/// on a corrupt/torn frame (fail loud rather than misparse).
-fn read_adopted_space(dir: &Path) -> Result<Option<AdoptedSpaceBytes>, ShardError> {
-    let path = dir.join(ADOPTED_SPACE_FILE);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let blob = std::fs::read(&path)
-        .map_err(|e| ShardError::Log(format!("reading {}: {e}", path.display())))?;
-    let dict_len = blob
-        .get(0..8)
-        .and_then(|s| s.try_into().ok())
-        .map(u64::from_le_bytes)
-        .map(|n| n as usize)
-        .filter(|&n| 8 + n <= blob.len())
-        .ok_or_else(|| ShardError::Log(format!("corrupt feature-space file {}", path.display())))?;
-    let dict_bytes = blob[8..8 + dict_len].to_vec();
-    let tag_bytes = blob[8 + dict_len..].to_vec();
-    Ok(Some((dict_bytes, tag_bytes)))
-}
 
 struct ServerState {
     dict: Arc<Dict>,
@@ -148,12 +102,6 @@ struct AdoptedSpace {
 /// The map of shards this node hosts, keyed by `shard_id` (= global position, ADR-093).
 type ShardMap = Arc<RwLock<HashMap<u32, Arc<ShardSlot>>>>;
 
-/// Parse a `shard_<NNN>` directory name back to its `shard_id`, mirroring [`shard_dir`]'s `{:03}`
-/// zero-padded scheme. Any other name (e.g. `feature_space.bin`, a legacy root `segments/`) ⇒ `None`.
-fn parse_shard_subdir(name: &OsStr) -> Option<u32> {
-    name.to_str()?.strip_prefix("shard_")?.parse().ok()
-}
-
 /// A node-scope adopted-space cell holding the given (already-deserialized) dict + tag space.
 fn node_space_cell(dict: Arc<Dict>, tag_dict: Arc<TagDict>) -> Arc<ArcSwapOption<AdoptedSpace>> {
     Arc::new(ArcSwapOption::from(Some(Arc::new(AdoptedSpace {
@@ -167,53 +115,6 @@ fn single_slot(slot: Arc<ShardSlot>) -> ShardMap {
     let mut map = HashMap::new();
     map.insert(0, slot);
     Arc::new(RwLock::new(map))
-}
-
-/// Restore every durable slot a node previously hosted (ADR-093): scan `data_dir` for `shard_<NNN>/`
-/// subdirs and reopen each `LocalShard` over the node-shared dict/tag space (self-restoring from that
-/// subdir's checkpoint sidecar + translog tail). A fresh dir (no subdirs) ⇒ an empty map (the node
-/// adopts on connect). Fails LOUD on a corrupt subdir dict (fingerprint mismatch) — never serves a slot
-/// compiled against a divergent feature space. No in-place migration of a legacy root `segments/`
-/// layout (the distributed shard store holds no production data yet — ADR-093 §Backward-compat).
-fn restore_durable_slots(
-    data_dir: &Path,
-    norm: &Arc<Normalizer>,
-    dict: &Arc<Dict>,
-    tag_dict: &Arc<TagDict>,
-    config: &EngineConfig,
-) -> Result<HashMap<u32, Arc<ShardSlot>>, ShardError> {
-    let mut slots = HashMap::new();
-    let entries = match std::fs::read_dir(data_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(slots),
-        Err(e) => {
-            return Err(ShardError::Log(format!(
-                "scanning {}: {e}",
-                data_dir.display()
-            )))
-        }
-    };
-    for entry in entries {
-        let entry =
-            entry.map_err(|e| ShardError::Log(format!("reading {}: {e}", data_dir.display())))?;
-        let Some(shard_id) = parse_shard_subdir(&entry.file_name()) else {
-            continue; // feature_space.bin, a legacy root dir, etc.
-        };
-        let subdir = shard_dir(data_dir, shard_id as usize);
-        let mut sc = config.clone();
-        sc.data_dir = Some(subdir);
-        let shard =
-            LocalShard::new_durable(Arc::clone(norm), Arc::clone(dict), Arc::clone(tag_dict), sc)?;
-        slots.insert(
-            shard_id,
-            ShardSlot::loaded(ServerState {
-                dict: Arc::clone(dict),
-                tag_dict: Arc::clone(tag_dict),
-                shard,
-            }),
-        );
-    }
-    Ok(slots)
 }
 
 /// A gRPC server wrapping ONE in-process shard.
@@ -318,6 +219,10 @@ impl ShardServer {
         config: EngineConfig,
         data_dir: PathBuf,
     ) -> Result<Self, ShardError> {
+        // Boot hygiene (ADR-096): reclaim any trash-renamed dropped-slot dir whose final delete
+        // was interrupted. Best-effort — never fails boot (the ADR-078/079 posture) — and runs
+        // BEFORE the adoption branch so a pending node's trash is swept too.
+        sweep_dropped_trash(&data_dir);
         // The dict + tag space are ONE atomically-written blob (never desynced); absent
         // ⇒ a never-adopted durable node, which starts pending and adopts on connect.
         let Some((dict_bytes, tag_bytes)) = read_adopted_space(&data_dir)? else {
@@ -460,6 +365,34 @@ impl ShardServer {
             .map_err(|_| Status::internal("shard map lock poisoned"))?
             .insert(shard_id, slot);
         Ok(())
+    }
+
+    /// Remove the slot for `shard_id`, RE-CHECKING the fence generation under the map WRITE lock
+    /// (ADR-096 — the `DropShard` CAS: a fence/unfence interleaving between the handler's guard
+    /// checks and this removal fails the drop rather than dropping a re-armed slot). `Ok(None)` ⇒
+    /// the slot was already absent (an idempotent re-run); `Err` ⇒ the fence changed. In-flight
+    /// RPCs holding the old `Arc` complete against it (serve-then-drop at micro scale); memory
+    /// frees when the last `Arc` drops.
+    fn remove_slot_if_fenced_at(
+        &self,
+        shard_id: u32,
+        expected_generation: u64,
+    ) -> Result<Option<Arc<ShardSlot>>, Status> {
+        let mut map = self
+            .shards
+            .write()
+            .map_err(|_| Status::internal("shard map lock poisoned"))?;
+        let Some(slot) = map.get(&shard_id) else {
+            return Ok(None);
+        };
+        let gen = slot.fenced_at_generation.load(Ordering::Acquire);
+        if gen != expected_generation {
+            return Err(Status::failed_precondition(format!(
+                "DropShard: shard {shard_id}'s fence generation changed under the drop \
+                 ({gen} != expected {expected_generation}); re-plan"
+            )));
+        }
+        Ok(map.remove(&shard_id))
     }
 
     /// Whether ANY hosted slot currently holds ≥1 query (ADR-093). The `AdoptDict` divergence guard:

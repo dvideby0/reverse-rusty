@@ -67,6 +67,27 @@ impl Shard for ReplicatedShard {
         true
     }
 
+    fn live_endpoints(&self) -> Vec<String> {
+        // The GC keep-set (ADR-096): EVERY member's endpoints — the primary's plus each replica's,
+        // in-sync or not (conservative: an out-of-sync replica still holds data a re-recovery may
+        // read; keeping it costs disk, dropping it live would be destructive). Snapshot the slot
+        // `Arc`s under the lock, then query lock-free (the composite's usual discipline).
+        let mut eps = self.primary.live_endpoints();
+        let slots: Vec<_> = {
+            let replicas = self
+                .replicas
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            replicas.clone()
+        };
+        for slot in slots {
+            eps.extend(slot.shard.live_endpoints());
+        }
+        eps.sort_unstable();
+        eps.dedup();
+        eps
+    }
+
     fn source_of(&self, logical: u64) -> Result<Option<String>, ShardError> {
         // Set-equal copies ⇒ any in-sync copy answers; same failover as the other reads.
         self.read(|s| s.source_of(logical))

@@ -56,9 +56,13 @@ pub use topology::{resolve_topology, route_topology, seed_position_preserving, S
 #[cfg(feature = "distributed")]
 mod distributed;
 #[cfg(feature = "distributed")]
+mod gc;
+#[cfg(feature = "distributed")]
 mod reassign;
 #[cfg(feature = "distributed")]
 mod reconcile;
+#[cfg(feature = "distributed")]
+pub use gc::{GcReport, OrphanSlot};
 #[cfg(feature = "distributed")]
 pub use reassign::{ReassignOutcome, RebalanceMoveReport};
 #[cfg(feature = "distributed")]

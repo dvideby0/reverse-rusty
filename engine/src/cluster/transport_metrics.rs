@@ -30,6 +30,8 @@ const METHOD_LABELS: [&str; TransportMetrics::SLOTS] = [
     "retention_lease",
     "recover_from",
     "translog",
+    "list_shards",
+    "drop_shard",
 ];
 
 #[derive(Default)]
@@ -55,7 +57,7 @@ impl Default for TransportMetrics {
 
 impl TransportMetrics {
     /// Number of distinct RPC kinds tracked (the counter-array length).
-    pub(crate) const SLOTS: usize = 13;
+    pub(crate) const SLOTS: usize = 15;
 
     /// A fresh, all-zero collector.
     pub fn new() -> Self {
@@ -177,6 +179,8 @@ pub(crate) enum RpcMethod {
     RetentionLease,
     RecoverFrom,
     Translog,
+    ListShards,
+    DropShard,
 }
 
 #[cfg(feature = "distributed")]

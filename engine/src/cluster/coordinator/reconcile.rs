@@ -92,6 +92,10 @@ pub struct ReconcileConfig {
     /// one OS thread plus its own connections for the duration of an `O(corpus)` copy — size to
     /// what the mesh and the nodes' disks can absorb.
     pub max_parallel_moves: usize,
+    /// Run an orphan-slot GC sweep ([`ClusterEngine::gc_orphan_slots`], ADR-096) after a pass
+    /// that left the map fully CONVERGED (never while positions are uncommitted/failed — belt on
+    /// top of the sweep's own keep-set). **Default `false` — no sweep ever runs, byte-identical.**
+    pub gc_orphans: bool,
 }
 
 impl Default for ReconcileConfig {
@@ -101,6 +105,7 @@ impl Default for ReconcileConfig {
             rf: 1,
             min_interval: Duration::from_secs(30),
             max_parallel_moves: 1,
+            gc_orphans: false,
         }
     }
 }
@@ -208,6 +213,11 @@ mod tests {
         );
         assert_eq!(cfg.min_interval, Duration::from_secs(30));
         assert_eq!(cfg.rf, 1);
+        assert_eq!(
+            cfg.max_parallel_moves, 1,
+            "the sequential default (ADR-095)"
+        );
+        assert!(!cfg.gc_orphans, "no GC sweep by default (ADR-096)");
     }
 
     #[test]

@@ -91,6 +91,21 @@ service ShardService {
   // left permanently write-quiesced (it would otherwise need a manual restart). Refuses a
   // dict-fingerprint mismatch. Returns the server's fence generation after the call.
   rpc Unfence (UnfenceRequest) returns (UnfenceReply);
+
+  // ---- orphan-slot GC (ADR-096) ----
+  // Node-level inventory: every slot this node hosts, with the state the coordinator's GC sweep
+  // classifies on (fence generation, live count, unexpired retention leases). Read-only; carries
+  // the node's dict/tag-dict fingerprints so the sweep verifies node identity before classifying.
+  rpc ListShards (Empty) returns (ListShardsReply);
+  // Drop ONE slot: remove it from the node's slot map and reclaim its `shard_<id>/` directory
+  // (rename-to-trash — atomically invisible to a restart — then best-effort delete). Guarded:
+  // fingerprints must match, the slot must be FENCED at exactly `expected_fence_generation`
+  // (a CAS-style arm — fences are not durable, so the coordinator arms a restart-orphan via the
+  // Fence probe first), and no unexpired retention lease may be held (an in-flight recovery's
+  // pinned source is never destroyed). A cold DropShard on a live unfenced slot is refused;
+  // destroying data requires the deliberate fence-then-drop two-step. Absent slot ⇒
+  // `dropped = false` (idempotent re-run).
+  rpc DropShard (DropShardRequest) returns (DropShardReply);
 }
 
 message Empty {}
@@ -368,6 +383,39 @@ message UnfenceRequest {
 }
 message UnfenceReply {
   uint64 fenced_at_generation = 1; // the server's fence generation after this call (0 ⇒ un-fenced)
+}
+
+// ---- orphan-slot GC (ADR-096) ----
+// One hosted slot's GC-relevant state, as reported by `ListShards`.
+message ShardListing {
+  uint32 shard_id = 1;
+  uint64 fenced_at_generation = 2; // 0 = unfenced (fences do NOT survive a server restart)
+  uint64 num_queries = 3;          // live count at listing time (report/observability only)
+  bool retention_leases_held = 4;  // unexpired leases exist (introspection; DropShard re-checks)
+}
+message ListShardsReply {
+  repeated ShardListing shards = 1;
+  // Node identity echo — the sweep verifies these equal the coordinator's before classifying
+  // (never GC against a divergent feature space).
+  uint64 dict_fingerprint = 2;
+  uint64 tag_dict_fingerprint = 3;
+}
+
+message DropShardRequest {
+  uint32 shard_id = 1;
+  // CAS-style arm: must equal the slot's CURRENT fence generation and be > 0. The coordinator
+  // arms an unfenced (e.g. restarted) orphan via the Fence RPC first; the CAS means any
+  // interleaving fence/unfence by a newer handoff makes a stale drop fail loud.
+  uint64 expected_fence_generation = 2;
+  uint64 dict_fingerprint = 3;     // refused on mismatch, like every guarded RPC
+  uint64 tag_dict_fingerprint = 4; // ADR-077: refused on mismatch, like dict_fingerprint
+}
+message DropShardReply {
+  bool dropped = 1;      // false = the slot was absent (an idempotent re-run)
+  uint64 num_queries = 2; // the dropped slot's live count (report/observability)
+  // false = the dir was renamed-to-trash but the delete failed/was skipped (the boot-time trash
+  // sweep reclaims it); in-memory slots report true (nothing on disk to remove).
+  bool dir_removed = 3;
 }
 
 // ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----

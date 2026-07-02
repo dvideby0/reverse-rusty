@@ -9,6 +9,7 @@
 //!   - [`dict_adopt`] — the `AdoptDict` body (dict + tag-space shipping, ADR-034/055)
 //!   - [`recovery`]   — the peer-recovery RPCs (FetchSegments / RecoverFrom / FetchTranslog) + their server-streaming helpers (ADR-035/036/039)
 //!   - [`leases`]     — translog retention leases + the live-handoff write fence (RetentionLease / Fence / Unfence, ADR-040/044/048)
+//!   - [`gc`]         — the orphan-slot GC RPCs (ListShards / DropShard, ADR-096)
 
 use std::pin::Pin;
 
@@ -24,6 +25,7 @@ use super::{compile_item, ShardServer};
 
 mod add_shard;
 mod dict_adopt;
+mod gc;
 mod leases;
 mod recovery;
 
@@ -337,5 +339,25 @@ impl ShardService for ShardServer {
         request: Request<proto::UnfenceRequest>,
     ) -> Result<Response<proto::UnfenceReply>, Status> {
         leases::unfence(self, request)
+    }
+
+    // ---- orphan-slot GC (ADR-096) ----
+    /// The node's slot inventory (fence generation, live count, unexpired leases) + its
+    /// dict/tag-dict fingerprints — what the coordinator's GC sweep classifies on. Read-only.
+    async fn list_shards(
+        &self,
+        request: Request<proto::Empty>,
+    ) -> Result<Response<proto::ListShardsReply>, Status> {
+        gc::list_shards(self, request)
+    }
+
+    /// Drop one slot (remove from the map + reclaim `shard_<id>/`), guarded: fingerprints, the
+    /// fence-armed CAS, and the retention-lease check — see the [`gc`] module docs. An absent
+    /// slot replies `dropped = false` (idempotent).
+    async fn drop_shard(
+        &self,
+        request: Request<proto::DropShardRequest>,
+    ) -> Result<Response<proto::DropShardReply>, Status> {
+        gc::drop_shard(self, request)
     }
 }
