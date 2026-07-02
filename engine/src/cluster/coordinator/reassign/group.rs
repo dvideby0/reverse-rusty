@@ -83,96 +83,20 @@ use std::sync::{Arc, PoisonError};
 
 use tokio::runtime::Handle;
 
-use crate::cluster::allocator;
 use crate::cluster::clog::LogPos;
-use crate::cluster::control::{ClusterState, NodeId, NodeRole, ShardAssignment};
+use crate::cluster::control::{NodeId, ShardAssignment};
 use crate::cluster::remote::RemoteShard;
 use crate::cluster::replica::{catch_up_replica, ReplicatedShard};
 use crate::cluster::shard::{Shard, ShardError};
 use crate::events::{DurabilityOp, EngineEvent};
 
-use super::ledger::MoveTicket;
 use super::{ClusterEngine, ReassignOutcome, COMMIT_ATTEMPTS, PLAN_ATTEMPTS};
 
-/// Clear a STALE fence on a member (re-)entering a group (codex P1 on this ADR): serve-then-drop
-/// deliberately leaves a dropped PRIMARY's slot fenced forever, and `RecoverFrom` preserves the
-/// slot's fence — so a later move that brings the same node back would commit a member that
-/// rejects every write (a fenced new primary write-breaks the position; a fenced new replica
-/// silently desyncs on its first fan-out). The server fence is a monotonic `fetch_max`, so
-/// `fence(0)` is a pure PROBE reporting the current generation; `unfence(probe)` then CAS-clears
-/// exactly that generation. Safe under the documented single-active-coordinator topology (there is
-/// no other orchestrator whose live fence this could trample); fails loud if the CAS loses a race.
-fn clear_stale_fence(member: &RemoteShard, ctx: &str) -> Result<(), ShardError> {
-    let stale = member.fence(0)?;
-    if stale == 0 {
-        return Ok(());
-    }
-    let now = member.unfence(stale)?;
-    if now != 0 {
-        return Err(ShardError::Remote(format!(
-            "{ctx}: clearing a stale fence (generation {stale}) on a group member failed — the \
-             slot is still fenced at generation {now} (a concurrent handoff?)"
-        )));
-    }
-    Ok(())
-}
-
-/// Set-equality of two replica lists. Replica ORDER is composite failover try-order — an artifact
-/// of how the group was seeded/planned — never placement, so a target computation that compared
-/// `Vec`s would flag every healthy cluster whose seed order differs from HRW rank order and drive
-/// K spurious `O(corpus)` moves on its first pass.
-fn replica_set_eq(a: &[NodeId], b: &[NodeId]) -> bool {
-    let sa: BTreeSet<u64> = a.iter().map(|n| n.0).collect();
-    let sb: BTreeSet<u64> = b.iter().map(|n| n.0).collect();
-    sa == sb
-}
-
-/// Group equality for placement purposes: primary by identity, replicas as a SET.
-pub(in crate::cluster::coordinator) fn groups_equal(
-    a: &ShardAssignment,
-    b: &ShardAssignment,
-) -> bool {
-    a.primary == b.primary && replica_set_eq(&a.replicas, &b.replicas)
-}
-
-/// The group-aware target computation (it replaced the primary-only `rebalance_targets`): positions
-/// whose committed GROUP (primary by identity OR replica set) diverges from the HRW-desired
-/// placement at `rf`, each with its full desired [`ShardAssignment`], in position order. Pure over
-/// the cluster-state document.
-/// A missing committed entry counts as diverged (the move then fails loudly per position, matching
-/// `reassign_and_move`'s no-committed-assignment error). Same node filter as the primary-only
-/// targets: only addr'd Data nodes are placement candidates. Empty for an in-process / genesis
-/// cluster ⇒ the byte-identical no-op.
-pub(in crate::cluster::coordinator) fn rebalance_group_targets(
-    state: &ClusterState,
-    rf: usize,
-) -> Vec<(u32, ShardAssignment)> {
-    let nodes: Vec<NodeId> = state
-        .nodes
-        .iter()
-        .filter(|n| n.role == NodeRole::Data && n.addr.is_some())
-        .map(|n| n.id)
-        .collect();
-    if nodes.is_empty() {
-        return Vec::new();
-    }
-    // `plan_assignments` clamps rf to the addr'd-node count: an OPERATOR deregistration below rf
-    // legitimately shrinks desired groups (a commanded de-replication); a dead-but-registered node
-    // keeps its HRW slots (moves to it fail per position and are retried each pass — never a
-    // silent de-replication).
-    let desired = allocator::plan_assignments(&nodes, state.num_shards, rf);
-    desired
-        .into_iter()
-        .filter(|d| {
-            !state
-                .assignments
-                .iter()
-                .find(|a| a.position == d.position)
-                .is_some_and(|c| groups_equal(c, d))
-        })
-        .map(|d| (d.position, d))
-        .collect()
-}
+/// The pure planning layer: target computation, group equality, the stale-fence clear, and the
+/// validated plan type (split for the <650-line budget).
+mod plan;
+use plan::{clear_stale_fence, PlannedGroupMove};
+pub(in crate::cluster::coordinator) use plan::{groups_equal, rebalance_group_targets};
 
 impl ClusterEngine {
     /// Move a position's whole replica GROUP to `desired` (ADR-094) — data first, commit second.
@@ -204,8 +128,7 @@ impl ClusterEngine {
         // move completes — then confirm the position's committed GROUP did not change while we
         // waited. A change re-plans from the fresh state (bounded); the phase-9 CAS stays the
         // final backstop.
-        let mut planned: Option<(ShardAssignment, String, Vec<(NodeId, String)>, MoveTicket<'_>)> =
-            None;
+        let mut planned: Option<PlannedGroupMove<'_>> = None;
         for _ in 0..PLAN_ATTEMPTS {
             let state = self.control_state()?;
             let committed = state
@@ -273,13 +196,24 @@ impl ClusterEngine {
                 .find(|a| a.position == pos)
                 .is_some_and(|a| groups_equal(a, &committed));
             if unchanged {
-                planned = Some((committed, cp_ep, d_members, ticket));
+                planned = Some(PlannedGroupMove {
+                    committed,
+                    cp_ep,
+                    d_members,
+                    ticket,
+                });
                 break;
             }
             // The group changed while we waited on the ledger: the ticket drops here and the next
             // iteration re-plans from the fresh committed state.
         }
-        let Some((committed, cp_ep, d_members, _ticket)) = planned else {
+        let Some(PlannedGroupMove {
+            committed,
+            cp_ep,
+            d_members,
+            ticket: _ticket,
+        }) = planned
+        else {
             return Err(ShardError::ControlPlane(format!(
                 "reassign_group_and_move: the committed group for shard position {position} kept \
                  changing while planning the move ({PLAN_ATTEMPTS} attempts); retry once the map \

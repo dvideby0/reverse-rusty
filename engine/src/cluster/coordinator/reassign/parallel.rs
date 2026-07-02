@@ -303,12 +303,10 @@ mod tests {
     #[test]
     fn cap_bounds_wave_width() {
         let nodes: Vec<NodeDescriptor> = (1..=10).map(node).collect();
-        let assignments: Vec<ShardAssignment> =
-            (0..5).map(|p| bare(p, u64::from(p) + 1)).collect();
+        let assignments: Vec<ShardAssignment> = (0..5).map(|p| bare(p, u64::from(p) + 1)).collect();
         let st = state_with(nodes, assignments);
-        let targets: Vec<(u32, ShardAssignment)> = (0..5u32)
-            .map(|p| (p, bare(p, u64::from(p) + 6)))
-            .collect();
+        let targets: Vec<(u32, ShardAssignment)> =
+            (0..5u32).map(|p| (p, bare(p, u64::from(p) + 6))).collect();
         assert_eq!(
             plan_waves(&st, &targets, 2),
             vec![vec![0, 1], vec![2, 3], vec![4]]
@@ -320,12 +318,10 @@ mod tests {
     #[test]
     fn cap_one_is_sequential_target_order() {
         let nodes: Vec<NodeDescriptor> = (1..=10).map(node).collect();
-        let assignments: Vec<ShardAssignment> =
-            (0..5).map(|p| bare(p, u64::from(p) + 1)).collect();
+        let assignments: Vec<ShardAssignment> = (0..5).map(|p| bare(p, u64::from(p) + 1)).collect();
         let st = state_with(nodes, assignments);
-        let targets: Vec<(u32, ShardAssignment)> = (0..5u32)
-            .map(|p| (p, bare(p, u64::from(p) + 6)))
-            .collect();
+        let targets: Vec<(u32, ShardAssignment)> =
+            (0..5u32).map(|p| (p, bare(p, u64::from(p) + 6))).collect();
         assert_eq!(
             plan_waves(&st, &targets, 1),
             vec![vec![0], vec![1], vec![2], vec![3], vec![4]]
@@ -361,15 +357,8 @@ mod tests {
             (1..=6).map(node).collect(),
             vec![bare(0, 1), bare(1, 2), bare(2, 3)],
         );
-        let targets = vec![
-            (0u32, bare(0, 2)),
-            (1u32, bare(1, 4)),
-            (2u32, bare(2, 5)),
-        ];
-        assert_eq!(
-            plan_waves(&st, &targets, 4),
-            plan_waves(&st, &targets, 4)
-        );
+        let targets = vec![(0u32, bare(0, 2)), (1u32, bare(1, 4)), (2u32, bare(2, 5))];
+        assert_eq!(plan_waves(&st, &targets, 4), plan_waves(&st, &targets, 4));
     }
 
     /// A target whose members don't all resolve (an addr-less committed primary — e.g. the

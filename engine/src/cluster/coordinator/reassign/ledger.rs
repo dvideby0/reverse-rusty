@@ -70,9 +70,15 @@ impl MoveLedger {
                 for e in &want {
                     busy.insert(e.clone());
                 }
-                return MoveTicket { ledger: self, eps: want };
+                return MoveTicket {
+                    ledger: self,
+                    eps: want,
+                };
             }
-            busy = self.freed.wait(busy).unwrap_or_else(PoisonError::into_inner);
+            busy = self
+                .freed
+                .wait(busy)
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 }

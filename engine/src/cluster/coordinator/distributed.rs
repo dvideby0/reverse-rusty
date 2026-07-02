@@ -524,7 +524,9 @@ impl ClusterEngine {
         target_endpoint: &str,
         handle: &tokio::runtime::Handle,
     ) -> Result<u64, ShardError> {
-        let _ticket = self.move_ledger.reserve(&[source_endpoint, target_endpoint]);
+        let _ticket = self
+            .move_ledger
+            .reserve(&[source_endpoint, target_endpoint]);
         self.execute_handoff_inner(position, source_endpoint, target_endpoint, handle)
     }
 

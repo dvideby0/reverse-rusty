@@ -222,7 +222,9 @@ impl ClusterEngine {
                 return Ok(ReassignOutcome::NoChange { position: pos });
             }
 
-            let ticket = self.move_ledger.reserve(&[from_ep.as_str(), tgt_ep.as_str()]);
+            let ticket = self
+                .move_ledger
+                .reserve(&[from_ep.as_str(), tgt_ep.as_str()]);
             let now = self.control_state()?;
             let unchanged = now
                 .assignments

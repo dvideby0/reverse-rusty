@@ -106,7 +106,10 @@ fn build_pair_diverged(tag: &str) -> PairDiverged {
     );
 
     // Physically place each position's data on its STALE node, then commit that same map.
-    let endpoints: Vec<String> = stale.iter().map(|&s| nodes[(s - 1) as usize].ep.clone()).collect();
+    let endpoints: Vec<String> = stale
+        .iter()
+        .map(|&s| nodes[(s - 1) as usize].ep.clone())
+        .collect();
     let cluster = ClusterEngine::connect_remote(
         Arc::clone(&norm),
         Arc::clone(&dict),
