@@ -2,7 +2,7 @@
 
 use super::{
     is_metrics_get, render_control, render_shard_pending, render_shards, serve_metrics,
-    ControlMetricsView, ShardSample,
+    ControlMetricsView, LatencySnapshot, ShardSample, LATENCY_LE, SHARD_RPC_LABELS,
 };
 use crate::events::{EngineMetrics, SegmentInfo, SegmentKind};
 use std::io::{Read, Write};
@@ -19,6 +19,7 @@ fn sample(
         metrics: m,
         segments,
         class,
+        rpc_latency: [LatencySnapshot::zero(); SHARD_RPC_LABELS.len()],
     }
 }
 
@@ -107,6 +108,96 @@ fn render_shards_labels_all_colocated_slots() {
     assert!(out.contains("reverse_rusty_shard_ready{shard=\"4\"} 1"));
     // Both slots ready ⇒ two ready series.
     assert_eq!(out.matches("reverse_rusty_shard_ready{shard=").count(), 2);
+}
+
+#[test]
+fn render_shards_emits_rpc_latency_histogram() {
+    // One slot with a hand-built percolate snapshot: 2 in bucket[1] (5µs), 1 in bucket[8] (1ms),
+    // and one >30s overflow observation (count > Σ buckets).
+    let mut s = sample(3, sample_metrics(), vec![seg(0)], [1, 0, 0, 0]);
+    let mut p = LatencySnapshot::zero();
+    p.buckets[1] = 2;
+    p.buckets[8] = 1;
+    p.count = 4; // 3 bucketed + 1 overflow (>30s)
+    p.sum_nanos = 1_500; // renders as seconds: 0.0000015
+    s.rpc_latency[0] = p;
+    let out = render_shards(&[s]);
+
+    // Family header once, typed histogram.
+    assert_eq!(
+        out.matches("# TYPE reverse_rusty_shard_rpc_duration_seconds histogram")
+            .count(),
+        1
+    );
+    // Every finite bound + the +Inf line render per method (all three methods present).
+    for method in SHARD_RPC_LABELS {
+        let series = format!("method=\"{method}\"");
+        assert_eq!(
+            out.matches(&format!(
+                "reverse_rusty_shard_rpc_duration_seconds_bucket{{shard=\"3\",{series}"
+            ))
+            .count(),
+            LATENCY_LE.len() + 1,
+            "{method}: one line per finite bound + one +Inf"
+        );
+    }
+    // Cumulative values: bucket[1]=2 carries forward; bucket[8] adds 1 ⇒ 3 from there on.
+    assert!(out.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_bucket{shard=\"3\",method=\"percolate\",le=\"0.000005\"} 2"
+    ));
+    assert!(out.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_bucket{shard=\"3\",method=\"percolate\",le=\"0.001\"} 3"
+    ));
+    assert!(out.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_bucket{shard=\"3\",method=\"percolate\",le=\"30\"} 3"
+    ));
+    // +Inf == _count == total (covers the overflow observation).
+    assert!(out.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_bucket{shard=\"3\",method=\"percolate\",le=\"+Inf\"} 4"
+    ));
+    assert!(out.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_count{shard=\"3\",method=\"percolate\"} 4"
+    ));
+    // _sum is seconds (1500ns).
+    assert!(out.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_sum{shard=\"3\",method=\"percolate\"} 0.0000015"
+    ));
+    // Rendered cumulative buckets are monotone non-decreasing per series, ending at +Inf.
+    let mut prev = 0u64;
+    for line in out.lines().filter(|l| {
+        l.starts_with(
+            "reverse_rusty_shard_rpc_duration_seconds_bucket{shard=\"3\",method=\"percolate\"",
+        )
+    }) {
+        let v: u64 = line.rsplit(' ').next().unwrap().parse().unwrap();
+        assert!(v >= prev, "cumulative buckets must be monotone: {line}");
+        prev = v;
+    }
+    // An all-zero method (ingest) still renders its full family (first-scrape continuity).
+    assert!(out.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_count{shard=\"3\",method=\"ingest\"} 0"
+    ));
+}
+
+#[test]
+fn render_shards_histogram_header_once_across_slots() {
+    // Two co-located slots: the histogram family header must appear exactly once, with both
+    // slots' labeled series present (the ADR-093 grouped-exposition rule).
+    let out = render_shards(&[
+        sample(1, sample_metrics(), vec![seg(0)], [1, 0, 0, 0]),
+        sample(4, sample_metrics(), vec![seg(0)], [1, 0, 0, 0]),
+    ]);
+    assert_eq!(
+        out.matches("# TYPE reverse_rusty_shard_rpc_duration_seconds histogram")
+            .count(),
+        1
+    );
+    assert!(out.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_count{shard=\"1\",method=\"percolate\"} 0"
+    ));
+    assert!(out.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_count{shard=\"4\",method=\"percolate\"} 0"
+    ));
 }
 
 #[test]
