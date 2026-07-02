@@ -58,6 +58,10 @@ struct ShardSlot {
     /// fenced; `> 0` ⇒ this slot has been demoted at that generation, so its data-mutating writes
     /// return `failed_precondition`. Set monotonically by `Fence`, CAS-cleared by `Unfence`.
     fenced_at_generation: AtomicU64,
+    /// Per-RPC service-latency histograms (ADR-100), rendered by the `/_metrics` exposition. On
+    /// the SLOT (not the swappable state) so an in-place `recover_from` state swap keeps the
+    /// series continuous; a whole-slot replacement is an ordinary Prometheus counter reset.
+    latency: super::node_metrics::SlotLatency,
 }
 
 impl ShardSlot {
@@ -66,6 +70,7 @@ impl ShardSlot {
         Arc::new(ShardSlot {
             state: ArcSwapOption::from(Some(Arc::new(state))),
             fenced_at_generation: AtomicU64::new(0),
+            latency: super::node_metrics::SlotLatency::new(),
         })
     }
 
@@ -605,30 +610,35 @@ impl ShardMetricsSource {
     /// lock; a pending (not-yet-adopted) server reports only `reverse_rusty_shard_ready 0`.
     pub fn render(&self) -> String {
         // ALL loaded slots this node hosts (ADR-093 multi-shard): a co-located node renders one
-        // `{shard="<id>"}` series per slot. Collect an `Arc<ServerState>` handle to each loaded slot
-        // under the map read-lock, then DROP the lock before snapshotting — mirroring the RPC
-        // handlers, which never hold the map lock across engine work. Sorted by shard-id so the
-        // exposition is deterministic across scrapes. A poisoned lock ⇒ the pending body.
-        let loaded: Vec<(u32, Arc<ServerState>)> = match self.shards.read() {
+        // `{shard="<id>"}` series per slot. Collect the slot Arc + an `Arc<ServerState>` handle to
+        // each loaded slot under the map read-lock, then DROP the lock before snapshotting —
+        // mirroring the RPC handlers, which never hold the map lock across engine work. The slot
+        // Arc is kept because the latency histograms (ADR-100) live on the slot. Sorted by
+        // shard-id so the exposition is deterministic across scrapes. A poisoned lock ⇒ the
+        // pending body.
+        let loaded: Vec<(u32, Arc<ShardSlot>, Arc<ServerState>)> = match self.shards.read() {
             Ok(map) => {
-                let mut v: Vec<(u32, Arc<ServerState>)> = map
+                let mut v: Vec<(u32, Arc<ShardSlot>, Arc<ServerState>)> = map
                     .iter()
-                    .filter_map(|(&id, slot)| slot.state.load_full().map(|st| (id, st)))
+                    .filter_map(|(&id, slot)| {
+                        slot.state.load_full().map(|st| (id, Arc::clone(slot), st))
+                    })
                     .collect();
-                v.sort_unstable_by_key(|(id, _)| *id);
+                v.sort_unstable_by_key(|(id, _, _)| *id);
                 v
             }
             Err(_) => return super::node_metrics::render_shard_pending(),
         };
         let samples: Vec<super::node_metrics::ShardSample> = loaded
             .into_iter()
-            .map(|(id, st)| {
+            .map(|(id, slot, st)| {
                 let snap = st.shard.metrics_snapshot();
                 super::node_metrics::ShardSample {
                     shard_id: id,
                     metrics: snap.metrics(),
                     segments: snap.segment_infos(),
                     class: snap.class_counts(),
+                    rpc_latency: slot.latency.snapshot(),
                 }
             })
             .collect();

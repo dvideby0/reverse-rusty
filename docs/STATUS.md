@@ -132,7 +132,9 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   `controlserver` (a lean std-only renderer + listener, no new dep): per-shard query count / memory /
   compaction backlog / cost-class, per-control Raft term/leader/log/membership; the coordinator adds a
   per-shard query gauge. Reads the lock-free snapshot / Raft handle ⇒ off every hot path; default-off
-  ⇒ byte-identical. Helm + Compose wired (ADR-091).
+  ⇒ byte-identical. Helm + Compose wired (ADR-091). Plus **per-shard RPC latency histograms**
+  (ADR-100): `reverse_rusty_shard_rpc_duration_seconds{shard,method,le}` timed at the gRPC handler
+  boundary (percolate / percolate_ranked / ingest) — p95/p99 via `histogram_quantile()`.
 - **Replication + recovery over gRPC** — `FetchSegments`/`RecoverFrom` (ADR-036); per-shard
   translog, no-quiesce peer recovery, durable self-restart (ADR-039); retention leases + finalize
   (ADR-040) with lease TTL reaping (ADR-048).
