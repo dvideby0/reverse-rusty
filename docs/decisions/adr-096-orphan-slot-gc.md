@@ -31,11 +31,15 @@ default-off; the in-process / lean / default paths are byte-identical.
   deliberate fence-then-drop two-step) → absent slot ⇒ `dropped=false` (idempotent) → the slot
   must be fenced at **exactly** the armed generation → no unexpired retention lease (an in-flight
   recovery's pinned source is never destroyed; `LocalShard::has_unexpired_retention_leases`
-  reaps-first so a crashed recovery's stale lease cannot block GC forever) → the fence is
-  **re-checked under the slot-map write lock** at removal (the CAS — an interleaving
-  fence/unfence by a newer handoff fails the drop loud). In-flight RPCs holding the old slot
-  `Arc` complete against it; a post-check lease race is data-safe (open fds/mmaps survive the
-  rename).
+  reaps-first so a crashed recovery's stale lease cannot block GC forever) → the removal itself
+  is a true **`compare_exchange`** on the fence atomic, swapping the expected generation for an
+  irrevocable **tombstone** (`u64::MAX`) under the slot-map write lock (a codex finding:
+  `Fence`/`Unfence` mutate the atomic through cloned slot `Arc`s WITHOUT the map lock, so a
+  plain load-then-remove could race a fence change — with the CAS, an interleaving lands either
+  before it (the drop is refused) or after it, where `fetch_max` cannot lower the tombstone and
+  `unfence` explicitly refuses to clear it, so a stale-fence probe can never re-arm a mid-drop
+  slot). In-flight RPCs holding the old slot `Arc` complete against it; a post-check lease race
+  is data-safe (open fds/mmaps survive the rename).
 - **Disk reclaim = rename-to-trash, then delete** (`server/durable.rs`): rename
   `shard_<id>/` → `shard_<id>.dropped.<nanos>` (one atomic step; the trash name does not parse as
   a slot, so a restart can never re-attach it) + fsync the parent, then best-effort
@@ -57,8 +61,11 @@ default-off; the in-process / lean / default paths are byte-identical.
   posture); a second sweep is idempotent.
 - **Wire-up** (default byte-identical): `ReconcileConfig.gc_orphans` (default `false`) runs the
   sweep as a reconcile-loop epilogue **only after a fully-converged pass** (belt on top of the
-  keep-set); `--reconcile-gc-orphans`; one-shot `POST /_cluster/gc` (mutating ⇒ behind the
-  ADR-062 auth gate).
+  keep-set), and a sweep that failed or skipped a node **holds the loop's epoch cursor back** so
+  it is retried next interval, exactly like an unconverged pass (a codex finding: the cursor
+  previously advanced before the epilogue, so a transient failure was never retried until an
+  unrelated commit bumped the epoch); `--reconcile-gc-orphans`; one-shot `POST /_cluster/gc`
+  (mutating ⇒ behind the ADR-062 auth gate).
 
 **Consequences.** Moves stop leaking: the steady state after a converged reconcile + sweep is
 exactly the committed placement's slots, on disk and in memory. The stale-coordinator write

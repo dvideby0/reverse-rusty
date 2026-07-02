@@ -102,6 +102,12 @@ struct AdoptedSpace {
 /// The map of shards this node hosts, keyed by `shard_id` (= global position, ADR-093).
 type ShardMap = Arc<RwLock<HashMap<u32, Arc<ShardSlot>>>>;
 
+/// The irrevocable fence value a `DropShard` removal swaps in (ADR-096): no legitimate handoff
+/// ever fences at `u64::MAX`, `Fence`'s `fetch_max` can never lower it, and `unfence` explicitly
+/// refuses to clear it — so once a slot is tombstoned mid-drop, no concurrent fence traffic
+/// (e.g. a stale-fence probe's `unfence(probe)`) can resurrect its writability.
+pub(in crate::cluster::server) const DROPPED_TOMBSTONE: u64 = u64::MAX;
+
 /// A node-scope adopted-space cell holding the given (already-deserialized) dict + tag space.
 fn node_space_cell(dict: Arc<Dict>, tag_dict: Arc<TagDict>) -> Arc<ArcSwapOption<AdoptedSpace>> {
     Arc::new(ArcSwapOption::from(Some(Arc::new(AdoptedSpace {
@@ -367,9 +373,12 @@ impl ShardServer {
         Ok(())
     }
 
-    /// Remove the slot for `shard_id`, RE-CHECKING the fence generation under the map WRITE lock
-    /// (ADR-096 — the `DropShard` CAS: a fence/unfence interleaving between the handler's guard
-    /// checks and this removal fails the drop rather than dropping a re-armed slot). `Ok(None)` ⇒
+    /// Remove the slot for `shard_id` iff its fence is EXACTLY `expected_generation` — decided by
+    /// a true `compare_exchange` swapping the fence to the irrevocable [`DROPPED_TOMBSTONE`]
+    /// (ADR-096, codex P2: `Fence`/`Unfence` mutate the atomic through cloned slot `Arc`s WITHOUT
+    /// the map lock, so a plain load-then-remove could race a concurrent fence change; the CAS
+    /// makes any interleaving land either before it — the drop is refused — or after it — where
+    /// `fetch_max` cannot lower the tombstone and `unfence` refuses to clear it). `Ok(None)` ⇒
     /// the slot was already absent (an idempotent re-run); `Err` ⇒ the fence changed. In-flight
     /// RPCs holding the old `Arc` complete against it (serve-then-drop at micro scale); memory
     /// frees when the last `Arc` drops.
@@ -385,11 +394,15 @@ impl ShardServer {
         let Some(slot) = map.get(&shard_id) else {
             return Ok(None);
         };
-        let gen = slot.fenced_at_generation.load(Ordering::Acquire);
-        if gen != expected_generation {
+        if let Err(now) = slot.fenced_at_generation.compare_exchange(
+            expected_generation,
+            DROPPED_TOMBSTONE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
             return Err(Status::failed_precondition(format!(
                 "DropShard: shard {shard_id}'s fence generation changed under the drop \
-                 ({gen} != expected {expected_generation}); re-plan"
+                 ({now} != expected {expected_generation}); re-plan"
             )));
         }
         Ok(map.remove(&shard_id))

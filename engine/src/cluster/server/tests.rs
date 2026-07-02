@@ -770,3 +770,46 @@ fn open_durable_sweeps_dropped_trash_and_ignores_it() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The DropShard tombstone is irrevocable (ADR-096, codex P2): `unfence` refuses to clear a
+/// fence at the tombstone value, so a concurrent stale-fence probe (`fence(0)` → observe →
+/// `unfence(observed)`) can never resurrect writability on a slot mid-drop.
+#[test]
+fn unfence_refuses_to_clear_the_drop_tombstone() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let d = frozen_dict(&["psa 10"], &n);
+    let fp = d.fingerprint();
+    let tag_fp = {
+        let mut td = TagDict::new();
+        td.mark_finalized();
+        td.fingerprint()
+    };
+    let srv = ShardServer::new(Arc::clone(&n), Arc::new(d), EngineConfig::default());
+    // Drive the fence to the tombstone value through the public monotonic fetch_max (the drop
+    // path swaps it in atomically; the wire value is equivalent for the guard under test).
+    rt.block_on(srv.fence(Request::new(proto::FenceRequest {
+        generation: u64::MAX,
+        dict_fingerprint: fp,
+        tag_dict_fingerprint: tag_fp,
+        shard_id: 0,
+    })))
+    .expect("fence to the tombstone value");
+
+    // The stale-fence-probe shape: unfence(exactly what a probe would observe) — REFUSED.
+    let after = rt
+        .block_on(srv.unfence(Request::new(proto::UnfenceRequest {
+            generation: u64::MAX,
+            dict_fingerprint: fp,
+            tag_dict_fingerprint: tag_fp,
+            shard_id: 0,
+        })))
+        .expect("unfence call succeeds (as a no-op)")
+        .into_inner()
+        .fenced_at_generation;
+    assert_eq!(
+        after,
+        u64::MAX,
+        "the tombstone survives an exact-value unfence — a mid-drop slot can never be re-armed"
+    );
+}
