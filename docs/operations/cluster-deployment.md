@@ -17,7 +17,7 @@ running cluster has its own doc: [backup-restore.md](backup-restore.md).
 > assignments as the routing source of truth. Drop both flags to fall back to the in-memory control
 > plane (placement re-derived deterministically from the frozen dict + ring on every start) —
 > byte-identical, the quorum then idle. Full wiring detail + *data-moving* reassignment (now available,
-> ADR-090 — [§5](#5-scaling)) are in [§11](#11-not-covered-in-v1-see-adr-081).
+> ADR-090 — [§5](#5-scaling)) are in [§11](#11-not-covered-in-v1--the-named-constraints).
 
 ## 1. Topology
 
@@ -103,6 +103,12 @@ rrc up -d --wait          # start the cluster; --wait blocks until every service
 the coordinator exits non-zero; `restart: unless-stopped` brings it straight back (the shard healthcheck
 makes this rare). This is why a cold start can show one coordinator restart in the logs — expected, not a
 fault.
+
+**Advertise URL (bootstrap control node).** The `--bootstrap` node must advertise a routable self-URL
+(`--advertise-url https://control0:50061`, ADR-082 — it fails loud on a wildcard bind). The URL is
+committed into the Raft membership at the *first* bootstrap only (`initialize` is idempotent), so an
+existing deployment whose quorum already bootstrapped a wildcard URL must reset its idle
+`controlN-data` volumes to adopt a corrected one.
 
 Load data after the cluster is green — there is no baked corpus (unlike the test harness):
 
@@ -267,34 +273,25 @@ unreachable endpoint.
 - [ ] **Cert SANs cover every service name**; rotate by re-running `gen-mesh-certs.sh` (remove the old
       certs first) and redeploying every node together.
 
-## 11. Not covered in v1 (see ADR-081)
+## 11. Not covered in v1 — the named constraints
 
-- **Control-plane↔coordinator wiring (ADR-083/086) — wired by default.** Pass `--control-endpoint <URL>`
-  (repeatable — list **all** quorum members) to attach the coordinator's cluster-state control plane to
-  the durable `controlserver` quorum as a **thin client** (it does NOT join consensus — stays stateless).
-  The client tries the endpoints in order and follows a follower's `ForwardToLeader`, **failing over**
-  across the list (ADR-086) if a member is down; all-down fails loud. Failover covers idempotent
-  **reads** (routing decisions stay available); admin **writes** are not resubmitted on failover (a
-  committed-but-lost write must not double-apply), so while a coordinator's primary control node is down
-  an admin write fails loud until the coordinator restarts onto a live endpoint. Add `--route-by-assignments`
-  (ADR-086) to make the committed shard→node assignments the **topology source of truth**: the coordinator
-  seeds the quorum position-preservingly from its `--shard-endpoint` list on first boot, then resolves its
-  shard topology from the durable document (so a coordinator can boot without `--shard-endpoint`, sizing
-  the ring from `--shards` and re-minting its dict from `--load-file`); a
-  fail-loud guard refuses a committed map that is not position-preserving. Absent both flags, the in-memory
-  backend is used (byte-identical). The bootstrap control node must advertise a routable self-URL via
-  `--advertise-url` (ADR-082), committed at the *first* bootstrap only (Raft `initialize` is idempotent —
-  an existing deployment whose quorum already bootstrapped a wildcard URL resets its idle `controlN-data`
-  volumes to adopt the new one). **Data-moving reassignment is available (ADR-090):**
-  `POST /_cluster/reassign {position, node}` (or `rebalance` with `{move:true}`) moves a shard's data
-  via live handoff THEN commits the new owner ([§5](#5-scaling)), so routing follows live + across a
-  resolve-only restart; the bare map-only HRW `rebalance` (no `move`) stays map-only and must **not** be
-  used alone to re-point a populated cluster. The default `compose.cluster.yml` now wires
-  `--control-endpoint` + `--route-by-assignments`.
-- **Kubernetes / Helm** — shipped (ADR-084): `deploy/helm/reverse-rusty/` (shard + control StatefulSets, a
-  stateless coordinator Deployment wiring `--control-endpoint` + `--route-by-assignments`, native gRPC
-  health probes). Compose remains the simplest single-host unit; Helm is the k8s analogue.
+The consolidated v1 constraints table — every non-goal with the deciding ADR — lives in
+[`deployment-modes.md` §4](deployment-modes.md) (ADR-098). The ones this runbook's procedures
+touch:
+
 - **Online / cross-process resize** — `/_cluster/resize` is in-process only; the remote topology scales
-  by redeploy ([§5](#5-scaling)).
+  by redeploy ([§5](#5-scaling), ADR-078).
 - **Custom vocabulary on the remote topology** — unsupported; remote shards run the default normalizer.
-  Custom vocab is an in-process `--data-dir` cluster capability ([§8](#8-vocabulary)).
+  Custom vocab is an in-process `--data-dir` cluster capability ([§8](#8-vocabulary), ADR-076).
+- **Cross-shard backup consistency barrier** — a remote cluster's backups are per-shard consistent;
+  a globally-consistent backup requires quiescence ([§7](#7-backup--restore), ADR-079).
+
+Formerly listed here and since **shipped** (capabilities now, not constraints):
+control-plane↔coordinator wiring with multi-endpoint failover + committed-assignment routing
+(ADR-082/083/086 — on by default in `compose.cluster.yml`; failover semantics in [§6](#6-recovery),
+the resolve-only restart + move-then-commit in [§5](#5-scaling), the bootstrap `--advertise-url`
+rule in [§3](#3-bootstrap--startup-ordering)); **data-moving reassignment** (ADR-090):
+`POST /_cluster/reassign {position, node}` (or `rebalance` with `{move:true}`) moves the data via
+live handoff THEN commits the new owner — the bare map-only HRW `rebalance` (no `move`) must
+**not** be used alone to re-point a populated cluster; and the **Kubernetes / Helm chart**
+(ADR-084, [`kubernetes-deployment.md`](kubernetes-deployment.md)).

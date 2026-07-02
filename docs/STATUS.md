@@ -217,9 +217,15 @@ The prioritized roadmap (open work only) is **[`roadmap.md`](roadmap.md)**. Tier
 gate (✅ complete) · **1** measured bottlenecks (✅ complete) · **2** feature-model self-tuning
 (open: alias-discovery sources, the "improve" menu) · **3** scale & production maturity (open:
 ADR-065 criterion 12, model versioning, aspects-first ingestion) · **4** percolator
-parity (✅ program complete; small deferred refinements) · the operational-polish backlog.
+parity (✅ program complete; small deferred refinements) · **5** deployability & operational
+maturity (M0 deploy-truth + M1 local-smoke CI gate ✅ shipped, ADR-098 — the supported-deployment
+contract is [`operations/deployment-modes.md`](operations/deployment-modes.md); open: M2 release
+pipeline, M3 hardening, M4 commercial ops) · the operational-polish backlog.
 
 ## Current limitations
+
+*(The consolidated v1 non-goals — each with its deciding ADR — are the named-constraints table in
+[`operations/deployment-modes.md`](operations/deployment-modes.md) §4, ADR-098.)*
 
 - **Not yet a hardened multi-machine deployment.** The distributed layers are oracle-proven
   in-process / on localhost / in the containerized harness, but the Distributed-v1 graduation
