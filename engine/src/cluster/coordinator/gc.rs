@@ -203,10 +203,7 @@ impl ClusterEngine {
                     shard_id: s.shard_id,
                     num_queries: s.num_queries,
                 };
-                let live = live_eps
-                    .get(s.shard_id as usize)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]);
+                let live: &[String] = live_eps.get(s.shard_id as usize).map_or(&[], Vec::as_slice);
                 match classify_slot(&state, node, &addr, s.shard_id, live) {
                     SlotClass::Committed => {} // simply not an orphan; unreported
                     SlotClass::Unassigned => report.skipped_unassigned.push(slot),

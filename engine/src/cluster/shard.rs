@@ -245,6 +245,9 @@ pub(crate) trait Shard: Send + Sync {
     /// `MovedButNotCommitted` crash window) — the committed map alone would miss those.
     /// `RemoteShard` reports its connect endpoint; `ReplicatedShard` its primary's plus every
     /// replica's (in-sync or not — conservative); `HandoffShard` forwards to its current backing.
+    /// `distributed`-gated (its sole consumer is the gRPC GC sweep) so the lean build carries no
+    /// dead trait surface — the `metrics_snapshot` precedent.
+    #[cfg(feature = "distributed")]
     fn live_endpoints(&self) -> Vec<String> {
         Vec::new()
     }

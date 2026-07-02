@@ -67,6 +67,7 @@ impl Shard for ReplicatedShard {
         true
     }
 
+    #[cfg(feature = "distributed")]
     fn live_endpoints(&self) -> Vec<String> {
         // The GC keep-set (ADR-096): EVERY member's endpoints — the primary's plus each replica's,
         // in-sync or not (conservative: an out-of-sync replica still holds data a re-recovery may

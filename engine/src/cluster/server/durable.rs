@@ -92,7 +92,8 @@ pub(super) fn sweep_dropped_trash(data_dir: &Path) {
     };
     for entry in entries.flatten() {
         if is_dropped_trash(&entry.file_name()) {
-            let _ = std::fs::remove_dir_all(entry.path());
+            // A failed delete leaves the trash for the next boot — never fails the sweep.
+            std::fs::remove_dir_all(entry.path()).ok();
         }
     }
 }
@@ -111,8 +112,7 @@ pub(super) fn reclaim_slot_dir(root: &Path, shard_id: u32) -> bool {
     }
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let trash = root.join(format!("shard_{shard_id:03}.dropped.{nanos}"));
     if std::fs::rename(&live, &trash).is_err() {
         // Rename failed: the live-named dir remains and a restart re-attaches it (the slot
@@ -123,7 +123,7 @@ pub(super) fn reclaim_slot_dir(root: &Path, shard_id: u32) -> bool {
     // rename after a crash leaves either name, both safe (live ⇒ re-attach + re-drop; trash ⇒
     // swept at boot).
     if let Ok(dir) = std::fs::File::open(root) {
-        let _ = dir.sync_all();
+        dir.sync_all().ok();
     }
     std::fs::remove_dir_all(&trash).is_ok()
 }

@@ -732,7 +732,7 @@ fn drop_shard_removes_slot_and_dir_and_is_idempotent() {
     assert!(!dir.join("shard_000").exists(), "no live-named dir remains");
     let leftovers: Vec<_> = std::fs::read_dir(&dir)
         .expect("scan")
-        .filter_map(|e| e.ok())
+        .filter_map(Result::ok)
         .filter(|e| is_dropped_trash(&e.file_name()))
         .collect();
     assert!(leftovers.is_empty(), "no trash dir remains: {leftovers:?}");
