@@ -12,10 +12,12 @@
 //!   - [`gc`]         — the orphan-slot GC RPCs (ListShards / DropShard, ADR-096)
 
 use std::pin::Pin;
+use std::time::Instant;
 
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
+use crate::cluster::node_metrics::ShardRpc;
 use crate::cluster::proto;
 use crate::cluster::proto::shard_service_server::ShardService;
 use crate::cluster::shard::Shard;
@@ -35,12 +37,16 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::PercolateRequest>,
     ) -> Result<Response<proto::PercolateReply>, Status> {
+        // Service-latency timing (ADR-100): one Instant pair at the handler boundary, success
+        // paths only (error paths `?`-return before the observe) — the engine hot path is never
+        // touched.
+        let started = Instant::now();
         let req = request.into_inner();
         // Rebuild the tag filter from the already-resolved `TagId` groups (ADR-055); empty ⇒
         // unfiltered. The ids are authoritative-from-coordinator, so the server never re-resolves
         // strings — immune to any server-side tag-space skew on reads.
         let pred = proto::tag_predicate_from_proto(req.filter);
-        let st = self.loaded_slot(req.shard_id)?.1;
+        let (slot, st) = self.loaded_slot(req.shard_id)?;
         // A `rank` spec (ADR-075) rides the same already-compiled-ids pattern: score this
         // shard's matched ids and echo `ranked = true` so the client can tell a scored reply
         // from an old server that silently ignored the field. Absent ⇒ the pre-rank wire.
@@ -51,6 +57,8 @@ impl ShardService for ShardServer {
                 .percolate_filtered_ranked(&req.title, req.include_broad, &pred, &spec)
                 .map_err(|e| Status::internal(e.to_string()))?;
             let (ids, scores) = scored.into_iter().unzip();
+            slot.latency
+                .observe(ShardRpc::PercolateRanked, started.elapsed());
             return Ok(Response::new(proto::PercolateReply {
                 ids,
                 stats: Some(proto::stats_from_engine(stats)),
@@ -62,6 +70,7 @@ impl ShardService for ShardServer {
             .shard
             .percolate_filtered(&req.title, req.include_broad, &pred)
             .map_err(|e| Status::internal(e.to_string()))?;
+        slot.latency.observe(ShardRpc::Percolate, started.elapsed());
         Ok(Response::new(proto::PercolateReply {
             ids,
             stats: Some(proto::stats_from_engine(stats)),
@@ -157,6 +166,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::IngestRequest>,
     ) -> Result<Response<proto::IngestReply>, Status> {
+        let started = Instant::now();
         let req = request.into_inner();
         let (slot, st) = self.loaded_slot(req.shard_id)?;
         slot.check_not_fenced()?;
@@ -186,6 +196,7 @@ impl ShardService for ShardServer {
             }
         }
         let report = st.shard.ingest_local(&extracted);
+        slot.latency.observe(ShardRpc::Ingest, started.elapsed());
         Ok(Response::new(proto::IngestReply {
             ingested: report.ingested as u64,
             rejected_parse: rejected_parse + report.rejected_parse as u64,

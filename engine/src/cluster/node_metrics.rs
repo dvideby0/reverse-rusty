@@ -12,10 +12,16 @@
 //! mesh data port — mirroring the ADR-084 `--health-addr` posture: a Prometheus scrape (plaintext,
 //! pod-local, non-sensitive observability) reaches it directly. Unset ⇒ no listener, byte-identical.
 //!
-//! The metric set is all **gauges read fresh at scrape time** (no cumulative-counter registry, no
-//! `EngineEvent` observer wiring on the deploy bins). Shard nodes emit the SAME `reverse_rusty_*`
-//! engine-gauge names a single-node server already emits — so existing dashboards work per-pod —
-//! plus a few shard extras; control nodes emit `reverse_rusty_control_*` Raft gauges.
+//! The metric set is **gauges read fresh at scrape time** (no cumulative-counter registry, no
+//! `EngineEvent` observer wiring on the deploy bins) plus, on shard nodes, the per-shard RPC
+//! **latency histogram** family (ADR-100 — recorded at the gRPC handler boundary, see
+//! [`latency`]). Shard nodes emit the SAME `reverse_rusty_*` engine-gauge names a single-node
+//! server already emits — so existing dashboards work per-pod — plus a few shard extras; control
+//! nodes emit `reverse_rusty_control_*` Raft gauges.
+
+mod latency;
+
+pub(crate) use latency::{LatencySnapshot, ShardRpc, SlotLatency, LATENCY_LE, SHARD_RPC_LABELS};
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -28,6 +34,8 @@ use crate::events::{EngineMetrics, SegmentInfo};
 
 /// The Prometheus text-exposition content type (format version 0.0.4).
 const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+/// The per-shard RPC service-latency histogram family (ADR-100).
+const RPC_HIST: &str = "reverse_rusty_shard_rpc_duration_seconds";
 /// How often the idle accept loop wakes to re-check the stop flag (non-blocking accept poll).
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
 /// Per-connection read timeout: a scrape is a tiny request line + headers; bound a slow/garbage
@@ -56,6 +64,12 @@ impl Exposition {
 
     /// Emit the `# HELP` + `# TYPE … gauge` header pair for a metric family (call once per family).
     fn header(&mut self, name: &str, help: &str) {
+        self.header_typed(name, help, "gauge");
+    }
+
+    /// Emit the `# HELP` + `# TYPE … <mtype>` header pair for a metric family of any type
+    /// (`gauge` / `histogram`); call once per family.
+    fn header_typed(&mut self, name: &str, help: &str, mtype: &str) {
         self.out.push_str("# HELP ");
         self.out.push_str(name);
         self.out.push(' ');
@@ -63,7 +77,9 @@ impl Exposition {
         self.out.push('\n');
         self.out.push_str("# TYPE ");
         self.out.push_str(name);
-        self.out.push_str(" gauge\n");
+        self.out.push(' ');
+        self.out.push_str(mtype);
+        self.out.push('\n');
     }
 
     /// A single unlabeled gauge (header + one sample).
@@ -123,6 +139,10 @@ pub(crate) struct ShardSample {
     pub metrics: EngineMetrics,
     pub segments: Vec<SegmentInfo>,
     pub class: [u64; 4],
+    /// Per-RPC service-latency histograms for this slot, indexed like [`SHARD_RPC_LABELS`]
+    /// (ADR-100). All-zero on a slot that has served no RPCs — the family still renders, so the
+    /// series exist from the first scrape.
+    pub rpc_latency: [LatencySnapshot; SHARD_RPC_LABELS.len()],
 }
 
 /// Render a shard node's `/_metrics` body over ALL the node's loaded slots (ADR-093 multi-shard). A
@@ -288,6 +308,47 @@ pub(crate) fn render_shards(samples: &[ShardSample]) -> String {
     );
     for sid in &sids {
         e.sample("reverse_rusty_shard_ready", &[("shard", sid)], 1u8);
+    }
+
+    // Per-shard RPC service-latency histograms (ADR-100): native HISTOGRAM exposition —
+    // cumulative `le` buckets + `_sum`/`_count` per {shard, method} — header once across all
+    // slots × methods (grouped exposition, the ADR-093 lesson). Quantiles are Prometheus's job:
+    // histogram_quantile(0.95, sum by (le, shard)
+    //   (rate(reverse_rusty_shard_rpc_duration_seconds_bucket{method="percolate"}[5m]))).
+    e.header_typed(
+        RPC_HIST,
+        "Shard-side service time of successful RPCs at the gRPC handler boundary.",
+        "histogram",
+    );
+    let bucket = format!("{RPC_HIST}_bucket");
+    let sum = format!("{RPC_HIST}_sum");
+    let count = format!("{RPC_HIST}_count");
+    for (s, sid) in samples.iter().zip(&sids) {
+        for (snap, method) in s.rpc_latency.iter().zip(SHARD_RPC_LABELS) {
+            let mut cumulative = 0u64;
+            for (n, &(_, le)) in snap.buckets.iter().zip(LATENCY_LE.iter()) {
+                cumulative += n;
+                e.sample(
+                    &bucket,
+                    &[("shard", sid), ("method", method), ("le", le)],
+                    cumulative,
+                );
+            }
+            // `total()` clamps to >= the last finite cumulative bucket (torn-read safety) and
+            // covers >30s overflow observations; `_count` must equal `le="+Inf"`.
+            let total = snap.total();
+            e.sample(
+                &bucket,
+                &[("shard", sid), ("method", method), ("le", "+Inf")],
+                total,
+            );
+            e.sample(
+                &sum,
+                &[("shard", sid), ("method", method)],
+                snap.sum_nanos as f64 / 1e9,
+            );
+            e.sample(&count, &[("shard", sid), ("method", method)], total);
+        }
     }
 
     e.into_string()

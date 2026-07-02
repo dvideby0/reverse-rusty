@@ -187,9 +187,11 @@ your priority.
   metrics shipped** ([ADR-091](decisions/adr-091-shard-control-metrics.md), closing ADR-084 deferral
   b): per-node `/_metrics` on `shardserver`/`controlserver` (stored-query count, memory, compaction
   backlog, cost-class; per-control Raft term/leader/log/membership) + a coordinator per-shard query
-  gauge — the autoscaling-signal prerequisite. *Residual:* **per-shard p95/p99 latency** (needs a
-  hot-path timing hook; the coordinator already has RPC latency via ADR-085) and per-shard broad-lane
-  cost stay open. Plus the operational docs above the shipped ADR-081 runbook: **DR runbook,
+  gauge — the autoscaling-signal prerequisite. **Per-shard latency histograms shipped**
+  ([ADR-100](decisions/adr-100-shard-rpc-latency-histogram.md)): native
+  `reverse_rusty_shard_rpc_duration_seconds{shard,method,le}` in the shard `/_metrics`, timed at the
+  gRPC handler boundary — p95/p99 via `histogram_quantile()`. *Residual:* per-shard broad-lane
+  cost stays open. Plus the operational docs above the shipped ADR-081 runbook: **DR runbook,
   rolling-upgrade procedure, resource-sizing guide, alert examples, a backup/restore rehearsal**.
   Promote **cooperative cancellation / bounded concurrency** (the ADR-052 deferral now in the
   Robustness backlog) here.

@@ -40,18 +40,21 @@ fn transport_metrics_recorded_and_downed_shard_fails_loud() {
     let server_rt = tokio::runtime::Runtime::new().expect("server runtime");
     let client_rt = tokio::runtime::Runtime::new().expect("client runtime");
 
-    let addr: SocketAddr = {
+    let (addr, metrics_source) = {
         let _enter = server_rt.enter();
         let incoming =
             TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind ephemeral port");
-        let addr = incoming.local_addr().expect("local_addr");
+        let addr: SocketAddr = incoming.local_addr().expect("local_addr");
         let server = ShardServer::new(
             Arc::clone(&norm),
             Arc::clone(&dict),
             EngineConfig::default(),
         );
+        // Captured BEFORE `serve_with_incoming` consumes the server (ADR-100: the server-side
+        // latency-histogram view of the same workload the client metrics record).
+        let metrics_source = server.metrics_source();
         server_rt.spawn(server.serve_with_incoming(incoming));
-        addr
+        (addr, metrics_source)
     };
     wait_until_listening(addr);
     let endpoints = vec![format!("http://{addr}")];
@@ -112,6 +115,33 @@ fn transport_metrics_recorded_and_downed_shard_fails_loud() {
     assert!(
         snap.total_calls() >= percolate.calls,
         "totals aggregate rows"
+    );
+
+    // ADR-100: the SERVER side of the same workload — the per-slot latency histograms recorded
+    // at the gRPC handler boundary, rendered in the node's /_metrics exposition. Two-sided
+    // consistency on the happy path (errors == 0 above): every client-recorded call completed
+    // successfully server-side, so the shard's histogram count equals the client's call count
+    // exactly, and `le="+Inf"` mirrors `_count` (the Prometheus histogram contract).
+    let body = metrics_source.render();
+    assert!(
+        body.contains(&format!(
+            "reverse_rusty_shard_rpc_duration_seconds_count{{shard=\"0\",method=\"percolate\"}} {}",
+            percolate.calls
+        )),
+        "server-side percolate count must equal the client-side call count ({}); got:\n{body}",
+        percolate.calls
+    );
+    assert!(body.contains(&format!(
+        "reverse_rusty_shard_rpc_duration_seconds_bucket{{shard=\"0\",method=\"percolate\",le=\"+Inf\"}} {}",
+        percolate.calls
+    )));
+    assert!(
+        body.contains(&format!(
+            "reverse_rusty_shard_rpc_duration_seconds_count{{shard=\"0\",method=\"ingest\"}} {}",
+            ingest.calls
+        )),
+        "server-side ingest count must equal the client-side call count ({}); got:\n{body}",
+        ingest.calls
     );
 
     // Now DOWN the shard (drop its whole runtime) and prove a percolate fails LOUD: the

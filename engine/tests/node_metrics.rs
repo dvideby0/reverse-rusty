@@ -70,6 +70,19 @@ fn populated_shard_metrics_report_real_numbers() {
     assert!(body.contains("reverse_rusty_memory_bytes{shard=\"0\",component=\"exact\"}"));
     assert!(body.contains("reverse_rusty_dict_features{shard=\"0\"}"));
     assert!(body.contains("# TYPE reverse_rusty_total_queries gauge"));
+    // The RPC-latency histogram family (ADR-100) renders from the FIRST scrape even before any
+    // RPC has been served (`ingest_dsl` above is a direct helper, not the timed gRPC handler):
+    // the all-zero family gives Prometheus series continuity.
+    assert!(
+        body.contains("# TYPE reverse_rusty_shard_rpc_duration_seconds histogram"),
+        "expected the histogram family; got:\n{body}"
+    );
+    assert!(body.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_count{shard=\"0\",method=\"percolate\"} 0"
+    ));
+    assert!(body.contains(
+        "reverse_rusty_shard_rpc_duration_seconds_bucket{shard=\"0\",method=\"percolate\",le=\"+Inf\"} 0"
+    ));
 }
 
 #[test]
