@@ -34,7 +34,7 @@ use tokio::runtime::Handle;
 use crate::cluster::control::NodeId;
 use crate::cluster::shard::ShardError;
 
-use super::reassign::{rebalance_group_targets, ReassignOutcome};
+use super::reassign::{plan_waves, rebalance_group_targets, ReassignOutcome};
 use super::ClusterEngine;
 
 /// One [`ClusterEngine::reconcile`] pass's outcome (ADR-092). Every position is independent and
@@ -86,6 +86,12 @@ pub struct ReconcileConfig {
     /// passes, coalescing a burst of changes into one pass. This wall-clock state lives ONLY in the
     /// driver loop — never in the engine.
     pub min_interval: Duration,
+    /// Wave parallelism for each pass's moves (ADR-095): up to this many CONFLICT-FREE moves
+    /// (disjoint node footprints — see [`ClusterEngine::reconcile_with`]) run concurrently.
+    /// **Default `1` = the sequential pre-ADR-095 pass, byte-identical.** Each parallel move costs
+    /// one OS thread plus its own connections for the duration of an `O(corpus)` copy — size to
+    /// what the mesh and the nodes' disks can absorb.
+    pub max_parallel_moves: usize,
 }
 
 impl Default for ReconcileConfig {
@@ -94,6 +100,7 @@ impl Default for ReconcileConfig {
             enabled: false,
             rf: 1,
             min_interval: Duration::from_secs(30),
+            max_parallel_moves: 1,
         }
     }
 }
@@ -103,11 +110,10 @@ impl ClusterEngine {
     /// (ADR-092/094 — the unattended controller's primitive). Reads the committed state +
     /// membership, computes the positions whose **group** (primary or replica set) diverges from
     /// the HRW-desired map ([`rebalance_group_targets`]), and drives the data-moving move for
-    /// each — SEQUENTIALLY in position order (the same chained-reshuffle constraint
-    /// `rebalance_and_move` obeys: a node cannot be a fenced source and a recovery target at
-    /// once). Dispatch is by SHAPE: a bare→bare change runs the proven single-shard
-    /// [`reassign_and_move`](Self::reassign_and_move) byte-identically; any change touching
-    /// replicas runs the group-aware
+    /// each — sequentially in position order (= [`reconcile_with`](Self::reconcile_with) at
+    /// `max_parallel_moves = 1`, the byte-identical default). Dispatch is by SHAPE: a bare→bare
+    /// change runs the proven single-shard [`reassign_and_move`](Self::reassign_and_move)
+    /// byte-identically; any change touching replicas runs the group-aware
     /// [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094), so an `rf > 1`
     /// reconcile creates and converges the replica placements it plans.
     ///
@@ -134,39 +140,57 @@ impl ClusterEngine {
     /// control-plane READ failure (the driver logs + retries next pass); per-position move failures
     /// land in the report, not as an `Err`.
     pub fn reconcile(&self, rf: usize, handle: &Handle) -> Result<ReconcileReport, ShardError> {
+        self.reconcile_with(rf, 1, handle)
+    }
+
+    /// [`reconcile`](Self::reconcile) with wave parallelism (ADR-095): the diverged positions are
+    /// partitioned into conflict-free waves (moves sharing any node serialize — the
+    /// chained-reshuffle constraint: position `p`: F→T while `q`: T→U would make T a handoff
+    /// target and a fenced source at once) and up to `max_parallel_moves` disjoint moves run
+    /// concurrently per wave. `max_parallel_moves <= 1` is the sequential pass, byte-identical to
+    /// the pre-ADR-095 reconcile. Safety never rests on the wave planner: every move still plans,
+    /// reserves its own endpoint footprint in the busy-endpoint ledger, and revalidates under its
+    /// ticket. The continue-past-failure semantics are per POSITION and unchanged — every wave
+    /// runs, every target is attempted exactly once.
+    pub fn reconcile_with(
+        &self,
+        rf: usize,
+        max_parallel_moves: usize,
+        handle: &Handle,
+    ) -> Result<ReconcileReport, ShardError> {
         let state = self.control_state()?;
         // Positions whose GROUP diverges from the HRW-desired placement (a data move), position
-        // order. Empty for an in-process / genesis cluster (no addr'd data nodes) ⇒ a clean no-op.
+        // order, partitioned into conflict-free waves (singletons in target order at the default
+        // parallelism). Empty for an in-process / genesis cluster (no addr'd data nodes) ⇒ a
+        // clean no-op.
         let targets = rebalance_group_targets(&state, rf);
+        let waves = plan_waves(&state, &targets, max_parallel_moves);
 
         let mut report = ReconcileReport::default();
-        for (pos, desired) in targets {
-            let to = desired.primary;
-            // Dispatch by shape: both committed and desired bare ⇒ the proven single-shard path
-            // (byte-identical to the RF=1 reconcile); anything touching replicas ⇒ the group move.
-            let committed_bare = state
-                .assignments
-                .iter()
-                .find(|a| a.position == pos)
-                .is_none_or(|a| a.replicas.is_empty());
-            let outcome = if committed_bare && desired.replicas.is_empty() {
-                self.reassign_and_move(pos as usize, to, handle)
-            } else {
-                self.reassign_group_and_move(pos as usize, &desired, handle)
-            };
-            match outcome {
-                Ok(ReassignOutcome::Moved { .. }) => report.reconciled.push(pos),
-                // Resolved equal under us (a concurrent move already placed it) — not a failure.
-                Ok(ReassignOutcome::NoChange { .. }) => report.skipped.push(pos),
-                // Data moved, commit pending — zero-FN (source serves reads); retried next pass.
-                Ok(ReassignOutcome::MovedButNotCommitted { from, .. }) => {
-                    report.uncommitted.push((pos, from, to));
+        for wave in &waves {
+            for (pos, outcome) in self.execute_move_wave(&state, &targets, wave, handle) {
+                match outcome {
+                    Ok(ReassignOutcome::Moved { .. }) => report.reconciled.push(pos),
+                    // Resolved equal under us (a concurrent move already placed it) — not a
+                    // failure.
+                    Ok(ReassignOutcome::NoChange { .. }) => report.skipped.push(pos),
+                    // Data moved, commit pending — zero-FN (source serves reads); retried next
+                    // pass.
+                    Ok(ReassignOutcome::MovedButNotCommitted { from, to, .. }) => {
+                        report.uncommitted.push((pos, from, to));
+                    }
+                    // A clean move failure rolled this position fully back (routing + map
+                    // unchanged). CONTINUE (do not abort the pass) — the next pass retries it.
+                    Err(e) => report.failed.push((pos, e.to_string())),
                 }
-                // A clean move failure rolled this position fully back (routing + map unchanged).
-                // CONTINUE (do not abort the pass) — the next pass retries this position.
-                Err(e) => report.failed.push((pos, e.to_string())),
             }
         }
+        // Position-sorted regardless of wave completion order (a no-op at the sequential default,
+        // where waves are singletons in target order).
+        report.reconciled.sort_unstable();
+        report.skipped.sort_unstable();
+        report.uncommitted.sort_unstable_by_key(|(p, _, _)| *p);
+        report.failed.sort_by_key(|(p, _)| *p);
         Ok(report)
     }
 }
@@ -274,6 +298,94 @@ mod tests {
                 "each failure is the pre-network endpoint-resolution check: {msg}"
             );
         }
+    }
+
+    /// `reconcile_with` at wave parallelism ≥ 2 keeps the UNATTENDED semantics (ADR-095): every
+    /// per-position failure is recorded and the pass continues — the parallel analogue of
+    /// `reconcile_continues_past_per_position_failures` (each move fails instantly + network-free
+    /// at the addr-less committed primary, whatever wave it ran in).
+    #[test]
+    fn reconcile_with_parallel_continues_past_per_position_failures() {
+        use crate::cluster::control::{NodeDescriptor, NodeRole};
+        use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
+        use crate::normalize::Normalizer;
+
+        let k = 3usize;
+        let queries: Vec<(u64, String)> = vec![
+            (1, "+nike +shoe".into()),
+            (2, "+sony +tv".into()),
+            (3, "+lego +set".into()),
+        ];
+        let cluster = ClusterEngine::build(
+            Normalizer::default_vocab().expect("vocab"),
+            &ClusterConfig {
+                num_shards: k,
+                ..ClusterConfig::default()
+            },
+            &queries,
+        )
+        .expect("in-process cluster");
+        for id in [1u64, 2] {
+            cluster
+                .register_node(NodeDescriptor {
+                    id: NodeId(id),
+                    addr: Some(format!("http://127.0.0.1:{id}")),
+                    role: NodeRole::Data,
+                })
+                .expect("register node");
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let report = cluster
+            .reconcile_with(1, 2, rt.handle())
+            .expect("parallel reconcile pass");
+        assert_eq!(
+            report.failed.len(),
+            k,
+            "every position's failure is recorded across the waves: {report:?}"
+        );
+        assert!(
+            report.reconciled.is_empty()
+                && report.skipped.is_empty()
+                && report.uncommitted.is_empty(),
+            "nothing moved or committed: {report:?}"
+        );
+        let positions: Vec<u32> = report.failed.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            positions,
+            vec![0, 1, 2],
+            "the report is position-sorted regardless of wave completion order"
+        );
+    }
+
+    /// `reconcile_with` on an in-process cluster (no addr'd data nodes ⇒ no targets) is a clean
+    /// no-op at ANY parallelism — empty report, committed epoch invariant (the byte-identical
+    /// default guard at the unit level; the full in-process proof is `cluster_reconcile_oracle`).
+    #[test]
+    fn reconcile_with_parallel_is_clean_no_op_in_process() {
+        use crate::cluster::coordinator::{ClusterConfig, ClusterEngine};
+        use crate::normalize::Normalizer;
+
+        let cluster = ClusterEngine::build(
+            Normalizer::default_vocab().expect("vocab"),
+            &ClusterConfig {
+                num_shards: 3,
+                ..ClusterConfig::default()
+            },
+            &[(1u64, "+nike +shoe".to_string())],
+        )
+        .expect("in-process cluster");
+        let epoch_before = cluster.control_state().expect("state").epoch;
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let report = cluster
+            .reconcile_with(1, 4, rt.handle())
+            .expect("no-op pass");
+        assert_eq!(report, ReconcileReport::default(), "clean empty report");
+        assert_eq!(
+            cluster.control_state().expect("state").epoch,
+            epoch_before,
+            "a no-op pass commits nothing — the epoch is invariant"
+        );
     }
 
     /// An `rf > 1` reconcile is no longer rejected up front (ADR-094 replaces the ADR-092-landing

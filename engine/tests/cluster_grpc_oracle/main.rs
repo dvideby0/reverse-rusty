@@ -29,6 +29,7 @@ mod filtered;
 mod handoff;
 mod health;
 mod legacy_layout;
+mod parallel;
 mod partial_apply;
 mod reassign;
 mod rebalance;

@@ -62,6 +62,11 @@ pub(in crate::cluster::coordinator) use group::rebalance_group_targets;
 mod ledger;
 pub(in crate::cluster::coordinator) use ledger::MoveLedger;
 
+/// Conflict-free wave planning + scoped-thread wave execution for multi-position sweeps
+/// (ADR-095). Scheduling-only — safety lives in the ledger.
+mod parallel;
+pub(in crate::cluster::coordinator) use parallel::plan_waves;
+
 /// Bounded retries of the `AssignShard` commit after a successful move, so a transient control-plane
 /// blip (e.g. a real quorum mid-leader-change) doesn't strand a successful move uncommitted. The
 /// in-memory control plane commits on the first attempt.
@@ -106,16 +111,19 @@ pub enum ReassignOutcome {
 }
 
 /// Outcome of a [`ClusterEngine::rebalance_and_move`] (ADR-090): which positions moved + committed,
-/// the first failure (if any — the loop stops there, fail-forward / resume), and the changed
+/// the first failure (if any — the sweep stops there, fail-forward / resume), and the changed
 /// positions not yet attempted. Each already-moved position is individually consistent, so a partial
 /// rebalance is a valid (resumable) state, never a false negative.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RebalanceMoveReport {
     /// Positions whose primary moved AND committed this pass.
     pub moved: Vec<u32>,
-    /// The first position that failed (with the error message); the loop stopped here.
+    /// The lowest-position failure (with the error message); the sweep stopped at its wave (at the
+    /// default `max_parallel_moves = 1` this is exactly "the first position that failed").
     pub failed: Option<(u32, String)>,
-    /// Changed positions after the failure — not attempted, left for a re-run.
+    /// Changed positions left for a re-run: everything after the failing wave, plus (at
+    /// `max_parallel_moves ≥ 2`) any ADDITIONAL same-wave failure — those were attempted and rolled
+    /// back cleanly (each emitted its own event), and a re-run retries them identically.
     pub not_attempted: Vec<u32>,
 }
 
@@ -331,23 +339,39 @@ impl ClusterEngine {
 
     /// Data-moving analogue of [`rebalance`](Self::rebalance) (ADR-090/094): recompute the desired
     /// HRW shard→node map at replication factor `rf`, then move each position whose **group**
-    /// (primary or replica set) changes — **sequentially**, in position order. Dispatch is by
-    /// SHAPE: a bare→bare change runs the proven single-shard
-    /// [`reassign_and_move`](Self::reassign_and_move) byte-identically (the RF=1 path); any change
-    /// touching replicas runs the group-aware
+    /// (primary or replica set) changes — sequentially, in position order (=
+    /// [`rebalance_and_move_with`](Self::rebalance_and_move_with) at `max_parallel_moves = 1`, the
+    /// byte-identical default). Dispatch is by SHAPE: a bare→bare change runs the proven
+    /// single-shard [`reassign_and_move`](Self::reassign_and_move) byte-identically (the RF=1
+    /// path); any change touching replicas runs the group-aware
     /// [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094), so an `rf > 1` sweep
     /// creates the replica placements it plans — closing the ADR-090 RF>1 deferral.
-    ///
-    /// Sequential is required: an HRW reshuffle can chain (position `p`: F→T while position `q`: T→U),
-    /// and running them concurrently would have T serve as a handoff target and source at once — the
-    /// drain-to-convergence proof assumes a quiescent, fenced source. Stops on the first failure and
-    /// returns a [`RebalanceMoveReport`] (fail-forward / resume — already-moved positions are each
-    /// consistent, so a partial rebalance is a valid resumable state, never a false negative). A hard
-    /// pre-flight error (no nodes, control-plane read failure) is an `Err`; per-position failures land
-    /// in the report.
     pub fn rebalance_and_move(
         &self,
         rf: usize,
+        handle: &Handle,
+    ) -> Result<RebalanceMoveReport, ShardError> {
+        self.rebalance_and_move_with(rf, 1, handle)
+    }
+
+    /// [`rebalance_and_move`](Self::rebalance_and_move) with wave parallelism (ADR-095): the
+    /// changed positions are partitioned into conflict-free waves
+    /// ([`plan_waves`](super::reassign::plan_waves) — moves sharing any node serialize, per the
+    /// chained-reshuffle constraint: position `p`: F→T while `q`: T→U would make T a handoff
+    /// target and a fenced source at once) and up to `max_parallel_moves` disjoint moves run
+    /// concurrently per wave. `max_parallel_moves <= 1` is the sequential path, byte-identical to
+    /// the pre-ADR-095 sweep. Safety never rests on the planner: every move still reserves its own
+    /// footprint in the busy-endpoint ledger.
+    ///
+    /// Stops at the first failing WAVE (fail-forward / resume — at the default this is exactly
+    /// "stops on the first failure") and returns a [`RebalanceMoveReport`]; already-moved positions
+    /// are each consistent, so a partial rebalance is a valid resumable state, never a false
+    /// negative. A hard pre-flight error (no nodes, control-plane read failure) is an `Err`;
+    /// per-position failures land in the report.
+    pub fn rebalance_and_move_with(
+        &self,
+        rf: usize,
+        max_parallel_moves: usize,
         handle: &Handle,
     ) -> Result<RebalanceMoveReport, ShardError> {
         let state = self.control_state()?;
@@ -356,50 +380,60 @@ impl ClusterEngine {
                 "rebalance_and_move: the cluster has no nodes to place shards on".into(),
             ));
         }
-        // Positions whose GROUP moves (a data move), in deterministic position order.
+        // Positions whose GROUP moves (a data move), in deterministic position order, partitioned
+        // into conflict-free waves (singletons in target order at the default parallelism).
         let targets = rebalance_group_targets(&state, rf);
+        let waves = plan_waves(&state, &targets, max_parallel_moves);
 
         let mut report = RebalanceMoveReport::default();
-        for (i, (pos, desired)) in targets.iter().enumerate() {
-            let stop = |report: &mut RebalanceMoveReport, reason: String| {
-                report.failed = Some((*pos, reason));
-                report.not_attempted = targets[i + 1..].iter().map(|(p, _)| *p).collect();
-            };
-            // Dispatch by shape: both committed and desired bare ⇒ the proven single-shard path;
-            // anything touching replicas ⇒ the group move.
-            let committed_bare = state
-                .assignments
-                .iter()
-                .find(|a| a.position == *pos)
-                .is_none_or(|a| a.replicas.is_empty());
-            let outcome = if committed_bare && desired.replicas.is_empty() {
-                self.reassign_and_move(*pos as usize, desired.primary, handle)
-            } else {
-                self.reassign_group_and_move(*pos as usize, desired, handle)
-            };
-            match outcome {
-                Ok(ReassignOutcome::Moved { .. }) => report.moved.push(*pos),
-                // Resolved equal under us (a concurrent move already placed it): not a failure.
-                Ok(ReassignOutcome::NoChange { .. }) => {}
-                Ok(ReassignOutcome::MovedButNotCommitted { .. }) => {
-                    // The data moved but its commit failed (event already emitted). Stop so the
-                    // durable map stays reconcilable rather than piling more moves on top.
-                    stop(
-                        &mut report,
-                        "data moved but committing the new owner failed (see the emitted event); \
-                         stopped the rebalance so the durable map stays reconcilable — re-run to resume"
-                            .into(),
-                    );
-                    return Ok(report);
-                }
-                Err(e) => {
-                    // A clean move failure rolled this position fully back (routing + map unchanged);
-                    // already-moved positions stay consistent. Stop and report for a resume.
-                    stop(&mut report, e.to_string());
-                    return Ok(report);
+        for (wi, wave) in waves.iter().enumerate() {
+            let mut wave_failed = false;
+            for (pos, outcome) in self.execute_move_wave(&state, &targets, wave, handle) {
+                match outcome {
+                    Ok(ReassignOutcome::Moved { .. }) => report.moved.push(pos),
+                    // Resolved equal under us (a concurrent move already placed it): not a failure.
+                    Ok(ReassignOutcome::NoChange { .. }) => {}
+                    Ok(ReassignOutcome::MovedButNotCommitted { .. }) => {
+                        // The data moved but its commit failed (event already emitted). Stop after
+                        // this wave so the durable map stays reconcilable rather than piling more
+                        // moves on top.
+                        wave_failed = true;
+                        if report.failed.is_none() {
+                            report.failed = Some((
+                                pos,
+                                "data moved but committing the new owner failed (see the emitted \
+                                 event); stopped the rebalance so the durable map stays \
+                                 reconcilable — re-run to resume"
+                                    .into(),
+                            ));
+                        } else {
+                            report.not_attempted.push(pos);
+                        }
+                    }
+                    Err(e) => {
+                        // A clean move failure rolled this position fully back (routing + map
+                        // unchanged); already-moved positions stay consistent. Stop after this
+                        // wave and report for a resume.
+                        wave_failed = true;
+                        if report.failed.is_none() {
+                            report.failed = Some((pos, e.to_string()));
+                        } else {
+                            report.not_attempted.push(pos);
+                        }
+                    }
                 }
             }
+            if wave_failed {
+                report
+                    .not_attempted
+                    .extend(waves[wi + 1..].iter().flatten().map(|&i| targets[i].0));
+                break;
+            }
         }
+        // Position-sorted regardless of wave completion order (a no-op at the sequential default,
+        // where waves are singletons in target order).
+        report.moved.sort_unstable();
+        report.not_attempted.sort_unstable();
         Ok(report)
     }
 }
