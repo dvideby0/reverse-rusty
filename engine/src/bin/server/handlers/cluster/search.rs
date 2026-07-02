@@ -213,10 +213,10 @@ pub(crate) async fn cluster_search(
         };
 
     // ADR-099: arm cooperative (per-title) cancellation only for an EXPLICIT
-    // timeout_ms, gated by the dynamic kill-switch on the shared per-shard config.
-    let deadline = (body.timeout_ms.is_some()
-        && state.cluster.read().per_shard_config().cooperative_cancel)
-        .then(|| start + timeout);
+    // timeout_ms. Lock-free here — the dynamic kill-switch is resolved INSIDE the
+    // blocking task (under the timeout race), so a held cluster write lock (e.g. a
+    // vocab rebuild) can never stall this async handler past its own deadline (codex).
+    let deadline = body.timeout_ms.is_some().then(|| start + timeout);
     let results = percolate_blocking(
         &state,
         titles,
@@ -382,10 +382,9 @@ pub(crate) async fn cluster_mpercolate(
         ));
     }
 
-    // ADR-099: see cluster_search above.
-    let deadline = (body.timeout_ms.is_some()
-        && state.cluster.read().per_shard_config().cooperative_cancel)
-        .then(|| start + timeout);
+    // ADR-099: see cluster_search above (lock-free; the kill-switch resolves in the
+    // blocking task).
+    let deadline = body.timeout_ms.is_some().then(|| start + timeout);
     let results = percolate_blocking(
         &state,
         titles,
@@ -455,7 +454,7 @@ async fn percolate_blocking(
     include_broad: bool,
     rank: Option<reverse_rusty::RankSpec>,
     timeout: tokio::time::Duration,
-    deadline: Option<Instant>,
+    requested_deadline: Option<Instant>,
     endpoint: &'static str,
 ) -> Result<Vec<(ScoredIds, MatchStats)>, Reject> {
     let state_inner = Arc::clone(state);
@@ -471,6 +470,16 @@ async fn percolate_blocking(
             let _permit = permit;
             state_inner.pool.install(|| {
                 use rayon::prelude::*;
+                // Resolve the dynamic kill-switch HERE — on a rayon thread, inside the
+                // timeout race — so a held cluster write lock stalls only this blocking
+                // task (which the client can time out on), never the async handler.
+                let deadline = requested_deadline.filter(|_| {
+                    state_inner
+                        .cluster
+                        .read()
+                        .per_shard_config()
+                        .cooperative_cancel
+                });
                 // The read guard is taken PER TITLE, not hoisted over the batch: the
                 // RwLock is fair, so one long-held batch guard would let a queued vocab
                 // writer stall every subsequent read for the whole batch duration
