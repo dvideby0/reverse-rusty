@@ -10,8 +10,9 @@
 //! ADR-092 landing).
 //!
 //! ## The algorithm (one position; C = committed group, D = desired group)
-//! Everything below runs under `reassign_serial` (moves stay sequential — the chained-reshuffle
-//! constraint) and under ONE retention lease on the source, exactly like `execute_handoff` — with
+//! Everything below runs under a busy-endpoint ledger reservation of `{cp} ∪ D` (ADR-095 — moves
+//! sharing a node serialize, per the chained-reshuffle constraint; disjoint moves may run in
+//! parallel) and under ONE retention lease on the source, exactly like `execute_handoff` — with
 //! two member-entry disciplines the multi-member shape adds (both codex findings on this ADR):
 //! **stale fences are cleared on every member entering the group** (serve-then-drop leaves a
 //! dropped primary fenced forever, and `RecoverFrom` preserves the fence — a re-entering member
@@ -90,7 +91,8 @@ use crate::cluster::replica::{catch_up_replica, ReplicatedShard};
 use crate::cluster::shard::{Shard, ShardError};
 use crate::events::{DurabilityOp, EngineEvent};
 
-use super::{ClusterEngine, ReassignOutcome, COMMIT_ATTEMPTS};
+use super::ledger::MoveTicket;
+use super::{ClusterEngine, ReassignOutcome, COMMIT_ATTEMPTS, PLAN_ATTEMPTS};
 
 /// Clear a STALE fence on a member (re-)entering a group (codex P1 on this ADR): serve-then-drop
 /// deliberately leaves a dropped PRIMARY's slot fenced forever, and `RecoverFrom` preserves the
@@ -187,13 +189,6 @@ impl ClusterEngine {
         desired: &ShardAssignment,
         handle: &Handle,
     ) -> Result<ReassignOutcome, ShardError> {
-        // Serialize against every other data-moving op for the whole move-then-commit (the same
-        // guard `reassign_and_move` takes — group and single moves never interleave).
-        let _guard = self
-            .reassign_serial
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-
         let pos = position as u32;
         if desired.position != pos {
             return Err(ShardError::Config(format!(
@@ -203,57 +198,95 @@ impl ClusterEngine {
             )));
         }
 
-        let state = self.control_state()?;
-        let committed = state
-            .assignments
-            .iter()
-            .find(|a| a.position == pos)
-            .cloned()
-            .ok_or_else(|| {
-                ShardError::ControlPlane(format!(
-                    "reassign_group_and_move: no committed assignment for shard position {position}"
-                ))
-            })?;
-
-        // The idempotent no-op: the committed group already IS the desired placement.
-        if groups_equal(&committed, desired) {
-            return Ok(ReassignOutcome::NoChange { position: pos });
-        }
-
-        // Fail-closed endpoint resolution (never silently skip an unroutable member — that would
-        // assemble a group that routes a title nowhere). Mirrors `reassign_and_move`.
-        let addr_of = |id: NodeId| -> Result<String, ShardError> {
-            state
-                .nodes
+        // Plan → reserve → revalidate (ADR-095): resolve the move's endpoint footprint
+        // (`{cp} ∪ D` — the source we fence + every member we establish/install) from a committed
+        // read, reserve it in the busy-endpoint ledger — blocking until every CONFLICTING in-flight
+        // move completes — then confirm the position's committed GROUP did not change while we
+        // waited. A change re-plans from the fresh state (bounded); the phase-9 CAS stays the
+        // final backstop.
+        let mut planned: Option<(ShardAssignment, String, Vec<(NodeId, String)>, MoveTicket<'_>)> =
+            None;
+        for _ in 0..PLAN_ATTEMPTS {
+            let state = self.control_state()?;
+            let committed = state
+                .assignments
                 .iter()
-                .find(|n| n.id == id)
-                .and_then(|n| n.addr.clone())
+                .find(|a| a.position == pos)
+                .cloned()
                 .ok_or_else(|| {
                     ShardError::ControlPlane(format!(
-                        "reassign_group_and_move: node {} has no registered endpoint (addr)",
-                        id.0
+                        "reassign_group_and_move: no committed assignment for shard position \
+                         {position}"
                     ))
-                })
+                })?;
+
+            // The idempotent no-op: the committed group already IS the desired placement.
+            if groups_equal(&committed, desired) {
+                return Ok(ReassignOutcome::NoChange { position: pos });
+            }
+
+            // Fail-closed endpoint resolution (never silently skip an unroutable member — that
+            // would assemble a group that routes a title nowhere). Mirrors `reassign_and_move`.
+            let addr_of = |id: NodeId| -> Result<String, ShardError> {
+                state
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .and_then(|n| n.addr.clone())
+                    .ok_or_else(|| {
+                        ShardError::ControlPlane(format!(
+                            "reassign_group_and_move: node {} has no registered endpoint (addr)",
+                            id.0
+                        ))
+                    })
+            };
+            let cp_ep = addr_of(committed.primary)?;
+            // D's members in composite order (primary first, then replicas), each with its
+            // endpoint.
+            let mut d_members: Vec<(NodeId, String)> =
+                Vec::with_capacity(1 + desired.replicas.len());
+            d_members.push((desired.primary, addr_of(desired.primary)?));
+            for r in &desired.replicas {
+                d_members.push((*r, addr_of(*r)?));
+            }
+            // Distinct endpoints resolving to one address would make "fresh vs retained"
+            // ambiguous — and HRW never plans a duplicate node, so treat it as the config error
+            // it is.
+            {
+                let eps: BTreeSet<&str> = d_members.iter().map(|(_, e)| e.as_str()).collect();
+                if eps.len() != d_members.len() {
+                    return Err(ShardError::Config(format!(
+                        "reassign_group_and_move: desired group for position {position} resolves \
+                         two members to one endpoint ({d_members:?})"
+                    )));
+                }
+            }
+
+            let mut footprint: Vec<&str> = Vec::with_capacity(1 + d_members.len());
+            footprint.push(cp_ep.as_str());
+            footprint.extend(d_members.iter().map(|(_, e)| e.as_str()));
+            let ticket = self.move_ledger.reserve(&footprint);
+            let now = self.control_state()?;
+            let unchanged = now
+                .assignments
+                .iter()
+                .find(|a| a.position == pos)
+                .is_some_and(|a| groups_equal(a, &committed));
+            if unchanged {
+                planned = Some((committed, cp_ep, d_members, ticket));
+                break;
+            }
+            // The group changed while we waited on the ledger: the ticket drops here and the next
+            // iteration re-plans from the fresh committed state.
+        }
+        let Some((committed, cp_ep, d_members, _ticket)) = planned else {
+            return Err(ShardError::ControlPlane(format!(
+                "reassign_group_and_move: the committed group for shard position {position} kept \
+                 changing while planning the move ({PLAN_ATTEMPTS} attempts); retry once the map \
+                 stops churning"
+            )));
         };
         let cp = committed.primary;
-        let cp_ep = addr_of(cp)?;
-        // D's members in composite order (primary first, then replicas), each with its endpoint.
-        let mut d_members: Vec<(NodeId, String)> = Vec::with_capacity(1 + desired.replicas.len());
-        d_members.push((desired.primary, addr_of(desired.primary)?));
-        for r in &desired.replicas {
-            d_members.push((*r, addr_of(*r)?));
-        }
-        // Distinct endpoints resolving to one address would make "fresh vs retained" ambiguous —
-        // and HRW never plans a duplicate node, so treat it as the config error it is.
-        {
-            let eps: BTreeSet<&str> = d_members.iter().map(|(_, e)| e.as_str()).collect();
-            if eps.len() != d_members.len() {
-                return Err(ShardError::Config(format!(
-                    "reassign_group_and_move: desired group for position {position} resolves two \
-                     members to one endpoint ({d_members:?})"
-                )));
-            }
-        }
         let committed_ids: BTreeSet<u64> = std::iter::once(cp.0)
             .chain(committed.replicas.iter().map(|n| n.0))
             .collect();

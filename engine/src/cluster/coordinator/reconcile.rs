@@ -124,7 +124,7 @@ impl ClusterEngine {
     ///
     /// ## Zero-FN
     /// `reconcile` adds only sequencing + continue-past-failure over `reassign_and_move`; it holds NO
-    /// lock across moves (`reassign_serial` is taken inside each move) and never touches the hot path. A
+    /// lock across moves (each move reserves its own ledger footprint) and never touches the hot path. A
     /// failed move leaves that position's routing + committed map untouched (a clean rollback); an
     /// uncommitted move leaves the source serving reads (the write-only fence). Re-running absorbs both
     /// (the next pass re-targets the still-diverged position and re-drives the idempotent move).

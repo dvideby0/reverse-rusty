@@ -73,8 +73,9 @@ impl ClusterEngine {
                     // A REMOTE cluster routed by the committed map: a MAP-ONLY `rebalance` would
                     // re-point routing at nodes holding DIFFERENT data — the ADR-086 false negative
                     // (the boot guard refuses such a map). Drive the DATA-MOVING rebalance instead, so
-                    // data follows the new map (ADR-090/092). It rides the shared `reassign_serial`
-                    // guard (so it never interleaves a manual move or the reconcile loop) and is
+                    // data follows the new map (ADR-090/092). Each move reserves its endpoint
+                    // footprint in the busy-endpoint ledger (ADR-095 — so it never interleaves a
+                    // CONFLICTING manual move or the reconcile loop) and the sweep is
                     // best-effort — a partial/failed sweep is surfaced as an event and retried by the
                     // next tick or the reconcile loop, never failing the enclosing `tick` (mirroring
                     // `drive_autoscaled_handoff`). The `handle.is_some()` gate keeps the in-process /
@@ -136,7 +137,8 @@ impl ClusterEngine {
     /// [`reassign_and_move`](Self::reassign_and_move) (ADR-090, evolving ADR-048's
     /// `execute_handoff`-only wiring): the move now ALSO commits the new owner into the cluster-state
     /// document, so an autoscaler-driven move keeps the committed map consistent with the live routing
-    /// (and rides the shared `reassign_serial` guard). Best-effort and side-effecting only: it never
+    /// (and reserves its endpoint footprint in the busy-endpoint ledger, ADR-095). Best-effort and
+    /// side-effecting only: it never
     /// fails the enclosing `tick`. Skips silently when the cluster has no runtime handle (an
     /// in-process cluster can't hand off to a remote node) or when the recommendation is stale (a
     /// concurrent change moved `position` off `from`). A move that can't be performed (e.g. a node
