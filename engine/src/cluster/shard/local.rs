@@ -400,6 +400,58 @@ impl LocalShard {
         self.lock().persistence_healthy()
     }
 
+    /// An order-independent 128-bit fingerprint over this shard's LIVE query multiset —
+    /// `(logical_id, version, dsl, TagId*)`, the `live_sources_tagged` basis (memtable +
+    /// segments, live copies only) — plus the live count (ADR-097). Two logically-equal copies
+    /// fingerprint equal regardless of insertion order, flush boundaries, segment layout, or
+    /// compaction history (byte-level segment CRCs cannot say this — equal op streams produce
+    /// byte-divergent files by construction). Each entry is canonically encoded
+    /// (LE scalars, length-prefixed dsl/tags), the encodings sorted (the multiset canon), then
+    /// folded through two independently-seeded FNV-1a streams. Takes the engine lock (the same
+    /// enumeration `set_vocab` trusts for completeness); called off the hot path — the ADR-094
+    /// fence window, where the alternative is an `O(corpus)` network copy. `distributed`-only.
+    #[cfg(feature = "distributed")]
+    pub(crate) fn content_fingerprint128(&self) -> (u64, u64, u64) {
+        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        // A second, independent stream seed (the golden-ratio constant XOR'd in) so the two
+        // 64-bit halves never collide in lockstep.
+        const HI_SEED: u64 = FNV_OFFSET ^ 0x9e37_79b9_7f4a_7c15;
+        fn fnv1a64_seeded(seed: u64, bytes: &[u8]) -> u64 {
+            let mut h = seed;
+            for &b in bytes {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+            h
+        }
+        let entries = self.lock().live_sources_tagged();
+        let mut encoded: Vec<Vec<u8>> = entries
+            .iter()
+            .map(|(logical, dsl, version, tags)| {
+                let mut e = Vec::with_capacity(8 + 4 + 8 + dsl.len() + 8 + 4 * tags.len());
+                e.extend_from_slice(&logical.to_le_bytes());
+                e.extend_from_slice(&version.to_le_bytes());
+                e.extend_from_slice(&(dsl.len() as u64).to_le_bytes());
+                e.extend_from_slice(dsl.as_bytes());
+                e.extend_from_slice(&(tags.len() as u64).to_le_bytes());
+                for t in tags {
+                    e.extend_from_slice(&t.to_le_bytes());
+                }
+                e
+            })
+            .collect();
+        // The multiset canon: sort the ENCODINGS (not the tuples), so equal live sets hash
+        // equal without any Ord requirement on the entry fields.
+        encoded.sort_unstable();
+        let mut lo = FNV_OFFSET;
+        let mut hi = HI_SEED;
+        for e in &encoded {
+            lo = fnv1a64_seeded(lo, e);
+            hi = fnv1a64_seeded(hi, e);
+        }
+        (lo, hi, encoded.len() as u64)
+    }
+
     /// Whether any UNEXPIRED peer-recovery retention lease is held (ADR-096) — the `DropShard`
     /// guard: a slot pinned as an in-flight recovery's source is never destroyed. Reaps expired
     /// leases first (mirroring the seal path, so a crashed recovery's stale lease cannot block a

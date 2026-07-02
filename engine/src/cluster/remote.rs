@@ -580,6 +580,30 @@ impl RemoteShard {
             }
         })
     }
+
+    /// This slot's order-independent 128-bit live-set fingerprint + live count (ADR-097): the
+    /// group move compares the frozen source's against a retained member's — equal (while both
+    /// sides are quiescent) proves the member already holds exactly the source's live set, so
+    /// its `O(corpus)` re-copy is skipped. Fingerprint-guarded; an old peer answers
+    /// `Unimplemented` and the caller falls back to the proven re-copy.
+    pub fn content_fingerprint(&self) -> Result<(u64, u64, u64), ShardError> {
+        let req = proto::ContentFingerprintRequest {
+            shard_id: self.shard_id,
+            dict_fingerprint: self.dict_fp,
+            tag_dict_fingerprint: self.tag_dict_fp,
+        };
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::ContentFingerprint, CallKind::Read, move || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .content_fingerprint(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
+        Ok((reply.fp_lo, reply.fp_hi, reply.live_count))
+    }
 }
 
 /// Drive `fut` on `handle` from a SYNCHRONOUS caller, dispatching on the caller's tokio

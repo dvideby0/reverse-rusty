@@ -106,6 +106,16 @@ service ShardService {
   // destroying data requires the deliberate fence-then-drop two-step. Absent slot ⇒
   // `dropped = false` (idempotent re-run).
   rpc DropShard (DropShardRequest) returns (DropShardReply);
+
+  // ---- content fingerprint (ADR-097) ----
+  // An order-independent 128-bit fingerprint over this slot's LIVE query multiset —
+  // (logical_id, version, dsl, TagIds), the `live_sources_tagged` basis. Read by the group
+  // move (ADR-094) while both sides are quiescent (the source frozen post-probe, the member
+  // write-quiesced by the primary fence): equal fingerprints prove a RETAINED member already
+  // holds exactly the frozen source's live set, so its O(corpus) re-copy is skipped. Refuses a
+  // dict/tag-fingerprint mismatch like every guarded RPC; deliberately blind to sources.dat /
+  // segment-layout divergence (never on the match path).
+  rpc ContentFingerprint (ContentFingerprintRequest) returns (ContentFingerprintReply);
 }
 
 message Empty {}
@@ -416,6 +426,18 @@ message DropShardReply {
   // false = the dir was renamed-to-trash but the delete failed/was skipped (the boot-time trash
   // sweep reclaims it); in-memory slots report true (nothing on disk to remove).
   bool dir_removed = 3;
+}
+
+// ---- content fingerprint (ADR-097) ----
+message ContentFingerprintRequest {
+  uint32 shard_id = 1;
+  uint64 dict_fingerprint = 2;     // refused on mismatch, like every guarded RPC
+  uint64 tag_dict_fingerprint = 3; // ADR-077: refused on mismatch, like dict_fingerprint
+}
+message ContentFingerprintReply {
+  uint64 fp_lo = 1;      // the 128-bit live-set fingerprint, low half
+  uint64 fp_hi = 2;      // ... high half (two independently-seeded FNV-1a streams)
+  uint64 live_count = 3; // the live entries hashed (a cheap cross-check / observability)
 }
 
 // ---- cluster-manager consensus (the openraft control plane; ADR-038, clustering step 5b) ----

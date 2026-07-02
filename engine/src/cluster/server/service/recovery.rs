@@ -366,6 +366,35 @@ async fn drain_recovery_stream(
     ))
 }
 
+/// Body of [`ShardService::content_fingerprint`](crate::cluster::proto::shard_service_server::ShardService::content_fingerprint)
+/// (ADR-097): the slot's order-independent live-set fingerprint — what the group move compares
+/// to skip a provably-complete retained member's re-copy. Fingerprint-guarded like every
+/// recovery RPC; reads through a fence (the caller's whole point is that the group is
+/// write-quiesced when it asks).
+pub(super) fn content_fingerprint(
+    server: &ShardServer,
+    request: Request<proto::ContentFingerprintRequest>,
+) -> Result<Response<proto::ContentFingerprintReply>, Status> {
+    let req = request.into_inner();
+    let (_slot, st) = server.loaded_slot(req.shard_id)?;
+    if req.dict_fingerprint != st.dict.fingerprint() {
+        return Err(Status::failed_precondition(
+            "ContentFingerprint dict-fingerprint mismatch (divergent feature space)",
+        ));
+    }
+    if req.tag_dict_fingerprint != st.tag_dict.fingerprint() {
+        return Err(Status::failed_precondition(
+            "ContentFingerprint tag-dict-fingerprint mismatch (divergent tag space)",
+        ));
+    }
+    let (fp_lo, fp_hi, live_count) = st.shard.content_fingerprint128();
+    Ok(Response::new(proto::ContentFingerprintReply {
+        fp_lo,
+        fp_hi,
+        live_count,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::validate_received;

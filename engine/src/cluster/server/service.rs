@@ -360,4 +360,14 @@ impl ShardService for ShardServer {
     ) -> Result<Response<proto::DropShardReply>, Status> {
         gc::drop_shard(self, request)
     }
+
+    // ---- content fingerprint (ADR-097) ----
+    /// The slot's order-independent live-set fingerprint — the group move's skip-a-complete-
+    /// retained-member comparison. Read-only, fence-transparent.
+    async fn content_fingerprint(
+        &self,
+        request: Request<proto::ContentFingerprintRequest>,
+    ) -> Result<Response<proto::ContentFingerprintReply>, Status> {
+        recovery::content_fingerprint(self, request)
+    }
 }

@@ -93,6 +93,24 @@ pub(in crate::cluster::coordinator) fn rebalance_group_targets(
         .collect()
 }
 
+/// Whether a RETAINED member provably already holds the frozen source's exact live set
+/// (ADR-097): both content fingerprints — computed while BOTH sides are quiescent (the source
+/// post-freeze-probe; the member write-quiesced by the primary fence, since composite writes are
+/// primary-first) — and equal. Equality covers the match-relevant live multiset
+/// `(logical, version, dsl, TagId*)`; sources.dat / segment-layout divergence is deliberately
+/// out of scope (never on the match path). `None` source fingerprint (the RPC failed — e.g. a
+/// pre-ADR-097 peer) or a member-side error ⇒ NOT provable ⇒ the caller falls back to the
+/// proven heal-by-re-copy. False negatives here cost a redundant copy, never correctness.
+pub(super) fn retained_member_is_complete(
+    source_fp: Option<(u64, u64, u64)>,
+    member: &RemoteShard,
+) -> bool {
+    let Some(src) = source_fp else {
+        return false;
+    };
+    member.content_fingerprint().is_ok_and(|m| m == src)
+}
+
 /// The validated output of the group move's plan→reserve→revalidate loop (ADR-095).
 pub(super) struct PlannedGroupMove<'a> {
     /// The committed group the plan (and the phase-9 CAS) compares against.

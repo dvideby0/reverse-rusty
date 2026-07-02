@@ -42,7 +42,7 @@ use reverse_rusty::cluster::{
 
 use crate::harness::*;
 
-mod fixture;
+pub(crate) mod fixture;
 use fixture::*;
 
 /// The headline: a packed RF=2 map converges to the HRW-desired GROUPS with zero false negatives —

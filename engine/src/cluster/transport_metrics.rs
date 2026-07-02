@@ -32,6 +32,7 @@ const METHOD_LABELS: [&str; TransportMetrics::SLOTS] = [
     "translog",
     "list_shards",
     "drop_shard",
+    "content_fingerprint",
 ];
 
 #[derive(Default)]
@@ -57,7 +58,7 @@ impl Default for TransportMetrics {
 
 impl TransportMetrics {
     /// Number of distinct RPC kinds tracked (the counter-array length).
-    pub(crate) const SLOTS: usize = 15;
+    pub(crate) const SLOTS: usize = 16;
 
     /// A fresh, all-zero collector.
     pub fn new() -> Self {
@@ -181,6 +182,7 @@ pub(crate) enum RpcMethod {
     Translog,
     ListShards,
     DropShard,
+    ContentFingerprint,
 }
 
 #[cfg(feature = "distributed")]
