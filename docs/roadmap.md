@@ -76,11 +76,9 @@ Broad-lane batch/columnar evaluation (ADR-026) and resident-memory reduction (AD
 ### Tier 2 — feature-model quality & self-tuning
 
 Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-anchoring
-(ADR-056), alias governance + multi-word activation (ADR-060/061). Open:
+(ADR-056), alias governance + multi-word activation (ADR-060/061), distributional alias
+discovery (ADR-102 — review-first candidates over the shipped seam). Open:
 
-- **Distributional alias discovery** — context-similarity candidates feeding the shipped
-  ADR-054/060 seam. Noisy (conflates substitutes with co-hyponyms) ⇒ review-first, never
-  auto-active.
 - **Match-feedback alias validation** — the highest-precision *automated* alias signal; needs an
   operational title→query feedback loop.
 - **The rest of the "improve" menu** ([`design/ingestion-and-updates.md`](design/ingestion-and-updates.md)
