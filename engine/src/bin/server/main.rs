@@ -72,9 +72,10 @@ use reverse_rusty::segment::Engine;
 use cli::Cli;
 use handlers::{
     api_root, backup, bulk_ingest, cat_segments, cat_stats, compact, delete_doc, discover_aliases,
-    discover_and_record_aliases, flush, get_aliases, get_doc, get_settings, get_vocab, health,
-    import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab, mpercolate,
-    prometheus_metrics, put_doc, put_settings, put_vocab, search, stats,
+    discover_and_record_aliases, flush, get_alias_feedback, get_aliases, get_doc, get_settings,
+    get_vocab, health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
+    mpercolate, prometheus_metrics, put_doc, put_settings, put_vocab, reset_alias_feedback, search,
+    stats, validate_and_apply_feedback,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -378,6 +379,7 @@ async fn main() {
         prom,
         slow_query_threshold_ms: slow_threshold,
         auth: auth_config,
+        feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
     });
 
     // Build router.
@@ -409,6 +411,12 @@ async fn main() {
             "/_vocab/aliases/discover_and_record",
             post(discover_and_record_aliases),
         )
+        .route("/_vocab/aliases/feedback", get(get_alias_feedback))
+        .route("/_vocab/aliases/feedback/reset", post(reset_alias_feedback))
+        .route(
+            "/_vocab/aliases/validate_and_apply",
+            post(validate_and_apply_feedback),
+        )
         .route("/_settings", get(get_settings).put(put_settings))
         .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100MB
         .layer(tower::limit::ConcurrencyLimitLayer::new(256))
@@ -429,7 +437,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, POST /_flush, POST /_compact, POST /_backup, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record",
+        endpoints = "GET /, GET/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, POST /_flush, POST /_compact, POST /_backup, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record, GET /_vocab/aliases/feedback, POST /_vocab/aliases/feedback/reset, POST /_vocab/aliases/validate_and_apply",
         "server listening"
     );
 

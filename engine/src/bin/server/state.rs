@@ -22,6 +22,7 @@ use tracing::Instrument;
 
 use reverse_rusty::cluster::ClusterEngine;
 use reverse_rusty::segment::{Engine, EngineSnapshot};
+use reverse_rusty::vocab::AliasFeedback;
 
 use crate::auth::AuthConfig;
 use crate::metrics::PrometheusMetrics;
@@ -41,12 +42,33 @@ pub(crate) struct AppState {
     pub(crate) slow_query_threshold_ms: u64,
     /// Bearer-token auth (ADR-062). `None` ⇒ the gate is a pass-through.
     pub(crate) auth: Option<AuthConfig>,
+    /// Match-feedback aggregator (ADR-103): tracked candidate pairs + bounded behavioral
+    /// evidence. Fed post-match by the percolate handlers when `alias_feedback_capture` is on
+    /// (default off ⇒ never touched); re-synced against the registry on every snapshot
+    /// publish. Not persisted — a rolling operational signal.
+    pub(crate) feedback: Mutex<AliasFeedback>,
 }
 
 impl AppState {
     pub(crate) fn publish_snapshot(&self) {
         let engine = self.engine.lock();
-        self.snapshot.store(Arc::new(engine.snapshot()));
+        let snap = Arc::new(engine.snapshot());
+        // Re-sync the feedback aggregator's tracked universe (ADR-103) on every publish — the
+        // vocab epoch is NOT a sufficient dirty signal (the ADR-102 metadata-only install
+        // records candidates without bumping it). Gated on the capture knob so the default-off
+        // contract stays zero-work (codex review): with capture off, no lock, no registry
+        // scan; flipping the knob on re-syncs at the next publish (the settings PUT publishes).
+        {
+            let cfg = engine.config();
+            if cfg.alias_feedback_capture {
+                let mut fb = self.feedback.lock();
+                match snap.vocab() {
+                    Some(v) => fb.sync_tracked(v.aliases(), cfg.alias_feedback_max_pairs),
+                    None => fb.reset(),
+                }
+            }
+        }
+        self.snapshot.store(snap);
     }
 }
 

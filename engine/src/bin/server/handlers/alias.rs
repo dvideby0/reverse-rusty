@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use crate::dto::ApiError;
 use crate::state::AppState;
 
+mod feedback;
+pub(crate) use feedback::{get_alias_feedback, reset_alias_feedback, validate_and_apply_feedback};
+
 fn default_min_count() -> usize {
     2
 }
@@ -284,6 +287,7 @@ mod tests {
             prom: PrometheusMetrics::new(),
             slow_query_threshold_ms: 0,
             auth: None,
+            feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
         })
     }
 

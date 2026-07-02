@@ -30,6 +30,7 @@ fn state() -> Arc<AppState> {
         prom: PrometheusMetrics::new(),
         slow_query_threshold_ms: 0,
         auth: None,
+        feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
     })
 }
 
@@ -131,6 +132,7 @@ async fn put_doc_honors_memtable_flush_threshold() {
         prom: PrometheusMetrics::new(),
         slow_query_threshold_ms: 0,
         auth: None,
+        feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
     });
 
     do_put(&state, 1, "michael jordan").await;

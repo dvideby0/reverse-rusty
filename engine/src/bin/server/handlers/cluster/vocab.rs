@@ -326,3 +326,29 @@ pub(crate) async fn cluster_discover_and_record_aliases() -> Response {
          on a single-node replica), review, then install reviewed entries via PUT /_vocab",
     )
 }
+
+/// GET /_vocab/aliases/feedback — 501 in cluster mode (ADR-103): capture is single-node v1
+/// (the coordinator would need a cross-request aggregation story per shard-fan-out).
+pub(crate) async fn cluster_get_alias_feedback() -> Response {
+    not_in_cluster_mode(
+        "GET /_vocab/aliases/feedback",
+        "run match-feedback capture on a single-node replica fed the same title stream, then \
+         install reviewed activations via PUT /_vocab",
+    )
+}
+
+/// POST /_vocab/aliases/validate_and_apply — 501 in cluster mode (ADR-103).
+pub(crate) async fn cluster_validate_and_apply_feedback() -> Response {
+    not_in_cluster_mode(
+        "POST /_vocab/aliases/validate_and_apply",
+        "validate on a single-node replica, then install reviewed activations via PUT /_vocab",
+    )
+}
+
+/// POST /_vocab/aliases/feedback/reset — 501 in cluster mode (ADR-103).
+pub(crate) async fn cluster_reset_alias_feedback() -> Response {
+    not_in_cluster_mode(
+        "POST /_vocab/aliases/feedback/reset",
+        "match-feedback capture is single-node v1",
+    )
+}

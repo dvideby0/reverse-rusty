@@ -48,6 +48,7 @@ fn state_with(eng: Engine, include_broad: bool) -> Arc<AppState> {
         prom: PrometheusMetrics::new(),
         slow_query_threshold_ms: 0,
         auth: None,
+        feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
     })
 }
 

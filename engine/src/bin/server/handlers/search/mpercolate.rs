@@ -197,6 +197,16 @@ pub(crate) async fn mpercolate(
                         .with_label_values(&["mpercolate"])
                         .inc();
                 }
+                // Match-feedback capture (ADR-103): opt-in, post-match.
+                if snap.config().alias_feedback_capture {
+                    if let Ok((results, _)) = &r {
+                        let mut fb = state_inner.feedback.lock();
+                        for (idx, ids) in results {
+                            let toks = reverse_rusty::corpus::tokenize(&titles[*idx]);
+                            fb.observe(&toks, ids);
+                        }
+                    }
+                }
                 r
             })
         })

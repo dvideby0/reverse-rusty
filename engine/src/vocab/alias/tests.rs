@@ -725,3 +725,117 @@ fn json_round_trips() {
     assert_eq!(e.provenance, AliasProvenance::LearnedDistributional);
     assert_eq!(e.status, AliasStatus::Candidate);
 }
+
+// ── Match-feedback (ADR-103) registry surface ─────────────────────────────────
+
+#[test]
+fn record_feedback_stamps_evidence_and_maxes_confidence() {
+    use crate::vocab::FeedbackEvidence;
+    let n = norm();
+    let d = Dict::new();
+    let mut reg = AliasRegistry::default();
+    reg.add_classified(
+        &forms(&["ud", "upperdeck"]),
+        AliasProvenance::LearnedDistributional,
+        0.6,
+        &n,
+        &d,
+    );
+    let ev = FeedbackEvidence {
+        overlap: 0.85,
+        titles_a: 100,
+        titles_b: 90,
+        queries_sampled: 40,
+    };
+    assert!(reg.record_feedback(&forms(&["ud", "upperdeck"]), ev));
+    let e = &reg.entries()[0];
+    assert_eq!(e.feedback, Some(ev));
+    assert!(
+        (e.confidence - 0.85).abs() < 1e-12,
+        "confidence raised to overlap"
+    );
+    assert_eq!(
+        e.status,
+        AliasStatus::Candidate,
+        "stamping never changes status"
+    );
+    // A NaN overlap must not poison confidence.
+    let nan = FeedbackEvidence {
+        overlap: f64::NAN,
+        ..ev
+    };
+    assert!(reg.record_feedback(&forms(&["ud", "upperdeck"]), nan));
+    assert!((reg.entries()[0].confidence - 0.85).abs() < 1e-12);
+    assert!(!reg.record_feedback(&forms(&["nope", "missing"]), ev));
+}
+
+#[test]
+fn activate_validated_refuses_rejected_and_mixed_kind() {
+    let n = norm();
+    let d = Dict::new();
+    let mut reg = AliasRegistry::default();
+    reg.add_classified(
+        &forms(&["ud", "upperdeck"]),
+        AliasProvenance::LearnedDistributional,
+        0.9,
+        &n,
+        &d,
+    );
+    reg.add_classified(
+        &forms(&["rc", "rookie"]),
+        AliasProvenance::LearnedDistributional,
+        0.9,
+        &n,
+        &d,
+    );
+    assert!(reg.reject(&forms(&["rc", "rookie"])));
+
+    // The automated path promotes a candidate…
+    assert!(reg.activate_validated(&forms(&["ud", "upperdeck"])));
+    // …idempotently: an already-active entry reports false, so a racing second validate
+    // pass never triggers a spurious full-recompile apply (codex).
+    assert!(!reg.activate_validated(&forms(&["ud", "upperdeck"])));
+    // …but must never resurrect an operator rejection (unlike the operator `activate`).
+    assert!(!reg.activate_validated(&forms(&["rc", "rookie"])));
+    assert_eq!(
+        reg.entries()
+            .iter()
+            .find(|e| e.forms == forms(&["rc", "rookie"]))
+            .unwrap()
+            .status,
+        AliasStatus::Rejected
+    );
+}
+
+#[test]
+fn feedback_field_round_trips_and_old_json_reads_none() {
+    use crate::vocab::FeedbackEvidence;
+    let n = norm();
+    let d = Dict::new();
+    let mut reg = AliasRegistry::default();
+    reg.add_classified(
+        &forms(&["ud", "upperdeck"]),
+        AliasProvenance::LearnedDistributional,
+        0.6,
+        &n,
+        &d,
+    );
+    // Old JSON (no `feedback` key) reads back as None.
+    let old_json = serde_json::to_string(&reg).unwrap();
+    assert!(!old_json.contains("feedback"), "absent until stamped");
+    let back: AliasRegistry = serde_json::from_str(&old_json).unwrap();
+    assert_eq!(back.entries()[0].feedback, None);
+    // Stamped evidence round-trips.
+    reg.record_feedback(
+        &forms(&["ud", "upperdeck"]),
+        FeedbackEvidence {
+            overlap: 0.7,
+            titles_a: 60,
+            titles_b: 55,
+            queries_sampled: 25,
+        },
+    );
+    let json = serde_json::to_string(&reg).unwrap();
+    let back: AliasRegistry = serde_json::from_str(&json).unwrap();
+    assert!(back.entries()[0].feedback.is_some());
+}

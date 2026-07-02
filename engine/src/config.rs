@@ -228,6 +228,23 @@ pub struct EngineConfig {
     /// Default: `true`
     pub cooperative_cancel: bool,
 
+    /// Opt-in match-feedback capture for alias validation (ADR-103): when true, the
+    /// single-node server's percolate handlers feed each result (title tokens + matched ids)
+    /// into the alias-feedback aggregator post-match — off the engine's match path entirely.
+    /// Default `false` ⇒ byte-identical responses and zero added work. Dynamic via
+    /// `/_settings`.
+    ///
+    /// Default: `false`
+    pub alias_feedback_capture: bool,
+
+    /// Cap on candidate pairs the feedback aggregator tracks (ADR-103) — bounds capture-time
+    /// work (O(pairs × title tokens) per request when capture is on) and memory (two fixed
+    /// bottom-k sketches per pair). Selection is deterministic: confidence desc, forms asc.
+    /// Dynamic via `/_settings`.
+    ///
+    /// Default: `256`
+    pub alias_feedback_max_pairs: usize,
+
     /// Maximum number of documents accepted in a single `POST /_mpercolate` batch.
     /// Requests above this are rejected with `400` before any work is scheduled,
     /// bounding per-request memory and latency.
@@ -290,6 +307,8 @@ impl Default for EngineConfig {
             broad_columnar: true,
             broad_materialize: true,
             cooperative_cancel: true,
+            alias_feedback_capture: false,
+            alias_feedback_max_pairs: 256,
             max_percolate_batch: 10_000,
             accept_class_d: false,
             retention_lease_ttl_secs: 1800,
