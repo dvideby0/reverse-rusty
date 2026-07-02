@@ -149,6 +149,33 @@ fn main() {
          statistics. The learner glues multi-token entities (raising selectivity) and the\n\
          signature optimizer already ranks anchors purely by frequency — no taxonomy required."
     );
+
+    // ---- Distributional alias candidates (ADR-102) ----
+    // The same corpus, asked a different question: which token pairs fill the SAME slot
+    // (similar neighbor distributions) while rarely co-occurring — substitute candidates the
+    // registry would file for review. Generated corpora have few true substitutes, so this
+    // section mostly demonstrates the noise floor + the co-occurrence penalty at work.
+    let dcfg = reverse_rusty::vocab::DistributionalConfig {
+        min_token_freq: min_count,
+        ..reverse_rusty::vocab::DistributionalConfig::default()
+    };
+    let pairs = reverse_rusty::vocab::discover_pairs(&data.queries, &dcfg);
+    println!("\n=== distributional alias candidates (ADR-102, review-first) ===");
+    println!(
+        "{:<44} {:>7} {:>9}",
+        "candidate pair (similarity desc)", "cosine", "cooc rate"
+    );
+    for p in pairs.iter().take(15) {
+        println!(
+            "{:<44} {:>7.3} {:>9.4}",
+            format!("{} ≡ {}", p.forms[0], p.forms[1]),
+            p.similarity,
+            p.cooccurrence_rate
+        );
+    }
+    if pairs.is_empty() {
+        println!("(none above the similarity threshold — expected on a synthetic corpus)");
+    }
 }
 
 fn doc_freq_unigrams(corpus: &[Vec<String>]) -> HashMap<String, usize> {

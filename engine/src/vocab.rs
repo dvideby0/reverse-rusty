@@ -19,6 +19,7 @@ use crate::dict::FeatureKind;
 use crate::normalize::PunctClass;
 
 mod alias;
+mod distributional;
 mod learn;
 mod methods;
 
@@ -26,6 +27,7 @@ mod methods;
 mod tests;
 
 pub use alias::{AliasEntry, AliasKind, AliasProvenance, AliasRegistry, AliasStatus, AliasSummary};
+pub use distributional::{discover_pairs, DiscoveredPair, DistributionalConfig};
 pub use learn::{
     learn_anyof_groups, learn_equivalences_from_queries, learn_from_queries,
     learn_vocab_from_corpus, CorpusLearnConfig,

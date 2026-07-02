@@ -164,6 +164,8 @@ The full method/path matrix is below.
 | `/_vocab/aliases` | GET | The governed alias registry + status summary (ADR-060) |
 | `/_vocab/aliases/import` | POST | Import a Solr/Lucene synonym file + apply (body `{"synonyms":"..."}`) |
 | `/_vocab/aliases/learn_and_apply` | POST | Learn alias candidates from stored queries + apply (`?min_count=N`) |
+| `/_vocab/aliases/discover` | POST | Distributional alias discovery, compute-only (ADR-102): proposals + similarity/co-occurrence evidence over the stored queries, or an explicit `{"queries": [[id, "dsl"], ...]}` body; knob overrides in the body (`min_similarity`, `max_pairs`, …) |
+| `/_vocab/aliases/discover_and_record` | POST | Discover over the engine's OWN stored queries and file every proposal as a review `Candidate` (never activates — `recompiled` is always 0; activation stays `PUT /_vocab` with an edited status) |
 | `/_settings` | GET | Read live engine settings (`?include_defaults`) |
 | `/_settings` | PUT | Update the dynamic settings subset |
 

@@ -193,6 +193,110 @@ fn policy_activates_variants_and_declared_distincts_only() {
     assert_eq!(default_status_for(MixedKind, DeclaredFile), Candidate);
 }
 
+#[test]
+fn distributional_provenance_never_auto_activates() {
+    // ADR-102: review-first, ALWAYS — even a pair the structural classifier calls a clear
+    // variant (which auto-activates from every other source) stays a candidate.
+    use AliasKind::{MixedKind, MultiWord, SingleTokenDistinct, SingleTokenVariant};
+    use AliasProvenance::LearnedDistributional;
+    use AliasStatus::Candidate;
+    for kind in [
+        SingleTokenVariant,
+        SingleTokenDistinct,
+        MultiWord,
+        MixedKind,
+    ] {
+        assert_eq!(
+            default_status_for(kind, LearnedDistributional),
+            Candidate,
+            "{kind:?} from distributional discovery must land as a review candidate"
+        );
+    }
+}
+
+#[test]
+fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
+    // A rejected group stays rejected on re-discovery; a re-discovered candidate only maxes
+    // its confidence (the same-rank promotion branch requires a computed Active, which the
+    // distributional provenance never produces).
+    let n = norm();
+    let d = Dict::new();
+    let mut reg = AliasRegistry::default();
+
+    // Seed a candidate via discovery, reject it, re-discover: stays rejected.
+    assert_eq!(
+        reg.add_classified(
+            &forms(&["refractor", "refractors"]),
+            AliasProvenance::LearnedDistributional,
+            0.7,
+            &n,
+            &d
+        ),
+        Some(AliasStatus::Candidate),
+        "even a variant-looking pair lands Candidate from discovery"
+    );
+    assert!(reg.reject(&forms(&["refractor", "refractors"])));
+    assert_eq!(
+        reg.add_classified(
+            &forms(&["refractor", "refractors"]),
+            AliasProvenance::LearnedDistributional,
+            0.9,
+            &n,
+            &d
+        ),
+        Some(AliasStatus::Rejected),
+        "re-discovery must not resurrect an operator rejection"
+    );
+
+    // A re-discovered candidate refreshes confidence upward, never status.
+    assert_eq!(
+        reg.add_classified(
+            &forms(&["ud", "upperdeck"]),
+            AliasProvenance::LearnedDistributional,
+            0.6,
+            &n,
+            &d
+        ),
+        Some(AliasStatus::Candidate)
+    );
+    assert_eq!(
+        reg.add_classified(
+            &forms(&["ud", "upperdeck"]),
+            AliasProvenance::LearnedDistributional,
+            0.8,
+            &n,
+            &d
+        ),
+        Some(AliasStatus::Candidate),
+        "same-rank re-add with a Candidate default cannot promote"
+    );
+    let e = reg
+        .entries()
+        .iter()
+        .find(|e| e.forms == forms(&["ud", "upperdeck"]))
+        .expect("entry recorded");
+    assert!(
+        (e.confidence - 0.8).abs() < 1e-12,
+        "confidence reconciles by max (got {})",
+        e.confidence
+    );
+    assert_eq!(e.status, AliasStatus::Candidate);
+
+    // A later DECLARED import of the same group still upgrades it (higher trust wins) — the
+    // distributional seed must not block the existing reconciliation ladder.
+    assert_eq!(
+        reg.add_classified(
+            &forms(&["ud", "upperdeck"]),
+            AliasProvenance::DeclaredFile,
+            1.0,
+            &n,
+            &d
+        ),
+        Some(AliasStatus::Active),
+        "declared provenance outranks and re-decides"
+    );
+}
+
 // ── Solr parsing ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -600,4 +704,24 @@ fn json_round_trips() {
     let back: AliasRegistry = serde_json::from_str(&json).unwrap();
     assert_eq!(back.len(), 2);
     assert_eq!(back.active_groups(), reg.active_groups());
+
+    // ADR-102: the distributional provenance round-trips (snake_case, one-directional compat —
+    // an old binary cannot read this JSON, the repo's stated format-forward stance).
+    reg.add_classified(
+        &forms(&["gem", "gemmint"]),
+        AliasProvenance::LearnedDistributional,
+        0.66,
+        &n,
+        &dict,
+    );
+    let json = serde_json::to_string(&reg).unwrap();
+    assert!(json.contains("learned_distributional"));
+    let back: AliasRegistry = serde_json::from_str(&json).unwrap();
+    let e = back
+        .entries()
+        .iter()
+        .find(|e| e.forms == forms(&["gem", "gemmint"]))
+        .expect("distributional entry survives the round-trip");
+    assert_eq!(e.provenance, AliasProvenance::LearnedDistributional);
+    assert_eq!(e.status, AliasStatus::Candidate);
 }

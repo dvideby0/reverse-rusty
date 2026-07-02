@@ -363,6 +363,24 @@ pub struct AliasApplyReport {
     pub summary: crate::vocab::AliasSummary,
 }
 
+/// Outcome of a distributional alias discovery run recorded into the registry (ADR-102).
+/// Nothing is ever activated by this path — candidates only — so unlike
+/// [`AliasApplyReport`] there is no `activated`/`recompiled` (the install is metadata-only;
+/// match results are byte-identical before/after).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AliasDiscoveryReport {
+    /// Pairs the discoverer proposed (post-filter, pre-registry).
+    pub proposed: usize,
+    /// Proposals recorded as NEW `Candidate` entries.
+    pub new_candidates: usize,
+    /// Proposals that already existed (confidence refreshed, status untouched).
+    pub rediscovered: usize,
+    /// Proposals refused because the group was operator-`Rejected` (stickiness).
+    pub rejected_sticky: usize,
+    /// The registry's status counts after recording.
+    pub summary: crate::vocab::AliasSummary,
+}
+
 /// Outcome of a single live insert. Distinguishes a successful insert (with its
 /// memtable-local id) from a class-D rejection. A parse failure is surfaced as
 /// `Err(ParseError)` by [`Engine::try_insert_live`], never folded in here.

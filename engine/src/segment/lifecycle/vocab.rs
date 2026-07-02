@@ -3,7 +3,7 @@
 //! recompile-on-vocabulary-change pass ([`recompile_stale_segments`](Engine::recompile_stale_segments))
 //! plus the corpus learn-and-apply drivers (ADR-046/053/054).
 
-use crate::segment::{AliasApplyReport, Engine, Segment};
+use crate::segment::{AliasApplyReport, AliasDiscoveryReport, Engine, Segment};
 use crate::vocab::AliasSummary;
 use std::sync::Arc;
 
@@ -67,6 +67,94 @@ impl Engine {
             recompiled,
             summary: self.alias_summary(),
         })
+    }
+
+    /// Discover distributional alias candidates over the engine's OWN stored queries
+    /// (ADR-102) — compute-only: nothing is recorded or changed. See
+    /// [`crate::vocab::discover_pairs`] for the signal + noise model.
+    pub fn discover_aliases(
+        &self,
+        cfg: &crate::vocab::DistributionalConfig,
+    ) -> Vec<crate::vocab::DiscoveredPair> {
+        crate::vocab::discover_pairs(&self.live_sources(), cfg)
+    }
+
+    /// [`discover_aliases`](Self::discover_aliases), then record every proposal into the
+    /// registry as a review `Candidate` (`LearnedDistributional` provenance — NEVER
+    /// auto-active, ADR-102) and install the updated vocabulary through the metadata-only
+    /// seam: candidates change no matching-relevant state, so there is no epoch bump and no
+    /// recompile — match results are byte-identical before/after. Like every single-node
+    /// runtime vocab mutation, durability is the operator's vocab file (`GET /_vocab` → save;
+    /// a cluster checkpoint embeds the vocab in its manifest).
+    pub fn discover_aliases_and_record(
+        &mut self,
+        cfg: &crate::vocab::DistributionalConfig,
+    ) -> Result<AliasDiscoveryReport, crate::error::NormalizerError> {
+        let pairs = self.discover_aliases(cfg);
+        let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
+        let (new_candidates, rediscovered, rejected_sticky) =
+            vocab.record_distributional_candidates(&pairs, &self.norm, &self.dict);
+        self.install_vocab_metadata_only(vocab)?;
+        Ok(AliasDiscoveryReport {
+            proposed: pairs.len(),
+            new_candidates,
+            rediscovered,
+            rejected_sticky,
+            summary: self.alias_summary(),
+        })
+    }
+
+    /// Install a vocabulary whose **matching-relevant state is provably unchanged** — the
+    /// metadata-only seam (ADR-102). The shipped apply path ([`set_vocab`](Self::set_vocab))
+    /// unconditionally bumps `vocab_epoch` and recompiles the corpus; for a change that only
+    /// adds/edits registry *candidates* that is an O(corpus) no-op. The fast path requires BOTH
+    /// (structurally verified — never trusted from the caller):
+    ///
+    /// 1. **Everything outside the alias registry is byte-identical** — compared over the
+    ///    serialized vocab documents with the registries blanked, so synonyms, phrases,
+    ///    graders, punctuation, number-context, declared equivalences, AND any future `Vocab`
+    ///    field automatically participate (a field-list comparison would silently rot; codex
+    ///    review). A vocab differing anywhere there affects the normalizer and must go through
+    ///    the genuine-change path.
+    /// 2. **The registry's matching-relevant projections are equal** —
+    ///    `effective_equivalence_groups` + `active_alias_forms` (candidate/rejected entries are
+    ///    invisible to both).
+    ///
+    /// Equal ⇒ swap the Arc (no epoch bump, no normalizer rebuild, no recompile). Anything else
+    /// ⇒ fall back to the full `set_vocab` + `recompile_stale_segments`, so the fast path can
+    /// never leave the advertised vocab out of sync with the live normalizer. `pub(crate)`
+    /// deliberately: callers outside the crate go through `set_vocab` (the general contract) or
+    /// the discovery/feedback recording paths that funnel here. Returns `true` when the fast
+    /// path was taken.
+    pub(crate) fn install_vocab_metadata_only(
+        &mut self,
+        vocab: crate::vocab::Vocab,
+    ) -> Result<bool, crate::error::NormalizerError> {
+        let current = self.vocab.as_deref().cloned().unwrap_or_default();
+        let outside_registry_identical = {
+            let mut a = vocab.clone();
+            let mut b = current.clone();
+            *a.aliases_mut() = crate::vocab::AliasRegistry::default();
+            *b.aliases_mut() = crate::vocab::AliasRegistry::default();
+            // Serialization of an in-memory Vocab cannot fail; if it ever did, `None != None`
+            // is avoided by mapping to unequal sentinels — the conservative direction (take
+            // the full-recompile path, never the skip).
+            match (serde_json::to_string(&a), serde_json::to_string(&b)) {
+                (Ok(ja), Ok(jb)) => ja == jb,
+                _ => false,
+            }
+        };
+        if outside_registry_identical
+            && vocab.effective_equivalence_groups() == current.effective_equivalence_groups()
+            && vocab.aliases().active_alias_forms() == current.aliases().active_alias_forms()
+        {
+            self.vocab = Some(Arc::new(vocab));
+            Ok(true)
+        } else {
+            self.set_vocab(vocab)?;
+            self.recompile_stale_segments();
+            Ok(false)
+        }
     }
 
     /// Replace the engine's vocabulary and normalizer. Existing compiled
@@ -373,5 +461,57 @@ impl Engine {
         merged.merge(&learned);
         self.set_vocab(merged)?; // bumps the epoch / marks segments stale
         Ok(self.recompile_stale_segments())
+    }
+}
+
+#[cfg(test)]
+mod metadata_only_tests {
+    use crate::normalize::Normalizer;
+    use crate::segment::Engine;
+    use crate::vocab::{AliasProvenance, AliasStatus};
+
+    /// The install_vocab_metadata_only guard (ADR-102, hardened per codex): a candidate-only
+    /// registry change takes the fast path (no epoch bump); ANY change outside the registry —
+    /// here a synonym, which affects the normalizer while leaving the alias projections equal —
+    /// must fall back to the genuine-change path, so the advertised vocab can never desync from
+    /// the live normalizer.
+    #[test]
+    fn fast_path_only_for_registry_candidate_changes() {
+        let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+        eng.build_from_queries(&[(1, "fleer jordan".to_string())]);
+        let e0 = eng.vocab_epoch();
+
+        // Candidates-only: fast path — vocab installed, epoch untouched.
+        let mut v = eng.vocab().cloned().unwrap_or_default();
+        let status = v.aliases_mut().add_classified(
+            &["zzud".to_string(), "zzupperdeck".to_string()],
+            AliasProvenance::LearnedDistributional,
+            0.7,
+            &eng.norm,
+            &eng.dict,
+        );
+        assert_eq!(status, Some(AliasStatus::Candidate));
+        assert!(
+            eng.install_vocab_metadata_only(v).expect("install"),
+            "a candidate-only change takes the fast path"
+        );
+        assert_eq!(eng.vocab_epoch(), e0, "no epoch bump on the fast path");
+        assert!(
+            eng.aliases().expect("vocab").entries().len() == 1,
+            "the candidate was installed"
+        );
+
+        // A synonym added with IDENTICAL alias projections: the whole-document guard must
+        // reject the fast path (epoch bumps, set_vocab ran).
+        let mut v = eng.vocab().cloned().unwrap_or_default();
+        v.add_synonym("colour", "color", crate::dict::FeatureKind::Generic);
+        assert!(
+            !eng.install_vocab_metadata_only(v).expect("install"),
+            "a normalizer-affecting change must take the full set_vocab path"
+        );
+        assert!(
+            eng.vocab_epoch() > e0,
+            "the fallback is the genuine-change path (epoch bumped)"
+        );
     }
 }

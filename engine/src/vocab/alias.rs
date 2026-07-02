@@ -43,6 +43,11 @@ pub enum AliasProvenance {
     LearnedFromQueries,
     /// Added directly by an operator through the API. Trusted like a declared file.
     Manual,
+    /// Discovered by context-distributional similarity over the stored queries (ADR-102).
+    /// Structurally noisy — the signal cannot tell substitutes from co-hyponyms — so entries
+    /// from this source NEVER auto-activate, not even variant-looking pairs: review-first,
+    /// always (`default_status_for` maps every kind to `Candidate`).
+    LearnedDistributional,
 }
 
 /// Lifecycle status governing whether an alias affects matching.
@@ -212,6 +217,12 @@ impl AliasRegistry {
         Self::canonical_forms(forms)
             .and_then(|f| self.position(&f))
             .is_some_and(|i| self.entries[i].status == AliasStatus::Active)
+    }
+
+    /// True if a group with these (raw, to-be-canonicalized) forms is already recorded, in any
+    /// status — the discovery paths use it to report new-vs-rediscovered (ADR-102).
+    pub fn contains(&self, forms: &[String]) -> bool {
+        Self::canonical_forms(forms).is_some_and(|f| self.position(&f).is_some())
     }
 
     /// Add (or reconcile) a group, classifying its [`AliasKind`] against `norm`/`dict` and
@@ -421,10 +432,15 @@ impl AliasRegistry {
     }
 }
 
-/// Trust ordering for reconciliation: declared/manual outrank a learned guess.
+/// Trust ordering for reconciliation: declared/manual outrank a learned guess. Both learned
+/// sources share the bottom rank — reconciliation safety for the distributional source then
+/// follows structurally: the same-rank promotion branch in [`AliasRegistry::add_classified`]
+/// requires the *computed* status to be `Active`, which `LearnedDistributional` never produces,
+/// so a re-discovery can only max confidence (and an any-of re-learn may still promote a
+/// variant under ITS OWN policy — that is ADR-060's trust level acting on its own signal).
 fn provenance_rank(p: AliasProvenance) -> u8 {
     match p {
-        AliasProvenance::LearnedFromQueries => 0,
+        AliasProvenance::LearnedFromQueries | AliasProvenance::LearnedDistributional => 0,
         AliasProvenance::DeclaredFile | AliasProvenance::Manual => 1,
     }
 }
