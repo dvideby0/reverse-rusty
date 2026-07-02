@@ -196,9 +196,14 @@ and `release.yml` publishes the smoke-gated GHCR image per `v*` tag.
   gRPC handler boundary — p95/p99 via `histogram_quantile()`. **Per-shard broad-lane cost
   counters shipped** ([ADR-101](decisions/adr-101-shard-broad-lane-cost-counters.md)): the
   coordinator's `reverse_rusty_broad_*_total` names, `{shard}`-labeled in the shard `/_metrics`,
-  accumulated from each percolate's `MatchStats` at the handler boundary. Still open: the
-  operational docs above the shipped ADR-081 runbook — **DR runbook, rolling-upgrade procedure,
-  resource-sizing guide, alert examples, a backup/restore rehearsal**.
+  accumulated from each percolate's `MatchStats` at the handler boundary. **The M3 operational
+  docs shipped**: the [DR runbook](operations/disaster-recovery.md) (RPO/RTO model +
+  volume-loss / quorum-loss / whole-cluster flows), the
+  [rolling-upgrade procedure](operations/rolling-upgrade.md) (fence contract +
+  control→shards→coordinator order + Helm `updateStrategy`/PDBs), the
+  [sizing guide](operations/sizing.md), [alerting](operations/alerting.md) over a
+  shipped promtool-validated [`deploy/prometheus-alerts.yml`](../deploy/prometheus-alerts.yml),
+  and the backup-restore **Rehearsal** drill — **M3 is complete**.
   **Cooperative cancellation / bounded concurrency shipped**
   ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md)): an explicit
   `timeout_ms` now stops the match work at coarse boundaries (not just the response), and

@@ -11,6 +11,13 @@ spec:
   replicas: {{ .Values.shardCount }}
   # Shards are independent positions — bring them up in parallel (no ordinal ordering).
   podManagementPolicy: Parallel
+  # Explicit (it IS the apps/v1 default — stated here so the rolling-upgrade contract is
+  # visible in the template, docs/operations/rolling-upgrade.md): updates replace pods ONE AT A
+  # TIME, in reverse ordinal order, each gated on Ready before the next — regardless of
+  # podManagementPolicy: Parallel, which affects scale-up/creation only, never updates. Setting
+  # a field to its default is not a pod-template change, so adding this line triggers no rollout.
+  updateStrategy:
+    type: RollingUpdate
   selector:
     matchLabels:
       {{- include "reverse-rusty.selectorLabels" . | nindent 6 }}

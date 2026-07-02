@@ -1,0 +1,59 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# PodDisruptionBudgets (roadmap Tier 5 M3): protect the rolling-upgrade invariants against
+# node drains/evictions — a voluntary disruption can never take a second shard while one is
+# already down, nor break the 2-of-3 control quorum. Involuntary failures are the runbooks'
+# job (docs/operations/disaster-recovery.md); PDBs only gate *voluntary* evictions.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "reverse-rusty.shardName" . }}
+  labels:
+    {{- include "reverse-rusty.labels" . | nindent 4 }}
+    app.kubernetes.io/component: shard
+spec:
+  # One shard down = fail-loud 502s on reads routing to it (ADR-072); two down at once is a
+  # needlessly wide outage a drain should never cause.
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "reverse-rusty.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: shard
+{{- if .Values.controlPlane.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "reverse-rusty.controlName" . }}
+  labels:
+    {{- include "reverse-rusty.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control
+spec:
+  # Preserves quorum during drains: with 3 replicas, at most one member may be evicted at a
+  # time, so a majority always holds (ADR-038/041).
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "reverse-rusty.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: control
+{{- end }}
+{{- if gt (int .Values.coordinator.replicas) 1 }}
+---
+# Only when the coordinator runs >1 replica: a PDB on a single-replica Deployment would
+# block node drains outright (minAvailable) or protect nothing (maxUnavailable: 1 == all).
+# The single coordinator is stateless and restart-cheap by design (ADR-086) — let drains
+# move it.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "reverse-rusty.coordinatorName" . }}
+  labels:
+    {{- include "reverse-rusty.labels" . | nindent 4 }}
+    app.kubernetes.io/component: coordinator
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "reverse-rusty.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: coordinator
+{{- end }}
+{{- end }}

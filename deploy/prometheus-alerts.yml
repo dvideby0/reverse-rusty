@@ -1,0 +1,188 @@
+# Reverse Rusty — example Prometheus alerting rules (roadmap Tier 5 M3).
+#
+# The starting rule set for a production deployment; every alert is explained — meaning,
+# threshold rationale, and what to do — in docs/operations/alerting.md (the `runbook`
+# annotation deep-links the matching section). Expressions live HERE only; the doc quotes a
+# rule by name, so tune thresholds in one place.
+#
+# Assumptions (adjust to your scrape config):
+#   - shard + control pods are scraped on their plaintext --metrics-addr ports (ADR-091),
+#     the coordinator on its REST /_metrics — see the prometheus.io/* pod annotations the
+#     Helm chart emits, or the compose network ports (cluster-deployment.md §9).
+#   - No `job`/`instance` selectors are baked in: metric NAMES are the contract
+#     (reverse_rusty_*); scope the expressions to your jobs if you run several clusters.
+#   - Thresholds marked "tune" are corpus-/SLO-dependent starting points, not gospel.
+#
+# Validated in CI by `promtool check rules` (the helm-chart job).
+
+groups:
+  - name: reverse-rusty-shard
+    rules:
+      - alert: RRShardNotReady
+        expr: reverse_rusty_shard_ready == 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Shard {{ $labels.shard }} not serving (pending or lost its dict) for 5m"
+          runbook: docs/operations/alerting.md#rrshardnotready
+
+      - alert: RRShardCompactionBacklog
+        # Tombstoned-but-not-compacted entries growing without a compaction catching up.
+        # Threshold: tune to corpus size (this fires at 1M dead entries sustained).
+        expr: reverse_rusty_tombstoned_entries > 1000000
+        for: 30m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Shard {{ $labels.shard }} compaction backlog > 1M tombstoned entries for 30m"
+          runbook: docs/operations/alerting.md#rrshardcompactionbacklog
+
+      - alert: RRShardStaleSegments
+        # Segments compiled under an older vocab epoch — a vocab change didn't finish recompiling.
+        expr: reverse_rusty_stale_segments > 0
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Shard {{ $labels.shard }} has vocab-stale segments for 15m"
+          runbook: docs/operations/alerting.md#rrshardstalesegments
+
+      - alert: RRShardPercolateP99High
+        # Service-time p99 from the ADR-100 histogram, per shard. Threshold: tune to your SLO;
+        # in-process p99 is single-digit µs — 250ms of *service* time means something is wrong.
+        expr: >
+          histogram_quantile(0.99,
+            sum by (le, shard) (rate(reverse_rusty_shard_rpc_duration_seconds_bucket{method="percolate"}[5m])))
+          > 0.25
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Shard {{ $labels.shard }} percolate service p99 > 250ms for 10m"
+          runbook: docs/operations/alerting.md#rrshardpercolatep99high
+
+      - alert: RRShardBroadShareHigh
+        # Broad-lane candidates per percolate (ADR-101 counters ÷ the ADR-100 count). The
+        # selective path holds ~54 candidates/title flat; a broad share sustained in the
+        # hundreds means the corpus mix shifted broad — cost, not correctness. Tune.
+        expr: >
+          rate(reverse_rusty_broad_candidates_total[10m])
+            / on (shard)
+          sum by (shard) (rate(reverse_rusty_shard_rpc_duration_seconds_count{method=~"percolate.*"}[10m]))
+          > 500
+        for: 15m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Shard {{ $labels.shard }} broad-lane candidates/title > 500 for 15m"
+          runbook: docs/operations/alerting.md#rrshardbroadsharehigh
+
+  - name: reverse-rusty-control
+    rules:
+      - alert: RRControlNoLeader
+        expr: reverse_rusty_control_leader_known == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Control node {{ $labels.shard }} sees no Raft leader for 1m"
+          runbook: docs/operations/alerting.md#rrcontrolnoleader
+
+      - alert: RRControlLeaderCountWrong
+        # Exactly one leader across the quorum. >1 is a partition artifact; 0 pages above.
+        expr: sum(reverse_rusty_control_is_leader) != 1
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Control plane reports {{ $value }} leaders (want exactly 1) for 5m"
+          runbook: docs/operations/alerting.md#rrcontrolleadercountwrong
+
+      - alert: RRControlTermChurn
+        # Repeated elections — flapping member or network trouble between control nodes.
+        expr: increase(reverse_rusty_control_term[10m]) > 3
+        labels:
+          severity: warn
+        annotations:
+          summary: "Raft term advanced {{ $value }} times in 10m on {{ $labels.shard }} (election churn)"
+          runbook: docs/operations/alerting.md#rrcontroltermchurn
+
+      - alert: RRControlApplyLag
+        # A member applying far behind its own log — stuck state machine or disk.
+        expr: (reverse_rusty_control_last_log_index - reverse_rusty_control_last_applied) > 100
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Control node {{ $labels.shard }} apply lag > 100 entries for 5m"
+          runbook: docs/operations/alerting.md#rrcontrolapplylag
+
+  - name: reverse-rusty-coordinator
+    rules:
+      - alert: RRDurabilityFailure
+        # A write could not be made durable (WAL/segment/manifest IO error). Zero-tolerance.
+        expr: increase(reverse_rusty_durability_failures_total[5m]) > 0
+        labels:
+          severity: page
+        annotations:
+          summary: "Durability failure recorded in the last 5m — investigate disk NOW"
+          runbook: docs/operations/alerting.md#rrdurabilityfailure
+
+      - alert: RRTransportErrors
+        # The coordinator's fan-out is failing loud against some shard (ADR-085) — reads are
+        # returning 502 rather than silently shrinking (ADR-072). Any sustained rate matters.
+        expr: sum(rate(reverse_rusty_transport_rpc_errors[5m])) > 0
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "Shard RPC errors from the coordinator for 5m (fail-loud reads are firing)"
+          runbook: docs/operations/alerting.md#rrtransporterrors
+
+      - alert: RRTransportTimeouts
+        expr: sum(rate(reverse_rusty_transport_rpc_timeouts[5m])) > 0
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Shard RPC timeouts from the coordinator for 5m (deadline pressure)"
+          runbook: docs/operations/alerting.md#rrtransporttimeouts
+
+      - alert: RRAuthFailures
+        expr: rate(reverse_rusty_auth_failures_total[5m]) > 1
+        for: 5m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Sustained bearer-token rejections (> 1/s for 5m): misconfig or probing"
+          runbook: docs/operations/alerting.md#rrauthfailures
+
+      - alert: RRSlowQueries
+        expr: rate(reverse_rusty_slow_queries_total[5m]) > 1
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Searches exceeding --slow-query-threshold-ms at > 1/s for 10m"
+          runbook: docs/operations/alerting.md#rrslowqueries
+
+      - alert: RRCancellationSpike
+        # Cooperative cancellations (ADR-099) mean clients are hitting timeout_ms — capacity
+        # or a pathological title/corpus mix.
+        expr: sum(rate(reverse_rusty_match_cancellations_total[5m])) > 1
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Match cancellations at > 1/s for 10m (clients hitting timeout_ms)"
+          runbook: docs/operations/alerting.md#rrcancellationspike
+
+      - alert: RRIngestRejects
+        expr: sum(rate(reverse_rusty_ingest_rejected_total[5m])) > 0
+        for: 10m
+        labels:
+          severity: warn
+        annotations:
+          summary: "Ingest rejects (parse failures / refused class-D) sustained for 10m"
+          runbook: docs/operations/alerting.md#rringestrejects

@@ -174,7 +174,9 @@ jobs:
           sudo mv linux-amd64/helm /usr/local/bin/helm
           curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
           sudo mv kubeconform /usr/local/bin/kubeconform
-          helm version --short && kubeconform -v
+          curl -fsSL https://github.com/prometheus/prometheus/releases/download/v3.4.1/prometheus-3.4.1.linux-amd64.tar.gz | tar xz --strip-components=1 prometheus-3.4.1.linux-amd64/promtool
+          sudo mv promtool /usr/local/bin/promtool
+          helm version --short && kubeconform -v && promtool --version
 
       - name: helm lint
         run: helm lint deploy/helm/reverse-rusty
@@ -202,3 +204,8 @@ jobs:
 
       - name: Version drift (Cargo.toml == Chart appVersion)
         run: ./deploy/check-versions.sh
+
+      # The shipped alert rules stay loadable (Tier 5 M3): promtool parses + validates
+      # deploy/prometheus-alerts.yml, so the file operators load cannot rot silently.
+      - name: Alert rules valid (promtool check rules)
+        run: promtool check rules deploy/prometheus-alerts.yml
