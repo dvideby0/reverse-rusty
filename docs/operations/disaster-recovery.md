@@ -122,8 +122,9 @@ around the same quiesce — see the point-in-time warning below).
 cross-shard consistent. Snapshots taken at different times can disagree — a query acked between
 shard A's snapshot and shard B's exists in one restored shard and not the other (matching is
 per-query, so the effect is "that query is missing", not corruption). For a consistent **set**,
-quiesce writes (pause the ingest pipeline), `POST /_checkpoint`, snapshot every shard volume, then
-resume. If you must restore from a non-quiesced set, treat the window between the oldest and
+quiesce writes (pause the ingest pipeline), snapshot every shard + control volume, then resume —
+the [runbook §7 procedure](cluster-deployment.md) (a stateless coordinator's `POST /_checkpoint`
+no-ops; each node's volume is crash-consistent on its own). If you must restore from a non-quiesced set, treat the window between the oldest and
 newest snapshot as lost and replay it from upstream.
 
 ## 4. Post-recovery verification checklist

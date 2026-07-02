@@ -120,9 +120,12 @@ storage/topology change:
      the restored instance and diff:
 
      ```sh
+     # golden-titles.tsv: <raw title>\t<expected sorted id array>, e.g.
+     #   1994 fleer jordan psa 10\t[12,845]
      while IFS=$'\t' read -r title expected; do
-       got=$(curl -fsS -XPOST :9201/_search -H 'content-type: application/json' \
-             -d "{\"query\":{\"percolate\":{\"document\":{\"title\":$title}}}}" \
+       body=$(jq -Rn --arg t "$title" '{query:{percolate:{document:{title:$t}}}}')
+       got=$(curl -fsS -XPOST http://localhost:9201/_search \
+             -H 'content-type: application/json' -d "$body" \
              | jq -c '[.hits.hits[]._id|tonumber]|sort')
        [ "$got" = "$expected" ] || echo "MISMATCH: $title got=$got want=$expected"
      done < golden-titles.tsv

@@ -18,8 +18,11 @@ starting the new binary on the same `--data-dir` — the durable formats do the 
 - [ ] **Read the release notes for format changes** (segment / manifest / WAL versions — see §2).
       A release that bumps a durable format documents it.
 - [ ] **Take a backup / snapshot set first** ([`backup-restore.md`](backup-restore.md)): for the
-      remote topologies, `POST /_checkpoint` + a volume snapshot per shard + control volume. This
-      is the rollback path if the new version writes a format the old one refuses.
+      remote topologies that means the **quiesce-writes → snapshot every `shardN-data` +
+      `controlN-data` volume → resume** procedure ([runbook §7](cluster-deployment.md) — a
+      stateless coordinator's `POST /_checkpoint`/`/_backup` no-op, there is no cross-shard
+      barrier in v1). This is the rollback path if the new version writes a format the old one
+      refuses.
 - [ ] **Version sanity:** `deploy/check-versions.sh vX.Y.Z` asserts the tag matches the crate +
       chart `appVersion` you are deploying (the same tripwire the release pipeline runs).
 - [ ] Upgrade at **low write traffic** if you can — the windows below are smaller and the
@@ -112,10 +115,12 @@ What the chart guarantees while that runs:
   invariant against *node drains* racing the rollout — an eviction can never take a second shard
   or break the control quorum while one member is already down.
 - The three workloads roll **concurrently with each other** (Helm applies all templates at once) —
-  a bounded mixed-version window the wire contract tolerates (§2). For the strict §3 order on a
-  cautious upgrade, run three `helm upgrade`s scoping `--set image.tag` per workload is not
-  supported by this chart (one shared tag); instead pre-pull and rely on the fences + probes, or
-  pause between workloads with `kubectl rollout pause/resume`.
+  a bounded mixed-version window the wire contract tolerates (§2). **Strict §3 cross-workload
+  ordering is not available with this chart** (one shared `image.tag`; and `kubectl rollout
+  pause` applies to Deployments only, never StatefulSets). If you need it, gate each StatefulSet
+  manually with `updateStrategy.rollingUpdate.partition` (`kubectl patch` the partition down as
+  each workload finishes) — otherwise rely on the readiness gates + the fail-loud fences, which
+  is what the concurrent roll is designed around.
 - A stuck pod (readiness never true on the new version) **halts the rollout** at that ordinal —
   the remaining replicas keep serving the old version. `kubectl rollout undo` (or `helm rollback
   rr`) rolls back; the format-fence caveat from §4 applies unchanged.
