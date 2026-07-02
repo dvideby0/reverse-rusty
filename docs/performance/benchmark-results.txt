@@ -31,6 +31,10 @@ HOW TO RUN
   cargo test --release --test stress                  # 15 pressure tests (churn, par==seq, ghosts)
   cargo test --release --test stress \
       ten_million_queries_mixed_ops -- --ignored --nocapture   # 10M-scale soak (needs ~4+ GiB)
+  cargo test --release --test cluster_soak \
+      -- --ignored --nocapture                        # 20M multi-shard scale soak (ADR-104; ~4 min,
+                                                      #   ~16 GiB RAM + ~3.2 GiB temp disk; scale down
+                                                      #   with RR_CLUSTER_SOAK_QUERIES/_TITLES/_SHARDS)
 
   # ---- throughput / structure ----
   cargo run --release --bin bench -- 1000000 20000 0.0      # PURE SELECTIVE (clean cand count)
@@ -91,6 +95,34 @@ INVARIANTS — the regression gate (machine-INDEPENDENT; must reproduce)
     -> the load-bearing cluster invariants: content routing touches a handful of shards (~2-5, never
        all N), and candidates/title does NOT grow with K. Both reproduce on any machine.
 
+  CLUSTER SCALE SOAK  (cluster_soak, ADR-104 — 20M queries, K=8, durable, in-process; seed
+  0x2000_0000, clusterbench-convention pools Q/40 / Q/100.  The scale half of ADR-065 criterion
+  12; a ONE-OFF acceptance run — in no gate/CI — kept reproducible in-tree):
+    correctness (must be exactly these):  differential mismatches 0 (pre- AND post-mutation,
+      50k titles vs the single-node reference);  sentinel misses 0 (pre / post-mutation / after
+      reopen);  ghosts 0;  reopen: 2000-title subset + sentinels byte-identical;  live-add
+      retrievability failures 0 (1k sampled synthetic-ID adds)
+    structure @20M (fixed by data + ring, must reproduce):
+      fan-out @K=8:  avg 3.18  p50 3  p95 5  p99 5  max 7   (of 8)   <- bounded at 200x the 100k pin
+      per-shard entries: min 2,399,795 / max 2,847,093  (max/min 1.19, balanced)
+      stored entries 20,613,457 over 20,002,000 queries (broad replicates to all K, ADR-080);
+        classes A/B/C/D = 19,914,649 / 350,192 / 348,616 / 0
+      candidates/title: unique 10,035.55 (selective 5,164.52 + broad 4,871.04, broad share 48.5%)
+        -> GROWS with Q by design with the broad lane ON (lineage 85.64 @100k -> 682 @1M ->
+           10,036 @20M; what the ADR-026 columnar lane amortizes). NOT a flatness violation:
+           the flat-~54 claim is the broad-OFF selective path — re-verified at 20M below.
+
+  SELECTIVE FLATNESS AT 20M  (bench 20000000 20000 0.0 — fixed default pools; extends the 1M/5M
+  pin 4x past the prior largest run):
+    avg unique cand/title 54.56  (p95 96, p99 112, max 152)   <- the flat-~54 invariant HOLDS at 20M
+    main max posting len 104, #postings>1024: 0;  classes 20M A / 0 B / 0 C / 0 D
+    dict 683,877 features (84.6 MB resident, 4.2 B/q — bounded);  resident total 5.2 B/q
+    (retain_source=false) / 109.0 B/q (retain_source=true)
+    cross-check (bench 20000000 20000 0.05, same fixed pools — SINGLE-node): unique 6,616.65
+    (broad 4,977.71, p99 43,741) -> the broad-on growth reproduces without any cluster code:
+    it is a property of a corpus containing broad-intent queries, not a cluster artifact;
+    columnar batch = 4.3x over inline broad at this scale (the ADR-026 mitigation, bs=256)
+
   CORRECTNESS  (must be exactly these — this is the contract):
     oracle:   false_neg = 0,  false_pos = 0      (~109k matches over 40k queries x 4k titles)
     stress:   15/15 pass;  ghosts (deleted ids in results) = 0;  par == seq, 0 mismatches
@@ -118,6 +150,30 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-07-02] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  20M MULTI-SHARD SCALE SOAK
+              (cluster_soak, ADR-104 — the ADR-065 criterion-12 scale half) + the 20M bench
+              flatness cross-check.  Interactive box — wall-clock/throughput indicative; the
+              structural + correctness numbers are NOT (seed-deterministic, reproduce anywhere).
+  INVARIANTS — cluster_soak 20M + 2k sentinels, 50k titles, K=8, durable (see CLUSTER SCALE SOAK
+  block above; all correctness EXACT):
+    differential 0 mismatches pre- AND post-mutation (319,595,408 reference matches / 50k titles)
+    sentinels 0/2000 missed (pre / post-mutation / after reopen);  ghosts 0
+    live-add retrievability 0/1000 failed (frozen-dict synthetic-ID adds, ADR-046)
+    reopen byte-identical (2000-title subset + all sentinels);  reopened stored 20,507,108
+    fan-out avg 3.18  p50 3  p95 5  p99 5  max 7  (of 8);  per-shard min 2,399,795 / max 2,847,093
+    classes A/B/C/D 19,914,649 / 350,192 / 348,616 / 0;  cand/title 10,035.55 (broad 48.5%)
+  TIMINGS / FOOTPRINT — indicative: gen 5.7s;  durable K=8 build 61.5s (~325k q/s placed);
+    fan-out+stats pass 6.0s (~8.3k titles/s through the cluster, per-title fan-out parallelised);
+    reference build 43.9s;  differentials 12.3s / 18.8s;  mutations 50.0s (320k ops incl. the
+    8-shard delete fan-out);  flush+checkpoint 25.5s;  reopen 4.5s (mmap attach).
+    TOTAL 233.5s;  peak RSS 16.07 GB;  data_dir 3,215 MB.
+  BENCH 20M (fixed default pools) — the flatness cross-check:
+    broad=0.0:  unique 54.56/title (p95 96, p99 112, max 152; max posting 104) — the flat-~54 pin
+      EXTENDS 1M/5M -> 20M;  437,730 titles/s/core selective;  build 42.7s (468k q/s);
+      dict 683,877 features (4.2 B/q);  resident 5.2 B/q (no sources) / 109.0 B/q (with)
+    broad=0.05: unique 6,616.65 (broad 4,977.71) — single-node REPRODUCES the broad-on growth
+      (a corpus property, not a cluster artifact);  columnar batch 4.3x over inline broad (bs=256)
+
 [2026-06-02] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  Cluster fan-out harness (clusterbench,
               Tier-0 observability).  Loaded interactive box — throughput indicative; the fan-out +
               candidate structural numbers are NOT (they are K-invariant and reproduce bit-for-bit).

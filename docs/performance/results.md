@@ -244,4 +244,45 @@ neutralizes the broad-query failure mode that dominates generic percolators. The
 claim is supported by measurement for the selective majority of the workload; the remaining work
 (broad-lane batching, tighter SoA / dict interning, multi-shard) is specified and is about *memory and
 the broad lane*, not the core matching speed. (daachorse, roaring, mmap'd segments, and rayon parallel matching have since
-shipped — see [`../STATUS.md`](../STATUS.md).)
+shipped — see [`../STATUS.md`](../STATUS.md); the multi-shard leg is now *measured*, not just
+specified, at 20M — §11.)
+
+---
+
+## 11. Scale proof: the 20M multi-shard soak (ADR-104)
+
+The scale half of Distributed-v1 criterion 12 ([ADR-065](../decisions/adr-065-distributed-v1-graduation.md)):
+one run (`tests/cluster_soak/`, [ADR-104](../decisions/adr-104-cluster-scale-soak.md)) builds a
+**durable K=8 in-process cluster over 20,002,000 queries** (20M generated + 2k planted sentinels,
+seed-deterministic; 20.61M stored entries across the shards — broad-lane queries replicate to all
+K, ADR-080), and proves at that scale what the cluster oracles prove at ≤100k:
+
+- **Zero false negatives relative to the proven reference:** the cluster's full match set equals
+  the single-node engine's on **every one of 50k titles**, before *and* after live mutations
+  (100k synthetic-ID adds + 20k upserts + 200k deletes, mirrored on both engines). The
+  single-node engine is the reference that scales — brute force at 20M×50k is ~10¹² evaluations —
+  and it runs none of the cluster code, so a cluster-layer FN cannot cancel out.
+- **Absolute zero-FN sentinels:** 2,000 planted query/title pairs are retrieved by containment at
+  every checkpoint (pre-mutation, post-mutation, post-reopen) — the check a relative differential
+  structurally cannot make.
+- **Bounded fan-out at 20M:** avg **3.18** shards probed/title, p50 3, p95 5, **p99 5, max 7 of
+  8** — content routing still touches a handful of shards, never all K, at 200× the corpus the
+  invariant was pinned on. Placement stays balanced (per-shard max ≤ 1.19× min).
+- **Durable reopen at 20M:** `flush → checkpoint → drop → open` reattaches the coordinator
+  manifest + mmap segments and re-serves a recorded 2k-title subset + all sentinels
+  **byte-identically**, with no deleted id resurrected — the reopen path had never run past ~100k.
+
+**Candidates/title at scale — the honest reading.** With the broad lane ON, candidates/title
+*grows with corpus size by design* (the recorded lineage: 85.64 @100k → 682 @1M → **10,036
+@20M** on this corpus shape) — broad-lane volume is exactly what the ADR-026 columnar batch path
+amortizes, so the soak captures it rather than banding it. The engine's **flatness claim is the
+broad-OFF selective path**, and it holds at 20M: `bench 20000000 20000 0.0` measures **54.56
+candidates/title (p95 96, p99 112, max 152; max main posting 104)** — bit-compatible with the
+54.5 pinned at 1M and 54.29 at 5M — at **~438k titles/sec/core**. Commands, pins, and the dated
+capture: [`benchmark-results.txt`](benchmark-results.txt).
+
+**What this run deliberately does not prove:** the gRPC wire at scale (the scale dimensions —
+dict, postings tiers, placement, manifest — are transport-identical; the wire's own failure modes
+are owned by the gRPC oracles + the ADR-072 multi-machine harness), and the **real-corpus
+FN/throughput audit**, which remains criterion 12's open half (intake: the ADR-087
+`RR_ORACLE_CORPUS` hook).

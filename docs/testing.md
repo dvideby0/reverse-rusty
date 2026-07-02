@@ -52,6 +52,7 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 | **Pressure / soak** | `tests/stress.rs` | Mixed read/write/delete churn, parallel-vs-sequential agreement under mutation, metrics/event consistency, and the ADR-099 **proves-work-stopped** cancellation legs (self-calibrating: cancelled wall-clock asserted against the measured uncancelled runtime). Self-contained (seeded `gen`, no data files). |
 | **Cluster oracle** | `tests/cluster_oracle.rs` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}; every placement class + fan-out asserted; dynamic-vocabulary absorb-correctly (hashed new tokens don't broaden, declared + auto-learned aliases make both surface forms match). **Half the Cluster-v1 gate (below).** |
 | **Cluster durability** | `tests/cluster_durability_oracle.rs` | A `data_dir` cluster rebuilt from manifest + per-shard segments + coordinator log ≡ pre-crash ≡ brute, K∈{1,3,8} × broad; checkpoint, torn-tail recovery, fail-loud guards, alias-survives-reopen. **Half the Cluster-v1 gate (below).** |
+| **Cluster scale soak** | `tests/cluster_soak/` | The **≥20M multi-shard scale proof** (ADR-104, the scale half of Distributed-v1 criterion 12): a durable K=8 in-process cluster at 20M queries ≡ the single-node engine over 50k titles, planted absolute-FN sentinels, mirrored live mutations (incl. a synthetic-ID retrievability check), and a checkpoint → reopen re-verify. `#[ignore]`d, **run explicitly by name only — in no gate and no CI workflow** (a one-off acceptance run; numbers pinned in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)) — see [Pressure & soak](#pressure--soak-tests). |
 
 ### What the oracle does and does not verify
 
@@ -136,6 +137,22 @@ cargo test --release --test stress ten_million_queries_mixed_ops -- --ignored --
 ```
 
 In CI the soak runs only on a manual `workflow_dispatch` with `run_soak = true`.
+
+[`tests/cluster_soak/`](../engine/tests/cluster_soak/) holds the **cluster scale soak** (ADR-104) —
+`twenty_million_multi_shard_soak`, the ≥20M multi-shard proof described in the suite table above. It
+is also `#[ignore]`d, but unlike the 10M soak it is **wired into no CI dispatch at all**: it was a
+one-off local acceptance run (~4 min, ~16 GB peak RSS, ~3.2 GB temp disk on the capture machine),
+kept in-tree so the ADR-104 evidence is reproducible. Run it explicitly, scaling down via env knobs
+for a harness smoke:
+
+```
+cargo test --release --test cluster_soak -- --ignored --nocapture            # the canonical 20M / 50k / K=8 run
+RR_CLUSTER_SOAK_QUERIES=200000 RR_CLUSTER_SOAK_TITLES=5000 \
+  cargo test --release --test cluster_soak -- --ignored --nocapture          # ~3s harness smoke
+```
+
+(`RR_CLUSTER_SOAK_QUERIES` / `_TITLES` / `_SHARDS` size the run; `RR_CLUSTER_SOAK_DIR` relocates the
+durable cluster's temp dir.)
 
 ## Crash injection
 

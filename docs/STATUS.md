@@ -231,6 +231,10 @@ live in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)
 - LSM read-amplification stays bounded as segments grow (1→8) — table in
   [`performance/results.md`](performance/results.md) §7.
 - **Resident memory:** ~148 → **~4.5 B/query** with `retain_source=false` (ADR-020).
+- **20M-query multi-shard scale soak** (K=8, in-process, durable — ADR-104): cluster ≡
+  single-node over 50k titles (0 mismatches, pre- and post-mutation), 0 sentinel misses / ghosts,
+  checkpoint → reopen byte-identical; fan-out avg ~3.2, p99 5, max 7 of 8 — the bounded-fan-out +
+  zero-FN claims hold at 20M ([`performance/benchmark-results.txt`](performance/benchmark-results.txt)).
 
 ## Roadmap at a glance
 
@@ -250,7 +254,8 @@ releases are smoke-gated GHCR images; M3 hardening complete; open: M4 commercial
 
 - **Not yet a hardened multi-machine deployment.** The distributed layers are oracle-proven
   in-process / on localhost / in the containerized harness, but the Distributed-v1 graduation
-  (ADR-065) is incomplete — one open criterion: the ≥20M scale proof (deployment packaging +
+  (ADR-065) is incomplete — one open criterion remnant: the **real-corpus FN/throughput audit**
+  (the ≥20M multi-shard scale proof is shipped, ADR-104; deployment packaging +
   operations runbook shipped, ADR-081; Kubernetes/Helm chart + native gRPC health/readiness probes,
   ADR-084; replicate-broad-to-all + the cluster class-D lane, ADR-080; backup/restore, ADR-079). The
   shard + control gRPC servers now expose the standard `grpc.health.v1.Health` service on an opt-in
@@ -291,5 +296,7 @@ releases are smoke-gated GHCR images; M3 hardening complete; open: M4 commercial
   runtime via `Vocab`/`NormalizerBuilder` (learning: ADR-015/053; aliases: ADR-054/060/061).
 - **Validated on synthetic + pinned-pair data, not a real corpus.** The oracle and benchmarks run
   the seeded adversarial generator (ADR-008/063); the ADR-064 PoC proved zero FN on pinned pairs
-  under the parity configuration. The full **real-corpus false-negative / throughput audit** is
-  still owed — the highest-leverage credibility step, and Distributed-v1 criterion 12 (ADR-065).
+  under the parity configuration; the 20M multi-shard soak (ADR-104) proved the scale story on the
+  synthetic corpus. The full **real-corpus false-negative / throughput audit** is still owed — the
+  highest-leverage credibility step, and the open remnant of Distributed-v1 criterion 12 (ADR-065);
+  the intake is the ADR-087 `RR_ORACLE_CORPUS` hook.
