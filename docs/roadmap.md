@@ -91,9 +91,13 @@ validation (ADR-103 — the title→query stream as behavioral evidence, opt-in 
 - **Distributed v1 ([ADR-065](decisions/adr-065-distributed-v1-graduation.md)) — open criteria**
   (1–11 shipped: ADR-070/071/072/074/075/076/077/078/079/080/081, + follow-ons ADR-082/083/084; see
   [`STATUS.md`](STATUS.md)):
-  - **Criterion 12 — scale proof at target:** a multi-shard load test at ≥20M stored queries on
-    real hardware (largest soak to date: 10M single-node), plus the **real-corpus FN/throughput
-    audit** owed in [`STATUS.md`](STATUS.md) "Current limitations".
+  - **Criterion 12 — scale proof at target:** the **≥20M multi-shard load test is ✅ shipped**
+    ([ADR-104](decisions/adr-104-cluster-scale-soak.md) — a durable K=8 in-process cluster at 20M
+    stored queries ≡ the single-node engine over 50k titles, sentinels + mirrored mutations +
+    checkpoint/reopen, run on real hardware; numbers pinned in
+    [`performance/benchmark-results.txt`](performance/benchmark-results.txt)). **Still open: the
+    real-corpus FN/throughput audit** owed in [`STATUS.md`](STATUS.md) "Current limitations" —
+    blocked on a user-supplied corpus (the intake is ADR-087's `RR_ORACLE_CORPUS` hook).
   - *Criterion 7 follow-ons (deferred, [ADR-078](decisions/adr-078-cluster-resize.md)):* always-on
     autoscaler-driven resize (needs hysteresis to avoid thrash, since a resize is non-idempotent +
     `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
