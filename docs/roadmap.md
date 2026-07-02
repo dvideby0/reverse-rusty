@@ -160,10 +160,10 @@ behind a shipped seam:
 The engine + distributed layers are built and oracle-proven; this tier is the **named, documented
 deployable contract** distinct from the scale proof, plus the operational hardening above it
 (source: external deployability review, 2026-06-24; the review positioned M0–M2 as the highest-ROI
-next work, ahead of more algorithm work). M0 + M1 shipped as
+next work, ahead of more algorithm work). M0–M2 all shipped as
 [ADR-098](decisions/adr-098-deployable-gate-and-release-pipeline.md) — the contract page is
-[`operations/deployment-modes.md`](operations/deployment-modes.md); M2 is the accepted follow-up in
-the same ADR.
+[`operations/deployment-modes.md`](operations/deployment-modes.md), the local smoke gates every PR,
+and `release.yml` publishes the smoke-gated GHCR image per `v*` tag.
 
 - **M0 — deploy-truth — ✅ shipped ([ADR-098](decisions/adr-098-deployable-gate-and-release-pipeline.md)).**
   [`operations/deployment-modes.md`](operations/deployment-modes.md) is the canonical
@@ -177,11 +177,15 @@ the same ADR.
   401-auth probe → `_doc`/`_bulk` ingest → `_search`/`_mpercolate` incl. a MUST_NOT suppression →
   `_stats`/`_metrics` → `_backup` → SIGTERM-restart-reopen → restore-the-backup) **inside the
   required `gate + benchmarks` CI job** — the M1 acceptance gate on every PR, no containers.
-- **M2 — Deployable Feature Complete: remote static cluster (static-K, RF=1).** A Helm smoke test + a
-  Compose smoke test in the release gate; **a versioned image + release pipeline** — publish to a
-  registry tagged by git SHA + semver (no image-publishing pipeline exists today; the chart already
-  expects `image.repository`/`tag`), ending `:latest`-only; and a check that Compose and Helm
-  represent the *same* topology. (Scale proof stays Tier 3 criterion 12, not a blocker here.)
+- **M2 — Deployable Feature Complete: remote static cluster — ✅ shipped (ADR-098).**
+  [`release.yml`](../.github/workflows/release.yml): on a `v*` tag — version preflight (tag ==
+  crate == chart appVersion, `deploy/check-versions.sh`) → build → **smoke the exact candidate
+  image** (Compose `cluster-smoke.sh` + kind `k8s-smoke.sh`, now fixed + passing end-to-end, +
+  `deploy/check-topology-parity.sh`) → publish `ghcr.io/<owner>/reverse-rusty:{vX.Y.Z,
+  sha-<short>}` (**the image is the only published artifact; no `:latest`** — ADR-098);
+  `workflow_dispatch` = the no-publish rehearsal. Per-PR: the compose smoke rides the harness
+  job's image; the parity + version tripwires ride the helm-chart job. (Scale proof stays Tier 3
+  criterion 12, not a blocker here.)
 - **M3 — production hardening (safe with on-call ownership).** **Shard/control-local Prometheus
   metrics shipped** ([ADR-091](decisions/adr-091-shard-control-metrics.md), closing ADR-084 deferral
   b): per-node `/_metrics` on `shardserver`/`controlserver` (stored-query count, memory, compaction

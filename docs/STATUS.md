@@ -218,9 +218,9 @@ gate (✅ complete) · **1** measured bottlenecks (✅ complete) · **2** featur
 (open: alias-discovery sources, the "improve" menu) · **3** scale & production maturity (open:
 ADR-065 criterion 12, model versioning, aspects-first ingestion) · **4** percolator
 parity (✅ program complete; small deferred refinements) · **5** deployability & operational
-maturity (M0 deploy-truth + M1 local-smoke CI gate ✅ shipped, ADR-098 — the supported-deployment
-contract is [`operations/deployment-modes.md`](operations/deployment-modes.md); open: M2 release
-pipeline, M3 hardening, M4 commercial ops) · the operational-polish backlog.
+maturity (M0 deploy-truth + M1 local-smoke CI gate + M2 release pipeline ✅ shipped, ADR-098 — the
+supported-deployment contract is [`operations/deployment-modes.md`](operations/deployment-modes.md),
+releases are smoke-gated GHCR images; open: M3 hardening residue, M4 commercial ops) · the operational-polish backlog.
 
 ## Current limitations
 

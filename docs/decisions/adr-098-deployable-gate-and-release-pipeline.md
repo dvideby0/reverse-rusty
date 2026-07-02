@@ -2,11 +2,14 @@
 
 > [Back to the decisions index](../DECISIONS.md)
 
-- **Status:** **Accepted (2026-07-02).** M0 + M1 shipped (this PR):
+- **Status:** **Done (2026-07-02).** M0 + M1 shipped first (PR #96):
   [`operations/deployment-modes.md`](../operations/deployment-modes.md) +
   [`deploy/local-smoke.sh`](../../deploy/local-smoke.sh) wired into the required CI gate job.
-  **M2 (the release pipeline + remote smoke gates) lands in the follow-up PR** — the staged
-  single-ADR pattern ADR-093 used.
+  **M2 shipped in the follow-up PR** (the staged single-ADR pattern ADR-093 used):
+  [`release.yml`](../../.github/workflows/release.yml) (tag-triggered, smoke-the-candidate-first,
+  GHCR `{vX.Y.Z, sha-<short>}`), the `check-versions.sh` + `check-topology-parity.sh` guards
+  wired per-PR, the production-compose smoke on the harness job's image per-PR, and the
+  `k8s-smoke.sh` u64-id fix + its first end-to-end PASS.
 
 - **Context:** The engine + distributed layers are built and oracle-proven, but everything
   deployment-shaped was folded into Distributed-v1 criterion 12 (the ≥20M scale proof, ADR-065) —

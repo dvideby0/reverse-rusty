@@ -33,10 +33,17 @@ The shipped compose is **K=3 shards, RF=1**. Scaling K and RF: [§5](#5-scaling)
 
 ## 2. Prerequisites
 
-### 2.1 Build the image
+### 2.1 Build (or pull) the image
 
 ```sh
 docker build -f deploy/Dockerfile -t reverse-rusty:latest .   # from the repo root
+```
+
+Or pull a released image (ADR-098 — published by `release.yml` after the candidate passes the
+Compose + kind smokes; tagged `vX.Y.Z` + `sha-<short>`, deliberately never `:latest`):
+
+```sh
+docker pull ghcr.io/<owner>/reverse-rusty:v0.1.0
 ```
 
 ### 2.2 Mint the mesh identity (TLS)
