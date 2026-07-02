@@ -17,6 +17,7 @@
 mod harness;
 
 mod alias;
+mod alias_discovery;
 mod alias_edges;
 mod batch;
 mod class_d;
