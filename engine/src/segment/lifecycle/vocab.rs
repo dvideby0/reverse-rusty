@@ -3,7 +3,7 @@
 //! recompile-on-vocabulary-change pass ([`recompile_stale_segments`](Engine::recompile_stale_segments))
 //! plus the corpus learn-and-apply drivers (ADR-046/053/054).
 
-use crate::segment::{AliasApplyReport, Engine, Segment};
+use crate::segment::{AliasApplyReport, AliasDiscoveryReport, Engine, Segment};
 use crate::vocab::AliasSummary;
 use std::sync::Arc;
 
@@ -67,6 +67,68 @@ impl Engine {
             recompiled,
             summary: self.alias_summary(),
         })
+    }
+
+    /// Discover distributional alias candidates over the engine's OWN stored queries
+    /// (ADR-102) — compute-only: nothing is recorded or changed. See
+    /// [`crate::vocab::discover_pairs`] for the signal + noise model.
+    pub fn discover_aliases(
+        &self,
+        cfg: &crate::vocab::DistributionalConfig,
+    ) -> Vec<crate::vocab::DiscoveredPair> {
+        crate::vocab::discover_pairs(&self.live_sources(), cfg)
+    }
+
+    /// [`discover_aliases`](Self::discover_aliases), then record every proposal into the
+    /// registry as a review `Candidate` (`LearnedDistributional` provenance — NEVER
+    /// auto-active, ADR-102) and install the updated vocabulary through the metadata-only
+    /// seam: candidates change no matching-relevant state, so there is no epoch bump and no
+    /// recompile — match results are byte-identical before/after. Like every single-node
+    /// runtime vocab mutation, durability is the operator's vocab file (`GET /_vocab` → save;
+    /// a cluster checkpoint embeds the vocab in its manifest).
+    pub fn discover_aliases_and_record(
+        &mut self,
+        cfg: &crate::vocab::DistributionalConfig,
+    ) -> Result<AliasDiscoveryReport, crate::error::NormalizerError> {
+        let pairs = self.discover_aliases(cfg);
+        let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
+        let (new_candidates, rediscovered, rejected_sticky) =
+            vocab.record_distributional_candidates(&pairs, &self.norm, &self.dict);
+        self.install_vocab_metadata_only(vocab)?;
+        Ok(AliasDiscoveryReport {
+            proposed: pairs.len(),
+            new_candidates,
+            rediscovered,
+            rejected_sticky,
+            summary: self.alias_summary(),
+        })
+    }
+
+    /// Install a vocabulary whose **matching-relevant projections are unchanged** — the
+    /// metadata-only seam (ADR-102). The shipped apply path ([`set_vocab`](Self::set_vocab))
+    /// unconditionally bumps `vocab_epoch` and recompiles the corpus; for a change that only
+    /// adds/edits registry *candidates* (which `effective_equivalence_groups` +
+    /// `active_alias_forms` cannot see) that is an O(corpus) no-op. This seam structurally
+    /// verifies the invariant instead of trusting the caller: equal projections ⇒ swap the Arc
+    /// (no epoch bump, no normalizer rebuild, no recompile); unequal (unreachable from the
+    /// candidate-only paths — belt-and-braces) ⇒ fall back to the full `set_vocab` +
+    /// `recompile_stale_segments`, so the fast path can never cause a false negative. Returns
+    /// `true` when the fast path was taken.
+    pub fn install_vocab_metadata_only(
+        &mut self,
+        vocab: crate::vocab::Vocab,
+    ) -> Result<bool, crate::error::NormalizerError> {
+        let current = self.vocab.as_deref().cloned().unwrap_or_default();
+        if vocab.effective_equivalence_groups() == current.effective_equivalence_groups()
+            && vocab.aliases().active_alias_forms() == current.aliases().active_alias_forms()
+        {
+            self.vocab = Some(Arc::new(vocab));
+            Ok(true)
+        } else {
+            self.set_vocab(vocab)?;
+            self.recompile_stale_segments();
+            Ok(false)
+        }
     }
 
     /// Replace the engine's vocabulary and normalizer. Existing compiled

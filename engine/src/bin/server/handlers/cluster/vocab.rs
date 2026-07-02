@@ -287,3 +287,42 @@ pub(crate) async fn cluster_put_settings() -> Response {
          the new flags",
     )
 }
+
+/// POST /_vocab/aliases/discover — distributional discovery in cluster mode is a **dry run over
+/// an explicit corpus only** (ADR-102): the coordinator has no single-engine corpus to analyze
+/// in place (gathering every shard's sources is a cross-shard op with no seam yet), so the
+/// request must carry `queries`. The computation is pure — no cluster lock, nothing recorded.
+#[instrument(skip_all)]
+pub(crate) async fn cluster_discover_aliases(
+    body: Option<Json<crate::handlers::alias::DiscoverAliasesRequest>>,
+) -> Response {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let Some(queries) = &req.queries else {
+        return crate::dto::ApiError::response(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "cluster-mode discovery is an explicit-corpus dry run: supply `queries` \
+             ([[id, dsl], ...]); engine-sourced discovery is single-node"
+                .to_string(),
+        )
+        .into_response();
+    };
+    let cfg = req.config();
+    let proposals = reverse_rusty::vocab::discover_pairs(queries, &cfg);
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({ "count": proposals.len(), "proposals": proposals })),
+    )
+        .into_response()
+}
+
+/// POST /_vocab/aliases/discover_and_record — 501 in cluster mode (ADR-102): recording into a
+/// cluster vocabulary is a full blue/green rebuild (ADR-074/076), grossly disproportionate for
+/// review-only candidates.
+pub(crate) async fn cluster_discover_and_record_aliases() -> Response {
+    not_in_cluster_mode(
+        "POST /_vocab/aliases/discover_and_record",
+        "run the dry-run /_vocab/aliases/discover with an explicit `queries` body (or discover \
+         on a single-node replica), review, then install reviewed entries via PUT /_vocab",
+    )
+}

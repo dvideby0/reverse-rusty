@@ -112,7 +112,13 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
 /// matcher cannot express, or any learned guess that is not a clear variant, defaults to a
 /// review candidate — never silently active.
 pub(super) fn default_status_for(kind: AliasKind, provenance: AliasProvenance) -> AliasStatus {
-    use AliasProvenance::{DeclaredFile, LearnedFromQueries, Manual};
+    use AliasProvenance::{DeclaredFile, LearnedDistributional, LearnedFromQueries, Manual};
+    // Distributional discovery (ADR-102) is review-first by contract: the signal cannot tell a
+    // substitute from a co-hyponym, so NOTHING it proposes auto-activates — not even a pair the
+    // structural classifier would call a clear variant. This arm outranks the kind logic below.
+    if provenance == LearnedDistributional {
+        return AliasStatus::Candidate;
+    }
     let auto_active = match kind {
         // Cross-kind expansion is unsafe — always review-only.
         AliasKind::MixedKind => false,
@@ -123,7 +129,7 @@ pub(super) fn default_status_for(kind: AliasKind, provenance: AliasProvenance) -
         // `(psa, bgs, sgc)` case, or a learned multi-word guess) as a review candidate.
         AliasKind::SingleTokenDistinct | AliasKind::MultiWord => match provenance {
             DeclaredFile | Manual => true,
-            LearnedFromQueries => false,
+            LearnedFromQueries | LearnedDistributional => false,
         },
     };
     if auto_active {

@@ -41,9 +41,9 @@ pub(crate) use admin::{
 pub(crate) use doc::{cluster_bulk, cluster_delete_doc, cluster_get_doc, cluster_put_doc};
 pub(crate) use search::{cluster_mpercolate, cluster_search};
 pub(crate) use vocab::{
-    cluster_get_aliases, cluster_get_settings, cluster_get_vocab, cluster_import_aliases,
-    cluster_learn_aliases, cluster_learn_and_apply_vocab, cluster_learn_vocab,
-    cluster_put_settings, cluster_put_vocab,
+    cluster_discover_aliases, cluster_discover_and_record_aliases, cluster_get_aliases,
+    cluster_get_settings, cluster_get_vocab, cluster_import_aliases, cluster_learn_aliases,
+    cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_put_settings, cluster_put_vocab,
 };
 
 /// Map a [`ShardError`] onto the HTTP layer. `PartiallyApplied` is deliberately NOT

@@ -436,6 +436,43 @@ impl Vocab {
         self.aliases.import_solr(text, norm, dict)
     }
 
+    /// Record distributionally-discovered pairs (ADR-102) into the registry as review
+    /// candidates — [`LearnedDistributional`](crate::vocab::AliasProvenance::LearnedDistributional)
+    /// provenance NEVER auto-activates, so this can only add/refresh `Candidate` entries (a
+    /// `Rejected` group stays rejected; an existing entry only maxes its confidence). Returns
+    /// `(new_candidates, rediscovered, rejected_sticky)`.
+    pub fn record_distributional_candidates(
+        &mut self,
+        pairs: &[crate::vocab::DiscoveredPair],
+        norm: &Normalizer,
+        dict: &Dict,
+    ) -> (usize, usize, usize) {
+        let (mut fresh, mut seen, mut sticky) = (0usize, 0usize, 0usize);
+        for p in pairs {
+            // Belt-and-braces: the discoverer already skips non-finite similarities, but a
+            // NaN confidence would poison the registry's max-reconciliation.
+            let confidence = if p.similarity.is_finite() {
+                p.similarity.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let existed = self.aliases.contains(&p.forms);
+            match self.aliases.add_classified(
+                &p.forms,
+                crate::vocab::AliasProvenance::LearnedDistributional,
+                confidence,
+                norm,
+                dict,
+            ) {
+                Some(crate::vocab::AliasStatus::Rejected) => sticky += 1,
+                Some(_) if existed => seen += 1,
+                Some(_) => fresh += 1,
+                None => {} // < 2 distinct forms after canonicalization — dropped
+            }
+        }
+        (fresh, seen, sticky)
+    }
+
     /// A count of alias entries by status (ADR-060 item 9) — for metrics / review surfaces.
     #[must_use]
     pub fn alias_summary(&self) -> AliasSummary {

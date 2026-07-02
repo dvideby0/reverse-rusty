@@ -36,12 +36,13 @@ use crate::cli::Cli;
 use crate::handlers::{
     cluster_backup, cluster_bulk, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats,
     cluster_checkpoint, cluster_compact, cluster_delete_doc, cluster_deregister_node,
-    cluster_flush, cluster_gc, cluster_get_aliases, cluster_get_doc, cluster_get_settings,
-    cluster_get_vocab, cluster_handoff, cluster_health, cluster_import_aliases,
-    cluster_learn_aliases, cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_metrics,
-    cluster_mpercolate, cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign,
-    cluster_rebalance, cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync,
-    cluster_root, cluster_search, cluster_state, cluster_stats,
+    cluster_discover_aliases, cluster_discover_and_record_aliases, cluster_flush, cluster_gc,
+    cluster_get_aliases, cluster_get_doc, cluster_get_settings, cluster_get_vocab, cluster_handoff,
+    cluster_health, cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
+    cluster_learn_vocab, cluster_metrics, cluster_mpercolate, cluster_put_doc,
+    cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
+    cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync, cluster_root,
+    cluster_search, cluster_state, cluster_stats,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -344,6 +345,11 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         .route(
             "/_vocab/aliases/learn_and_apply",
             post(cluster_learn_aliases),
+        )
+        .route("/_vocab/aliases/discover", post(cluster_discover_aliases))
+        .route(
+            "/_vocab/aliases/discover_and_record",
+            post(cluster_discover_and_record_aliases),
         )
         .route(
             "/_settings",
