@@ -71,7 +71,20 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`operations/kubernetes-deployment.md`](operations/kubernetes-deployment.md) — the Helm chart
   ([`deploy/helm/`](../deploy/helm/)): values, secrets, probes, and the k8s deploy procedure (ADR-084).
 - [`operations/backup-restore.md`](operations/backup-restore.md) — back up + restore a deployment
-  (single-node or cluster); the safety guarantee + the FS-snapshot zero-stall path (ADR-079).
+  (single-node or cluster); the safety guarantee + the FS-snapshot zero-stall path (ADR-079) + the
+  **restore rehearsal** drill (Tier 5 M3).
+- [`operations/disaster-recovery.md`](operations/disaster-recovery.md) — the **DR runbook** (Tier 5
+  M3): the RPO/RTO model by mode, the scenario→procedure map, and the flows only it owns —
+  shard-volume loss at RF=1, control-quorum majority loss, whole-cluster restore.
+- [`operations/rolling-upgrade.md`](operations/rolling-upgrade.md) — the **version-upgrade
+  procedure** (Tier 5 M3): preflight, the compatibility-fence contract, the
+  control→shards→coordinator order with health gates, the Compose + Helm legs, rollback.
+- [`operations/sizing.md`](operations/sizing.md) — the **resource-sizing guide** (Tier 5 M3): the
+  memory-driven shard-count method, headroom, cache residency, per-component sizing — pointing at
+  [`performance/results.md`](performance/results.md) for the numbers.
+- [`operations/alerting.md`](operations/alerting.md) — **what to alert on and why** (Tier 5 M3),
+  one section per rule in the shipped, promtool-validated
+  [`deploy/prometheus-alerts.yml`](../deploy/prometheus-alerts.yml).
 - [`operations/threat-model.md`](operations/threat-model.md) — the **threat model**: trust boundaries,
   assets, adversary model, controls mapped to code, the v1 non-goals + operator checklist, and the
   container-scan baseline (ADR-089).

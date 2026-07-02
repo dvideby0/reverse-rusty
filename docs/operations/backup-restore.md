@@ -93,6 +93,47 @@ available.
 date-stamped `dest`, then prune old copies with your normal retention tooling. Each backup is
 fully self-contained (no dependency on prior backups), so pruning is just `rm -rf` of old dirs.
 
+## Rehearsal — prove you can restore
+
+A backup you have never restored is a hope, not a plan. The engine's restore path is
+CI-proven (`local-smoke.sh` restores a backup on every PR; the durability oracles diff restored
+vs source), so what a rehearsal actually tests is **your** side: the snapshots exist, they are
+complete, your runbook works, and you know how long a restore takes. Quarterly, or after any
+storage/topology change:
+
+1. **Pick the latest real backup** — the `POST /_backup` dir (local modes) or the newest
+   quiesced per-volume snapshot set (remote — see the zero-write-stall procedure above). Use the
+   real artifact, not a fresh one taken for the drill.
+2. **Verify integrity first:** run `storage::verify_backup(dir)` / `verify_cluster_backup(dir)`
+   on the copy (a tiny Rust snippet, or keep a copy of the backup around and rely on the verify
+   that ran at `POST /_backup` time + checksums from your archiver). Bit-rot found *now* is a
+   snooze; found during a real recovery it is the incident.
+3. **Restore into a sandbox** — a fresh dir + port on any machine with the released image:
+   `server --data-dir <copy> --port 9201` (single-node) or the full topology bring-up against
+   restored volumes (remote; [`disaster-recovery.md` §3.3](disaster-recovery.md)). **Start the
+   clock here.**
+4. **Verify content, not just liveness:**
+   - `GET :9201/_stats` — the query count equals the count you recorded when the backup was
+     taken (record it next to the backup; the smoke does exactly this).
+   - **Golden-titles probe:** keep a small file of representative titles WITH their expected
+     matched ids (regenerate it whenever the corpus changes materially); percolate each against
+     the restored instance and diff:
+
+     ```sh
+     while IFS=$'\t' read -r title expected; do
+       got=$(curl -fsS -XPOST :9201/_search -H 'content-type: application/json' \
+             -d "{\"query\":{\"percolate\":{\"document\":{\"title\":$title}}}}" \
+             | jq -c '[.hits.hits[]._id|tonumber]|sort')
+       [ "$got" = "$expected" ] || echo "MISMATCH: $title got=$got want=$expected"
+     done < golden-titles.tsv
+     ```
+5. **Stop the clock and record it.** Copy time + reopen time + verification time = your measured
+   **RTO evidence** — the number [`disaster-recovery.md` §1](disaster-recovery.md) tells you to
+   plug into its table. Record the backup's age at restore time too: that is your demonstrated
+   RPO.
+6. **Tear the sandbox down** — and fix whatever snagged (a missing mount, a stale golden file, a
+   runbook step that assumed a host that no longer exists). The snags are the yield.
+
 ## Not covered in v1 (see ADR-079)
 
 - **Online (no-quiesce) backup** that allows concurrent writes during the copy — the

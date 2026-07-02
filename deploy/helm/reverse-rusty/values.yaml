@@ -52,6 +52,13 @@ ports:
 metrics:
   enabled: true
 
+# PodDisruptionBudgets (roadmap Tier 5 M3): protect the rolling-upgrade invariants against node
+# drains — a voluntary eviction can never take a second shard while one is down, nor break the
+# 2-of-3 control quorum (maxUnavailable: 1 each). The coordinator gets a PDB only when
+# coordinator.replicas > 1 (on a single stateless replica a PDB would block drains for nothing).
+podDisruptionBudget:
+  enabled: true
+
 # Durable openraft control plane (ADR-038/041). When enabled AND wireToCoordinator, the
 # coordinator attaches to the quorum via --control-endpoint (ADR-083), listing ALL members
 # for failover (ADR-086), so cluster state survives a coordinator restart — the reason k8s

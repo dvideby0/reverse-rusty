@@ -6,7 +6,10 @@ auth posture, and — in one place — the **v1 non-goals** as named constraints
 *contract*; the fresh-clone *acceptance recipe* that proves a checkout is green stays
 [`build-and-smoke.md`](build-and-smoke.md), and the per-mode *operational runbooks* stay
 [`cluster-deployment.md`](cluster-deployment.md) (Compose) and
-[`kubernetes-deployment.md`](kubernetes-deployment.md) (Helm).
+[`kubernetes-deployment.md`](kubernetes-deployment.md) (Helm); cross-mode operations —
+disaster recovery, rolling upgrades, sizing, alerting, the backup rehearsal — have their own
+pages ([`disaster-recovery.md`](disaster-recovery.md), [`rolling-upgrade.md`](rolling-upgrade.md),
+[`sizing.md`](sizing.md), [`alerting.md`](alerting.md), [`backup-restore.md`](backup-restore.md)).
 
 > TL;DR: four supported modes. The two **local** modes are CI-gated on every PR
 > (`deploy/local-smoke.sh` runs inside the required `gate + benchmarks` job); the two **remote**

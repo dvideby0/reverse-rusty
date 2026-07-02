@@ -106,7 +106,14 @@ cluster-level counters + a per-shard `reverse_rusty_cluster_shard_queries{shard=
 - **Recovery:** a restarted shard/control pod self-restores from its PVC (durable `--data-dir`,
   ADR-036/041). Don't wipe the PVC on restart.
 - **Backup:** the remote/stateless coordinator has no cross-shard backup barrier — back up each shard's
-  PVC (a volume snapshot per `data` PVC) per [backup-restore.md](backup-restore.md).
+  PVC (a volume snapshot per `data` PVC) per [backup-restore.md](backup-restore.md); rehearse the
+  restore (its Rehearsal section) and see [disaster-recovery.md](disaster-recovery.md) for the flows
+  that need those snapshots.
+- **Upgrades:** `helm upgrade --set image.tag=vX.Y.Z` — the StatefulSets set
+  `updateStrategy: RollingUpdate` explicitly (one pod at a time, gated on Ready) and ship
+  PodDisruptionBudgets (`podDisruptionBudget.enabled`, default on) so node drains cannot take a
+  second shard or break the control quorum mid-roll. Full procedure incl. the
+  compatibility-fence contract and rollback: [rolling-upgrade.md](rolling-upgrade.md).
 
 ## 6. Control-plane wiring & limits
 

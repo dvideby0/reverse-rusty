@@ -88,6 +88,13 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   container scan (`deploy/scan-image.sh`, triaged baseline: base-image CVEs only, none service-reachable)
   + the `_backup` client-`dest` finding dispositioned (auth-gated, non-root operator responsibility). The
   app deps stay `cargo audit`/`deny`-clean; no code-level vuln found.
+- **M3 operational docs** (Tier 5 M3, no ADR — runbook extensions): the
+  [DR runbook](operations/disaster-recovery.md) (RPO/RTO by mode + volume/quorum/whole-cluster
+  loss flows), the [rolling-upgrade procedure](operations/rolling-upgrade.md) (compatibility-fence
+  contract; the chart sets explicit `updateStrategy` + ships PodDisruptionBudgets), the
+  [sizing guide](operations/sizing.md), [alerting](operations/alerting.md) + the shipped
+  promtool-validated [`deploy/prometheus-alerts.yml`](../deploy/prometheus-alerts.yml), and the
+  backup-restore Rehearsal drill.
 
 ### Vocabulary & aliases
 
@@ -228,7 +235,7 @@ ADR-065 criterion 12, model versioning, aspects-first ingestion) · **4** percol
 parity (✅ program complete; small deferred refinements) · **5** deployability & operational
 maturity (M0 deploy-truth + M1 local-smoke CI gate + M2 release pipeline ✅ shipped, ADR-098 — the
 supported-deployment contract is [`operations/deployment-modes.md`](operations/deployment-modes.md),
-releases are smoke-gated GHCR images; open: M3 hardening residue, M4 commercial ops) · the operational-polish backlog.
+releases are smoke-gated GHCR images; M3 hardening complete; open: M4 commercial ops) · the operational-polish backlog.
 
 ## Current limitations
 

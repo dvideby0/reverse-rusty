@@ -188,7 +188,9 @@ durable-map commit failed — re-run to reconcile (still zero-FN). The bare map-
 ## 6. Recovery
 
 The cluster is shard-authoritative and **fails loud** — a degraded read returns `502`, never a silently
-short result (ADR-072).
+short result (ADR-072). This section is the per-component reaction table; RPO/RTO targets and the
+flows that need a backup (volume loss, quorum-majority loss, whole-cluster loss) live in the
+[DR runbook](disaster-recovery.md). Version upgrades → [rolling-upgrade.md](rolling-upgrade.md).
 
 | Event | What happens | Action |
 |---|---|---|
@@ -267,7 +269,9 @@ coordinator alerts:
 | `reverse_rusty_slow_queries_total` | rising — searches past `--slow-query-threshold-ms`. |
 
 Logs are structured (`--log-format json` for machine parsing); a degraded-shard `502` is logged with the
-unreachable endpoint.
+unreachable endpoint. The full starting rule set — one alert per failure mode, with thresholds and
+responses — is [`deploy/prometheus-alerts.yml`](../../deploy/prometheus-alerts.yml), explained rule
+by rule in [alerting.md](alerting.md); node sizing → [sizing.md](sizing.md).
 
 ## 10. Security checklist
 
