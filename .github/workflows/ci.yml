@@ -59,6 +59,19 @@ jobs:
       - name: check.sh (fmt + clippy + test + audit + deny)
         run: ./engine/check.sh
 
+      # The Tier 5 M1 deployable smoke (ADR-098): run → ingest → search → restart →
+      # search again → restore, over the release bin, for BOTH local modes
+      # (single-node + in-process cluster). A deployment gate over the built
+      # artifact like the harness job — check.sh stays the engine-gate SSOT.
+      # check.sh's test build has already compiled the deps, so this build is
+      # roughly a link step.
+      - name: Build the server bin (release, default features)
+        working-directory: engine
+        run: cargo build --release --bin server
+
+      - name: Local deploy smoke (single-node + in-process cluster)
+        run: ./deploy/local-smoke.sh --prebuilt engine/target/release
+
       # Benchmarks are run-and-print only: throughput is machine-dependent, so CI
       # captures the numbers for review but never fails on them. The structural
       # regression gate stays a manual comparison (docs/performance/benchmark-results.txt).

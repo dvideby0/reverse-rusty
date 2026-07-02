@@ -1,12 +1,13 @@
 # Build & deploy smoke — the fresh-clone checklist
 
 The reproducible-from-zero verification recipe: from a clean checkout, prove the engine **builds**,
-**passes the gate**, and **deploys + serves** across every shipped topology. This is the
-[roadmap](../roadmap.md) **Tier 5 M0 "deploy-truth"** artifact and the Phase 0 "fresh-clone build &
-deploy smoke" item — a checklist, not new engine code: each leg below is an existing script or gate,
-listed with the exact command and what it proves.
+**passes the gate**, and **deploys + serves** across every shipped topology. This is the Phase 0
+"fresh-clone build & deploy smoke" item — a checklist, not new engine code: each leg below is an
+existing script or gate, listed with the exact command and what it proves.
 
-For the *operational* procedures (production bring-up, recovery, scaling, the v1 non-goals) see the
+The **supported-deployment contract** (the mode matrix, the guaranteed REST surface, the auth
+posture, and the consolidated v1 non-goals) is [`deployment-modes.md`](deployment-modes.md)
+(Tier 5 M0, ADR-098); the *operational* procedures (production bring-up, recovery, scaling) are the
 runbooks: [`cluster-deployment.md`](cluster-deployment.md) (Compose) and
 [`kubernetes-deployment.md`](kubernetes-deployment.md) (Helm). This page is the *acceptance* recipe
 that proves a clone is green before you follow them.
@@ -25,7 +26,7 @@ The gate and the Helm render are **daemon-independent** (no Docker needed); the 
 and harness need a running Docker daemon. The Compose/harness images build `linux/<host-arch>` from
 source, so they run on both x86-64 and Apple-silicon hosts.
 
-## The five legs
+## The six legs
 
 Run from the repo root. Each leg is independent; a green result is noted from the **last verified**
 run (see the footer).
@@ -45,7 +46,21 @@ Proves the lean + default + `distributed` builds compile, lints are clean, and *
 the `ref-matcher independence` check (ADR-087). ✅ **All checks passed.** (`check.sh` also prints a
 non-failing file-size advisory — informational, never blocks the gate.)
 
-### 2. Build the node image
+### 2. Local deploy smoke (daemon-independent) — the two local modes
+
+```bash
+deploy/local-smoke.sh            # cargo-builds the server bin; or --prebuilt <bindir>
+```
+
+For **single-node** and the **in-process cluster** (`--cluster --shards 3`), each on a fresh
+`--data-dir`: start → assert an unauthenticated write is **401** (the ADR-062 posture) → ingest
+over `PUT /_doc` + `POST /_bulk` → `_search`/`_mpercolate` (a match, a MUST_NOT suppression, an
+any-of match) → `_stats`/`_metrics` → `POST /_backup` → **SIGTERM-restart on the same data dir and
+re-assert** → **open the backup copy and re-assert** (restore = open, ADR-079). The Tier 5 **M1
+acceptance gate** (ADR-098): proves the documented deployable surface + restart-reopen for the two
+modes a `cargo build` user runs, with no containers. ✅ **PASS (both modes).**
+
+### 3. Build the node image
 
 ```bash
 docker build -f deploy/Dockerfile -t reverse-rusty:latest .
@@ -53,10 +68,10 @@ docker build -f deploy/Dockerfile -t reverse-rusty:latest .
 
 Proves the multi-stage image builds: the builder compiles `--features distributed` (server,
 shardserver, controlserver); the runtime carries the three binaries on `debian:trixie-slim` as a
-non-root user (uid 10001). ✅ **Image built.** (Legs 3 and 4 reuse the cached compile layers, so build
+non-root user (uid 10001). ✅ **Image built.** (Legs 4 and 5 reuse the cached compile layers, so build
 this once.)
 
-### 3. Production-compose smoke (the shipped K=3 / RF=1 remote topology)
+### 4. Production-compose smoke (the shipped K=3 / RF=1 remote topology)
 
 ```bash
 RR_IMAGE=reverse-rusty:latest deploy/cluster-smoke.sh
@@ -67,7 +82,7 @@ coordinator + 3-node control plane, mesh TLS + tokens), waits for green, then do
 ingest** and asserts the title percolates back to it — then tears down. Proves the *production* compose
 comes up healthy and serves a match end-to-end. ✅ **PASS** (`1 query, hits=[1]`).
 
-### 4. Multi-machine lifecycle harness (ADR-072)
+### 5. Multi-machine lifecycle harness (ADR-072)
 
 ```bash
 deploy/harness.sh                # builds from source; or: deploy/harness.sh --prebuilt <bindir>
@@ -87,7 +102,7 @@ mesh, asserting through REST that every event preserves the percolate baseline a
 | 4 — live handoff under load | 200 writes accepted during a position move, **zero false negatives** |
 | 5 — control-plane restart | all three Raft managers resume from durable state |
 
-### 5. Helm static validation (daemon-independent)
+### 6. Helm static validation (daemon-independent)
 
 ```bash
 helm lint deploy/helm/reverse-rusty
@@ -104,12 +119,13 @@ acceptance run and needs a real cluster + corpus — out of scope for this check
 
 ## What CI already enforces
 
-[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs legs 1, 4, and 5 on every PR and
-push: the `gate` job runs `check.sh` + benchmarks (the 10M soak is on-demand via `run_soak`), the
-`harness` job lints `compose.cluster.yml` and runs `harness.sh --prebuilt`, and the `helm chart` job
-runs the lint + kubeconform matrix. So a green CI ≈ legs 1/4/5; **legs 2 and 3 (image build + the
-production-compose smoke) are the parts a fresh-clone operator should run locally** before a first
-deploy. They were previously unproven end-to-end — see the finding below.
+[`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) runs legs 1, 2, 5, and 6 on every PR
+and push: the `gate` job runs `check.sh`, then the **local deploy smoke** (`local-smoke.sh
+--prebuilt`, the M1 gate — ADR-098), then benchmarks (the 10M soak is on-demand via `run_soak`);
+the `harness` job lints `compose.cluster.yml` and runs `harness.sh --prebuilt`; and the `helm
+chart` job runs the lint + kubeconform matrix. So a green CI ≈ legs 1/2/5/6; **legs 3 and 4 (image
+build + the production-compose smoke) are the parts a fresh-clone operator should run locally**
+before a first deploy. They were previously unproven end-to-end — see the finding below.
 
 ## Findings from the verification run (2026-06-25)
 
@@ -123,5 +139,6 @@ deploy. They were previously unproven end-to-end — see the finding below.
 
 ## Last verified
 
-2026-06-25 · macOS (arm64) · Docker 29.5.2 · all five legs green. Re-run this checklist on a toolchain
+2026-06-25 · macOS (arm64) · Docker 29.5.2 · legs 1/3–6 green (five at the time); leg 2
+(`local-smoke.sh`) added + verified green 2026-07-02. Re-run this checklist on a toolchain
 or dependency bump, and after any change under `deploy/`.

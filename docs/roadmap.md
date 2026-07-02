@@ -157,27 +157,26 @@ behind a shipped seam:
 
 ### Tier 5 — deployability & operational maturity
 
-The engine + distributed layers are built and oracle-proven; what's missing is a **named, documented
-deployable contract** distinct from the scale proof. Today everything deployment-shaped is folded into
-Distributed-v1 criterion 12 (Tier 3) — there is no "deployable feature complete" gate separate from
-"production-proven at scale." This tier defines that gate and the operational hardening above it
-(source: external deployability review, 2026-06-24). The review positions M0–M2 as the **highest-ROI
-next work, ahead of more algorithm work** — promote this tier above the research tiers if that matches
-your priority.
+The engine + distributed layers are built and oracle-proven; this tier is the **named, documented
+deployable contract** distinct from the scale proof, plus the operational hardening above it
+(source: external deployability review, 2026-06-24; the review positioned M0–M2 as the highest-ROI
+next work, ahead of more algorithm work). M0 + M1 shipped as
+[ADR-098](decisions/adr-098-deployable-gate-and-release-pipeline.md) — the contract page is
+[`operations/deployment-modes.md`](operations/deployment-modes.md); M2 is the accepted follow-up in
+the same ADR.
 
-- **M0 — deploy-truth (mostly docs).** One canonical **deployment matrix** (single-node · in-process
-  cluster · remote Compose · remote Helm) + a "known-supported deployment" page with exact commands
-  per mode, and the v1 **non-goals** (RF>1 in Helm, online/remote resize, remote custom vocab,
-  cross-shard backup barrier) surfaced together as explicit named constraints — each is documented
-  today but scattered across the two runbooks + ADR-079. (The acute drift this review found — the
-  `/_metrics` scrape path and the stale "control-plane idle / no wiring flag" wording — is already
-  fixed; this item is the broader consolidation.)
-- **M1 — Deployable Feature Complete: single-node + in-process cluster.** A "works-by-assumption"
-  badge, no scale proof required: a tiny end-to-end **smoke script** (build → run → ingest → search →
-  restart → search again) wired into CI as the acceptance gate for these two modes (extends the
-  compose harness, ADR-072), plus a documented supported surface
-  (`_doc`/`_bulk`/`_search`/`_mpercolate`/`_health`/`_stats`/`_metrics`/`_backup` + restart-reopen)
-  and the auth posture (loopback open; non-loopback requires `RR_AUTH_TOKEN`, ADR-062).
+- **M0 — deploy-truth — ✅ shipped ([ADR-098](decisions/adr-098-deployable-gate-and-release-pipeline.md)).**
+  [`operations/deployment-modes.md`](operations/deployment-modes.md) is the canonical
+  supported-deployment contract: the four-mode matrix (single-node · in-process cluster · remote
+  Compose · remote Helm) with exact bring-up commands, the guaranteed REST surface, the auth
+  posture, and the **v1 non-goals consolidated into one named-constraints table** (RF>1 in Helm,
+  online/remote resize, remote custom vocab, cross-shard backup barrier, scale proof, mTLS,
+  power-loss default — each with its deciding ADR). The runbooks' scattered copies now point there.
+- **M1 — Deployable Feature Complete: single-node + in-process cluster — ✅ shipped (ADR-098).**
+  [`deploy/local-smoke.sh`](../deploy/local-smoke.sh) runs both local modes end-to-end (start →
+  401-auth probe → `_doc`/`_bulk` ingest → `_search`/`_mpercolate` incl. a MUST_NOT suppression →
+  `_stats`/`_metrics` → `_backup` → SIGTERM-restart-reopen → restore-the-backup) **inside the
+  required `gate + benchmarks` CI job** — the M1 acceptance gate on every PR, no containers.
 - **M2 — Deployable Feature Complete: remote static cluster (static-K, RF=1).** A Helm smoke test + a
   Compose smoke test in the release gate; **a versioned image + release pipeline** — publish to a
   registry tagged by git SHA + semver (no image-publishing pipeline exists today; the chart already
