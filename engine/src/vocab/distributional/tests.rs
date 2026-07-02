@@ -193,11 +193,17 @@ fn output_is_deterministic_and_capped() {
         "premise: both planted pairs discovered; got {a:?}"
     );
     for w in a.windows(2) {
+        let ord = w[0]
+            .similarity
+            .partial_cmp(&w[1].similarity)
+            .expect("finite similarities");
         assert!(
-            w[0].similarity > w[1].similarity
-                || (w[0].similarity == w[1].similarity && w[0].forms <= w[1].forms),
-            "output ordering must be (similarity desc, forms asc)"
+            ord != std::cmp::Ordering::Less,
+            "similarity must be non-increasing"
         );
+        if ord == std::cmp::Ordering::Equal {
+            assert!(w[0].forms <= w[1].forms, "ties must break forms-ascending");
+        }
     }
     let capped = discover_pairs(
         &queries,

@@ -275,7 +275,11 @@ fn distributional_rediscovery_respects_rejection_and_cannot_promote() {
         .iter()
         .find(|e| e.forms == forms(&["ud", "upperdeck"]))
         .expect("entry recorded");
-    assert_eq!(e.confidence, 0.8, "confidence reconciles by max");
+    assert!(
+        (e.confidence - 0.8).abs() < 1e-12,
+        "confidence reconciles by max (got {})",
+        e.confidence
+    );
     assert_eq!(e.status, AliasStatus::Candidate);
 
     // A later DECLARED import of the same group still upgrades it (higher trust wins) — the
