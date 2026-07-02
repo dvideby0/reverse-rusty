@@ -148,7 +148,9 @@ curl -X POST localhost:9200/_search -H 'Content-Type: application/json' \
 ```
 
 Full endpoint and flag reference: [`docs/reference/api.md`](docs/reference/api.md). Query language:
-[`docs/reference/dsl.md`](docs/reference/dsl.md).
+[`docs/reference/dsl.md`](docs/reference/dsl.md). Deploying it — the four supported modes
+(single-node · in-process cluster · Compose · Helm) with exact commands and the v1 constraints:
+[`docs/operations/deployment-modes.md`](docs/operations/deployment-modes.md).
 
 **Use as a library:**
 

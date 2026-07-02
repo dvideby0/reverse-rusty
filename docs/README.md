@@ -58,9 +58,13 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`reference/dsl.md`](reference/dsl.md) — the query DSL, normalization, and vocabulary.
 
 ### Operations
+- [`operations/deployment-modes.md`](operations/deployment-modes.md) — the **supported-deployment
+  contract** (Tier 5 M0, ADR-098): the four-mode matrix with exact bring-up commands, the guaranteed
+  REST surface, the auth posture, and the consolidated **v1 non-goals** table. Supported-deployment
+  truth lives here — the other operations pages link to it rather than restating it.
 - [`operations/build-and-smoke.md`](operations/build-and-smoke.md) — the **fresh-clone checklist**:
-  build + gate + image + Compose/harness smoke + Helm validation, with the exact command and what each
-  leg proves (the Tier 5 M0 "deploy-truth" acceptance recipe).
+  build + gate + local smoke + image + Compose/harness smoke + Helm validation, with the exact
+  command and what each leg proves (the acceptance recipe for the contract above).
 - [`operations/cluster-deployment.md`](operations/cluster-deployment.md) — deploy + run a multi-node
   cluster from the container image: topology, bootstrap order, certs/tokens, scale, recover, monitor,
   the vocab-redeploy procedure ([`deploy/`](../deploy/) packaging + ADR-081).

@@ -207,8 +207,12 @@ manual dispatch. One job on `ubuntu-latest`:
 2. `Swatinem/rust-cache` (the release+LTO build is slow; caching is what keeps PR runs reasonable).
 3. `cargo-audit` + `cargo-deny` installed as prebuilt binaries.
 4. **`./engine/check.sh`** — the must-pass gate (now including the committed stress suite).
-5. Benchmarks — run-and-print, `continue-on-error`, output uploaded as the `benchmark-output` artifact.
-6. The 10M soak — only when dispatched with `run_soak = true`.
+5. **`./deploy/local-smoke.sh --prebuilt`** — the Tier 5 M1 deployable smoke (ADR-098): both local
+   modes (single-node + in-process cluster) end-to-end over the release bin — ingest, search,
+   SIGTERM-restart-reopen, restore-from-backup. A deployment gate over the built artifact, like the
+   harness; `check.sh` stays the engine-gate SSOT.
+6. Benchmarks — run-and-print, `continue-on-error`, output uploaded as the `benchmark-output` artifact.
+7. The 10M soak — only when dispatched with `run_soak = true`.
 
 In-progress runs are cancelled when a newer commit lands on the same ref.
 
