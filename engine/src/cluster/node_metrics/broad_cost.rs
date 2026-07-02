@@ -86,8 +86,8 @@ mod tests {
         broad_batches: u32,
     ) -> MatchStats {
         MatchStats {
-            broad_candidates,
             broad_postings_scanned,
+            broad_candidates,
             broad_queries_evaluated,
             broad_batches,
             ..MatchStats::default()
@@ -112,13 +112,23 @@ mod tests {
         c.record(&stats(0, 0, 0, 0));
         let s = c.snapshot();
         assert_eq!(
-            (s.candidates, s.postings_scanned, s.queries_evaluated, s.batches),
+            (
+                s.candidates,
+                s.postings_scanned,
+                s.queries_evaluated,
+                s.batches
+            ),
             (0, 0, 0, 0)
         );
         c.record(&stats(1, 0, 0, 0));
         let s = c.snapshot();
         assert_eq!(
-            (s.candidates, s.postings_scanned, s.queries_evaluated, s.batches),
+            (
+                s.candidates,
+                s.postings_scanned,
+                s.queries_evaluated,
+                s.batches
+            ),
             (1, 0, 0, 0)
         );
     }
@@ -127,7 +137,12 @@ mod tests {
     fn default_snapshot_is_all_zero() {
         let s = BroadCostSnapshot::default();
         assert_eq!(
-            (s.candidates, s.postings_scanned, s.queries_evaluated, s.batches),
+            (
+                s.candidates,
+                s.postings_scanned,
+                s.queries_evaluated,
+                s.batches
+            ),
             (0, 0, 0, 0)
         );
     }

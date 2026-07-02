@@ -598,4 +598,3 @@ fn finalized_empty_tag_dict() -> TagDict {
     td.mark_finalized();
     td
 }
-
