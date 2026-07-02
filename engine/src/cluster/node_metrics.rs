@@ -19,8 +19,10 @@
 //! server already emits — so existing dashboards work per-pod — plus a few shard extras; control
 //! nodes emit `reverse_rusty_control_*` Raft gauges.
 
+mod broad_cost;
 mod latency;
 
+pub(crate) use broad_cost::{BroadCostSnapshot, SlotBroadCost};
 pub(crate) use latency::{LatencySnapshot, ShardRpc, SlotLatency, LATENCY_LE, SHARD_RPC_LABELS};
 
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -143,6 +145,9 @@ pub(crate) struct ShardSample {
     /// (ADR-100). All-zero on a slot that has served no RPCs — the family still renders, so the
     /// series exist from the first scrape.
     pub rpc_latency: [LatencySnapshot; SHARD_RPC_LABELS.len()],
+    /// Cumulative broad-lane cost totals for this slot (ADR-101). All-zero on a slot that has
+    /// served no percolates — the families still render, so the series exist from the first scrape.
+    pub broad: BroadCostSnapshot,
 }
 
 /// Render a shard node's `/_metrics` body over ALL the node's loaded slots (ADR-093 multi-shard). A
@@ -297,6 +302,42 @@ pub(crate) fn render_shards(samples: &[ShardSample]) -> String {
                 &[("shard", sid), ("class", label)],
                 count,
             );
+        }
+    }
+
+    // Per-shard broad-lane cost counters (ADR-101): the SAME `reverse_rusty_broad_*_total` names
+    // the coordinator's registry emits (a shard IS an engine — the ADR-091 wire-name rule), with
+    // the additive `{shard}` label. Broad share per title is a PromQL job:
+    // rate(reverse_rusty_broad_candidates_total[5m])
+    //   / rate(reverse_rusty_shard_rpc_duration_seconds_count{method=~"percolate.*"}[5m]).
+    // `queries_evaluated`/`batches` are structurally 0 on today's per-title Percolate wire (the
+    // columnar evaluator only runs under match_titles_batch, which no shard RPC reaches); they
+    // render anyway for name symmetry — a future batch RPC lights them up without a rename.
+    for (name, help, get) in [
+        (
+            "reverse_rusty_broad_candidates_total",
+            "Broad-lane candidates retrieved by percolates on this shard.",
+            (|b: &BroadCostSnapshot| b.candidates) as fn(&BroadCostSnapshot) -> u64,
+        ),
+        (
+            "reverse_rusty_broad_postings_scanned_total",
+            "Broad-lane posting entries scanned by percolates on this shard.",
+            |b: &BroadCostSnapshot| b.postings_scanned,
+        ),
+        (
+            "reverse_rusty_broad_queries_evaluated_total",
+            "Broad queries bitmap-evaluated by the columnar batch path on this shard.",
+            |b: &BroadCostSnapshot| b.queries_evaluated,
+        ),
+        (
+            "reverse_rusty_broad_batches_total",
+            "Broad-lane columnar sub-batches processed on this shard.",
+            |b: &BroadCostSnapshot| b.batches,
+        ),
+    ] {
+        e.header_typed(name, help, "counter");
+        for (s, sid) in samples.iter().zip(&sids) {
+            e.sample(name, &[("shard", sid)], get(&s.broad));
         }
     }
 

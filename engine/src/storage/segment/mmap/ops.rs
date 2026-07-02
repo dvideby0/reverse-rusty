@@ -518,6 +518,13 @@ impl MmapSegment {
 
         if let Some(posting) = frozen_probe(key, slots, blob, mask) {
             stats.postings_scanned += posting.len() as u32;
+            // Broad subset of postings_scanned — the memory-path `Segment::probe` and the
+            // columnar `broad_reach` above both count it; this per-title mmap path missed it
+            // (codex, ADR-101), under-counting the exported per-shard broad-cost counter on
+            // durable shards.
+            if is_broad {
+                stats.broad_postings_scanned += posting.len() as u32;
+            }
             for &local in posting {
                 if seen[local as usize] == epoch {
                     continue;

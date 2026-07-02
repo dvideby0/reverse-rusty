@@ -21,6 +21,7 @@
 mod harness;
 
 mod block_on;
+mod broad_cost;
 mod class_d;
 mod colocation;
 mod core;
