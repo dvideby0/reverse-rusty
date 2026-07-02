@@ -62,7 +62,10 @@ else
   command -v cargo >/dev/null || fail "missing tool: cargo (or pass --prebuilt DIR)"
   echo "==> cargo build --release --bin server (default features)"
   (cd engine && cargo build --release --bin server)
-  SERVER_BIN="${CARGO_TARGET_DIR:-$REPO_ROOT/engine/target}/release/server"
+  # Ask cargo where the target dir actually is (resolved from engine/, the build's
+  # cwd) — handles CARGO_TARGET_DIR absolute OR relative, and .cargo/config.toml.
+  target_dir=$(cd engine && cargo metadata --format-version 1 --no-deps | jq -r '.target_directory')
+  SERVER_BIN="$target_dir/release/server"
   [[ -x "$SERVER_BIN" ]] || fail "built server bin not found at $SERVER_BIN"
 fi
 

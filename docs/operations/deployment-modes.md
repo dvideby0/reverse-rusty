@@ -37,9 +37,14 @@ POST /_bulk                    (NDJSON, ES-shaped)
 POST /_search                  (single-document percolation; `include_broad` per request)
 POST /_mpercolate              (batch percolation, ES _msearch-shaped responses[])
 GET  /_health   /_stats   /_metrics   (unauthenticated reads; Prometheus text on /_metrics)
-POST /_backup {"dest": ...}    (server-side snapshot; restore = open the copy via --data-dir)
 + restart-reopen               (every acknowledged write survives an operational restart)
 ```
+
+Plus, in the two **local** modes (any server with a `--data-dir`): `POST /_backup {"dest": ...}` —
+a server-side snapshot; restore = open the copy via `--data-dir` (asserted by the smoke). The
+shipped **remote** topologies run a *stateless* coordinator (no `--data-dir`), where `/_backup`
+is a 400 by design — remote backup is the per-shard volume-snapshot procedure in
+[`backup-restore.md`](backup-restore.md) (the cross-shard barrier is a named constraint in §4).
 
 Per-mode extras (single-node `/_settings`, `/_vocab*`; cluster `/_cluster/*` ops, `/_cat/shards`)
 are in the API reference — [`../reference/api.md`](../reference/api.md). Endpoints that exist in

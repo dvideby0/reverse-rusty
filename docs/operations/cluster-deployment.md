@@ -17,7 +17,7 @@ running cluster has its own doc: [backup-restore.md](backup-restore.md).
 > assignments as the routing source of truth. Drop both flags to fall back to the in-memory control
 > plane (placement re-derived deterministically from the frozen dict + ring on every start) —
 > byte-identical, the quorum then idle. Full wiring detail + *data-moving* reassignment (now available,
-> ADR-090 — [§5](#5-scaling)) are in [§11](#11-not-covered-in-v1-see-adr-081).
+> ADR-090 — [§5](#5-scaling)) are in [§11](#11-not-covered-in-v1--the-named-constraints).
 
 ## 1. Topology
 
