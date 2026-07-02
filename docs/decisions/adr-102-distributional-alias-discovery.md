@@ -60,12 +60,18 @@
      distributionally-seeded variant under *its own* shipped policy — that is ADR-060's trust
      level acting on its own signal, not distributional auto-activation. Confidence = the cosine
      similarity (finite-guarded), review-sort metadata only.
-  4. **A metadata-only vocab install seam** (`Engine::install_vocab_metadata_only`). The shipped
+  4. **A metadata-only vocab install seam** (`Engine::install_vocab_metadata_only`,
+     `pub(crate)` deliberately — external callers go through `set_vocab`). The shipped
      apply path (`set_vocab`) unconditionally bumps `vocab_epoch` and recompiles the corpus —
-     O(corpus) for a change that, here, activates *nothing*. The new seam installs a vocab whose
-     **matching-relevant projections are provably unchanged** — it structurally compares
-     `effective_equivalence_groups()` AND `active_alias_forms()` against the live vocab — with no
-     epoch bump, no normalizer rebuild, no recompile. Durability follows the EXISTING
+     O(corpus) for a change that, here, activates *nothing*. The seam's fast path structurally
+     verifies (never trusts) BOTH: everything **outside the alias registry is byte-identical**,
+     compared over the serialized vocab documents with the registries blanked — so
+     synonyms/phrases/graders/punctuation/number-context/declared equivalences AND any future
+     `Vocab` field automatically participate (a field-list compare would silently rot — codex
+     review); and the registry's matching-relevant projections
+     (`effective_equivalence_groups` + `active_alias_forms`) are equal. Only then does it swap
+     the Arc with no epoch bump, no normalizer rebuild, no recompile — the advertised vocab can
+     never desync from the live normalizer. Durability follows the EXISTING
      single-node vocab semantics: the engine manifest carries **no** vocab blob (only the
      `ClusterManifest` does, ADR-046), so — like `PUT /_vocab`, `learn_and_apply`, and the alias
      import before it — a recorded registry rides the vocab *document*: `GET /_vocab` → the
@@ -117,7 +123,9 @@
   with every prior match preserved (widening-only); the quality split (substitute proposed,
   co-listed suppressed); candidates ride the vocab document across a durable reopen
   (`open_with_vocab` — the operator's actual persistence path). Handler tests cover both
-  endpoints + the explicit-corpus refusal on the record path.
+  endpoints + the explicit-corpus refusal on the record path. The seam guard has its own unit:
+  a candidate-only change takes the fast path (no epoch bump) while a synonym added with
+  identical alias projections falls back to the full `set_vocab` path (epoch bumped).
 
 - **Deferred follow-ons.** Match-feedback validation of these candidates (ADR-103 — the sibling
   item); a cluster-side gather (needs a cross-shard sources RPC); title-corpus contexts as an
