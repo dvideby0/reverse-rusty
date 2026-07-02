@@ -114,6 +114,11 @@ pub(crate) struct RebalanceBody {
     /// existing no-body callers are unaffected).
     #[serde(default, rename = "move")]
     do_move: bool,
+    /// Wave parallelism for the data-moving sweep (ADR-095): up to N conflict-free moves run
+    /// concurrently. Absent/`1` (the default) = the sequential sweep, byte-identical. Ignored
+    /// without `"move": true`.
+    #[serde(default)]
+    max_parallel: Option<usize>,
 }
 
 /// POST /_cluster/rebalance — recompute the desired shard→node map from membership
@@ -128,11 +133,11 @@ pub(crate) async fn cluster_rebalance(
 ) -> Response {
     // Parse leniently: an empty body (the common no-arg call) is map-only, preserving the prior
     // signature; a present-but-invalid body is a clean 400.
-    let do_move = if body.is_empty() {
-        false
+    let parsed = if body.is_empty() {
+        RebalanceBody::default()
     } else {
         match serde_json::from_slice::<RebalanceBody>(&body) {
-            Ok(b) => b.do_move,
+            Ok(b) => b,
             Err(e) => {
                 return ApiError::response(
                     StatusCode::BAD_REQUEST,
@@ -143,6 +148,7 @@ pub(crate) async fn cluster_rebalance(
             }
         }
     };
+    let do_move = parsed.do_move;
 
     if !do_move {
         // Map-only HRW rebalance (ADR-042) — unchanged; works in-process and remote.
@@ -164,20 +170,21 @@ pub(crate) async fn cluster_rebalance(
     }
 
     // Data-moving rebalance (ADR-090) — distributed only.
-    rebalance_move(state).await
+    rebalance_move(state, parsed.max_parallel.unwrap_or(1)).await
 }
 
 /// The `{"move": true}` arm of [`cluster_rebalance`]: drive a data-moving rebalance on the blocking
 /// pool (the move uses the sync→async bridge). A per-position failure stops the sweep fail-forward;
 /// the report names what moved, what failed, and what was not attempted, so an operator can resume.
+/// `max_parallel` > 1 runs conflict-free moves in waves (ADR-095); 1 is the sequential default.
 #[cfg(feature = "distributed")]
-async fn rebalance_move(state: Arc<ClusterAppState>) -> Response {
+async fn rebalance_move(state: Arc<ClusterAppState>, max_parallel: usize) -> Response {
     let handle = tokio::runtime::Handle::current();
     let state_inner = Arc::clone(&state);
     let result = tokio::task::spawn_blocking(move || {
         let cluster = state_inner.cluster.read();
         let rf = cluster.replication_factor();
-        cluster.rebalance_and_move(rf, &handle)
+        cluster.rebalance_and_move_with(rf, max_parallel.max(1), &handle)
     })
     .await;
     match result {
@@ -226,7 +233,7 @@ async fn rebalance_move(state: Arc<ClusterAppState>) -> Response {
 // uniformly across both builds.
 #[cfg(not(feature = "distributed"))]
 #[allow(clippy::unused_async)]
-async fn rebalance_move(_state: Arc<ClusterAppState>) -> Response {
+async fn rebalance_move(_state: Arc<ClusterAppState>, _max_parallel: usize) -> Response {
     not_in_cluster_mode(
         "POST /_cluster/rebalance {\"move\":true}",
         "a data-moving rebalance needs the gRPC transport — rebuild the server with --features \
@@ -427,19 +434,47 @@ pub(crate) async fn cluster_reassign(Json(_body): Json<ReassignBody>) -> Respons
 /// failures (the controller semantics — a manual one-shot of what the `--reconcile-interval-secs` loop
 /// runs). Idempotent: a converged map moves nothing and commits nothing. Runs on the blocking pool
 /// (each move uses the sync→async bridge); does NOT hold `write_serial` — each move's own fence +
-/// retention lease + the engine-level reassign guard provide concurrency safety (a reconcile pass runs
-/// concurrently with ingestion by design, like `/_cluster/reassign`). `acknowledged` is true only when
+/// retention lease + the engine's busy-endpoint move ledger provide concurrency safety (a reconcile
+/// pass runs concurrently with ingestion by design, like `/_cluster/reassign`). An optional
+/// `{"max_parallel": N}` body runs up to N conflict-free moves concurrently (ADR-095); an empty body
+/// (the common call) is the sequential pass, byte-identical. `acknowledged` is true only when
 /// the pass fully converged (no `uncommitted`/`failed` positions). Requires a `--features distributed`
 /// build; else 501.
 #[cfg(feature = "distributed")]
 #[instrument(skip_all)]
-pub(crate) async fn cluster_reconcile(State(state): State<Arc<ClusterAppState>>) -> Response {
+pub(crate) async fn cluster_reconcile(
+    State(state): State<Arc<ClusterAppState>>,
+    body: axum::body::Bytes,
+) -> Response {
+    // Parse leniently, mirroring `cluster_rebalance`: an empty body is the sequential pass; a
+    // present-but-invalid body is a clean 400.
+    #[derive(Deserialize, Default)]
+    struct ReconcileBody {
+        #[serde(default)]
+        max_parallel: Option<usize>,
+    }
+    let parsed = if body.is_empty() {
+        ReconcileBody::default()
+    } else {
+        match serde_json::from_slice::<ReconcileBody>(&body) {
+            Ok(b) => b,
+            Err(e) => {
+                return ApiError::response(
+                    StatusCode::BAD_REQUEST,
+                    "bad_request",
+                    format!("invalid reconcile body: {e}"),
+                )
+                .into_response()
+            }
+        }
+    };
+    let max_parallel = parsed.max_parallel.unwrap_or(1).max(1);
     let handle = tokio::runtime::Handle::current();
     let state_inner = Arc::clone(&state);
     let result = tokio::task::spawn_blocking(move || {
         let cluster = state_inner.cluster.read();
         let rf = cluster.replication_factor();
-        cluster.reconcile(rf, &handle)
+        cluster.reconcile_with(rf, max_parallel, &handle)
     })
     .await;
     match result {

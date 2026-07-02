@@ -28,16 +28,21 @@
 //! ## Serialization & supported topology
 //! **The supported topology is a single active coordinator** (the v1 deployment — Compose/Helm run
 //! one coordinator). Every data-moving op here — plus the autoscaler-driven handoff
-//! ([`drive_autoscaled_handoff`](super::ClusterEngine::drive_autoscaled_handoff)) — holds
-//! `reassign_serial` for the whole move-then-commit, so two moves of one position on this coordinator
-//! cannot interleave their flip + commit and invert the map vs routing. A compare-and-set on the
-//! committed primary just before the commit is a best-effort guard against a *second* coordinator;
-//! making it truly atomic across horizontally-scaled stateless coordinators needs a control-plane
-//! **conditional-propose** (compare-and-set `AssignShard`) primitive — which, with an unattended
-//! assignment-watch → re-point controller, is the deferred follow-on (ADR-090). The whole module is
-//! `distributed`-gated; the in-process/default path never compiles it and is byte-identical.
-
-use std::sync::PoisonError;
+//! ([`drive_autoscaled_handoff`](super::ClusterEngine::drive_autoscaled_handoff)) and a raw
+//! [`execute_handoff`](super::ClusterEngine::execute_handoff) — reserves its resolved endpoint
+//! footprint in the busy-endpoint [`MoveLedger`](ledger::MoveLedger) for the whole move-then-commit
+//! (ADR-095, replacing ADR-090's whole-coordinator `reassign_serial` mutex): moves sharing a node
+//! serialize exactly as before (so two moves of one position — both reserving its committed
+//! primary — cannot interleave their flip + commit and invert the map vs routing), while moves over
+//! disjoint node sets may run in parallel (the opt-in
+//! [`reconcile_with`](super::ClusterEngine::reconcile_with) /
+//! [`rebalance_and_move_with`](super::ClusterEngine::rebalance_and_move_with) waves). A
+//! compare-and-set on the committed primary just before the commit is a best-effort guard against a
+//! *second* coordinator; making it truly atomic across horizontally-scaled stateless coordinators
+//! needs a control-plane **conditional-propose** (compare-and-set `AssignShard`) primitive — which,
+//! with an unattended assignment-watch → re-point controller, is the deferred follow-on (ADR-090).
+//! The whole module is `distributed`-gated; the in-process/default path never compiles it and is
+//! byte-identical.
 
 use tokio::runtime::Handle;
 
@@ -52,10 +57,29 @@ use super::ClusterEngine;
 mod group;
 pub(in crate::cluster::coordinator) use group::rebalance_group_targets;
 
+/// The busy-endpoint move ledger + RAII ticket (ADR-095) — the per-node concurrency guard every
+/// data-moving op reserves its footprint in.
+mod ledger;
+pub(in crate::cluster::coordinator) use ledger::MoveLedger;
+
+/// Conflict-free wave planning + scoped-thread wave execution for multi-position sweeps
+/// (ADR-095). Scheduling-only — safety lives in the ledger.
+mod parallel;
+pub(in crate::cluster::coordinator) use parallel::plan_waves;
+
 /// Bounded retries of the `AssignShard` commit after a successful move, so a transient control-plane
 /// blip (e.g. a real quorum mid-leader-change) doesn't strand a successful move uncommitted. The
 /// in-memory control plane commits on the first attempt.
 const COMMIT_ATTEMPTS: usize = 3;
+
+/// Bounded plan→reserve→revalidate attempts (ADR-095): a move plans its endpoint footprint from a
+/// committed read, reserves it in the ledger (possibly waiting out a conflicting in-flight move),
+/// then re-reads to confirm neither the position's committed entry NOR any member's endpoint
+/// resolution changed while it waited — a change (e.g. the conflicting move just committed this
+/// very position, or a `register_node` replaced a member's addr) re-plans from the fresh state.
+/// More than a couple of iterations means the map is churning under a storm of concurrent
+/// commits; fail typed rather than spin.
+const PLAN_ATTEMPTS: usize = 4;
 
 /// Outcome of a [`ClusterEngine::reassign_and_move`] (ADR-090).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,16 +112,19 @@ pub enum ReassignOutcome {
 }
 
 /// Outcome of a [`ClusterEngine::rebalance_and_move`] (ADR-090): which positions moved + committed,
-/// the first failure (if any — the loop stops there, fail-forward / resume), and the changed
+/// the first failure (if any — the sweep stops there, fail-forward / resume), and the changed
 /// positions not yet attempted. Each already-moved position is individually consistent, so a partial
 /// rebalance is a valid (resumable) state, never a false negative.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RebalanceMoveReport {
     /// Positions whose primary moved AND committed this pass.
     pub moved: Vec<u32>,
-    /// The first position that failed (with the error message); the loop stopped here.
+    /// The lowest-position failure (with the error message); the sweep stopped at its wave (at the
+    /// default `max_parallel_moves = 1` this is exactly "the first position that failed").
     pub failed: Option<(u32, String)>,
-    /// Changed positions after the failure — not attempted, left for a re-run.
+    /// Changed positions left for a re-run: everything after the failing wave, plus (at
+    /// `max_parallel_moves ≥ 2`) any ADDITIONAL same-wave failure — those were attempted and rolled
+    /// back cleanly (each emitted its own event), and a re-run retries them identically.
     pub not_attempted: Vec<u32>,
 }
 
@@ -106,8 +133,8 @@ impl ClusterEngine {
     /// of [`reassign_shard`](Self::reassign_shard) (ADR-090). Resolves `from` (the current committed
     /// primary) and `to` to endpoints from membership, then **move-then-commit**: run
     /// [`execute_handoff`](Self::execute_handoff) (peer-recover → fence → drain to convergence → flip
-    /// routing) and only on success commit `AssignShard{position, primary: to}` — preserving the
-    /// position's existing `replicas` (an `AssignShard` replaces the whole entry).
+    /// routing) and only on success commit `AssignShard{position, primary: to}` (bare — the replica
+    /// guard below rejects a replicated position, so the entry this replaces is replica-free).
     ///
     /// Fail-closed and zero-FN at every step (see the module docs for the crash-window argument):
     /// - a failed move propagates `Err` and commits nothing (the source auto-unfenced, routing + the
@@ -119,9 +146,11 @@ impl ClusterEngine {
     ///   the live path) while the committed map still names the reads-serving source — so a re-run
     ///   reconciles the durable map (idempotent).
     ///
-    /// **Supported topology: a single active coordinator** (the v1 deployment). The `reassign_serial`
-    /// guard serializes this coordinator's moves; cross-coordinator atomicity of the primary check +
-    /// commit needs a control-plane conditional-propose primitive (deferred — see the module docs).
+    /// **Supported topology: a single active coordinator** (the v1 deployment). The busy-endpoint
+    /// ledger (ADR-095) serializes this coordinator's CONFLICTING moves (any shared node — see the
+    /// module docs) while disjoint moves may run in parallel; cross-coordinator atomicity of the
+    /// primary check + commit needs a control-plane conditional-propose primitive (deferred — see
+    /// the module docs).
     /// **A position with committed replicas is rejected** (a single-target move would de-replicate
     /// it) — the group-aware [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094)
     /// moves a replicated position. Requires a
@@ -133,70 +162,109 @@ impl ClusterEngine {
         to: NodeId,
         handle: &Handle,
     ) -> Result<ReassignOutcome, ShardError> {
-        // Serialize against every other data-moving op (operator + autoscaler) for the whole
-        // move-then-commit, so concurrent moves of one position can't interleave their flip + commit
-        // and invert committed-map vs live-routing.
-        let _guard = self
-            .reassign_serial
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-
-        let state = self.control_state()?;
         let pos = position as u32;
-        let assignment = state
-            .assignments
-            .iter()
-            .find(|a| a.position == pos)
-            .ok_or_else(|| {
-                ShardError::ControlPlane(format!(
-                    "reassign_and_move: no committed assignment for shard position {position}"
-                ))
-            })?;
-        let from = assignment.primary;
-        let prev_replicas = assignment.replicas.clone();
-        // A single-target move of a REPLICATED position is ambiguous and unsafe (ADR-090/094): the
-        // move (`execute_handoff`) swaps the position to a SINGLE `RemoteShard` for `to`, dropping
-        // the replica group, while the committed map would still advertise the old replicas — so a
-        // failover could read a replica that no longer receives writes (stale). The guard is
-        // PER-POSITION (the committed entry, not the cluster's replication factor): a bare position
-        // on a replicated cluster is a plain single-shard move, and a replicated position has the
-        // group-aware [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094).
-        if !prev_replicas.is_empty() {
-            return Err(ShardError::Config(format!(
-                "reassign_and_move: shard position {position} has {} committed replica(s); a \
-                 single-target move would de-replicate it — use reassign_group_and_move (or \
-                 rebalance_and_move / reconcile, which dispatch group moves) instead (ADR-094)",
-                prev_replicas.len()
-            )));
-        }
-
-        // Resolve node ids → endpoints. Fail-closed (never silently skip an unroutable node — that
-        // would route a title nowhere). Mirrors `resolve_topology`'s stance.
-        let addr_of = |id: NodeId| -> Result<String, ShardError> {
-            state
-                .nodes
+        // Plan → reserve → revalidate (ADR-095): resolve the move's endpoint footprint from a
+        // committed read, reserve it in the busy-endpoint ledger — blocking until every
+        // CONFLICTING in-flight move completes (the ADR-090 serialization, now per-node) — then
+        // confirm the position's committed entry did not change while we waited (the conflicting
+        // move may have committed this very position). A change re-plans from the fresh state
+        // (bounded); the pre-commit CAS below stays the final backstop.
+        let mut planned: Option<(NodeId, String, String, ledger::MoveTicket<'_>)> = None;
+        for _ in 0..PLAN_ATTEMPTS {
+            let state = self.control_state()?;
+            let assignment = state
+                .assignments
                 .iter()
-                .find(|n| n.id == id)
-                .and_then(|n| n.addr.clone())
+                .find(|a| a.position == pos)
                 .ok_or_else(|| {
                     ShardError::ControlPlane(format!(
-                        "reassign_and_move: node {} has no registered endpoint (addr)",
-                        id.0
+                        "reassign_and_move: no committed assignment for shard position {position}"
                     ))
-                })
-        };
-        let from_ep = addr_of(from)?;
-        let tgt_ep = addr_of(to)?;
+                })?;
+            let from = assignment.primary;
+            // A single-target move of a REPLICATED position is ambiguous and unsafe (ADR-090/094):
+            // the move (`execute_handoff`) swaps the position to a SINGLE `RemoteShard` for `to`,
+            // dropping the replica group, while the committed map would still advertise the old
+            // replicas — so a failover could read a replica that no longer receives writes
+            // (stale). The guard is PER-POSITION (the committed entry, not the cluster's
+            // replication factor): a bare position on a replicated cluster is a plain single-shard
+            // move, and a replicated position has the group-aware
+            // [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094).
+            if !assignment.replicas.is_empty() {
+                return Err(ShardError::Config(format!(
+                    "reassign_and_move: shard position {position} has {} committed replica(s); a \
+                     single-target move would de-replicate it — use reassign_group_and_move (or \
+                     rebalance_and_move / reconcile, which dispatch group moves) instead (ADR-094)",
+                    assignment.replicas.len()
+                )));
+            }
 
-        // Already in place (same node), or two ids resolving to one endpoint: nothing to move or
-        // commit (the idempotent no-op, e.g. re-running a completed reassign).
-        if from == to || from_ep == tgt_ep {
-            return Ok(ReassignOutcome::NoChange { position: pos });
+            // Resolve node ids → endpoints. Fail-closed (never silently skip an unroutable node —
+            // that would route a title nowhere). Mirrors `resolve_topology`'s stance.
+            let addr_of = |id: NodeId| -> Result<String, ShardError> {
+                state
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .and_then(|n| n.addr.clone())
+                    .ok_or_else(|| {
+                        ShardError::ControlPlane(format!(
+                            "reassign_and_move: node {} has no registered endpoint (addr)",
+                            id.0
+                        ))
+                    })
+            };
+            let from_ep = addr_of(from)?;
+            let tgt_ep = addr_of(to)?;
+
+            // Already in place (same node), or two ids resolving to one endpoint: nothing to move
+            // or commit (the idempotent no-op, e.g. re-running a completed reassign).
+            if from == to || from_ep == tgt_ep {
+                return Ok(ReassignOutcome::NoChange { position: pos });
+            }
+
+            let ticket = self
+                .move_ledger
+                .reserve(&[from_ep.as_str(), tgt_ep.as_str()]);
+            // Revalidate BOTH the committed entry AND the endpoint resolution (codex P2 on this
+            // ADR): while we waited on the ledger, a concurrent op may have re-committed this
+            // position, or re-registered a member with a NEW addr (`register_node` replaces by
+            // id). Moving over a stale endpoint and then committing the NodeId would leave a
+            // route-by-assignments restart resolving that id to a server that never received the
+            // data — a restart false negative.
+            let now = self.control_state()?;
+            let addr_now = |id: NodeId| {
+                now.nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .and_then(|n| n.addr.as_deref())
+            };
+            let entry_unchanged = now
+                .assignments
+                .iter()
+                .find(|a| a.position == pos)
+                .is_some_and(|a| a.primary == from && a.replicas.is_empty());
+            let eps_unchanged =
+                addr_now(from) == Some(from_ep.as_str()) && addr_now(to) == Some(tgt_ep.as_str());
+            if entry_unchanged && eps_unchanged {
+                planned = Some((from, from_ep, tgt_ep, ticket));
+                break;
+            }
+            // The entry (or a member's endpoint) changed while we waited on the ledger: the
+            // ticket drops here and the next iteration re-plans from the fresh committed state.
         }
+        let Some((from, from_ep, tgt_ep, _ticket)) = planned else {
+            return Err(ShardError::ControlPlane(format!(
+                "reassign_and_move: the committed assignment for shard position {position} kept \
+                 changing while planning the move ({PLAN_ATTEMPTS} attempts); retry once the map \
+                 stops churning"
+            )));
+        };
 
         // MOVE first. On failure this auto-unfences the source and leaves routing + the committed map
-        // untouched (consistent rollback) — propagate it; nothing was committed.
-        let generation = self.execute_handoff(position, &from_ep, &tgt_ep, handle)?;
+        // untouched (consistent rollback) — propagate it; nothing was committed. The `_inner` variant
+        // skips the ledger re-reservation (our ticket already covers {from, to}).
+        let generation = self.execute_handoff_inner(position, &from_ep, &tgt_ep, handle)?;
 
         // The move already flipped LIVE routing to `to`. COMPARE-AND-SET before committing: confirm
         // the committed primary is still `from`. If a concurrent op moved this position under us
@@ -228,17 +296,18 @@ impl ClusterEngine {
             });
         }
 
-        // COMMIT (move-then-commit): name the new owner, PRESERVING the existing replicas (an
-        // `AssignShard` replaces the whole entry, so a primary-only assignment would silently drop the
-        // committed replica set). Bounded-retry the proposal so a transient control-plane blip (e.g. a
-        // real quorum mid-leader-change) doesn't strand a successful move uncommitted; the in-memory
-        // control plane commits on the first attempt (no behavior change).
+        // COMMIT (move-then-commit): name the new owner. The entry's replica set is provably empty
+        // here (the replica guard rejected a replicated position at plan time and the post-reserve
+        // revalidation re-checked it), so the committed entry is written bare — an `AssignShard`
+        // replaces the whole entry. Bounded-retry the proposal so a transient control-plane blip
+        // (e.g. a real quorum mid-leader-change) doesn't strand a successful move uncommitted; the
+        // in-memory control plane commits on the first attempt (no behavior change).
         let mut last_err: Option<ShardError> = None;
         for attempt in 0..COMMIT_ATTEMPTS {
             match self.reassign_shard(ShardAssignment {
                 position: pos,
                 primary: to,
-                replicas: prev_replicas.clone(),
+                replicas: Vec::new(),
             }) {
                 Ok(()) => {
                     return Ok(ReassignOutcome::Moved {
@@ -287,23 +356,39 @@ impl ClusterEngine {
 
     /// Data-moving analogue of [`rebalance`](Self::rebalance) (ADR-090/094): recompute the desired
     /// HRW shard→node map at replication factor `rf`, then move each position whose **group**
-    /// (primary or replica set) changes — **sequentially**, in position order. Dispatch is by
-    /// SHAPE: a bare→bare change runs the proven single-shard
-    /// [`reassign_and_move`](Self::reassign_and_move) byte-identically (the RF=1 path); any change
-    /// touching replicas runs the group-aware
+    /// (primary or replica set) changes — sequentially, in position order (=
+    /// [`rebalance_and_move_with`](Self::rebalance_and_move_with) at `max_parallel_moves = 1`, the
+    /// byte-identical default). Dispatch is by SHAPE: a bare→bare change runs the proven
+    /// single-shard [`reassign_and_move`](Self::reassign_and_move) byte-identically (the RF=1
+    /// path); any change touching replicas runs the group-aware
     /// [`reassign_group_and_move`](Self::reassign_group_and_move) (ADR-094), so an `rf > 1` sweep
     /// creates the replica placements it plans — closing the ADR-090 RF>1 deferral.
-    ///
-    /// Sequential is required: an HRW reshuffle can chain (position `p`: F→T while position `q`: T→U),
-    /// and running them concurrently would have T serve as a handoff target and source at once — the
-    /// drain-to-convergence proof assumes a quiescent, fenced source. Stops on the first failure and
-    /// returns a [`RebalanceMoveReport`] (fail-forward / resume — already-moved positions are each
-    /// consistent, so a partial rebalance is a valid resumable state, never a false negative). A hard
-    /// pre-flight error (no nodes, control-plane read failure) is an `Err`; per-position failures land
-    /// in the report.
     pub fn rebalance_and_move(
         &self,
         rf: usize,
+        handle: &Handle,
+    ) -> Result<RebalanceMoveReport, ShardError> {
+        self.rebalance_and_move_with(rf, 1, handle)
+    }
+
+    /// [`rebalance_and_move`](Self::rebalance_and_move) with wave parallelism (ADR-095): the
+    /// changed positions are partitioned into conflict-free waves
+    /// ([`plan_waves`](super::reassign::plan_waves) — moves sharing any node serialize, per the
+    /// chained-reshuffle constraint: position `p`: F→T while `q`: T→U would make T a handoff
+    /// target and a fenced source at once) and up to `max_parallel_moves` disjoint moves run
+    /// concurrently per wave. `max_parallel_moves <= 1` is the sequential path, byte-identical to
+    /// the pre-ADR-095 sweep. Safety never rests on the planner: every move still reserves its own
+    /// footprint in the busy-endpoint ledger.
+    ///
+    /// Stops at the first failing WAVE (fail-forward / resume — at the default this is exactly
+    /// "stops on the first failure") and returns a [`RebalanceMoveReport`]; already-moved positions
+    /// are each consistent, so a partial rebalance is a valid resumable state, never a false
+    /// negative. A hard pre-flight error (no nodes, control-plane read failure) is an `Err`;
+    /// per-position failures land in the report.
+    pub fn rebalance_and_move_with(
+        &self,
+        rf: usize,
+        max_parallel_moves: usize,
         handle: &Handle,
     ) -> Result<RebalanceMoveReport, ShardError> {
         let state = self.control_state()?;
@@ -312,50 +397,60 @@ impl ClusterEngine {
                 "rebalance_and_move: the cluster has no nodes to place shards on".into(),
             ));
         }
-        // Positions whose GROUP moves (a data move), in deterministic position order.
+        // Positions whose GROUP moves (a data move), in deterministic position order, partitioned
+        // into conflict-free waves (singletons in target order at the default parallelism).
         let targets = rebalance_group_targets(&state, rf);
+        let waves = plan_waves(&state, &targets, max_parallel_moves);
 
         let mut report = RebalanceMoveReport::default();
-        for (i, (pos, desired)) in targets.iter().enumerate() {
-            let stop = |report: &mut RebalanceMoveReport, reason: String| {
-                report.failed = Some((*pos, reason));
-                report.not_attempted = targets[i + 1..].iter().map(|(p, _)| *p).collect();
-            };
-            // Dispatch by shape: both committed and desired bare ⇒ the proven single-shard path;
-            // anything touching replicas ⇒ the group move.
-            let committed_bare = state
-                .assignments
-                .iter()
-                .find(|a| a.position == *pos)
-                .is_none_or(|a| a.replicas.is_empty());
-            let outcome = if committed_bare && desired.replicas.is_empty() {
-                self.reassign_and_move(*pos as usize, desired.primary, handle)
-            } else {
-                self.reassign_group_and_move(*pos as usize, desired, handle)
-            };
-            match outcome {
-                Ok(ReassignOutcome::Moved { .. }) => report.moved.push(*pos),
-                // Resolved equal under us (a concurrent move already placed it): not a failure.
-                Ok(ReassignOutcome::NoChange { .. }) => {}
-                Ok(ReassignOutcome::MovedButNotCommitted { .. }) => {
-                    // The data moved but its commit failed (event already emitted). Stop so the
-                    // durable map stays reconcilable rather than piling more moves on top.
-                    stop(
-                        &mut report,
-                        "data moved but committing the new owner failed (see the emitted event); \
-                         stopped the rebalance so the durable map stays reconcilable — re-run to resume"
-                            .into(),
-                    );
-                    return Ok(report);
-                }
-                Err(e) => {
-                    // A clean move failure rolled this position fully back (routing + map unchanged);
-                    // already-moved positions stay consistent. Stop and report for a resume.
-                    stop(&mut report, e.to_string());
-                    return Ok(report);
+        for (wi, wave) in waves.iter().enumerate() {
+            let mut wave_failed = false;
+            for (pos, outcome) in self.execute_move_wave(&state, &targets, wave, handle) {
+                match outcome {
+                    Ok(ReassignOutcome::Moved { .. }) => report.moved.push(pos),
+                    // Resolved equal under us (a concurrent move already placed it): not a failure.
+                    Ok(ReassignOutcome::NoChange { .. }) => {}
+                    Ok(ReassignOutcome::MovedButNotCommitted { .. }) => {
+                        // The data moved but its commit failed (event already emitted). Stop after
+                        // this wave so the durable map stays reconcilable rather than piling more
+                        // moves on top.
+                        wave_failed = true;
+                        if report.failed.is_none() {
+                            report.failed = Some((
+                                pos,
+                                "data moved but committing the new owner failed (see the emitted \
+                                 event); stopped the rebalance so the durable map stays \
+                                 reconcilable — re-run to resume"
+                                    .into(),
+                            ));
+                        } else {
+                            report.not_attempted.push(pos);
+                        }
+                    }
+                    Err(e) => {
+                        // A clean move failure rolled this position fully back (routing + map
+                        // unchanged); already-moved positions stay consistent. Stop after this
+                        // wave and report for a resume.
+                        wave_failed = true;
+                        if report.failed.is_none() {
+                            report.failed = Some((pos, e.to_string()));
+                        } else {
+                            report.not_attempted.push(pos);
+                        }
+                    }
                 }
             }
+            if wave_failed {
+                report
+                    .not_attempted
+                    .extend(waves[wi + 1..].iter().flatten().map(|&i| targets[i].0));
+                break;
+            }
         }
+        // Position-sorted regardless of wave completion order (a no-op at the sequential default,
+        // where waves are singletons in target order).
+        report.moved.sort_unstable();
+        report.not_attempted.sort_unstable();
         Ok(report)
     }
 }

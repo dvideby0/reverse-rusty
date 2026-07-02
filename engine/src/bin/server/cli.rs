@@ -221,12 +221,21 @@ pub(crate) struct Cli {
     /// Run the unattended re-point reconciler every N seconds (ADR-092): periodically reconcile the
     /// committed shard→node map to the desired HRW placement by MOVING data (the data-moving path, not
     /// the map-only `rebalance`), so a membership change converges routing automatically with no
-    /// operator action. Idempotent — a converged map moves nothing — and it shares the engine's
-    /// move-serialization guard with `/_cluster/reassign` and the autoscaler, so passes never overlap a
-    /// manual move. Requires `--route-by-assignments` (and therefore `--control-endpoint`) and a
-    /// `--features distributed` build. Unset (default) ⇒ no reconciler runs (byte-identical).
+    /// operator action. Idempotent — a converged map moves nothing — and every move reserves its
+    /// nodes in the engine's busy-endpoint move ledger (ADR-095), shared with `/_cluster/reassign`
+    /// and the autoscaler, so a pass never overlaps a CONFLICTING manual move. Requires
+    /// `--route-by-assignments` (and therefore `--control-endpoint`) and a `--features distributed`
+    /// build. Unset (default) ⇒ no reconciler runs (byte-identical).
     #[arg(long)]
     pub(crate) reconcile_interval_secs: Option<u64>,
+
+    /// Wave parallelism for each reconcile pass's moves (ADR-095): up to N conflict-free moves
+    /// (disjoint node footprints) run concurrently per pass. Default 1 = the sequential pass,
+    /// byte-identical to pre-ADR-095. Each parallel move costs one OS thread + its own gRPC
+    /// connections for the duration of an O(corpus) copy — size to what the mesh and the nodes'
+    /// disks can absorb. Only meaningful with `--reconcile-interval-secs`.
+    #[arg(long, default_value_t = 1)]
+    pub(crate) reconcile_max_parallel: usize,
 
     /// Coordinator gRPC client connect timeout in seconds (ADR-085) — bounds the TCP+TLS
     /// dial so an unreachable shard fails fast. Default: 5s.

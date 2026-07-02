@@ -361,16 +361,19 @@ pub struct ClusterEngine {
     /// in-process path ⇒ byte-identical.
     #[cfg(feature = "distributed")]
     client_security: super::security::ClientSecurity,
-    /// Serializes every DATA-MOVING map mutation against each other (ADR-090): an operator
-    /// `reassign_and_move`/`rebalance_and_move` and the autoscaler-driven handoff
-    /// (`drive_autoscaled_handoff`) all hold this for the whole move-then-commit, so two
-    /// concurrent moves of the same position can't interleave their `execute_handoff` flip and
-    /// `AssignShard` commit and invert committed-map vs live-routing. It does NOT guard the hot
-    /// path (percolate/ingest never touch it) — only the rare admin/autoscaler move path — so a
-    /// long segment copy here never stalls reads or writes. Gated, so the lean struct is
-    /// unchanged; the in-process path has no `execute_handoff` to serialize.
+    /// The busy-endpoint move ledger (ADR-095, replacing ADR-090's whole-coordinator
+    /// `reassign_serial: Mutex<()>`): every DATA-MOVING op — an operator
+    /// `reassign_and_move`/`reassign_group_and_move`/`rebalance_and_move`, a raw
+    /// `execute_handoff`, and the autoscaler-driven handoff — reserves its resolved endpoint
+    /// footprint here for the whole move-then-commit. Conflicting moves (any shared node: chained
+    /// reshuffle, shared source/destination, the same position's committed primary) serialize
+    /// exactly as under the old global mutex; moves over DISJOINT node sets may now run in
+    /// parallel (the opt-in `max_parallel_moves` waves). It does NOT guard the hot path
+    /// (percolate/ingest never touch it) — only the rare admin/autoscaler move path — so a long
+    /// segment copy here never stalls reads or writes. Gated, so the lean struct is unchanged;
+    /// the in-process path has no `execute_handoff` to serialize.
     #[cfg(feature = "distributed")]
-    reassign_serial: Mutex<()>,
+    move_ledger: reassign::MoveLedger,
 }
 
 /// Observer callback for cluster durability events — the `Arc` analogue of the

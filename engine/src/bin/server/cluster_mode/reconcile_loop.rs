@@ -33,13 +33,16 @@ pub(crate) fn spawn_reconcile_loop(
     let enabled = cfg.enabled;
     let rf = cfg.rf;
     let min_interval = cfg.min_interval;
+    let max_parallel_moves = cfg.max_parallel_moves.max(1);
     tokio::spawn(async move {
         if !enabled {
             return;
         }
         info!(
             min_interval_secs = min_interval.as_secs(),
-            rf, "reconcile loop started (ADR-092): watching the committed map for divergence"
+            rf,
+            max_parallel_moves,
+            "reconcile loop started (ADR-092): watching the committed map for divergence"
         );
 
         // Epoch cursor: the committed version as of the last FULLY-CONVERGED pass. Polling it (a cheap
@@ -76,7 +79,7 @@ pub(crate) fn spawn_reconcile_loop(
             let st = Arc::clone(&state);
             let result = tokio::task::spawn_blocking(move || {
                 let cluster = st.cluster.read();
-                cluster.reconcile(rf, &handle)
+                cluster.reconcile_with(rf, max_parallel_moves, &handle)
             })
             .await;
 

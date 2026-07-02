@@ -2,7 +2,8 @@
 //! split from `group.rs` to keep it under the file-size goal.
 
 use super::*;
-use crate::cluster::control::NodeDescriptor;
+use crate::cluster::allocator;
+use crate::cluster::control::{ClusterState, NodeDescriptor, NodeRole};
 
 fn node(id: u64) -> NodeDescriptor {
     NodeDescriptor {

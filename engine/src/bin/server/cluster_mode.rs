@@ -404,6 +404,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             enabled: true,
             rf: cli.replication_factor,
             min_interval: std::time::Duration::from_secs(secs.max(1)),
+            max_parallel_moves: cli.reconcile_max_parallel.max(1),
         };
         reconcile_loop::spawn_reconcile_loop(Arc::clone(&state), &cfg)
     });

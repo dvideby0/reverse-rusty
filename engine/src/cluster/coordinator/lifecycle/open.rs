@@ -99,10 +99,10 @@ impl ClusterEngine {
             // `with_client_security` (ADR-071).
             #[cfg(feature = "distributed")]
             client_security: crate::cluster::security::ClientSecurity::default(),
-            // Unlocked; held only by the data-moving reassign path (ADR-090). Default-path
+            // Empty; reserved only by the data-moving reassign path (ADR-090/095). Default-path
             // moves never happen (no `execute_handoff` in-process), so it is never contended.
             #[cfg(feature = "distributed")]
-            reassign_serial: std::sync::Mutex::new(()),
+            move_ledger: crate::cluster::coordinator::reassign::MoveLedger::new(),
         })
     }
     /// True if `data_dir` holds a committed cluster manifest — i.e. [`Self::open`]

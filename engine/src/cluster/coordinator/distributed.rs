@@ -509,7 +509,32 @@ impl ClusterEngine {
     /// vanishes), and a source that fails to converge aborts the flip (leaving the source fenced)
     /// rather than dropping a write. "Drop the old owner" = drop it from ROUTING, not teardown (its
     /// server keeps running; tearing it down is a separate ops step).
+    ///
+    /// Reserves `{source, target}` in the busy-endpoint move ledger for the whole move (ADR-095), so
+    /// a raw handoff — the REST `POST /_cluster/handoff` path — serializes against every concurrent
+    /// data-moving reassign touching either node. (Before the ledger, a raw handoff took NO guard at
+    /// all and could race a `reassign_and_move` of the same position — a latent hole ADR-095
+    /// closes.) [`reassign_and_move`](Self::reassign_and_move) calls the unguarded `_inner` variant
+    /// instead: its own ticket already covers both endpoints, and re-reserving here would
+    /// self-deadlock.
     pub fn execute_handoff(
+        &self,
+        position: usize,
+        source_endpoint: &str,
+        target_endpoint: &str,
+        handle: &tokio::runtime::Handle,
+    ) -> Result<u64, ShardError> {
+        let _ticket = self
+            .move_ledger
+            .reserve(&[source_endpoint, target_endpoint]);
+        self.execute_handoff_inner(position, source_endpoint, target_endpoint, handle)
+    }
+
+    /// [`execute_handoff`](Self::execute_handoff) minus the ledger reservation — for callers already
+    /// holding a [`MoveTicket`](super::reassign::MoveLedger) covering `{source, target}` (the
+    /// data-moving reassign path). Never call this without such a ticket: two unguarded handoffs
+    /// sharing a node would interleave their fence windows.
+    pub(in crate::cluster::coordinator) fn execute_handoff_inner(
         &self,
         position: usize,
         source_endpoint: &str,
