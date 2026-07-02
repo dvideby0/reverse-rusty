@@ -83,6 +83,14 @@ fn populated_shard_metrics_report_real_numbers() {
     assert!(body.contains(
         "reverse_rusty_shard_rpc_duration_seconds_bucket{shard=\"0\",method=\"percolate\",le=\"+Inf\"} 0"
     ));
+    // The broad-lane cost counters (ADR-101) also render from the FIRST scrape, all-zero on a
+    // slot that has served no percolate — series continuity, same as the histogram family.
+    assert!(
+        body.contains("# TYPE reverse_rusty_broad_candidates_total counter"),
+        "expected the broad-cost counter family; got:\n{body}"
+    );
+    assert!(body.contains("reverse_rusty_broad_candidates_total{shard=\"0\"} 0"));
+    assert!(body.contains("reverse_rusty_broad_postings_scanned_total{shard=\"0\"} 0"));
 }
 
 #[test]

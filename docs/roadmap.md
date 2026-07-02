@@ -193,9 +193,12 @@ and `release.yml` publishes the smoke-gated GHCR image per `v*` tag.
   gauge — the autoscaling-signal prerequisite. **Per-shard latency histograms shipped**
   ([ADR-100](decisions/adr-100-shard-rpc-latency-histogram.md)): native
   `reverse_rusty_shard_rpc_duration_seconds{shard,method,le}` in the shard `/_metrics`, timed at the
-  gRPC handler boundary — p95/p99 via `histogram_quantile()`. *Residual:* per-shard broad-lane
-  cost stays open. Plus the operational docs above the shipped ADR-081 runbook: **DR runbook,
-  rolling-upgrade procedure, resource-sizing guide, alert examples, a backup/restore rehearsal**.
+  gRPC handler boundary — p95/p99 via `histogram_quantile()`. **Per-shard broad-lane cost
+  counters shipped** ([ADR-101](decisions/adr-101-shard-broad-lane-cost-counters.md)): the
+  coordinator's `reverse_rusty_broad_*_total` names, `{shard}`-labeled in the shard `/_metrics`,
+  accumulated from each percolate's `MatchStats` at the handler boundary. Still open: the
+  operational docs above the shipped ADR-081 runbook — **DR runbook, rolling-upgrade procedure,
+  resource-sizing guide, alert examples, a backup/restore rehearsal**.
   **Cooperative cancellation / bounded concurrency shipped**
   ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md)): an explicit
   `timeout_ms` now stops the match work at coarse boundaries (not just the response), and

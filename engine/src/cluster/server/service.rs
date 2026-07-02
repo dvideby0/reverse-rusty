@@ -59,6 +59,7 @@ impl ShardService for ShardServer {
             let (ids, scores) = scored.into_iter().unzip();
             slot.latency
                 .observe(ShardRpc::PercolateRanked, started.elapsed());
+            slot.broad.record(&stats);
             return Ok(Response::new(proto::PercolateReply {
                 ids,
                 stats: Some(proto::stats_from_engine(stats)),
@@ -71,6 +72,9 @@ impl ShardService for ShardServer {
             .percolate_filtered(&req.title, req.include_broad, &pred)
             .map_err(|e| Status::internal(e.to_string()))?;
         slot.latency.observe(ShardRpc::Percolate, started.elapsed());
+        // Broad-lane cost accumulation (ADR-101): unconditional — include_broad=false stats carry
+        // all-zero broad fields, and a fetch_add(0) is branch-free noise.
+        slot.broad.record(&stats);
         Ok(Response::new(proto::PercolateReply {
             ids,
             stats: Some(proto::stats_from_engine(stats)),

@@ -64,6 +64,9 @@ struct ShardSlot {
     /// the SLOT (not the swappable state) so an in-place `recover_from` state swap keeps the
     /// series continuous; a whole-slot replacement is an ordinary Prometheus counter reset.
     latency: super::node_metrics::SlotLatency,
+    /// Cumulative broad-lane cost counters (ADR-101), accumulated from each percolate's
+    /// `MatchStats` at the handler boundary — same slot-lifetime semantics as `latency`.
+    broad: super::node_metrics::SlotBroadCost,
 }
 
 impl ShardSlot {
@@ -73,6 +76,7 @@ impl ShardSlot {
             state: ArcSwapOption::from(Some(Arc::new(state))),
             fenced_at_generation: AtomicU64::new(0),
             latency: super::node_metrics::SlotLatency::new(),
+            broad: super::node_metrics::SlotBroadCost::new(),
         })
     }
 

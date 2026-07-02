@@ -51,6 +51,7 @@ impl ShardMetricsSource {
                     segments: snap.segment_infos(),
                     class: snap.class_counts(),
                     rpc_latency: slot.latency.snapshot(),
+                    broad: slot.broad.snapshot(),
                 }
             })
             .collect();

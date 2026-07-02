@@ -2,7 +2,8 @@
 
 use super::{
     is_metrics_get, render_control, render_shard_pending, render_shards, serve_metrics,
-    ControlMetricsView, LatencySnapshot, ShardSample, LATENCY_LE, SHARD_RPC_LABELS,
+    BroadCostSnapshot, ControlMetricsView, LatencySnapshot, ShardSample, LATENCY_LE,
+    SHARD_RPC_LABELS,
 };
 use crate::events::{EngineMetrics, SegmentInfo, SegmentKind};
 use std::io::{Read, Write};
@@ -20,6 +21,7 @@ fn sample(
         segments,
         class,
         rpc_latency: [LatencySnapshot::zero(); SHARD_RPC_LABELS.len()],
+        broad: BroadCostSnapshot::default(),
     }
 }
 
@@ -198,6 +200,45 @@ fn render_shards_histogram_header_once_across_slots() {
     assert!(out.contains(
         "reverse_rusty_shard_rpc_duration_seconds_count{shard=\"4\",method=\"percolate\"} 0"
     ));
+}
+
+#[test]
+fn render_shards_emits_broad_cost_counters() {
+    // Two co-located slots with distinct hand-built broad totals (ADR-101): each of the four
+    // families renders its typed COUNTER header exactly once (grouped exposition), one labeled
+    // series per slot, exact values — and the two columnar-only families render 0 (they are
+    // structurally 0 on the per-title Percolate wire; rendered for name symmetry).
+    let mut s1 = sample(1, sample_metrics(), vec![seg(0)], [1, 0, 2, 0]);
+    s1.broad = BroadCostSnapshot {
+        candidates: 7,
+        postings_scanned: 40,
+        queries_evaluated: 0,
+        batches: 0,
+    };
+    let s4 = sample(4, sample_metrics(), vec![seg(0)], [1, 0, 0, 0]);
+    let out = render_shards(&[s1, s4]);
+
+    for family in [
+        "reverse_rusty_broad_candidates_total",
+        "reverse_rusty_broad_postings_scanned_total",
+        "reverse_rusty_broad_queries_evaluated_total",
+        "reverse_rusty_broad_batches_total",
+    ] {
+        assert_eq!(
+            out.matches(&format!("# TYPE {family} counter")).count(),
+            1,
+            "{family}: typed counter header exactly once"
+        );
+        // One labeled series per slot, present from the first scrape even when 0.
+        assert!(out.contains(&format!("{family}{{shard=\"1\"}}")));
+        assert!(out.contains(&format!("{family}{{shard=\"4\"}}")));
+    }
+    // Exact values on the served slot; the idle slot renders zeros.
+    assert!(out.contains("reverse_rusty_broad_candidates_total{shard=\"1\"} 7"));
+    assert!(out.contains("reverse_rusty_broad_postings_scanned_total{shard=\"1\"} 40"));
+    assert!(out.contains("reverse_rusty_broad_queries_evaluated_total{shard=\"1\"} 0"));
+    assert!(out.contains("reverse_rusty_broad_batches_total{shard=\"1\"} 0"));
+    assert!(out.contains("reverse_rusty_broad_candidates_total{shard=\"4\"} 0"));
 }
 
 #[test]
