@@ -38,10 +38,13 @@ zero threads spawned.
   was built for — serialized by construction); a replicated install holds all of D, so no second
   move touches a member mid-assembly.
 - **Plan → reserve → revalidate.** Each move resolves its footprint from a committed read, reserves
-  it, then **re-reads and confirms the position's committed entry did not change** while it waited
-  (the conflicting move it waited on may have committed this very position); a change re-plans from
-  the fresh state (bounded, typed error past `PLAN_ATTEMPTS`). The pre-commit CAS stays as the
-  final backstop, unchanged.
+  it, then **re-reads and confirms both the position's committed entry AND every member's endpoint
+  resolution did not change** while it waited (the conflicting move it waited on may have committed
+  this very position, and `register_node` replaces a descriptor by id — moving over a stale addr
+  and committing the NodeId would leave a route-by-assignments restart resolving to a server that
+  never received the data; a codex finding on this ADR); a change re-plans from the fresh state
+  (bounded, typed error past `PLAN_ATTEMPTS`). The pre-commit CAS stays as the final backstop,
+  unchanged.
 - **Waves** (new [`reassign/parallel.rs`](../../engine/src/cluster/coordinator/reassign/parallel.rs)):
   `plan_waves` greedily partitions `rebalance_group_targets` output in position order — a target
   joins the current wave iff its footprint is disjoint from every admitted one and the wave is

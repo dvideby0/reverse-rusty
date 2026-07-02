@@ -74,9 +74,10 @@ const COMMIT_ATTEMPTS: usize = 3;
 
 /// Bounded plan→reserve→revalidate attempts (ADR-095): a move plans its endpoint footprint from a
 /// committed read, reserves it in the ledger (possibly waiting out a conflicting in-flight move),
-/// then re-reads to confirm the position's committed entry did not change while it waited — a
-/// change (e.g. the conflicting move just committed this very position) re-plans from the fresh
-/// state. More than a couple of iterations means the map is churning under a storm of concurrent
+/// then re-reads to confirm neither the position's committed entry NOR any member's endpoint
+/// resolution changed while it waited — a change (e.g. the conflicting move just committed this
+/// very position, or a `register_node` replaced a member's addr) re-plans from the fresh state.
+/// More than a couple of iterations means the map is churning under a storm of concurrent
 /// commits; fail typed rather than spin.
 const PLAN_ATTEMPTS: usize = 4;
 
@@ -225,18 +226,32 @@ impl ClusterEngine {
             let ticket = self
                 .move_ledger
                 .reserve(&[from_ep.as_str(), tgt_ep.as_str()]);
+            // Revalidate BOTH the committed entry AND the endpoint resolution (codex P2 on this
+            // ADR): while we waited on the ledger, a concurrent op may have re-committed this
+            // position, or re-registered a member with a NEW addr (`register_node` replaces by
+            // id). Moving over a stale endpoint and then committing the NodeId would leave a
+            // route-by-assignments restart resolving that id to a server that never received the
+            // data — a restart false negative.
             let now = self.control_state()?;
-            let unchanged = now
+            let addr_now = |id: NodeId| {
+                now.nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .and_then(|n| n.addr.as_deref())
+            };
+            let entry_unchanged = now
                 .assignments
                 .iter()
                 .find(|a| a.position == pos)
                 .is_some_and(|a| a.primary == from && a.replicas.is_empty());
-            if unchanged {
+            let eps_unchanged =
+                addr_now(from) == Some(from_ep.as_str()) && addr_now(to) == Some(tgt_ep.as_str());
+            if entry_unchanged && eps_unchanged {
                 planned = Some((from, from_ep, tgt_ep, ticket));
                 break;
             }
-            // The entry changed while we waited on the ledger: the ticket drops here and the next
-            // iteration re-plans from the fresh committed state.
+            // The entry (or a member's endpoint) changed while we waited on the ledger: the
+            // ticket drops here and the next iteration re-plans from the fresh committed state.
         }
         let Some((from, from_ep, tgt_ep, _ticket)) = planned else {
             return Err(ShardError::ControlPlane(format!(

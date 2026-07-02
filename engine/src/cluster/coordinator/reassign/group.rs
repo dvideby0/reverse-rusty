@@ -189,13 +189,29 @@ impl ClusterEngine {
             footprint.push(cp_ep.as_str());
             footprint.extend(d_members.iter().map(|(_, e)| e.as_str()));
             let ticket = self.move_ledger.reserve(&footprint);
+            // Revalidate BOTH the committed group AND every member's endpoint resolution (codex
+            // P2 on this ADR): while we waited on the ledger, a concurrent op may have re-shaped
+            // this position, or re-registered a member with a NEW addr (`register_node` replaces
+            // by id). Installing/copying over stale endpoints and then committing the NodeIds
+            // would leave a route-by-assignments restart resolving to servers that never received
+            // the group — a restart false negative.
             let now = self.control_state()?;
-            let unchanged = now
+            let addr_now = |id: NodeId| {
+                now.nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .and_then(|n| n.addr.as_deref())
+            };
+            let group_unchanged = now
                 .assignments
                 .iter()
                 .find(|a| a.position == pos)
                 .is_some_and(|a| groups_equal(a, &committed));
-            if unchanged {
+            let eps_unchanged = addr_now(committed.primary) == Some(cp_ep.as_str())
+                && d_members
+                    .iter()
+                    .all(|(nid, ep)| addr_now(*nid) == Some(ep.as_str()));
+            if group_unchanged && eps_unchanged {
                 planned = Some(PlannedGroupMove {
                     committed,
                     cp_ep,
@@ -204,8 +220,8 @@ impl ClusterEngine {
                 });
                 break;
             }
-            // The group changed while we waited on the ledger: the ticket drops here and the next
-            // iteration re-plans from the fresh committed state.
+            // The group (or a member's endpoint) changed while we waited on the ledger: the
+            // ticket drops here and the next iteration re-plans from the fresh committed state.
         }
         let Some(PlannedGroupMove {
             committed,
