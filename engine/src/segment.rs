@@ -363,6 +363,19 @@ pub struct AliasApplyReport {
     pub summary: crate::vocab::AliasSummary,
 }
 
+/// Outcome of applying match-feedback validation to the registry (ADR-103).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AliasFeedbackApplyReport {
+    /// Entries stamped with [`FeedbackEvidence`](crate::vocab::FeedbackEvidence).
+    pub stamped: usize,
+    /// Entries promoted to `Active` (only with `activate=true`; rejected/mixed-kind refused).
+    pub activated: usize,
+    /// Stored queries recompiled (0 unless something activated — the metadata-only path).
+    pub recompiled: usize,
+    /// The registry's status counts after applying.
+    pub summary: crate::vocab::AliasSummary,
+}
+
 /// Outcome of a distributional alias discovery run recorded into the registry (ADR-102).
 /// Nothing is ever activated by this path — candidates only — so unlike
 /// [`AliasApplyReport`] there is no `activated`/`recompiled` (the install is metadata-only;

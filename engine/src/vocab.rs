@@ -26,7 +26,10 @@ mod methods;
 #[cfg(test)]
 mod tests;
 
-pub use alias::{AliasEntry, AliasKind, AliasProvenance, AliasRegistry, AliasStatus, AliasSummary};
+pub use alias::{
+    AliasEntry, AliasFeedback, AliasKind, AliasProvenance, AliasRegistry, AliasStatus,
+    AliasSummary, FeedbackEvidence, PairFeedback,
+};
 pub use distributional::{discover_pairs, DiscoveredPair, DistributionalConfig};
 pub use learn::{
     learn_anyof_groups, learn_equivalences_from_queries, learn_from_queries,

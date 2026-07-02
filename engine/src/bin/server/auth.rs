@@ -342,6 +342,7 @@ mod tests {
             prom: PrometheusMetrics::new(),
             slow_query_threshold_ms: 0,
             auth,
+            feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
         })
     }
 

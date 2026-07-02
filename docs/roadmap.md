@@ -77,10 +77,9 @@ Broad-lane batch/columnar evaluation (ADR-026) and resident-memory reduction (AD
 
 Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-anchoring
 (ADR-056), alias governance + multi-word activation (ADR-060/061), distributional alias
-discovery (ADR-102 — review-first candidates over the shipped seam). Open:
+discovery (ADR-102 — review-first candidates over the shipped seam), match-feedback alias
+validation (ADR-103 — the title→query stream as behavioral evidence, opt-in capture). Open:
 
-- **Match-feedback alias validation** — the highest-precision *automated* alias signal; needs an
-  operational title→query feedback loop.
 - **The rest of the "improve" menu** ([`design/ingestion-and-updates.md`](design/ingestion-and-updates.md)
   §7): candidate-survival telemetry, `recommended_shard_count`/`recommended_arity`, feature-ID
   re-ranking for locality, re-running the corpus learner per range.

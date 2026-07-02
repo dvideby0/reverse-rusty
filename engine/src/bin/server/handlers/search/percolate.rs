@@ -197,6 +197,14 @@ pub(crate) async fn search(
                                     .with_label_values(&["search"])
                                     .inc();
                             }
+                            // Match-feedback capture (ADR-103): opt-in, post-match, off the
+                            // engine's match path (this is the handler's blocking thread).
+                            if snap.config().alias_feedback_capture {
+                                if let Ok((ids, _)) = &r {
+                                    let toks = reverse_rusty::corpus::tokenize(&title);
+                                    state_inner.feedback.lock().observe(&toks, ids);
+                                }
+                            }
                             r
                         })
                     })
@@ -348,6 +356,16 @@ pub(crate) async fn search(
                                 .match_cancellations_total
                                 .with_label_values(&["search"])
                                 .inc();
+                        }
+                        // Match-feedback capture (ADR-103): opt-in, post-match.
+                        if snap.config().alias_feedback_capture {
+                            if let Ok(results) = &r {
+                                let mut fb = state_inner.feedback.lock();
+                                for (idx, ids, _stats) in results {
+                                    let toks = reverse_rusty::corpus::tokenize(&titles[*idx]);
+                                    fb.observe(&toks, ids);
+                                }
+                            }
                         }
                         r
                     })

@@ -106,6 +106,9 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **Distributional alias discovery** — PPMI-cosine context-similarity candidates over the stored
   queries, review-first (`LearnedDistributional` never auto-activates); metadata-only recording
   (no recompile), `POST /_vocab/aliases/discover[_and_record]` (ADR-102).
+- **Match-feedback alias validation** — opt-in passive capture of the live match stream into
+  per-candidate-pair behavioral evidence (bottom-k sketches + degenerate-evidence exclusion);
+  `GET /_vocab/aliases/feedback` + `validate_and_apply` (explicit `activate=true`) (ADR-103).
 - **Multi-word aliases** — two title-side views P(T)/N(T) (ADR-061); on a cluster via P(T)-aware
   routing + `build_with_vocab` (live cross-process vocab shipping decided-refused: deploy-time
   config) (ADR-076).
@@ -233,7 +236,7 @@ live in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)
 
 The prioritized roadmap (open work only) is **[`roadmap.md`](roadmap.md)**. Tiers: **0** Cluster-v1
 gate (✅ complete) · **1** measured bottlenecks (✅ complete) · **2** feature-model self-tuning
-(open: match-feedback validation, the "improve" menu) · **3** scale & production maturity (open:
+(open: the "improve" menu) · **3** scale & production maturity (open:
 ADR-065 criterion 12, model versioning, aspects-first ingestion) · **4** percolator
 parity (✅ program complete; small deferred refinements) · **5** deployability & operational
 maturity (M0 deploy-truth + M1 local-smoke CI gate + M2 release pipeline ✅ shipped, ADR-098 — the

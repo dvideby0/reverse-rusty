@@ -166,6 +166,9 @@ The full method/path matrix is below.
 | `/_vocab/aliases/learn_and_apply` | POST | Learn alias candidates from stored queries + apply (`?min_count=N`) |
 | `/_vocab/aliases/discover` | POST | Distributional alias discovery, compute-only (ADR-102): proposals + similarity/co-occurrence evidence over the stored queries, or an explicit `{"queries": [[id, "dsl"], ...]}` body; knob overrides in the body (`min_similarity`, `max_pairs`, …) |
 | `/_vocab/aliases/discover_and_record` | POST | Discover over the engine's OWN stored queries and file every proposal as a review `Candidate` (never activates — `recompiled` is always 0; activation stays `PUT /_vocab` with an edited status) |
+| `/_vocab/aliases/feedback` | GET | Match-feedback evidence per tracked candidate pair (ADR-103): title counts, surviving sampled queries, Jaccard `overlap`, `validated` — thresholds `?min_overlap=0.5&min_titles=50&min_queries=20` echoed (capture is opt-in: `alias_feedback_capture`) |
+| `/_vocab/aliases/feedback/reset` | POST | Wipe accumulated feedback evidence (a measurement-window boundary) |
+| `/_vocab/aliases/validate_and_apply` | POST | Stamp validated pairs into the registry (evidence + confidence — metadata-only, no recompile); `?activate=true` additionally promotes them (refuses operator-rejected groups) via the full recompile path |
 | `/_settings` | GET | Read live engine settings (`?include_defaults`) |
 | `/_settings` | PUT | Update the dynamic settings subset |
 

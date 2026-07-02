@@ -340,6 +340,13 @@ fn apply_settings_patch(
             "broad_materialize" => set_bool(&mut cfg.broad_materialize, key, val, &mut errors),
             // ---- cooperative cancellation (ADR-099) ----
             "cooperative_cancel" => set_bool(&mut cfg.cooperative_cancel, key, val, &mut errors),
+            // ---- match-feedback alias validation (ADR-103) ----
+            "alias_feedback_capture" => {
+                set_bool(&mut cfg.alias_feedback_capture, key, val, &mut errors);
+            }
+            "alias_feedback_max_pairs" => {
+                set_usize(&mut cfg.alias_feedback_max_pairs, key, val, &mut errors);
+            }
             // ---- the class-D always-candidate lane (ADR-068) ----
             "accept_class_d" => set_bool(&mut cfg.accept_class_d, key, val, &mut errors),
             // ---- static (bound at construction) ----
@@ -445,6 +452,18 @@ mod settings_tests {
                 .any(|e| e.contains("broad_batch_size must be >= 1")),
             "{err:?}"
         );
+    }
+
+    #[test]
+    fn applies_alias_feedback_settings() {
+        // ADR-103: both knobs are dynamic.
+        let cfg = apply_settings_patch(
+            EngineConfig::default(),
+            &patch(r#"{"alias_feedback_capture": true, "alias_feedback_max_pairs": 64}"#),
+        )
+        .expect("valid dynamic patch");
+        assert!(cfg.alias_feedback_capture);
+        assert_eq!(cfg.alias_feedback_max_pairs, 64);
     }
 
     #[test]

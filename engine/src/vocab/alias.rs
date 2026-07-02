@@ -23,12 +23,14 @@ use crate::dict::Dict;
 use crate::normalize::Normalizer;
 
 mod classify;
+mod feedback;
 mod solr;
 
 #[cfg(test)]
 mod tests;
 
 pub use classify::AliasKind;
+pub use feedback::{AliasFeedback, FeedbackEvidence, PairFeedback};
 
 /// Where an alias group came from — drives how aggressively it auto-activates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +78,11 @@ pub struct AliasEntry {
     /// scales with how many any-of groups reinforced it). Metadata only — never a
     /// correctness input.
     pub confidence: f64,
+    /// Behavioral evidence from the match-feedback loop (ADR-103), stamped by
+    /// `validate_and_apply`. Review metadata only — never a correctness input. Absent on old
+    /// vocab JSON and on entries never validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<FeedbackEvidence>,
 }
 
 impl AliasEntry {
@@ -286,6 +293,7 @@ impl AliasRegistry {
             kind,
             status,
             confidence,
+            feedback: None,
         });
         Some(status)
     }
@@ -368,6 +376,47 @@ impl AliasRegistry {
             return false;
         };
         self.entries[i].status = AliasStatus::Rejected;
+        true
+    }
+
+    /// Stamp match-feedback evidence onto an entry (ADR-103): sets
+    /// [`feedback`](AliasEntry::feedback) and raises `confidence` to at least the measured
+    /// overlap (finite-guarded; reconcile-by-max, like re-learning). Pure metadata — status is
+    /// untouched. Returns `false` for an unknown group.
+    pub fn record_feedback(&mut self, forms: &[String], evidence: FeedbackEvidence) -> bool {
+        let Some(forms) = Self::canonical_forms(forms) else {
+            return false;
+        };
+        let Some(i) = self.position(&forms) else {
+            return false;
+        };
+        let e = &mut self.entries[i];
+        if evidence.overlap.is_finite() {
+            e.confidence = e.confidence.max(evidence.overlap.clamp(0.0, 1.0));
+        }
+        e.feedback = Some(evidence);
+        true
+    }
+
+    /// The **automated** activation used by feedback validation (`validate_and_apply?activate=true`,
+    /// ADR-103): promotes a `Candidate` to `Active`. Unlike the operator-override
+    /// [`activate`](Self::activate) it acts ONLY on a `Candidate` — a `Rejected` entry is
+    /// refused (an automated pass must never resurrect an operator's rejection), `MixedKind`
+    /// is refused (structurally unexpressible), and an already-`Active` entry returns `false`
+    /// so a racing/repeated validate pass is idempotent and never triggers a spurious
+    /// full-recompile apply (codex review).
+    pub fn activate_validated(&mut self, forms: &[String]) -> bool {
+        let Some(forms) = Self::canonical_forms(forms) else {
+            return false;
+        };
+        let Some(i) = self.position(&forms) else {
+            return false;
+        };
+        let e = &mut self.entries[i];
+        if e.status != AliasStatus::Candidate || e.kind == AliasKind::MixedKind {
+            return false;
+        }
+        e.status = AliasStatus::Active;
         true
     }
 

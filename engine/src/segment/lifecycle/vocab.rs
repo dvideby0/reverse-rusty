@@ -104,6 +104,43 @@ impl Engine {
         })
     }
 
+    /// Apply match-feedback validation outcomes to the registry (ADR-103): stamp
+    /// [`FeedbackEvidence`](crate::vocab::FeedbackEvidence) (confidence reconciles by max)
+    /// onto each validated pair, and — only with `activate` — promote them via the
+    /// reject-refusing [`activate_validated`](crate::vocab::AliasRegistry::activate_validated)
+    /// (an automated pass must never resurrect an operator rejection). Evidence stamping alone
+    /// is metadata (the ADR-102 fast path: no epoch bump, no recompile); any actual activation
+    /// changes the active groups, so it takes the genuine `set_vocab` + recompile path.
+    pub fn apply_alias_feedback(
+        &mut self,
+        validated: &[(Vec<String>, crate::vocab::FeedbackEvidence)],
+        activate: bool,
+    ) -> Result<crate::segment::AliasFeedbackApplyReport, crate::error::NormalizerError> {
+        let mut vocab = self.vocab.as_deref().cloned().unwrap_or_default();
+        let (mut stamped, mut activated_n) = (0usize, 0usize);
+        for (forms, evidence) in validated {
+            if vocab.aliases_mut().record_feedback(forms, *evidence) {
+                stamped += 1;
+            }
+            if activate && vocab.aliases_mut().activate_validated(forms) {
+                activated_n += 1;
+            }
+        }
+        let recompiled = if activated_n > 0 {
+            self.set_vocab(vocab)?;
+            self.recompile_stale_segments()
+        } else {
+            self.install_vocab_metadata_only(vocab)?;
+            0
+        };
+        Ok(crate::segment::AliasFeedbackApplyReport {
+            stamped,
+            activated: activated_n,
+            recompiled,
+            summary: self.alias_summary(),
+        })
+    }
+
     /// Install a vocabulary whose **matching-relevant state is provably unchanged** — the
     /// metadata-only seam (ADR-102). The shipped apply path ([`set_vocab`](Self::set_vocab))
     /// unconditionally bumps `vocab_epoch` and recompiles the corpus; for a change that only
