@@ -34,6 +34,7 @@ pub(crate) fn spawn_reconcile_loop(
     let rf = cfg.rf;
     let min_interval = cfg.min_interval;
     let max_parallel_moves = cfg.max_parallel_moves.max(1);
+    let gc_orphans = cfg.gc_orphans;
     tokio::spawn(async move {
         if !enabled {
             return;
@@ -42,6 +43,7 @@ pub(crate) fn spawn_reconcile_loop(
             min_interval_secs = min_interval.as_secs(),
             rf,
             max_parallel_moves,
+            gc_orphans,
             "reconcile loop started (ADR-092): watching the committed map for divergence"
         );
 
@@ -85,12 +87,6 @@ pub(crate) fn spawn_reconcile_loop(
 
             match result {
                 Ok(Ok(report)) => {
-                    converged_epoch = if report.is_converged() {
-                        Some(epoch)
-                    } else {
-                        // Work remains (uncommitted / failed positions) — force a retry next interval.
-                        None
-                    };
                     if report.moved_count() > 0 || !report.is_converged() {
                         info!(
                             reconciled = report.moved_count(),
@@ -101,6 +97,51 @@ pub(crate) fn spawn_reconcile_loop(
                             "reconcile pass"
                         );
                     }
+                    // Opt-in orphan-slot GC epilogue (ADR-096): only after a pass that left the
+                    // map fully CONVERGED (never while positions are uncommitted/failed — belt on
+                    // top of the sweep's own keep-set), on the blocking pool like the pass itself.
+                    // A sweep that failed (or skipped a node) must be RETRIED next interval, so it
+                    // holds the epoch cursor back exactly like an unconverged pass (codex P2: the
+                    // cursor previously advanced before the epilogue, so a transient DropShard
+                    // failure was never retried until an unrelated commit bumped the epoch).
+                    let mut fully_done = report.is_converged();
+                    if gc_orphans && report.is_converged() {
+                        let handle = tokio::runtime::Handle::current();
+                        let st = Arc::clone(&state);
+                        match tokio::task::spawn_blocking(move || {
+                            let cluster = st.cluster.read();
+                            cluster.gc_orphan_slots(&handle)
+                        })
+                        .await
+                        {
+                            Ok(Ok(gc)) => {
+                                if !gc.dropped.is_empty() || !gc.is_clean() {
+                                    info!(
+                                        dropped = gc.dropped.len(),
+                                        kept_live_routed = gc.kept_live_routed.len(),
+                                        skipped_unassigned = gc.skipped_unassigned.len(),
+                                        failed = gc.failed.len(),
+                                        skipped_nodes = gc.skipped_nodes.len(),
+                                        "orphan-slot GC sweep"
+                                    );
+                                }
+                                if !gc.is_clean() || !gc.skipped_nodes.is_empty() {
+                                    fully_done = false;
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                warn!(error = %e, "orphan-slot GC sweep failed (retried next interval)");
+                                fully_done = false;
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "orphan-slot GC task panicked (retried next interval)");
+                                fully_done = false;
+                            }
+                        }
+                    }
+                    // Advance the cursor only past a pass whose FULL work (moves + the opt-in
+                    // sweep) completed clean; anything pending forces a retry next interval.
+                    converged_epoch = if fully_done { Some(epoch) } else { None };
                 }
                 Ok(Err(e)) => {
                     warn!(error = %e, "reconcile pass failed (will retry next interval)");

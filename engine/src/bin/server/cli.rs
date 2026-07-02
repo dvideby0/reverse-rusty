@@ -237,6 +237,14 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = 1)]
     pub(crate) reconcile_max_parallel: usize,
 
+    /// Run an orphan-slot GC sweep after each reconcile pass that leaves the map fully converged
+    /// (ADR-096): reclaim the fenced, unrouted slots data-moving reassignment strands on their old
+    /// nodes (slot map + `shard_<id>/` disk). Unset (default) ⇒ no sweep ever runs
+    /// (byte-identical); a one-shot sweep is also available as `POST /_cluster/gc`. Only
+    /// meaningful with `--reconcile-interval-secs`.
+    #[arg(long, default_value_t = false)]
+    pub(crate) reconcile_gc_orphans: bool,
+
     /// Coordinator gRPC client connect timeout in seconds (ADR-085) — bounds the TCP+TLS
     /// dial so an unreachable shard fails fast. Default: 5s.
     #[arg(long)]

@@ -3,11 +3,14 @@
 //! `POST /_checkpoint`, `POST /_backup`) + the single-node-only `_cat`/compact stubs.
 //!
 //! The `_cluster/*` control-plane operations (state, node register/deregister,
-//! rebalance, handoff, reassign, resize, resync) live in the [`ops`] submodule and are
-//! re-exported below, so callers keep resolving them as `admin::cluster_*`.
+//! rebalance, handoff, reassign, resize, resync) live in the [`ops`] submodule — plus
+//! the orphan-slot GC sweep in [`gc`] (ADR-096) — and are re-exported below, so
+//! callers keep resolving them as `admin::cluster_*`.
 
+mod gc;
 mod ops;
 
+pub(crate) use gc::cluster_gc;
 pub(crate) use ops::{
     cluster_deregister_node, cluster_handoff, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync, cluster_state,

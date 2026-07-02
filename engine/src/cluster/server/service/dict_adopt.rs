@@ -92,12 +92,14 @@ pub(super) fn adopt_dict(
     // cell lacks.
     if !node_matches {
         if let Some(root) = &server.data_dir {
-            super::super::persist_adopted_space(root, &req.dict, &req.tag_dict).map_err(|e| {
-                Status::internal(format!(
-                    "persisting adopted dict under {}: {e}",
-                    root.display()
-                ))
-            })?;
+            super::super::durable::persist_adopted_space(root, &req.dict, &req.tag_dict).map_err(
+                |e| {
+                    Status::internal(format!(
+                        "persisting adopted dict under {}: {e}",
+                        root.display()
+                    ))
+                },
+            )?;
         }
         server.node_dict.store(Some(Arc::new(AdoptedSpace {
             dict: Arc::clone(&space_dict),

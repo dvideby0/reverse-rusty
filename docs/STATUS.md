@@ -160,7 +160,10 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   **Parallel multi-position moves** — the busy-endpoint move ledger (replacing the global
   `reassign_serial` mutex) + conflict-free waves; opt-in `max_parallel_moves` /
   `--reconcile-max-parallel`, default 1 = the sequential path byte-identically; also guards the raw
-  REST handoff (ADR-095).
+  REST handoff (ADR-095). **Orphan-slot GC** — `ListShards`/`DropShard` (fence-armed CAS +
+  lease-guarded; rename-to-trash disk reclaim) + the ledger-reserved coordinator sweep with the
+  committed-map + live-routing keep-set; opt-in `--reconcile-gc-orphans` / `POST /_cluster/gc`,
+  default off (ADR-096).
 - **Partial-apply repair** — typed `PartiallyApplied` + live `resync` (ADR-047).
 - **Mesh security** — opt-in TLS + shared cluster token, constant-time default-deny interceptor on
   both planes (ADR-071).
@@ -253,7 +256,8 @@ parity (✅ program complete; small deferred refinements) · the operational-pol
   this foundation, with the packed-K>N gRPC oracle proving the *reconciler itself* converges the exact
   topology that parked it — no slot lost, zero-FN, epoch-invariant idempotence, restart routes zero-FN.
   RF>1 data-moving reconciliation shipped as ADR-094 (the group move); parallel multi-position
-  moves shipped as ADR-095 (the busy-endpoint ledger + waves, default sequential).
+  moves shipped as ADR-095 (the busy-endpoint ledger + waves, default sequential); orphan-slot GC
+  shipped as ADR-096 (the moved-away slots are reclaimed, opt-in).
 - **Empty default vocabulary.** `default_vocab()` ships no domain terms; vocabulary arrives at
   runtime via `Vocab`/`NormalizerBuilder` (learning: ADR-015/053; aliases: ADR-054/060/061).
 - **Validated on synthetic + pinned-pair data, not a real corpus.** The oracle and benchmarks run

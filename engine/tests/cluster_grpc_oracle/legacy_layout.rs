@@ -149,6 +149,18 @@ impl ShardService for LegacyLayoutServer {
     ) -> Result<Response<raw::UnfenceReply>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
+    async fn list_shards(
+        &self,
+        _req: Request<raw::Empty>,
+    ) -> Result<Response<raw::ListShardsReply>, Status> {
+        Err(Status::unimplemented("legacy mock"))
+    }
+    async fn drop_shard(
+        &self,
+        _req: Request<raw::DropShardRequest>,
+    ) -> Result<Response<raw::DropShardReply>, Status> {
+        Err(Status::unimplemented("legacy mock"))
+    }
 }
 
 /// Both connect paths refuse a server that does not attest the replicate-to-all broad layout;

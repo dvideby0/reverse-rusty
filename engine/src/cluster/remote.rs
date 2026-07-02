@@ -65,6 +65,11 @@ pub(crate) async fn connect_mesh(
 pub struct RemoteShard {
     client: ShardServiceClient<MeshChannel>,
     handle: Handle,
+    /// The endpoint string this client was connected with (ADR-096): the coordinator's GC sweep
+    /// reads it back through [`Shard::live_endpoints`] so live routing's physical targets are a
+    /// KEEP-set no drop can violate, however routing got there (a committed reassign, a raw
+    /// handoff flip, an uncommitted move).
+    endpoint: String,
     /// The coordinator's frozen-dict fingerprint (verified equal to the server's at connect).
     /// Carried so dict-guarded RPCs (e.g. `FetchTranslog`) can present it.
     dict_fp: u64,
@@ -161,6 +166,7 @@ impl RemoteShard {
         Ok(RemoteShard {
             client,
             handle,
+            endpoint: endpoint.to_string(),
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
             shard_id,
@@ -271,6 +277,7 @@ impl RemoteShard {
         Ok(RemoteShard {
             client,
             handle,
+            endpoint: endpoint.to_string(),
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
             shard_id,
@@ -366,6 +373,7 @@ impl RemoteShard {
         Ok(RemoteShard {
             client,
             handle,
+            endpoint: endpoint.to_string(),
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
             shard_id,
@@ -527,6 +535,50 @@ impl RemoteShard {
             async move { client.unfence(req).await.map(tonic::Response::into_inner) }
         })?;
         Ok(reply.fenced_at_generation)
+    }
+
+    /// The NODE's slot inventory (ADR-096): every shard the server hosts with its GC-relevant
+    /// state (fence generation, live count, unexpired leases), plus the node's dict/tag-dict
+    /// fingerprints — the coordinator's GC sweep verifies node identity from the reply before
+    /// classifying. Node-level (not per-slot): the request carries no `shard_id`.
+    pub fn list_shards(&self) -> Result<proto::ListShardsReply, ShardError> {
+        let client = self.client.clone();
+        self.call(RpcMethod::ListShards, CallKind::Read, move || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .list_shards(proto::Empty {})
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })
+    }
+
+    /// Drop THIS client's slot on the node (ADR-096): remove it from the slot map and reclaim its
+    /// `shard_<id>/` dir. The server refuses unless the slot is fenced at exactly
+    /// `expected_fence_generation` (> 0 — the coordinator arms an unfenced orphan via
+    /// [`Self::fence`] first) and holds no unexpired retention lease; a divergent dict/tag space
+    /// is refused like every guarded RPC. An absent slot replies `dropped = false` (idempotent).
+    pub fn drop_shard(
+        &self,
+        expected_fence_generation: u64,
+    ) -> Result<proto::DropShardReply, ShardError> {
+        let req = proto::DropShardRequest {
+            shard_id: self.shard_id,
+            expected_fence_generation,
+            dict_fingerprint: self.dict_fp,
+            tag_dict_fingerprint: self.tag_dict_fp,
+        };
+        let client = self.client.clone();
+        self.call(RpcMethod::DropShard, CallKind::Write, move || {
+            let mut client = client.clone();
+            async move {
+                client
+                    .drop_shard(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })
     }
 }
 
@@ -738,6 +790,12 @@ impl Shard for RemoteShard {
             }
         })?;
         Ok(reply.count as usize)
+    }
+
+    fn live_endpoints(&self) -> Vec<String> {
+        // The GC keep-set contribution (ADR-096): the endpoint this client was connected with —
+        // wherever live routing reaches through this shard is a node the sweep must not drop from.
+        vec![self.endpoint.clone()]
     }
 
     fn class_counts(&self) -> Result<[u64; 4], ShardError> {

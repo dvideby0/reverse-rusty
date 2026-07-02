@@ -103,6 +103,14 @@ pub(super) fn unfence(
             "Unfence tag-dict-fingerprint mismatch (divergent tag space)",
         ));
     }
+    // A tombstoned fence (the DropShard removal marker, ADR-096) is irrevocable: refuse the
+    // clear so a concurrent stale-fence probe (`unfence(probe)` where the probe read the
+    // tombstone) can never resurrect writability on a slot mid-drop.
+    if req.generation == super::super::DROPPED_TOMBSTONE {
+        return Ok(Response::new(proto::UnfenceReply {
+            fenced_at_generation: slot.fenced_at_generation.load(Ordering::Acquire),
+        }));
+    }
     // CAS from the exact generation this handoff fenced at, on THIS slot's fence (ADR-093). If the
     // slot is at 0 (not fenced) or at a higher generation (a newer handoff re-fenced it), the swap
     // fails and the fence is left as-is — we report its current value.

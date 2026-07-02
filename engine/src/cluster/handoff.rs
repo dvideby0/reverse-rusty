@@ -164,6 +164,10 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().class_counts()
     }
 
+    fn live_endpoints(&self) -> Vec<String> {
+        self.current.load().live_endpoints()
+    }
+
     fn source_of(&self, logical: u64) -> Result<Option<String>, ShardError> {
         self.current.load().source_of(logical)
     }
@@ -464,6 +468,9 @@ mod tests {
         ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
             Ok((Vec::new(), MatchStats::default()))
         }
+        fn live_endpoints(&self) -> Vec<String> {
+            vec!["http://recording:1".into()]
+        }
         fn num_queries(&self) -> Result<usize, ShardError> {
             Ok(42) // sentinel
         }
@@ -531,6 +538,14 @@ mod tests {
         assert!(
             flag.load(Ordering::Acquire),
             "set_event_sink must FORWARD to the backing, not inherit the no-op default"
+        );
+
+        // The GC keep-set introspection forwards too (ADR-096): relying on the trait default
+        // would report an EMPTY live set and let the sweep drop a slot routing still reaches.
+        assert_eq!(
+            h.live_endpoints(),
+            vec!["http://recording:1".to_string()],
+            "live_endpoints must FORWARD to the backing, not inherit the empty default"
         );
     }
 
