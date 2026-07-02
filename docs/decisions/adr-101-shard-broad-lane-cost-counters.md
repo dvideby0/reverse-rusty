@@ -46,6 +46,16 @@
   full metric names appear unlabeled on the coordinator and `{shard}`-labeled on shard pods —
   different scrape targets, the deliberate ADR-091 posture.
 
+- **Found while shipping (codex, fixed here):** the mmap per-title probe
+  (`storage/segment/mmap/ops.rs::probe_index`) counted `postings_scanned` + `broad_candidates`
+  for broad probes but missed the `broad_postings_scanned` subset — the memory-path
+  `Segment::probe` and the columnar `broad_reach` both counted it. Pre-existing stats asymmetry
+  (harmless while the field fed only bench output from memory segments), but it would have made
+  the exported counter under-count on exactly the durable shards production runs. Fixed +
+  mutation-validated by the memory-vs-mmap parity regression
+  (`tests/coverage_gaps/broad_lane.rs::broad_postings_scanned_parity_memory_vs_mmap` — fails
+  without the one-line fix).
+
 - **Proven.**
   - Unit (`node_metrics/broad_cost.rs` + `node_metrics/tests.rs`): monotonic accumulation,
     field independence, zero-default; the rendered families (typed `counter` header once across

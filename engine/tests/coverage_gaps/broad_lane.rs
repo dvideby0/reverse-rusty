@@ -144,3 +144,84 @@ fn match_stats_separate_main_and_broad_candidates() {
         "include_broad=false still reported broad candidates"
     );
 }
+
+/// Regression (codex on ADR-101): the mmap per-title probe counted `postings_scanned` and
+/// `broad_candidates` for broad probes but missed the `broad_postings_scanned` subset — so a
+/// durable (mmap-backed) engine under-reported the exact stat the ADR-101 per-shard counter
+/// exports, while an in-memory engine counted it. The two paths must report identical broad
+/// stats for the same corpus + titles.
+#[test]
+fn broad_postings_scanned_parity_memory_vs_mmap() {
+    use reverse_rusty::config::EngineConfig;
+    use reverse_rusty::events::SegmentKind;
+
+    let cfg = GenConfig {
+        num_queries: 10_000,
+        num_titles: 200,
+        broad_query_frac: 0.10,
+        hot_skew: 2.0,
+        family_size: 8,
+        seed: 0x0B20_AD58,
+        num_players: 1_000,
+        num_sets: 400,
+    };
+    let data = generate(&cfg);
+
+    // In-memory build: memory base segments (the path that always counted correctly).
+    let mut mem = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    mem.build_from_queries(&data.queries);
+
+    // Durable build of the SAME corpus: base segments are written + mmap'd, so per-title
+    // matching goes through the mmap probe. Classification is corpus-deterministic, so the
+    // two engines hold identical query sets in identical classes.
+    let dir = std::env::temp_dir().join(format!(
+        "rr_broad_parity_{}_{:x}",
+        std::process::id(),
+        cfg.seed
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut mmap_eng = Engine::with_config(
+        Normalizer::default_vocab().expect("built-in vocab"),
+        EngineConfig {
+            data_dir: Some(dir.clone()),
+            ..EngineConfig::default()
+        },
+    );
+    mmap_eng.build_from_queries(&data.queries);
+    assert!(
+        mmap_eng
+            .snapshot()
+            .segment_infos()
+            .iter()
+            .any(|s| s.kind == SegmentKind::Mmap),
+        "the durable engine must serve at least one mmap-backed segment for this test to bite"
+    );
+
+    let mut scratch = MatchScratch::new();
+    let mut out = Vec::new();
+    let (mut mem_bp, mut mem_bc) = (0u64, 0u64);
+    let (mut mmap_bp, mut mmap_bc) = (0u64, 0u64);
+    for title in &data.titles {
+        let s = mem.match_title(title, &mut scratch, &mut out, true);
+        mem_bp += u64::from(s.broad_postings_scanned);
+        mem_bc += u64::from(s.broad_candidates);
+        let s = mmap_eng.match_title(title, &mut scratch, &mut out, true);
+        mmap_bp += u64::from(s.broad_postings_scanned);
+        mmap_bc += u64::from(s.broad_candidates);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert!(
+        mem_bp > 0,
+        "premise: the corpus must exercise the broad lane"
+    );
+    assert_eq!(
+        mem_bc, mmap_bc,
+        "broad_candidates must agree between the memory and mmap per-title paths"
+    );
+    assert_eq!(
+        mem_bp, mmap_bp,
+        "broad_postings_scanned must agree between the memory and mmap per-title paths \
+         (the mmap probe under-counted before the ADR-101 fix)"
+    );
+}
