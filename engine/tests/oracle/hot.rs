@@ -256,13 +256,18 @@ fn durable_reopen_preserves_hot_tier_exactly() {
 fn wal_tail_replay_under_flipped_theta_is_result_identical() {
     let dir = tempdir("flip");
     let data = gen_corpus(0x0407_F11B);
-    // The un-flushed WAL tail: 200 identical single-token queries. Their anchor's
-    // frequency grows 1..=200 across the inserts, so the early copies classify A
-    // and — once freq crosses θ — the later ones classify H: the tail
+    // The un-flushed WAL tail: 200 DISTINCT-body any-of queries all carrying
+    // `walfliptok`, whose frequency grows 1..=200 across the inserts — the early
+    // ones classify A and, once freq crosses θ, the later ones classify H (the
+    // mixed-any-of rule: no top-64 member, worst member θ-hot): the tail
     // deterministically holds BOTH classes, and a dedicated title below proves
-    // every copy stays visible across the θ-flip replay.
+    // every query stays visible across the θ-flip replay. The unique `wrare{i}`
+    // member keeps every body distinct — identical bodies would body-group under
+    // dedup (ADR-106) and ADOPT the first insert's class A, leaving no H to flip
+    // (that adoption behavior is pinned by `tests/oracle/dedup.rs`; this test
+    // pins the θ-flip replay).
     let tail: Vec<(u64, String)> = (0..200u64)
-        .map(|i| (2_000_000 + i, "walfliptok".to_string()))
+        .map(|i| (2_000_000 + i, format!("(walfliptok,wrare{i})")))
         .collect();
     let mut titles = data.titles.clone();
     titles.push("walfliptok listing".to_string());
@@ -579,9 +584,15 @@ fn compaction_drains_hot_tier_when_theta_disabled() {
 #[test]
 fn migration_work_cap_bounds_per_merge_and_converges() {
     let (mut queries, mut id) = masked_filler_corpus(200);
-    // SINGLE-token queries so captok IS the rarest required anchor (freq 40).
-    for _ in 0..40 {
-        queries.push((id, "captok".to_string()));
+    // DISTINCT-body any-of queries whose deciding anchor group carries `captok`
+    // (freq 40, unmasked — the fillers own every mask bit): θ=30 re-derives each
+    // to class H via the mixed-any-of rule. The unique `crare{i}` member keeps
+    // every body distinct: identical bodies would body-group under dedup
+    // (ADR-106) and migrate as ONE leader decision + N cap-EXEMPT adoptions,
+    // which is exactly what this test must not conflate with the cap it pins —
+    // the per-merge bound on posting-REBUILD work.
+    for i in 0..40u64 {
+        queries.push((id, format!("(captok,crare{i})")));
         id += 1;
     }
     let titles: Vec<String> = vec!["captok anything".into(), "fillertok8 uniq2".into()];

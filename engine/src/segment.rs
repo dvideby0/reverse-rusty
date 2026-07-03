@@ -279,6 +279,52 @@ pub struct Segment {
     /// Reverse index: logical_id → local_ids in this segment. Enables O(1)
     /// delete lookups instead of full segment scans.
     logical_index: crate::util::FastMap<u64, Vec<u32>>,
+    // ---- canonical-body dedup, Stage A (the Broad-Query Cost Program) ----
+    /// Per-local body-group leader: `dup_of[i] == i` for a leader (or any entry
+    /// ingested with dedup off / attached from disk); a non-leader (duplicate
+    /// body) carries its leader's local id and has NO posting entries of its own
+    /// — it is reached, verified, and emitted THROUGH its leader. In-memory
+    /// only: the on-disk format expands postings back to one entry per member
+    /// (no format change — Stage B is the persisted indirection).
+    dup_of: Vec<u32>,
+    /// Leader → its duplicate members (non-leaders only). Empty map ⇔ this
+    /// segment has no shared bodies ⇔ every match path takes the exact
+    /// pre-dedup code (the structural zero-cost default).
+    dup_members: crate::util::FastMap<u32, Vec<u32>>,
+    /// Building-time index: canonical body signature → leader locals with that
+    /// signature (collision candidates; equality is confirmed with
+    /// `ExactStore::bodies_equal` before any sharing). Unused after sealing.
+    body_index: crate::util::FastMap<u64, Vec<u32>>,
+}
+
+/// The compile-time knobs `Segment::add_compiled` consults, bundled (they grew
+/// past bare-parameter sanity with ADR-105 + dedup Stage A). Construct from the
+/// engine config via [`EngineConfig::compile_knobs`](crate::config::EngineConfig::compile_knobs);
+/// the WAL-replay / recompile paths override `accept_class_d` per their
+/// trust-the-log rules (ADR-068).
+#[derive(Clone, Copy, Debug)]
+pub struct CompileKnobs {
+    /// Store a negation-only (class D) plan as an always-candidate (ADR-068).
+    pub accept_class_d: bool,
+    /// The hot-anchor threshold θ (class H, ADR-105; 0 = off).
+    pub hot_anchor_threshold: u32,
+    /// Share identical canonical bodies within the segment (dedup Stage A):
+    /// duplicates skip posting insertion and ride their leader's evaluation.
+    pub dedup_bodies: bool,
+}
+
+/// What [`Segment::add_compiled`] accepted — the per-compile telemetry the
+/// `Engine` accumulates (the observe-first hot counter + the dedup sketch).
+#[derive(Clone, Copy, Debug)]
+pub struct AddedCompiled {
+    /// The new segment-local id.
+    pub local: u32,
+    /// The plan's observe-first hot-tier flag (see `SigPlan::would_be_hot`).
+    pub would_be_hot: bool,
+    /// The canonical body signature (feeds the engine's duplication sketch).
+    pub body_hash: u64,
+    /// Whether this entry joined an existing body group as a duplicate.
+    pub is_duplicate: bool,
 }
 
 /// Which candidate lanes a `match_into` call evaluates INLINE (per title).
@@ -300,6 +346,10 @@ pub struct ProbeLanes {
 
 /// A sealed (immutable) base segment, either in-memory or backed by mmap.
 /// The memtable is always an in-memory `Segment` (mutable).
+// Always heap-allocated behind `Arc` (`Vec<Arc<BaseSegment>>`), so the
+// variant-size gap (the Memory variant's inline maps) never rides the stack
+// or a dense array — boxing would only add a pointer hop.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum BaseSegment {
     Memory(Segment),
@@ -360,6 +410,12 @@ pub struct EngineSnapshot {
     rejected_class_d: u64,
     /// Observe-first hot-tier telemetry at snapshot time — see the `Engine` field.
     would_be_hot: u64,
+    /// Dedup Stage A telemetry at snapshot time — see the `Engine` fields.
+    bodies_total: u64,
+    dup_joined: u64,
+    /// Linear-counting estimate of distinct canonical bodies at snapshot time
+    /// (0 until the first accepted compile).
+    distinct_bodies_est: u64,
     vocab_epoch: u64,
     wal_healthy: bool,
     persistence_healthy: bool,
@@ -559,6 +615,17 @@ pub struct Engine {
     /// vocab recompiles, not distinct stored queries); deliberately NOT persisted
     /// in the manifest, so hot-free corpora keep their manifest bytes unchanged.
     would_be_hot: u64,
+    /// Dedup Stage A observe telemetry (process-lifetime event counters, the
+    /// `would_be_hot` discipline): accepted compile events and how many of them
+    /// joined an existing body group in their segment. Not persisted.
+    bodies_total: u64,
+    dup_joined: u64,
+    /// Linear-counting sketch of DISTINCT canonical bodies seen (2^22 bits =
+    /// 512 KiB, lazily allocated on the first accepted compile). Measures GLOBAL
+    /// duplication — the cross-segment potential Stage A's per-segment groups
+    /// cannot reach (the Stage B sizing evidence). Fed on every accepted
+    /// compile regardless of `dedup_bodies` (observe-first).
+    dup_sketch: Option<Box<[u64]>>,
     /// Optional observer callback for engine events (flush, compact, ingest, etc.)
     observer: Option<EventObserver>,
     /// Events emitted during construction/recovery (`with_config`/`open`), before
@@ -604,6 +671,8 @@ impl std::fmt::Debug for Engine {
             .field("rejected_parse", &self.rejected_parse)
             .field("rejected_class_d", &self.rejected_class_d)
             .field("would_be_hot", &self.would_be_hot)
+            .field("bodies_total", &self.bodies_total)
+            .field("dup_joined", &self.dup_joined)
             .field("has_observer", &self.observer.is_some())
             .field("pending_events", &self.pending_events.len())
             .field("has_wal", &self.wal.is_some())

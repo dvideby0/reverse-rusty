@@ -58,6 +58,13 @@ pub(in crate::segment) trait BroadBackend {
         stats: &mut MatchStats,
     );
     fn alive(&self, local: u32) -> bool;
+    /// Whether this segment holds any shared body groups (dedup Stage A) — the
+    /// per-segment gate for the group-aware candidate/emission handling below.
+    /// A group-free segment (incl. every mmap-attached one, whose on-disk
+    /// postings are always expanded) takes the exact pre-dedup paths.
+    fn has_dup_groups(&self) -> bool;
+    /// Leader → duplicate members (empty for a singleton or an mmap backend).
+    fn members_of(&self, leader: u32) -> &[u32];
     /// Whether query `local` may take the skip-verify VACUOUS ACCEPT for a
     /// candidate reached through `anchor`: its entire positive semantics is that
     /// one anchor, so retrieval is proof of match. Lane-specific because the two
@@ -156,6 +163,14 @@ impl BroadBackend for &Segment {
         self.alive[local as usize]
     }
     #[inline]
+    fn has_dup_groups(&self) -> bool {
+        Segment::has_dup_groups(self)
+    }
+    #[inline]
+    fn members_of(&self, leader: u32) -> &[u32] {
+        Segment::members_of(self, leader)
+    }
+    #[inline]
     fn vacuous_accept(&self, lane: Lane, local: u32, anchor: FeatureId) -> bool {
         match lane {
             Lane::Broad => self.exact.is_pure_anchor(local),
@@ -224,6 +239,14 @@ impl BroadBackend for &MmapSegment {
         self.is_alive_at(local)
     }
     #[inline]
+    fn has_dup_groups(&self) -> bool {
+        false // on-disk postings are always expanded (dedup Stage A)
+    }
+    #[inline]
+    fn members_of(&self, _leader: u32) -> &[u32] {
+        &[]
+    }
+    #[inline]
     fn vacuous_accept(&self, lane: Lane, local: u32, anchor: FeatureId) -> bool {
         match lane {
             Lane::Broad => self.is_pure_anchor(local),
@@ -270,6 +293,34 @@ impl BroadBackend for &MmapSegment {
     }
 }
 
+/// Emit one matched CANDIDATE's logical ids from a title bitmap — the leader
+/// itself plus, on a group-bearing segment, its body-group members (dedup
+/// Stage A), each gated on aliveness + the request's tag filter. `grouped=false`
+/// emits exactly the pre-dedup single-id path (the alive/tag gates then repeat
+/// checks the caller already made — same values, no behavior change).
+#[inline]
+fn emit_from_bits<B: BroadBackend>(
+    backend: &B,
+    grouped: bool,
+    local: u32,
+    pred: &crate::exact::TagPredicate,
+    bits: &[u64],
+    outs: &mut [Vec<u64>],
+) {
+    if backend.alive(local) && backend.passes_tags(local, pred) {
+        let logical = backend.logical_id(local);
+        for_each_set_bit(bits, |ti| outs[ti].push(logical));
+    }
+    if grouped {
+        for &m in backend.members_of(local) {
+            if backend.alive(m) && backend.passes_tags(m, pred) {
+                let logical = backend.logical_id(m);
+                for_each_set_bit(bits, |ti| outs[ti].push(logical));
+            }
+        }
+    }
+}
+
 /// Evaluate one columnar lane (broad or hot) of one segment against the whole
 /// batch, appending matched logical IDs to each title's `outs[ti]`.
 ///
@@ -303,6 +354,12 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
 ) {
     cands.clear();
     non_pure.clear();
+    // Dedup Stage A: on a group-bearing segment a posting entry is a group
+    // LEADER — a candidate is viable if the leader OR any member could emit
+    // (a dead leader must not drop its alive members: a false negative), the
+    // body is verified once, and emission fans out per member. Group-free
+    // segments take the exact pre-dedup paths.
+    let grouped = backend.has_dup_groups();
     match lane {
         // +1: the universal probe below is an anchor-table probe too — without it
         // an empty-feature batch would report zero anchors scanned despite probing.
@@ -334,8 +391,8 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
         for &local in &cands[before..] {
             stats.unique_candidates += 1;
             stats.broad_candidates += 1;
-            if !backend.alive(local) {
-                continue;
+            if !backend.alive(local) && (!grouped || backend.members_of(local).is_empty()) {
+                continue; // tombstoned singleton — no member can emit
             }
             if prefilter && !backend.can_match_batch(local, batch_mask_union, feat_row) {
                 stats.broad_prefilter_skipped += 1;
@@ -366,8 +423,8 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
                 Lane::Broad => stats.broad_candidates += 1,
                 Lane::Hot => stats.hot_candidates += 1,
             }
-            if !backend.alive(local) {
-                continue;
+            if !backend.alive(local) && (!grouped || backend.members_of(local).is_empty()) {
+                continue; // tombstoned singleton — no member can emit
             }
             // Vacuous-accept fast path: emit straight from the anchor bitmap. When
             // materialization is off, fall through to full verification — eval_into
@@ -376,12 +433,11 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
             // identical, just slower. The tag filter (ADR-049) must still be honored
             // here, since this path bypasses `verify`/`eval_into`: a query that
             // fails the filter emits nothing (an empty predicate always passes, so
-            // the no-filter path is unchanged).
+            // the no-filter path is unchanged). Group members share the leader's
+            // body — the vacuous property holds for each — so emission fans out
+            // per alive, tag-passing member.
             if materialize && backend.vacuous_accept(lane, local, f) {
-                if backend.passes_tags(local, pred) {
-                    let logical = backend.logical_id(local);
-                    for_each_set_bit(fbits, |ti| outs[ti].push(logical));
-                }
+                emit_from_bits(&backend, grouped, local, pred, fbits, outs);
             } else {
                 // Count-gate pre-reject (lever 5a) before queueing full bitmap
                 // verification. A vacuous-accept candidate never reaches this check
@@ -399,23 +455,41 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
     }
 
     // Full bitmap verification for the rest (eval_into applies the tag filter as a
-    // per-query scalar gate, so a filtered-out query writes an empty bitmap).
+    // per-query scalar gate, so a filtered-out query writes an empty bitmap). On a
+    // group-bearing segment the SHARED BODY is evaluated once with the empty
+    // predicate — the leader's tags must not veto a member's emission (identity
+    // stays per-member, ADR-049) — and alive/tag gating moves to the per-member
+    // emit.
     for &local in non_pure.iter() {
         match lane {
             Lane::Broad => stats.broad_queries_evaluated += 1,
             Lane::Hot => stats.hot_queries_evaluated += 1,
         }
-        backend.eval_into(
-            local,
-            tmask_batch,
-            feat_row,
-            feat_bits,
-            words,
-            acc,
-            grp,
-            pred,
-        );
-        let logical = backend.logical_id(local);
-        for_each_set_bit(acc, |ti| outs[ti].push(logical));
+        if grouped {
+            backend.eval_into(
+                local,
+                tmask_batch,
+                feat_row,
+                feat_bits,
+                words,
+                acc,
+                grp,
+                &crate::exact::TagPredicate::empty(),
+            );
+            emit_from_bits(&backend, grouped, local, pred, acc, outs);
+        } else {
+            backend.eval_into(
+                local,
+                tmask_batch,
+                feat_row,
+                feat_bits,
+                words,
+                acc,
+                grp,
+                pred,
+            );
+            let logical = backend.logical_id(local);
+            for_each_set_bit(acc, |ti| outs[ti].push(logical));
+        }
     }
 }

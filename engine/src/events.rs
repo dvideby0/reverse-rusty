@@ -259,6 +259,16 @@ pub struct EngineMetrics {
     /// events (incl. WAL replay / vocab recompiles), not distinct stored queries;
     /// resets on restart (rate()-friendly).
     pub would_be_hot: u64,
+    /// Dedup Stage A telemetry (process-lifetime, the `would_be_hot`
+    /// discipline): accepted compile events since process start.
+    pub bodies_total: u64,
+    /// Accepted compiles that joined an existing canonical-body group in their
+    /// segment (what per-segment sharing actually captured).
+    pub dup_joined: u64,
+    /// Linear-counting estimate of DISTINCT canonical bodies seen — global
+    /// duplication, incl. the cross-segment share per-segment groups cannot
+    /// capture (Stage B sizing evidence). 0 until the first accepted compile.
+    pub distinct_bodies_est: u64,
     /// Number of distinct features in the shared dictionary.
     pub dict_features: usize,
     /// Heap bytes used by the exact-match SoA store.

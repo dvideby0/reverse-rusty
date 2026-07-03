@@ -50,6 +50,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   in the cluster, margin-gated compaction migration; default off (`hot_anchor_threshold` = 0)
   ⇒ byte-identical (ADR-105 — built + oracle-proven; the recovery measurement runs paired
   with dedup Stage A per the roadmap).
+- **Canonical-body dedup, Stage A** — queries with identical semantic bodies share one posting
+  entry per in-memory segment (verified once, emitted per member under per-member
+  aliveness/tags); flush expands so the on-disk format is untouched; compaction regroups
+  cross-segment; `dedup_bodies` default ON + the global distinct-bodies sketch that sizes
+  Stage B (ADR-106 — built + oracle-proven).
 - **Class-D always-candidate lane** — opt-in `accept_class_d` stores negation-only queries under
   the universal signature; default off = the loud reject (ADR-068).
 - **Per-query tags + filtered percolation** — verify-stage filter, never gates (ADR-049); threaded

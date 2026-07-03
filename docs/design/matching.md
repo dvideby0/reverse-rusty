@@ -236,6 +236,25 @@ reproduce it by construction. The probe is unconditional within the broad lane �
 toggled; with none stored it costs one bloom miss per sealed segment. Like class C, an
 always-candidate is visible only when the request includes the broad lane.
 
+### 4.2 Canonical-body dedup, Stage A (ADR-106)
+
+Orthogonal to lane placement: queries whose **semantic bodies** are identical (masks +
+required/forbidden tails + canonical any-of groups — never identity: logical id, version,
+tags) share ONE posting entry per in-memory segment. At `add_compiled` a body-hash hit
+confirmed by exact equality joins the group — the duplicate inserts no postings and **adopts
+the leader's class** (identical bodies can plan A vs H across a θ-crossing frequency bump;
+adoption is lossless because A/B/H are all always-visible, and C/D are structural under the
+frozen mask). Every match path — the scalar probe, the columnar kernel's vacuous-accept and
+full-verification arms, the class-D universal probe — verifies the shared body **once** and
+fans emission out per member, each gated on its OWN aliveness and tags (a dead leader never
+drops alive members; grouped `eval_into` runs with the empty predicate so the leader's tags
+cannot veto a member). Flush **expands** groups into plain postings (the `.seg` format is
+untouched; mmap segments are always group-free and take the exact pre-dedup paths); both
+compaction merges regroup on the destination side by body — which makes compaction the
+**cross-segment** dedup mechanism. `dedup_bodies` (default on, dynamic) gates new grouping
+only; the observe sketch (`bodies_total`/`dup_joined`/`distinct_bodies_est`) sizes Stage B —
+the persisted indirection this stage deliberately defers.
+
 ---
 
 ## 5. Per-query metadata, filtered percolation, and ranking

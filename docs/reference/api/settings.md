@@ -66,6 +66,9 @@ curl -X PUT localhost:9200/_settings \
   writes immediately and sealed entries at the next re-anchoring compaction; a θ change is
   correctness-benign, it only moves queries between the two always-visible lanes) and
   `hot_migration_max_moves` (the per-merge migration work cap),
+  `dedup_bodies` (canonical-body dedup Stage A, ADR-106 — default on; queries with identical
+  semantic bodies share one posting entry per in-memory segment, verified once and emitted per
+  member; result-identical either way, gates the grouping of NEW writes only),
   `cooperative_cancel` (stop armed match work at
   its deadline, ADR-099), and `accept_class_d` (store negation-only queries
   as broad-lane always-candidates instead of rejecting them, ADR-068 — gates **acceptance only**:

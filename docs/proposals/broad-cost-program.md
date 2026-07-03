@@ -215,7 +215,7 @@ exact FN the ADR-056 guard exists to prevent. Lever 2 is designed around this.
   into a mergeable sketch — dedup Stage A), and a would-be-reclassified counter — the
   observe-first mode of lever 2 before enforcement.
 
-### 5.1 Lever 1 — identity dedup with ID fan-out *(biggest expected win; staged, sized by Stage A + the real corpus)*
+### 5.1 Lever 1 — identity dedup with ID fan-out *(Stage A shipped as [ADR-106](../decisions/adr-106-canonical-body-dedup-stage-a.md): in-memory per-segment sharing + the sizing sketch, flush expands — no format change; Stage B below = the persisted indirection, gated on the sketch's real-corpus numbers)*
 
 **Mechanism.** Dedup key = the canonical **compiled body**: (`required` sorted, `anyof` groups
 canonicalized, `forbidden` sorted) — *post* equivalence-expansion, so surface variants that

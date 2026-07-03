@@ -90,19 +90,26 @@ ships under its own ADR with the ADR-104 soak as the standing at-scale acceptanc
    byte-identical "psa 10" class-B pair queries sharing one 43,533-entry posting — the dedup
    lever's case), and its genuine θ-population is `would_be_hot = 782`. Lever 5's
    dense-posting promotion was re-scoped to a measurement-gated follow-up (the columnar pass
-   already amortizes posting iteration; ADR-105 §Deferred). The recovery acceptance (20M bench
-   + `RR_CLUSTER_SOAK_THETA` soak re-run + the hot-empty overhead pin) runs once Stage A lands,
-   with BOTH in place — the combined increment attacks the measured defect honestly.
-2. **Increment 2 — duplicate interning, Stage A ("measure by building the cheap half") — IN
-   PROGRESS, paired with increment 1's merge.** Canonical-compiled-body hash at ingest feeding
-   a duplication-rate sketch (telemetry), plus memtable/flush-time **per-segment** body
-   sharing — no format change, reversible, delivers a fraction of the win and *is* the
-   instrument that sizes Stage B.
+   already amortizes posting iteration; ADR-105 §Deferred). **The combined recovery is MEASURED**
+   (capture log 2026-07-03): per-title selective 13,383 → 84,708 t/s/core, cand/title 6,616 →
+   53.75, θ=1024 moves exactly `would_be_hot` = 782 result-identically, hot-empty pinned free,
+   both 20M soaks green — dedup-driven on this corpus, exactly as the corrected reading
+   predicted; the hot tier is the standing defense for genuinely fat-anchored corpora
+   (ADR-106 §Measured).
+2. **Increment 2 — duplicate interning, Stage A — ✅ built
+   ([ADR-106](decisions/adr-106-canonical-body-dedup-stage-a.md)); merges paired with
+   increment 1.** Canonical-body groups share one posting entry per in-memory segment
+   (verified once, emitted per member under per-member aliveness/tags); flush expands (no
+   format change); compaction regroups cross-segment; the `bodies_total`/`dup_joined` counters
+   + the linear-counting global distinct-bodies sketch are the Stage B sizing instrument.
+   Recovered the measured 20M defect (ADR-106 §Measured); the durable-cluster path's candidate
+   volume is unchanged (mmap postings are expanded) — the Stage B gate's other half.
 3. **Increment 3 — duplicate interning, Stage B (format bump, gated on Stage A's numbers).**
    Segment-format body→member indirection (one verify row + member ID list per distinct
-   compiled body), cross-segment dedup at compaction, member-level WAL/upsert/tag/rank
-   semantics. Ships only if Stage A measures a duplication rate that justifies the most
-   expensive-to-un-ship kind of change.
+   compiled body — extends Stage A's in-memory groups to the mmap'd/persisted majority of a
+   durable corpus), member-level WAL/upsert/tag/rank semantics. Ships only if Stage A's sketch
+   measures a duplication rate on the REAL corpus that justifies the most expensive-to-un-ship
+   kind of change.
 4. **Increment 4 — pair-anchor escalation + residual factoring (gated on the real corpus +
    increments 1–2).** Joint-frequency pair anchors for θ-hot multi-feature queries via
    query-nominated count-min sketches, with the compile/match pairing predicate extended **on

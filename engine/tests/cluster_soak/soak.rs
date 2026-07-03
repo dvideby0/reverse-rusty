@@ -60,6 +60,7 @@ fn twenty_million_multi_shard_soak() {
             memtable_flush_threshold: 50_000,
             auto_compact_on_flush: true,
             max_segments: 8,
+            hot_anchor_threshold: cfg.hot_theta,
             ..EngineConfig::default()
         },
         include_broad: true,
@@ -74,8 +75,8 @@ fn twenty_million_multi_shard_soak() {
     let classes = cluster.class_counts().expect("class counts");
     let stored = cluster.num_queries().expect("num_queries");
     eprintln!(
-        "  Phase 1: built durable K={} cluster in {:.1}s — {} stored, classes A/B/C/D = {:?}",
-        cfg.num_shards, build_secs, stored, classes
+        "  Phase 1: built durable K={} cluster in {:.1}s — {} stored, classes A/B/C/D/H = {:?} (θ={})",
+        cfg.num_shards, build_secs, stored, classes, cfg.hot_theta
     );
     eprintln!(
         "    per-shard counts: min={} max={} {:?}",
@@ -84,6 +85,14 @@ fn twenty_million_multi_shard_soak() {
         shard_counts
     );
     assert_eq!(classes[3], 0, "class D in generated corpus");
+    // θ-conditional band (ADR-105): with the hot tier on, the 20M corpus's
+    // θ-hot anchors must actually classify H (volume captured, not banded —
+    // the ADR-104 lesson); θ=0 must store none.
+    if cfg.hot_theta > 0 {
+        assert!(classes[4] > 0, "θ={} stored no class H", cfg.hot_theta);
+    } else {
+        assert_eq!(classes[4], 0, "class H must be empty with θ off");
+    }
     let (min_c, max_c) = (
         *shard_counts.iter().min().unwrap(),
         *shard_counts.iter().max().unwrap(),

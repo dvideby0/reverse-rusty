@@ -272,6 +272,23 @@ pub struct EngineConfig {
     /// Default: `usize::MAX` (uncapped)
     pub hot_migration_max_moves: usize,
 
+    /// Canonical-body deduplication, Stage A (in-memory sharing): queries whose
+    /// SEMANTIC bodies are identical (masks, required/forbidden tails, any-of
+    /// groups — never identity: logical id, version, or tags) share one posting
+    /// entry per in-memory segment. The group is reached and verified once and
+    /// emitted per member, so results are identical by construction — this is
+    /// the measured answer to identical-query concentration (a 43,533-entry
+    /// shared posting at 20M, the ADR-104 32×). Stage A is in-memory only: flush
+    /// EXPANDS groups back to plain postings (the on-disk format is unchanged),
+    /// so mmap-attached segments carry no groups until Stage B persists the
+    /// indirection.
+    ///
+    /// Dynamic (`PUT /_settings`); gates the grouping of NEW writes only —
+    /// already-grouped entries stay grouped (and correct) when toggled off.
+    ///
+    /// Default: `true`
+    pub dedup_bodies: bool,
+
     /// Cooperative match cancellation (ADR-099): when a search request sets an
     /// EXPLICIT `timeout_ms`, the match work re-checks the deadline at coarse
     /// (per-segment / per-title) boundaries and abandons itself once expired —
@@ -368,6 +385,7 @@ impl Default for EngineConfig {
             broad_prefilter: true,
             hot_anchor_threshold: 0,
             hot_migration_max_moves: usize::MAX,
+            dedup_bodies: true,
             cooperative_cancel: true,
             alias_feedback_capture: false,
             alias_feedback_max_pairs: 256,
@@ -383,6 +401,17 @@ impl EngineConfig {
     /// as a `const fn` for static initialization.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The compile-time knobs `Segment::add_compiled` consults, derived from
+    /// this config. The WAL-replay / vocab-recompile paths override
+    /// `accept_class_d` per their trust-the-log rules (ADR-068).
+    pub fn compile_knobs(&self) -> crate::segment::CompileKnobs {
+        crate::segment::CompileKnobs {
+            accept_class_d: self.accept_class_d,
+            hot_anchor_threshold: self.hot_anchor_threshold,
+            dedup_bodies: self.dedup_bodies,
+        }
     }
 
     /// The query-complexity limits to apply at parse time, derived from this

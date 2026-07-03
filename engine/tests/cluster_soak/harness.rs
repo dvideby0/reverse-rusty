@@ -36,6 +36,9 @@ pub(crate) struct SoakConfig {
     pub num_queries: usize,
     pub num_titles: usize,
     pub num_shards: usize,
+    /// Hot-anchor threshold θ (ADR-105) for every shard. Default 0 (off) keeps
+    /// the canonical ADR-104 run byte-identical; a θ-on run is a NEW capture.
+    pub hot_theta: u32,
     /// Fresh per-run directory for the durable cluster. Removed on success;
     /// left in place on failure so the artifacts can be inspected.
     pub data_dir: PathBuf,
@@ -49,6 +52,7 @@ impl SoakConfig {
             num_queries: env_usize("RR_CLUSTER_SOAK_QUERIES", 20_000_000),
             num_titles: env_usize("RR_CLUSTER_SOAK_TITLES", 50_000),
             num_shards: env_usize("RR_CLUSTER_SOAK_SHARDS", 8),
+            hot_theta: env_usize("RR_CLUSTER_SOAK_THETA", 0) as u32,
             data_dir: base.join(format!("rr_cluster_soak_{}", std::process::id())),
         }
     }

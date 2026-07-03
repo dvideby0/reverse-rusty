@@ -301,6 +301,9 @@ impl Engine {
             // Process-lifetime observe counter (deliberately not in the manifest);
             // the WAL-tail replay below re-counts the tail's compiles.
             would_be_hot: 0,
+            bodies_total: 0,
+            dup_joined: 0,
+            dup_sketch: None,
             observer: None,
             pending_events,
             wal,
@@ -386,6 +389,9 @@ impl Engine {
             rejected_parse: 0,
             rejected_class_d: 0,
             would_be_hot: 0,
+            bodies_total: 0,
+            dup_joined: 0,
+            dup_sketch: None,
             observer: None,
             pending_events: Vec::new(),
             wal: None,
