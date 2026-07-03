@@ -10,6 +10,8 @@
 //! Scale knobs (defaults = the canonical 20M / 50k-title / K=8 run; drop them
 //! for a seconds-long harness smoke):
 //!   RR_CLUSTER_SOAK_QUERIES / RR_CLUSTER_SOAK_TITLES / RR_CLUSTER_SOAK_SHARDS
+//!   RR_CLUSTER_SOAK_THETA (per-shard hot-anchor θ, ADR-105; default 0 = off,
+//!     which reproduces the canonical ADR-104 run byte-identically)
 //!   RR_CLUSTER_SOAK_DIR (base dir for the durable cluster; default temp_dir())
 //!
 //! What it proves — and what it deliberately does not (no brute force at 20M,

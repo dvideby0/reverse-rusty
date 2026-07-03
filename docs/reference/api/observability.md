@@ -43,6 +43,12 @@ curl localhost:9200/_stats
   frequency is already ≥ the default hot-anchor threshold (1024) without a top-64 mask bit —
   the queries a frequency-threshold reclassification would move. Counts compile events (incl.
   WAL replay and vocab recompiles), resets on restart; also a Prometheus gauge on `/_metrics`
+- **dedup** — canonical-body dedup telemetry (Stage A, ADR-106): `bodies_total` (accepted
+  compiles since process start), `dup_joined` (compiles that joined an existing per-segment
+  body group — what sharing actually captured), and `distinct_bodies_est` (a linear-counting
+  estimate of GLOBAL distinct bodies — the cross-segment duplication Stage A cannot reach; the
+  Stage B sizing instrument). All three are also Prometheus gauges on `/_metrics`
+  (`dedup_bodies_total`, `dedup_joined`, `dedup_distinct_bodies_est`)
 - **postings** — posting-length percentiles per candidate-index lane (nearest-rank, computed
   on demand across all segments + the memtable). A fat `main.max` against a modest `main.p99`
   is the top-64 rank-cliff fingerprint the hot tier targets (ADR-104)
