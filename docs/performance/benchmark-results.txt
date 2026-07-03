@@ -150,6 +150,45 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-07-03] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  20M BROAD-BEARING BASELINE
+              (bench 20000000 20000 0.05, default skew 2.0 / seed 0x00C0FFEE) — the
+              Broad-Query Cost Program increment-1 "BEFORE" leg (observe-first telemetry +
+              lever-5a count-gate built; hot tier NOT yet built). Interactive box —
+              throughput indicative; the structural numbers are seed-fixed and reproduce.
+  INVARIANTS (machine-independent):
+    classes A/B/C/D = 19,912,766 / 43,589 / 43,645 / 0;   would-be hot 782  <- NEW meter
+    main max posting 43,533;  #main postings >1024: exactly 1;  dict 684,509 features
+    cand/title unique 6,616.65 (broad 4,977.71 / selective 1,638.94; p95 43,701 p99 43,741)
+    broad sweep amortization (broad_post/pass): 99,554,245 @bs=1 -> 3,447,955 @256 (29x)
+      -> 872,900 @1024 (114x);  broad_qs_eval 0 (all generated broad = pure-anchor);
+      prefilt_skip 0 at every bs (expected: the count-gate's shape — multi-positive broad
+      candidates with batch-absent features — does not occur in this corpus; the gate is
+      pinned by tests/broad_batch.rs instead)
+  THROUGHPUT — indicative:  build 44.5s (450k q/s);  per-title selective 13,383 titles/s/core
+    (the "32x lane": the broad-FREE corpus pins 437,730 — see the 2026-07-02 block);  parallel
+    selective 26,878 t/s;  inline broad 16,377;  batch-path selective (broad OFF) 93,452;
+    columnar bs=256 69,463 (4.2x inline).  Resident 5.2 B/q (no sources) / 108.7 B/q (with).
+  THE CORRECTED READING (what the observe-first telemetry falsified — the reason it ships
+  before enforcement):
+    * The generated broad-intent population is ~130k queries (~43.5k per shape), NOT ~1M:
+      gen.rs draws the 5% broad branch per FAMILY ITERATION (family_size=8), not per query.
+      The prior "~956k broad-intent classified A" reading (broad-cost-program.md §3.1) was
+      an arithmetic artifact of assuming per-query draws. Cross-check: the 100k clusterbench
+      pin (B=223, C=212 ~= 218/shape) and the ADR-104 soak (stored B=350,192 = ~43.8k x8
+      replicas, ADR-080) both fit the per-iteration reading exactly.
+    * The fat 43,533-entry MAIN posting is the SHARED CLASS-B ARITY-2 PAIR posting of the
+      ~43.5k identical "psa 10" broad-shape queries (B=43,589 ~= that one shape), NOT a
+      rank-#65 class-A anchor. The per-title selective collapse (13.4k t/s/core; p95
+      cand/title 43,701) is titles bearing BOTH pair tokens scanning that one posting.
+      Consequences: (a) this corpus's realtime defect is an IDENTICAL-QUERY CONCENTRATION —
+      the dedup lever's case (spec §5.1) and the ADR-080 deferred B-arity-2 cost note — and
+      theta-reclassification (lever 2) does NOT move class B, so the hot tier alone will not
+      recover this corpus's 32x; (b) the genuine lever-2 population here (non-top64 anchors
+      past theta=1024) is would_be_hot = 782 (Zipf-head players), i.e. the top-64-cliff
+      defect remains real by construction but is nearly absent from THIS synthetic corpus.
+      Increment-1 acceptance needs recalibration against these facts (a fat-anchor corpus
+      variant, or acceptance via the oracle stack + hot-empty pins + a constructed bench).
+
 [2026-07-02] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  20M MULTI-SHARD SCALE SOAK
               (cluster_soak, ADR-104 — the ADR-065 criterion-12 scale half) + the 20M bench
               flatness cross-check.  Interactive box — wall-clock/throughput indicative; the
