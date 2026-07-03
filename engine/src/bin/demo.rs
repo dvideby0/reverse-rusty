@@ -19,7 +19,7 @@ fn main() {
 
     let mut dict = Dict::new();
     let mut lc = String::new();
-    let cq = match compile_one(spec_query, 42, 1, &norm, &mut dict, &mut lc) {
+    let cq = match compile_one(spec_query, 42, 1, &norm, &mut dict, &mut lc, 0) {
         Ok(cq) => cq,
         Err(e) => {
             eprintln!("built-in spec query failed to compile: {e}");

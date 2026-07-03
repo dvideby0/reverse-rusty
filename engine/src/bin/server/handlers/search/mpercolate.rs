@@ -272,6 +272,23 @@ pub(crate) async fn mpercolate(
         .prom
         .broad_candidates_total
         .inc_by(u64::from(stats.broad_candidates));
+    // Hot-tier meters (class H, ADR-105) — all-zero while θ is off.
+    state
+        .prom
+        .hot_batches_total
+        .inc_by(u64::from(stats.hot_batches));
+    state
+        .prom
+        .hot_postings_scanned_total
+        .inc_by(u64::from(stats.hot_postings_scanned));
+    state
+        .prom
+        .hot_queries_evaluated_total
+        .inc_by(u64::from(stats.hot_queries_evaluated));
+    state
+        .prom
+        .hot_candidates_total
+        .inc_by(u64::from(stats.hot_candidates));
 
     // Reassemble per-document results in submission order (`results` is
     // (global_index, ids) with index in 0..num_docs).

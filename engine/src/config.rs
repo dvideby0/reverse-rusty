@@ -241,6 +241,37 @@ pub struct EngineConfig {
     /// Default: `true`
     pub broad_prefilter: bool,
 
+    // ---- the hot tier (class H — ADR-105, the Broad-Query Cost Program) ----
+    /// The hot-anchor frequency threshold θ. `0` (the default) disables the hot
+    /// tier — classification is byte-identical to the pre-ADR-105 engine. When
+    /// set, a query whose deciding anchor has **no top-64 mask bit** but a query
+    /// frequency ≥ θ classifies as **class H**: stored in the per-segment hot
+    /// index, probed on every request (always-visible, like main) but evaluated
+    /// columnar on the batch path (like broad) — a cost quarantine for the
+    /// ADR-104 rank-cliff postings that never changes which requests see a query
+    /// (the two-axis placement rule). Recommended value:
+    /// [`DEFAULT_HOT_ANCHOR_THETA`] (1024).
+    ///
+    /// Dynamic (`PUT /_settings`): affects the classification of NEW writes
+    /// immediately and sealed entries at the next re-anchoring compaction
+    /// (`compaction_reanchor`). A θ change is correctness-benign in every
+    /// direction — class A and class H are both always-visible and place
+    /// identically in the cluster — so live/replay classification divergence
+    /// under a flipped θ can only move cost, never results.
+    ///
+    /// Default: `0` (off)
+    pub hot_anchor_threshold: u32,
+
+    /// Per-merge cap on hot-tier lane moves (main↔hot) during a re-anchoring
+    /// compaction (ADR-105) — the migration work cap. A would-be move past the
+    /// cap keeps its old (still-correct) cover and migrates on a later merge, so
+    /// repeated compactions converge without any single merge paying an
+    /// unbounded reorganization bill. Only consulted when `compaction_reanchor`
+    /// and `hot_anchor_threshold` are both enabled.
+    ///
+    /// Default: `usize::MAX` (uncapped)
+    pub hot_migration_max_moves: usize,
+
     /// Cooperative match cancellation (ADR-099): when a search request sets an
     /// EXPLICIT `timeout_ms`, the match work re-checks the deadline at coarse
     /// (per-segment / per-title) boundaries and abandons itself once expired —
@@ -335,6 +366,8 @@ impl Default for EngineConfig {
             broad_columnar: true,
             broad_materialize: true,
             broad_prefilter: true,
+            hot_anchor_threshold: 0,
+            hot_migration_max_moves: usize::MAX,
             cooperative_cancel: true,
             alias_feedback_capture: false,
             alias_feedback_max_pairs: 256,

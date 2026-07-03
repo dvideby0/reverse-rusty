@@ -182,7 +182,12 @@ impl Engine {
         let source = self.get_query_source(logical_id)?;
         let mut lc = String::new();
         let cq = crate::compile::compile_one_readonly(
-            &source, logical_id, &self.norm, &self.dict, &mut lc,
+            &source,
+            logical_id,
+            &self.norm,
+            &self.dict,
+            &mut lc,
+            self.config.hot_anchor_threshold,
         )
         .ok()?;
         Some(crate::explain::explain_match_structured(

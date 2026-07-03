@@ -85,6 +85,12 @@ pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
         broad_anchors_scanned: p.broad_anchors_scanned,
         broad_batches: p.broad_batches,
         broad_prefilter_skipped: p.broad_prefilter_skipped,
+        hot_postings_scanned: p.hot_postings_scanned,
+        hot_candidates: p.hot_candidates,
+        hot_queries_evaluated: p.hot_queries_evaluated,
+        hot_anchors_scanned: p.hot_anchors_scanned,
+        hot_batches: p.hot_batches,
+        hot_prefilter_skipped: p.hot_prefilter_skipped,
     }
 }
 
@@ -103,6 +109,12 @@ pub(crate) fn stats_from_engine(s: EngineStats) -> MatchStats {
         broad_anchors_scanned: s.broad_anchors_scanned,
         broad_batches: s.broad_batches,
         broad_prefilter_skipped: s.broad_prefilter_skipped,
+        hot_postings_scanned: s.hot_postings_scanned,
+        hot_candidates: s.hot_candidates,
+        hot_queries_evaluated: s.hot_queries_evaluated,
+        hot_anchors_scanned: s.hot_anchors_scanned,
+        hot_batches: s.hot_batches,
+        hot_prefilter_skipped: s.hot_prefilter_skipped,
     }
 }
 
@@ -161,10 +173,12 @@ pub(crate) fn translog_entry_from_mutation(
 mod tests {
     use super::{stats_from_engine, stats_to_engine, EngineStats, MatchStats};
 
-    // 12 DISTINCT values, so any field swap in either mapper changes the result — a pure
+    // 18 DISTINCT values, so any field swap in either mapper changes the result — a pure
     // round-trip alone would miss a *symmetric* transposition present in both directions,
     // which the per-field, by-name assertions below catch.
-    const VALS: [u32; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+    const VALS: [u32; 18] = [
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+    ];
 
     fn engine_sample() -> EngineStats {
         EngineStats {
@@ -180,6 +194,12 @@ mod tests {
             broad_anchors_scanned: VALS[9],
             broad_batches: VALS[10],
             broad_prefilter_skipped: VALS[11],
+            hot_postings_scanned: VALS[12],
+            hot_candidates: VALS[13],
+            hot_queries_evaluated: VALS[14],
+            hot_anchors_scanned: VALS[15],
+            hot_batches: VALS[16],
+            hot_prefilter_skipped: VALS[17],
         }
     }
 
@@ -198,6 +218,12 @@ mod tests {
         assert_eq!(p.broad_anchors_scanned, VALS[9]);
         assert_eq!(p.broad_batches, VALS[10]);
         assert_eq!(p.broad_prefilter_skipped, VALS[11]);
+        assert_eq!(p.hot_postings_scanned, VALS[12]);
+        assert_eq!(p.hot_candidates, VALS[13]);
+        assert_eq!(p.hot_queries_evaluated, VALS[14]);
+        assert_eq!(p.hot_anchors_scanned, VALS[15]);
+        assert_eq!(p.hot_batches, VALS[16]);
+        assert_eq!(p.hot_prefilter_skipped, VALS[17]);
     }
 
     #[test]
@@ -215,6 +241,12 @@ mod tests {
             broad_anchors_scanned: VALS[9],
             broad_batches: VALS[10],
             broad_prefilter_skipped: VALS[11],
+            hot_postings_scanned: VALS[12],
+            hot_candidates: VALS[13],
+            hot_queries_evaluated: VALS[14],
+            hot_anchors_scanned: VALS[15],
+            hot_batches: VALS[16],
+            hot_prefilter_skipped: VALS[17],
         };
         let e = stats_to_engine(p);
         assert_eq!(e.unique_candidates, VALS[0]);
@@ -229,6 +261,12 @@ mod tests {
         assert_eq!(e.broad_anchors_scanned, VALS[9]);
         assert_eq!(e.broad_batches, VALS[10]);
         assert_eq!(e.broad_prefilter_skipped, VALS[11]);
+        assert_eq!(e.hot_postings_scanned, VALS[12]);
+        assert_eq!(e.hot_candidates, VALS[13]);
+        assert_eq!(e.hot_queries_evaluated, VALS[14]);
+        assert_eq!(e.hot_anchors_scanned, VALS[15]);
+        assert_eq!(e.hot_batches, VALS[16]);
+        assert_eq!(e.hot_prefilter_skipped, VALS[17]);
     }
 
     #[test]

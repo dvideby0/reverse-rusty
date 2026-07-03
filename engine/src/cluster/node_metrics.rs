@@ -135,12 +135,12 @@ fn push_escaped(out: &mut String, value: &str) {
 // ---- shard rendering ---------------------------------------------------------------------------
 
 /// One hosted shard's live numbers for the per-node exposition (ADR-093). A co-located node passes
-/// one of these per LOADED slot to [`render_shards`]; `class` is `[A, B, C, D]` stored-query counts.
+/// one of these per LOADED slot to [`render_shards`]; `class` is `[A, B, C, D, H]` stored-query counts.
 pub(crate) struct ShardSample {
     pub shard_id: u32,
     pub metrics: EngineMetrics,
     pub segments: Vec<SegmentInfo>,
-    pub class: [u64; 4],
+    pub class: [u64; 5],
     /// Per-RPC service-latency histograms for this slot, indexed like [`SHARD_RPC_LABELS`]
     /// (ADR-100). All-zero on a slot that has served no RPCs — the family still renders, so the
     /// series exist from the first scrape.
@@ -296,6 +296,7 @@ pub(crate) fn render_shards(samples: &[ShardSample]) -> String {
             ("b", s.class[1]),
             ("c", s.class[2]),
             ("d", s.class[3]),
+            ("h", s.class[4]),
         ] {
             e.sample(
                 "reverse_rusty_class_queries",
@@ -333,6 +334,28 @@ pub(crate) fn render_shards(samples: &[ShardSample]) -> String {
             "reverse_rusty_broad_batches_total",
             "Broad-lane columnar sub-batches processed on this shard.",
             |b: &BroadCostSnapshot| b.batches,
+        ),
+        // The hot tier's totals (class H, ADR-105) — same shape/labels; all-zero
+        // while the θ knob is off.
+        (
+            "reverse_rusty_hot_candidates_total",
+            "Hot-tier candidates retrieved by percolates on this shard (ADR-105).",
+            |b: &BroadCostSnapshot| b.hot_candidates,
+        ),
+        (
+            "reverse_rusty_hot_postings_scanned_total",
+            "Hot-tier posting entries scanned by percolates on this shard.",
+            |b: &BroadCostSnapshot| b.hot_postings_scanned,
+        ),
+        (
+            "reverse_rusty_hot_queries_evaluated_total",
+            "Hot-tier queries bitmap-evaluated by the columnar batch path on this shard.",
+            |b: &BroadCostSnapshot| b.hot_queries_evaluated,
+        ),
+        (
+            "reverse_rusty_hot_batches_total",
+            "Hot-tier columnar sub-batches processed on this shard.",
+            |b: &BroadCostSnapshot| b.hot_batches,
         ),
     ] {
         e.header_typed(name, help, "counter");

@@ -24,6 +24,12 @@ pub(crate) struct SlotBroadCost {
     postings_scanned: AtomicU64,
     queries_evaluated: AtomicU64,
     batches: AtomicU64,
+    // The hot tier's totals (class H, ADR-105) — the same shape, `hot_*`-named on
+    // the wire; all-zero while the θ knob is off.
+    hot_candidates: AtomicU64,
+    hot_postings_scanned: AtomicU64,
+    hot_queries_evaluated: AtomicU64,
+    hot_batches: AtomicU64,
 }
 
 impl SlotBroadCost {
@@ -33,6 +39,10 @@ impl SlotBroadCost {
             postings_scanned: AtomicU64::new(0),
             queries_evaluated: AtomicU64::new(0),
             batches: AtomicU64::new(0),
+            hot_candidates: AtomicU64::new(0),
+            hot_postings_scanned: AtomicU64::new(0),
+            hot_queries_evaluated: AtomicU64::new(0),
+            hot_batches: AtomicU64::new(0),
         }
     }
 
@@ -52,6 +62,14 @@ impl SlotBroadCost {
             .fetch_add(u64::from(stats.broad_queries_evaluated), Ordering::Relaxed);
         self.batches
             .fetch_add(u64::from(stats.broad_batches), Ordering::Relaxed);
+        self.hot_candidates
+            .fetch_add(u64::from(stats.hot_candidates), Ordering::Relaxed);
+        self.hot_postings_scanned
+            .fetch_add(u64::from(stats.hot_postings_scanned), Ordering::Relaxed);
+        self.hot_queries_evaluated
+            .fetch_add(u64::from(stats.hot_queries_evaluated), Ordering::Relaxed);
+        self.hot_batches
+            .fetch_add(u64::from(stats.hot_batches), Ordering::Relaxed);
     }
 
     /// A point-in-time copy for rendering (relaxed reads — each total is independent).
@@ -61,6 +79,10 @@ impl SlotBroadCost {
             postings_scanned: self.postings_scanned.load(Ordering::Relaxed),
             queries_evaluated: self.queries_evaluated.load(Ordering::Relaxed),
             batches: self.batches.load(Ordering::Relaxed),
+            hot_candidates: self.hot_candidates.load(Ordering::Relaxed),
+            hot_postings_scanned: self.hot_postings_scanned.load(Ordering::Relaxed),
+            hot_queries_evaluated: self.hot_queries_evaluated.load(Ordering::Relaxed),
+            hot_batches: self.hot_batches.load(Ordering::Relaxed),
         }
     }
 }
@@ -73,6 +95,10 @@ pub(crate) struct BroadCostSnapshot {
     pub(crate) postings_scanned: u64,
     pub(crate) queries_evaluated: u64,
     pub(crate) batches: u64,
+    pub(crate) hot_candidates: u64,
+    pub(crate) hot_postings_scanned: u64,
+    pub(crate) hot_queries_evaluated: u64,
+    pub(crate) hot_batches: u64,
 }
 
 #[cfg(test)]

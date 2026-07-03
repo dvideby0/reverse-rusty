@@ -158,6 +158,18 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = 10_000)]
     pub(crate) max_percolate_batch: usize,
 
+    /// The hot-anchor threshold θ (class H, ADR-105). 0 (the default) disables
+    /// the hot tier — classification is byte-identical to the pre-ADR-105
+    /// engine. When set (recommended 1024), a query whose deciding anchor has no
+    /// top-64 mask bit but a frequency ≥ θ is stored in the always-probed,
+    /// columnar-evaluated hot tier instead of fattening the realtime lane.
+    /// Dynamic via `PUT /_settings` (affects new writes immediately; sealed
+    /// entries migrate at the next re-anchoring compaction). In remote cluster
+    /// mode run every `shardserver` with the same value (divergence is
+    /// cost-only, never correctness — see ADR-105).
+    #[arg(long, default_value_t = 0)]
+    pub(crate) hot_anchor_threshold: u32,
+
     // ---- coordinator (cluster) mode, ADR-070 ----
     /// Run as a CLUSTER coordinator: the same REST API served over a multi-shard
     /// `ClusterEngine` instead of a single-node `Engine` (ADR-070). In-process by

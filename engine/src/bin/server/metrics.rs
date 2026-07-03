@@ -60,6 +60,10 @@ pub(crate) struct PrometheusMetrics {
     pub(crate) broad_postings_scanned_total: IntCounter,
     pub(crate) broad_queries_evaluated_total: IntCounter,
     pub(crate) broad_candidates_total: IntCounter,
+    pub(crate) hot_batches_total: IntCounter,
+    pub(crate) hot_postings_scanned_total: IntCounter,
+    pub(crate) hot_queries_evaluated_total: IntCounter,
+    pub(crate) hot_candidates_total: IntCounter,
 
     // Slow query counter
     pub(crate) slow_queries_total: IntCounter,
@@ -317,6 +321,26 @@ impl PrometheusMetrics {
         ))
         .unwrap();
 
+        let hot_batches_total = IntCounter::with_opts(Opts::new(
+            "hot_batches_total",
+            "Hot-tier columnar sub-batches processed (class H, ADR-105)",
+        ))
+        .unwrap();
+        let hot_postings_scanned_total = IntCounter::with_opts(Opts::new(
+            "hot_postings_scanned_total",
+            "Hot-tier posting entries scanned",
+        ))
+        .unwrap();
+        let hot_queries_evaluated_total = IntCounter::with_opts(Opts::new(
+            "hot_queries_evaluated_total",
+            "Hot-tier queries bitmap-evaluated by the columnar batch path",
+        ))
+        .unwrap();
+        let hot_candidates_total = IntCounter::with_opts(Opts::new(
+            "hot_candidates_total",
+            "Hot-tier candidates retrieved",
+        ))
+        .unwrap();
         // --- Cluster gRPC transport metrics (ADR-085) ---
 
         let transport_rpc_calls = IntGaugeVec::new(
@@ -426,6 +450,18 @@ impl PrometheusMetrics {
             .register(Box::new(broad_candidates_total.clone()))
             .unwrap();
         registry
+            .register(Box::new(hot_batches_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(hot_postings_scanned_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(hot_queries_evaluated_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(hot_candidates_total.clone()))
+            .unwrap();
+        registry
             .register(Box::new(slow_queries_total.clone()))
             .unwrap();
         registry
@@ -501,6 +537,10 @@ impl PrometheusMetrics {
             broad_postings_scanned_total,
             broad_queries_evaluated_total,
             broad_candidates_total,
+            hot_batches_total,
+            hot_postings_scanned_total,
+            hot_queries_evaluated_total,
+            hot_candidates_total,
             slow_queries_total,
             match_cancellations_total,
             search_permits_in_use,

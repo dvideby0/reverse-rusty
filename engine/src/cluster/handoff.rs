@@ -160,7 +160,7 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().num_queries()
     }
 
-    fn class_counts(&self) -> Result<[u64; 4], ShardError> {
+    fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         self.current.load().class_counts()
     }
 
@@ -474,8 +474,8 @@ mod tests {
         fn num_queries(&self) -> Result<usize, ShardError> {
             Ok(42) // sentinel
         }
-        fn class_counts(&self) -> Result<[u64; 4], ShardError> {
-            Ok([0; 4])
+        fn class_counts(&self) -> Result<[u64; 5], ShardError> {
+            Ok([0; 5])
         }
         fn ingest_extracted(&self, _i: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
             Ok(IngestReport::default())

@@ -421,9 +421,15 @@ impl Engine {
                 // always-candidate when it still has forbidden features — zero FN,
                 // bounded FP — instead of being silently dropped from the rebuilt
                 // index (the pre-existing hazard); only the all-empty case drops.
-                if let Some((_, would_be_hot)) =
-                    seg.add_compiled(&ex, &tags, &self.dict, *logical, version, true)
-                {
+                if let Some((_, would_be_hot)) = seg.add_compiled(
+                    &ex,
+                    &tags,
+                    &self.dict,
+                    *logical,
+                    version,
+                    true,
+                    self.config.hot_anchor_threshold,
+                ) {
                     self.would_be_hot += u64::from(would_be_hot);
                     recompiled += 1;
                 }

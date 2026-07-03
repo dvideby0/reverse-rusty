@@ -1,14 +1,24 @@
 //! `impl Segment` — the in-memory (or memtable) index slice: append, probe,
-//! tombstone, compaction merge, and the per-segment memory accounting. Type
-//! definition lives in the `segment` module root.
+//! tombstone, and the per-segment memory accounting. Type definition lives in
+//! the `segment` module root; the compaction merges live in the sibling
+//! [`merge`](super::merge) submodule.
 
-use super::{MatchStats, Segment};
+use super::{MatchStats, ProbeLanes, Segment};
 use crate::compile::{build_signatures, is_hot, CostClass, Extracted};
 use crate::dict::Dict;
 use crate::exact::ExactStore;
 use crate::filter::SegmentFilter;
 use crate::index::CandidateIndex;
 use crate::util::sig_key;
+
+/// Which candidate index a [`Segment::probe`] call is reading — routes the
+/// per-lane [`MatchStats`] counters without a boolean pair.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::segment) enum ProbeLane {
+    Main,
+    Broad,
+    Hot,
+}
 
 /// The single accept/reject predicate for a compiled plan's cost class (ADR-068):
 /// class D is stored only when the lane is on AND the query has forbidden features
@@ -30,6 +40,7 @@ impl Segment {
         Segment {
             main: CandidateIndex::new(),
             broad: CandidateIndex::new(),
+            hot: CandidateIndex::new(),
             exact: ExactStore::new(),
             class: Vec::new(),
             alive: Vec::new(),
@@ -40,12 +51,13 @@ impl Segment {
         }
     }
 
-    /// Build and attach the anchor filter from the current main + broad index
-    /// keys. Called once when a segment is sealed (flush, bulk_ingest, compaction).
-    /// After this, `match_into` will use the filter to skip probes.
+    /// Build and attach the anchor filter from the current main + broad + hot
+    /// index keys. Called once when a segment is sealed (flush, bulk_ingest,
+    /// compaction). After this, `match_into` will use the filter to skip probes.
     pub(in crate::segment) fn build_filter(&mut self) {
         let mut keys = self.main.keys();
         keys.extend(self.broad.keys());
+        keys.extend(self.hot.keys());
         self.filter = Some(SegmentFilter::build(&keys));
     }
 
@@ -64,6 +76,16 @@ impl Segment {
     pub fn broad_index(&self) -> &CandidateIndex {
         &self.broad
     }
+    /// The hot tier's candidate index (class H, ADR-105).
+    pub fn hot_index(&self) -> &CandidateIndex {
+        &self.hot
+    }
+    /// Whether this segment holds any hot-tier entries — the per-segment skip
+    /// that makes the hot tier structurally free on hot-empty corpora.
+    #[inline]
+    pub fn has_hot_entries(&self) -> bool {
+        self.hot.num_signatures() > 0
+    }
 
     /// Append one already-extracted query. Returns the new segment-local id plus
     /// the plan's [`would_be_hot`](crate::compile::SigPlan::would_be_hot)
@@ -80,6 +102,9 @@ impl Segment {
     /// `EngineConfig::accept_class_d` knob; WAL replay and the vocab recompile pass
     /// `true` unconditionally (an acknowledged/stored query must never be dropped
     /// by a since-flipped knob).
+    // The knobs are threaded bare, matching the established accept_class_d
+    // precedent (ADR-068); an options struct waits for lever 3's AnchorCtx.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_compiled(
         &mut self,
         ex: &Extracted,
@@ -88,8 +113,9 @@ impl Segment {
         logical: u64,
         version: u32,
         accept_class_d: bool,
+        theta: u32,
     ) -> Option<(u32, bool)> {
-        let plan = build_signatures(ex, dict);
+        let plan = build_signatures(ex, dict, theta);
         if rejects_class_d(plan.class, ex, accept_class_d) {
             return None;
         }
@@ -99,6 +125,9 @@ impl Segment {
         }
         for &s in &plan.broad_sigs {
             self.broad.insert(s, local);
+        }
+        for &s in &plan.hot_sigs {
+            self.hot.insert(s, local);
         }
         self.class.push(plan.class);
         self.alive.push(true);
@@ -141,13 +170,16 @@ impl Segment {
         self.alive.get(local_id as usize).copied().unwrap_or(false)
     }
 
-    pub fn class_counts(&self, c: &mut [u64; 4]) {
+    pub fn class_counts(&self, c: &mut [u64; 5]) {
         for &cl in &self.class {
             match cl {
                 CostClass::A => c[0] += 1,
                 CostClass::B => c[1] += 1,
                 CostClass::C => c[2] += 1,
                 CostClass::D => c[3] += 1,
+                // Index 4 is APPENDED (never reordered): the autoscaler and the
+                // class-D pins read c[2]/c[3] positionally.
+                CostClass::H => c[4] += 1,
             }
         }
     }
@@ -167,7 +199,7 @@ impl Segment {
         epoch: u32,
         seen: &mut [u32],
         out: &mut Vec<u64>,
-        include_broad: bool,
+        lanes: ProbeLanes,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
@@ -186,9 +218,22 @@ impl Segment {
                     continue;
                 }
             }
-            self.probe(key, &self.main, epoch, view, seen, out, pred, stats, false);
+            self.probe(
+                key,
+                &self.main,
+                epoch,
+                view,
+                seen,
+                out,
+                pred,
+                stats,
+                ProbeLane::Main,
+            );
         }
-        // arity-2 signatures: {hot feature} x {every other feature}
+        // arity-2 signatures: {hot feature} x {every other feature}. Deliberately
+        // keyed to the FROZEN top-64 mask (`is_hot`), never θ — this loop is the
+        // title side of the class-B pair predicate, and extending it is lever 3's
+        // fenced change, not the hot tier's (ADR-105).
         for &h in feats {
             if is_hot(dict, h) {
                 for &o in feats {
@@ -202,13 +247,28 @@ impl Segment {
                                 continue;
                             }
                         }
-                        self.probe(key, &self.main, epoch, view, seen, out, pred, stats, false);
+                        self.probe(
+                            key,
+                            &self.main,
+                            epoch,
+                            view,
+                            seen,
+                            out,
+                            pred,
+                            stats,
+                            ProbeLane::Main,
+                        );
                     }
                 }
             }
         }
-        // broad lane (arity-1 anchors), measured separately
-        if include_broad {
+        // Hot tier (class H, ADR-105): arity-1 anchors, probed on EVERY request —
+        // always-visible like main, so this is NOT gated by `include_broad`. The
+        // `lanes.include_hot` gate only lets the batch driver lift the lane into
+        // its columnar pass (evaluated exactly once either way). Skipped outright
+        // when the segment holds no hot entries — one branch per segment per
+        // title, the structural zero-overhead answer for hot-free corpora.
+        if lanes.include_hot && self.has_hot_entries() {
             for &f in feats {
                 let key = sig_key(&[f]);
                 stats.probes_attempted += 1;
@@ -218,7 +278,41 @@ impl Segment {
                         continue;
                     }
                 }
-                self.probe(key, &self.broad, epoch, view, seen, out, pred, stats, true);
+                self.probe(
+                    key,
+                    &self.hot,
+                    epoch,
+                    view,
+                    seen,
+                    out,
+                    pred,
+                    stats,
+                    ProbeLane::Hot,
+                );
+            }
+        }
+        // broad lane (arity-1 anchors), measured separately
+        if lanes.include_broad {
+            for &f in feats {
+                let key = sig_key(&[f]);
+                stats.probes_attempted += 1;
+                if let Some(flt) = filter {
+                    if !flt.may_contain(key) {
+                        stats.probes_skipped += 1;
+                        continue;
+                    }
+                }
+                self.probe(
+                    key,
+                    &self.broad,
+                    epoch,
+                    view,
+                    seen,
+                    out,
+                    pred,
+                    stats,
+                    ProbeLane::Broad,
+                );
             }
             // Universal signature: class-D always-candidates (ADR-068). Probed
             // unconditionally — the accept knob gates ingest, never visibility, so a
@@ -230,7 +324,17 @@ impl Segment {
             if skip {
                 stats.probes_skipped += 1;
             } else {
-                self.probe(key, &self.broad, epoch, view, seen, out, pred, stats, true);
+                self.probe(
+                    key,
+                    &self.broad,
+                    epoch,
+                    view,
+                    seen,
+                    out,
+                    pred,
+                    stats,
+                    ProbeLane::Broad,
+                );
             }
         }
     }
@@ -247,12 +351,14 @@ impl Segment {
         out: &mut Vec<u64>,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
-        is_broad: bool,
+        lane: ProbeLane,
     ) {
         if let Some(posting) = index.get(key) {
             stats.postings_scanned += posting.len() as u32;
-            if is_broad {
-                stats.broad_postings_scanned += posting.len() as u32;
+            match lane {
+                ProbeLane::Broad => stats.broad_postings_scanned += posting.len() as u32,
+                ProbeLane::Hot => stats.hot_postings_scanned += posting.len() as u32,
+                ProbeLane::Main => {}
             }
             posting.for_each(|local| {
                 // dedup across signatures with an epoch stamp (O(1), no alloc)
@@ -261,10 +367,10 @@ impl Segment {
                 }
                 seen[local as usize] = epoch;
                 stats.unique_candidates += 1;
-                if is_broad {
-                    stats.broad_candidates += 1;
-                } else {
-                    stats.main_candidates += 1;
+                match lane {
+                    ProbeLane::Broad => stats.broad_candidates += 1,
+                    ProbeLane::Hot => stats.hot_candidates += 1,
+                    ProbeLane::Main => stats.main_candidates += 1,
                 }
                 if !self.alive[local as usize] {
                     return; // tombstoned
@@ -291,200 +397,12 @@ impl Segment {
         1.0 - (self.alive_count() as f64 / total as f64)
     }
 
-    /// Merge multiple source segments into one fresh segment, dropping tombstoned
-    /// entries and renumbering local IDs to be dense/contiguous. This is the core
-    /// compaction mechanic.
-    ///
-    /// Correctness argument: every alive entry is copied verbatim (exact store
-    /// data, cost class); every signature posting that pointed to an alive entry
-    /// is remapped to the new local ID. Dead entries are simply skipped, reclaiming
-    /// their space. The resulting segment is equivalent to the union of the alive
-    /// entries from all sources.
-    pub fn compact_from(sources: &[&Segment]) -> Segment {
-        let mut dest = Segment::new();
-
-        for &src in sources {
-            // Build the old→new local-id remap for this source segment.
-            // Dead entries get u32::MAX (sentinel); alive entries get dense IDs.
-            let n = src.len();
-            let mut remap: Vec<u32> = vec![u32::MAX; n];
-            for (old, &is_alive) in src.alive.iter().enumerate() {
-                if is_alive {
-                    let new_id = src.exact.copy_entry(old as u32, &mut dest.exact);
-                    let logical = dest.exact.logical(new_id);
-                    dest.class.push(src.class[old]);
-                    dest.alive.push(true);
-                    dest.alive_counter += 1;
-                    dest.logical_index.entry(logical).or_default().push(new_id);
-                    remap[old] = new_id;
-                }
-            }
-
-            // Remap main index postings
-            src.main.for_each_posting(|key, posting| {
-                posting.for_each(|old_id| {
-                    let new_id = remap[old_id as usize];
-                    if new_id != u32::MAX {
-                        dest.main.insert(key, new_id);
-                    }
-                });
-            });
-
-            // Remap broad index postings
-            src.broad.for_each_posting(|key, posting| {
-                posting.for_each(|old_id| {
-                    let new_id = remap[old_id as usize];
-                    if new_id != u32::MAX {
-                        dest.broad.insert(key, new_id);
-                    }
-                });
-            });
-        }
-        // Build anchor filter for the newly compacted (sealed) segment.
-        dest.build_filter();
-        // Merged segment inherits the minimum epoch — still stale if any source was.
-        dest.vocab_epoch = sources.iter().map(|s| s.vocab_epoch).min().unwrap_or(0);
-        dest
-    }
-
-    /// Compaction's "improve" variant (ADR-056): merge like [`compact_from`](Self::compact_from)
-    /// but **re-anchor** each alive query — re-derive its signature cover with the *current*
-    /// feature frequencies instead of carrying the old anchors forward. Returns the merged
-    /// segment plus the number of queries whose cover actually changed.
-    ///
-    /// Correctness (zero false negatives): the cover is rebuilt by the SAME
-    /// [`build_signatures`]/`anchor_plan` optimizer the title side is matched against
-    /// ([`match_into`](Self::match_into)), using the same `dict`, so any title that matches a
-    /// query still generates a signature that retrieves it — the anchor choice only governs
-    /// *which* posting list the query lives in. The exact-store data is copied **verbatim**
-    /// (`copy_entry`), so `verify`/`is_pure_anchor` are byte-identical and forbidden features
-    /// are preserved; only the index postings and the per-query cost class are re-derived.
-    ///
-    /// The cost class *can* change (e.g. A→B): with the common mask frozen, a feature's
-    /// frequency and its hotness diverge as the corpus drifts, so a query's rarest-by-current-
-    /// frequency required feature can now be a hot one and escalate to an arity-2 cover. This
-    /// is still lossless because `anchor_plan`'s class-B/C anchors are always hot features, and
-    /// the title side ([`match_into`](Self::match_into)) generates exactly those {hot}×{other}
-    /// and broad signatures — the same matched-pair guarantee. A stored non-D query is never
-    /// re-anchored to class D (it always has a required/any-of feature); a stored class-D
-    /// always-candidate (ADR-068) re-derives its universal broad cover verbatim.
-    ///
-    /// One transition is **refused**: a main-lane (A/B) query is never demoted into the broad
-    /// (C) lane. The main index is always probed, but the broad lane is opt-in (the default
-    /// percolate path has `include_broad = false`), so a main→broad move would hide the query
-    /// on that path — a false negative. That crossing happens only for a query whose sole
-    /// anchor became hot (e.g. an entry compiled before the mask was finalized), which is a
-    /// hotness reclassification — a major-version blue/green concern (matching.md §8), not a
-    /// silent compaction change — so such an entry keeps its original cover.
-    ///
-    /// Invariant preserved: entries are processed in ascending old-local-id order and each
-    /// entry's fresh sigs are inserted at its (ascending) new id immediately, so every posting
-    /// stays sorted by construction (no per-insert sort/dedup needed — same contract as
-    /// `add_compiled`).
-    pub fn compact_from_reanchored(sources: &[&Segment], dict: &Dict) -> (Segment, usize) {
-        let mut dest = Segment::new();
-        let mask_inverse = dict.mask_inverse();
-        let mut reanchored = 0usize;
-
-        for &src in sources {
-            // Invert the indexes once, lane-separated (old_id -> the main / broad sig keys it
-            // appears under), so we can tell which entries actually moved AND in which lane.
-            // One pass, O(postings) — the same order as the merge, and it stands in for
-            // compact_from's posting-remap passes.
-            let mut old_main: Vec<Vec<u64>> = vec![Vec::new(); src.len()];
-            let mut old_broad: Vec<Vec<u64>> = vec![Vec::new(); src.len()];
-            src.main.for_each_posting(|key, posting| {
-                posting.for_each(|old_id| old_main[old_id as usize].push(key));
-            });
-            src.broad.for_each_posting(|key, posting| {
-                posting.for_each(|old_id| old_broad[old_id as usize].push(key));
-            });
-
-            for (old, &is_alive) in src.alive.iter().enumerate() {
-                if !is_alive {
-                    continue; // drop tombstoned entries, reclaiming their space
-                }
-                // Copy the exact-store entry verbatim (masks, forbidden, any-of, tags,
-                // identity) — re-anchoring must not touch the verified semantics.
-                let new_id = src.exact.copy_entry(old as u32, &mut dest.exact);
-                let logical = dest.exact.logical(new_id);
-                let old_class = src.class[old];
-
-                // Re-derive the cover from the (unchanged) stored required/any-of features
-                // against the current dict. `anchor_plan` reads only required + any-of, so the
-                // empty `forbidden` here is irrelevant to selection.
-                let (required, anyof) = dest.exact.anchoring_inputs(new_id, &mask_inverse);
-                let ex = Extracted {
-                    required,
-                    forbidden: Vec::new(),
-                    anyof,
-                };
-                let plan = build_signatures(&ex, dict);
-                debug_assert!(
-                    old_class == CostClass::D || plan.class != CostClass::D,
-                    "a stored non-D query must never re-anchor to class D"
-                );
-
-                // CORRECTNESS GUARD — never demote a main-lane (A/B) query into the broad
-                // lane. The main index is probed on every percolate; the broad lane is opt-in
-                // (the default path has `include_broad = false`), so moving a query main→broad
-                // would hide it there — a false negative. A query crossing INTO broad because
-                // its anchor went hot is a *hotness reclassification*, which is a major-version
-                // blue/green concern (matching.md §8), NOT a silent compaction change — so keep
-                // the original cover. (The reverse, broad→main, only adds findability and is
-                // kept. This can leave a now-hot arity-1 anchor in main, but that pollution
-                // already existed pre-compaction; re-anchoring just doesn't make it unfindable.)
-                let prev_main = std::mem::take(&mut old_main[old]);
-                let prev_broad = std::mem::take(&mut old_broad[old]);
-                let demotes_to_broad =
-                    matches!(old_class, CostClass::A | CostClass::B) && plan.class == CostClass::C;
-                let (main_keys, broad_keys, class): (&[u64], &[u64], CostClass) =
-                    if demotes_to_broad {
-                        (&prev_main, &prev_broad, old_class)
-                    } else {
-                        (&plan.main_sigs, &plan.broad_sigs, plan.class)
-                    };
-
-                for &s in main_keys {
-                    dest.main.insert(s, new_id);
-                }
-                for &s in broad_keys {
-                    dest.broad.insert(s, new_id);
-                }
-                dest.class.push(class);
-                dest.alive.push(true);
-                dest.alive_counter += 1;
-                dest.logical_index.entry(logical).or_default().push(new_id);
-
-                // Did the cover actually change? Compare lane-tagged key sets, so a posting
-                // that merely moved lane (same `u64`, different index) still counts.
-                let lane_tagged = |main: &[u64], broad: &[u64]| {
-                    let mut v: Vec<(u8, u64)> = main
-                        .iter()
-                        .map(|&k| (0u8, k))
-                        .chain(broad.iter().map(|&k| (1u8, k)))
-                        .collect();
-                    v.sort_unstable();
-                    v
-                };
-                if lane_tagged(main_keys, broad_keys) != lane_tagged(&prev_main, &prev_broad) {
-                    reanchored += 1;
-                }
-            }
-        }
-
-        // Build anchor filter for the newly compacted (sealed) segment.
-        dest.build_filter();
-        // Merged segment inherits the minimum epoch — still stale if any source was.
-        dest.vocab_epoch = sources.iter().map(|s| s.vocab_epoch).min().unwrap_or(0);
-        (dest, reanchored)
-    }
-
     /// Reconstruct a Segment from pre-built parts. Used by MmapSegment::to_memory_segment
     /// to convert mmap'd data back into an in-memory segment (for compaction).
     pub fn from_parts(
         main: CandidateIndex,
         broad: CandidateIndex,
+        hot: CandidateIndex,
         exact: ExactStore,
         class: Vec<CostClass>,
         alive: Vec<bool>,
@@ -516,6 +434,7 @@ impl Segment {
         let mut seg = Segment {
             main,
             broad,
+            hot,
             exact,
             class,
             alive,
@@ -569,6 +488,9 @@ impl Segment {
     }
     pub fn broad_bytes(&self) -> usize {
         self.broad.heap_bytes()
+    }
+    pub fn hot_bytes(&self) -> usize {
+        self.hot.heap_bytes()
     }
     pub fn filter_bytes(&self) -> usize {
         self.filter

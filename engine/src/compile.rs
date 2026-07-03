@@ -27,7 +27,7 @@ mod plan;
 #[cfg(test)]
 mod tests;
 
-pub use extract::{extract, extract_readonly, is_hot};
+pub use extract::{extract, extract_readonly, is_hot, is_hot_anchor};
 pub use plan::{anchor_plan, build_signatures, compile_one, compile_one_readonly};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,12 +36,22 @@ pub enum CostClass {
     A,
     /// acceptable (arity-2 anchor, or selective any-of reps) — main index, realtime
     B,
-    /// broad (only a hot anchor available) — broad lane, not the selective path
+    /// broad (only a top-64-hot anchor available) — broad lane, **opt-in
+    /// visibility** (`include_broad`), not the selective path
     C,
     /// negation-only (no required feature and no any-of) — rejected at ingest by
     /// default; the opt-in always-candidate lane stores it under the universal
     /// signature in the broad lane (ADR-068)
     D,
+    /// θ-hot anchor (ADR-105, the Broad-Query Cost Program's hot tier): the
+    /// deciding anchor has no top-64 mask bit but its frequency is ≥ the
+    /// engine's `hot_anchor_threshold` — a fat posting that would pollute the
+    /// realtime lane. Stored in the per-segment **hot index**: columnar-
+    /// evaluated like the broad lane, **probed on every request** like the main
+    /// lane — cost quarantine only, NEVER a visibility change (the two-axis
+    /// placement rule: cost movement must never imply visibility movement).
+    /// Exists only when the θ knob is on; θ=0 classifies exactly as before.
+    H,
 }
 
 /// The positive/negative integer form of a query (no signatures yet).
@@ -145,12 +155,17 @@ pub struct CompiledQuery {
     pub extracted: Extracted,
     pub main_sigs: Vec<u64>,
     pub broad_sigs: Vec<u64>,
+    pub hot_sigs: Vec<u64>,
     pub cost_class: CostClass,
 }
 
 pub struct SigPlan {
     pub main_sigs: Vec<u64>,
     pub broad_sigs: Vec<u64>,
+    /// Hot-tier signatures (class H, ADR-105): arity-1 anchors stored in the
+    /// per-segment hot index — always probed, columnar-evaluated. Empty for
+    /// every other class (a query lives in exactly ONE index per segment).
+    pub hot_sigs: Vec<u64>,
     pub class: CostClass,
     /// Observe-first telemetry for the Broad-Query Cost Program (roadmap
     /// Increment 1): true when this plan keeps the query on the always-probed
@@ -158,7 +173,9 @@ pub struct SigPlan {
     /// anchor's frequency is already ≥
     /// [`DEFAULT_HOT_ANCHOR_THETA`](crate::config::DEFAULT_HOT_ANCHOR_THETA) —
     /// i.e. the query *would* reclassify to the hot tier under the default
-    /// threshold. Purely observational: nothing reads it on the match path.
+    /// threshold. Computed only while the θ knob is OFF (with θ on, class H
+    /// itself is the signal — `class_counts()[4]`). Purely observational:
+    /// nothing reads it on the match path.
     pub would_be_hot: bool,
 }
 
@@ -176,12 +193,18 @@ pub struct SigPlan {
 #[derive(Clone, Debug)]
 pub struct AnchorPlan {
     /// Each group = one main-index signature's features (arity 1, or 2 for the
-    /// escalated class-B pair). Empty for class C and class D.
+    /// escalated class-B pair). Empty for classes C, D and H.
     pub main_anchors: Vec<Vec<FeatureId>>,
     /// Each group = one broad-lane signature's features: arity 1 for class C; for
     /// class D one **empty** group — the universal signature, the lossless cover of
-    /// an empty positive set (ADR-068). Empty for classes A/B.
+    /// an empty positive set (ADR-068). Empty for classes A/B/H.
     pub broad_anchors: Vec<Vec<FeatureId>>,
+    /// Each group = one hot-tier signature's features (arity 1 — the θ-hot
+    /// required anchor, or one per member of the chosen θ-hot any-of group;
+    /// ADR-105). Empty for every class but H. Like main anchors these are
+    /// REQUIRED-side features, so the cluster ring-places them selectively
+    /// (`Target::Selective`), identically to class A.
+    pub hot_anchors: Vec<Vec<FeatureId>>,
     pub class: CostClass,
     /// Observe-first hot-tier telemetry — see [`SigPlan::would_be_hot`].
     pub would_be_hot: bool,

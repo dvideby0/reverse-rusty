@@ -169,6 +169,7 @@ async fn main() {
         wal_sync_on_write: cli.wal_sync_on_write,
         retain_source: cli.retain_source,
         broad_batch_size: cli.broad_batch_size,
+        hot_anchor_threshold: cli.hot_anchor_threshold,
         broad_columnar: cli.broad_columnar,
         broad_materialize: cli.broad_materialize,
         max_percolate_batch: cli.max_percolate_batch,

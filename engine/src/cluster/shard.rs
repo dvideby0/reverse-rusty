@@ -200,7 +200,7 @@ pub(crate) trait Shard: Send + Sync {
     /// once per local entry, so it is counted on each shard holding it).
     fn num_queries(&self) -> Result<usize, ShardError>;
     /// Per-class entry tally `[A, B, C, D]` for this shard (introspection/tests).
-    fn class_counts(&self) -> Result<[u64; 4], ShardError>;
+    fn class_counts(&self) -> Result<[u64; 5], ShardError>;
 
     /// This shard's live `(logical_id, dsl)` source set — the corpus the shard's
     /// index is a materialized view of. Used by `ClusterEngine::set_vocab` to

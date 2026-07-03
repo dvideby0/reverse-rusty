@@ -35,9 +35,16 @@ const MAGIC: [u8; 4] = *b"PERC";
 // universal signature, so a v4 file's class-D queries would silently stop matching;
 // the version bump makes that reader fail loudly ("unsupported format version")
 // instead. Class-D-free segments keep writing v3, so rollback stays clean for
-// anyone who never enabled the lane.
+// anyone who never enabled the lane. v5 (ADR-105): adds the HOT-TIER index
+// section (hot_index_off in the previously-reserved header bytes 72..80; class
+// byte 4 = class H in the meta section) — written ONLY for a segment holding ≥1
+// class-H entry, doubling as the same kind of rollback fence: a pre-ADR-105
+// binary never probes the hot index, so its entries would silently stop
+// matching; the unsupported-version refusal makes that loud. Hot-free segments
+// keep writing v3/v4 byte-identically.
 const FORMAT_VERSION: u32 = 3;
 const FORMAT_VERSION_CLASS_D: u32 = 4;
+const FORMAT_VERSION_HOT: u32 = 5;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -53,7 +60,8 @@ const HEADER_SIZE: usize = 80;
 //   48..56  meta_off (u64 LE)
 //   56..64  logical_index_off (u64 LE; 0 or absent in v1)
 //   64..72  tag_section_off (u64 LE; 0 or absent in v1/v2)
-//   72..80  reserved (8 bytes, zeroed)
+//   72..80  hot_index_off (u64 LE; v5 — 0 or absent pre-v5: those bytes were
+//            reserved-zero, so a legacy header reads back as "no hot section")
 
 // ---- frozen hash table for on-disk CandidateIndex ----
 

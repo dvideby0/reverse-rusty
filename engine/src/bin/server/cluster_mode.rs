@@ -76,6 +76,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         wal_sync_on_write: cli.wal_sync_on_write,
         retain_source: cli.retain_source,
         broad_batch_size: cli.broad_batch_size,
+        hot_anchor_threshold: cli.hot_anchor_threshold,
         broad_columnar: cli.broad_columnar,
         broad_materialize: cli.broad_materialize,
         max_percolate_batch: cli.max_percolate_batch,
@@ -123,6 +124,16 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
     }
     if in_process && cli.data_dir.is_none() {
         warn!("no --data-dir specified: cluster is in-memory only, data will not survive restarts");
+    }
+    // The hot tier (ADR-105) is classified SHARD-SIDE in remote mode: each shardserver's
+    // own θ decides whether a coordinator-placed query lands in its realtime lane or its
+    // hot tier. Divergence is cost-only (both lanes always-visible; placement θ-invariant)
+    // but silently defeats the quarantine — remind the operator of the contract.
+    if !in_process && cli.hot_anchor_threshold != 0 {
+        warn!(
+            theta = cli.hot_anchor_threshold,
+            "--hot-anchor-threshold in remote cluster mode: ensure every shardserver runs              the same --hot-anchor-threshold (divergence is cost-only, never correctness)"
+        );
     }
     // --control-endpoint attaches the coordinator to a durable control-plane quorum (ADR-083). It is
     // only meaningful for a REMOTE cluster: an in-process cluster owns the one logical node, so its

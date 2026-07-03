@@ -218,7 +218,7 @@ mod golden {
         let ast = parse("michael jordan psa 10 -(auto,signed) -(sgc,bgs)").unwrap();
         let ex = extract(&ast, &n, &mut dict, &mut lc);
         dict.finalize_mask();
-        let plan = anchor_plan(&ex, &dict);
+        let plan = anchor_plan(&ex, &dict, 0);
         let forbidden: std::collections::HashSet<FeatureId> =
             ex.forbidden.iter().copied().collect();
         assert!(
@@ -235,7 +235,7 @@ mod golden {
             }
         }
         // build_signatures hashes exactly those groups, so the same holds for sig keys.
-        let _ = build_signatures(&ex, &dict);
+        let _ = build_signatures(&ex, &dict, 0);
     }
 
     #[test]
@@ -286,57 +286,57 @@ mod golden {
         };
 
         // Class A anchored on a θ-frequency non-top64 feature: the defect shape.
-        let p = anchor_plan(&ex(vec![fat], vec![]), &dict);
+        let p = anchor_plan(&ex(vec![fat], vec![]), &dict, 0);
         assert_eq!(p.class, CostClass::A);
         assert!(p.would_be_hot, "θ-frequency class-A anchor must be flagged");
 
         // Exactly θ−1 stays unflagged (the boundary is ≥ θ).
-        let p = anchor_plan(&ex(vec![just_under], vec![]), &dict);
+        let p = anchor_plan(&ex(vec![just_under], vec![]), &dict, 0);
         assert_eq!(p.class, CostClass::A);
         assert!(!p.would_be_hot, "freq θ−1 is below the threshold");
 
         // A rare rarest-required keeps the query unflagged even with a fat co-feature
         // (the anchor is the rare one — nothing rides a fat posting).
-        let p = anchor_plan(&ex(vec![rare, fat], vec![]), &dict);
+        let p = anchor_plan(&ex(vec![rare, fat], vec![]), &dict, 0);
         assert_eq!(p.class, CostClass::A);
         assert!(!p.would_be_hot);
 
         // Rarest = the cliff feature while a top-64 co-feature exists: still the
         // defect shape (ADR-104's measured case — anchor_plan picks the #65 feature).
-        let p = anchor_plan(&ex(vec![top64[0], fat], vec![]), &dict);
+        let p = anchor_plan(&ex(vec![top64[0], fat], vec![]), &dict, 0);
         assert_eq!(p.class, CostClass::A);
         assert!(p.would_be_hot);
 
         // Top-64-anchored plans are never flagged: class C (single hot required)…
-        let p = anchor_plan(&ex(vec![top64[0]], vec![]), &dict);
+        let p = anchor_plan(&ex(vec![top64[0]], vec![]), &dict, 0);
         assert_eq!(p.class, CostClass::C);
         assert!(!p.would_be_hot);
         // …and the class-B arity-2 escalation.
-        let p = anchor_plan(&ex(vec![top64[0], top64[1]], vec![]), &dict);
+        let p = anchor_plan(&ex(vec![top64[0], top64[1]], vec![]), &dict, 0);
         assert_eq!(p.class, CostClass::B);
         assert!(!p.would_be_hot);
 
         // Any-of class B: flagged iff the chosen group's WORST member is ≥ θ.
-        let p = anchor_plan(&ex(vec![], vec![vec![rare, fat2]]), &dict);
+        let p = anchor_plan(&ex(vec![], vec![vec![rare, fat2]]), &dict, 0);
         assert_eq!(p.class, CostClass::B);
         assert!(p.would_be_hot, "group worst member ≥ θ must be flagged");
-        let p = anchor_plan(&ex(vec![], vec![vec![rare, just_under]]), &dict);
+        let p = anchor_plan(&ex(vec![], vec![vec![rare, just_under]]), &dict, 0);
         assert_eq!(p.class, CostClass::B);
         assert!(!p.would_be_hot);
         // Any-of with a top-64 member is class C — never flagged.
-        let p = anchor_plan(&ex(vec![], vec![vec![rare, top64[3]]]), &dict);
+        let p = anchor_plan(&ex(vec![], vec![vec![rare, top64[3]]]), &dict, 0);
         assert_eq!(p.class, CostClass::C);
         assert!(!p.would_be_hot);
 
         // Class D: never flagged.
         let mut d = ex(vec![], vec![]);
         d.forbidden.push(rare);
-        let p = anchor_plan(&d, &dict);
+        let p = anchor_plan(&d, &dict, 0);
         assert_eq!(p.class, CostClass::D);
         assert!(!p.would_be_hot);
 
         // build_signatures carries the flag through unchanged.
-        let sp = build_signatures(&ex(vec![fat], vec![]), &dict);
+        let sp = build_signatures(&ex(vec![fat], vec![]), &dict, 0);
         assert!(sp.would_be_hot);
     }
 
@@ -354,7 +354,7 @@ mod golden {
         assert!(ex.anyof.is_empty());
         assert_eq!(ex.forbidden.len(), 1);
         dict.finalize_mask();
-        let plan = anchor_plan(&ex, &dict);
+        let plan = anchor_plan(&ex, &dict, 0);
         assert_eq!(plan.class, CostClass::D);
         assert!(plan.main_anchors.is_empty(), "class D never anchors main");
         assert_eq!(
@@ -460,7 +460,7 @@ mod class_d_universal_cover {
     fn anchor_plan_derives_the_universal_broad_group() {
         let mut dict = Dict::new();
         dict.finalize_mask();
-        let plan = anchor_plan(&class_d_ex(), &dict);
+        let plan = anchor_plan(&class_d_ex(), &dict, 0);
         assert_eq!(plan.class, CostClass::D);
         assert!(plan.main_anchors.is_empty(), "class D never anchors main");
         assert_eq!(
@@ -474,7 +474,7 @@ mod class_d_universal_cover {
     fn build_signatures_hashes_it_to_universal_sig() {
         let mut dict = Dict::new();
         dict.finalize_mask();
-        let plan = build_signatures(&class_d_ex(), &dict);
+        let plan = build_signatures(&class_d_ex(), &dict, 0);
         assert_eq!(plan.class, CostClass::D);
         assert!(plan.main_sigs.is_empty());
         assert_eq!(plan.broad_sigs, vec![crate::util::universal_sig()]);
@@ -496,7 +496,7 @@ mod class_d_universal_cover {
         // different forbidden sets share the identical plan.
         let mut dict = Dict::new();
         dict.finalize_mask();
-        let a = build_signatures(&class_d_ex(), &dict);
+        let a = build_signatures(&class_d_ex(), &dict, 0);
         let b = build_signatures(
             &Extracted {
                 required: vec![],
@@ -504,6 +504,7 @@ mod class_d_universal_cover {
                 anyof: vec![],
             },
             &dict,
+            0,
         );
         assert_eq!(a.broad_sigs, b.broad_sigs);
         assert_eq!(a.class, b.class);

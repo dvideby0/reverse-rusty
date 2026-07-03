@@ -54,6 +54,19 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
         }
         s.push('\n');
     }
+    if !cq.hot_sigs.is_empty() {
+        s.push_str("  signatures (hot tier): ");
+        for sg in &cq.hot_sigs {
+            s.push_str(&format!("{sg:#018x} "));
+        }
+        s.push('\n');
+    }
+    if cq.cost_class == crate::compile::CostClass::H {
+        s.push_str(
+            "  class H: θ-hot anchor — hot tier (ADR-105): probed on every request \
+             (always visible), evaluated columnar on the batch path\n",
+        );
+    }
     if cq.cost_class == crate::compile::CostClass::D {
         s.push_str(
             "  class D: negation-only — the broad signature above is the UNIVERSAL key \
@@ -107,7 +120,8 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
     // `candidate: false` for a query the matcher reaches.
     title_sigs.insert(crate::util::universal_sig());
     let retrieved = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.broad_sigs.iter().any(|s| title_sigs.contains(s));
+        || cq.broad_sigs.iter().any(|s| title_sigs.contains(s))
+        || cq.hot_sigs.iter().any(|s| title_sigs.contains(s));
     s.push_str(&format!(
         "  candidate? {retrieved} (title generates a signature in this query's cover)\n"
     ));

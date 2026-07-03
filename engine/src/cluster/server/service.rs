@@ -106,8 +106,12 @@ impl ShardService for ShardServer {
             .shard
             .class_counts()
             .map_err(|e| Status::internal(e.to_string()))?;
+        // Wire contract (ADR-105): `counts` stays exactly [A, B, C, D] — a pre-ADR-105
+        // coordinator hard-errors on any other length — and class H rides the additive
+        // `hot` field (default-0 to older readers).
         Ok(Response::new(proto::ClassCountsReply {
-            counts: counts.to_vec(),
+            counts: counts[..4].to_vec(),
+            hot: counts[4],
         }))
     }
 

@@ -535,7 +535,7 @@ impl Shard for LocalShard {
         Ok(self.snapshot.load().num_queries())
     }
 
-    fn class_counts(&self) -> Result<[u64; 4], ShardError> {
+    fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         Ok(self.snapshot.load().class_counts())
     }
 

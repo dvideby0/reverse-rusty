@@ -11,6 +11,16 @@ use std::path::Path;
 
 use super::super::read::frozen_probe;
 use super::super::FrozenSlot;
+
+/// Which candidate index a probe reads — routes the per-lane stats counters.
+/// Local twin of the segment-side lane enums (those are `pub(in crate::segment)`
+/// and this module lives under `crate::storage`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    Main,
+    Broad,
+    Hot,
+}
 use super::{MmapLogicalIndex, MmapSegment};
 use crate::compile::CostClass;
 use crate::dict::FeatureId;
@@ -134,6 +144,21 @@ impl MmapSegment {
     fn broad_blob(&self) -> &[u32] {
         self.mmap_slice(self.broad_blob, self.broad_blob_len)
     }
+    #[inline]
+    fn hot_slots(&self) -> &[FrozenSlot] {
+        self.mmap_slice(self.hot_slots, self.hot_cap)
+    }
+    #[inline]
+    fn hot_blob(&self) -> &[u32] {
+        self.mmap_slice(self.hot_blob, self.hot_blob_len)
+    }
+
+    /// Whether this segment holds any hot-tier entries (class H, ADR-105) — the
+    /// per-segment skip keeping the hot lane free on hot-empty corpora.
+    #[inline]
+    pub fn has_hot_entries(&self) -> bool {
+        self.hot_cap > 0
+    }
 
     #[inline]
     fn filter_data(&self) -> &[u64] {
@@ -156,6 +181,17 @@ impl MmapSegment {
             self.main_slots()
         };
         into.extend(slots.iter().filter(|s| s.key != 0).map(|s| s.len));
+    }
+
+    /// Hot-tier variant of [`collect_posting_lens`](Self::collect_posting_lens)
+    /// (class H, ADR-105) — empty pre-v5 / on hot-free files.
+    pub fn collect_hot_posting_lens(&self, into: &mut Vec<u32>) {
+        into.extend(
+            self.hot_slots()
+                .iter()
+                .filter(|s| s.key != 0)
+                .map(|s| s.len),
+        );
     }
 
     // ---- public interface ----
@@ -227,13 +263,16 @@ impl MmapSegment {
     /// [`Segment::class_counts`](crate::segment::Segment::class_counts) so introspection
     /// is identical whether a segment is in-memory or mmap'd (the latter is what a
     /// reopened durable cluster attaches — ADR-032).
-    pub fn class_counts(&self, c: &mut [u64; 4]) {
+    pub fn class_counts(&self, c: &mut [u64; 5]) {
         let n = self.len();
         for i in 0..n {
             // SAFETY: `i < n == num_queries`, the length of the `class_arr` byte array
             // parsed from the mmap (same bound `to_memory_segment` uses).
             let class_byte = unsafe { *self.class_arr.add(i) };
-            c[(class_byte as usize).min(3)] += 1;
+            // Bytes 0..=4 are the only values `open`'s class-byte validation admits
+            // (≤3 pre-v5, ≤4 on v5), so this direct index cannot mis-bucket — the
+            // old `.min(3)` clamp would have silently counted class H as D.
+            c[class_byte as usize] += 1;
         }
     }
 
@@ -372,10 +411,53 @@ impl MmapSegment {
         }
     }
 
+    /// The hot-tier twin of [`broad_reach`](Self::broad_reach) (class H,
+    /// ADR-105): probe the hot index for `key`, appending reachable locals to
+    /// `cands` (epoch-deduped), counting into the hot-lane meters.
+    pub(crate) fn hot_reach(
+        &self,
+        key: u64,
+        epoch: u32,
+        seen: &mut [u32],
+        cands: &mut Vec<u32>,
+        stats: &mut MatchStats,
+    ) {
+        stats.probes_attempted += 1;
+        if self.filter_num_blocks > 0 && !self.may_contain(key) {
+            stats.probes_skipped += 1;
+            return;
+        }
+        if let Some(posting) = frozen_probe(key, self.hot_slots(), self.hot_blob(), self.hot_mask) {
+            stats.postings_scanned += posting.len() as u32;
+            stats.hot_postings_scanned += posting.len() as u32;
+            for &local in posting {
+                if seen[local as usize] != epoch {
+                    seen[local as usize] = epoch;
+                    cands.push(local);
+                }
+            }
+        }
+    }
+
     /// Liveness for one local ID (mmap tombstone overlay).
     #[inline]
     pub(crate) fn is_alive_at(&self, local: u32) -> bool {
         self.alive_overlay[local as usize]
+    }
+
+    /// The hot-tier vacuous-accept twin (class H, ADR-105). Mmap twin of
+    /// [`crate::exact::ExactStore::pure_tail_anchor`]: the single required
+    /// feature lives in the TAIL (a θ-hot anchor has no mask bit), so equality
+    /// with the reaching anchor proves retrieval == match.
+    #[inline]
+    pub(crate) fn pure_tail_anchor(&self, local: u32, anchor: crate::dict::FeatureId) -> bool {
+        let i = local as usize;
+        self.req_mask()[i] == 0
+            && self.req_len()[i] == 1
+            && self.forb_mask()[i] == 0
+            && self.forb_len()[i] == 0
+            && self.q_group_count()[i] == 0
+            && self.req_blob()[self.req_off()[i] as usize] == anchor
     }
 
     /// Whether `local`'s entire semantics is its hot anchor — the pure-anchor
@@ -476,7 +558,7 @@ impl MmapSegment {
         epoch: u32,
         seen: &mut [u32],
         out: &mut Vec<u64>,
-        include_broad: bool,
+        lanes: crate::segment::ProbeLanes,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
@@ -492,7 +574,7 @@ impl MmapSegment {
                 stats.probes_skipped += 1;
                 continue;
             }
-            self.probe_index(key, true, epoch, view, seen, out, pred, stats, false);
+            self.probe_index(key, Lane::Main, epoch, view, seen, out, pred, stats);
         }
         // arity-2 signatures
         for &h in feats {
@@ -506,13 +588,15 @@ impl MmapSegment {
                             stats.probes_skipped += 1;
                             continue;
                         }
-                        self.probe_index(key, true, epoch, view, seen, out, pred, stats, false);
+                        self.probe_index(key, Lane::Main, epoch, view, seen, out, pred, stats);
                     }
                 }
             }
         }
-        // broad lane
-        if include_broad {
+        // Hot tier (class H, ADR-105): arity-1, probed on EVERY request — mirrors
+        // `Segment::match_into` (see the invariants there); skipped outright when
+        // the segment holds no hot entries.
+        if lanes.include_hot && self.has_hot_entries() {
             for &f in feats {
                 let key = crate::util::sig_key(&[f]);
                 stats.probes_attempted += 1;
@@ -520,7 +604,19 @@ impl MmapSegment {
                     stats.probes_skipped += 1;
                     continue;
                 }
-                self.probe_index(key, false, epoch, view, seen, out, pred, stats, true);
+                self.probe_index(key, Lane::Hot, epoch, view, seen, out, pred, stats);
+            }
+        }
+        // broad lane
+        if lanes.include_broad {
+            for &f in feats {
+                let key = crate::util::sig_key(&[f]);
+                stats.probes_attempted += 1;
+                if has_filter && !self.may_contain(key) {
+                    stats.probes_skipped += 1;
+                    continue;
+                }
+                self.probe_index(key, Lane::Broad, epoch, view, seen, out, pred, stats);
             }
             // Universal signature: class-D always-candidates (ADR-068). Probed
             // unconditionally (the accept knob gates ingest, never visibility);
@@ -531,7 +627,7 @@ impl MmapSegment {
             if has_filter && !self.may_contain(key) {
                 stats.probes_skipped += 1;
             } else {
-                self.probe_index(key, false, epoch, view, seen, out, pred, stats, true);
+                self.probe_index(key, Lane::Broad, epoch, view, seen, out, pred, stats);
             }
         }
     }
@@ -541,29 +637,30 @@ impl MmapSegment {
     fn probe_index(
         &self,
         key: u64,
-        is_main: bool,
+        lane: Lane,
         epoch: u32,
         view: &crate::exact::TitleView,
         seen: &mut [u32],
         out: &mut Vec<u64>,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
-        is_broad: bool,
     ) {
-        let (slots, blob, mask) = if is_main {
-            (self.main_slots(), self.main_blob(), self.main_mask)
-        } else {
-            (self.broad_slots(), self.broad_blob(), self.broad_mask)
+        let (slots, blob, mask) = match lane {
+            Lane::Main => (self.main_slots(), self.main_blob(), self.main_mask),
+            Lane::Broad => (self.broad_slots(), self.broad_blob(), self.broad_mask),
+            Lane::Hot => (self.hot_slots(), self.hot_blob(), self.hot_mask),
         };
 
         if let Some(posting) = frozen_probe(key, slots, blob, mask) {
             stats.postings_scanned += posting.len() as u32;
-            // Broad subset of postings_scanned — the memory-path `Segment::probe` and the
-            // columnar `broad_reach` above both count it; this per-title mmap path missed it
-            // (codex, ADR-101), under-counting the exported per-shard broad-cost counter on
-            // durable shards.
-            if is_broad {
-                stats.broad_postings_scanned += posting.len() as u32;
+            // Per-lane subset of postings_scanned — the memory-path `Segment::probe` and
+            // the columnar reach paths both count it; this per-title mmap path once missed
+            // the broad subset (codex, ADR-101), under-counting the exported per-shard
+            // cost counters on durable shards.
+            match lane {
+                Lane::Broad => stats.broad_postings_scanned += posting.len() as u32,
+                Lane::Hot => stats.hot_postings_scanned += posting.len() as u32,
+                Lane::Main => {}
             }
             for &local in posting {
                 if seen[local as usize] == epoch {
@@ -571,10 +668,10 @@ impl MmapSegment {
                 }
                 seen[local as usize] = epoch;
                 stats.unique_candidates += 1;
-                if is_broad {
-                    stats.broad_candidates += 1;
-                } else {
-                    stats.main_candidates += 1;
+                match lane {
+                    Lane::Broad => stats.broad_candidates += 1,
+                    Lane::Hot => stats.hot_candidates += 1,
+                    Lane::Main => stats.main_candidates += 1,
                 }
                 if !self.alive_overlay[local as usize] {
                     continue;
@@ -646,6 +743,8 @@ impl MmapSegment {
                 0 => CostClass::A,
                 1 => CostClass::B,
                 2 => CostClass::C,
+                4 => CostClass::H,
+                // 3 is the only remaining byte `open`'s validation admits.
                 _ => CostClass::D,
             });
             alive.push(self.alive_overlay[i]);
@@ -674,7 +773,21 @@ impl MmapSegment {
             }
         }
 
-        let mut seg = Segment::from_parts(main, broad, exact, classes, alive);
+        // Hot-tier index (class H, ADR-105): empty pre-v5 / on hot-free files.
+        // Skipping this rebuild would silently unanchor every class-H entry
+        // through a compaction — a false negative.
+        let mut hot = CandidateIndex::new();
+        for slot in self.hot_slots() {
+            if slot.key != 0 {
+                let start = slot.offset as usize;
+                let end = start + slot.len as usize;
+                for &id in &self.hot_blob()[start..end] {
+                    hot.insert(slot.key, id);
+                }
+            }
+        }
+
+        let mut seg = Segment::from_parts(main, broad, hot, exact, classes, alive);
         seg.vocab_epoch = self.vocab_epoch;
         seg
     }

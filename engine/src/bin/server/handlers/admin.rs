@@ -45,6 +45,13 @@ struct CompactResponse {
     /// `compaction_reanchor` is enabled and drift actually moved a query.
     #[serde(skip_serializing_if = "Option::is_none")]
     reanchored: Option<usize>,
+    /// Hot-tier lane moves main→hot during the merge (ADR-105); present only
+    /// when the migration ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hot_promoted: Option<usize>,
+    /// Hot-tier lane moves hot→main (past the θ/2 margin gate) during the merge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hot_demoted: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<&'static str>,
 }
@@ -77,12 +84,16 @@ struct ClassCounts {
     b: u64,
     c: u64,
     d: u64,
+    /// The hot tier (class H, ADR-105) — θ-hot-anchored, always-visible,
+    /// columnar-evaluated. 0 while `hot_anchor_threshold` is off.
+    h: u64,
 }
 
 #[derive(Serialize)]
 struct PostingLanes {
     main: PostingLaneStats,
     broad: PostingLaneStats,
+    hot: PostingLaneStats,
 }
 
 #[derive(Serialize)]
@@ -259,6 +270,8 @@ pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResp
                 entries_after: None,
                 tombstones_reclaimed: None,
                 reanchored: None,
+                hot_promoted: None,
+                hot_demoted: None,
                 message: Some("persistence degraded; compaction not durably acknowledged"),
             },
         )
@@ -269,6 +282,8 @@ pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResp
             entries_after = r.entries_after,
             tombstones_reclaimed = r.tombstones_reclaimed,
             reanchored = r.reanchored,
+            hot_promoted = r.hot_promoted,
+            hot_demoted = r.hot_demoted,
             "compaction complete"
         );
         (
@@ -282,6 +297,8 @@ pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResp
                 entries_after: Some(r.entries_after),
                 tombstones_reclaimed: Some(r.tombstones_reclaimed),
                 reanchored: Some(r.reanchored),
+                hot_promoted: Some(r.hot_promoted),
+                hot_demoted: Some(r.hot_demoted),
                 message: None,
             },
         )
@@ -298,6 +315,8 @@ pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResp
                 entries_after: None,
                 tombstones_reclaimed: None,
                 reanchored: None,
+                hot_promoted: None,
+                hot_demoted: None,
                 message: Some("no compaction needed"),
             },
         )
@@ -334,10 +353,12 @@ pub(crate) async fn stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
             b: cc[1],
             c: cc[2],
             d: cc[3],
+            h: cc[4],
         },
         postings: PostingLanes {
             main: lanes.main.into(),
             broad: lanes.broad.into(),
+            hot: lanes.hot.into(),
         },
         segment_sizes: m.segment_sizes,
         segment_holes: m.segment_holes,
@@ -364,8 +385,8 @@ pub(crate) async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoRe
     ));
     out.push_str(&format!("features         {}\n", m.dict_features));
     out.push_str(&format!(
-        "class A/B/C/D    {} / {} / {} / {}\n",
-        cc[0], cc[1], cc[2], cc[3]
+        "class A/B/C/D/H  {} / {} / {} / {} / {}\n",
+        cc[0], cc[1], cc[2], cc[3], cc[4]
     ));
     out.push_str(&format!("rejected parse   {}\n", m.rejected_parse));
     out.push_str(&format!("rejected classD  {}\n", m.rejected_class_d));
@@ -378,6 +399,10 @@ pub(crate) async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoRe
     out.push_str(&format!(
         "postings broad   {} sigs (p50 {} p95 {} p99 {} max {})\n",
         lanes.broad.count, lanes.broad.p50, lanes.broad.p95, lanes.broad.p99, lanes.broad.max
+    ));
+    out.push_str(&format!(
+        "postings hot     {} sigs (p50 {} p95 {} p99 {} max {})\n",
+        lanes.hot.count, lanes.hot.p50, lanes.hot.p95, lanes.hot.p99, lanes.hot.max
     ));
     out.push_str(&format!(
         "memory           {} bytes (~{:.1} MB)\n",

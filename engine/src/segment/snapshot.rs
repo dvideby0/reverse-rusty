@@ -164,7 +164,12 @@ impl MatchView<'_> {
                 epoch,
                 &mut s.seen[i],
                 out,
-                include_broad,
+                // The scalar path evaluates the always-visible hot tier INLINE
+                // (include_hot is a batch-driver cost switch, never visibility).
+                crate::segment::ProbeLanes {
+                    include_broad,
+                    include_hot: true,
+                },
                 self.pred,
                 &mut stats,
             );
@@ -178,7 +183,10 @@ impl MatchView<'_> {
                     epoch,
                     &mut s.seen[n_base],
                     out,
-                    include_broad,
+                    crate::segment::ProbeLanes {
+                        include_broad,
+                        include_hot: true,
+                    },
                     self.pred,
                     &mut stats,
                 ),
@@ -318,7 +326,12 @@ impl EngineSnapshot {
         let source = self.get_query_source(logical_id)?;
         let mut lc = String::new();
         let cq = crate::compile::compile_one_readonly(
-            &source, logical_id, &self.norm, &self.dict, &mut lc,
+            &source,
+            logical_id,
+            &self.norm,
+            &self.dict,
+            &mut lc,
+            self.config.hot_anchor_threshold,
         )
         .ok()?;
         Some(crate::explain::explain_match_structured(
@@ -326,8 +339,8 @@ impl EngineSnapshot {
         ))
     }
 
-    pub fn class_counts(&self) -> [u64; 4] {
-        let mut c = [0u64; 4];
+    pub fn class_counts(&self) -> [u64; 5] {
+        let mut c = [0u64; 5];
         for seg in &self.segments {
             match seg.as_ref() {
                 BaseSegment::Memory(s) => s.class_counts(&mut c),
@@ -365,10 +378,11 @@ impl EngineSnapshot {
             index_bytes: self
                 .segments
                 .iter()
-                .map(|s| s.main_bytes() + s.broad_bytes())
+                .map(|s| s.main_bytes() + s.broad_bytes() + s.hot_bytes())
                 .sum::<usize>()
                 + self.memtable.main_bytes()
-                + self.memtable.broad_bytes(),
+                + self.memtable.broad_bytes()
+                + self.memtable.hot_bytes(),
             filter_bytes: self
                 .segments
                 .iter()

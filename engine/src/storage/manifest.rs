@@ -27,6 +27,14 @@ const MANIFEST_VERSION: u32 = 3;
 // mixed segment — but an unsupported MANIFEST version fails `Engine::open` outright,
 // the loud refusal rollback needs. A class-D-free commit keeps writing v3.
 const MANIFEST_VERSION_CLASS_D: u32 = 4;
+// v5 (ADR-105): written ONLY while a registered segment holds class-H hot-tier entries —
+// the same manifest-level rollback fence as v4 (a pre-ADR-105 binary never probes the hot
+// index, so a mixed corpus must refuse to open loudly rather than silently stop matching
+// those queries). Unlike v4, v5 is NOT layout-identical: it appends `hot_anchor_theta`
+// (the θ the hot entries were classified under — recorded for forensics/observability;
+// the LIVE config stays authoritative for new classification, since an A↔H divergence is
+// correctness-benign by the ADR-105 placement argument). Hot-free commits keep v3/v4.
+const MANIFEST_VERSION_HOT: u32 = 5;
 
 /// Engine manifest — records the list of active segment files, dict state,
 /// and counters. Written atomically (tmp + rename) alongside segment files.
@@ -36,6 +44,16 @@ pub struct Manifest {
     /// Not serialized as data — it selects the version word (v4 vs v3), the loud
     /// rollback fence. Set from the version on read.
     pub class_d_fence: bool,
+    /// `true` ⇔ some registered segment holds class-H hot-tier entries (ADR-105).
+    /// Selects the v5 version word (which outranks v4); set from the version on
+    /// read. NOTE: a v5 manifest reads back `class_d_fence = true` conservatively —
+    /// the write side always recomputes both fences from the live segments, so
+    /// the read-back value is informational only.
+    pub hot_fence: bool,
+    /// The hot-anchor threshold θ the corpus's class-H entries were classified
+    /// under (ADR-105) — recorded in v5 manifests for forensics; 0 otherwise.
+    /// The live `EngineConfig` stays authoritative for new classification.
+    pub hot_anchor_theta: u32,
     pub next_seg_id: u64,
     pub dict_data: Vec<u8>,
     /// `serialize_tagdict(tag dict)` — the frozen tag space (ADR-049). Empty when no
@@ -66,7 +84,9 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
     f.write_all(&MANIFEST_MAGIC)?;
     write_u32(
         &mut f,
-        if manifest.class_d_fence {
+        if manifest.hot_fence {
+            MANIFEST_VERSION_HOT
+        } else if manifest.class_d_fence {
             MANIFEST_VERSION_CLASS_D
         } else {
             MANIFEST_VERSION
@@ -97,6 +117,11 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
         f.write_all(nb)?;
         write_u32(&mut f, bitmap.len() as u32)?;
         f.write_all(bitmap)?;
+    }
+    // v5 (ADR-105): the recorded θ — appended ONLY under the hot fence, so hot-free
+    // manifests stay byte-identical v3/v4.
+    if manifest.hot_fence {
+        write_u32(&mut f, manifest.hot_anchor_theta)?;
     }
     // CRC of everything written so far
     f.sync_all()?;
@@ -140,15 +165,14 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         ));
     }
     let version = read_u32_at(&data, 4)?;
-    // v1..=v3 are accepted; v2 appends `tag_dict_data` (ADR-049) and v3 appends the WAL
-    // watermark + per-segment dead-locals bitmaps (ADR-066), each absent in earlier
-    // versions.
-    if !(1..=MANIFEST_VERSION_CLASS_D).contains(&version) {
+    // v1..=v5 are accepted; v2 appends `tag_dict_data` (ADR-049), v3 appends the WAL
+    // watermark + per-segment dead-locals bitmaps (ADR-066), v4 is the class-D fence
+    // (ADR-068), and v5 appends the recorded θ under the hot fence (ADR-105) — each
+    // absent in earlier versions.
+    if !(1..=MANIFEST_VERSION_HOT).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!(
-                "unsupported manifest version {version} (expected 1..={MANIFEST_VERSION_CLASS_D})"
-            ),
+            format!("unsupported manifest version {version} (expected 1..={MANIFEST_VERSION_HOT})"),
         ));
     }
     let mut cursor = 8usize;
@@ -230,10 +254,21 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     } else {
         (0, Vec::new())
     };
+    // v5 appends the recorded θ (ADR-105); absent in earlier versions.
+    let hot_anchor_theta = if version >= MANIFEST_VERSION_HOT {
+        let t = read_u32_at(&data, cursor)?;
+        cursor += 4;
+        let _ = cursor;
+        t
+    } else {
+        0
+    };
 
     Ok(Manifest {
         segment_files,
         class_d_fence: version >= MANIFEST_VERSION_CLASS_D,
+        hot_fence: version >= MANIFEST_VERSION_HOT,
+        hot_anchor_theta,
         next_seg_id,
         dict_data,
         tag_dict_data,
@@ -513,6 +548,8 @@ mod tests {
         let manifest = Manifest {
             segment_files: vec!["seg_000001.seg".to_string(), "seg_000002.seg".to_string()],
             class_d_fence: false,
+            hot_fence: false,
+            hot_anchor_theta: 0,
             next_seg_id: 3,
             dict_data: vec![1, 2, 3],
             tag_dict_data: vec![4, 5],

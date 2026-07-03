@@ -302,6 +302,26 @@ impl ExactStore {
             && self.req_mask[i].is_power_of_two()
     }
 
+    /// The hot-tier twin of [`is_pure_anchor`](Self::is_pure_anchor) (ADR-105):
+    /// whether query `local`'s ENTIRE semantics is the single TAIL-stored
+    /// required feature `anchor`. A class-H anchor is θ-hot but NOT top-64, so
+    /// it has no mask bit — the query stores as `req_mask == 0, req_len == 1`
+    /// with the anchor in the required tail, which `is_pure_anchor` structurally
+    /// never matches (`is_power_of_two()` fails on 0). The caller supplies the
+    /// feature that reached the candidate; equality proves it IS the stored
+    /// anchor, so retrieval is proof of match (the vacuous accept), exactly like
+    /// the masked case. Derived purely from the SoA columns.
+    #[inline]
+    pub fn pure_tail_anchor(&self, local: u32, anchor: FeatureId) -> bool {
+        let i = local as usize;
+        self.req_mask[i] == 0
+            && self.req_len[i] == 1
+            && self.forb_mask[i] == 0
+            && self.forb_len[i] == 0
+            && self.q_group_count[i] == 0
+            && self.req_blob[self.req_off[i] as usize] == anchor
+    }
+
     /// Copy entry `id` from `self` into `dest`, returning the new local id in
     /// `dest`. Used by compaction to migrate alive entries into a fresh segment.
     pub fn copy_entry(&self, id: u32, dest: &mut ExactStore) -> u32 {

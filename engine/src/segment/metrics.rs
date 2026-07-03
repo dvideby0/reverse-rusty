@@ -40,23 +40,28 @@ impl EngineSnapshot {
     pub fn lane_posting_stats(&self) -> LanePostingStats {
         let mut main: Vec<u32> = Vec::new();
         let mut broad: Vec<u32> = Vec::new();
+        let mut hot: Vec<u32> = Vec::new();
         for seg in &self.segments {
             match seg.as_ref() {
                 BaseSegment::Memory(s) => {
                     s.main_index().collect_posting_lens(&mut main);
                     s.broad_index().collect_posting_lens(&mut broad);
+                    s.hot_index().collect_posting_lens(&mut hot);
                 }
                 BaseSegment::Mmap(m) => {
                     m.collect_posting_lens(false, &mut main);
                     m.collect_posting_lens(true, &mut broad);
+                    m.collect_hot_posting_lens(&mut hot);
                 }
             }
         }
         self.memtable.main_index().collect_posting_lens(&mut main);
         self.memtable.broad_index().collect_posting_lens(&mut broad);
+        self.memtable.hot_index().collect_posting_lens(&mut hot);
         LanePostingStats {
             main: posting_stats(&mut main),
             broad: posting_stats(&mut broad),
+            hot: posting_stats(&mut hot),
         }
     }
 }
@@ -88,6 +93,7 @@ pub(in crate::segment) fn collect_segment_infos(
             resident_bytes: seg.exact_bytes()
                 + seg.main_bytes()
                 + seg.broad_bytes()
+                + seg.hot_bytes()
                 + seg.filter_bytes(),
             overhead_bytes: seg.logical_index_bytes() + seg.alive_bytes(),
         });
@@ -109,6 +115,7 @@ pub(in crate::segment) fn collect_segment_infos(
         resident_bytes: memtable.exact_bytes()
             + memtable.main_bytes()
             + memtable.broad_bytes()
+            + memtable.hot_bytes()
             + memtable.filter_bytes(),
         overhead_bytes: memtable.logical_index_bytes() + memtable.alive_bytes(),
     });
@@ -166,8 +173,8 @@ impl Engine {
             _ => self.memtable.broad_index(),
         }
     }
-    pub fn class_counts(&self) -> [u64; 4] {
-        let mut c = [0u64; 4];
+    pub fn class_counts(&self) -> [u64; 5] {
+        let mut c = [0u64; 5];
         for seg in &self.segments {
             match seg.as_ref() {
                 BaseSegment::Memory(s) => s.class_counts(&mut c),
@@ -208,7 +215,7 @@ impl Engine {
             would_be_hot: self.would_be_hot,
             dict_features: self.dict.len(),
             exact_bytes: self.exact_bytes(),
-            index_bytes: self.main_bytes() + self.broad_bytes(),
+            index_bytes: self.main_bytes() + self.broad_bytes() + self.hot_bytes(),
             filter_bytes: self.filter_bytes(),
             stale_segments: self.stale_segment_count(),
             dict_bytes: self.dict.heap_bytes(),
@@ -235,6 +242,9 @@ impl Engine {
     }
     pub fn broad_bytes(&self) -> usize {
         self.segments.iter().map(|s| s.broad_bytes()).sum::<usize>() + self.memtable.broad_bytes()
+    }
+    pub fn hot_bytes(&self) -> usize {
+        self.segments.iter().map(|s| s.hot_bytes()).sum::<usize>() + self.memtable.hot_bytes()
     }
     pub fn filter_bytes(&self) -> usize {
         self.segments

@@ -7,7 +7,7 @@
 //! / `batch_stats` entry points the engine and snapshot call. The columnar broad
 //! eval itself lives in [`super::kernel`].
 
-use super::kernel::eval_one_segment;
+use super::kernel::{eval_one_segment, Lane};
 use crate::dict::FeatureId;
 use crate::segment::snapshot::MatchView;
 use crate::segment::{
@@ -122,7 +122,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
         return Ok(());
     }
     let words = b.div_ceil(64);
-    // ADR-061: the columnar broad kernel is single-view, so while multi-word aliases are
+    // ADR-061: the columnar kernel is single-view, so while multi-word aliases are
     // active we route the broad lane through the two-view *inline* path (`match_into`) — the
     // documented kill-switch (matching.md §4) — keeping forbidden checks recall-correct.
     // Columnar two-view is a perf follow-on; the per-title selective lane is always two-view.
@@ -132,6 +132,21 @@ fn match_batch_chunk<D: DeadlineCheck>(
         && matches!(opts.broad_strategy, BroadStrategy::Columnar);
     let inline_broad = opts.include_broad
         && (matches!(opts.broad_strategy, BroadStrategy::Inline) || (force_inline && !columnar));
+    // The hot tier (class H, ADR-105) is ALWAYS evaluated — it is default-visible,
+    // never `include_broad`-gated. The only question is WHERE: lifted into the
+    // columnar pass below (the amortization the tier exists for), or inline in the
+    // per-title `match_into` when columnar is unavailable (`BroadStrategy::Inline`
+    // — the shared kill-switch — or the ADR-061 multi-word-alias two-view forcing).
+    // Exactly one of the two runs, so no query is double-evaluated. Hot-free
+    // corpora skip the lane entirely in both forms.
+    let hot_present =
+        view.segments.iter().any(|s| s.has_hot_entries()) || view.memtable.has_hot_entries();
+    let hot_columnar =
+        hot_present && !force_inline && matches!(opts.broad_strategy, BroadStrategy::Columnar);
+    let hot_inline = hot_present && !hot_columnar;
+    // Feature bitmaps are needed by EITHER columnar lane (the broad pass may be
+    // off while the hot pass still runs — e.g. include_broad=false).
+    let any_columnar = columnar || hot_columnar;
 
     ms.ensure(view.segments, view.memtable.len());
     bs.ensure(view.segments, view.memtable.len(), words);
@@ -205,6 +220,10 @@ fn match_batch_chunk<D: DeadlineCheck>(
             crate::exact::TitleView::single(neg_mask, &feats)
         };
 
+        let lanes = crate::segment::ProbeLanes {
+            include_broad: inline_broad,
+            include_hot: hot_inline,
+        };
         for (i, base) in view.segments.iter().enumerate() {
             base.match_into(
                 &tview,
@@ -212,7 +231,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 epoch,
                 &mut ms.seen[i],
                 out,
-                inline_broad,
+                lanes,
                 view.pred,
                 stats,
             );
@@ -223,17 +242,18 @@ fn match_batch_chunk<D: DeadlineCheck>(
             epoch,
             &mut ms.seen[n_base],
             out,
-            inline_broad,
+            lanes,
             view.pred,
             stats,
         );
 
-        // The columnar broad kernel is single-view; it only runs when no multi-word alias is
-        // active (`columnar` is forced off otherwise), so the canonical view == the superset
-        // here and the inverted index + masks are built from `feats`.
+        // The columnar kernel is single-view; it only runs when no multi-word alias is
+        // active (both `columnar` and `hot_columnar` are forced off otherwise), so the
+        // canonical view == the superset here and the inverted index + masks are built
+        // from `feats`.
         bs.tmask_batch.push(neg_mask);
         batch_mask_union |= neg_mask;
-        if columnar {
+        if any_columnar {
             for &f in &feats {
                 let row = if let Some(&r) = bs.feat_row.get(&f) {
                     r as usize
@@ -252,18 +272,23 @@ fn match_batch_chunk<D: DeadlineCheck>(
         if force_inline {
             ms.feats_pos = feats_pos;
         }
-        if !columnar {
+        if !any_columnar {
             out.sort_unstable();
             out.dedup();
         }
     }
 
-    if !columnar {
+    if !any_columnar {
         return Ok(());
     }
-    stats.broad_batches += 1;
+    if columnar {
+        stats.broad_batches += 1;
+    }
+    if hot_columnar {
+        stats.hot_batches += 1;
+    }
 
-    // ---- Phase 1+2: columnar broad lane, per segment ----
+    // ---- Phase 1+2: columnar lanes (broad + hot), per segment ----
     let BroadBatchScratch {
         feat_row,
         feat_bits,
@@ -282,34 +307,49 @@ fn match_batch_chunk<D: DeadlineCheck>(
     let prefilter = opts.broad_prefilter;
 
     for (si, base) in view.segments.iter().enumerate() {
-        // Cooperative-deadline segment boundary in the columnar broad pass (ADR-099).
+        // Cooperative-deadline segment boundary in the columnar pass (ADR-099).
         if let Err(c) = dl.check() {
             for v in outs.iter_mut().take(b) {
                 v.clear();
             }
             return Err(c);
         }
-        *broad_epoch = (*broad_epoch).wrapping_add(1);
-        if *broad_epoch == 0 {
-            for buf in broad_seen.iter_mut() {
-                for v in buf.iter_mut() {
-                    *v = 0;
-                }
-            }
-            *broad_epoch = 1;
+        if columnar {
+            let epoch = next_epoch(broad_epoch, broad_seen);
+            eval_base_lane(
+                base.as_ref(),
+                Lane::Broad,
+                distinct,
+                feat_row,
+                feat_bits,
+                words,
+                tmask_batch,
+                batch_mask_union,
+                &mut broad_seen[si],
+                epoch,
+                cands,
+                non_pure,
+                acc,
+                grp,
+                outs,
+                materialize,
+                prefilter,
+                view.pred,
+                stats,
+            );
         }
-        let epoch = *broad_epoch;
-        let seen = &mut broad_seen[si];
-        match base.as_ref() {
-            BaseSegment::Memory(s) => eval_one_segment(
-                s,
+        if hot_columnar && base.has_hot_entries() {
+            let epoch = next_epoch(broad_epoch, broad_seen);
+            eval_base_lane(
+                base.as_ref(),
+                Lane::Hot,
                 distinct,
                 feat_row,
                 feat_bits,
                 words,
                 tmask_batch,
                 batch_mask_union,
-                seen,
+                &mut broad_seen[si],
                 epoch,
                 cands,
                 non_pure,
@@ -320,27 +360,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 prefilter,
                 view.pred,
                 stats,
-            ),
-            BaseSegment::Mmap(m) => eval_one_segment(
-                m,
-                distinct,
-                feat_row,
-                feat_bits,
-                words,
-                tmask_batch,
-                batch_mask_union,
-                seen,
-                epoch,
-                cands,
-                non_pure,
-                acc,
-                grp,
-                outs,
-                materialize,
-                prefilter,
-                view.pred,
-                stats,
-            ),
+            );
         }
     }
     // memtable last (its broad_seen buffer is at index n_base)
@@ -351,19 +371,108 @@ fn match_batch_chunk<D: DeadlineCheck>(
             }
             return Err(c);
         }
-        *broad_epoch = (*broad_epoch).wrapping_add(1);
-        if *broad_epoch == 0 {
-            for buf in broad_seen.iter_mut() {
-                for v in buf.iter_mut() {
-                    *v = 0;
-                }
-            }
-            *broad_epoch = 1;
+        if columnar {
+            let epoch = next_epoch(broad_epoch, broad_seen);
+            eval_one_segment(
+                view.memtable,
+                Lane::Broad,
+                distinct,
+                feat_row,
+                feat_bits,
+                words,
+                tmask_batch,
+                batch_mask_union,
+                &mut broad_seen[n_base],
+                epoch,
+                cands,
+                non_pure,
+                acc,
+                grp,
+                outs,
+                materialize,
+                prefilter,
+                view.pred,
+                stats,
+            );
         }
-        let epoch = *broad_epoch;
-        let seen = &mut broad_seen[n_base];
-        eval_one_segment(
-            view.memtable,
+        if hot_columnar && view.memtable.has_hot_entries() {
+            let epoch = next_epoch(broad_epoch, broad_seen);
+            eval_one_segment(
+                view.memtable,
+                Lane::Hot,
+                distinct,
+                feat_row,
+                feat_bits,
+                words,
+                tmask_batch,
+                batch_mask_union,
+                &mut broad_seen[n_base],
+                epoch,
+                cands,
+                non_pure,
+                acc,
+                grp,
+                outs,
+                materialize,
+                prefilter,
+                view.pred,
+                stats,
+            );
+        }
+    }
+
+    // ---- merge: dedup each title's matches across lanes + segments ----
+    for v in outs.iter_mut().take(b) {
+        v.sort_unstable();
+        v.dedup();
+    }
+    Ok(())
+}
+
+/// Advance the shared per-segment dedup epoch (each lane pass gets its own —
+/// the two lanes' locals are disjoint by the one-index-per-query invariant,
+/// but a fresh epoch keeps each pass's dedup domain self-contained).
+fn next_epoch(broad_epoch: &mut u32, broad_seen: &mut [Vec<u32>]) -> u32 {
+    *broad_epoch = (*broad_epoch).wrapping_add(1);
+    if *broad_epoch == 0 {
+        for buf in broad_seen.iter_mut() {
+            for v in buf.iter_mut() {
+                *v = 0;
+            }
+        }
+        *broad_epoch = 1;
+    }
+    *broad_epoch
+}
+
+/// Dispatch one columnar-lane evaluation over a [`BaseSegment`]'s two backings —
+/// collapses the Memory/Mmap duplication at the two lane-call sites above.
+#[allow(clippy::too_many_arguments)]
+fn eval_base_lane(
+    base: &BaseSegment,
+    lane: Lane,
+    distinct: &[FeatureId],
+    feat_row: &crate::util::FastMap<FeatureId, u32>,
+    feat_bits: &[u64],
+    words: usize,
+    tmask_batch: &[u64],
+    batch_mask_union: u64,
+    seen: &mut [u32],
+    epoch: u32,
+    cands: &mut Vec<u32>,
+    non_pure: &mut Vec<u32>,
+    acc: &mut [u64],
+    grp: &mut [u64],
+    outs: &mut [Vec<u64>],
+    materialize: bool,
+    prefilter: bool,
+    pred: &crate::exact::TagPredicate,
+    stats: &mut MatchStats,
+) {
+    match base {
+        BaseSegment::Memory(s) => eval_one_segment(
+            s,
+            lane,
             distinct,
             feat_row,
             feat_bits,
@@ -379,17 +488,31 @@ fn match_batch_chunk<D: DeadlineCheck>(
             outs,
             materialize,
             prefilter,
-            view.pred,
+            pred,
             stats,
-        );
+        ),
+        BaseSegment::Mmap(m) => eval_one_segment(
+            m,
+            lane,
+            distinct,
+            feat_row,
+            feat_bits,
+            words,
+            tmask_batch,
+            batch_mask_union,
+            seen,
+            epoch,
+            cands,
+            non_pure,
+            acc,
+            grp,
+            outs,
+            materialize,
+            prefilter,
+            pred,
+            stats,
+        ),
     }
-
-    // ---- merge: dedup each title's matches across lanes + segments ----
-    for v in outs.iter_mut().take(b) {
-        v.sort_unstable();
-        v.dedup();
-    }
-    Ok(())
 }
 
 /// Sum two `MatchStats` field-by-field (for the parallel stats reduce).

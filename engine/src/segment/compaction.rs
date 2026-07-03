@@ -317,12 +317,21 @@ impl Engine {
             .collect();
         let refs: Vec<&Segment> = memory_segs.iter().collect();
         // The "improve" merge (ADR-056) re-anchors drifted queries when enabled; the
-        // default path is the byte-identical mechanical remap. `reanchored` is 0 unless
-        // re-anchoring ran and actually moved a query.
-        let (merged, reanchored) = if self.config.compaction_reanchor {
-            Segment::compact_from_reanchored(&refs, &self.dict)
+        // default path is the byte-identical mechanical remap. The re-anchor pass is
+        // also the hot tier's migration seam (ADR-105): θ + the per-merge move cap
+        // ride the config; all counters are 0 unless re-anchoring ran and moved a query.
+        let (merged, reanchor_stats) = if self.config.compaction_reanchor {
+            Segment::compact_from_reanchored(
+                &refs,
+                &self.dict,
+                self.config.hot_anchor_threshold,
+                self.config.hot_migration_max_moves,
+            )
         } else {
-            (Segment::compact_from(&refs), 0)
+            (
+                Segment::compact_from(&refs),
+                crate::segment::merge::ReanchorStats::default(),
+            )
         };
         let entries_after = merged.len();
 
@@ -371,7 +380,9 @@ impl Engine {
             entries_before,
             entries_after,
             tombstones_reclaimed: entries_before - entries_after,
-            reanchored,
+            reanchored: reanchor_stats.reanchored,
+            hot_promoted: reanchor_stats.hot_promoted,
+            hot_demoted: reanchor_stats.hot_demoted,
         };
         self.emit(crate::events::EngineEvent::Compaction {
             report,

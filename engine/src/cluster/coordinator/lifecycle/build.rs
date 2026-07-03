@@ -230,7 +230,13 @@ impl ClusterEngine {
         let mut buckets: Vec<Vec<PlacedQuery>> =
             (0..config.num_shards).map(|_| Vec::new()).collect();
         for (logical, ex, text, qtags) in extracted {
-            match placement_of(&dict, &ring, &ex, config.per_shard.accept_class_d) {
+            match placement_of(
+                &dict,
+                &ring,
+                &ex,
+                config.per_shard.accept_class_d,
+                config.per_shard.hot_anchor_threshold,
+            ) {
                 Target::Reject => {}
                 Target::Replicated => {
                     // The broad lane is replicated to every shard (ADR-080).

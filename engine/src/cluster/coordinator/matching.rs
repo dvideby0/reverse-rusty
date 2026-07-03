@@ -289,14 +289,15 @@ impl ClusterEngine {
         self.shards.iter().map(|s| s.num_queries()).collect()
     }
 
-    /// Cluster-wide per-class entry tally `[A, B, C, D]`, summed across shards
-    /// (replicated/any-of queries counted per holding shard). Used by the oracle
-    /// to assert each placement branch is actually exercised.
-    pub fn class_counts(&self) -> Result<[u64; 4], ShardError> {
-        let mut total = [0u64; 4];
+    /// Cluster-wide per-class entry tally `[A, B, C, D, H]`, summed across shards
+    /// (replicated/any-of queries counted per holding shard; H appended at index
+    /// 4 — ADR-105). Used by the oracle to assert each placement branch is
+    /// actually exercised.
+    pub fn class_counts(&self) -> Result<[u64; 5], ShardError> {
+        let mut total = [0u64; 5];
         for s in &self.shards {
             let c = s.class_counts()?;
-            for i in 0..4 {
+            for i in 0..5 {
                 total[i] += c[i];
             }
         }
