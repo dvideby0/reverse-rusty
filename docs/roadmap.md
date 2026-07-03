@@ -14,14 +14,16 @@ and is complete except its one externally-blocked item. **The current top develo
 the [Broad-Query Cost Program](#the-broad-query-cost-program--current-top-development-priority)
 below.**
 
-## Phase 0 — Reality / adversarial audit (do this first)
+## Phase 0 — Reality / adversarial audit — ✅ complete except item 4 (externally blocked)
 
-**Top priority — precedes every tier below.** The engine is oracle-proven, but the in-tree differential
-oracle *shares the front-end* (normalizer, parser, extractor, dict) with the engine, so a front-end bug
-is structurally invisible to it (the reference-free `tests/adversarial.rs` only partly covers this —
-ADR-063). This phase proves which parts are real — under an *independent* check and under real failure —
-before more is built on top. Goal: separate what's real from plausible-looking scaffolding. Tier work
-resumes once it passes.
+**This phase preceded all tier work and no longer gates anything.** The engine is oracle-proven, but
+the in-tree differential oracle *shares the front-end* (normalizer, parser, extractor, dict) with the
+engine, so a front-end bug is structurally invisible to it (the reference-free `tests/adversarial.rs`
+only partly covers this — ADR-063). This phase proved which parts are real — under an *independent*
+check and under real failure — before more was built on top. Items 1/2/3/5 shipped; **item 4 remains
+open, blocked on externally-supplied inputs (a real cluster + a real corpus) and does not block
+active development** — the current top priority is the
+[Broad-Query Cost Program](#the-broad-query-cost-program--current-top-development-priority) below.
 
 1. **Fresh-clone build & deploy smoke — ✅ shipped
    ([`operations/build-and-smoke.md`](operations/build-and-smoke.md)).** The reproducible-from-zero

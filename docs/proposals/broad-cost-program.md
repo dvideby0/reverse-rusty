@@ -26,10 +26,10 @@ The 20M scale soak measured two distinct phenomena that look like one "broad sca
 Plus one **missing optimization** the strongest peer systems treat as first-order: duplicate
 stored queries are stored and evaluated N times instead of once-with-an-ID-list.
 
-This proposal specifies five levers (§5), their FN-safety arguments, and a sequencing gated on a
-**real-corpus measurement phase** (§5.0) — because the payoff of the two biggest levers is a
-function of real user behavior (duplication rate, class mix) that the synthetic generator cannot
-predict. Everything is scoped to change *internal work per title only*: request/response
+This proposal specifies five levers (§5), their FN-safety arguments, and a sequencing (§5.6, as
+amended by review): the classification fix leads because its defect is corpus-independent, while
+the levers whose payoff is a function of real user behavior (duplication rate, pair shape — §5.0)
+are staged behind measurement the earlier increments themselves provide. Everything is scoped to change *internal work per title only*: request/response
 semantics, the zero-FN contract, and default visibility are all invariant.
 
 ---
@@ -187,21 +187,23 @@ exact FN the ADR-056 guard exists to prevent. Lever 2 is designed around this.
 
 ## 5. The five levers
 
-### 5.0 Phase 0 — measure before building (gates everything)
+### 5.0 The measurement work — sizes increments 3–4; does NOT gate increment 1 (§8)
 
 - **Real-corpus sample** (same intake as ADR-065 criterion 12's open half: the ADR-087
   `RR_ORACLE_CORPUS` JSONL hook): measure **duplication rate** (exact-duplicate cluster-size
   distribution of compiled bodies), **class mix** under real queries (the generator's broad
   queries are single-token by construction — unrepresentative), **posting-length distribution**,
-  and pair-frequency shape. These numbers size levers 1–3; ICDCS'05's covering-rate collapse
-  (75% → 45% as predicate diversity grew) is the cautionary tale for building sharing structure
-  before measuring sharing potential.
-- **Telemetry, cheap and immediate:** posting-length percentiles per lane in `/_stats`
-  (`index.rs` already computes `max_posting_len`/`count_over`), a duplication-rate estimate at
-  ingest (canonical-body hash into a mergeable sketch), and a would-be-reclassified counter —
-  the observe-first mode of lever 2 before any enforcement exists.
+  and pair-frequency shape. These numbers size dedup Stage B and the pair lever (increments
+  3–4); ICDCS'05's covering-rate collapse (75% → 45% as predicate diversity grew) is the
+  cautionary tale for building sharing structure before measuring sharing potential. They do
+  **not** gate increment 1, whose defect exists by construction at any large corpus.
+- **Telemetry, cheap and immediate (ships inside increments 1–2, not as a separate phase):**
+  posting-length percentiles per lane in `/_stats` (`index.rs` already computes
+  `max_posting_len`/`count_over`), a duplication-rate estimate at ingest (canonical-body hash
+  into a mergeable sketch — dedup Stage A), and a would-be-reclassified counter — the
+  observe-first mode of lever 2 before enforcement.
 
-### 5.1 Lever 1 — identity dedup with ID fan-out *(biggest expected win; sized by Phase 0)*
+### 5.1 Lever 1 — identity dedup with ID fan-out *(biggest expected win; staged, sized by Stage A + the real corpus)*
 
 **Mechanism.** Dedup key = the canonical **compiled body**: (`required` sorted, `anyof` groups
 canonicalized, `forbidden` sorted) — *post* equivalence-expansion, so surface variants that
