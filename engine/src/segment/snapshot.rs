@@ -270,6 +270,13 @@ impl EngineSnapshot {
         self.rejected_class_d
     }
 
+    /// Observe-first hot-tier telemetry (the Broad-Query Cost Program): accepted
+    /// compiles since process start whose plan would reclassify to the hot tier
+    /// under [`DEFAULT_HOT_ANCHOR_THETA`](crate::config::DEFAULT_HOT_ANCHOR_THETA).
+    pub fn would_be_hot(&self) -> u64 {
+        self.would_be_hot
+    }
+
     pub fn vocab_epoch(&self) -> u64 {
         self.vocab_epoch
     }
@@ -351,6 +358,7 @@ impl EngineSnapshot {
             segment_holes,
             rejected_parse: self.rejected_parse,
             rejected_class_d: self.rejected_class_d,
+            would_be_hot: self.would_be_hot,
             dict_features: self.dict.len(),
             exact_bytes: self.segments.iter().map(|s| s.exact_bytes()).sum::<usize>()
                 + self.memtable.exact_bytes(),
@@ -623,17 +631,9 @@ impl EngineSnapshot {
                 },
             )
             .reduce(MatchStats::default, |mut a, b| {
-                a.unique_candidates += b.unique_candidates;
-                a.postings_scanned += b.postings_scanned;
-                a.broad_postings_scanned += b.broad_postings_scanned;
-                a.main_candidates += b.main_candidates;
-                a.broad_candidates += b.broad_candidates;
-                a.matches += b.matches;
-                a.probes_attempted += b.probes_attempted;
-                a.probes_skipped += b.probes_skipped;
-                a.broad_queries_evaluated += b.broad_queries_evaluated;
-                a.broad_anchors_scanned += b.broad_anchors_scanned;
-                a.broad_batches += b.broad_batches;
+                // The ONE shared merge body — a new field cannot be silently
+                // dropped from this reduce (the ADR-101 under-count lesson).
+                a.merge(b);
                 a
             })
     }

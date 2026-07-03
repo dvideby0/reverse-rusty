@@ -298,6 +298,9 @@ impl Engine {
             memtable: Arc::new(Segment::new()),
             rejected_parse: manifest.rejected_parse,
             rejected_class_d: manifest.rejected_class_d,
+            // Process-lifetime observe counter (deliberately not in the manifest);
+            // the WAL-tail replay below re-counts the tail's compiles.
+            would_be_hot: 0,
             observer: None,
             pending_events,
             wal,
@@ -382,6 +385,7 @@ impl Engine {
             memtable: Arc::new(Segment::new()),
             rejected_parse: 0,
             rejected_class_d: 0,
+            would_be_hot: 0,
             observer: None,
             pending_events: Vec::new(),
             wal: None,

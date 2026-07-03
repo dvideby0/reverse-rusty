@@ -145,6 +145,19 @@ impl MmapSegment {
         self.mmap_slice(self.filter_data, self.filter_num_blocks * 8)
     }
 
+    /// Append every occupied slot's posting length from one lane's frozen table —
+    /// the mmap twin of
+    /// [`CandidateIndex::collect_posting_lens`](crate::index::CandidateIndex::collect_posting_lens)
+    /// (`/_stats` per-lane percentiles; off the hot path).
+    pub fn collect_posting_lens(&self, broad: bool, into: &mut Vec<u32>) {
+        let slots = if broad {
+            self.broad_slots()
+        } else {
+            self.main_slots()
+        };
+        into.extend(slots.iter().filter(|s| s.key != 0).map(|s| s.len));
+    }
+
     // ---- public interface ----
 
     pub fn len(&self) -> usize {
@@ -375,6 +388,33 @@ impl MmapSegment {
             && self.forb_len()[i] == 0
             && self.q_group_count()[i] == 0
             && self.req_mask()[i].is_power_of_two()
+    }
+
+    /// Batch-level count-gate pre-reject — the mmap twin of
+    /// [`ExactStore::can_match_batch`](crate::exact::ExactStore::can_match_batch),
+    /// sharing [`prefilter_slices`](crate::exact::prefilter_slices) so the two
+    /// paths cannot drift (Broad-Query Cost Program lever 5a).
+    #[inline]
+    pub(crate) fn can_match_batch(
+        &self,
+        local: u32,
+        batch_mask_union: u64,
+        present: impl Fn(FeatureId) -> bool,
+    ) -> bool {
+        crate::exact::prefilter_slices(
+            local as usize,
+            batch_mask_union,
+            present,
+            self.req_mask(),
+            self.req_off(),
+            self.req_len(),
+            self.req_blob(),
+            self.q_group_start(),
+            self.q_group_count(),
+            self.group_off(),
+            self.group_len(),
+            self.anyof_blob(),
+        )
     }
 
     /// Columnar batch verification for one query against a title batch, writing

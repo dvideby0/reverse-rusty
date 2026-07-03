@@ -52,6 +52,17 @@ pub(in crate::segment) trait BroadBackend {
     /// pure-anchor fast path bypasses `verify`/`eval_into`, so it must check tags here
     /// to avoid leaking a filtered-out query.
     fn passes_tags(&self, local: u32, pred: &crate::exact::TagPredicate) -> bool;
+    /// Batch-level count-gate pre-reject (lever 5a): `false` only when NO title
+    /// in the batch can possibly satisfy `local` (a required feature or a whole
+    /// any-of group is absent from the batch) — the caller then skips
+    /// [`eval_into`](Self::eval_into) for it. Under-reject is the only possible
+    /// error direction; never consults forbidden features.
+    fn can_match_batch(
+        &self,
+        local: u32,
+        batch_mask_union: u64,
+        feat_row: &FastMap<FeatureId, u32>,
+    ) -> bool;
     /// Write the matching-title bitmap for `local` into `acc` (bitmap transpose
     /// of `verify`); `grp` is reused scratch of the same width. `pred` is the request's
     /// tag filter, applied as a per-query scalar gate (same as the scalar path).
@@ -128,6 +139,16 @@ impl BroadBackend for &Segment {
         pred.matches(self.exact.tags_of(local))
     }
     #[inline]
+    fn can_match_batch(
+        &self,
+        local: u32,
+        batch_mask_union: u64,
+        feat_row: &FastMap<FeatureId, u32>,
+    ) -> bool {
+        self.exact
+            .can_match_batch(local, batch_mask_union, |f| feat_row.contains_key(&f))
+    }
+    #[inline]
     fn eval_into(
         &self,
         local: u32,
@@ -179,6 +200,15 @@ impl BroadBackend for &MmapSegment {
         pred.matches(self.tags_of(local))
     }
     #[inline]
+    fn can_match_batch(
+        &self,
+        local: u32,
+        batch_mask_union: u64,
+        feat_row: &FastMap<FeatureId, u32>,
+    ) -> bool {
+        MmapSegment::can_match_batch(self, local, batch_mask_union, |f| feat_row.contains_key(&f))
+    }
+    #[inline]
     fn eval_into(
         &self,
         local: u32,
@@ -203,6 +233,13 @@ impl BroadBackend for &MmapSegment {
 
 /// Evaluate the broad lane of one segment against the whole batch, appending
 /// matched logical IDs to each title's `outs[ti]`.
+///
+/// `prefilter` + `batch_mask_union` drive the count-gate pre-reject (lever 5a):
+/// a reached, alive, non-pure candidate whose required features / any-of groups
+/// cannot all be satisfied by ANY batch title is skipped before full bitmap
+/// verification (result-identical by [`prefilter_slices`]'s necessary-condition
+/// argument; counted in `broad_prefilter_skipped`). The knob is the provable
+/// kill-switch — `false` restores the exact pre-lever path.
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
     backend: B,
@@ -211,6 +248,7 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
     feat_bits: &[u64],
     words: usize,
     tmask_batch: &[u64],
+    batch_mask_union: u64,
     seen: &mut [u32],
     epoch: u32,
     cands: &mut Vec<u32>,
@@ -219,6 +257,7 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
     grp: &mut [u64],
     outs: &mut [Vec<u64>],
     materialize: bool,
+    prefilter: bool,
     pred: &crate::exact::TagPredicate,
     stats: &mut MatchStats,
 ) {
@@ -233,16 +272,24 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
     // entries go straight to full bitmap verification: they are never
     // pure-anchor (`is_pure_anchor` is structurally false for an empty required
     // mask), and `eval_batch_slices` on an empty-positive entry computes exactly
-    // the vacuous semantics (titles bearing no forbidden feature).
+    // the vacuous semantics (titles bearing no forbidden feature). The count-gate
+    // passes them vacuously by construction (empty positives — nothing to be
+    // absent), so class-D always-candidates can never be prefilter-skipped; the
+    // check is still run so the shared predicate stays the single source of truth.
     {
         let before = cands.len();
         backend.reach(crate::util::universal_sig(), epoch, seen, cands, stats);
         for &local in &cands[before..] {
             stats.unique_candidates += 1;
             stats.broad_candidates += 1;
-            if backend.alive(local) {
-                non_pure.push(local);
+            if !backend.alive(local) {
+                continue;
             }
+            if prefilter && !backend.can_match_batch(local, batch_mask_union, feat_row) {
+                stats.broad_prefilter_skipped += 1;
+                continue;
+            }
+            non_pure.push(local);
         }
     }
 
@@ -281,6 +328,13 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
                     for_each_set_bit(fbits, |ti| outs[ti].push(logical));
                 }
             } else {
+                // Count-gate pre-reject (lever 5a) before queueing full bitmap
+                // verification. A pure-anchor candidate never reaches this check
+                // (its anchor IS in the batch — it was reached through it).
+                if prefilter && !backend.can_match_batch(local, batch_mask_union, feat_row) {
+                    stats.broad_prefilter_skipped += 1;
+                    continue;
+                }
                 non_pure.push(local);
             }
         }

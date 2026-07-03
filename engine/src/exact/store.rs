@@ -257,6 +257,35 @@ impl ExactStore {
         );
     }
 
+    /// Batch-level count-gate pre-reject (Broad-Query Cost Program lever 5a):
+    /// `false` only when NO title in the batch can possibly satisfy `local`, so
+    /// the columnar pass may skip its full bitmap verification. Shares
+    /// [`prefilter_slices`](super::slices::prefilter_slices) with the mmap path
+    /// so the two cannot drift. Under-reject is the only possible error
+    /// direction; forbidden features are never consulted.
+    #[inline]
+    pub fn can_match_batch(
+        &self,
+        local: u32,
+        batch_mask_union: u64,
+        present: impl Fn(FeatureId) -> bool,
+    ) -> bool {
+        super::slices::prefilter_slices(
+            local as usize,
+            batch_mask_union,
+            present,
+            &self.req_mask,
+            &self.req_off,
+            &self.req_len,
+            &self.req_blob,
+            &self.q_group_start,
+            &self.q_group_count,
+            &self.group_off,
+            &self.group_len,
+            &self.anyof_blob,
+        )
+    }
+
     /// Whether query `local`'s ENTIRE semantics is its single hot anchor: one
     /// masked required feature, no required tail, no forbidden, no any-of. Such a
     /// query matches any title containing the anchor with NO exact verification —

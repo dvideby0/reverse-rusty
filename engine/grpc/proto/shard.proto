@@ -192,6 +192,9 @@ message MatchStats {
   uint32 broad_queries_evaluated = 9;
   uint32 broad_anchors_scanned   = 10;
   uint32 broad_batches           = 11;
+  // Broad candidates skipped by the batch count-gate pre-reject (lever 5a of the
+  // Broad-Query Cost Program). Additive (proto3): absent from an older peer ⇒ 0.
+  uint32 broad_prefilter_skipped = 12;
 }
 
 // One query to (re)compile on the server, identified by logical id. `dsl` is the

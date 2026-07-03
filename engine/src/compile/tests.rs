@@ -239,6 +239,108 @@ mod golden {
     }
 
     #[test]
+    fn would_be_hot_flags_exactly_the_rank_cliff_shapes() {
+        // The observe-first hot-tier counter (Broad-Query Cost Program increment 1):
+        // `would_be_hot` must fire exactly when a plan keeps a query on the
+        // always-probed main lane while its deciding anchor's frequency is already
+        // ≥ DEFAULT_HOT_ANCHOR_THETA — the top-64 rank cliff ADR-104 measured (a
+        // feature ranked #65+ carrying a fat posting yet classifying "selective").
+        use crate::config::DEFAULT_HOT_ANCHOR_THETA;
+
+        let theta = DEFAULT_HOT_ANCHOR_THETA;
+        let mut dict = Dict::new();
+        // 64 mask-holders: strictly more frequent than anything below, so they own
+        // all 64 common-mask bits after finalize.
+        let mut top64 = Vec::new();
+        for i in 0..64u32 {
+            let f = dict.intern(&format!("top{i}"), FeatureKind::Generic);
+            for _ in 0..(theta * 2) {
+                dict.bump_freq(f);
+            }
+            top64.push(f);
+        }
+        // The cliff features: ranked #65+ (no mask bit) with θ-level frequency.
+        let fat = dict.intern("fatanchor", FeatureKind::Generic);
+        for _ in 0..theta {
+            dict.bump_freq(fat);
+        }
+        let fat2 = dict.intern("fatanchor2", FeatureKind::Generic);
+        for _ in 0..theta + 100 {
+            dict.bump_freq(fat2);
+        }
+        // Genuinely rare features.
+        let rare = dict.intern("rareterm", FeatureKind::Generic);
+        dict.bump_freq(rare);
+        let just_under = dict.intern("justunder", FeatureKind::Generic);
+        for _ in 0..theta - 1 {
+            dict.bump_freq(just_under);
+        }
+        dict.finalize_mask();
+        assert!(!is_hot(&dict, fat), "the cliff feature must not be top-64");
+        assert!(is_hot(&dict, top64[0]));
+
+        let ex = |required: Vec<FeatureId>, anyof: Vec<Vec<FeatureId>>| Extracted {
+            required,
+            forbidden: Vec::new(),
+            anyof,
+        };
+
+        // Class A anchored on a θ-frequency non-top64 feature: the defect shape.
+        let p = anchor_plan(&ex(vec![fat], vec![]), &dict);
+        assert_eq!(p.class, CostClass::A);
+        assert!(p.would_be_hot, "θ-frequency class-A anchor must be flagged");
+
+        // Exactly θ−1 stays unflagged (the boundary is ≥ θ).
+        let p = anchor_plan(&ex(vec![just_under], vec![]), &dict);
+        assert_eq!(p.class, CostClass::A);
+        assert!(!p.would_be_hot, "freq θ−1 is below the threshold");
+
+        // A rare rarest-required keeps the query unflagged even with a fat co-feature
+        // (the anchor is the rare one — nothing rides a fat posting).
+        let p = anchor_plan(&ex(vec![rare, fat], vec![]), &dict);
+        assert_eq!(p.class, CostClass::A);
+        assert!(!p.would_be_hot);
+
+        // Rarest = the cliff feature while a top-64 co-feature exists: still the
+        // defect shape (ADR-104's measured case — anchor_plan picks the #65 feature).
+        let p = anchor_plan(&ex(vec![top64[0], fat], vec![]), &dict);
+        assert_eq!(p.class, CostClass::A);
+        assert!(p.would_be_hot);
+
+        // Top-64-anchored plans are never flagged: class C (single hot required)…
+        let p = anchor_plan(&ex(vec![top64[0]], vec![]), &dict);
+        assert_eq!(p.class, CostClass::C);
+        assert!(!p.would_be_hot);
+        // …and the class-B arity-2 escalation.
+        let p = anchor_plan(&ex(vec![top64[0], top64[1]], vec![]), &dict);
+        assert_eq!(p.class, CostClass::B);
+        assert!(!p.would_be_hot);
+
+        // Any-of class B: flagged iff the chosen group's WORST member is ≥ θ.
+        let p = anchor_plan(&ex(vec![], vec![vec![rare, fat2]]), &dict);
+        assert_eq!(p.class, CostClass::B);
+        assert!(p.would_be_hot, "group worst member ≥ θ must be flagged");
+        let p = anchor_plan(&ex(vec![], vec![vec![rare, just_under]]), &dict);
+        assert_eq!(p.class, CostClass::B);
+        assert!(!p.would_be_hot);
+        // Any-of with a top-64 member is class C — never flagged.
+        let p = anchor_plan(&ex(vec![], vec![vec![rare, top64[3]]]), &dict);
+        assert_eq!(p.class, CostClass::C);
+        assert!(!p.would_be_hot);
+
+        // Class D: never flagged.
+        let mut d = ex(vec![], vec![]);
+        d.forbidden.push(rare);
+        let p = anchor_plan(&d, &dict);
+        assert_eq!(p.class, CostClass::D);
+        assert!(!p.would_be_hot);
+
+        // build_signatures carries the flag through unchanged.
+        let sp = build_signatures(&ex(vec![fat], vec![]), &dict);
+        assert!(sp.would_be_hot);
+    }
+
+    #[test]
     fn forbidden_only_query_is_class_d_with_the_universal_cover() {
         // A query with only a negation has no required feature and no any-of -> class D.
         // Its cover is the UNIVERSAL signature (one EMPTY broad-anchor group, ADR-068) —

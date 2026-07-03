@@ -152,6 +152,14 @@ pub struct SigPlan {
     pub main_sigs: Vec<u64>,
     pub broad_sigs: Vec<u64>,
     pub class: CostClass,
+    /// Observe-first telemetry for the Broad-Query Cost Program (roadmap
+    /// Increment 1): true when this plan keeps the query on the always-probed
+    /// main lane (class A, or an all-selective any-of class B) but its deciding
+    /// anchor's frequency is already ≥
+    /// [`DEFAULT_HOT_ANCHOR_THETA`](crate::config::DEFAULT_HOT_ANCHOR_THETA) —
+    /// i.e. the query *would* reclassify to the hot tier under the default
+    /// threshold. Purely observational: nothing reads it on the match path.
+    pub would_be_hot: bool,
 }
 
 /// The pre-hash form of a [`SigPlan`]: the actual *feature groups* the lossless
@@ -175,4 +183,6 @@ pub struct AnchorPlan {
     /// an empty positive set (ADR-068). Empty for classes A/B.
     pub broad_anchors: Vec<Vec<FeatureId>>,
     pub class: CostClass,
+    /// Observe-first hot-tier telemetry — see [`SigPlan::would_be_hot`].
+    pub would_be_hot: bool,
 }

@@ -22,6 +22,7 @@ pub(crate) struct PrometheusMetrics {
     pub(crate) memory_bytes: IntGaugeVec,
     pub(crate) wal_size_bytes: IntGauge,
     pub(crate) wal_pending_entries: IntGauge,
+    pub(crate) would_be_hot: IntGauge,
 
     // Cumulative counters (incremented via EngineEvent observer)
     pub(crate) flush_total: IntCounter,
@@ -134,6 +135,13 @@ impl PrometheusMetrics {
         let wal_pending_entries = IntGauge::with_opts(Opts::new(
             "wal_pending_entries",
             "Un-checkpointed WAL entries (mutations not yet in a sealed segment)",
+        ))
+        .unwrap();
+
+        let would_be_hot = IntGauge::with_opts(Opts::new(
+            "would_be_hot",
+            "Accepted compiles since process start that would reclassify to the hot tier \
+             under the default hot-anchor threshold (Broad-Query Cost Program observe mode)",
         ))
         .unwrap();
 
@@ -430,6 +438,7 @@ impl PrometheusMetrics {
         registry
             .register(Box::new(wal_pending_entries.clone()))
             .unwrap();
+        registry.register(Box::new(would_be_hot.clone())).unwrap();
         registry
             .register(Box::new(flush_time_seconds_total.clone()))
             .unwrap();
@@ -470,6 +479,7 @@ impl PrometheusMetrics {
             memory_bytes,
             wal_size_bytes,
             wal_pending_entries,
+            would_be_hot,
             flush_total,
             flush_entries_total,
             ingest_total,
@@ -520,6 +530,7 @@ impl PrometheusMetrics {
             .set(m.filter_bytes as i64);
         self.wal_size_bytes.set(m.wal_size_bytes as i64);
         self.wal_pending_entries.set(m.wal_pending_entries as i64);
+        self.would_be_hot.set(m.would_be_hot as i64);
     }
 
     /// Refresh the cluster gRPC transport gauges (ADR-085) from a coordinator snapshot.

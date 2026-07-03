@@ -170,6 +170,7 @@ pub(crate) async fn mpercolate(
             BroadStrategy::Inline
         },
         broad_materialize: cfg.broad_materialize,
+        broad_prefilter: cfg.broad_prefilter,
     };
 
     let pred = snap.compile_tag_predicate(&filter_spec);

@@ -84,6 +84,7 @@ pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
         broad_queries_evaluated: p.broad_queries_evaluated,
         broad_anchors_scanned: p.broad_anchors_scanned,
         broad_batches: p.broad_batches,
+        broad_prefilter_skipped: p.broad_prefilter_skipped,
     }
 }
 
@@ -101,6 +102,7 @@ pub(crate) fn stats_from_engine(s: EngineStats) -> MatchStats {
         broad_queries_evaluated: s.broad_queries_evaluated,
         broad_anchors_scanned: s.broad_anchors_scanned,
         broad_batches: s.broad_batches,
+        broad_prefilter_skipped: s.broad_prefilter_skipped,
     }
 }
 
@@ -159,10 +161,10 @@ pub(crate) fn translog_entry_from_mutation(
 mod tests {
     use super::{stats_from_engine, stats_to_engine, EngineStats, MatchStats};
 
-    // 11 DISTINCT values, so any field swap in either mapper changes the result — a pure
+    // 12 DISTINCT values, so any field swap in either mapper changes the result — a pure
     // round-trip alone would miss a *symmetric* transposition present in both directions,
     // which the per-field, by-name assertions below catch.
-    const VALS: [u32; 11] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+    const VALS: [u32; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
     fn engine_sample() -> EngineStats {
         EngineStats {
@@ -177,6 +179,7 @@ mod tests {
             broad_queries_evaluated: VALS[8],
             broad_anchors_scanned: VALS[9],
             broad_batches: VALS[10],
+            broad_prefilter_skipped: VALS[11],
         }
     }
 
@@ -194,6 +197,7 @@ mod tests {
         assert_eq!(p.broad_queries_evaluated, VALS[8]);
         assert_eq!(p.broad_anchors_scanned, VALS[9]);
         assert_eq!(p.broad_batches, VALS[10]);
+        assert_eq!(p.broad_prefilter_skipped, VALS[11]);
     }
 
     #[test]
@@ -210,6 +214,7 @@ mod tests {
             broad_queries_evaluated: VALS[8],
             broad_anchors_scanned: VALS[9],
             broad_batches: VALS[10],
+            broad_prefilter_skipped: VALS[11],
         };
         let e = stats_to_engine(p);
         assert_eq!(e.unique_candidates, VALS[0]);
@@ -223,6 +228,7 @@ mod tests {
         assert_eq!(e.broad_queries_evaluated, VALS[8]);
         assert_eq!(e.broad_anchors_scanned, VALS[9]);
         assert_eq!(e.broad_batches, VALS[10]);
+        assert_eq!(e.broad_prefilter_skipped, VALS[11]);
     }
 
     #[test]

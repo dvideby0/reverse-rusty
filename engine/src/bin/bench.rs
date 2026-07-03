@@ -56,6 +56,11 @@ fn main() {
         "cost classes        : A(selective)={}  B(arity-2/anyof)={}  C(broad)={}  D(rejected)={}",
         cc[0], cc[1], cc[2], cc[3]
     );
+    // Observe-first hot-tier telemetry (Broad-Query Cost Program): main-lane
+    // queries whose deciding anchor is already past the default θ — the
+    // population a frequency-threshold reclassification would move to the hot
+    // tier. Machine-independent (seed-fixed), so it belongs in the capture log.
+    println!("would-be hot        : {}", eng.would_be_hot());
     println!("dict features       : {}", eng.dict_len());
     println!(
         "main signatures     : {}",
@@ -244,6 +249,7 @@ fn main() {
         broad_batch_size: bs,
         broad_strategy: BroadStrategy::Columnar,
         broad_materialize: true,
+        broad_prefilter: true,
     };
     // Selective-only through the SAME batch path (broad off, same par_chunks
     // granularity) — the fair baseline for the broad lane's marginal cost (the
@@ -254,6 +260,7 @@ fn main() {
         broad_batch_size: 256,
         broad_strategy: BroadStrategy::Columnar,
         broad_materialize: true,
+        broad_prefilter: true,
     };
     let _ = eng.match_titles_batch_stats(&data.titles, selective_batch); // warmup
     let tselb = Instant::now();
@@ -293,8 +300,8 @@ fn main() {
         data.titles.len()
     );
     println!(
-        "   {:>6}  {:>13}  {:>15}  {:>13}  {:>8}",
-        "bs", "titles/sec", "broad_post/pass", "broad_qs_eval", "batches"
+        "   {:>6}  {:>13}  {:>15}  {:>13}  {:>8}  {:>12}",
+        "bs", "titles/sec", "broad_post/pass", "broad_qs_eval", "batches", "prefilt_skip"
     );
     let mut broad_post_bs1 = 0u64;
     for &bs in &[1usize, 8, 64, 256, 1024] {
@@ -314,12 +321,13 @@ fn main() {
             0.0
         };
         println!(
-            "   {:>6}  {:>13.0}  {:>15}  {:>13}  {:>8}   ({amort:.0}x amortized)",
+            "   {:>6}  {:>13.0}  {:>15}  {:>13}  {:>8}  {:>12}   ({amort:.0}x amortized)",
             bs,
             total_titles as f64 / sw_s,
             st.broad_postings_scanned,
             st.broad_queries_evaluated,
-            st.broad_batches
+            st.broad_batches,
+            st.broad_prefilter_skipped
         );
     }
 

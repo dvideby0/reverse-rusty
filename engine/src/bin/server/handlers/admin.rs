@@ -58,7 +58,14 @@ struct EngineStatsResponse {
     dict_features: usize,
     rejected_parse: u64,
     rejected_class_d: u64,
+    /// Observe-first hot-tier telemetry (Broad-Query Cost Program): accepted
+    /// compiles since process start that would reclassify to the hot tier under
+    /// the default hot-anchor threshold.
+    would_be_hot: u64,
     class_counts: ClassCounts,
+    /// Posting-length percentiles per candidate-index lane (nearest-rank; a fat
+    /// main `max` against a modest `p99` is the top-64 rank-cliff fingerprint).
+    postings: PostingLanes,
     segment_sizes: Vec<usize>,
     segment_holes: Vec<f64>,
     memory: MemoryStats,
@@ -70,6 +77,33 @@ struct ClassCounts {
     b: u64,
     c: u64,
     d: u64,
+}
+
+#[derive(Serialize)]
+struct PostingLanes {
+    main: PostingLaneStats,
+    broad: PostingLaneStats,
+}
+
+#[derive(Serialize)]
+struct PostingLaneStats {
+    count: usize,
+    p50: u32,
+    p95: u32,
+    p99: u32,
+    max: u32,
+}
+
+impl From<reverse_rusty::events::PostingStats> for PostingLaneStats {
+    fn from(s: reverse_rusty::events::PostingStats) -> Self {
+        Self {
+            count: s.count,
+            p50: s.p50,
+            p95: s.p95,
+            p99: s.p99,
+            max: s.max,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -286,6 +320,7 @@ pub(crate) async fn stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
     let snap = state.snapshot.load();
     let m = snap.metrics();
     let cc = snap.class_counts();
+    let lanes = snap.lane_posting_stats();
     Json(EngineStatsResponse {
         total_queries: m.total_queries,
         base_segments: m.base_segments,
@@ -293,11 +328,16 @@ pub(crate) async fn stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
         dict_features: m.dict_features,
         rejected_parse: m.rejected_parse,
         rejected_class_d: m.rejected_class_d,
+        would_be_hot: m.would_be_hot,
         class_counts: ClassCounts {
             a: cc[0],
             b: cc[1],
             c: cc[2],
             d: cc[3],
+        },
+        postings: PostingLanes {
+            main: lanes.main.into(),
+            broad: lanes.broad.into(),
         },
         segment_sizes: m.segment_sizes,
         segment_holes: m.segment_holes,
@@ -329,6 +369,16 @@ pub(crate) async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoRe
     ));
     out.push_str(&format!("rejected parse   {}\n", m.rejected_parse));
     out.push_str(&format!("rejected classD  {}\n", m.rejected_class_d));
+    out.push_str(&format!("would-be hot     {}\n", m.would_be_hot));
+    let lanes = snap.lane_posting_stats();
+    out.push_str(&format!(
+        "postings main    {} sigs (p50 {} p95 {} p99 {} max {})\n",
+        lanes.main.count, lanes.main.p50, lanes.main.p95, lanes.main.p99, lanes.main.max
+    ));
+    out.push_str(&format!(
+        "postings broad   {} sigs (p50 {} p95 {} p99 {} max {})\n",
+        lanes.broad.count, lanes.broad.p50, lanes.broad.p95, lanes.broad.p99, lanes.broad.max
+    ));
     out.push_str(&format!(
         "memory           {} bytes (~{:.1} MB)\n",
         total_mem,
@@ -336,7 +386,7 @@ pub(crate) async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoRe
     ));
     let cfg = snap.config();
     out.push_str(&format!(
-        "broad lane       {} (batch_size {}, materialize {}, max_batch {})\n",
+        "broad lane       {} (batch_size {}, materialize {}, prefilter {}, max_batch {})\n",
         if cfg.broad_columnar {
             "columnar"
         } else {
@@ -344,6 +394,7 @@ pub(crate) async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoRe
         },
         cfg.broad_batch_size,
         cfg.broad_materialize,
+        cfg.broad_prefilter,
         cfg.max_percolate_batch,
     ));
 

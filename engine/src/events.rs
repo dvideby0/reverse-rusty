@@ -251,6 +251,14 @@ pub struct EngineMetrics {
     pub rejected_parse: u64,
     /// Cumulative queries rejected as cost-class D.
     pub rejected_class_d: u64,
+    /// Observe-first hot-tier telemetry (the Broad-Query Cost Program): accepted
+    /// compiles since process start whose plan kept a main-lane query whose
+    /// deciding anchor's frequency is already ≥ the default hot-anchor threshold
+    /// ([`DEFAULT_HOT_ANCHOR_THETA`](crate::config::DEFAULT_HOT_ANCHOR_THETA)) —
+    /// the queries the hot tier will reclassify once it ships. Counts compile
+    /// events (incl. WAL replay / vocab recompiles), not distinct stored queries;
+    /// resets on restart (rate()-friendly).
+    pub would_be_hot: u64,
     /// Number of distinct features in the shared dictionary.
     pub dict_features: usize,
     /// Heap bytes used by the exact-match SoA store.
@@ -283,6 +291,35 @@ pub struct EngineMetrics {
     /// Elasticsearch's translog `operations` — shows whether checkpointing keeps
     /// up with the write rate.
     pub wal_pending_entries: u64,
+}
+
+/// Posting-length distribution of one candidate-index lane, computed on demand
+/// across every segment + the memtable (the Broad-Query Cost Program's
+/// observe-first telemetry — `docs/proposals/broad-cost-program.md` §5.0).
+/// Percentiles are nearest-rank over the per-signature posting lengths; all
+/// zeros when the lane holds no postings. Never computed on the match path.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PostingStats {
+    /// Number of postings (distinct signatures) in the lane.
+    pub count: usize,
+    /// Median posting length.
+    pub p50: u32,
+    /// 95th-percentile posting length.
+    pub p95: u32,
+    /// 99th-percentile posting length.
+    pub p99: u32,
+    /// Longest posting in the lane — the fat-anchor fingerprint the hot tier
+    /// targets (a large main-lane max here with a modest p99 is the top-64
+    /// rank-cliff signature ADR-104 measured).
+    pub max: u32,
+}
+
+/// Per-lane [`PostingStats`] (main = the always-probed realtime lane, broad =
+/// the opt-in quarantine lane). Returned by `EngineSnapshot::lane_posting_stats`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LanePostingStats {
+    pub main: PostingStats,
+    pub broad: PostingStats,
 }
 
 /// How a segment's payload is backed. Mirrors the engine's two sealed-segment

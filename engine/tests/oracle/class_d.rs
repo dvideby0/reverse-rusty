@@ -137,13 +137,17 @@ fn vacuous_accept_differential_per_title_and_batch() {
     // Per-title path ≡ brute.
     assert_no_fn_fp(&engine_sets, &brute, &titles, "per-title");
 
-    // Batch path ≡ brute: columnar (both materialization modes) + the inline
-    // kill-switch, across a word-boundary batch size and a degenerate one.
+    // Batch path ≡ brute: columnar (both materialization modes, count-gate
+    // prefilter both ways — a class-D always-candidate has empty positives, so
+    // the prefilter must pass it vacuously; lever 5a) + the inline kill-switch,
+    // across a word-boundary batch size and a degenerate one.
     let snap = eng.snapshot();
-    for (strat, mat) in [
-        (BroadStrategy::Columnar, true),
-        (BroadStrategy::Columnar, false),
-        (BroadStrategy::Inline, true),
+    for (strat, mat, pre) in [
+        (BroadStrategy::Columnar, true, true),
+        (BroadStrategy::Columnar, true, false),
+        (BroadStrategy::Columnar, false, true),
+        (BroadStrategy::Columnar, false, false),
+        (BroadStrategy::Inline, true, true),
     ] {
         for bs in [1usize, 64, 256] {
             let mut sets: Vec<HashSet<u64>> = vec![HashSet::new(); titles.len()];
@@ -154,6 +158,7 @@ fn vacuous_accept_differential_per_title_and_batch() {
                     broad_batch_size: bs,
                     broad_strategy: strat,
                     broad_materialize: mat,
+                    broad_prefilter: pre,
                 },
             ) {
                 sets[idx] = ids.into_iter().collect();
@@ -162,7 +167,7 @@ fn vacuous_accept_differential_per_title_and_batch() {
                 &sets,
                 &brute,
                 &titles,
-                &format!("batch strat={strat:?} mat={mat} bs={bs}"),
+                &format!("batch strat={strat:?} mat={mat} pre={pre} bs={bs}"),
             );
         }
     }

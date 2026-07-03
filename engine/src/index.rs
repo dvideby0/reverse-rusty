@@ -189,6 +189,13 @@ impl CandidateIndex {
     pub fn count_over(&self, threshold: usize) -> usize {
         self.map.values().filter(|p| p.len() > threshold).count()
     }
+
+    /// Append every posting's length to `into` — the raw material for the
+    /// `/_stats` per-lane posting-length percentiles (Broad-Query Cost Program
+    /// observe-first telemetry). Off the hot path; called on demand per snapshot.
+    pub fn collect_posting_lens(&self, into: &mut Vec<u32>) {
+        into.extend(self.map.values().map(|p| p.len() as u32));
+    }
 }
 
 #[cfg(test)]

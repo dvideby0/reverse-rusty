@@ -34,6 +34,7 @@ fn sample_metrics() -> EngineMetrics {
         segment_holes: vec![0.0, 0.5],
         rejected_parse: 0,
         rejected_class_d: 0,
+        would_be_hot: 0,
         dict_features: 99,
         exact_bytes: 11,
         index_bytes: 22,
