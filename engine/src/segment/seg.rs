@@ -87,6 +87,12 @@ impl Segment {
         keys.extend(self.broad.keys());
         keys.extend(self.hot.keys());
         self.filter = Some(SegmentFilter::build(&keys));
+        // Sealing also retires the building-time body index (dedup Stage A):
+        // sealed read paths and the merges consult only `dup_of`/`dup_members`
+        // (a merge regroups into the DEST's fresh index), so keeping ~one map
+        // entry per distinct body would be pure resident overhead at scale
+        // (codex review). The memtable keeps its index until IT seals here.
+        self.body_index = crate::util::fast_map();
     }
 
     #[inline]
