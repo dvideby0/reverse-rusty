@@ -31,6 +31,7 @@ mod fingerprint;
 mod gc;
 mod handoff;
 mod health;
+mod hot;
 mod legacy_layout;
 mod parallel;
 mod partial_apply;

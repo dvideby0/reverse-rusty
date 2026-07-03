@@ -22,6 +22,7 @@ mod backup;
 mod checkpoint;
 mod class_d;
 mod core;
+mod hot;
 mod replication;
 mod resize;
 mod torn_tail;

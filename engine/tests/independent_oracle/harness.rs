@@ -31,6 +31,21 @@ impl RefOracle {
         Self::from_parts(eng, reference, queries)
     }
 
+    /// [`build_default`](Self::build_default) with an engine config override — the
+    /// classification-sweep hook (e.g. the ADR-105 hot tier's θ). The REFERENCE is
+    /// deliberately untouched: it is classification-blind (it evaluates predicate
+    /// semantics only), which is exactly why a config sweep needs no reference change.
+    pub fn build_default_with_config(
+        queries: &[(u64, String)],
+        cfg: reverse_rusty::config::EngineConfig,
+    ) -> Self {
+        let mut eng =
+            Engine::with_config(Normalizer::default_vocab().expect("built-in vocab"), cfg);
+        eng.build_from_queries(queries);
+        let reference = RefMatcher::build(queries, RefVocab::default_vocab());
+        Self::from_parts(eng, reference, queries)
+    }
+
     /// Build both sides from a paired `(engine Normalizer, RefVocab)` description — the caller is
     /// responsible for the two expressing the SAME vocabulary in each side's own type. Used for the
     /// grader / phrase / synonym pass (no equivalence map needed).
