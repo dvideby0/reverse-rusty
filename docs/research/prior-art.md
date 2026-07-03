@@ -2,7 +2,9 @@
 
 *Scope: survey the battle-tested systems named in the spec, extract the data structures /
 invariants / layouts worth borrowing, and record what we deliberately reject and why. Feeds
-directly into the [design docs](../design/README.md).*
+directly into the [design docs](../design/README.md). This doc answers "how to gate
+selectively"; its complement — hot/broad predicates, duplicate queries, shared evaluation, and
+self-tuning classification — is [`broad-scaling-prior-art.md`](broad-scaling-prior-art.md).*
 
 ## The problem in one paragraph
 
