@@ -142,6 +142,10 @@ fn match_batch_chunk<D: DeadlineCheck>(
 
     let n_base = view.segments.len();
 
+    // OR of every batch title's common-mask word — the count-gate pre-reject's
+    // one-AND clause (lever 5a). Folded for free while Phase 0 pushes tmasks.
+    let mut batch_mask_union = 0u64;
+
     // ---- Phase 0: per-title normalize + selective lane + build feat bitmaps ----
     for (ti, title) in titles.iter().enumerate() {
         // Cooperative-deadline title boundary (ADR-099): clear the chunk's outputs
@@ -228,6 +232,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
         // active (`columnar` is forced off otherwise), so the canonical view == the superset
         // here and the inverted index + masks are built from `feats`.
         bs.tmask_batch.push(neg_mask);
+        batch_mask_union |= neg_mask;
         if columnar {
             for &f in &feats {
                 let row = if let Some(&r) = bs.feat_row.get(&f) {
@@ -274,6 +279,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
     let acc: &mut [u64] = &mut acc[..words];
     let grp: &mut [u64] = &mut grp[..words];
     let materialize = opts.broad_materialize;
+    let prefilter = opts.broad_prefilter;
 
     for (si, base) in view.segments.iter().enumerate() {
         // Cooperative-deadline segment boundary in the columnar broad pass (ADR-099).
@@ -302,6 +308,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 feat_bits,
                 words,
                 tmask_batch,
+                batch_mask_union,
                 seen,
                 epoch,
                 cands,
@@ -310,6 +317,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 grp,
                 outs,
                 materialize,
+                prefilter,
                 view.pred,
                 stats,
             ),
@@ -320,6 +328,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 feat_bits,
                 words,
                 tmask_batch,
+                batch_mask_union,
                 seen,
                 epoch,
                 cands,
@@ -328,6 +337,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 grp,
                 outs,
                 materialize,
+                prefilter,
                 view.pred,
                 stats,
             ),
@@ -359,6 +369,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
             feat_bits,
             words,
             tmask_batch,
+            batch_mask_union,
             seen,
             epoch,
             cands,
@@ -367,6 +378,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
             grp,
             outs,
             materialize,
+            prefilter,
             view.pred,
             stats,
         );
@@ -381,18 +393,11 @@ fn match_batch_chunk<D: DeadlineCheck>(
 }
 
 /// Sum two `MatchStats` field-by-field (for the parallel stats reduce).
+/// Delegates to [`MatchStats::merge`] — the ONE shared body — so a new field
+/// cannot be silently dropped from one of the reduce sites (the ADR-101
+/// under-count lesson).
 fn add_stats(mut a: MatchStats, b: MatchStats) -> MatchStats {
-    a.unique_candidates += b.unique_candidates;
-    a.postings_scanned += b.postings_scanned;
-    a.broad_postings_scanned += b.broad_postings_scanned;
-    a.main_candidates += b.main_candidates;
-    a.broad_candidates += b.broad_candidates;
-    a.matches += b.matches;
-    a.probes_attempted += b.probes_attempted;
-    a.probes_skipped += b.probes_skipped;
-    a.broad_queries_evaluated += b.broad_queries_evaluated;
-    a.broad_anchors_scanned += b.broad_anchors_scanned;
-    a.broad_batches += b.broad_batches;
+    a.merge(b);
     a
 }
 

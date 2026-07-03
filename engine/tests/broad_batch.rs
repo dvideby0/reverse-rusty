@@ -82,6 +82,7 @@ fn assert_equiv(
     batch_size: usize,
     strat: BroadStrategy,
     materialize: bool,
+    prefilter: bool,
 ) {
     let scalar = scalar_baseline(eng, titles, include_broad);
     let batch = batch_result(
@@ -92,13 +93,14 @@ fn assert_equiv(
             broad_batch_size: batch_size,
             broad_strategy: strat,
             broad_materialize: materialize,
+            broad_prefilter: prefilter,
         },
     );
     assert_eq!(batch.len(), scalar.len(), "length mismatch");
     for (i, (b, s)) in batch.iter().zip(scalar.iter()).enumerate() {
         assert_eq!(
             b, s,
-            "title {i} mismatch (broad={include_broad}, batch_size={batch_size}, strategy={strat:?}, materialize={materialize})"
+            "title {i} mismatch (broad={include_broad}, batch_size={batch_size}, strategy={strat:?}, materialize={materialize}, prefilter={prefilter})"
         );
     }
 }
@@ -110,15 +112,18 @@ fn run_matrix(eng: &Engine, titles: &[String]) {
     let n = titles.len().max(1);
     let sizes = [1usize, 2, 7, 63, 64, 65, 256, n, n + 1, 2 * n + 3];
     for &bs in &sizes {
-        // broad ON, columnar: the case that matters — BOTH materialization modes
-        // must equal scalar (pure-anchor fast path on, and forced through full
-        // verification when off).
-        assert_equiv(eng, titles, true, bs, BroadStrategy::Columnar, true);
-        assert_equiv(eng, titles, true, bs, BroadStrategy::Columnar, false);
+        // broad ON, columnar: the case that matters — materialization AND the
+        // count-gate prefilter (lever 5a) each swept both ways; the
+        // (materialize=false, prefilter=false) cell is exactly the pre-lever
+        // full-verification path.
+        assert_equiv(eng, titles, true, bs, BroadStrategy::Columnar, true, true);
+        assert_equiv(eng, titles, true, bs, BroadStrategy::Columnar, true, false);
+        assert_equiv(eng, titles, true, bs, BroadStrategy::Columnar, false, true);
+        assert_equiv(eng, titles, true, bs, BroadStrategy::Columnar, false, false);
         // broad OFF: the batch wrapper must not perturb the selective lane.
-        assert_equiv(eng, titles, false, bs, BroadStrategy::Columnar, true);
+        assert_equiv(eng, titles, false, bs, BroadStrategy::Columnar, true, true);
         // Inline strategy (kill-switch) must also equal scalar.
-        assert_equiv(eng, titles, true, bs, BroadStrategy::Inline, true);
+        assert_equiv(eng, titles, true, bs, BroadStrategy::Inline, true, true);
     }
 }
 
@@ -206,6 +211,7 @@ fn batch_inline_equals_columnar() {
                 broad_batch_size: bs,
                 broad_strategy: BroadStrategy::Inline,
                 broad_materialize: true,
+                broad_prefilter: true,
             },
         );
         let columnar = batch_result(
@@ -216,6 +222,7 @@ fn batch_inline_equals_columnar() {
                 broad_batch_size: bs,
                 broad_strategy: BroadStrategy::Columnar,
                 broad_materialize: true,
+                broad_prefilter: true,
             },
         );
         assert_eq!(inline, columnar, "Inline != Columnar at batch_size {bs}");
@@ -235,6 +242,7 @@ fn batch_materialize_on_equals_off() {
             broad_batch_size: bs,
             broad_strategy: BroadStrategy::Columnar,
             broad_materialize: materialize,
+            broad_prefilter: true,
         };
         let on = batch_result(&eng, &data.titles, opts(true));
         let off = batch_result(&eng, &data.titles, opts(false));
@@ -260,8 +268,8 @@ fn batch_empty_and_singleton() {
 
     // Singleton batch equals scalar for that one title.
     let one = vec![data.titles[0].clone()];
-    assert_equiv(&eng, &one, true, 256, BroadStrategy::Columnar, true);
-    assert_equiv(&eng, &one, true, 1, BroadStrategy::Columnar, true);
+    assert_equiv(&eng, &one, true, 256, BroadStrategy::Columnar, true, true);
+    assert_equiv(&eng, &one, true, 1, BroadStrategy::Columnar, true, true);
 }
 
 #[test]
@@ -278,6 +286,7 @@ fn batch_size_never_changes_results() {
             broad_batch_size: 256,
             broad_strategy: BroadStrategy::Columnar,
             broad_materialize: true,
+            broad_prefilter: true,
         },
     );
     for &bs in &[1usize, 3, 64, 65, 1000, 5000] {
@@ -289,6 +298,7 @@ fn batch_size_never_changes_results() {
                 broad_batch_size: bs,
                 broad_strategy: BroadStrategy::Columnar,
                 broad_materialize: true,
+                broad_prefilter: true,
             },
         );
         assert_eq!(other, reference, "results changed at batch_size {bs}");
@@ -385,6 +395,7 @@ fn batch_equals_scalar_under_tag_filter_including_materialized_pure_anchors() {
                     broad_batch_size: 128,
                     broad_strategy: BroadStrategy::Columnar,
                     broad_materialize: materialize,
+                    broad_prefilter: true,
                 },
                 filter,
             );
@@ -398,4 +409,135 @@ fn batch_equals_scalar_under_tag_filter_including_materialized_pure_anchors() {
         }
     }
     assert!(saw_nonempty, "degenerate: no filter matched anything");
+}
+
+// ---- The batch count-gate pre-reject (lever 5a of the Broad-Query Cost Program):
+// a necessary-condition filter, so under-reject is the only possible error direction —
+// results must be identical with the prefilter on or off, and the meter must prove the
+// skip actually fires on the shape it exists for. ----
+
+/// A hand-built corpus where the prefilter provably bites: class-C queries carry TWO
+/// any-of groups — the cover anchors on the more-selective group, the other group is a
+/// verify-only condition — and half the titles lack that second group entirely. Reached
+/// via their anchor, those candidates can never match any such title, which is exactly
+/// what the count-gate detects at batch level.
+fn prefilter_corpus() -> (Vec<(u64, String)>, Vec<String>) {
+    let mut queries: Vec<(u64, String)> = Vec::new();
+    // 24 two-group class-C queries. Every distinct query-side feature in this corpus is
+    // common-mask hot (fewer than 64 features total), so any-of groups classify C
+    // (broad lane) and the queries are NOT pure-anchor (two groups -> full verification).
+    for i in 0..24u64 {
+        queries.push((i, "(alpha,beta) (gamma,delta)".to_string()));
+    }
+    // Filler queries inflate gamma/delta frequency so the (alpha,beta) group is the
+    // more-selective cover choice (anchors = alpha, beta; gamma/delta stay verify-only).
+    for i in 0..30u64 {
+        queries.push((1_000 + i, format!("gamma delta filler{i}")));
+    }
+    let mut titles = Vec::new();
+    for i in 0..40 {
+        // Anchor-bearing titles WITHOUT the second group: reached, never matching.
+        titles.push(format!("alpha item number {i}"));
+    }
+    for i in 0..8 {
+        // Titles bearing both groups: these must keep matching (the over-reject guard).
+        titles.push(format!("alpha gamma item {i}"));
+    }
+    (queries, titles)
+}
+
+#[test]
+fn prefilter_on_equals_off_and_bites() {
+    let (queries, titles) = prefilter_corpus();
+    let mut eng = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    eng.build_from_queries(&queries);
+
+    let opts = |bs: usize, prefilter: bool| BatchMatchOptions {
+        include_broad: true,
+        broad_batch_size: bs,
+        broad_strategy: BroadStrategy::Columnar,
+        broad_materialize: true,
+        broad_prefilter: prefilter,
+    };
+
+    // Results identical across the sweep, prefilter on == off == scalar.
+    for &bs in &[1usize, 7, 64, 256] {
+        let on = batch_result(&eng, &titles, opts(bs, true));
+        let off = batch_result(&eng, &titles, opts(bs, false));
+        assert_eq!(on, off, "prefilter changed results at batch_size {bs}");
+        let scalar = scalar_baseline(&eng, &titles, true);
+        assert_eq!(on, scalar, "batch != scalar at batch_size {bs}");
+    }
+    // The both-group titles must actually match (the corpus is not degenerate, and
+    // the prefilter did not over-reject the satisfiable shape).
+    let on = batch_result(&eng, &titles, opts(1, true));
+    assert!(
+        on[40..].iter().all(|r| r.iter().any(|&id| id < 24)),
+        "a both-group title lost its class-C matches"
+    );
+    assert!(
+        on[..40].iter().all(|r| r.iter().all(|&id| id >= 1_000)),
+        "an anchor-only title matched a two-group query"
+    );
+
+    // The meter: per-title batches make every anchor-only title a gamma/delta-free
+    // batch, so the skip fires; off => the counter is structurally zero.
+    let stats_on = eng.match_titles_batch_stats(&titles, opts(1, true));
+    assert!(
+        stats_on.broad_prefilter_skipped > 0,
+        "prefilter never fired on the shape built to trigger it"
+    );
+    let stats_off = eng.match_titles_batch_stats(&titles, opts(1, false));
+    assert_eq!(stats_off.broad_prefilter_skipped, 0, "off must never skip");
+    // Skipping only ever removes full bitmap evaluations, never candidates.
+    assert!(stats_on.broad_queries_evaluated < stats_off.broad_queries_evaluated);
+    assert_eq!(stats_on.broad_candidates, stats_off.broad_candidates);
+}
+
+#[test]
+fn prefilter_never_skips_class_d() {
+    // A class-D always-candidate has EMPTY positives — the count-gate's clauses all
+    // pass vacuously, so it can never be prefilter-skipped (skipping it would be
+    // gating on MUST_NOT). Lane-on corpus of negation-only queries: the counter must
+    // stay zero and every title without the forbidden token must keep its matches.
+    let mut cfg = reverse_rusty::config::EngineConfig::default();
+    cfg.accept_class_d = true;
+    let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg);
+    let queries: Vec<(u64, String)> = (0..12u64)
+        .map(|i| (i, format!("-junktoken{}", i % 3)))
+        .collect();
+    eng.build_from_queries(&queries);
+
+    let titles: Vec<String> = (0..20)
+        .map(|i| {
+            if i % 4 == 0 {
+                format!("clean listing junktoken0 number {i}")
+            } else {
+                format!("clean listing number {i}")
+            }
+        })
+        .collect();
+
+    let opts = |prefilter: bool| BatchMatchOptions {
+        include_broad: true,
+        broad_batch_size: 4,
+        broad_strategy: BroadStrategy::Columnar,
+        broad_materialize: true,
+        broad_prefilter: prefilter,
+    };
+    let on = batch_result(&eng, &titles, opts(true));
+    let off = batch_result(&eng, &titles, opts(false));
+    let scalar = scalar_baseline(&eng, &titles, true);
+    assert_eq!(on, off, "prefilter changed class-D results");
+    assert_eq!(on, scalar, "batch != scalar on the class-D corpus");
+    assert!(
+        on.iter().any(|r| !r.is_empty()),
+        "degenerate: no class-D query matched"
+    );
+
+    let stats = eng.match_titles_batch_stats(&titles, opts(true));
+    assert_eq!(
+        stats.broad_prefilter_skipped, 0,
+        "a class-D always-candidate was prefilter-skipped"
+    );
 }

@@ -105,6 +105,67 @@ pub fn verify_slices(
     true
 }
 
+/// Batch-level count-gate pre-reject — the broad/hot batch pass's necessary-
+/// condition filter (Broad-Query Cost Program lever 5a, Vespa's `min_feature`
+/// adapted to batch granularity). Returns `false` only when NO title in the
+/// batch can possibly satisfy stored query `i`, so the caller may skip its full
+/// bitmap verification. `batch_mask_union` is the OR of every batch title's
+/// common-mask word; `present(f)` reports whether feature `f` occurs in ANY
+/// batch title (the batch's distinct-feature set).
+///
+/// Sound by the same clauses [`eval_batch_slices`] evaluates: a title matches
+/// only if it contains every required feature (mask + tail) and ≥1 member of
+/// every any-of group — if a required feature is absent from the whole batch,
+/// or an entire any-of group is, steps 1/2/4 provably produce an all-zero
+/// bitmap for every title. **Under-reject is the only possible error
+/// direction** (a `true` just means "run the full verification").
+///
+/// Forbidden features are deliberately never consulted — the never-gate-on-
+/// MUST_NOT invariant: skipping work based on a *present* forbidden feature
+/// would be gating on a negative. Tags are not consulted either (the tag gate
+/// never prunes retrieval; `eval_batch_slices` step 0 handles it).
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn prefilter_slices(
+    i: usize,
+    batch_mask_union: u64,
+    present: impl Fn(FeatureId) -> bool,
+    req_mask: &[u64],
+    req_off: &[u32],
+    req_len: &[u16],
+    req_blob: &[u32],
+    q_group_start: &[u32],
+    q_group_count: &[u16],
+    group_off: &[u32],
+    group_len: &[u16],
+    anyof_blob: &[u32],
+) -> bool {
+    // 1) every masked required feature appears somewhere in the batch (one AND).
+    let rm = req_mask[i];
+    if (rm & batch_mask_union) != rm {
+        return false;
+    }
+    // 2) every required-tail feature appears in the batch's distinct set.
+    let ro = req_off[i] as usize;
+    let rl = req_len[i] as usize;
+    for &f in &req_blob[ro..ro + rl] {
+        if !present(f) {
+            return false;
+        }
+    }
+    // 3) every any-of group has at least one member in the batch.
+    let gs = q_group_start[i] as usize;
+    let gc = q_group_count[i] as usize;
+    for gi in gs..gs + gc {
+        let go = group_off[gi] as usize;
+        let gl = group_len[gi] as usize;
+        if !anyof_blob[go..go + gl].iter().any(|&m| present(m)) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Columnar batch verification — the bitmap transpose of [`verify_slices`].
 ///
 /// Computes, for one stored query `i`, the set of titles in a batch that satisfy
@@ -177,13 +238,24 @@ pub fn eval_batch_slices<'a>(
         }
     }
 
+    // Steps 2–4 below short-circuit the moment `acc` goes all-zero: every
+    // remaining clause is an AND / AND-NOT, which preserves all-zero, so
+    // returning early is byte-identical — it just skips provably-dead word
+    // loops (the count-gate's in-kernel twin, lever 5a). The running OR costs
+    // one register OR per word already being written.
+
     // 2) required tail: AND of each feature's title bitmap (verify step 2)
     let ro = req_off[i] as usize;
     let rl = req_len[i] as usize;
     for &f in &req_blob[ro..ro + rl] {
         if let Some(b) = lookup(f) {
+            let mut nz = 0u64;
             for (a, x) in acc.iter_mut().zip(b) {
                 *a &= *x;
+                nz |= *a;
+            }
+            if nz == 0 {
+                return;
             }
         } else {
             // feature absent from the whole batch -> no title can match
@@ -199,8 +271,13 @@ pub fn eval_batch_slices<'a>(
     let fl = forb_len[i] as usize;
     for &f in &forb_blob[fo..fo + fl] {
         if let Some(b) = lookup(f) {
+            let mut nz = 0u64;
             for (a, x) in acc.iter_mut().zip(b) {
                 *a &= !*x;
+                nz |= *a;
+            }
+            if nz == 0 {
+                return;
             }
         }
     }
@@ -221,8 +298,13 @@ pub fn eval_batch_slices<'a>(
                 }
             }
         }
+        let mut nz = 0u64;
         for (a, x) in acc.iter_mut().zip(grp.iter()) {
             *a &= *x;
+            nz |= *a;
+        }
+        if nz == 0 {
+            return;
         }
     }
 }

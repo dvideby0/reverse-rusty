@@ -28,7 +28,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use slices::{eval_batch_slices, verify_slices};
+pub use slices::{eval_batch_slices, prefilter_slices, verify_slices};
 pub use store::ExactStore;
 
 /// The two title feature views threaded through exact verification (ADR-061).

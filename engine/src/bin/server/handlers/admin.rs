@@ -386,7 +386,7 @@ pub(crate) async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoRe
     ));
     let cfg = snap.config();
     out.push_str(&format!(
-        "broad lane       {} (batch_size {}, materialize {}, max_batch {})\n",
+        "broad lane       {} (batch_size {}, materialize {}, prefilter {}, max_batch {})\n",
         if cfg.broad_columnar {
             "columnar"
         } else {
@@ -394,6 +394,7 @@ pub(crate) async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoRe
         },
         cfg.broad_batch_size,
         cfg.broad_materialize,
+        cfg.broad_prefilter,
         cfg.max_percolate_batch,
     ));
 

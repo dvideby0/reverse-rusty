@@ -227,6 +227,20 @@ pub struct EngineConfig {
     /// Default: `true`
     pub broad_materialize: bool,
 
+    /// Use the batch count-gate pre-reject in the columnar broad pass (lever 5a
+    /// of the Broad-Query Cost Program): a reached broad candidate whose required
+    /// features / any-of groups cannot all be satisfied by ANY title in the batch
+    /// is skipped before full bitmap verification. A necessary-condition filter —
+    /// under-reject is the only possible error direction, so results are
+    /// identical for every setting (the `tests/broad_batch.rs` equivalence
+    /// matrix); forbidden features are never consulted (never-gate-on-MUST_NOT).
+    /// When `false`, every reached candidate takes full bitmap verification — the
+    /// provable kill-switch. Skips are metered as
+    /// [`MatchStats::broad_prefilter_skipped`](crate::segment::MatchStats).
+    ///
+    /// Default: `true`
+    pub broad_prefilter: bool,
+
     /// Cooperative match cancellation (ADR-099): when a search request sets an
     /// EXPLICIT `timeout_ms`, the match work re-checks the deadline at coarse
     /// (per-segment / per-title) boundaries and abandons itself once expired —
@@ -320,6 +334,7 @@ impl Default for EngineConfig {
             broad_batch_size: 256,
             broad_columnar: true,
             broad_materialize: true,
+            broad_prefilter: true,
             cooperative_cancel: true,
             alias_feedback_capture: false,
             alias_feedback_max_pairs: 256,

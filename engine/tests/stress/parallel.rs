@@ -315,6 +315,7 @@ fn broad_batch_equals_per_title_under_churn() {
                 broad_batch_size: 256,
                 broad_strategy: strat,
                 broad_materialize: true,
+                broad_prefilter: true,
             },
         );
         let mut mismatches = 0usize;

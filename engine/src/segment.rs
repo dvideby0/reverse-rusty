@@ -77,6 +77,11 @@ pub struct MatchStats {
     pub broad_queries_evaluated: u32, // distinct broad queries exact-checked via bitmap eval
     pub broad_anchors_scanned: u32,   // distinct broad anchors (postings) probed per batch
     pub broad_batches: u32,           // broad sub-batches (chunks) processed
+    /// Broad candidates skipped by the batch count-gate pre-reject (lever 5a):
+    /// reached + alive, but a required feature or a whole any-of group is absent
+    /// from the batch, so full bitmap verification is provably pointless. The
+    /// meter proving the prefilter bites; 0 with `broad_prefilter` off.
+    pub broad_prefilter_skipped: u32,
 }
 
 impl MatchStats {
@@ -96,6 +101,7 @@ impl MatchStats {
         self.broad_queries_evaluated += other.broad_queries_evaluated;
         self.broad_anchors_scanned += other.broad_anchors_scanned;
         self.broad_batches += other.broad_batches;
+        self.broad_prefilter_skipped += other.broad_prefilter_skipped;
     }
 }
 
@@ -126,6 +132,14 @@ pub struct BatchMatchOptions {
     /// identical results, slower. A kill-switch for the optimization; only
     /// consulted on the [`BroadStrategy::Columnar`] path.
     pub broad_materialize: bool,
+    /// Use the batch count-gate pre-reject (lever 5a of the Broad-Query Cost
+    /// Program): a reached broad candidate whose required features / any-of
+    /// groups cannot all be satisfied by ANY title in the batch is skipped
+    /// before full bitmap verification — a necessary-condition filter, so
+    /// results are identical (under-reject is the only possible error
+    /// direction). A kill-switch; only consulted on the
+    /// [`BroadStrategy::Columnar`] path.
+    pub broad_prefilter: bool,
 }
 
 impl Default for BatchMatchOptions {
@@ -135,6 +149,7 @@ impl Default for BatchMatchOptions {
             broad_batch_size: 256,
             broad_strategy: BroadStrategy::Columnar,
             broad_materialize: true,
+            broad_prefilter: true,
         }
     }
 }

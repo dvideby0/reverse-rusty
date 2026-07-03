@@ -396,6 +396,33 @@ impl MmapSegment {
     /// [`crate::exact::eval_batch_slices`] so the in-memory and mmap broad-batch
     /// paths cannot drift.
     #[inline]
+    /// Batch-level count-gate pre-reject — the mmap twin of
+    /// [`ExactStore::can_match_batch`](crate::exact::ExactStore::can_match_batch),
+    /// sharing [`prefilter_slices`](crate::exact::prefilter_slices) so the two
+    /// paths cannot drift (Broad-Query Cost Program lever 5a).
+    #[inline]
+    pub(crate) fn can_match_batch(
+        &self,
+        local: u32,
+        batch_mask_union: u64,
+        present: impl Fn(FeatureId) -> bool,
+    ) -> bool {
+        crate::exact::prefilter_slices(
+            local as usize,
+            batch_mask_union,
+            present,
+            self.req_mask(),
+            self.req_off(),
+            self.req_len(),
+            self.req_blob(),
+            self.q_group_start(),
+            self.q_group_count(),
+            self.group_off(),
+            self.group_len(),
+            self.anyof_blob(),
+        )
+    }
+
     pub(crate) fn eval_batch<'a>(
         &self,
         local: u32,

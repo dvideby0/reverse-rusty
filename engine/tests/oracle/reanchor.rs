@@ -355,6 +355,7 @@ fn compaction_reanchoring_matches_oracle_at_scale() {
         broad_batch_size: 256,
         broad_strategy: BroadStrategy::Columnar,
         broad_materialize: true,
+        broad_prefilter: true,
     };
     let mut batch_sets: Vec<HashSet<u64>> = vec![HashSet::new(); data.titles.len()];
     for (idx, ids) in snap.match_titles_batch(&data.titles, opts) {
