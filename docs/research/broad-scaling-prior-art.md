@@ -287,8 +287,9 @@ statistics on the cost side of that line, and the discipline for the one place t
 - **Anti-thrash policy, with shipped defaults to steal.** Trigger families: churn-based (SQL Server's
   `MIN(500 + 0.20n, √(1000n))` — sub-linear so large corpora still re-tune), schedule-based, and
   error-feedback-based (LEO). Dampers: **monotone or margin-gated moves** (database cracking never
-  un-cracks — demotion-to-broad should be eager and promotion-to-selective conservative, since
-  mis-demotion costs only latency while both stay lossless); **verify-then-persist**;
+  un-cracks — demotion into an *always-visible* cost-quarantine tier can be eager and promotion back
+  conservative, since a mis-demotion there costs only latency while both placements stay lossless
+  and default-visible; see the visibility obligation below); **verify-then-persist**;
   **observe-first** (OpenSearch search-backpressure ships `monitor_only` as the default mode — the
   classifier should log its lane decisions before it makes them); **per-pass work caps** (stochastic
   cracking's "at most one reorganization per query"; OpenSearch's cancellation ratio ≤10% — bound the
@@ -303,9 +304,20 @@ are only slow): the **agreement fence**. Any classification whose match-side beh
 pair-anchored query needs the title side to *generate* that pair signature) must be a pure function
 of a **durably recorded stats snapshot**, shipped with the dict like the common mask, and consumed
 at match time as the *recorded decision* — never the live sketch. The closest prior art is RocksDB's
-determinism discipline and our own manifest-version fences (ADR-068/080). Demotion into the broad
-lane needs no fence at all: the broad index is probed arity-1 for every title feature already, so
-demotion is FN-safe with zero match-side change.
+determinism discipline and our own manifest-version fences (ADR-068/080).
+
+**And one obligation this repo already learned the hard way: cost lane ≠ visibility lane.** The
+broad lane is not just "cheaper elsewhere" — it is **request-gated** (`include_broad`, default OFF
+on the engine's per-title path), so moving an A/B query into it silently hides that query from
+default requests: a user-visible false negative even though the index can still retrieve it. The
+ADR-056 re-anchoring pass carries an explicit CORRECTNESS GUARD refusing exactly this (`segment/seg.rs`
+— "never demote a main-lane (A/B) query into the broad lane … a hotness reclassification is a
+major-version blue/green concern, NOT a silent compaction change"; originally a review-caught FN in
+PR #31). Any frequency-threshold reclassification (lever 2 below) must therefore keep visibility
+invariant: either the demoted-hot queries land in an **always-probed cost-quarantine** (batched
+/columnar evaluation like the broad lane, but probed on every request like main — a third tier that
+separates the cost axis from the visibility axis), or reclassification rides the documented
+blue/green major-version path — never a silent lane move.
 
 ---
 
@@ -336,17 +348,19 @@ The levers below are what the stronger families add, ranked by evidence strength
 | # | Lever | Prior art & evidence | Reverse Rusty seam | FN-safety argument |
 |---|---|---|---|---|
 | 1 | **Identity/conjunction dedup with ID-list fan-out** | Whang: "significant factor" of k-index performance; Vespa `ConjunctionIndex`; A-Tree's design axis; Gryphon coalescing; YFilter shared accepting states; Rebeca identity routing — *unanimous and measured* | Canonical hash of the compiled plan → one posting entry + one verify row per distinct plan, ID fan-out at emit; per-segment at flush/compaction (no online poset) | Emission is identical by construction — duplicates share one evaluation whose verdict applies to every ID |
-| 2 | **Frequency-threshold classification + compaction-time demotion** (replaces the top-64 cliff) | The ADR-104 measured defect (32×); Monitor's `termFreqWeightor` (threshold, not rank); BE-Tree's false-candidate Gain/Loss loop; LEO/CE-feedback discipline; cracking's monotone-moves; OpenSearch observe-first | `is_broad_anchor = top-64 ∨ freq ≥ θ` at classification (mask unchanged); ADR-056 compaction migrates old segments under work caps; stats snapshot pinned in the manifest | Demotion-to-broad needs **no match-side change** (broad index probed arity-1 for any feature) — strictly FN-safe; both lanes lossless, so half-migrated states are correct |
+| 2 | **Frequency-threshold cost reclassification** (replaces the top-64 cliff) | The ADR-104 measured defect (32×); Monitor's `termFreqWeightor` (threshold, not rank); BE-Tree's false-candidate Gain/Loss loop; LEO/CE-feedback discipline; cracking's monotone-moves; OpenSearch observe-first | `is_hot_anchor = top-64 ∨ freq ≥ θ` at classification (mask unchanged); migration at compaction under work caps; stats snapshot pinned in the manifest | **Visibility must stay invariant** — the broad lane is `include_broad`-gated, so a silent A/B→broad move is a user-visible FN (the ADR-056 guard in `segment/seg.rs` exists because a review caught exactly this, PR #31). FN-safe forms only: an **always-probed cost-quarantine tier** (batch-evaluated like broad, default-visible like main), or the blue/green major-version reclassification path (`matching.md` §8). Retrievability inside either structure is arity-1-probe-preserved; both forms lossless ⇒ half-migrated states correct |
 | 3 | **Pair-anchor escalation with measured joint frequencies** | PSTHash (N=2 access predicates wins dense real-ads data, 0.24 ms @3M); Fabret multi-attribute clustering (46,600→26,500 checks); CM-sketch one-sided error; nominate-then-count with query-side auto-nomination | Extend the pairing predicate on **both** sides in lockstep, persisted with the dict (RDCT-additive) — the **agreement fence**; title-side pair probes already exist for hot×other | The fence: pair classification is a pure function of a durably recorded snapshot; CM overestimation ⇒ a truly-rare pair may miss the optimization, never the reverse |
 | 4 | **Residual factoring inside posting lists** | Fabret's 35× phase-2 gap (columnwise size-grouped clusters, signature-implied predicates subtracted); NiagaraCQ constant tables; SIFT tries | Group posting-list members by residual plan shape; subtract probe-implied features from verify plans; size-specialized kernels (our SoA verify is halfway there) | Verify-layer only — gating untouched |
 | 5 | **Broad-lane counting pre-reject + dense-posting promotion** | Vespa `min_feature` (count-gate before verification) + `dense-posting-list-threshold` 0.40 | A conservative per-query lower bound on required title-feature hits, checked in the columnar pass before full verification; promote hot broad postings to bitvectors | The bound must be provably *necessary* (≤ true minimum); a conservative bound only ever under-rejects |
 
-Cross-cutting obligations: the **agreement fence** for any lever that changes match-side behavior
-(only #3); **measure first** — duplicate rate, subset/covering structure, and the class mix on the
-*real* corpus decide whether #1 is a structural win or a no-op (ICDCS: covering 75%→45% as predicate
-diversity grew; the generator's single-token broad queries are unrepresentative by construction —
-this is the same real-corpus dependency as ADR-065 criterion 12's open half); and **observe-first**
-(ship the classifier logging its decisions before enforcement, the OpenSearch pattern).
+Cross-cutting obligations: **cost lane ≠ visibility lane** — every lever must leave which requests
+see a query invariant (the §6 obligation; the in-repo ADR-056 guard is the precedent); the
+**agreement fence** for any lever that changes match-side behavior (only #3); **measure first** —
+duplicate rate, subset/covering structure, and the class mix on the *real* corpus decide whether #1
+is a structural win or a no-op (ICDCS: covering 75%→45% as predicate diversity grew; the generator's
+single-token broad queries are unrepresentative by construction — this is the same real-corpus
+dependency as ADR-065 criterion 12's open half); and **observe-first** (ship the classifier logging
+its decisions before enforcement, the OpenSearch pattern).
 
 What no lever changes: true matches are output, not overhead. The recall-first contract makes
 emission volume the product's choice (rank/size caps, filters — built); the engine's job, per this
