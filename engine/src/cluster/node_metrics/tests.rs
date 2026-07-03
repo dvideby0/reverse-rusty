@@ -13,7 +13,7 @@ fn sample(
     shard_id: u32,
     m: EngineMetrics,
     segments: Vec<SegmentInfo>,
-    class: [u64; 4],
+    class: [u64; 5],
 ) -> ShardSample {
     ShardSample {
         shard_id,
@@ -71,7 +71,7 @@ fn render_shard_emits_named_gauges() {
         3,
         sample_metrics(),
         vec![seg(3), seg(2)],
-        [1, 2, 3, 4],
+        [1, 2, 3, 4, 5],
     )]);
     assert!(out.contains("# TYPE reverse_rusty_total_queries gauge"));
     assert!(out.contains("\nreverse_rusty_total_queries{shard=\"3\"} 7\n"));
@@ -94,8 +94,8 @@ fn render_shards_labels_all_colocated_slots() {
     let mut m4 = sample_metrics();
     m4.total_queries = 44;
     let out = render_shards(&[
-        sample(1, m1, vec![seg(1)], [1, 0, 0, 0]),
-        sample(4, m4, vec![seg(2)], [0, 2, 0, 0]),
+        sample(1, m1, vec![seg(1)], [1, 0, 0, 0, 0]),
+        sample(4, m4, vec![seg(2)], [0, 2, 0, 0, 0]),
     ]);
     // Header emitted ONCE for the family (duplicating it would be malformed exposition).
     assert_eq!(
@@ -117,7 +117,7 @@ fn render_shards_labels_all_colocated_slots() {
 fn render_shards_emits_rpc_latency_histogram() {
     // One slot with a hand-built percolate snapshot: 2 in bucket[1] (5µs), 1 in bucket[8] (1ms),
     // and one >30s overflow observation (count > Σ buckets).
-    let mut s = sample(3, sample_metrics(), vec![seg(0)], [1, 0, 0, 0]);
+    let mut s = sample(3, sample_metrics(), vec![seg(0)], [1, 0, 0, 0, 0]);
     let mut p = LatencySnapshot::zero();
     p.buckets[1] = 2;
     p.buckets[8] = 1;
@@ -187,8 +187,8 @@ fn render_shards_histogram_header_once_across_slots() {
     // Two co-located slots: the histogram family header must appear exactly once, with both
     // slots' labeled series present (the ADR-093 grouped-exposition rule).
     let out = render_shards(&[
-        sample(1, sample_metrics(), vec![seg(0)], [1, 0, 0, 0]),
-        sample(4, sample_metrics(), vec![seg(0)], [1, 0, 0, 0]),
+        sample(1, sample_metrics(), vec![seg(0)], [1, 0, 0, 0, 0]),
+        sample(4, sample_metrics(), vec![seg(0)], [1, 0, 0, 0, 0]),
     ]);
     assert_eq!(
         out.matches("# TYPE reverse_rusty_shard_rpc_duration_seconds histogram")
@@ -209,14 +209,18 @@ fn render_shards_emits_broad_cost_counters() {
     // families renders its typed COUNTER header exactly once (grouped exposition), one labeled
     // series per slot, exact values — and the two columnar-only families render 0 (they are
     // structurally 0 on the per-title Percolate wire; rendered for name symmetry).
-    let mut s1 = sample(1, sample_metrics(), vec![seg(0)], [1, 0, 2, 0]);
+    let mut s1 = sample(1, sample_metrics(), vec![seg(0)], [1, 0, 2, 0, 0]);
     s1.broad = BroadCostSnapshot {
         candidates: 7,
         postings_scanned: 40,
         queries_evaluated: 0,
         batches: 0,
+        hot_candidates: 0,
+        hot_postings_scanned: 0,
+        hot_queries_evaluated: 0,
+        hot_batches: 0,
     };
-    let s4 = sample(4, sample_metrics(), vec![seg(0)], [1, 0, 0, 0]);
+    let s4 = sample(4, sample_metrics(), vec![seg(0)], [1, 0, 0, 0, 0]);
     let out = render_shards(&[s1, s4]);
 
     for family in [

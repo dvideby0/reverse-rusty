@@ -51,6 +51,7 @@ mod compaction;
 mod ingest;
 mod lifecycle;
 mod matching;
+mod merge;
 mod metrics;
 mod persistence;
 mod seg;
@@ -82,6 +83,20 @@ pub struct MatchStats {
     /// from the batch, so full bitmap verification is provably pointless. The
     /// meter proving the prefilter bites; 0 with `broad_prefilter` off.
     pub broad_prefilter_skipped: u32,
+    // ---- hot-tier accounting (class H, ADR-105; all 0 while θ is off) ----
+    /// Hot-tier subset of `postings_scanned` — the columnar batch pass amortizes
+    /// this exactly like `broad_postings_scanned` (once per batch, not per title).
+    pub hot_postings_scanned: u32,
+    /// Distinct hot-tier candidates reached (deduped), mirror of `broad_candidates`.
+    pub hot_candidates: u32,
+    /// Distinct hot-tier queries exact-checked via bitmap eval (columnar path).
+    pub hot_queries_evaluated: u32,
+    /// Distinct hot-tier anchors (postings) probed per batch (columnar path).
+    pub hot_anchors_scanned: u32,
+    /// Hot-tier columnar sub-batches processed.
+    pub hot_batches: u32,
+    /// Hot-tier candidates skipped by the count-gate pre-reject (lever 5a).
+    pub hot_prefilter_skipped: u32,
 }
 
 impl MatchStats {
@@ -102,6 +117,12 @@ impl MatchStats {
         self.broad_anchors_scanned += other.broad_anchors_scanned;
         self.broad_batches += other.broad_batches;
         self.broad_prefilter_skipped += other.broad_prefilter_skipped;
+        self.hot_postings_scanned += other.hot_postings_scanned;
+        self.hot_candidates += other.hot_candidates;
+        self.hot_queries_evaluated += other.hot_queries_evaluated;
+        self.hot_anchors_scanned += other.hot_anchors_scanned;
+        self.hot_batches += other.hot_batches;
+        self.hot_prefilter_skipped += other.hot_prefilter_skipped;
     }
 }
 
@@ -239,6 +260,12 @@ pub(in crate::segment) fn infallible<T>(r: Result<T, std::convert::Infallible>) 
 pub struct Segment {
     main: CandidateIndex,
     broad: CandidateIndex,
+    /// The hot tier's candidate index (class H, ADR-105): θ-hot-anchored
+    /// queries, probed arity-1 on EVERY request (like main) but evaluated
+    /// columnar on the batch path (like broad). An empty map until the first
+    /// class-H entry — the structural zero-cost answer for hot-free corpora
+    /// (`match_into` skips the whole lane on `hot.num_signatures() == 0`).
+    hot: CandidateIndex,
     exact: ExactStore,
     class: Vec<CostClass>,
     alive: Vec<bool>,
@@ -252,6 +279,21 @@ pub struct Segment {
     /// Reverse index: logical_id → local_ids in this segment. Enables O(1)
     /// delete lookups instead of full segment scans.
     logical_index: crate::util::FastMap<u64, Vec<u32>>,
+}
+
+/// Which candidate lanes a `match_into` call evaluates INLINE (per title).
+/// The main lane (+ the hot tier) is always-visible; `include_broad` carries the
+/// documented opt-in broad semantics. `include_hot` exists so the columnar batch
+/// driver can lift the hot tier out of the per-title pass (evaluating it once
+/// per batch instead — ADR-105); it is a COST switch, never a visibility one:
+/// every entry point evaluates the hot tier exactly once, inline or columnar.
+#[derive(Clone, Copy, Debug)]
+pub struct ProbeLanes {
+    /// Evaluate the opt-in broad lane inline (the documented request semantics).
+    pub include_broad: bool,
+    /// Evaluate the hot tier inline. `true` on every scalar path; the batch
+    /// driver passes `false` exactly when its columnar hot pass will run.
+    pub include_hot: bool,
 }
 
 // ---- BaseSegment: in-memory or mmap'd sealed segment ----
@@ -471,6 +513,11 @@ pub struct CompactionReport {
     /// (ADR-056). Always `0` unless `compaction_reanchor` is enabled, and `0` in a
     /// cluster shard (frozen dict ⇒ no frequency drift ⇒ no anchor change).
     pub reanchored: usize,
+    /// Hot-tier lane moves main→hot during the merge (ADR-105) — `0` unless both
+    /// `compaction_reanchor` and `hot_anchor_threshold` are enabled.
+    pub hot_promoted: usize,
+    /// Hot-tier lane moves hot→main (the θ/2 margin gate passed) during the merge.
+    pub hot_demoted: usize,
 }
 
 /// Boxed observer callback for engine events.

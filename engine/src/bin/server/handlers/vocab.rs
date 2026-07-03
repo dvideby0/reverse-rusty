@@ -339,6 +339,13 @@ fn apply_settings_patch(
             "broad_columnar" => set_bool(&mut cfg.broad_columnar, key, val, &mut errors),
             "broad_materialize" => set_bool(&mut cfg.broad_materialize, key, val, &mut errors),
             "broad_prefilter" => set_bool(&mut cfg.broad_prefilter, key, val, &mut errors),
+            // ---- the hot tier (class H, ADR-105) ----
+            "hot_anchor_threshold" => {
+                set_u32(&mut cfg.hot_anchor_threshold, key, val, &mut errors);
+            }
+            "hot_migration_max_moves" => {
+                set_usize(&mut cfg.hot_migration_max_moves, key, val, &mut errors);
+            }
             // ---- cooperative cancellation (ADR-099) ----
             "cooperative_cancel" => set_bool(&mut cfg.cooperative_cancel, key, val, &mut errors),
             // ---- match-feedback alias validation (ADR-103) ----
@@ -381,6 +388,15 @@ fn set_f64(slot: &mut f64, key: &str, val: &serde_json::Value, errors: &mut Vec<
     match val.as_f64() {
         Some(n) => *slot = n,
         None => errors.push(format!("setting [{key}] must be a number")),
+    }
+}
+
+fn set_u32(slot: &mut u32, key: &str, val: &serde_json::Value, errors: &mut Vec<String>) {
+    match val.as_u64().and_then(|n| u32::try_from(n).ok()) {
+        Some(n) => *slot = n,
+        None => errors.push(format!(
+            "setting [{key}] must be a non-negative integer fitting u32"
+        )),
     }
 }
 

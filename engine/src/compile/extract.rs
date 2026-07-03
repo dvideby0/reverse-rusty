@@ -18,9 +18,27 @@ use crate::normalize::Normalizer;
 
 /// "hot" == one of the 64 most frequent features (has a common-mask bit).
 /// Both compile and match agree on this, which is what keeps the cover lossless.
+///
+/// This predicate serves the title side too (the arity-2 pair loop and the
+/// cluster's `route()` exclude exactly the top-64 features) — it must stay
+/// mask-keyed. The θ extension below is COMPILE-SIDE ONLY.
 #[inline]
 pub fn is_hot(dict: &Dict, f: FeatureId) -> bool {
     dict.mask_bit(f) != crate::dict::NO_MASK_BIT
+}
+
+/// The Broad-Query Cost Program's classification predicate (ADR-105): a feature
+/// is a *hot anchor* when it is top-64 (`is_hot`) OR its query frequency has
+/// reached the engine's `hot_anchor_threshold` θ (`theta == 0` disables the
+/// extension — byte-identical to [`is_hot`]).
+///
+/// **Compile-side only.** The title side never consults θ: hot-tier entries are
+/// retrieved by exhaustive arity-1 probes of the hot index, so no title-side
+/// predicate has to mirror this one (the ADR-105 safety argument — unlike the
+/// pair predicate, which stays strictly `is_hot`-keyed on both sides).
+#[inline]
+pub fn is_hot_anchor(dict: &Dict, f: FeatureId, theta: u32) -> bool {
+    is_hot(dict, f) || (theta != 0 && dict.freq(f) >= theta)
 }
 
 /// Extract required / forbidden / any-of from an AST, interning features and

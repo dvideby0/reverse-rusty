@@ -315,11 +315,14 @@ pub struct PostingStats {
 }
 
 /// Per-lane [`PostingStats`] (main = the always-probed realtime lane, broad =
-/// the opt-in quarantine lane). Returned by `EngineSnapshot::lane_posting_stats`.
+/// the opt-in quarantine lane, hot = the always-probed columnar tier, ADR-105).
+/// Returned by `EngineSnapshot::lane_posting_stats`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LanePostingStats {
     pub main: PostingStats,
     pub broad: PostingStats,
+    /// The hot tier (class H, ADR-105) — all-zero while the θ knob is off.
+    pub hot: PostingStats,
 }
 
 /// How a segment's payload is backed. Mirrors the engine's two sealed-segment

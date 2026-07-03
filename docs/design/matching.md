@@ -151,16 +151,37 @@ ADR-061.
 
 ---
 
-## 4. Broad-query handling (cost classes)
+## 4. Broad-query handling (cost classes × the two-axis placement model)
 
-Every compiled query is classified by the selectivity of its **best achievable signature cover**:
+Every compiled query is classified by the selectivity of its **best achievable signature cover**.
+Since ADR-105 the classification answers TWO independent questions — **who can see the query**
+(visibility) and **how its work is scheduled** (evaluation):
 
-| Class | Meaning | Handling |
-|---|---|---|
-| **A** | highly selective (rare multi-feature anchor) | main index, realtime |
-| **B** | acceptable selectivity | main index, realtime |
-| **C** | broad (`PSA 10`, `Michael Jordan`, `rookie`) | **separate broad lane** |
-| **D** | negation-only (only forbidden clauses — no required feature, no any-of) | **reject at ingest** (default); opt-in `accept_class_d` stores it as an **always-candidate** in the broad lane (ADR-068) |
+| Class | Meaning | Visibility | Evaluation |
+|---|---|---|---|
+| **A** | highly selective (rare arity-1 anchor) | default-visible (every request) | main index, realtime per-title |
+| **B** | acceptable selectivity (arity-2 pair / selective any-of) | default-visible | main index, realtime per-title |
+| **C** | broad — only a **top-64** anchor available (`PSA 10`, `rookie`) | **opt-in** (`include_broad`) | broad lane, columnar batch |
+| **D** | negation-only (only forbidden clauses) | opt-in, and rejected at ingest by default (`accept_class_d` stores it as an **always-candidate**, ADR-068) | broad lane, universal signature |
+| **H** | **θ-hot anchor** (frequency ≥ `hot_anchor_threshold`, *no* top-64 mask bit — the ADR-104 rank-cliff population) | **default-visible** — probed on every request | **hot index**, columnar batch (per-title inline on the scalar path) |
+
+### 4.1 The two-axis placement rule (ADR-105 — an architecture invariant)
+
+> **Cost movement must never imply visibility movement.**
+
+Visibility ∈ {default-visible, opt-in broad, rejected/explicit-universal} and evaluation
+strategy ∈ {realtime anchor, columnar hot, columnar broad, universal} are separate axes; any
+lever that moves a query for *cost* reasons must keep its visibility cell fixed. The hot tier
+is the first non-trivial cell (default-visible × columnar): a θ-hot-anchored query leaves the
+realtime lane's per-title scans but stays visible to every request — unlike class C, whose
+opt-in visibility is part of the documented request semantics and whose boundary therefore
+stays keyed to the **frozen top-64 mask**, never θ. This is enforced structurally in
+`anchor_plan` (the C branch and the title-side pair loop never read θ) and pinned by the
+visibility-invariance oracle (`tests/oracle/hot.rs`: θ-on ≡ θ-off byte-identically on both
+`include_broad` modes). The same rule is why the ADR-056 compaction demote-guard refuses
+{A,B,H}→C, and why a θ flip — config drift, WAL replay, a coordinator/shard mismatch — is
+correctness-benign: it can only move queries between the two always-visible lanes (A↔H),
+which also place identically in the cluster (`Target::Selective` on the same ring anchor).
 
 A class-C query's best signature is still too common (posting would be "huge"). Putting it in the main
 index would poison candidate selectivity for *every* title that has that feature. Instead the **broad
@@ -187,6 +208,18 @@ is the direct, structural fix for the percolator "unsupported query becomes an a
 failure mode: we *detect* low selectivity at compile time, quarantine it, and then evaluate it cheaply
 in batch — instead of paying for it silently on every title. (Roaring-bitmap / SIMD posting
 intersection for the very broadest postings is a further micro-optimization, not yet done.)
+
+**The hot tier (class H, ADR-105)** rides the SAME columnar machinery, lane-parameterized
+(`Lane::{Broad, Hot}` through the kernel), with three deliberate differences from class C: it is
+probed on **every** request (the batch driver lifts it into the columnar pass even when
+`include_broad=false`; the scalar path probes it inline per title, skip-when-empty — structurally
+free on hot-free corpora); its vacuous accept is `pure_tail_anchor` (a θ-hot anchor has no mask
+bit, so the single required feature lives in the required *tail* and `is_pure_anchor` is
+structurally false for it); and the universal-signature probe stays broad-only (class D lives in
+the broad index). The batch's **count-gate pre-reject** (`broad_prefilter`, lever 5a) serves both
+lanes: a reached candidate whose required features / any-of groups cannot all be satisfied by ANY
+title in the batch skips full bitmap verification — a necessary-condition filter (under-reject is
+the only possible error direction; forbidden features are never consulted).
 
 **Class-D always-candidates (the opt-in lane, ADR-068).** With `accept_class_d` on, a negation-only
 query is the *deliberate* version of that always-candidate: its lossless cover of an empty positive

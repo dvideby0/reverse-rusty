@@ -126,8 +126,8 @@ impl Shard for FailingShard {
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.read_err().map_or(Ok(0), Err)
     }
-    fn class_counts(&self) -> Result<[u64; 4], ShardError> {
-        self.read_err().map_or(Ok([0; 4]), Err)
+    fn class_counts(&self) -> Result<[u64; 5], ShardError> {
+        self.read_err().map_or(Ok([0; 5]), Err)
     }
     fn ingest_extracted(&self, _i: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         self.write_err().map(|()| IngestReport::default())

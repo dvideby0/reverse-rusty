@@ -822,7 +822,7 @@ impl Shard for RemoteShard {
         vec![self.endpoint.clone()]
     }
 
-    fn class_counts(&self) -> Result<[u64; 4], ShardError> {
+    fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         let client = self.client.clone();
         let shard_id = self.shard_id;
         let reply = self.call(RpcMethod::ClassCounts, CallKind::Read, move || {
@@ -835,13 +835,16 @@ impl Shard for RemoteShard {
             }
         })?;
         let c = reply.counts;
+        // The wire keeps `counts` at exactly 4 (a pre-ADR-105 reader hard-errors on
+        // any other length mid-rolling-upgrade); class H rides the ADDITIVE `hot`
+        // field — proto3 default-0 from an older server, invisible to older readers.
         if c.len() != 4 {
             return Err(ShardError::Remote(format!(
                 "class_counts: expected 4 entries, got {}",
                 c.len()
             )));
         }
-        Ok([c[0], c[1], c[2], c[3]])
+        Ok([c[0], c[1], c[2], c[3], reply.hot])
     }
 
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {

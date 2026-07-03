@@ -207,7 +207,15 @@ impl Engine {
                 report.rejected_parse += 1;
                 continue;
             }
-            match seg.add_compiled(ex, qtag_ids, &self.dict, *logical, 1, accept_class_d) {
+            match seg.add_compiled(
+                ex,
+                qtag_ids,
+                &self.dict,
+                *logical,
+                1,
+                accept_class_d,
+                self.config.hot_anchor_threshold,
+            ) {
                 None => {
                     self.rejected_class_d += 1;
                     report.rejected_class_d += 1;
@@ -325,7 +333,8 @@ impl Engine {
         // Reject a compiled query whose columns would overflow the u16 exact-store
         // counts BEFORE the WAL — a truncated store is a silent false negative.
         Self::check_column_limit(&ex).map_err(crate::error::WriteError::Parse)?;
-        let class = crate::compile::anchor_plan(&ex, &self.dict).class;
+        let class =
+            crate::compile::anchor_plan(&ex, &self.dict, self.config.hot_anchor_threshold).class;
         if super::seg::rejects_class_d(class, &ex, self.config.accept_class_d) {
             self.rejected_class_d += 1;
             return Ok(InsertOutcome::RejectedClassD);
@@ -349,8 +358,15 @@ impl Engine {
             }
         }
         let tag_ids = self.intern_tags(tags);
-        let outcome = Arc::make_mut(&mut self.memtable)
-            .add_compiled(&ex, &tag_ids, &self.dict, logical, version, true);
+        let outcome = Arc::make_mut(&mut self.memtable).add_compiled(
+            &ex,
+            &tag_ids,
+            &self.dict,
+            logical,
+            version,
+            true,
+            self.config.hot_anchor_threshold,
+        );
         if let Some((local, would_be_hot)) = outcome {
             self.would_be_hot += u64::from(would_be_hot);
             self.query_store.insert(logical, text.to_string());
@@ -423,7 +439,8 @@ impl Engine {
         // Reject a column-overflowing compiled query before the WAL too — and so a
         // failed replace never tombstones the prior version (same reason as tags).
         Self::check_column_limit(&ex).map_err(crate::error::WriteError::Parse)?;
-        let class = crate::compile::anchor_plan(&ex, &self.dict).class;
+        let class =
+            crate::compile::anchor_plan(&ex, &self.dict, self.config.hot_anchor_threshold).class;
         if super::seg::rejects_class_d(class, &ex, self.config.accept_class_d) {
             self.rejected_class_d += 1;
             return Ok(UpsertOutcome::RejectedClassD);
@@ -521,6 +538,7 @@ impl Engine {
             logical,
             version,
             accept_class_d,
+            self.config.hot_anchor_threshold,
         ) else {
             // The new version is class D and not marked accepted (a legacy op-4
             // frame on replay, or an effectively empty query): leave the prior
@@ -806,7 +824,15 @@ impl Engine {
                 ));
                 continue;
             }
-            match seg.add_compiled(ex, qtag_ids, &self.dict, *logical, 1, accept_class_d) {
+            match seg.add_compiled(
+                ex,
+                qtag_ids,
+                &self.dict,
+                *logical,
+                1,
+                accept_class_d,
+                self.config.hot_anchor_threshold,
+            ) {
                 None => {
                     self.rejected_class_d += 1;
                     report.rejected_class_d += 1;
@@ -878,6 +904,7 @@ impl Engine {
                 item.logical,
                 item.version,
                 self.config.accept_class_d,
+                self.config.hot_anchor_threshold,
             ) {
                 self.would_be_hot += u64::from(would_be_hot);
                 accepted.push((item.logical, item.dsl.clone()));
@@ -928,6 +955,7 @@ impl Engine {
             logical,
             version,
             self.config.accept_class_d,
+            self.config.hot_anchor_threshold,
         );
         if let Some((local, would_be_hot)) = outcome {
             self.would_be_hot += u64::from(would_be_hot);
@@ -975,6 +1003,7 @@ impl Engine {
                 logical,
                 version,
                 class_d_accepted,
+                self.config.hot_anchor_threshold,
             ) {
                 self.would_be_hot += u64::from(would_be_hot);
                 self.query_store.insert(logical, text.to_string());

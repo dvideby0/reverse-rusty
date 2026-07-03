@@ -25,6 +25,24 @@ fn default_vocab_clean_corpus() {
 }
 
 #[test]
+fn default_vocab_clean_corpus_with_hot_tier_on() {
+    // The ADR-105 classification sweep: the hot tier (class H at θ=64) must be
+    // invisible to the front-end-independent reference — it is a COST placement,
+    // never a semantic one. The reference is classification-blind, so it needs
+    // no counterpart change; a divergence here means the tier dropped or
+    // duplicated a match.
+    let data = generate(&cfg(0x00AB_0407));
+    let oracle = RefOracle::build_default_with_config(
+        &data.queries,
+        reverse_rusty::config::EngineConfig {
+            hot_anchor_threshold: 64,
+            ..Default::default()
+        },
+    );
+    oracle.assert_matches(&data.titles, "default/clean+hot-tier");
+}
+
+#[test]
 fn default_vocab_messy_corpus() {
     // Surface noise (case / diacritics / whitespace runs / punctuation / unicode junk) stresses the
     // reference's byte-clean + diacritic-fold + marker handling against the engine's.

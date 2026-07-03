@@ -206,7 +206,7 @@ fn reanchoring_is_a_noop_under_a_frozen_dict() {
     let mut b = Segment::new();
     for (i, ex) in exes.iter().enumerate() {
         let seg = if i < half { &mut a } else { &mut b };
-        seg.add_compiled(ex, &[], &dict, i as u64, 1, false);
+        seg.add_compiled(ex, &[], &dict, i as u64, 1, false, 0);
     }
     assert!(
         !a.is_empty() && !b.is_empty(),
@@ -214,14 +214,14 @@ fn reanchoring_is_a_noop_under_a_frozen_dict() {
     );
 
     // Re-anchoring against the SAME frozen dict must reproduce every cover exactly.
-    let (merged, reanchored) = Segment::compact_from_reanchored(&[&a, &b], &dict);
+    let (merged, stats) = Segment::compact_from_reanchored(&[&a, &b], &dict, 0, usize::MAX);
     assert_eq!(
         merged.len(),
         a.len() + b.len(),
         "no entries lost in the no-op merge"
     );
     assert_eq!(
-        reanchored, 0,
+        stats.reanchored, 0,
         "re-anchoring must be a no-op when the dict (and thus frequencies) is frozen"
     );
 }

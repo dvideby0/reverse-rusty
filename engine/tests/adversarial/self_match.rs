@@ -184,3 +184,41 @@ fn structured_queries_self_match_on_every_branch() {
         );
     }
 }
+
+/// The θ-on self-match diagonal (ADR-105): the hot tier is a COST quarantine,
+/// never a visibility change — every query still matches the title built from
+/// its own positive terms with the hot tier enforcing (same broad-on probe as
+/// the θ-off diagonal). The reference-free safety net for the classification split.
+#[test]
+fn every_query_matches_its_own_positive_terms_with_hot_tier_on() {
+    let data = small_corpus(0x5E1F_0407);
+    let cfg = reverse_rusty::config::EngineConfig {
+        hot_anchor_threshold: 64,
+        ..Default::default()
+    };
+    let mut eng = reverse_rusty::segment::Engine::with_config(
+        reverse_rusty::normalize::Normalizer::default_vocab().expect("vocab"),
+        cfg,
+    );
+    eng.build_from_queries(&data.queries);
+    assert!(
+        eng.class_counts()[4] > 0,
+        "degenerate: θ=64 produced no class H at this scale"
+    );
+    let mut s = MatchScratch::new();
+    let mut checked = 0usize;
+    for (id, q) in &data.queries {
+        let title = positive_title(q);
+        let out = matched(&eng, &mut s, &title);
+        assert!(
+            out.binary_search(id).is_ok(),
+            "SELF-MATCH FN under θ: query {id} `{q}` does not match its own \
+             positive title `{title}`"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 10_000,
+        "degenerate corpus: only {checked} queries"
+    );
+}

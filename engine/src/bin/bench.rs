@@ -53,8 +53,8 @@ fn main() {
     println!("================ BUILD ================");
     println!("indexed queries     : {}", eng.num_queries());
     println!(
-        "cost classes        : A(selective)={}  B(arity-2/anyof)={}  C(broad)={}  D(rejected)={}",
-        cc[0], cc[1], cc[2], cc[3]
+        "cost classes        : A(selective)={}  B(arity-2/anyof)={}  C(broad)={}  D(rejected)={}  H(hot)={}",
+        cc[0], cc[1], cc[2], cc[3], cc[4]
     );
     // Observe-first hot-tier telemetry (Broad-Query Cost Program): main-lane
     // queries whose deciding anchor is already past the default θ — the

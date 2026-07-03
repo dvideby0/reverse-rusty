@@ -245,7 +245,13 @@ impl ClusterEngine {
             // (mirrors the single-node ADR-068 vocab recompile, which passes accept=true
             // unconditionally). The empty-forbidden guard in `placement_of` still rejects the
             // never-stored empty query, so passing `true` cannot resurrect one.
-            match placement_of(&new_dict, &new_ring, &ex, true) {
+            match placement_of(
+                &new_dict,
+                &new_ring,
+                &ex,
+                true,
+                self.per_shard.hot_anchor_threshold,
+            ) {
                 Target::Reject => {}
                 Target::Replicated => {
                     // The broad lane is replicated to every shard (ADR-080). Carry the stored

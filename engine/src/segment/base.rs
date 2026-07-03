@@ -111,17 +111,25 @@ impl BaseSegment {
         epoch: u32,
         seen: &mut [u32],
         out: &mut Vec<u64>,
-        include_broad: bool,
+        lanes: super::ProbeLanes,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
         match self {
             BaseSegment::Memory(s) => {
-                s.match_into(view, dict, epoch, seen, out, include_broad, pred, stats);
+                s.match_into(view, dict, epoch, seen, out, lanes, pred, stats);
             }
             BaseSegment::Mmap(s) => {
-                s.match_into(view, dict, epoch, seen, out, include_broad, pred, stats);
+                s.match_into(view, dict, epoch, seen, out, lanes, pred, stats);
             }
+        }
+    }
+
+    /// Whether this segment holds any hot-tier entries (class H, ADR-105).
+    pub fn has_hot_entries(&self) -> bool {
+        match self {
+            BaseSegment::Memory(s) => s.has_hot_entries(),
+            BaseSegment::Mmap(s) => s.has_hot_entries(),
         }
     }
     pub fn exact_bytes(&self) -> usize {
@@ -139,6 +147,12 @@ impl BaseSegment {
     pub fn broad_bytes(&self) -> usize {
         match self {
             BaseSegment::Memory(s) => s.broad_bytes(),
+            BaseSegment::Mmap(_) => 0,
+        }
+    }
+    pub fn hot_bytes(&self) -> usize {
+        match self {
+            BaseSegment::Memory(s) => s.hot_bytes(),
             BaseSegment::Mmap(_) => 0,
         }
     }

@@ -195,6 +195,13 @@ message MatchStats {
   // Broad candidates skipped by the batch count-gate pre-reject (lever 5a of the
   // Broad-Query Cost Program). Additive (proto3): absent from an older peer ⇒ 0.
   uint32 broad_prefilter_skipped = 12;
+  // Hot-tier meters (class H, ADR-105) — all additive; 0 from a pre-ADR-105 peer.
+  uint32 hot_postings_scanned    = 13;
+  uint32 hot_candidates          = 14;
+  uint32 hot_queries_evaluated   = 15;
+  uint32 hot_anchors_scanned     = 16;
+  uint32 hot_batches             = 17;
+  uint32 hot_prefilter_skipped   = 18;
 }
 
 // One query to (re)compile on the server, identified by logical id. `dsl` is the
@@ -232,7 +239,14 @@ message FlushRequest { uint32 shard_id = 1; } // ADR-093
 message FlushReply   {}
 
 message CountReply       { uint64 count = 1; }            // usize num_queries
-message ClassCountsReply { repeated uint64 counts = 1; }  // exactly 4: [A, B, C, D]
+// `counts` stays at EXACTLY 4 ([A, B, C, D]) — a pre-ADR-105 reader hard-errors on any
+// other length, and the rolling-upgrade order (control → shards → coordinator) guarantees
+// an old-coordinator × new-shard window. Class H (the hot tier, ADR-105) rides the
+// ADDITIVE `hot` field: proto3 default-0 from an older server, invisible to older readers.
+message ClassCountsReply {
+  repeated uint64 counts = 1;
+  uint64 hot = 2;
+}
 
 // 64-bit fingerprints of the server's frozen dict (engine `Dict::fingerprint`) and its
 // frozen tag dict (`TagDict::fingerprint`, ADR-077). A pre-ADR-077 server leaves

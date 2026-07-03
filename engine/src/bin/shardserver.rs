@@ -53,6 +53,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut health_addr: Option<SocketAddr> = None;
     // Optional SEPARATE plaintext port for the Prometheus `/_metrics` endpoint (ADR-091).
     let mut metrics_addr: Option<SocketAddr> = None;
+    // The hot-anchor threshold θ (class H, ADR-105). Cost-only: this node CLASSIFIES the
+    // queries the coordinator places on it, so θ decides whether a fat-anchored query
+    // lands in the always-probed realtime lane (θ=0) or the columnar hot tier. Run the
+    // SAME value as the coordinator; divergence can never drop a match (both lanes are
+    // always visible), it only decides which node re-inherits the un-quarantined scans.
+    let mut hot_anchor_threshold: u32 = 0;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -69,6 +75,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--metrics-addr" => {
                 if let Some(v) = args.get(i + 1) {
                     metrics_addr = Some(v.parse().map_err(|e| format!("--metrics-addr {v}: {e}"))?);
+                }
+                i += 1;
+            }
+            "--hot-anchor-threshold" => {
+                if let Some(v) = args.get(i + 1) {
+                    hot_anchor_threshold = v
+                        .parse()
+                        .map_err(|e| format!("--hot-anchor-threshold {v}: {e}"))?;
                 }
                 i += 1;
             }
@@ -105,6 +119,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         resolve_security(tls_cert, tls_key, tls_ca, tls_domain, token_flag)?;
 
     let norm = Arc::new(Normalizer::default_vocab()?);
+    let engine_cfg = EngineConfig {
+        hot_anchor_threshold,
+        ..EngineConfig::default()
+    };
     let rt = tokio::runtime::Runtime::new()?;
 
     if pending {
@@ -114,8 +132,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let server = match &data_dir {
             // open_durable self-restores a previously adopted node (ADR-072); a fresh
             // dir starts pending exactly as before.
-            Some(dir) => ShardServer::open_durable(norm, EngineConfig::default(), dir.clone())?,
-            None => ShardServer::pending(norm, EngineConfig::default()),
+            Some(dir) => ShardServer::open_durable(norm, engine_cfg.clone(), dir.clone())?,
+            None => ShardServer::pending(norm, engine_cfg.clone()),
         };
         let state = if server.is_serving() {
             "RESUMED from durable state".to_string()
@@ -167,10 +185,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(dir) => ShardServer::new_durable(
             Arc::clone(&norm),
             Arc::new(dict),
-            EngineConfig::default(),
+            engine_cfg.clone(),
             dir.clone(),
         )?,
-        None => ShardServer::new(Arc::clone(&norm), Arc::new(dict), EngineConfig::default()),
+        None => ShardServer::new(Arc::clone(&norm), Arc::new(dict), engine_cfg.clone()),
     };
     server.ingest_dsl(&queries);
     if let Some(ha) = health_addr {

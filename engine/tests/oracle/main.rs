@@ -27,6 +27,7 @@ mod corpus;
 mod degenerate;
 mod equivalence;
 mod filtered;
+mod hot;
 mod messy;
 mod reanchor;
 mod segments;

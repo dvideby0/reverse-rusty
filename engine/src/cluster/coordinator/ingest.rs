@@ -121,7 +121,13 @@ impl ClusterEngine {
     /// Delegates to the free [`placement_of`] so `build` can bucket the corpus before
     /// the cluster value exists.
     fn placement(&self, ex: &Extracted) -> Target {
-        placement_of(&self.dict, &self.ring, ex, self.per_shard.accept_class_d)
+        placement_of(
+            &self.dict,
+            &self.ring,
+            ex,
+            self.per_shard.accept_class_d,
+            self.per_shard.hot_anchor_threshold,
+        )
     }
 
     /// True if the cluster holds (or has ever held) any tagged query (ADR-055): the `tags_present`
@@ -352,7 +358,13 @@ impl ClusterEngine {
         // placement is configuration-independent — a knob flip on reopen neither drops nor
         // resurrects (codex review). The empty-class-D guard in `placement_of` still rejects a
         // never-stored empty query defensively.
-        let (insert_shards, outcome) = match placement_of(&self.dict, &self.ring, &ex, true) {
+        let (insert_shards, outcome) = match placement_of(
+            &self.dict,
+            &self.ring,
+            &ex,
+            true,
+            self.per_shard.hot_anchor_threshold,
+        ) {
             Target::Reject => return Ok((0, AddOutcome::RejectedClassD)),
             // The broad lane is replicated to every shard (ADR-080); pass 1 already tombstones
             // every shard, so pass 2 re-inserts the new version on every shard.
@@ -506,7 +518,13 @@ impl ClusterEngine {
         // reproduces the writer's decision regardless of the current knob, so a knob flip on
         // reopen cannot drop or resurrect a class-D write (codex review). Rejected writes never
         // reach the log (classified out in add_query), so the Reject arm is defensive.
-        let outcome = match placement_of(&self.dict, &self.ring, &ex, true) {
+        let outcome = match placement_of(
+            &self.dict,
+            &self.ring,
+            &ex,
+            true,
+            self.per_shard.hot_anchor_threshold,
+        ) {
             // Defensive: an effectively-empty query is rejected before logging, so a logged
             // mutation never lands here; a replayed no-op (stored nowhere) is still safe.
             Target::Reject => return Ok(AddOutcome::RejectedClassD),

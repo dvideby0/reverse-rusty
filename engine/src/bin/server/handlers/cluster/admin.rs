@@ -84,6 +84,8 @@ struct ClassCounts {
     b: u64,
     c: u64,
     d: u64,
+    /// The hot tier (class H, ADR-105) — 0 while `hot_anchor_threshold` is off.
+    h: u64,
 }
 
 /// GET /_stats — cluster-wide counts.
@@ -113,6 +115,7 @@ pub(crate) async fn cluster_stats(State(state): State<Arc<ClusterAppState>>) -> 
             b: cc[1],
             c: cc[2],
             d: cc[3],
+            h: cc[4],
         },
         epoch: cluster.epoch(),
         pending_repairs: cluster.pending_repairs(),

@@ -14,7 +14,10 @@ use crate::index::CandidateIndex;
 use crate::segment::Segment;
 
 use super::super::{crc32, durable_rename, write_u32, write_u64};
-use super::{align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, HEADER_SIZE, MAGIC};
+use super::{
+    align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_HOT, HEADER_SIZE,
+    MAGIC,
+};
 
 /// Build a frozen hash table + posting blob from an in-memory CandidateIndex.
 /// Returns (slots, posting_blob).
@@ -156,21 +159,47 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     write_u16_array(&mut f, exact.tag_lens())?;
     write_u32_array(&mut f, exact.tag_blobs())?;
 
+    // ---- Hot-tier index (class H; ADR-105) ----
+    // Written ONLY when the segment holds class-H entries: the section (and the
+    // v5 version word carrying it) is what makes a hot-bearing file refuse a
+    // pre-ADR-105 reader loudly. Hot-free segments write no section and leave
+    // the header slot zero — byte-identical v3/v4 output.
+    let has_hot = seg
+        .classes()
+        .iter()
+        .any(|c| matches!(c, crate::compile::CostClass::H));
+    debug_assert_eq!(
+        has_hot,
+        seg.hot_index().num_signatures() > 0,
+        "class column and hot index must agree on hot-tier presence"
+    );
+    let hot_off = if has_hot {
+        pad_to_8(&mut f)?;
+        let off = f.stream_position()?;
+        write_frozen_index_section(&mut f, seg.hot_index())?;
+        off
+    } else {
+        0
+    };
+
     // ---- Write header ----
     f.seek(SeekFrom::Start(0))?;
     f.write_all(&MAGIC)?;
-    // A segment holding ≥1 class-D always-candidate writes v4 (layout-identical to
-    // v3) purely as a rollback fence: a pre-ADR-068 reader never probes the
-    // universal signature, so it must fail loudly on this file rather than serve
-    // it with the class-D queries silently unmatchable. Class-D-free segments keep
-    // v3 byte-identically.
+    // Version ladder (highest capability wins): a segment holding ≥1 class-H
+    // entry writes v5 (the hot-index section + the rollback fence — a pre-ADR-105
+    // reader never probes the hot index, so it must fail loudly on this file
+    // rather than serve it with those queries silently unmatchable). Otherwise a
+    // segment holding ≥1 class-D always-candidate writes v4 (layout-identical to
+    // v3) purely as the ADR-068 rollback fence. Otherwise v3, byte-identically.
     let has_class_d = seg
         .classes()
         .iter()
         .any(|c| matches!(c, crate::compile::CostClass::D));
     write_u32(
         &mut f,
-        if has_class_d {
+        if has_hot {
+            FORMAT_VERSION_HOT
+        } else if has_class_d {
             FORMAT_VERSION_CLASS_D
         } else {
             FORMAT_VERSION
@@ -185,7 +214,7 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     write_u64(&mut f, meta_off)?;
     write_u64(&mut f, logical_off)?;
     write_u64(&mut f, tag_off_pos)?;
-    // remaining header bytes are already zero (reserved)
+    write_u64(&mut f, hot_off)?;
 
     // Compute CRC32 of the entire file and append it as the trailing 4 bytes
     f.sync_all()?;
@@ -277,6 +306,10 @@ fn write_meta_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Result<
             CostClass::B => 1,
             CostClass::C => 2,
             CostClass::D => 3,
+            // Class byte 4 appears only in v5 files (the write path pairs any
+            // class-H entry with FORMAT_VERSION_HOT), so a pre-v5 reader can
+            // never encounter it — it refuses the file at the version check.
+            CostClass::H => 4,
         })
         .collect();
     write_u8_array(w, &classes)?;

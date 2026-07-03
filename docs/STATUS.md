@@ -41,7 +41,15 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   batch transpose `eval_batch` (ADR-026); tag column + `TagPredicate` (ADR-049); `TitleView`
   P(T)/N(T) (ADR-061).
 - **Broad lane** — class-C quarantine (ADR-003) + batch/columnar evaluation amortizing broad
-  postings ~1/batch_size, exposed as `/_mpercolate` (ADR-026).
+  postings ~1/batch_size, exposed as `/_mpercolate` (ADR-026); + the lever-5a **count-gate
+  pre-reject** (`broad_prefilter`) and the observe-first Broad-Query Cost Program telemetry
+  (`would_be_hot`, per-lane posting percentiles).
+- **The hot tier (class H)** — θ-reclassification under the two-axis placement rule: a
+  θ-hot non-top-64 anchor moves the query to a third per-segment index, probed on every
+  request (always-visible) but columnar-evaluated; `.seg`/manifest v5 fences, ring placement
+  in the cluster, margin-gated compaction migration; default off (`hot_anchor_threshold` = 0)
+  ⇒ byte-identical (ADR-105 — built + oracle-proven; the recovery measurement runs paired
+  with dedup Stage A per the roadmap).
 - **Class-D always-candidate lane** — opt-in `accept_class_d` stores negation-only queries under
   the universal signature; default off = the loud reject (ADR-068).
 - **Per-query tags + filtered percolation** — verify-stage filter, never gates (ADR-049); threaded

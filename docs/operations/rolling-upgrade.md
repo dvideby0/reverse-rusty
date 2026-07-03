@@ -34,12 +34,22 @@ Durable formats are **versioned and fail loud, never corrupt silently** — an i
 a refused open with a versioned error, and a refusal is always recoverable by restoring the
 pre-upgrade backup:
 
-- **Segments** (`.seg` v3/v4) and **manifests** (engine v3/v4, cluster v4/v5): newer minor formats
-  read older files back; an *older* binary refuses a *newer* file it cannot honor. The
-  layout-identical "fence" versions exist precisely to make a semantic change loud — e.g. a
+- **Segments** (`.seg` v3/v4/v5) and **manifests** (engine v3/v4/v5, cluster v4/v5): newer minor
+  formats read older files back; an *older* binary refuses a *newer* file it cannot honor. The
+  "fence" versions exist precisely to make a semantic change loud — e.g. a
   class-D-bearing segment is written v4 so a pre-ADR-068 binary refuses it rather than silently
-  mis-serving; a replicate-broad-to-all cluster writes manifest v5 as a **two-way** fence
+  mis-serving; a hot-tier-bearing segment is written **v5** (its hot-index section would be
+  silently un-probed by an older binary — ADR-105; the engine manifest bumps in lockstep);
+  a replicate-broad-to-all cluster writes manifest v5 as a **two-way** fence
   (ADR-080: the old binary refuses v5; the new binary refuses a v<5 shard-0-only-broad layout).
+  The *cluster* manifest deliberately does NOT bump for the hot tier: cluster shards attach
+  their registered segments fail-loud, so the per-shard `.seg` v5 word alone fences an old
+  binary (ADR-105).
+- **Same-θ contract (ADR-105):** in remote cluster mode, run every `shardserver` (and the
+  coordinator) with the same `--hot-anchor-threshold`. Divergence can never drop a match —
+  class A and class H are both always-visible and place identically — it only decides which
+  node re-inherits the un-quarantined fat-posting scans; the coordinator warns at startup when
+  θ is set in remote mode.
 - **WAL** frames (v3–v5) replay forward compatibly (ADR-066/067/068).
 - **The mesh wire** is protobuf-additive (unknown fields ignored; absent fields default), so a
   bounded mixed-version window during the roll is safe: RPCs fail loud (`InvalidArgument` /

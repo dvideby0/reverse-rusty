@@ -20,6 +20,7 @@ mod class_d;
 mod differential;
 mod dynamic_vocab;
 mod filtered;
+mod hot;
 mod placement;
 mod ranking;
 mod replication;

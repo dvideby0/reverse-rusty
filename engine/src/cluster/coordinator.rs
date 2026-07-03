@@ -429,8 +429,24 @@ fn into_shard(copies: Vec<LocalShard>) -> Result<Box<dyn Shard>, ShardError> {
 /// is placed on the broad lane (every shard, under the universal signature) when the knob
 /// is on, and rejected otherwise. The decision is re-derived identically on log replay
 /// (same frozen dict + same config), so live ≡ replay.
-fn placement_of(dict: &Dict, ring: &HashRing, ex: &Extracted, accept_class_d: bool) -> Target {
-    let ap = anchor_plan(ex, dict);
+///
+/// `theta` is the hot-anchor threshold (ADR-105). A class-H query places
+/// **selectively, exactly like class A**: its anchors are non-top-64 required
+/// features, which `route()` ring-routes on the title side, so every matching
+/// title probes the shard(s) holding it — no replication, no broad-eval-shard
+/// gating (the tier is always-visible on the shards that own it). Because A and
+/// H produce the IDENTICAL `Target`, placement is θ-invariant: a θ change (or a
+/// coordinator/shard θ mismatch) can never move a query to a different shard,
+/// only between the two always-probed indexes on the same shard — the ADR-105
+/// benign-divergence property.
+fn placement_of(
+    dict: &Dict,
+    ring: &HashRing,
+    ex: &Extracted,
+    accept_class_d: bool,
+    theta: u32,
+) -> Target {
+    let ap = anchor_plan(ex, dict, theta);
     match ap.class {
         CostClass::D => {
             // Stored only when the lane is on AND there is something to forbid: an
@@ -445,17 +461,26 @@ fn placement_of(dict: &Dict, ring: &HashRing, ex: &Extracted, accept_class_d: bo
             }
         }
         CostClass::C => Target::Replicated,
-        CostClass::A | CostClass::B => {
+        CostClass::A | CostClass::B | CostClass::H => {
             // A class-B-arity-2 query's only main anchor is an all-hot PAIR (a len-2
             // group): no rare feature to hash on, so it joins the replicated lane.
             // Class A and class-B any-of have only arity-1 non-hot anchors, which the
-            // ring distributes selectively.
-            if ap.main_anchors.iter().any(|g| g.len() != 1) {
+            // ring distributes selectively — and class H's arity-1 anchors are
+            // non-top-64 by definition, so they ring-place the same way (chained
+            // below; the defensive len!=1 guard would fail a future arity>1 hot
+            // anchor safe into the replicated lane rather than mis-hashing it).
+            if ap
+                .main_anchors
+                .iter()
+                .chain(ap.hot_anchors.iter())
+                .any(|g| g.len() != 1)
+            {
                 return Target::Replicated;
             }
             let mut shards: Vec<usize> = ap
                 .main_anchors
                 .iter()
+                .chain(ap.hot_anchors.iter())
                 .filter_map(|g| g.first().copied())
                 .map(|f| ring.lookup(f))
                 .collect();

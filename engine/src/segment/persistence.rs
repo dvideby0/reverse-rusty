@@ -257,9 +257,19 @@ impl Engine {
                     .iter()
                     .any(|c| matches!(c, crate::compile::CostClass::D)),
             });
+            // The hot-tier fence (ADR-105) mirrors the class-D fence: any registered
+            // segment holding class-H entries makes this commit write manifest v5, so
+            // a pre-ADR-105 binary — which never probes the hot index — refuses the
+            // corpus loudly instead of silently serving without those queries.
+            let hot_fence = self.segments.iter().any(|s| match s.as_ref() {
+                BaseSegment::Mmap(m) => m.carries_hot_fence(),
+                BaseSegment::Memory(seg) => seg.has_hot_entries(),
+            });
             let manifest = crate::storage::Manifest {
                 segment_files,
                 class_d_fence,
+                hot_fence,
+                hot_anchor_theta: self.config.hot_anchor_threshold,
                 next_seg_id: self.next_seg_id,
                 dict_data: crate::storage::serialize_dict(&self.dict),
                 tag_dict_data: crate::storage::serialize_tagdict(&self.tag_dict),

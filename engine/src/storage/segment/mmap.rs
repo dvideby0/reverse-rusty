@@ -13,7 +13,7 @@ use super::super::{crc32, read_u32_at, read_u64_at};
 use super::read::{
     parse_frozen_index, read_u16_slice, read_u32_slice, read_u64_slice, read_u8_slice,
 };
-use super::{FrozenSlot, FORMAT_VERSION_CLASS_D, HEADER_SIZE, MAGIC};
+use super::{FrozenSlot, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_HOT, HEADER_SIZE, MAGIC};
 
 mod ops;
 
@@ -47,9 +47,10 @@ enum MmapLogicalIndex {
 pub struct MmapSegment {
     mmap: Arc<memmap2::Mmap>,
     num_queries: u32,
-    /// The file's header format version (1..=4). v4 ⇔ the segment holds class-D
-    /// always-candidates (the ADR-068 rollback fence) — surfaced so the manifest
-    /// commit can propagate the fence to its own version word.
+    /// The file's header format version (1..=5). v4 ⇔ the segment holds class-D
+    /// always-candidates (the ADR-068 rollback fence); v5 ⇔ it holds class-H
+    /// hot-tier entries (the ADR-105 fence + the hot-index section) — surfaced so
+    /// the manifest commit can propagate the fence to its own version word.
     format_version: u32,
     // ExactStore slices (offsets into the mmap, cast at load time)
     req_mask: *const u64,
@@ -90,6 +91,13 @@ pub struct MmapSegment {
     broad_mask: u64,
     broad_blob: *const u32,
     broad_blob_len: usize,
+    // Hot-tier index (class H, ADR-105; v5). Absent pre-v5 / on hot-free files:
+    // cap 0 + dangling pointers, same soundness pattern as the tag column.
+    hot_slots: *const FrozenSlot,
+    hot_cap: usize,
+    hot_mask: u64,
+    hot_blob: *const u32,
+    hot_blob_len: usize,
     // Filter
     filter_data: *const u64,
     filter_num_blocks: usize,
@@ -268,6 +276,11 @@ impl Clone for MmapSegment {
             broad_mask: self.broad_mask,
             broad_blob: self.broad_blob,
             broad_blob_len: self.broad_blob_len,
+            hot_slots: self.hot_slots,
+            hot_cap: self.hot_cap,
+            hot_mask: self.hot_mask,
+            hot_blob: self.hot_blob,
+            hot_blob_len: self.hot_blob_len,
             filter_data: self.filter_data,
             filter_num_blocks: self.filter_num_blocks,
             filter_mask: self.filter_mask,
@@ -298,6 +311,13 @@ impl MmapSegment {
     /// ORs this across registered segments to pick its own version word.
     pub fn carries_class_d_fence(&self) -> bool {
         self.format_version >= FORMAT_VERSION_CLASS_D
+    }
+
+    /// Whether this segment's file carries the hot-tier fence (format v5,
+    /// ADR-105) — i.e. it holds class-H entries a pre-ADR-105 binary would
+    /// silently never probe. Propagated to the engine manifest's version word.
+    pub fn carries_hot_fence(&self) -> bool {
+        self.format_version >= FORMAT_VERSION_HOT
     }
 
     /// Load a segment from a file, memory-mapping it.
@@ -338,10 +358,11 @@ impl MmapSegment {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
             }
             let version = read_u32_at(data, 4)?;
-            // v1–v4 are all supported (v1 reconstructs the reverse index; v1/v2 read
+            // v1–v5 are all supported (v1 reconstructs the reverse index; v1/v2 read
             // back with an empty tag column; v4 is layout-identical to v3 — the bump
-            // is the class-D rollback fence, ADR-068).
-            if !(1..=FORMAT_VERSION_CLASS_D).contains(&version) {
+            // is the class-D rollback fence, ADR-068; v5 adds the hot-index section,
+            // ADR-105).
+            if !(1..=FORMAT_VERSION_HOT).contains(&version) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("unsupported format version {version}"),
@@ -408,6 +429,32 @@ impl MmapSegment {
         let (broad_slots_s, broad_blob_s, broad_cap) =
             parse_frozen_index(data_for_parse, broad_off)?;
 
+        // ---- Parse hot-tier index (v5, ADR-105) ----
+        // Pre-v5 files (and, defensively, a v5 header with a zero offset) have no
+        // section: cap 0 + dangling pointers, the tag-column soundness pattern.
+        let (hot_slots_s, hot_blob_s, hot_cap) = if format_version >= FORMAT_VERSION_HOT {
+            let hoff = read_u64_at(data_for_parse, 72)? as usize;
+            if hoff != 0 {
+                parse_frozen_index(data_for_parse, hoff)?
+            } else {
+                (&[][..], &[][..], 0usize)
+            }
+        } else {
+            (&[][..], &[][..], 0usize)
+        };
+        let hot_slots_ptr = if hot_cap != 0 {
+            hot_slots_s.as_ptr()
+        } else {
+            std::ptr::NonNull::<FrozenSlot>::dangling()
+                .as_ptr()
+                .cast_const()
+        };
+        let hot_blob_ptr = if hot_blob_s.is_empty() {
+            std::ptr::NonNull::<u32>::dangling().as_ptr().cast_const()
+        } else {
+            hot_blob_s.as_ptr()
+        };
+
         // ---- Parse filter ----
         let filter_num_blocks = read_u32_at(data_for_parse, filter_off)? as usize;
         let filter_mask_val = read_u64_at(data_for_parse, filter_off + 8)?;
@@ -428,6 +475,25 @@ impl MmapSegment {
         let (class_s, next) = read_u8_slice(data_for_parse, cursor)?;
         cursor = next;
         let (alive_s, _) = read_u8_slice(data_for_parse, cursor)?;
+
+        // Validate the class bytes against the version's ceiling ONCE at open
+        // (class 4 = H exists only in v5 files; anything higher came from a
+        // future build). A corrupt/foreign byte would otherwise be silently
+        // mis-bucketed by `class_counts`/`to_memory_segment` — fail loud instead.
+        let class_ceiling: u8 = if format_version >= FORMAT_VERSION_HOT {
+            4
+        } else {
+            3
+        };
+        if let Some(bad) = class_s.iter().find(|&&b| b > class_ceiling) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "cost-class byte {bad} exceeds format v{format_version}'s ceiling {class_ceiling}: {}",
+                    path.display()
+                ),
+            ));
+        }
 
         // Build alive overlay from on-disk data; seed the dead set from the same
         // flags so it stays ≡ the overlay's dead entries from the start (ADR-066).
@@ -581,6 +647,11 @@ impl MmapSegment {
             },
             broad_blob: broad_blob_s.as_ptr(),
             broad_blob_len: broad_blob_s.len(),
+            hot_slots: hot_slots_ptr,
+            hot_cap,
+            hot_mask: if hot_cap > 0 { (hot_cap - 1) as u64 } else { 0 },
+            hot_blob: hot_blob_ptr,
+            hot_blob_len: hot_blob_s.len(),
             filter_data: filter_data_ptr,
             filter_num_blocks,
             filter_mask: filter_mask_val,
