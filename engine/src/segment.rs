@@ -301,6 +301,8 @@ pub struct EngineSnapshot {
     config: Arc<EngineConfig>,
     rejected_parse: u64,
     rejected_class_d: u64,
+    /// Observe-first hot-tier telemetry at snapshot time — see the `Engine` field.
+    would_be_hot: u64,
     vocab_epoch: u64,
     wal_healthy: bool,
     persistence_healthy: bool,
@@ -487,6 +489,14 @@ pub struct Engine {
     memtable: Arc<Segment>,
     rejected_parse: u64,   // queries dropped because the DSL failed to parse
     rejected_class_d: u64, // class-D queries rejected at compile (not stored)
+    /// Observe-first hot-tier telemetry (the Broad-Query Cost Program): accepted
+    /// compiles whose plan reported
+    /// [`would_be_hot`](crate::compile::SigPlan::would_be_hot) — main-lane
+    /// queries that would reclassify to the hot tier under the default θ. A
+    /// process-lifetime event counter (counts compile events incl. WAL replay and
+    /// vocab recompiles, not distinct stored queries); deliberately NOT persisted
+    /// in the manifest, so hot-free corpora keep their manifest bytes unchanged.
+    would_be_hot: u64,
     /// Optional observer callback for engine events (flush, compact, ingest, etc.)
     observer: Option<EventObserver>,
     /// Events emitted during construction/recovery (`with_config`/`open`), before
@@ -531,6 +541,7 @@ impl std::fmt::Debug for Engine {
             .field("memtable_entries", &self.memtable.len())
             .field("rejected_parse", &self.rejected_parse)
             .field("rejected_class_d", &self.rejected_class_d)
+            .field("would_be_hot", &self.would_be_hot)
             .field("has_observer", &self.observer.is_some())
             .field("pending_events", &self.pending_events.len())
             .field("has_wal", &self.wal.is_some())

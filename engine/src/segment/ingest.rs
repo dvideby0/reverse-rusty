@@ -207,15 +207,16 @@ impl Engine {
                 report.rejected_parse += 1;
                 continue;
             }
-            if seg
-                .add_compiled(ex, qtag_ids, &self.dict, *logical, 1, accept_class_d)
-                .is_none()
-            {
-                self.rejected_class_d += 1;
-                report.rejected_class_d += 1;
-            } else {
-                accepted.push((*logical, (*text).to_string()));
-                report.ingested += 1;
+            match seg.add_compiled(ex, qtag_ids, &self.dict, *logical, 1, accept_class_d) {
+                None => {
+                    self.rejected_class_d += 1;
+                    report.rejected_class_d += 1;
+                }
+                Some((_, would_be_hot)) => {
+                    self.would_be_hot += u64::from(would_be_hot);
+                    accepted.push((*logical, (*text).to_string()));
+                    report.ingested += 1;
+                }
             }
         }
         // Seal: build anchor filter before pushing as immutable base segment.
@@ -350,7 +351,8 @@ impl Engine {
         let tag_ids = self.intern_tags(tags);
         let outcome = Arc::make_mut(&mut self.memtable)
             .add_compiled(&ex, &tag_ids, &self.dict, logical, version, true);
-        if let Some(local) = outcome {
+        if let Some((local, would_be_hot)) = outcome {
+            self.would_be_hot += u64::from(would_be_hot);
             self.query_store.insert(logical, text.to_string());
             self.maybe_flush();
             Ok(InsertOutcome::Inserted(local))
@@ -512,7 +514,7 @@ impl Engine {
         }
 
         let tag_ids = self.intern_tags(tags);
-        let Some(new_local) = Arc::make_mut(&mut self.memtable).add_compiled(
+        let Some((new_local, would_be_hot)) = Arc::make_mut(&mut self.memtable).add_compiled(
             ex,
             &tag_ids,
             &self.dict,
@@ -527,6 +529,7 @@ impl Engine {
             // (manifest-persisted — codex).
             return UpsertOutcome::RejectedClassD;
         };
+        self.would_be_hot += u64::from(would_be_hot);
 
         let replaced = prior.len();
         for (seg_idx, local) in prior {
@@ -803,16 +806,17 @@ impl Engine {
                 ));
                 continue;
             }
-            if seg
-                .add_compiled(ex, qtag_ids, &self.dict, *logical, 1, accept_class_d)
-                .is_none()
-            {
-                self.rejected_class_d += 1;
-                report.rejected_class_d += 1;
-                item_status[*idx] = IngestItemStatus::RejectedClassD;
-            } else {
-                accepted.push((*logical, (*text).to_string()));
-                report.ingested += 1;
+            match seg.add_compiled(ex, qtag_ids, &self.dict, *logical, 1, accept_class_d) {
+                None => {
+                    self.rejected_class_d += 1;
+                    report.rejected_class_d += 1;
+                    item_status[*idx] = IngestItemStatus::RejectedClassD;
+                }
+                Some((_, would_be_hot)) => {
+                    self.would_be_hot += u64::from(would_be_hot);
+                    accepted.push((*logical, (*text).to_string()));
+                    report.ingested += 1;
+                }
             }
         }
         // Seal: build anchor filter before pushing as immutable base segment.
@@ -867,22 +871,23 @@ impl Engine {
                 tag_ids.sort_unstable();
                 tag_ids.dedup();
             }
-            if seg
-                .add_compiled(
-                    &item.ex,
-                    &tag_ids,
-                    &self.dict,
-                    item.logical,
-                    item.version,
-                    self.config.accept_class_d,
-                )
-                .is_some()
-            {
-                accepted.push((item.logical, item.dsl.clone()));
-                report.ingested += 1;
-            } else {
-                self.rejected_class_d += 1;
-                report.rejected_class_d += 1;
+            match seg.add_compiled(
+                &item.ex,
+                &tag_ids,
+                &self.dict,
+                item.logical,
+                item.version,
+                self.config.accept_class_d,
+            ) {
+                Some((_, would_be_hot)) => {
+                    self.would_be_hot += u64::from(would_be_hot);
+                    accepted.push((item.logical, item.dsl.clone()));
+                    report.ingested += 1;
+                }
+                None => {
+                    self.rejected_class_d += 1;
+                    report.rejected_class_d += 1;
+                }
             }
         }
         seg.build_filter();
@@ -927,12 +932,14 @@ impl Engine {
             version,
             self.config.accept_class_d,
         );
-        if outcome.is_some() {
+        if let Some((local, would_be_hot)) = outcome {
+            self.would_be_hot += u64::from(would_be_hot);
             self.query_store.insert(logical, text.to_string());
+            Some(local)
         } else {
             self.rejected_class_d += 1;
+            None
         }
-        outcome
     }
 
     /// Replay an insert from WAL recovery (does NOT write back to WAL).
@@ -964,17 +971,15 @@ impl Engine {
                 let dict = Arc::make_mut(&mut self.dict);
                 extract(&ast, &self.norm, dict, &mut lc)
             };
-            if Arc::make_mut(&mut self.memtable)
-                .add_compiled(
-                    &ex,
-                    &tag_ids,
-                    &self.dict,
-                    logical,
-                    version,
-                    class_d_accepted,
-                )
-                .is_some()
-            {
+            if let Some((_, would_be_hot)) = Arc::make_mut(&mut self.memtable).add_compiled(
+                &ex,
+                &tag_ids,
+                &self.dict,
+                logical,
+                version,
+                class_d_accepted,
+            ) {
+                self.would_be_hot += u64::from(would_be_hot);
                 self.query_store.insert(logical, text.to_string());
             }
         }

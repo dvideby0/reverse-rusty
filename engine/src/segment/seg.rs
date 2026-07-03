@@ -65,9 +65,12 @@ impl Segment {
         &self.broad
     }
 
-    /// Append one already-extracted query. Returns the new segment-local id, or
-    /// `None` if the query is class D and rejected. `tags` are the query's
-    /// interned, sorted `TagId`s (ADR-049); pass `&[]` for an untagged query.
+    /// Append one already-extracted query. Returns the new segment-local id plus
+    /// the plan's [`would_be_hot`](crate::compile::SigPlan::would_be_hot)
+    /// observe-first flag (the Broad-Query Cost Program's reclassification
+    /// telemetry — the `Engine` accumulates it per accepted compile), or `None`
+    /// if the query is class D and rejected. `tags` are the query's interned,
+    /// sorted `TagId`s (ADR-049); pass `&[]` for an untagged query.
     ///
     /// `accept_class_d` (ADR-068): when set, a negation-only query (class D with a
     /// non-empty forbidden set) is stored as an **always-candidate** under the
@@ -85,7 +88,7 @@ impl Segment {
         logical: u64,
         version: u32,
         accept_class_d: bool,
-    ) -> Option<u32> {
+    ) -> Option<(u32, bool)> {
         let plan = build_signatures(ex, dict);
         if rejects_class_d(plan.class, ex, accept_class_d) {
             return None;
@@ -101,7 +104,7 @@ impl Segment {
         self.alive.push(true);
         self.alive_counter += 1;
         self.logical_index.entry(logical).or_default().push(local);
-        Some(local)
+        Some((local, plan.would_be_hot))
     }
 
     pub fn tombstone(&mut self, local_id: u32) {

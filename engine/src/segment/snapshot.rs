@@ -270,6 +270,13 @@ impl EngineSnapshot {
         self.rejected_class_d
     }
 
+    /// Observe-first hot-tier telemetry (the Broad-Query Cost Program): accepted
+    /// compiles since process start whose plan would reclassify to the hot tier
+    /// under [`DEFAULT_HOT_ANCHOR_THETA`](crate::config::DEFAULT_HOT_ANCHOR_THETA).
+    pub fn would_be_hot(&self) -> u64 {
+        self.would_be_hot
+    }
+
     pub fn vocab_epoch(&self) -> u64 {
         self.vocab_epoch
     }
@@ -351,6 +358,7 @@ impl EngineSnapshot {
             segment_holes,
             rejected_parse: self.rejected_parse,
             rejected_class_d: self.rejected_class_d,
+            would_be_hot: self.would_be_hot,
             dict_features: self.dict.len(),
             exact_bytes: self.segments.iter().map(|s| s.exact_bytes()).sum::<usize>()
                 + self.memtable.exact_bytes(),

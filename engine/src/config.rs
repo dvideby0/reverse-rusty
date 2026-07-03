@@ -9,6 +9,20 @@
 //! production workloads. The knobs here are engine-level: flush cadence,
 //! compaction trigger policy, and merge-score tuning.
 
+/// The default hot-anchor frequency threshold θ of the Broad-Query Cost Program
+/// (`docs/proposals/broad-cost-program.md` §5.2): a feature whose query frequency
+/// is ≥ θ is a *hot anchor* for cost-classification purposes even when it holds
+/// no top-64 common-mask bit. Today this drives only the **observe-first**
+/// `would_be_hot` counter ([`SigPlan::would_be_hot`](crate::compile::SigPlan));
+/// the enforcing hot tier ships behind its own knob in the next increment.
+///
+/// 1024 is an absolute posting-length bound chosen with wide margin between the
+/// two measured populations at 20M queries: the selective path's max main
+/// posting (~104) and the mislabeled broad-intent postings (up to 43,533). It is
+/// deliberately NOT tied to the index's roaring tier boundary (256, `index.rs`);
+/// the real-corpus audit refines it later (spec §7.2).
+pub const DEFAULT_HOT_ANCHOR_THETA: u32 = 1024;
+
 /// Configuration for the Reverse Rusty [`Engine`](crate::segment::Engine).
 ///
 /// All fields have sensible defaults via `Default`. Pass to

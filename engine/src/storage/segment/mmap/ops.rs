@@ -145,6 +145,19 @@ impl MmapSegment {
         self.mmap_slice(self.filter_data, self.filter_num_blocks * 8)
     }
 
+    /// Append every occupied slot's posting length from one lane's frozen table —
+    /// the mmap twin of
+    /// [`CandidateIndex::collect_posting_lens`](crate::index::CandidateIndex::collect_posting_lens)
+    /// (`/_stats` per-lane percentiles; off the hot path).
+    pub fn collect_posting_lens(&self, broad: bool, into: &mut Vec<u32>) {
+        let slots = if broad {
+            self.broad_slots()
+        } else {
+            self.main_slots()
+        };
+        into.extend(slots.iter().filter(|s| s.key != 0).map(|s| s.len));
+    }
+
     // ---- public interface ----
 
     pub fn len(&self) -> usize {

@@ -95,6 +95,7 @@ impl Engine {
             config: Arc::clone(&self.config),
             rejected_parse: self.rejected_parse,
             rejected_class_d: self.rejected_class_d,
+            would_be_hot: self.would_be_hot,
             vocab_epoch: self.vocab_epoch,
             wal_healthy: self.wal_healthy,
             persistence_healthy: self.persistence_healthy,

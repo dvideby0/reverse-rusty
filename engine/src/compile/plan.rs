@@ -35,6 +35,7 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
             main_anchors,
             broad_anchors,
             class: CostClass::D,
+            would_be_hot: false,
         };
     }
 
@@ -53,10 +54,16 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
                 main_anchors,
                 broad_anchors,
                 class: CostClass::D,
+                would_be_hot: false,
             };
         };
         let all_selective = best.iter().all(|&f| !is_hot(dict, f));
         if all_selective {
+            // Observe-first counter for the Broad-Query Cost Program: a group kept
+            // on the main lane whose worst member's frequency already exceeds the
+            // default hot-anchor threshold would reclassify to the hot tier.
+            let worst = best.iter().map(|&f| dict.freq(f)).max().unwrap_or(0);
+            let would_be_hot = worst >= crate::config::DEFAULT_HOT_ANCHOR_THETA;
             for &f in best {
                 main_anchors.push(vec![f]);
             }
@@ -64,6 +71,7 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
                 main_anchors,
                 broad_anchors,
                 class: CostClass::B,
+                would_be_hot,
             }
         } else {
             for &f in best {
@@ -73,6 +81,7 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
                 main_anchors,
                 broad_anchors,
                 class: CostClass::C,
+                would_be_hot: false,
             }
         }
     } else {
@@ -81,12 +90,17 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
         r.sort_by_key(|&f| dict.freq(f));
         let r1 = r[0];
         if !is_hot(dict, r1) {
-            // arity-1 selective anchor
+            // arity-1 selective anchor. `would_be_hot`: the anchor has no top-64
+            // mask bit yet its frequency exceeds the default hot-anchor threshold —
+            // the top-64 rank cliff the Broad-Query Cost Program's hot tier fixes
+            // (a fat posting riding the realtime lane). Observe-first telemetry.
+            let would_be_hot = dict.freq(r1) >= crate::config::DEFAULT_HOT_ANCHOR_THETA;
             main_anchors.push(vec![r1]);
             AnchorPlan {
                 main_anchors,
                 broad_anchors,
                 class: CostClass::A,
+                would_be_hot,
             }
         } else if r.len() >= 2 {
             // hot rarest feature -> escalate to arity-2 with next-rarest
@@ -97,6 +111,7 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
                 main_anchors,
                 broad_anchors,
                 class: CostClass::B,
+                would_be_hot: false,
             }
         } else {
             // single, hot required feature and nothing to pair -> broad lane
@@ -105,6 +120,7 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict) -> AnchorPlan {
                 main_anchors,
                 broad_anchors,
                 class: CostClass::C,
+                would_be_hot: false,
             }
         }
     }
@@ -120,6 +136,7 @@ pub fn build_signatures(ex: &Extracted, dict: &Dict) -> SigPlan {
         main_sigs: plan.main_anchors.iter().map(|g| sig_key(g)).collect(),
         broad_sigs: plan.broad_anchors.iter().map(|g| sig_key(g)).collect(),
         class: plan.class,
+        would_be_hot: plan.would_be_hot,
     }
 }
 
