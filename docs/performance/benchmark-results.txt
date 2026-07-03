@@ -150,6 +150,62 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-07-03] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  20M COMBINED RECOVERY
+              (hot tier ADR-105 + dedup Stage A ADR-106 — Broad-Query Cost Program
+              increments 1+2, measured together per the corrected reading: the corpus's
+              32x is an identical-query concentration, so the recovery is dedup-driven
+              and the hot tier is pinned separately).  bench 20000000 20000 0.05 2.0
+              12648430 25 [theta] [dedup];  soak RR_CLUSTER_SOAK_THETA=[theta].
+              Interactive box — throughput indicative; structural numbers seed-fixed.
+  INVARIANTS (machine-independent; baseline = the 2026-07-03 20M BROAD-BEARING BASELINE):
+    classes: dedup NEVER reclassifies (A/B/C/D byte-identical to baseline at theta=0);
+      theta=1024 moves EXACTLY would_be_hot: A 19,912,766 -> 19,911,984 (-782), H = 782,
+      and the theta-on run's would_be_hot reads 0 (nothing left to move) — the
+      observe-counter == enforcement pin, seed-fixed
+    dedup telemetry: 285,945 joined / 20,000,000 bodies; distinct est 19,697,575
+      (~300k global duplicates; the ~43.5k-per-shape identical broad-intent population
+      + generated family repeats); broad=0.0 corpus: 195,998 joined / est 19,811,494
+    main max posting 43,533 -> 103  (#main postings >1024: 1 -> 0) — the fat shared
+      class-B pair posting collapsed to its group leaders
+    cand/title unique 6,616.65 -> 53.75 (p95 43,701 -> 95;  p99 111;  max 136) — the
+      broad-FREE flat-~54 pin now holds on the BROAD-BEARING corpus
+    avg matches/title 6,562.671 (UNCHANGED — emission is the answer, not waste; the
+      recovery moves scan+verify volume, never the result set)
+    broad lane: broad_post/pass @bs=1 99,554,245 -> 2,281 (the identical class-C shapes
+      grouped too); broad cand/title 4,977.71 -> 0.11;  bs sweep 1x/1x/7x/29x/114x
+      amortization shape preserved;  prefilt_skip 0 (unchanged, corpus-shaped)
+    HOT-EMPTY PIN (broad=0.0, theta 0 vs 1024, dedup on both): H=0 both; candidates
+      byte-identical (54.03, p95 95, p99 111, max 151); 423,045 vs 416,172 t/s/core
+      per-title selective (~1.6%, run noise) — the hot tier is FREE when empty
+  THROUGHPUT — indicative (all dedup-on; baseline in parens):
+    per-title selective, broad=0.05:  84,708 t/s/core  (13,383 -> 6.3x recovered;
+      residual vs the broad-free 423k lane is EMISSION-bound: ~6.5k true matches/title
+      x ~550M emitted ids/s — levers 1/4 territory, not scan waste)
+    batch-path selective (broad OFF): 391,388 t/s  (93,452 -> 4.2x)
+    columnar broad bs=256:            192,343 t/s  (69,463 -> 2.8x);  inline broad
+      34,558 (16,377 -> 2.1x)
+    theta=1024 combined run within noise of dedup-only (84,501 / 394,374 / 191,874) —
+      at H=782 the hot tier costs nothing measurable, exactly as the corrected
+      reading predicted for THIS corpus
+    build 41.9s (477k q/s; baseline 44.5s — the 285,945 skipped posting inserts);
+      broad=0.0 builds 44.4s (449-452k q/s both theta)
+    (parallel per-title micro-bench reads 51-65k total @16T on this box — BELOW
+      single-thread; the per-thread work at these throughputs is too small for the
+      rayon chunking + per-thread scratch to amortize, and emission saturates write
+      bandwidth. The batch path is the parallel proxy that matters: 391-712k t/s.)
+  SOAK (20M + 2k sentinels, 50k titles, K=8, durable; RR_CLUSTER_SOAK_THETA):
+    theta=0, dedup-on: ALL GREEN, 264.3s total, build 60.7s (3,215 MB) — classes AND
+      cand/title (10,035.55; selective 5,164.52 + broad 4,871.04) IDENTICAL to the
+      ADR-104 canonical run: the durable cluster FLUSHES to mmap segments, whose
+      postings are always EXPANDED — Stage A's candidate-volume win is confined to
+      in-memory segments by design; the durable-path counterpart is Stage B (the
+      persisted indirection, roadmap increment 3, sized by the sketch above).
+      0 mismatches / 0 sentinel misses / 0 ghosts / reopen identical.
+    theta=1024, dedup-on: ALL GREEN, 263.7s — classes A/B/C/D/H = 19,913,851 /
+      350,192 / 348,616 / 0 / 798 (A -798 = exactly the theta-hot population under
+      the cluster dict; B/C byte-identical); every differential/sentinel/ghost/reopen
+      check identical to theta=0 — theta is visibility-invariant at 20M cluster scale.
+
 [2026-07-03] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  20M BROAD-BEARING BASELINE
               (bench 20000000 20000 0.05, default skew 2.0 / seed 0x00C0FFEE) — the
               Broad-Query Cost Program increment-1 "BEFORE" leg (observe-first telemetry +

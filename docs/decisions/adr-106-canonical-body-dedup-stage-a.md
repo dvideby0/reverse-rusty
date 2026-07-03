@@ -88,6 +88,20 @@ memory-vs-mmap stats-parity regression (`coverage_gaps/broad_lane.rs`) pins the 
 under-count class with `dedup_bodies=false`, since leader-scanning vs expanded postings is a
 stats divergence *by design*.
 
+## Measured (the combined 20M recovery — capture log 2026-07-03, `docs/performance/benchmark-results.txt`)
+
+On the ADR-104 broad=0.05 20M corpus: main max posting **43,533 → 103**, candidates/title
+**6,616.65 → 53.75** (the broad-free flat-~54 pin restored on the broad-bearing corpus),
+per-title selective **13,383 → 84,708 t/s/core (6.3×)**, batch selective **93,452 →
+391,388 (4.2×)**, broad postings/pass @bs=1 **99.5M → 2,281**; matches/title unchanged at
+6,562.671 (emission is the answer — the residual per-title gap vs the broad-free 423k lane
+is emission-bound, levers 1/4 territory). θ=1024 moves exactly `would_be_hot` = 782 → class
+H with results byte-identical; hot-empty overhead pinned free (423,045 vs 416,172 t/s/core,
+run noise). The 20M K=8 durable soak is green at θ ∈ {0, 1024} with zero mismatches; its
+candidate volume matches the ADR-104 canonical exactly — the durable path flushes to
+expanded mmap postings, so Stage A's candidate-volume win is in-memory-only by design
+(Stage B is the durable counterpart).
+
 ## Alternatives considered
 
 - **Persist the groups now (skip to Stage B).** Rejected: a segment-format indirection is the
