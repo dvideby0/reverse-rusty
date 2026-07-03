@@ -168,7 +168,18 @@ fn broad_postings_scanned_parity_memory_vs_mmap() {
     let data = generate(&cfg);
 
     // In-memory build: memory base segments (the path that always counted correctly).
-    let mut mem = Engine::new(Normalizer::default_vocab().expect("built-in vocab"));
+    // dedup_bodies OFF on both engines: body-group sharing (dedup Stage A) makes an
+    // in-memory segment scan LEADERS while the (always-expanded) mmap postings scan
+    // every member — a stats divergence by design, results identical (pinned by
+    // `tests/oracle/dedup.rs`). This test pins the ADR-101 under-count bug class,
+    // which needs the two backings structurally comparable.
+    let mut mem = Engine::with_config(
+        Normalizer::default_vocab().expect("built-in vocab"),
+        EngineConfig {
+            dedup_bodies: false,
+            ..EngineConfig::default()
+        },
+    );
     mem.build_from_queries(&data.queries);
 
     // Durable build of the SAME corpus: base segments are written + mmap'd, so per-title
@@ -184,6 +195,7 @@ fn broad_postings_scanned_parity_memory_vs_mmap() {
         Normalizer::default_vocab().expect("built-in vocab"),
         EngineConfig {
             data_dir: Some(dir.clone()),
+            dedup_bodies: false,
             ..EngineConfig::default()
         },
     );

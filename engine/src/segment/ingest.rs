@@ -192,7 +192,7 @@ impl Engine {
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
-        let accept_class_d = self.config.accept_class_d;
+        let knobs = self.config.compile_knobs();
         for (i, (_, logical, ex, text)) in extracted.iter().enumerate() {
             let Some(qtag_ids) = &tag_ids[i] else {
                 // Over-large tag set: rejected, never stored truncated.
@@ -207,21 +207,13 @@ impl Engine {
                 report.rejected_parse += 1;
                 continue;
             }
-            match seg.add_compiled(
-                ex,
-                qtag_ids,
-                &self.dict,
-                *logical,
-                1,
-                accept_class_d,
-                self.config.hot_anchor_threshold,
-            ) {
+            match seg.add_compiled(ex, qtag_ids, &self.dict, *logical, 1, knobs) {
                 None => {
                     self.rejected_class_d += 1;
                     report.rejected_class_d += 1;
                 }
-                Some((_, would_be_hot)) => {
-                    self.would_be_hot += u64::from(would_be_hot);
+                Some(added) => {
+                    self.record_compiled(&added);
                     accepted.push((*logical, (*text).to_string()));
                     report.ingested += 1;
                 }
@@ -358,20 +350,17 @@ impl Engine {
             }
         }
         let tag_ids = self.intern_tags(tags);
-        let outcome = Arc::make_mut(&mut self.memtable).add_compiled(
-            &ex,
-            &tag_ids,
-            &self.dict,
-            logical,
-            version,
-            true,
-            self.config.hot_anchor_threshold,
-        );
-        if let Some((local, would_be_hot)) = outcome {
-            self.would_be_hot += u64::from(would_be_hot);
+        let knobs = crate::segment::CompileKnobs {
+            accept_class_d: true, // gated pre-WAL above (ADR-068)
+            ..self.config.compile_knobs()
+        };
+        let outcome = Arc::make_mut(&mut self.memtable)
+            .add_compiled(&ex, &tag_ids, &self.dict, logical, version, knobs);
+        if let Some(added) = outcome {
+            self.record_compiled(&added);
             self.query_store.insert(logical, text.to_string());
             self.maybe_flush();
-            Ok(InsertOutcome::Inserted(local))
+            Ok(InsertOutcome::Inserted(added.local))
         } else {
             // Unreachable: the pre-WAL gate shares its predicate with
             // add_compiled, and the dict is unchanged in between. Kept as a
@@ -531,15 +520,13 @@ impl Engine {
         }
 
         let tag_ids = self.intern_tags(tags);
-        let Some((new_local, would_be_hot)) = Arc::make_mut(&mut self.memtable).add_compiled(
-            ex,
-            &tag_ids,
-            &self.dict,
-            logical,
-            version,
+        let knobs = crate::segment::CompileKnobs {
             accept_class_d,
-            self.config.hot_anchor_threshold,
-        ) else {
+            ..self.config.compile_knobs()
+        };
+        let Some(added) = Arc::make_mut(&mut self.memtable)
+            .add_compiled(ex, &tag_ids, &self.dict, logical, version, knobs)
+        else {
             // The new version is class D and not marked accepted (a legacy op-4
             // frame on replay, or an effectively empty query): leave the prior
             // copies untouched — a failed replace must never delete (ES `index`
@@ -547,7 +534,8 @@ impl Engine {
             // (manifest-persisted — codex).
             return UpsertOutcome::RejectedClassD;
         };
-        self.would_be_hot += u64::from(would_be_hot);
+        self.record_compiled(&added);
+        let new_local = added.local;
 
         let replaced = prior.len();
         for (seg_idx, local) in prior {
@@ -801,7 +789,7 @@ impl Engine {
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut accepted: Vec<(u64, String)> = Vec::new();
-        let accept_class_d = self.config.accept_class_d;
+        let knobs = self.config.compile_knobs();
         for (i, (idx, logical, ex, text)) in extracted.iter().enumerate() {
             let Some(qtag_ids) = &tag_ids[i] else {
                 // Over-large tag set: rejected, never stored truncated.
@@ -824,22 +812,14 @@ impl Engine {
                 ));
                 continue;
             }
-            match seg.add_compiled(
-                ex,
-                qtag_ids,
-                &self.dict,
-                *logical,
-                1,
-                accept_class_d,
-                self.config.hot_anchor_threshold,
-            ) {
+            match seg.add_compiled(ex, qtag_ids, &self.dict, *logical, 1, knobs) {
                 None => {
                     self.rejected_class_d += 1;
                     report.rejected_class_d += 1;
                     item_status[*idx] = IngestItemStatus::RejectedClassD;
                 }
-                Some((_, would_be_hot)) => {
-                    self.would_be_hot += u64::from(would_be_hot);
+                Some(added) => {
+                    self.record_compiled(&added);
                     accepted.push((*logical, (*text).to_string()));
                     report.ingested += 1;
                 }
@@ -897,16 +877,15 @@ impl Engine {
                 tag_ids.sort_unstable();
                 tag_ids.dedup();
             }
-            if let Some((_, would_be_hot)) = seg.add_compiled(
+            if let Some(added) = seg.add_compiled(
                 &item.ex,
                 &tag_ids,
                 &self.dict,
                 item.logical,
                 item.version,
-                self.config.accept_class_d,
-                self.config.hot_anchor_threshold,
+                self.config.compile_knobs(),
             ) {
-                self.would_be_hot += u64::from(would_be_hot);
+                self.record_compiled(&added);
                 accepted.push((item.logical, item.dsl.clone()));
                 report.ingested += 1;
             } else {
@@ -954,13 +933,12 @@ impl Engine {
             &self.dict,
             logical,
             version,
-            self.config.accept_class_d,
-            self.config.hot_anchor_threshold,
+            self.config.compile_knobs(),
         );
-        if let Some((local, would_be_hot)) = outcome {
-            self.would_be_hot += u64::from(would_be_hot);
+        if let Some(added) = outcome {
+            self.record_compiled(&added);
             self.query_store.insert(logical, text.to_string());
-            Some(local)
+            Some(added.local)
         } else {
             self.rejected_class_d += 1;
             None
@@ -996,16 +974,14 @@ impl Engine {
                 let dict = Arc::make_mut(&mut self.dict);
                 extract(&ast, &self.norm, dict, &mut lc)
             };
-            if let Some((_, would_be_hot)) = Arc::make_mut(&mut self.memtable).add_compiled(
-                &ex,
-                &tag_ids,
-                &self.dict,
-                logical,
-                version,
-                class_d_accepted,
-                self.config.hot_anchor_threshold,
-            ) {
-                self.would_be_hot += u64::from(would_be_hot);
+            let knobs = crate::segment::CompileKnobs {
+                accept_class_d: class_d_accepted,
+                ..self.config.compile_knobs()
+            };
+            if let Some(added) = Arc::make_mut(&mut self.memtable)
+                .add_compiled(&ex, &tag_ids, &self.dict, logical, version, knobs)
+            {
+                self.record_compiled(&added);
                 self.query_store.insert(logical, text.to_string());
             }
         }

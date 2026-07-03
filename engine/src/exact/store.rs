@@ -302,6 +302,101 @@ impl ExactStore {
             && self.req_mask[i].is_power_of_two()
     }
 
+    /// The CANONICAL body signature of stored query `local` (dedup Stage A):
+    /// a 64-bit hash over the query's SEMANTIC columns only — the two mask
+    /// words, the required/forbidden tails as SORTED sets, and the any-of
+    /// groups as a SORTED multiset of sorted member sets. Tags, version and
+    /// logical id are deliberately excluded (they are per-member identity, not
+    /// semantics). Two queries with equal signatures are *candidates* for
+    /// sharing; the caller must confirm with [`bodies_equal`](Self::bodies_equal)
+    /// (a hash collision must never cause false sharing — that would be a
+    /// correctness bug, not a missed optimization).
+    pub fn body_signature(&self, local: u32) -> u64 {
+        let i = local as usize;
+        let mut h = crate::util::fnv1a64(b"body");
+        let mut mix = |v: u64| {
+            for b in v.to_le_bytes() {
+                h = (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01B3);
+            }
+        };
+        mix(self.req_mask[i]);
+        mix(self.forb_mask[i]);
+        let sorted = |off: u32, len: u16, blob: &[u32]| -> Vec<u32> {
+            let mut v = blob[off as usize..off as usize + len as usize].to_vec();
+            v.sort_unstable();
+            v
+        };
+        let req = sorted(self.req_off[i], self.req_len[i], &self.req_blob);
+        mix(0xA1); // domain separators between variable-length sections
+        for f in &req {
+            mix(u64::from(*f));
+        }
+        let forb = sorted(self.forb_off[i], self.forb_len[i], &self.forb_blob);
+        mix(0xA2);
+        for f in &forb {
+            mix(u64::from(*f));
+        }
+        let mut groups = self.canonical_groups(i);
+        mix(0xA3);
+        for g in groups.drain(..) {
+            mix(0xA4);
+            for f in g {
+                mix(u64::from(f));
+            }
+        }
+        h
+    }
+
+    /// The any-of groups of row `i` in canonical form: each group's members
+    /// sorted, and the groups themselves sorted (a multiset comparison key).
+    fn canonical_groups(&self, i: usize) -> Vec<Vec<u32>> {
+        let gs = self.q_group_start[i] as usize;
+        let gc = self.q_group_count[i] as usize;
+        let mut groups: Vec<Vec<u32>> = (gs..gs + gc)
+            .map(|gi| {
+                let go = self.group_off[gi] as usize;
+                let gl = self.group_len[gi] as usize;
+                let mut g = self.anyof_blob[go..go + gl].to_vec();
+                g.sort_unstable();
+                g
+            })
+            .collect();
+        groups.sort_unstable();
+        groups
+    }
+
+    /// Exact canonical-body equality between two stored rows — the collision
+    /// check behind [`body_signature`](Self::body_signature). Compares the
+    /// SEMANTIC columns only (masks, sorted tails, canonicalized groups); never
+    /// tags/version/logical.
+    pub fn bodies_equal(&self, a: u32, b: u32) -> bool {
+        let (ia, ib) = (a as usize, b as usize);
+        if self.req_mask[ia] != self.req_mask[ib]
+            || self.forb_mask[ia] != self.forb_mask[ib]
+            || self.req_len[ia] != self.req_len[ib]
+            || self.forb_len[ia] != self.forb_len[ib]
+            || self.q_group_count[ia] != self.q_group_count[ib]
+        {
+            return false;
+        }
+        let sorted = |off: u32, len: u16, blob: &[u32]| -> Vec<u32> {
+            let mut v = blob[off as usize..off as usize + len as usize].to_vec();
+            v.sort_unstable();
+            v
+        };
+        if sorted(self.req_off[ia], self.req_len[ia], &self.req_blob)
+            != sorted(self.req_off[ib], self.req_len[ib], &self.req_blob)
+        {
+            return false;
+        }
+        if sorted(self.forb_off[ia], self.forb_len[ia], &self.forb_blob)
+            != sorted(self.forb_off[ib], self.forb_len[ib], &self.forb_blob)
+        {
+            return false;
+        }
+        self.canonical_groups(ia) == self.canonical_groups(ib)
+    }
+
     /// The hot-tier twin of [`is_pure_anchor`](Self::is_pure_anchor) (ADR-105):
     /// whether query `local`'s ENTIRE semantics is the single TAIL-stored
     /// required feature `anchor`. A class-H anchor is θ-hot but NOT top-64, so

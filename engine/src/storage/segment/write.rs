@@ -21,7 +21,15 @@ use super::{
 
 /// Build a frozen hash table + posting blob from an in-memory CandidateIndex.
 /// Returns (slots, posting_blob).
-fn freeze_index(index: &CandidateIndex) -> (Vec<FrozenSlot>, Vec<u32>) {
+///
+/// On a group-bearing segment (dedup Stage A) each posting entry — a body-group
+/// LEADER — is EXPANDED to the whole group here: the on-disk format carries no
+/// group indirection, so an mmap reader (and any pre-dedup binary) sees plain
+/// per-entry postings. Group-free segments flatten byte-identically. The
+/// expanded run is re-sorted (members carry higher local ids than their leader,
+/// so groups interleave); ids stay unique because every local belongs to
+/// exactly one group.
+fn freeze_index(index: &CandidateIndex, seg: &Segment) -> (Vec<FrozenSlot>, Vec<u32>) {
     let n = index.num_signatures();
     if n == 0 {
         return (vec![FrozenSlot::default(); 1], Vec::new());
@@ -31,11 +39,21 @@ fn freeze_index(index: &CandidateIndex) -> (Vec<FrozenSlot>, Vec<u32>) {
     let mask = (cap - 1) as u64;
     let mut slots = vec![FrozenSlot::default(); cap];
     let mut blob = Vec::new();
+    let grouped = seg.has_dup_groups();
 
     index.for_each_posting(|key, posting| {
         let offset = blob.len() as u32;
-        // Flatten posting IDs into the blob
-        posting.for_each(|id| blob.push(id));
+        // Flatten posting IDs into the blob (expanding body groups)
+        if grouped {
+            let start = blob.len();
+            posting.for_each(|id| {
+                blob.push(id);
+                blob.extend_from_slice(seg.members_of(id));
+            });
+            blob[start..].sort_unstable();
+        } else {
+            posting.for_each(|id| blob.push(id));
+        }
         let len = blob.len() as u32 - offset;
         // Insert into hash table with linear probing
         let mut idx = key & mask;
@@ -122,12 +140,12 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     // ---- Main index ----
     pad_to_8(&mut f)?;
     let main_off = f.stream_position()?;
-    write_frozen_index_section(&mut f, seg.main_index())?;
+    write_frozen_index_section(&mut f, seg.main_index(), seg)?;
 
     // ---- Broad index ----
     pad_to_8(&mut f)?;
     let broad_off = f.stream_position()?;
-    write_frozen_index_section(&mut f, seg.broad_index())?;
+    write_frozen_index_section(&mut f, seg.broad_index(), seg)?;
 
     // ---- Filter ----
     pad_to_8(&mut f)?;
@@ -176,7 +194,7 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     let hot_off = if has_hot {
         pad_to_8(&mut f)?;
         let off = f.stream_position()?;
-        write_frozen_index_section(&mut f, seg.hot_index())?;
+        write_frozen_index_section(&mut f, seg.hot_index(), seg)?;
         off
     } else {
         0
@@ -254,8 +272,9 @@ fn write_exact_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Result
 fn write_frozen_index_section(
     w: &mut (impl Write + Seek),
     index: &CandidateIndex,
+    seg: &Segment,
 ) -> io::Result<()> {
-    let (slots, blob) = freeze_index(index);
+    let (slots, blob) = freeze_index(index, seg);
     // Write slots as a u64-aligned array (each slot is 16 bytes = 2 u64s)
     let cap = slots.len();
     write_u32(w, cap as u32)?;

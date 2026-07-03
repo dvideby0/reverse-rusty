@@ -33,6 +33,13 @@ impl Segment {
     /// reclaiming their space. The resulting segment is equivalent to the union
     /// of the alive entries from all sources.
     pub fn compact_from(sources: &[&Segment]) -> Segment {
+        // Group-aware only when a source actually carries body groups (dedup
+        // Stage A): the dominant compaction inputs — mmap-attached segments,
+        // whose on-disk postings are always expanded — take the pre-dedup path
+        // below byte-identically.
+        if sources.iter().any(|s| s.has_dup_groups()) {
+            return Self::compact_from_grouped(sources);
+        }
         let mut dest = Segment::new();
 
         for &src in sources {
@@ -48,6 +55,7 @@ impl Segment {
                     dest.alive.push(true);
                     dest.alive_counter += 1;
                     dest.logical_index.entry(logical).or_default().push(new_id);
+                    dest.dup_of.push(new_id); // identity: no groups on this arm
                     remap[old] = new_id;
                 }
             }
@@ -85,6 +93,89 @@ impl Segment {
         // Build anchor filter for the newly compacted (sealed) segment.
         dest.build_filter();
         // Merged segment inherits the minimum epoch — still stale if any source was.
+        dest.vocab_epoch = sources.iter().map(|s| s.vocab_epoch).min().unwrap_or(0);
+        dest
+    }
+
+    /// The group-aware arm of [`compact_from`](Self::compact_from) (dedup
+    /// Stage A). Two changes from the mechanical remap, both forced by the fact
+    /// that a source posting entry is a group LEADER:
+    ///
+    /// - **An entry's keys are its source leader's keys** (`dup_of[old]`'s
+    ///   inverted postings) — a member has none of its own, and a dead leader's
+    ///   keys must still carry its alive members (dropping them would unanchor
+    ///   the members: a false negative). Lossless because group members share
+    ///   the leader's SEMANTIC body, for which the leader's cover is a valid
+    ///   lossless cover.
+    /// - **Groups are re-derived on the dest side** by canonical body, so
+    ///   sharing survives the merge — and identical bodies from DIFFERENT
+    ///   source segments regroup here (compaction is the cross-segment dedup
+    ///   mechanism). A member adopts its dest leader's class (the lane whose
+    ///   postings it rides).
+    ///
+    /// Entries are processed in ascending (source, old-id) order and a dest
+    /// leader inserts its keys at its (ascending) new id immediately, so every
+    /// posting stays sorted by construction.
+    fn compact_from_grouped(sources: &[&Segment]) -> Segment {
+        let mut dest = Segment::new();
+
+        for &src in sources {
+            // Invert the indexes once, lane-separated (leader old_id → sig keys).
+            let mut old_main: Vec<Vec<u64>> = vec![Vec::new(); src.len()];
+            let mut old_broad: Vec<Vec<u64>> = vec![Vec::new(); src.len()];
+            let mut old_hot: Vec<Vec<u64>> = vec![Vec::new(); src.len()];
+            src.main.for_each_posting(|key, posting| {
+                posting.for_each(|old_id| old_main[old_id as usize].push(key));
+            });
+            src.broad.for_each_posting(|key, posting| {
+                posting.for_each(|old_id| old_broad[old_id as usize].push(key));
+            });
+            src.hot.for_each_posting(|key, posting| {
+                posting.for_each(|old_id| old_hot[old_id as usize].push(key));
+            });
+
+            for (old, &is_alive) in src.alive.iter().enumerate() {
+                if !is_alive {
+                    continue;
+                }
+                let new_id = src.exact.copy_entry(old as u32, &mut dest.exact);
+                let logical = dest.exact.logical(new_id);
+                let body_hash = dest.exact.body_signature(new_id);
+                let joined = dest.body_index.get(&body_hash).and_then(|leaders| {
+                    leaders
+                        .iter()
+                        .copied()
+                        .find(|&l| dest.exact.bodies_equal(l, new_id))
+                });
+                if let Some(leader) = joined {
+                    dest.dup_of.push(leader);
+                    dest.dup_members.entry(leader).or_default().push(new_id);
+                    dest.class.push(dest.class[leader as usize]);
+                } else {
+                    dest.dup_of.push(new_id);
+                    dest.body_index.entry(body_hash).or_default().push(new_id);
+                    // The source LEADER's keys (this entry's own for a singleton).
+                    // Read at most once: an alive source leader becomes the dest
+                    // leader before its members arrive, and once a body has a dest
+                    // leader every later same-body entry joins above.
+                    let src_leader = src.dup_leader_of(old as u32) as usize;
+                    for &k in &old_main[src_leader] {
+                        dest.main.insert(k, new_id);
+                    }
+                    for &k in &old_broad[src_leader] {
+                        dest.broad.insert(k, new_id);
+                    }
+                    for &k in &old_hot[src_leader] {
+                        dest.hot.insert(k, new_id);
+                    }
+                    dest.class.push(src.class[old]);
+                }
+                dest.alive.push(true);
+                dest.alive_counter += 1;
+                dest.logical_index.entry(logical).or_default().push(new_id);
+            }
+        }
+        dest.build_filter();
         dest.vocab_epoch = sources.iter().map(|s| s.vocab_epoch).min().unwrap_or(0);
         dest
     }
@@ -137,6 +228,18 @@ impl Segment {
     /// entry's fresh sigs are inserted at its (ascending) new id immediately, so every posting
     /// stays sorted by construction (no per-insert sort/dedup needed — same contract as
     /// `add_compiled`).
+    ///
+    /// **Body groups (dedup Stage A)** are re-derived on the dest side exactly as in
+    /// [`compact_from`](Self::compact_from): the first alive entry of each canonical body
+    /// becomes the dest leader and carries the group's cover; every later same-body entry
+    /// joins its group, inserts no postings, and ADOPTS the leader's (possibly migrated,
+    /// possibly kept-old) class. An adoption that crosses the main↔hot boundary still counts
+    /// in `hot_promoted`/`hot_demoted` — the class split moved — but is exempt from
+    /// `max_moves` (the cap bounds posting-rebuild work; an adoption does none). A source
+    /// member's re-anchor inputs are its own (identical) body columns, so the shared-body
+    /// invariant "one dest leader per body" holds without consulting source groups; a DEAD
+    /// source leader's alive members re-derive a fresh cover rather than inheriting keys
+    /// (this is the re-anchoring merge — every leader's cover is rebuilt anyway).
     pub fn compact_from_reanchored(
         sources: &[&Segment],
         dict: &Dict,
@@ -176,6 +279,35 @@ impl Segment {
                 let logical = dest.exact.logical(new_id);
                 let old_class = src.class[old];
 
+                // Body regroup (dedup Stage A) — join an existing dest group and adopt
+                // its leader's class; only a dest LEADER re-derives a cover below.
+                let body_hash = dest.exact.body_signature(new_id);
+                let joined = dest.body_index.get(&body_hash).and_then(|leaders| {
+                    leaders
+                        .iter()
+                        .copied()
+                        .find(|&l| dest.exact.bodies_equal(l, new_id))
+                });
+                if let Some(leader) = joined {
+                    let adopted = dest.class[leader as usize];
+                    if matches!(old_class, CostClass::A | CostClass::B) && adopted == CostClass::H {
+                        stats.hot_promoted += 1;
+                    } else if old_class == CostClass::H
+                        && matches!(adopted, CostClass::A | CostClass::B)
+                    {
+                        stats.hot_demoted += 1;
+                    }
+                    dest.dup_of.push(leader);
+                    dest.dup_members.entry(leader).or_default().push(new_id);
+                    dest.class.push(adopted);
+                    dest.alive.push(true);
+                    dest.alive_counter += 1;
+                    dest.logical_index.entry(logical).or_default().push(new_id);
+                    continue;
+                }
+                dest.dup_of.push(new_id);
+                dest.body_index.entry(body_hash).or_default().push(new_id);
+
                 // Re-derive the cover from the (unchanged) stored required/any-of features
                 // against the current dict. `anchor_plan` reads only required + any-of, so the
                 // empty `forbidden` here is irrelevant to selection.
@@ -196,9 +328,14 @@ impl Segment {
                     "a stored non-D query must never re-anchor to class D"
                 );
 
-                let prev_main = std::mem::take(&mut old_main[old]);
-                let prev_broad = std::mem::take(&mut old_broad[old]);
-                let prev_hot = std::mem::take(&mut old_hot[old]);
+                // A source member carries no postings of its own — its keep-old cover
+                // (and the did-it-move comparison) is its source LEADER's key set,
+                // a valid lossless cover for the shared body. Identity for
+                // singletons. Read at most once (see `compact_from_grouped`).
+                let src_leader = src.dup_leader_of(old as u32) as usize;
+                let prev_main = std::mem::take(&mut old_main[src_leader]);
+                let prev_broad = std::mem::take(&mut old_broad[src_leader]);
+                let prev_hot = std::mem::take(&mut old_hot[src_leader]);
 
                 // CORRECTNESS GUARD — never demote an always-visible (A/B/H) query into the
                 // broad lane. The main index and the hot tier are probed on every percolate;
