@@ -408,6 +408,85 @@ fn thousand_identical_queries_scan_one_posting_entry() {
     );
 }
 
+/// The dedup × migration interplay (ADR-105 + ADR-106): an identical-body
+/// population θ-migrates as ONE leader decision plus N cap-EXEMPT adoptions —
+/// the whole group crosses A→H in a single merge even under a tiny work cap
+/// (the cap bounds posting-REBUILD work; an adoption does none), the counters
+/// still report the full class-split movement, and results are untouched.
+/// The distinct-body cap semantics live in `hot.rs`
+/// (`migration_work_cap_bounds_per_merge_and_converges`).
+#[test]
+fn grouped_migration_is_one_leader_move_with_cap_exempt_adoptions() {
+    // 70 filler features with descending frequencies own the 64 mask bits
+    // (the `hot.rs::masked_filler_corpus` construction), leaving `grptok`
+    // (freq 40) θ-hot-but-unmasked at θ=30.
+    let mut queries: Vec<(u64, String)> = Vec::new();
+    let mut id = 0u64;
+    for i in 0..70u64 {
+        for _ in 0..(200 + 4 * i) {
+            queries.push((id, format!("fillertok{i} uniq{id}")));
+            id += 1;
+        }
+    }
+    for _ in 0..40 {
+        queries.push((id, "grptok".to_string())); // ONE body × 40 copies
+        id += 1;
+    }
+    let titles: Vec<String> = vec!["grptok anything".into(), "fillertok8 uniq2".into()];
+    let mut eng = Engine::with_config(
+        Normalizer::default_vocab().expect("vocab"),
+        EngineConfig {
+            compaction_reanchor: true,
+            auto_compact_on_flush: false,
+            auto_compact_on_ingest: false,
+            ..cfg_dedup(true)
+        },
+    );
+    // Build θ-OFF in two segments (the grptok copies split across both), so the
+    // merge also regroups cross-segment.
+    let half = queries.len() / 2;
+    eng.build_from_queries(&queries[..half]);
+    eng.bulk_ingest(&queries[half..]);
+    assert_eq!(eng.class_counts()[4], 0);
+    let before = per_title_sets(&eng, &titles, true).0;
+
+    // θ=30 under a cap of 1: the single leader decision fits the cap, and the
+    // 39 adoptions ride along — the whole group migrates in ONE merge.
+    let mut cfg = EngineConfig {
+        hot_anchor_threshold: 30,
+        hot_migration_max_moves: 1,
+        compaction_reanchor: true,
+        auto_compact_on_flush: false,
+        auto_compact_on_ingest: false,
+        ..cfg_dedup(true)
+    };
+    eng.set_config(cfg.clone());
+    let r = eng.compact_all().expect("reanchoring compaction");
+    assert_eq!(
+        r.hot_promoted, 40,
+        "the counters must report the FULL class-split movement (1 leader + 39 adoptions)"
+    );
+    assert_eq!(
+        eng.class_counts()[4],
+        40,
+        "the whole group crossed together"
+    );
+    assert_eq!(
+        per_title_sets(&eng, &titles, true).0,
+        before,
+        "grouped migration changed results"
+    );
+
+    // And back: θ high enough that freq 40 ≤ θ/2 — the group demotes together.
+    cfg.hot_anchor_threshold = 300;
+    eng.set_config(cfg);
+    eng.bulk_ingest(&queries[..4]); // a second segment so compact_all has a merge to do
+    let r = eng.compact_all().expect("demoting compaction");
+    assert_eq!(r.hot_demoted, 40);
+    assert_eq!(eng.class_counts()[4], 0);
+    assert_eq!(per_title_sets(&eng, &titles, true).0, before);
+}
+
 /// Upsert interplay: replacing a MEMBER tombstones its copy without touching
 /// the group; upserting it back to the same body re-joins as a fresh member.
 #[test]
