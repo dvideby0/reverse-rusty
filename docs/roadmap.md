@@ -9,17 +9,21 @@ component design → [`design/`](design/README.md).
 Priority follows the bottleneck analysis ([`performance/results.md`](performance/results.md) §9):
 the selective path is far past the spec target with a flat ~54 candidates/title, so the leverage is
 in the broad lane, memory/footprint, and the durability + scale story — not in shaving the
-selective candidate count further. **But before any tier work, Phase 0 (the reality / adversarial
-audit) runs first — it is the current top priority.**
+selective candidate count further. Phase 0 (the reality / adversarial audit) preceded all tier work
+and is complete except its one externally-blocked item. **The current top development priority is
+the [Broad-Query Cost Program](#the-broad-query-cost-program--current-top-development-priority)
+below.**
 
-## Phase 0 — Reality / adversarial audit (do this first)
+## Phase 0 — Reality / adversarial audit — ✅ complete except item 4 (externally blocked)
 
-**Top priority — precedes every tier below.** The engine is oracle-proven, but the in-tree differential
-oracle *shares the front-end* (normalizer, parser, extractor, dict) with the engine, so a front-end bug
-is structurally invisible to it (the reference-free `tests/adversarial.rs` only partly covers this —
-ADR-063). This phase proves which parts are real — under an *independent* check and under real failure —
-before more is built on top. Goal: separate what's real from plausible-looking scaffolding. Tier work
-resumes once it passes.
+**This phase preceded all tier work and no longer gates anything.** The engine is oracle-proven, but
+the in-tree differential oracle *shares the front-end* (normalizer, parser, extractor, dict) with the
+engine, so a front-end bug is structurally invisible to it (the reference-free `tests/adversarial.rs`
+only partly covers this — ADR-063). This phase proved which parts are real — under an *independent*
+check and under real failure — before more was built on top. Items 1/2/3/5 shipped; **item 4 remains
+open, blocked on externally-supplied inputs (a real cluster + a real corpus) and does not block
+active development** — the current top priority is the
+[Broad-Query Cost Program](#the-broad-query-cost-program--current-top-development-priority) below.
 
 1. **Fresh-clone build & deploy smoke — ✅ shipped
    ([`operations/build-and-smoke.md`](operations/build-and-smoke.md)).** The reproducible-from-zero
@@ -62,6 +66,55 @@ resumes once it passes.
    `_backup` client-`dest` path-traversal finding dispositioned (auth-gated + non-root operator
    responsibility; an optional config jail deferred). Docs + tooling only; no code-level vuln found.
    *Deferred:* a distroless/curl-free base, the `_backup` jail, mTLS + per-RPC authz (ADR-071 post-v1).
+
+## The Broad-Query Cost Program — current top development priority
+
+**Adopted 2026-07-03** after two independent external reviews (both converged on the same
+ranking). The program spec — problem, today's mechanics, the four design obligations
+(cost lane ≠ visibility lane · the agreement fence · compaction-only reorganization ·
+oracle-gated migration), lever designs, and the review outcome — is
+[`proposals/broad-cost-program.md`](proposals/broad-cost-program.md); the evidence base is
+[ADR-104](decisions/adr-104-cluster-scale-soak.md) (the measured 32× realtime-lane defect +
+the broad-volume decomposition) and
+[`research/broad-scaling-prior-art.md`](research/broad-scaling-prior-art.md). Each increment
+ships under its own ADR with the ADR-104 soak as the standing at-scale acceptance run.
+
+1. **Increment 1 — two-axis placement + frequency-threshold reclassification + the
+   always-visible hot tier (+ batch-pass internals).** Adopt the two-axis placement model
+   (visibility × evaluation strategy) as the architecture rule; split `is_hot`'s two roles —
+   the 64-bit verify mask stays frozen, classification gains
+   `is_hot_anchor = top64 ∨ posting ≥ θ` (initial θ = the ~1024 roaring-tier boundary,
+   persisted per the agreement-fence discipline); θ-hot-anchored queries land in a **hot
+   tier** — columnar-evaluated like the broad lane, **probed on every request** like the main
+   lane (the ADR-056 demote-guard reasoning honored structurally). Observe-first counter +
+   posting-length percentiles in `/_stats` ship first inside this increment; compaction
+   migrates old segments margin-gated (demote ≥ θ, promote ≤ θ/2) under per-merge work caps.
+   Bundled: the broad/hot batch pass gains the **`min_feature` count pre-reject** (a
+   necessary-condition filter — under-reject is the only error direction) and
+   **dense-posting promotion** past a relative-size threshold (Vespa-proven, 0.40 default).
+   **Acceptance:** the oracle stack + the measured recovery of the 20M broad-on realtime lane
+   (the 32×) + a pinned **hot-tier fixed-overhead** number on hot-empty corpora (the named
+   regression risk) + an ADR-104 soak re-run. **Not gated on the real corpus** — the defect is
+   corpus-independent; real data later refines θ only.
+2. **Increment 2 — duplicate interning, Stage A ("measure by building the cheap half").**
+   Canonical-compiled-body hash at ingest feeding a duplication-rate sketch (telemetry), plus
+   memtable/flush-time **per-segment** body sharing — no format change, reversible, delivers a
+   fraction of the win and *is* the instrument that sizes Stage B.
+3. **Increment 3 — duplicate interning, Stage B (format bump, gated on Stage A's numbers).**
+   Segment-format body→member indirection (one verify row + member ID list per distinct
+   compiled body), cross-segment dedup at compaction, member-level WAL/upsert/tag/rank
+   semantics. Ships only if Stage A measures a duplication rate that justifies the most
+   expensive-to-un-ship kind of change.
+4. **Increment 4 — pair-anchor escalation + residual factoring (gated on the real corpus +
+   increments 1–2).** Joint-frequency pair anchors for θ-hot multi-feature queries via
+   query-nominated count-min sketches, with the compile/match pairing predicate extended **on
+   both sides in lockstep** and persisted (the fence — the program's only match-side-agreement
+   risk); residual factoring inside posting lists (subtract probe-implied features, group by
+   residual shape, size-specialized kernels).
+
+*The real-corpus sample (the ADR-087 `RR_ORACLE_CORPUS` intake) sizes increments 3–4 and
+closes ADR-065 criterion 12's open half — one sample serves both — but does **not** block
+increment 1.*
 
 ### Tier 0 — Cluster v1 acceptance gate — ✅ complete
 

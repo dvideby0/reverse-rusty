@@ -32,6 +32,10 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`roadmap.md`](roadmap.md) — the **prioritized roadmap**: **open work only** (a shipped item is
   deleted — the ADR is the record), plus the operational-polish backlog and evaluated-and-declined.
   Read when asking "what's next?".
+- [`proposals/broad-cost-program.md`](proposals/broad-cost-program.md) — the **accepted program
+  spec** for the current top roadmap priority (the Broad-Query Cost Program): problem +
+  measurements, today's mechanics, the four design obligations, the lever designs, and the
+  review-adopted sequencing. Each increment still ships under its own ADR.
 - [`DECISIONS.md`](DECISIONS.md) — the **index** of ADRs (architecture decision records); each ADR's
   full record is one file under [`decisions/`](decisions/). Read when asking "why was it done this
   way?" or "why was X *not* built?" (declined → ADR-019).
