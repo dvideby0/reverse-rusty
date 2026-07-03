@@ -56,6 +56,11 @@ fn main() {
         "cost classes        : A(selective)={}  B(arity-2/anyof)={}  C(broad)={}  D(rejected)={}",
         cc[0], cc[1], cc[2], cc[3]
     );
+    // Observe-first hot-tier telemetry (Broad-Query Cost Program): main-lane
+    // queries whose deciding anchor is already past the default θ — the
+    // population a frequency-threshold reclassification would move to the hot
+    // tier. Machine-independent (seed-fixed), so it belongs in the capture log.
+    println!("would-be hot        : {}", eng.would_be_hot());
     println!("dict features       : {}", eng.dict_len());
     println!(
         "main signatures     : {}",
