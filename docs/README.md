@@ -100,6 +100,10 @@ Three levels, each giving *just enough* to decide whether to go deeper:
 - [`research/README.md`](research/README.md) — index of the prior-art studies.
 - [`research/prior-art.md`](research/prior-art.md) — Lucene Monitor, ES/OS percolator, Tantivy,
   roaring, Aho-Corasick, set-containment joins.
+- [`research/broad-scaling-prior-art.md`](research/broad-scaling-prior-art.md) — hot/broad
+  predicates, duplicate queries, shared evaluation, self-tuning classification: the k-index→Vespa
+  lineage, BE/PS/A-Trees, SIFT/Le Subscribe/NiagaraCQ/YFilter, Siena covering, LEO/CE-feedback —
+  five evidence-ranked levers + FN-safety arguments (→ ADR-104's measured broad growth).
 - [`research/percolator-workload.md`](research/percolator-workload.md) — the abstract **reference
   workload** a production percolator serves (per-query tags, filter-by-tag, two-stage recall+verify,
   ranking-as-presentation) and how Reverse Rusty maps to it (→ ADR-049, STATUS Tier 4).
