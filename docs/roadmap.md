@@ -93,16 +93,18 @@ ships under its own ADR with the ADR-104 soak as the standing at-scale acceptanc
    already amortizes posting iteration; ADR-105 §Deferred). The recovery acceptance (20M bench
    + `RR_CLUSTER_SOAK_THETA` soak re-run + the hot-empty overhead pin) runs once Stage A lands,
    with BOTH in place — the combined increment attacks the measured defect honestly.
-2. **Increment 2 — duplicate interning, Stage A ("measure by building the cheap half") — IN
-   PROGRESS, paired with increment 1's merge.** Canonical-compiled-body hash at ingest feeding
-   a duplication-rate sketch (telemetry), plus memtable/flush-time **per-segment** body
-   sharing — no format change, reversible, delivers a fraction of the win and *is* the
-   instrument that sizes Stage B.
+2. **Increment 2 — duplicate interning, Stage A — ✅ built
+   ([ADR-106](decisions/adr-106-canonical-body-dedup-stage-a.md)); merges paired with
+   increment 1.** Canonical-body groups share one posting entry per in-memory segment
+   (verified once, emitted per member under per-member aliveness/tags); flush expands (no
+   format change); compaction regroups cross-segment; the `bodies_total`/`dup_joined` counters
+   + the linear-counting global distinct-bodies sketch are the Stage B sizing instrument.
 3. **Increment 3 — duplicate interning, Stage B (format bump, gated on Stage A's numbers).**
    Segment-format body→member indirection (one verify row + member ID list per distinct
-   compiled body), cross-segment dedup at compaction, member-level WAL/upsert/tag/rank
-   semantics. Ships only if Stage A measures a duplication rate that justifies the most
-   expensive-to-un-ship kind of change.
+   compiled body — extends Stage A's in-memory groups to the mmap'd/persisted majority of a
+   durable corpus), member-level WAL/upsert/tag/rank semantics. Ships only if Stage A's sketch
+   measures a duplication rate on the REAL corpus that justifies the most expensive-to-un-ship
+   kind of change.
 4. **Increment 4 — pair-anchor escalation + residual factoring (gated on the real corpus +
    increments 1–2).** Joint-frequency pair anchors for θ-hot multi-feature queries via
    query-nominated count-min sketches, with the compile/match pairing predicate extended **on
