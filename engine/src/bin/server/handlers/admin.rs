@@ -69,6 +69,10 @@ struct EngineStatsResponse {
     /// compiles since process start that would reclassify to the hot tier under
     /// the default hot-anchor threshold.
     would_be_hot: u64,
+    /// Canonical-body dedup telemetry (Stage A): accepted compiles, how many
+    /// joined an existing per-segment body group, and a linear-counting
+    /// estimate of DISTINCT bodies seen (global — the cross-segment potential).
+    dedup: DedupStats,
     class_counts: ClassCounts,
     /// Posting-length percentiles per candidate-index lane (nearest-rank; a fat
     /// main `max` against a modest `p99` is the top-64 rank-cliff fingerprint).
@@ -76,6 +80,13 @@ struct EngineStatsResponse {
     segment_sizes: Vec<usize>,
     segment_holes: Vec<f64>,
     memory: MemoryStats,
+}
+
+#[derive(Serialize)]
+struct DedupStats {
+    bodies_total: u64,
+    dup_joined: u64,
+    distinct_bodies_est: u64,
 }
 
 #[derive(Serialize)]
@@ -348,6 +359,11 @@ pub(crate) async fn stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
         rejected_parse: m.rejected_parse,
         rejected_class_d: m.rejected_class_d,
         would_be_hot: m.would_be_hot,
+        dedup: DedupStats {
+            bodies_total: m.bodies_total,
+            dup_joined: m.dup_joined,
+            distinct_bodies_est: m.distinct_bodies_est,
+        },
         class_counts: ClassCounts {
             a: cc[0],
             b: cc[1],
@@ -391,6 +407,10 @@ pub(crate) async fn cat_stats(State(state): State<Arc<AppState>>) -> impl IntoRe
     out.push_str(&format!("rejected parse   {}\n", m.rejected_parse));
     out.push_str(&format!("rejected classD  {}\n", m.rejected_class_d));
     out.push_str(&format!("would-be hot     {}\n", m.would_be_hot));
+    out.push_str(&format!(
+        "dedup            {} joined / {} bodies (distinct est {})\n",
+        m.dup_joined, m.bodies_total, m.distinct_bodies_est
+    ));
     let lanes = snap.lane_posting_stats();
     out.push_str(&format!(
         "postings main    {} sigs (p50 {} p95 {} p99 {} max {})\n",

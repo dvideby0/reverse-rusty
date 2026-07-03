@@ -204,9 +204,16 @@ fn reanchoring_is_a_noop_under_a_frozen_dict() {
     let half = exes.len() / 2;
     let mut a = Segment::new();
     let mut b = Segment::new();
+    // dedup_bodies off: this test pins the RE-ANCHORING no-op in isolation
+    // (the dedup×merge interplay has its own oracle legs in `dedup.rs`).
+    let knobs = reverse_rusty::segment::CompileKnobs {
+        accept_class_d: false,
+        hot_anchor_threshold: 0,
+        dedup_bodies: false,
+    };
     for (i, ex) in exes.iter().enumerate() {
         let seg = if i < half { &mut a } else { &mut b };
-        seg.add_compiled(ex, &[], &dict, i as u64, 1, false, 0);
+        seg.add_compiled(ex, &[], &dict, i as u64, 1, knobs);
     }
     assert!(
         !a.is_empty() && !b.is_empty(),

@@ -122,6 +122,12 @@ pub(in crate::segment) fn collect_segment_infos(
     infos
 }
 
+/// Dedup Stage A distinct-body sketch geometry: 2^22 bits = 512 KiB, lazily
+/// allocated. Linear counting stays estimable to ~5× this load (a 20M-body
+/// single-node corpus reads ~0.9% zero bits — comfortably measurable).
+const DUP_SKETCH_BITS: u64 = 1 << 22;
+const DUP_SKETCH_WORDS: usize = (DUP_SKETCH_BITS / 64) as usize;
+
 impl Engine {
     pub fn num_queries(&self) -> usize {
         self.segments.iter().map(|s| s.len()).sum::<usize>() + self.memtable.len()
@@ -158,6 +164,49 @@ impl Engine {
     /// Cost Program's reclassification counter).
     pub fn would_be_hot(&self) -> u64 {
         self.would_be_hot
+    }
+    /// Dedup Stage A telemetry: accepted compile events since process start.
+    pub fn bodies_total(&self) -> u64 {
+        self.bodies_total
+    }
+    /// Dedup Stage A telemetry: accepted compiles that joined an existing
+    /// per-segment body group.
+    pub fn dup_joined(&self) -> u64 {
+        self.dup_joined
+    }
+    /// Accumulate the per-compile observe telemetry (the would-be-hot counter +
+    /// the dedup Stage A counters/sketch) for one accepted
+    /// [`Segment::add_compiled`](crate::segment::Segment::add_compiled).
+    /// Every accepting call site funnels through here so the counters cannot
+    /// drift apart (the ADR-101 under-count lesson).
+    pub(in crate::segment) fn record_compiled(&mut self, added: &super::AddedCompiled) {
+        self.would_be_hot += u64::from(added.would_be_hot);
+        self.bodies_total += 1;
+        self.dup_joined += u64::from(added.is_duplicate);
+        let sketch = self
+            .dup_sketch
+            .get_or_insert_with(|| vec![0u64; DUP_SKETCH_WORDS].into_boxed_slice());
+        let bit = (added.body_hash & (DUP_SKETCH_BITS - 1)) as usize;
+        sketch[bit >> 6] |= 1u64 << (bit & 63);
+    }
+    /// Linear-counting estimate of DISTINCT canonical bodies seen since process
+    /// start (`-m·ln(V)` over the sketch's zero-bit fraction `V`) — global
+    /// duplication, incl. the cross-segment share Stage A's per-segment groups
+    /// cannot capture. Saturates at the sketch capacity; 0 before the first
+    /// accepted compile.
+    pub fn distinct_bodies_estimate(&self) -> u64 {
+        let Some(sketch) = &self.dup_sketch else {
+            return 0;
+        };
+        let zeros: u64 = sketch.iter().map(|w| u64::from(w.count_zeros())).sum();
+        if zeros == 0 {
+            return DUP_SKETCH_BITS; // saturated: report the capacity floor
+        }
+        let m = DUP_SKETCH_BITS as f64;
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_sign_loss)]
+        let est = (-m * (zeros as f64 / m).ln()).round() as u64;
+        est
     }
     /// First base segment's main index (kept for bench/back-compat callers).
     /// Falls back to the memtable if no base segments exist.
@@ -213,6 +262,9 @@ impl Engine {
             rejected_parse: self.rejected_parse,
             rejected_class_d: self.rejected_class_d,
             would_be_hot: self.would_be_hot,
+            bodies_total: self.bodies_total,
+            dup_joined: self.dup_joined,
+            distinct_bodies_est: self.distinct_bodies_estimate(),
             dict_features: self.dict.len(),
             exact_bytes: self.exact_bytes(),
             index_bytes: self.main_bytes() + self.broad_bytes() + self.hot_bytes(),

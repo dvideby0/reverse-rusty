@@ -285,6 +285,25 @@ impl EngineSnapshot {
         self.would_be_hot
     }
 
+    /// Dedup Stage A telemetry (process-lifetime): accepted compile events.
+    pub fn bodies_total(&self) -> u64 {
+        self.bodies_total
+    }
+
+    /// Dedup Stage A telemetry: accepted compiles that joined an existing body
+    /// group in their segment (what per-segment sharing actually captured).
+    pub fn dup_joined(&self) -> u64 {
+        self.dup_joined
+    }
+
+    /// Linear-counting estimate of DISTINCT canonical bodies seen since process
+    /// start — global duplication, incl. the cross-segment share Stage A's
+    /// per-segment groups cannot capture (Stage B sizing evidence). 0 until the
+    /// first accepted compile.
+    pub fn distinct_bodies_est(&self) -> u64 {
+        self.distinct_bodies_est
+    }
+
     pub fn vocab_epoch(&self) -> u64 {
         self.vocab_epoch
     }
@@ -372,6 +391,9 @@ impl EngineSnapshot {
             rejected_parse: self.rejected_parse,
             rejected_class_d: self.rejected_class_d,
             would_be_hot: self.would_be_hot,
+            bodies_total: self.bodies_total,
+            dup_joined: self.dup_joined,
+            distinct_bodies_est: self.distinct_bodies_est,
             dict_features: self.dict.len(),
             exact_bytes: self.segments.iter().map(|s| s.exact_bytes()).sum::<usize>()
                 + self.memtable.exact_bytes(),

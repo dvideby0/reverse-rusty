@@ -339,6 +339,7 @@ fn apply_settings_patch(
             "broad_columnar" => set_bool(&mut cfg.broad_columnar, key, val, &mut errors),
             "broad_materialize" => set_bool(&mut cfg.broad_materialize, key, val, &mut errors),
             "broad_prefilter" => set_bool(&mut cfg.broad_prefilter, key, val, &mut errors),
+            "dedup_bodies" => set_bool(&mut cfg.dedup_bodies, key, val, &mut errors),
             // ---- the hot tier (class H, ADR-105) ----
             "hot_anchor_threshold" => {
                 set_u32(&mut cfg.hot_anchor_threshold, key, val, &mut errors);
@@ -436,7 +437,7 @@ mod settings_tests {
         let cfg = apply_settings_patch(
             EngineConfig::default(),
             &patch(
-                r#"{"broad_batch_size": 512, "broad_columnar": false, "broad_materialize": false, "broad_prefilter": false, "max_percolate_batch": 50000}"#,
+                r#"{"broad_batch_size": 512, "broad_columnar": false, "broad_materialize": false, "broad_prefilter": false, "dedup_bodies": false, "max_percolate_batch": 50000}"#,
             ),
         )
         .expect("valid broad-lane patch");
@@ -444,6 +445,7 @@ mod settings_tests {
         assert!(!cfg.broad_columnar);
         assert!(!cfg.broad_materialize);
         assert!(!cfg.broad_prefilter);
+        assert!(!cfg.dedup_bodies);
         assert_eq!(cfg.max_percolate_batch, 50_000);
     }
 

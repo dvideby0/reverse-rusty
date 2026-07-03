@@ -24,6 +24,7 @@ mod batch;
 mod class_d;
 mod core;
 mod corpus;
+mod dedup;
 mod degenerate;
 mod equivalence;
 mod filtered;

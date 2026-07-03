@@ -3,7 +3,7 @@
 //! the `segment` module root; the compaction merges live in the sibling
 //! [`merge`](super::merge) submodule.
 
-use super::{MatchStats, ProbeLanes, Segment};
+use super::{AddedCompiled, CompileKnobs, MatchStats, ProbeLanes, Segment};
 use crate::compile::{build_signatures, is_hot, CostClass, Extracted};
 use crate::dict::Dict;
 use crate::exact::ExactStore;
@@ -48,7 +48,35 @@ impl Segment {
             filter: None,
             vocab_epoch: 0,
             logical_index: crate::util::fast_map(),
+            dup_of: Vec::new(),
+            dup_members: crate::util::fast_map(),
+            body_index: crate::util::fast_map(),
         }
+    }
+
+    /// Whether this segment holds any shared body groups (dedup Stage A). The
+    /// per-segment gate that keeps every match path byte-identical (and
+    /// zero-extra-cost) on dup-free segments — incl. every mmap-attached
+    /// segment, whose on-disk postings are always expanded.
+    #[inline]
+    pub fn has_dup_groups(&self) -> bool {
+        !self.dup_members.is_empty()
+    }
+
+    /// Leader → duplicate members (empty slice for a singleton). Only meaningful
+    /// on segments where [`has_dup_groups`](Self::has_dup_groups) is true.
+    /// `pub(crate)` for the flush writer, which EXPANDS groups back into plain
+    /// postings (the on-disk format carries no group indirection in Stage A).
+    #[inline]
+    pub(crate) fn members_of(&self, leader: u32) -> &[u32] {
+        self.dup_members.get(&leader).map_or(&[], |v| v.as_slice())
+    }
+
+    /// This segment's body-group leader for `local` (`local` itself unless it
+    /// was deduplicated into another entry's group).
+    #[inline]
+    pub fn dup_leader_of(&self, local: u32) -> u32 {
+        self.dup_of.get(local as usize).copied().unwrap_or(local)
     }
 
     /// Build and attach the anchor filter from the current main + broad + hot
@@ -102,9 +130,6 @@ impl Segment {
     /// `EngineConfig::accept_class_d` knob; WAL replay and the vocab recompile pass
     /// `true` unconditionally (an acknowledged/stored query must never be dropped
     /// by a since-flipped knob).
-    // The knobs are threaded bare, matching the established accept_class_d
-    // precedent (ADR-068); an options struct waits for lever 3's AnchorCtx.
-    #[allow(clippy::too_many_arguments)]
     pub fn add_compiled(
         &mut self,
         ex: &Extracted,
@@ -112,28 +137,64 @@ impl Segment {
         dict: &Dict,
         logical: u64,
         version: u32,
-        accept_class_d: bool,
-        theta: u32,
-    ) -> Option<(u32, bool)> {
-        let plan = build_signatures(ex, dict, theta);
-        if rejects_class_d(plan.class, ex, accept_class_d) {
+        knobs: CompileKnobs,
+    ) -> Option<AddedCompiled> {
+        let plan = build_signatures(ex, dict, knobs.hot_anchor_threshold);
+        if rejects_class_d(plan.class, ex, knobs.accept_class_d) {
             return None;
         }
         let local = self.exact.push(ex, tags, dict, version, logical);
-        for &s in &plan.main_sigs {
-            self.main.insert(s, local);
+
+        // Canonical-body dedup (Stage A): an entry whose SEMANTIC body equals an
+        // existing leader's joins that group instead of inserting postings — it
+        // is reached, verified once, and emitted through the leader. Identity
+        // (logical/version/tags) stays per-member; a hash hit is confirmed with
+        // exact body equality (a collision must never cause false sharing).
+        let body_hash = self.exact.body_signature(local);
+        let mut is_duplicate = false;
+        if knobs.dedup_bodies {
+            if let Some(leaders) = self.body_index.get(&body_hash) {
+                if let Some(&leader) = leaders.iter().find(|&&l| self.exact.bodies_equal(l, local))
+                {
+                    self.dup_of.push(leader);
+                    self.dup_members.entry(leader).or_default().push(local);
+                    is_duplicate = true;
+                    // ADOPT the leader's class: the member rides the leader's
+                    // postings, so its class byte must describe the lane it
+                    // actually lives in. (Identical bodies CAN plan different
+                    // classes — a θ-crossing frequency bump between two adds
+                    // flips A→H — and A/B/H are all always-visible, so the
+                    // adoption is lossless. The structural classes C/D cannot
+                    // diverge between identical bodies under the frozen mask.)
+                    self.class.push(self.class[leader as usize]);
+                }
+            }
         }
-        for &s in &plan.broad_sigs {
-            self.broad.insert(s, local);
+        if !is_duplicate {
+            self.dup_of.push(local);
+            if knobs.dedup_bodies {
+                self.body_index.entry(body_hash).or_default().push(local);
+            }
+            for &s in &plan.main_sigs {
+                self.main.insert(s, local);
+            }
+            for &s in &plan.broad_sigs {
+                self.broad.insert(s, local);
+            }
+            for &s in &plan.hot_sigs {
+                self.hot.insert(s, local);
+            }
+            self.class.push(plan.class);
         }
-        for &s in &plan.hot_sigs {
-            self.hot.insert(s, local);
-        }
-        self.class.push(plan.class);
         self.alive.push(true);
         self.alive_counter += 1;
         self.logical_index.entry(logical).or_default().push(local);
-        Some((local, plan.would_be_hot))
+        Some(AddedCompiled {
+            local,
+            would_be_hot: plan.would_be_hot,
+            body_hash,
+            is_duplicate,
+        })
     }
 
     pub fn tombstone(&mut self, local_id: u32) {
@@ -353,6 +414,12 @@ impl Segment {
         stats: &mut MatchStats,
         lane: ProbeLane,
     ) {
+        // Dedup Stage A: on a segment with shared body groups, a posting entry is
+        // a group LEADER — verified once per body, emitted per alive/tag-passing
+        // member. Dup-free segments (incl. every mmap-attached one) take the
+        // exact pre-dedup path below: one segment-level branch, zero per-candidate
+        // cost.
+        let has_dups = self.has_dup_groups();
         if let Some(posting) = index.get(key) {
             stats.postings_scanned += posting.len() as u32;
             match lane {
@@ -372,12 +439,37 @@ impl Segment {
                     ProbeLane::Hot => stats.hot_candidates += 1,
                     ProbeLane::Main => stats.main_candidates += 1,
                 }
-                if !self.alive[local as usize] {
-                    return; // tombstoned
+                if !has_dups {
+                    if !self.alive[local as usize] {
+                        return; // tombstoned
+                    }
+                    // Tag filter (ADR-049) — applied post-candidate inside verify.
+                    if self.exact.verify(local, view, pred) {
+                        out.push(self.exact.logical(local));
+                    }
+                    return;
                 }
-                // Tag filter (ADR-049) — applied post-candidate inside verify.
-                if self.exact.verify(local, view, pred) {
+                // Group-aware path. The leader may itself be tombstoned while a
+                // member lives, so aliveness gates EMISSION, never the body
+                // verification; the tag filter (per-member identity, ADR-049) is
+                // likewise applied per member, after the shared body check.
+                let members = self.members_of(local);
+                if members.is_empty() && !self.alive[local as usize] {
+                    return; // tombstoned singleton — the cheap skip
+                }
+                if !self
+                    .exact
+                    .verify(local, view, &crate::exact::TagPredicate::empty())
+                {
+                    return;
+                }
+                if self.alive[local as usize] && pred.matches(self.exact.tags_of(local)) {
                     out.push(self.exact.logical(local));
+                }
+                for &m in members {
+                    if self.alive[m as usize] && pred.matches(self.exact.tags_of(m)) {
+                        out.push(self.exact.logical(m));
+                    }
                 }
             });
         }
@@ -431,6 +523,7 @@ impl Segment {
                     .push(i as u32);
             }
         }
+        let identity: Vec<u32> = (0..alive.len() as u32).collect();
         let mut seg = Segment {
             main,
             broad,
@@ -442,6 +535,12 @@ impl Segment {
             filter: None,
             vocab_epoch: 0,
             logical_index,
+            // Rebuilt-from-parts segments carry EXPANDED postings (the on-disk
+            // form) — identity groups, no sharing (dedup is re-derived only by
+            // the group-aware merges).
+            dup_of: identity,
+            dup_members: crate::util::fast_map(),
+            body_index: crate::util::fast_map(),
         };
         seg.build_filter();
         seg

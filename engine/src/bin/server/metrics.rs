@@ -23,6 +23,9 @@ pub(crate) struct PrometheusMetrics {
     pub(crate) wal_size_bytes: IntGauge,
     pub(crate) wal_pending_entries: IntGauge,
     pub(crate) would_be_hot: IntGauge,
+    pub(crate) dedup_bodies_total: IntGauge,
+    pub(crate) dedup_joined: IntGauge,
+    pub(crate) dedup_distinct_bodies_est: IntGauge,
 
     // Cumulative counters (incremented via EngineEvent observer)
     pub(crate) flush_total: IntCounter,
@@ -146,6 +149,22 @@ impl PrometheusMetrics {
             "would_be_hot",
             "Accepted compiles since process start that would reclassify to the hot tier \
              under the default hot-anchor threshold (Broad-Query Cost Program observe mode)",
+        ))
+        .unwrap();
+
+        let dedup_bodies_total = IntGauge::with_opts(Opts::new(
+            "dedup_bodies_total",
+            "Accepted compiles since process start (canonical-body dedup Stage A)",
+        ))
+        .unwrap();
+        let dedup_joined = IntGauge::with_opts(Opts::new(
+            "dedup_joined",
+            "Accepted compiles that joined an existing per-segment body group (dedup Stage A)",
+        ))
+        .unwrap();
+        let dedup_distinct_bodies_est = IntGauge::with_opts(Opts::new(
+            "dedup_distinct_bodies_est",
+            "Linear-counting estimate of distinct canonical bodies seen since process start",
         ))
         .unwrap();
 
@@ -476,6 +495,13 @@ impl PrometheusMetrics {
             .unwrap();
         registry.register(Box::new(would_be_hot.clone())).unwrap();
         registry
+            .register(Box::new(dedup_bodies_total.clone()))
+            .unwrap();
+        registry.register(Box::new(dedup_joined.clone())).unwrap();
+        registry
+            .register(Box::new(dedup_distinct_bodies_est.clone()))
+            .unwrap();
+        registry
             .register(Box::new(flush_time_seconds_total.clone()))
             .unwrap();
         registry
@@ -516,6 +542,9 @@ impl PrometheusMetrics {
             wal_size_bytes,
             wal_pending_entries,
             would_be_hot,
+            dedup_bodies_total,
+            dedup_joined,
+            dedup_distinct_bodies_est,
             flush_total,
             flush_entries_total,
             ingest_total,
@@ -571,6 +600,10 @@ impl PrometheusMetrics {
         self.wal_size_bytes.set(m.wal_size_bytes as i64);
         self.wal_pending_entries.set(m.wal_pending_entries as i64);
         self.would_be_hot.set(m.would_be_hot as i64);
+        self.dedup_bodies_total.set(m.bodies_total as i64);
+        self.dedup_joined.set(m.dup_joined as i64);
+        self.dedup_distinct_bodies_est
+            .set(m.distinct_bodies_est as i64);
     }
 
     /// Refresh the cluster gRPC transport gauges (ADR-085) from a coordinator snapshot.

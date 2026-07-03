@@ -1,6 +1,6 @@
 //! Benchmark harness.
 //!
-//! Usage: bench [num_queries] [num_titles] [broad_frac] [skew] [seed]
+//! Usage: bench [num_queries] [num_titles] [broad_frac] [skew] [seed] [reps] [hot_theta] [dedup]
 //!
 //! Reports build throughput, match throughput (titles/sec/core), candidate
 //! counts (avg/p95/p99), exact-check counts, memory, cost-class distribution,
@@ -20,6 +20,11 @@ fn main() {
     let broad_frac = arg_f64(&args, 3, 0.05);
     let skew = arg_f64(&args, 4, 2.0);
     let seed = arg_u64(&args, 5, 0x00C0_FFEE);
+    // arg 6 = reps (parsed below, where the default needs num_titles).
+    // The hot tier (ADR-105) + dedup Stage A knobs, so acceptance runs can
+    // sweep them from the command line (capture-log friendly).
+    let hot_theta = arg_u64(&args, 7, 0) as u32;
+    let dedup = arg_usize(&args, 8, 1) != 0;
 
     let cfg = GenConfig {
         num_queries,
@@ -44,7 +49,17 @@ fn main() {
 
     // ---- build ----
     let norm = Normalizer::default_vocab().expect("built-in vocab");
-    let mut eng = Engine::new(norm);
+    let mut eng = Engine::with_config(
+        norm,
+        EngineConfig {
+            hot_anchor_threshold: hot_theta,
+            dedup_bodies: dedup,
+            ..EngineConfig::default()
+        },
+    );
+    if hot_theta > 0 || !dedup {
+        eprintln!("[cfg] hot_anchor_threshold={hot_theta} dedup_bodies={dedup}");
+    }
     let tb = Instant::now();
     eng.build_from_queries(&data.queries);
     let build_s = tb.elapsed().as_secs_f64();
@@ -61,6 +76,15 @@ fn main() {
     // population a frequency-threshold reclassification would move to the hot
     // tier. Machine-independent (seed-fixed), so it belongs in the capture log.
     println!("would-be hot        : {}", eng.would_be_hot());
+    // Dedup Stage A: joined/bodies is what per-segment sharing captured; the
+    // distinct estimate (linear counting) is the global duplication — both
+    // machine-independent (seed-fixed), so they belong in the capture log.
+    println!(
+        "dedup               : {} joined / {} bodies (distinct est {})",
+        eng.dup_joined(),
+        eng.bodies_total(),
+        eng.distinct_bodies_estimate()
+    );
     println!("dict features       : {}", eng.dict_len());
     println!(
         "main signatures     : {}",
