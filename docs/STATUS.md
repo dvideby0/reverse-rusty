@@ -238,7 +238,10 @@ live in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)
 
 ## Roadmap at a glance
 
-The prioritized roadmap (open work only) is **[`roadmap.md`](roadmap.md)**. Tiers: **0** Cluster-v1
+The prioritized roadmap (open work only) is **[`roadmap.md`](roadmap.md)**. **Current top
+priority: the Broad-Query Cost Program** (adopted 2026-07-03; spec →
+[`proposals/broad-cost-program.md`](proposals/broad-cost-program.md) — threshold reclassification +
+the always-visible hot tier first, then staged duplicate interning). Tiers: **0** Cluster-v1
 gate (✅ complete) · **1** measured bottlenecks (✅ complete) · **2** feature-model self-tuning
 (open: the "improve" menu) · **3** scale & production maturity (open:
 ADR-065 criterion 12, model versioning, aspects-first ingestion) · **4** percolator

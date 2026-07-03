@@ -1,8 +1,8 @@
-# PROPOSAL — The Broad-Query Cost Program
+# The Broad-Query Cost Program
 
-> **Status: DRAFT FOR MAINTAINER REVIEW — not on the roadmap, nothing here is decided.** On
-> approval, the accepted levers become roadmap Tier items (each shipping under its own ADR) and
-> this document graduates into the design docs. Evidence base:
+> **Status: ACCEPTED (2026-07-03) — adopted with amendments after two independent external
+> reviews (§8).** The program is tracked at the top of [`../roadmap.md`](../roadmap.md); each
+> increment ships under its own ADR. This document is the program spec. Evidence base:
 > [ADR-104](../decisions/adr-104-cluster-scale-soak.md) (the 20M scale soak that measured the
 > problem) and [`research/broad-scaling-prior-art.md`](../research/broad-scaling-prior-art.md)
 > (the four-thread prior-art survey behind every claim of the form "the field does X").
@@ -289,17 +289,18 @@ counting pass past a relative-size threshold (Vespa ships 0.40 with documented f
 both sides; our three-tier postings already do this for *storage* — this extends it to the
 batch evaluator's internal representation).
 
-### 5.6 Sequencing
+### 5.6 Sequencing (as amended by review — §8)
 
-| Phase | Contents | Gate |
+| Increment | Contents | Gate |
 |---|---|---|
-| 0 | Real-corpus measurement + telemetry + observe-only reclassification counter | corpus sample availability |
-| 1 | Lever 2 (threshold + hot tier) · Lever 5 | Phase 0 numbers; oracle + soak re-run |
-| 2 | Lever 1 (dedup) | Phase 0 duplication rate justifies the format bump |
-| 3 | Lever 3 (pairs + fence) · Lever 4 | Phase 1/2 residual profile |
+| 1 | **Two-axis placement + Lever 2 (threshold + always-visible hot tier) + Lever 5** — observe-first counter and posting-length telemetry ship first inside the same increment; initial θ = the absolute posting bound (~1024, the roaring boundary) | **None** — the defect is corpus-independent; the real corpus later refines θ only |
+| 2 | **Lever 1 Stage A** — canonical-body hash sketch at ingest (dup-rate telemetry) + memtable/flush-time per-segment body sharing; **no format change, reversible** | none (it *is* the measurement instrument) |
+| 3 | **Lever 1 Stage B** — segment-format body→member indirection, cross-segment dedup at compaction, member-level WAL semantics | Stage A's measured duplication rate justifies the format bump |
+| 4 | **Lever 3 (pairs + the fence) · Lever 4 (residual factoring)** | real-corpus pair/residual profile + increments 1–2 landed |
 
-Each phase is one-or-two ADR-sized PRs, codex-gated, with the ADR-104 soak as the standing
-at-scale acceptance run.
+Each increment is one-or-two ADR-sized PRs, codex-gated, with the ADR-104 soak as the standing
+at-scale acceptance run. The real-corpus sample (§5.0) sizes increments 3–4 and closes ADR-065
+criterion 12's open half — but it does **not** block increment 1.
 
 ---
 
@@ -320,17 +321,47 @@ at-scale acceptance run.
 - **Reducing emitted matches by any means** — the volume is the product's correct answer;
   rank/size/filter caps already exist at the API layer for consumers that want less.
 
-## 7. Open questions for review
+## 7. Open questions — resolved by review (see §8)
 
-1. **The hot tier vs. documented semantics:** lever 2 proposes a third always-visible tier.
-   The cheaper alternative — reclassify only *newly ingested* queries into class C and document
-   the semantic — changes visibility for those queries under `include_broad=false`. Recommend
-   the tier; confirm.
-2. **θ policy:** absolute posting-length bound (~1024, the roaring boundary) vs corpus-relative
-   frequency. Phase 0 data decides; default recommendation is the absolute bound (it's the
-   quantity the index already treats as a regime change).
-3. **Dedup member semantics:** per-member versions/tags are kept (required for ADR-049/059
-   parity) — confirm that upsert-moves-member-between-bodies is acceptable WAL semantics
-   (single-frame, ADR-067 pattern).
-4. **Corpus sample logistics:** size, sanitization, and delivery of the real saved-search
-   sample (same blocker as criterion 12's real-corpus audit — one sample serves both).
+1. **The hot tier vs. documented semantics** — **RESOLVED: the hot tier.** Both reviews;
+   Review 2: "changing visibility under include_broad=false would turn a cost fix into a
+   correctness/contract regression."
+2. **θ policy** — **RESOLVED: absolute posting-length bound (~1024, the roaring boundary) as
+   the initial value**, refined by real-corpus data later. Phase 0 does not gate the mechanism.
+3. **Dedup member semantics** — **DEFERRED to the Stage B ADR** (Stage A requires no format or
+   WAL change; the single-frame member-move design is the starting hypothesis).
+4. **Corpus sample logistics** — **still open, no longer blocking**: sizes increments 3–4 and
+   closes criterion 12; increment 1 proceeds without it.
+
+## 8. Review outcome (2026-07-03) — the adopted decision
+
+Two independent external reviews of this document converged; their amendments are baked into
+§5.6 and the roadmap program:
+
+1. **Lever 2 is the centerpiece — and Phase 0 does not gate it.** Both reviews, same argument:
+   it is the only item fixing a *measured, diagnosed, corpus-independent* defect (the top-64
+   rank cliff exists by construction at any large corpus) rather than pursuing an expected win.
+   The measurement phase refines θ only. The observe-first counter and posting-length telemetry
+   ship inside increment 1, not as a separate blocking phase.
+2. **The two-axis placement model is adopted as a durable architecture rule** (Review 2's
+   generalization): visibility ∈ {default-visible, opt-in broad, rejected/explicit-universal} ×
+   evaluation strategy ∈ {realtime anchor, columnar hot, columnar broad, universal}. The hot
+   tier is the first instance, not a special case; "cost movement must never imply visibility
+   movement" becomes a stated invariant alongside the §4 obligations.
+3. **Dedup is staged** (Review 1's restructure, satisfying Review 2's "workload-dependent —
+   later"): **Stage A** — the ingest-time canonical-body sketch plus memtable/flush-time
+   per-segment body sharing — has no format change, is reversible, delivers a fraction of the
+   win, and *is* the instrument that measures the rest ("measure by building the cheap half").
+   **Stage B** — the segment-format body→member indirection — ships only when Stage A's numbers
+   justify the most expensive-to-un-ship kind of change.
+4. **Lever 5 bundles into increment 1** (both reviews): once the hot tier routes more queries
+   through the columnar pass, the count-gate pre-reject pays twice; it needs no fence, no
+   migration, no format change.
+5. **Levers 3–4 stay last** and corpus-gated; pair-anchor escalation carries the program's only
+   match-side-agreement risk (the fence) and the field positions it as a later-stage
+   optimization (PSTHash).
+6. **New named regression risk** (Review 1): the hot tier adds a third probe family per
+   request; its **fixed overhead on hot-empty corpora** (broad-off / small-corpus workloads
+   where the tier should be near-free) must be measured and pinned in
+   `performance/benchmark-results.txt` as part of increment 1's acceptance — that, not
+   FN-safety, is where increment 1 can regress.
