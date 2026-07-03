@@ -223,6 +223,9 @@ impl Segment {
                 let demote_margin_ok = if demotes_from_hot {
                     // Hysteresis: leave the hot tier only once the re-derived anchor's
                     // WORST frequency has fallen to θ/2 — never on a wobble around θ.
+                    // θ=0 means the tier is OFF: drain unconditionally (there is no
+                    // threshold to wobble around, and `worst <= 0` would otherwise
+                    // strand every sealed class-H entry hot forever — codex review).
                     let worst = plan
                         .main_anchors
                         .iter()
@@ -230,7 +233,7 @@ impl Segment {
                         .map(|&f| dict.freq(f))
                         .max()
                         .unwrap_or(0);
-                    worst <= theta / 2
+                    theta == 0 || worst <= theta / 2
                 } else {
                     true
                 };

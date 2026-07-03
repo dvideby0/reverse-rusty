@@ -450,6 +450,7 @@ fn would_be_hot_predicts_enforcement() {
 ///   - re-merged at θ=150 the plan says A (100 < 150) but 100 > 150/2 = 75 ⇒
 ///     the margin BLOCKS the demotion (no merge-to-merge thrash);
 ///   - re-merged at θ=300 (100 ≤ 150) the demotion clears ⇒ H→A.
+///
 /// Results are identical at every step, on both visibility modes.
 #[test]
 fn compaction_migrates_main_to_hot_and_back_margin_gated() {
@@ -521,6 +522,53 @@ fn compaction_migrates_main_to_hot_and_back_margin_gated() {
         eng.class_counts()[4],
         0,
         "every hot entry demotes once θ dwarfs all frequencies"
+    );
+    assert_eq!(per_title_sets(&eng, &titles, true), before_broad);
+    assert_eq!(per_title_sets(&eng, &titles, false), before_sel);
+}
+
+/// θ=0 must DRAIN the hot tier at the next re-anchoring compaction — the
+/// knob's documented "0 = off" contract covers sealed entries, not just new
+/// writes. (The θ/2 hysteresis margin is `worst <= 0` at θ=0, which no real
+/// anchor satisfies — without the explicit θ=0 arm every stored class-H entry
+/// would stay hot forever: the codex-review P2.)
+#[test]
+fn compaction_drains_hot_tier_when_theta_disabled() {
+    let (mut queries, mut id) = masked_filler_corpus(200);
+    for _ in 0..100 {
+        queries.push((id, "draintok".to_string()));
+        id += 1;
+    }
+    let titles: Vec<String> = vec!["draintok something".into(), "fillertok9 uniq3".into()];
+    let mk = |theta: u32| EngineConfig {
+        hot_anchor_threshold: theta,
+        compaction_reanchor: true,
+        auto_compact_on_flush: false,
+        auto_compact_on_ingest: false,
+        ..EngineConfig::default()
+    };
+
+    // Built θ=50 across two segments: the draintok population lands in class H.
+    let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), mk(50));
+    let half = queries.len() / 2;
+    eng.build_from_queries(&queries[..half]);
+    eng.bulk_ingest(&queries[half..]);
+    assert!(
+        eng.class_counts()[4] >= 100,
+        "degenerate: draintok population did not classify H"
+    );
+    let before_broad = per_title_sets(&eng, &titles, true);
+    let before_sel = per_title_sets(&eng, &titles, false);
+
+    // θ back to 0 (off): the next re-anchoring merge drains every H entry.
+    eng.set_config(mk(0));
+    eng.bulk_ingest(&queries[..8]); // a second segment so a merge happens
+    let r = eng.compact_all().expect("draining compaction");
+    assert!(r.hot_demoted >= 100, "θ=0 must demote the hot population");
+    assert_eq!(
+        eng.class_counts()[4],
+        0,
+        "θ=0 left sealed entries in the hot tier"
     );
     assert_eq!(per_title_sets(&eng, &titles, true), before_broad);
     assert_eq!(per_title_sets(&eng, &titles, false), before_sel);
