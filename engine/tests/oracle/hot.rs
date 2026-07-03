@@ -748,13 +748,18 @@ fn tiny_hot_corpus() -> Vec<(u64, String)> {
 #[test]
 fn hot_segments_write_the_v5_rollback_fence() {
     use reverse_rusty::storage::MmapSegment;
+    // Sorted by filename: readdir order is FILESYSTEM-dependent (APFS returned
+    // the first-written file, ext4's hash order did not — a CI-only failure), so
+    // pick the first segment deterministically.
     let seg_path = |dir: &std::path::Path| -> std::path::PathBuf {
-        std::fs::read_dir(dir.join("segments"))
+        let mut segs: Vec<std::path::PathBuf> = std::fs::read_dir(dir.join("segments"))
             .expect("read segments dir")
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .find(|p| p.extension().is_some_and(|x| x == "seg"))
-            .expect("a sealed segment file")
+            .filter(|p| p.extension().is_some_and(|x| x == "seg"))
+            .collect();
+        segs.sort();
+        segs.into_iter().next().expect("a sealed segment file")
     };
     let seg_version = |dir: &std::path::Path| -> u32 {
         let bytes = std::fs::read(seg_path(dir)).expect("read segment");
@@ -801,15 +806,24 @@ fn hot_segments_write_the_v5_rollback_fence() {
     );
 
     // ---- the version ladder: hot outranks class D ----
+    // The class-D query rides the BUILD corpus so ONE base segment holds both
+    // classes — the ladder decision (`has_hot` checked before `has_class_d`)
+    // is what this leg pins. (An insert_live + flush would seal the D query
+    // into its own v4 segment and leave the ladder unexercised.)
     let dir_both = tempdir("fence-both");
     {
         let mut cfg = cfg_theta(2);
         cfg.accept_class_d = true;
         cfg.data_dir = Some(dir_both.clone());
         let mut eng = Engine::open(Normalizer::default_vocab().expect("vocab"), cfg).expect("open");
-        eng.build_from_queries(&queries);
-        eng.insert_live("-auto", 900_000, 1);
-        eng.flush();
+        let mut both_queries = queries.clone();
+        both_queries.push((900_000, "-auto".to_string()));
+        eng.build_from_queries(&both_queries);
+        let cc = eng.class_counts();
+        assert!(
+            cc[3] > 0 && cc[4] > 0,
+            "degenerate: the ladder segment must hold BOTH class D and class H"
+        );
     }
     assert_eq!(seg_version(&dir_both), 5, "hot + class D ⇒ v5 (the ladder)");
     assert_eq!(manifest_version(&dir_both), 5);
