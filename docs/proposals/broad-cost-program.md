@@ -125,6 +125,18 @@ the *selective* path and stands.)
 
 ### 3.1 What was measured (ADR-104 + the 20M bench cross-check)
 
+> **Measurement erratum (2026-07-03, found by increment 1's observe-first telemetry — the
+> corrected-reading capture block in
+> [`performance/benchmark-results.txt`](../performance/benchmark-results.txt) is canonical):**
+> the "~956k broad-intent queries classified A" row below was an arithmetic artifact (the
+> generator draws its 5% broad branch per FAMILY ITERATION, so the population is ~130k, ~43.5k
+> per shape), and the 43,533-entry max main posting is the **shared class-B arity-2 pair
+> posting of ~43.5k byte-identical "psa 10" queries** — an identical-query concentration
+> (lever 1's case), not a rank-#65 class-A anchor. The synthetic corpus's genuine
+> θ-reclassifiable population at θ=1024 is `would_be_hot = 782`. The top-64 cliff (lever 2's
+> defect) remains real by construction; increments 1 and 2's Stage A therefore merge PAIRED,
+> with the recovery measured over both.
+
 | Measurement | Value | Meaning |
 |---|---|---|
 | Candidates/title, broad ON | 85.64 @100k → 682 @1M → **10,036 @20M** | grows with corpus **by design** |
@@ -227,7 +239,7 @@ coalescing assumption). **Effect:** verification and posting volume scale with *
 emission cost unchanged (it's the answer). Broad queries are short → the most likely to be
 exactly duplicated → this directly attacks the broad lane's evaluated-query count.
 
-### 5.2 Lever 2 — frequency-threshold cost reclassification + the always-visible hot tier *(fixes the measured 32×)*
+### 5.2 Lever 2 — frequency-threshold cost reclassification + the always-visible hot tier *(shipped as [ADR-105](../decisions/adr-105-hot-tier-two-axis-placement.md); θ=1024 is an absolute bound — the in-code roaring boundary is 256, the rationale below is corrected there)*
 
 **Mechanism.** Split `is_hot`'s two roles. The 64-bit verify mask stays exactly as-is (baked
 into segments, frozen). Classification gains `is_hot_anchor(f) = top64(f) ∨ freq(f) ≥ θ` (θ
@@ -279,7 +291,7 @@ measured **35×** phase-2 gap from exactly this (columnwise size-grouped cluster
 their layout is literally SoA). Touches only `exact.rs` evaluation order — gating untouched, so
 FN-safety is structural.
 
-### 5.5 Lever 5 — broad-lane count-gate + dense-posting promotion *(small, contained)*
+### 5.5 Lever 5 — broad-lane count-gate + dense-posting promotion *(count-gate shipped with increment 1 — `broad_prefilter`, PR #107 + the hot lane; dense promotion re-scoped to a measurement-gated follow-up, ADR-105 §Deferred: the columnar pass already amortizes posting iteration once-per-batch)*
 
 Two Vespa-proven internals for the broad/hot lanes' batch pass: (a) a **`min_feature`
 pre-reject** — per query, a conservative lower bound on how many distinct positive title

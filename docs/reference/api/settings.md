@@ -62,6 +62,10 @@ curl -X PUT localhost:9200/_settings \
   `broad_columnar`, `broad_materialize` (ADR-026), `broad_prefilter` (the batch count-gate
   pre-reject — a necessary-condition filter that skips provably-unmatchable broad candidates
   before bitmap verification; result-identical either way, `false` is the kill-switch),
+  the hot-tier knobs `hot_anchor_threshold` (θ, ADR-105 — affects the classification of NEW
+  writes immediately and sealed entries at the next re-anchoring compaction; a θ change is
+  correctness-benign, it only moves queries between the two always-visible lanes) and
+  `hot_migration_max_moves` (the per-merge migration work cap),
   `cooperative_cancel` (stop armed match work at
   its deadline, ADR-099), and `accept_class_d` (store negation-only queries
   as broad-lane always-candidates instead of rejecting them, ADR-068 — gates **acceptance only**:

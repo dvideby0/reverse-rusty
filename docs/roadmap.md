@@ -79,27 +79,25 @@ the broad-volume decomposition) and
 [`research/broad-scaling-prior-art.md`](research/broad-scaling-prior-art.md). Each increment
 ships under its own ADR with the ADR-104 soak as the standing at-scale acceptance run.
 
-1. **Increment 1 — two-axis placement + frequency-threshold reclassification + the
-   always-visible hot tier (+ batch-pass internals).** Adopt the two-axis placement model
-   (visibility × evaluation strategy) as the architecture rule; split `is_hot`'s two roles —
-   the 64-bit verify mask stays frozen, classification gains
-   `is_hot_anchor = top64 ∨ posting ≥ θ` (initial θ = the ~1024 roaring-tier boundary,
-   persisted per the agreement-fence discipline); θ-hot-anchored queries land in a **hot
-   tier** — columnar-evaluated like the broad lane, **probed on every request** like the main
-   lane (the ADR-056 demote-guard reasoning honored structurally). Observe-first counter +
-   posting-length percentiles in `/_stats` ship first inside this increment; compaction
-   migrates old segments margin-gated (demote ≥ θ, promote ≤ θ/2) under per-merge work caps.
-   Bundled: the broad/hot batch pass gains the **`min_feature` count pre-reject** (a
-   necessary-condition filter — under-reject is the only error direction) and
-   **dense-posting promotion** past a relative-size threshold (Vespa-proven, 0.40 default).
-   **Acceptance:** the oracle stack + the measured recovery of the 20M broad-on realtime lane
-   (the 32×) + a pinned **hot-tier fixed-overhead** number on hot-empty corpora (the named
-   regression risk) + an ADR-104 soak re-run. **Not gated on the real corpus** — the defect is
-   corpus-independent; real data later refines θ only.
-2. **Increment 2 — duplicate interning, Stage A ("measure by building the cheap half").**
-   Canonical-compiled-body hash at ingest feeding a duplication-rate sketch (telemetry), plus
-   memtable/flush-time **per-segment** body sharing — no format change, reversible, delivers a
-   fraction of the win and *is* the instrument that sizes Stage B.
+1. **Increment 1 — two-axis placement + θ-reclassification + the always-visible hot tier —
+   ✅ built ([ADR-105](decisions/adr-105-hot-tier-two-axis-placement.md)); merges PAIRED with
+   increment 2's Stage A (below).** The observe-first telemetry + the lever-5a count-gate
+   shipped first (PR #107); the tier itself — `is_hot_anchor = top64 ∨ freq ≥ θ`, class H in a
+   third always-probed columnar-evaluated index, `.seg`/manifest v5 fences, ring placement,
+   margin-gated compaction migration — is built and oracle-proven (24 legs across 7 suites).
+   **The measurement recalibration (why the pairing):** the PR-A telemetry falsified the spec
+   §3.1 sizing — the synthetic 20M corpus's 32× is an identical-query concentration (~43.5k
+   byte-identical "psa 10" class-B pair queries sharing one 43,533-entry posting — the dedup
+   lever's case), and its genuine θ-population is `would_be_hot = 782`. Lever 5's
+   dense-posting promotion was re-scoped to a measurement-gated follow-up (the columnar pass
+   already amortizes posting iteration; ADR-105 §Deferred). The recovery acceptance (20M bench
+   + `RR_CLUSTER_SOAK_THETA` soak re-run + the hot-empty overhead pin) runs once Stage A lands,
+   with BOTH in place — the combined increment attacks the measured defect honestly.
+2. **Increment 2 — duplicate interning, Stage A ("measure by building the cheap half") — IN
+   PROGRESS, paired with increment 1's merge.** Canonical-compiled-body hash at ingest feeding
+   a duplication-rate sketch (telemetry), plus memtable/flush-time **per-segment** body
+   sharing — no format change, reversible, delivers a fraction of the win and *is* the
+   instrument that sizes Stage B.
 3. **Increment 3 — duplicate interning, Stage B (format bump, gated on Stage A's numbers).**
    Segment-format body→member indirection (one verify row + member ID list per distinct
    compiled body), cross-segment dedup at compaction, member-level WAL/upsert/tag/rank
