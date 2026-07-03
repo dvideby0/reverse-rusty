@@ -13,7 +13,7 @@ use crate::wal::Wal;
 
 /// Nearest-rank percentiles over one lane's collected posting lengths.
 /// Sorts in place; all-zero stats for an empty lane.
-fn posting_stats(lens: &mut Vec<u32>) -> PostingStats {
+fn posting_stats(lens: &mut [u32]) -> PostingStats {
     if lens.is_empty() {
         return PostingStats::default();
     }
@@ -27,35 +27,6 @@ fn posting_stats(lens: &mut Vec<u32>) -> PostingStats {
         p95: rank(95),
         p99: rank(99),
         max: lens[n - 1],
-    }
-}
-
-#[cfg(test)]
-mod posting_stats_tests {
-    use super::posting_stats;
-
-    #[test]
-    fn nearest_rank_percentiles() {
-        // Empty lane -> all zeros (never a panic).
-        assert_eq!(posting_stats(&mut Vec::new()), Default::default());
-        // Single posting: every percentile IS that posting.
-        let s = posting_stats(&mut vec![7]);
-        assert_eq!((s.count, s.p50, s.p95, s.p99, s.max), (1, 7, 7, 7, 7));
-        // 1..=100 (unsorted input): nearest-rank p50/p95/p99 are exactly 50/95/99.
-        let mut lens: Vec<u32> = (1..=100).rev().collect();
-        let s = posting_stats(&mut lens);
-        assert_eq!(
-            (s.count, s.p50, s.p95, s.p99, s.max),
-            (100, 50, 95, 99, 100)
-        );
-        // Two postings: p50 = the 1st (⌈0.5·2⌉ = 1), p95/p99 = the 2nd.
-        let s = posting_stats(&mut vec![10, 2]);
-        assert_eq!((s.p50, s.p95, s.p99, s.max), (2, 10, 10, 10));
-        // The rank-cliff fingerprint shape: one fat posting dominates max but not p99.
-        let mut lens: Vec<u32> = vec![4; 999];
-        lens.push(43_533);
-        let s = posting_stats(&mut lens);
-        assert_eq!((s.p99, s.max), (4, 43_533));
     }
 }
 
@@ -82,9 +53,7 @@ impl EngineSnapshot {
             }
         }
         self.memtable.main_index().collect_posting_lens(&mut main);
-        self.memtable
-            .broad_index()
-            .collect_posting_lens(&mut broad);
+        self.memtable.broad_index().collect_posting_lens(&mut broad);
         LanePostingStats {
             main: posting_stats(&mut main),
             broad: posting_stats(&mut broad),
@@ -275,5 +244,35 @@ impl Engine {
     }
     pub fn dict_len(&self) -> usize {
         self.dict.len()
+    }
+}
+
+#[cfg(test)]
+mod posting_stats_tests {
+    use super::posting_stats;
+    use crate::events::PostingStats;
+
+    #[test]
+    fn nearest_rank_percentiles() {
+        // Empty lane -> all zeros (never a panic).
+        assert_eq!(posting_stats(&mut []), PostingStats::default());
+        // Single posting: every percentile IS that posting.
+        let s = posting_stats(&mut [7]);
+        assert_eq!((s.count, s.p50, s.p95, s.p99, s.max), (1, 7, 7, 7, 7));
+        // 1..=100 (unsorted input): nearest-rank p50/p95/p99 are exactly 50/95/99.
+        let mut lens: Vec<u32> = (1..=100).rev().collect();
+        let s = posting_stats(&mut lens);
+        assert_eq!(
+            (s.count, s.p50, s.p95, s.p99, s.max),
+            (100, 50, 95, 99, 100)
+        );
+        // Two postings: p50 = the 1st (⌈0.5·2⌉ = 1), p95/p99 = the 2nd.
+        let s = posting_stats(&mut [10, 2]);
+        assert_eq!((s.p50, s.p95, s.p99, s.max), (2, 10, 10, 10));
+        // The rank-cliff fingerprint shape: one fat posting dominates max but not p99.
+        let mut lens: Vec<u32> = vec![4; 999];
+        lens.push(43_533);
+        let s = posting_stats(&mut lens);
+        assert_eq!((s.p99, s.max), (4, 43_533));
     }
 }

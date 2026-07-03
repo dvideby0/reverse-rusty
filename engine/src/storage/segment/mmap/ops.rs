@@ -390,12 +390,6 @@ impl MmapSegment {
             && self.req_mask()[i].is_power_of_two()
     }
 
-    /// Columnar batch verification for one query against a title batch, writing
-    /// the matching-title bitmap into `acc`. Mmap twin of
-    /// [`crate::exact::ExactStore::eval_batch`]; shares
-    /// [`crate::exact::eval_batch_slices`] so the in-memory and mmap broad-batch
-    /// paths cannot drift.
-    #[inline]
     /// Batch-level count-gate pre-reject — the mmap twin of
     /// [`ExactStore::can_match_batch`](crate::exact::ExactStore::can_match_batch),
     /// sharing [`prefilter_slices`](crate::exact::prefilter_slices) so the two
@@ -423,6 +417,12 @@ impl MmapSegment {
         )
     }
 
+    /// Columnar batch verification for one query against a title batch, writing
+    /// the matching-title bitmap into `acc`. Mmap twin of
+    /// [`crate::exact::ExactStore::eval_batch`]; shares
+    /// [`crate::exact::eval_batch_slices`] so the in-memory and mmap broad-batch
+    /// paths cannot drift.
+    #[inline]
     pub(crate) fn eval_batch<'a>(
         &self,
         local: u32,

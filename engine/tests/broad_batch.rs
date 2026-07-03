@@ -500,8 +500,10 @@ fn prefilter_never_skips_class_d() {
     // pass vacuously, so it can never be prefilter-skipped (skipping it would be
     // gating on MUST_NOT). Lane-on corpus of negation-only queries: the counter must
     // stay zero and every title without the forbidden token must keep its matches.
-    let mut cfg = reverse_rusty::config::EngineConfig::default();
-    cfg.accept_class_d = true;
+    let cfg = reverse_rusty::config::EngineConfig {
+        accept_class_d: true,
+        ..Default::default()
+    };
     let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), cfg);
     let queries: Vec<(u64, String)> = (0..12u64)
         .map(|i| (i, format!("-junktoken{}", i % 3)))

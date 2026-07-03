@@ -206,9 +206,7 @@ impl BroadBackend for &MmapSegment {
         batch_mask_union: u64,
         feat_row: &FastMap<FeatureId, u32>,
     ) -> bool {
-        MmapSegment::can_match_batch(self, local, batch_mask_union, |f| {
-            feat_row.contains_key(&f)
-        })
+        MmapSegment::can_match_batch(self, local, batch_mask_union, |f| feat_row.contains_key(&f))
     }
     #[inline]
     fn eval_into(

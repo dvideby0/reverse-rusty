@@ -871,7 +871,7 @@ impl Engine {
                 tag_ids.sort_unstable();
                 tag_ids.dedup();
             }
-            match seg.add_compiled(
+            if let Some((_, would_be_hot)) = seg.add_compiled(
                 &item.ex,
                 &tag_ids,
                 &self.dict,
@@ -879,15 +879,12 @@ impl Engine {
                 item.version,
                 self.config.accept_class_d,
             ) {
-                Some((_, would_be_hot)) => {
-                    self.would_be_hot += u64::from(would_be_hot);
-                    accepted.push((item.logical, item.dsl.clone()));
-                    report.ingested += 1;
-                }
-                None => {
-                    self.rejected_class_d += 1;
-                    report.rejected_class_d += 1;
-                }
+                self.would_be_hot += u64::from(would_be_hot);
+                accepted.push((item.logical, item.dsl.clone()));
+                report.ingested += 1;
+            } else {
+                self.rejected_class_d += 1;
+                report.rejected_class_d += 1;
             }
         }
         seg.build_filter();
