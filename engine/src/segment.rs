@@ -134,15 +134,6 @@ impl MatchStats {
         self.hot_prefilter_skipped += other.hot_prefilter_skipped;
     }
 
-    /// Record one local collection boundary: `emissions` rows entered the
-    /// result collector and `unique` survived logical-id deduplication.
-    pub(crate) fn record_delivery(&mut self, emissions: usize, unique: usize) {
-        self.logical_emissions = self
-            .logical_emissions
-            .saturating_add(u64::try_from(emissions).unwrap_or(u64::MAX));
-        self.record_cross_source_duplicates(emissions, unique);
-    }
-
     /// Record duplicates removed by a higher-level union whose child collectors
     /// already accounted for their own emissions (for example, shard fan-in).
     pub(crate) fn record_cross_source_duplicates(&mut self, emissions: usize, unique: usize) {

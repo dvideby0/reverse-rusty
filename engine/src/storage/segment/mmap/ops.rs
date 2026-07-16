@@ -22,6 +22,7 @@ enum Lane {
     Hot,
 }
 use super::{MmapLogicalIndex, MmapSegment};
+use crate::collect::{MatchSink, VecSink};
 use crate::compile::CostClass;
 use crate::dict::FeatureId;
 use crate::index::CandidateIndex;
@@ -562,6 +563,23 @@ impl MmapSegment {
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
+        let mut ignored_emissions = 0;
+        let mut collector = VecSink::new(out, &mut ignored_emissions);
+        self.match_collect(view, dict, epoch, seen, &mut collector, lanes, pred, stats);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn match_collect<C: MatchSink>(
+        &self,
+        view: &crate::exact::TitleView,
+        dict: &crate::dict::Dict,
+        epoch: u32,
+        seen: &mut [u32],
+        collector: &mut C,
+        lanes: crate::segment::ProbeLanes,
+        pred: &crate::exact::TagPredicate,
+        stats: &mut MatchStats,
+    ) {
         let has_filter = self.filter_num_blocks > 0;
         // Retrieval uses the positive (superset) view; verify applies both (ADR-061).
         let feats = view.pos;
@@ -574,7 +592,7 @@ impl MmapSegment {
                 stats.probes_skipped += 1;
                 continue;
             }
-            self.probe_index(key, Lane::Main, epoch, view, seen, out, pred, stats);
+            self.probe_index(key, Lane::Main, epoch, view, seen, collector, pred, stats);
         }
         // arity-2 signatures
         for &h in feats {
@@ -588,7 +606,16 @@ impl MmapSegment {
                             stats.probes_skipped += 1;
                             continue;
                         }
-                        self.probe_index(key, Lane::Main, epoch, view, seen, out, pred, stats);
+                        self.probe_index(
+                            key,
+                            Lane::Main,
+                            epoch,
+                            view,
+                            seen,
+                            collector,
+                            pred,
+                            stats,
+                        );
                     }
                 }
             }
@@ -604,7 +631,7 @@ impl MmapSegment {
                     stats.probes_skipped += 1;
                     continue;
                 }
-                self.probe_index(key, Lane::Hot, epoch, view, seen, out, pred, stats);
+                self.probe_index(key, Lane::Hot, epoch, view, seen, collector, pred, stats);
             }
         }
         // broad lane
@@ -616,7 +643,7 @@ impl MmapSegment {
                     stats.probes_skipped += 1;
                     continue;
                 }
-                self.probe_index(key, Lane::Broad, epoch, view, seen, out, pred, stats);
+                self.probe_index(key, Lane::Broad, epoch, view, seen, collector, pred, stats);
             }
             // Universal signature: class-D always-candidates (ADR-068). Probed
             // unconditionally (the accept knob gates ingest, never visibility);
@@ -627,21 +654,21 @@ impl MmapSegment {
             if has_filter && !self.may_contain(key) {
                 stats.probes_skipped += 1;
             } else {
-                self.probe_index(key, Lane::Broad, epoch, view, seen, out, pred, stats);
+                self.probe_index(key, Lane::Broad, epoch, view, seen, collector, pred, stats);
             }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn probe_index(
+    fn probe_index<C: MatchSink>(
         &self,
         key: u64,
         lane: Lane,
         epoch: u32,
         view: &crate::exact::TitleView,
         seen: &mut [u32],
-        out: &mut Vec<u64>,
+        collector: &mut C,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
@@ -678,7 +705,7 @@ impl MmapSegment {
                 }
                 // Tag filter (ADR-049) — applied post-candidate inside verify.
                 if self.verify(local, view, pred) {
-                    out.push(self.logical(local));
+                    collector.on_match(self.logical(local));
                 }
             }
         }

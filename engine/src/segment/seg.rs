@@ -4,6 +4,7 @@
 //! [`merge`](super::merge) submodule.
 
 use super::{AddedCompiled, CompileKnobs, MatchStats, ProbeLanes, Segment};
+use crate::collect::{MatchSink, VecSink};
 use crate::compile::{build_signatures, is_hot, CostClass, Extracted};
 use crate::dict::Dict;
 use crate::exact::ExactStore;
@@ -252,12 +253,8 @@ impl Segment {
     }
 
     /// Probe this segment for one title and append matched LOGICAL ids to `out`.
-    /// `seen` is this segment's epoch-stamp dedup array (size = self.len()).
-    ///
-    /// If the segment has an anchor filter (sealed base segments), each signature
-    /// key is tested against the filter first. Keys that are definitely not
-    /// present are skipped without touching the candidate index, cutting read
-    /// amplification across multiple segments.
+    /// This compatibility surface intentionally preserves its existing
+    /// signature; engine-owned matching uses the collector-generic twin below.
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(
         &self,
@@ -266,6 +263,30 @@ impl Segment {
         epoch: u32,
         seen: &mut [u32],
         out: &mut Vec<u64>,
+        lanes: ProbeLanes,
+        pred: &crate::exact::TagPredicate,
+        stats: &mut MatchStats,
+    ) {
+        let mut ignored_emissions = 0;
+        let mut collector = VecSink::new(out, &mut ignored_emissions);
+        self.match_collect(view, dict, epoch, seen, &mut collector, lanes, pred, stats);
+    }
+
+    /// Probe this segment for one title and emit matched LOGICAL ids.
+    /// `seen` is this segment's epoch-stamp dedup array (size = self.len()).
+    ///
+    /// If the segment has an anchor filter (sealed base segments), each signature
+    /// key is tested against the filter first. Keys that are definitely not
+    /// present are skipped without touching the candidate index, cutting read
+    /// amplification across multiple segments.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn match_collect<C: MatchSink>(
+        &self,
+        view: &crate::exact::TitleView,
+        dict: &Dict,
+        epoch: u32,
+        seen: &mut [u32],
+        collector: &mut C,
         lanes: ProbeLanes,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
@@ -291,7 +312,7 @@ impl Segment {
                 epoch,
                 view,
                 seen,
-                out,
+                collector,
                 pred,
                 stats,
                 ProbeLane::Main,
@@ -320,7 +341,7 @@ impl Segment {
                             epoch,
                             view,
                             seen,
-                            out,
+                            collector,
                             pred,
                             stats,
                             ProbeLane::Main,
@@ -351,7 +372,7 @@ impl Segment {
                     epoch,
                     view,
                     seen,
-                    out,
+                    collector,
                     pred,
                     stats,
                     ProbeLane::Hot,
@@ -375,7 +396,7 @@ impl Segment {
                     epoch,
                     view,
                     seen,
-                    out,
+                    collector,
                     pred,
                     stats,
                     ProbeLane::Broad,
@@ -397,7 +418,7 @@ impl Segment {
                     epoch,
                     view,
                     seen,
-                    out,
+                    collector,
                     pred,
                     stats,
                     ProbeLane::Broad,
@@ -408,14 +429,14 @@ impl Segment {
 
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn probe(
+    fn probe<C: MatchSink>(
         &self,
         key: u64,
         index: &CandidateIndex,
         epoch: u32,
         view: &crate::exact::TitleView,
         seen: &mut [u32],
-        out: &mut Vec<u64>,
+        collector: &mut C,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
         lane: ProbeLane,
@@ -451,7 +472,7 @@ impl Segment {
                     }
                     // Tag filter (ADR-049) — applied post-candidate inside verify.
                     if self.exact.verify(local, view, pred) {
-                        out.push(self.exact.logical(local));
+                        collector.on_match(self.exact.logical(local));
                     }
                     return;
                 }
@@ -470,11 +491,11 @@ impl Segment {
                     return;
                 }
                 if self.alive[local as usize] && pred.matches(self.exact.tags_of(local)) {
-                    out.push(self.exact.logical(local));
+                    collector.on_match(self.exact.logical(local));
                 }
                 for &m in members {
                     if self.alive[m as usize] && pred.matches(self.exact.tags_of(m)) {
-                        out.push(self.exact.logical(m));
+                        collector.on_match(self.exact.logical(m));
                     }
                 }
             });

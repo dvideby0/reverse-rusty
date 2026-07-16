@@ -5,7 +5,7 @@
 //!   must be stable so segments built at different times agree)
 //! Hot path: sig_key() is called per title-signature on the match path
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{BuildHasherDefault, Hasher};
 
 /// FNV-1a 64-bit. Deterministic across runs (important: signature keys must be
@@ -100,6 +100,7 @@ impl Hasher for IdentityU64Hasher {
 }
 
 pub type FastMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityU64Hasher>>;
+pub type FastSet<K> = HashSet<K, BuildHasherDefault<IdentityU64Hasher>>;
 
 pub fn fast_map<K, V>() -> FastMap<K, V> {
     FastMap::default()

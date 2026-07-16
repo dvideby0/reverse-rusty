@@ -8,6 +8,7 @@
 //! these the destructured [`BroadBatchScratch`](super::driver::BroadBatchScratch)
 //! buffers as plain slices/`Vec`s.
 
+use crate::collect::BatchMatchSink;
 use crate::dict::FeatureId;
 use crate::segment::{MatchStats, Segment};
 use crate::storage::MmapSegment;
@@ -299,30 +300,30 @@ impl BroadBackend for &MmapSegment {
 /// emits exactly the pre-dedup single-id path (the alive/tag gates then repeat
 /// checks the caller already made — same values, no behavior change).
 #[inline]
-fn emit_from_bits<B: BroadBackend>(
+fn emit_from_bits<B: BroadBackend, S: BatchMatchSink>(
     backend: &B,
     grouped: bool,
     local: u32,
     pred: &crate::exact::TagPredicate,
     bits: &[u64],
-    outs: &mut [Vec<u64>],
+    collector: &mut S,
 ) {
     if backend.alive(local) && backend.passes_tags(local, pred) {
         let logical = backend.logical_id(local);
-        for_each_set_bit(bits, |ti| outs[ti].push(logical));
+        for_each_set_bit(bits, |ti| collector.on_match(ti, logical));
     }
     if grouped {
         for &m in backend.members_of(local) {
             if backend.alive(m) && backend.passes_tags(m, pred) {
                 let logical = backend.logical_id(m);
-                for_each_set_bit(bits, |ti| outs[ti].push(logical));
+                for_each_set_bit(bits, |ti| collector.on_match(ti, logical));
             }
         }
     }
 }
 
 /// Evaluate one columnar lane (broad or hot) of one segment against the whole
-/// batch, appending matched logical IDs to each title's `outs[ti]`.
+/// batch, emitting matched logical IDs to the indexed batch collector.
 ///
 /// `prefilter` + `batch_mask_union` drive the count-gate pre-reject (lever 5a):
 /// a reached, alive, non-vacuous candidate whose required features / any-of
@@ -331,7 +332,7 @@ fn emit_from_bits<B: BroadBackend>(
 /// condition argument; counted per lane). The knob is the provable kill-switch —
 /// `false` restores the exact pre-lever path.
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
-pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
+pub(in crate::segment) fn eval_one_segment<B: BroadBackend, S: BatchMatchSink>(
     backend: B,
     lane: Lane,
     distinct: &[FeatureId],
@@ -346,7 +347,7 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
     non_pure: &mut Vec<u32>,
     acc: &mut [u64],
     grp: &mut [u64],
-    outs: &mut [Vec<u64>],
+    collector: &mut S,
     materialize: bool,
     prefilter: bool,
     pred: &crate::exact::TagPredicate,
@@ -437,7 +438,7 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
             // body — the vacuous property holds for each — so emission fans out
             // per alive, tag-passing member.
             if materialize && backend.vacuous_accept(lane, local, f) {
-                emit_from_bits(&backend, grouped, local, pred, fbits, outs);
+                emit_from_bits(&backend, grouped, local, pred, fbits, collector);
             } else {
                 // Count-gate pre-reject (lever 5a) before queueing full bitmap
                 // verification. A vacuous-accept candidate never reaches this check
@@ -476,7 +477,7 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
                 grp,
                 &crate::exact::TagPredicate::empty(),
             );
-            emit_from_bits(&backend, grouped, local, pred, acc, outs);
+            emit_from_bits(&backend, grouped, local, pred, acc, collector);
         } else {
             backend.eval_into(
                 local,
@@ -489,7 +490,7 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend>(
                 pred,
             );
             let logical = backend.logical_id(local);
-            for_each_set_bit(acc, |ti| outs[ti].push(logical));
+            for_each_set_bit(acc, |ti| collector.on_match(ti, logical));
         }
     }
 }

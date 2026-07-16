@@ -3,6 +3,7 @@
 //! `segment` module root.
 
 use super::{BaseSegment, MatchStats, Segment};
+use crate::collect::{MatchSink, VecSink};
 use crate::dict::Dict;
 
 impl BaseSegment {
@@ -102,7 +103,7 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.tags_of(local_id),
         }
     }
-    // Dispatch wrapper — signature must mirror the inner segment's match_into.
+    // Compatibility dispatch wrapper — signature stays byte-for-byte stable.
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(
         &self,
@@ -115,12 +116,29 @@ impl BaseSegment {
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
+        let mut ignored_emissions = 0;
+        let mut collector = VecSink::new(out, &mut ignored_emissions);
+        self.match_collect(view, dict, epoch, seen, &mut collector, lanes, pred, stats);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::segment) fn match_collect<C: MatchSink>(
+        &self,
+        view: &crate::exact::TitleView,
+        dict: &Dict,
+        epoch: u32,
+        seen: &mut [u32],
+        collector: &mut C,
+        lanes: super::ProbeLanes,
+        pred: &crate::exact::TagPredicate,
+        stats: &mut MatchStats,
+    ) {
         match self {
             BaseSegment::Memory(s) => {
-                s.match_into(view, dict, epoch, seen, out, lanes, pred, stats);
+                s.match_collect(view, dict, epoch, seen, collector, lanes, pred, stats);
             }
             BaseSegment::Mmap(s) => {
-                s.match_into(view, dict, epoch, seen, out, lanes, pred, stats);
+                s.match_collect(view, dict, epoch, seen, collector, lanes, pred, stats);
             }
         }
     }

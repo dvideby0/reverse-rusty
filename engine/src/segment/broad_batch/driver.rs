@@ -8,6 +8,7 @@
 //! eval itself lives in [`super::kernel`].
 
 use super::kernel::{eval_one_segment, Lane};
+use crate::collect::{AllBatchCollector, BatchMatchSink, CollectionSummary, VecSink};
 use crate::dict::FeatureId;
 use crate::segment::snapshot::MatchView;
 use crate::segment::{
@@ -45,6 +46,9 @@ pub(in crate::segment) struct BroadBatchScratch {
     acc: Vec<u64>,
     /// Per-any-of-group OR accumulator (`words` u64 words).
     grp: Vec<u64>,
+    /// Logical emissions accumulated per title across inline and columnar
+    /// lanes. Parallel to the reusable `outs` vectors owned by the driver.
+    delivery_emissions: Vec<u64>,
 }
 
 impl BroadBatchScratch {
@@ -60,6 +64,7 @@ impl BroadBatchScratch {
             non_pure: Vec::new(),
             acc: Vec::new(),
             grp: Vec::new(),
+            delivery_emissions: Vec::new(),
         }
     }
 
@@ -118,6 +123,12 @@ fn match_batch_chunk<D: DeadlineCheck>(
     for v in outs.iter_mut().take(b) {
         v.clear();
     }
+    if bs.delivery_emissions.len() < b {
+        bs.delivery_emissions.resize(b, 0);
+    }
+    for count in bs.delivery_emissions.iter_mut().take(b) {
+        *count = 0;
+    }
     if b == 0 {
         return Ok(());
     }
@@ -169,6 +180,9 @@ fn match_batch_chunk<D: DeadlineCheck>(
             for v in outs.iter_mut().take(b) {
                 v.clear();
             }
+            for count in bs.delivery_emissions.iter_mut().take(b) {
+                *count = 0;
+            }
             return Err(c);
         }
         // per-title epoch bump for the selective lane's cross-signature dedup
@@ -182,9 +196,6 @@ fn match_batch_chunk<D: DeadlineCheck>(
             ms.epoch = 1;
         }
         let epoch = ms.epoch;
-        let out = &mut outs[ti];
-        out.clear();
-
         // normalize once. The default (no active multi-word alias) takes the **single-view fast
         // path** — one feature set + one mask, no second copy (ADR-061: zero-overhead default).
         // Only with multi-word aliases active (`force_inline`) do we build the canonical `N(T)` +
@@ -224,28 +235,31 @@ fn match_batch_chunk<D: DeadlineCheck>(
             include_broad: inline_broad,
             include_hot: hot_inline,
         };
-        for (i, base) in view.segments.iter().enumerate() {
-            base.match_into(
+        {
+            let mut collector = VecSink::new(&mut outs[ti], &mut bs.delivery_emissions[ti]);
+            for (i, base) in view.segments.iter().enumerate() {
+                base.match_collect(
+                    &tview,
+                    view.dict,
+                    epoch,
+                    &mut ms.seen[i],
+                    &mut collector,
+                    lanes,
+                    view.pred,
+                    stats,
+                );
+            }
+            view.memtable.match_collect(
                 &tview,
                 view.dict,
                 epoch,
-                &mut ms.seen[i],
-                out,
+                &mut ms.seen[n_base],
+                &mut collector,
                 lanes,
                 view.pred,
                 stats,
             );
         }
-        view.memtable.match_into(
-            &tview,
-            view.dict,
-            epoch,
-            &mut ms.seen[n_base],
-            out,
-            lanes,
-            view.pred,
-            stats,
-        );
 
         // The columnar kernel is single-view; it only runs when no multi-word alias is
         // active (both `columnar` and `hot_columnar` are forced off otherwise), so the
@@ -275,7 +289,8 @@ fn match_batch_chunk<D: DeadlineCheck>(
     }
 
     if !any_columnar {
-        finalize_delivery(outs, b, stats);
+        let mut collector = AllBatchCollector::new(&mut outs[..b], &mut bs.delivery_emissions[..b]);
+        record_collection(stats, collector.finish());
         return Ok(());
     }
     if columnar {
@@ -297,18 +312,18 @@ fn match_batch_chunk<D: DeadlineCheck>(
         non_pure,
         acc,
         grp,
+        delivery_emissions,
     } = bs;
     let acc: &mut [u64] = &mut acc[..words];
     let grp: &mut [u64] = &mut grp[..words];
     let materialize = opts.broad_materialize;
     let prefilter = opts.broad_prefilter;
+    let mut collector = AllBatchCollector::new(&mut outs[..b], &mut delivery_emissions[..b]);
 
     for (si, base) in view.segments.iter().enumerate() {
         // Cooperative-deadline segment boundary in the columnar pass (ADR-099).
         if let Err(c) = dl.check() {
-            for v in outs.iter_mut().take(b) {
-                v.clear();
-            }
+            collector.abort();
             return Err(c);
         }
         if columnar {
@@ -328,7 +343,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 non_pure,
                 acc,
                 grp,
-                outs,
+                &mut collector,
                 materialize,
                 prefilter,
                 view.pred,
@@ -352,7 +367,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 non_pure,
                 acc,
                 grp,
-                outs,
+                &mut collector,
                 materialize,
                 prefilter,
                 view.pred,
@@ -363,9 +378,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
     // memtable last (its broad_seen buffer is at index n_base)
     {
         if let Err(c) = dl.check() {
-            for v in outs.iter_mut().take(b) {
-                v.clear();
-            }
+            collector.abort();
             return Err(c);
         }
         if columnar {
@@ -385,7 +398,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 non_pure,
                 acc,
                 grp,
-                outs,
+                &mut collector,
                 materialize,
                 prefilter,
                 view.pred,
@@ -409,7 +422,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 non_pure,
                 acc,
                 grp,
-                outs,
+                &mut collector,
                 materialize,
                 prefilter,
                 view.pred,
@@ -419,19 +432,17 @@ fn match_batch_chunk<D: DeadlineCheck>(
     }
 
     // ---- merge: dedup each title's matches across lanes + segments ----
-    finalize_delivery(outs, b, stats);
+    record_collection(stats, collector.finish());
     Ok(())
 }
 
-/// Finalize each title's result collector and account for duplicate logical
-/// emissions. Kept in one helper so inline and columnar batches cannot drift.
-fn finalize_delivery(outs: &mut [Vec<u64>], titles: usize, stats: &mut MatchStats) {
-    for v in outs.iter_mut().take(titles) {
-        let emissions = v.len();
-        v.sort_unstable();
-        v.dedup();
-        stats.record_delivery(emissions, v.len());
-    }
+fn record_collection(stats: &mut MatchStats, summary: CollectionSummary) {
+    stats.logical_emissions = stats
+        .logical_emissions
+        .saturating_add(summary.logical_emissions);
+    stats.duplicate_emissions = stats
+        .duplicate_emissions
+        .saturating_add(summary.duplicate_emissions.unwrap_or(0));
 }
 
 /// Advance the shared per-segment dedup epoch (each lane pass gets its own —
@@ -453,7 +464,7 @@ fn next_epoch(broad_epoch: &mut u32, broad_seen: &mut [Vec<u32>]) -> u32 {
 /// Dispatch one columnar-lane evaluation over a [`BaseSegment`]'s two backings —
 /// collapses the Memory/Mmap duplication at the two lane-call sites above.
 #[allow(clippy::too_many_arguments)]
-fn eval_base_lane(
+fn eval_base_lane<S: BatchMatchSink>(
     base: &BaseSegment,
     lane: Lane,
     distinct: &[FeatureId],
@@ -468,7 +479,7 @@ fn eval_base_lane(
     non_pure: &mut Vec<u32>,
     acc: &mut [u64],
     grp: &mut [u64],
-    outs: &mut [Vec<u64>],
+    collector: &mut S,
     materialize: bool,
     prefilter: bool,
     pred: &crate::exact::TagPredicate,
@@ -490,7 +501,7 @@ fn eval_base_lane(
             non_pure,
             acc,
             grp,
-            outs,
+            collector,
             materialize,
             prefilter,
             pred,
@@ -511,7 +522,7 @@ fn eval_base_lane(
             non_pure,
             acc,
             grp,
-            outs,
+            collector,
             materialize,
             prefilter,
             pred,

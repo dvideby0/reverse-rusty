@@ -192,6 +192,10 @@ mod tests {
             main_candidates: VALS[3],
             broad_candidates: VALS[4],
             matches: VALS[5],
+            // ADR-107 delivery telemetry is deliberately absent from the frozen
+            // protobuf contract; transport mapping leaves both counters zero.
+            logical_emissions: 0,
+            duplicate_emissions: 0,
             probes_attempted: VALS[6],
             probes_skipped: VALS[7],
             broad_queries_evaluated: VALS[8],

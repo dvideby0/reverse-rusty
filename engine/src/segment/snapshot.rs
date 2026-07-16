@@ -6,6 +6,7 @@ use super::{
     infallible, BaseSegment, BatchMatchOptions, DeadlineAt, DeadlineCheck, EngineSnapshot,
     MatchCancelled, MatchScratch, MatchStats, NoDeadline, Segment,
 };
+use crate::collect::{AllCollector, MatchCollector};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::exact::TagPredicate;
@@ -89,6 +90,22 @@ impl MatchView<'_> {
         include_broad: bool,
         dl: D,
     ) -> Result<MatchStats, D::Cancelled> {
+        let mut collector = AllCollector::new(out);
+        self.match_title_collect(title, s, &mut collector, include_broad, dl)
+    }
+
+    /// Generic internal collector path. Public compatibility entry points use
+    /// `AllCollector`; bounded collectors remain disconnected from serving in
+    /// this increment.
+    #[inline]
+    fn match_title_collect<D: DeadlineCheck, C: MatchCollector>(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        collector: &mut C,
+        include_broad: bool,
+        dl: D,
+    ) -> Result<MatchStats, D::Cancelled> {
         // per-segment seen-buffer sizing (base segments first, memtable last)
         let segments = self.segments;
         let n_base = segments.len();
@@ -105,7 +122,7 @@ impl MatchView<'_> {
             s.epoch = 1;
         }
         let epoch = s.epoch;
-        out.clear();
+        collector.reset();
 
         // Cooperative-deadline entry check (ADR-099): a match that spent its whole
         // budget queued on the rayon pool dies here, before doing any work. The
@@ -158,12 +175,12 @@ impl MatchView<'_> {
                 cancelled = Some(c);
                 break;
             }
-            base.match_into(
+            base.match_collect(
                 &view,
                 self.dict,
                 epoch,
                 &mut s.seen[i],
-                out,
+                collector,
                 // The scalar path evaluates the always-visible hot tier INLINE
                 // (include_hot is a batch-driver cost switch, never visibility).
                 crate::segment::ProbeLanes {
@@ -177,12 +194,12 @@ impl MatchView<'_> {
         if cancelled.is_none() {
             match dl.check() {
                 Err(c) => cancelled = Some(c),
-                Ok(()) => self.memtable.match_into(
+                Ok(()) => self.memtable.match_collect(
                     &view,
                     self.dict,
                     epoch,
                     &mut s.seen[n_base],
-                    out,
+                    collector,
                     crate::segment::ProbeLanes {
                         include_broad,
                         include_hot: true,
@@ -193,13 +210,6 @@ impl MatchView<'_> {
             }
         }
 
-        // 4) dedup logical ids across segments (a logical id can live in more
-        // than one segment, e.g. base + an updated copy in a later segment).
-        let emissions = out.len();
-        out.sort_unstable();
-        out.dedup();
-        stats.record_delivery(emissions, out.len());
-
         // restore the reusable buffers (the positive buffer only when it was used)
         s.feats = feats;
         if dual {
@@ -208,10 +218,19 @@ impl MatchView<'_> {
         if let Some(c) = cancelled {
             // Anti-partial guarantee at the lowest level: a cancelled match returns
             // NO ids, never a truncated union (ADR-099).
-            out.clear();
+            collector.abort();
             return Err(c);
         }
-        stats.matches = out.len() as u32;
+        // 4) finalize after every lane and segment has emitted. A logical id can
+        // live in more than one segment (for example base + an updated copy).
+        let summary = collector.finish();
+        stats.logical_emissions = stats
+            .logical_emissions
+            .saturating_add(summary.logical_emissions);
+        stats.duplicate_emissions = stats
+            .duplicate_emissions
+            .saturating_add(summary.duplicate_emissions.unwrap_or(0));
+        stats.matches = summary.retained as u32;
         Ok(stats)
     }
 

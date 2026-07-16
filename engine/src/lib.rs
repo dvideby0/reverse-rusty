@@ -33,6 +33,10 @@
 )]
 
 pub mod cluster;
+// Increment 1 deliberately builds Count/TopK without connecting them to a
+// serving API yet; their unit oracle exercises that reserved internal surface.
+#[allow(dead_code)]
+mod collect;
 pub mod compile;
 pub mod config;
 pub mod corpus;
