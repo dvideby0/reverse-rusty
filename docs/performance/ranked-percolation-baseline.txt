@@ -1,0 +1,56 @@
+Ranked percolation / exhaustive-delivery baseline (ADR-107 Increment 0)
+Captured: 2026-07-16, macOS aarch64, release profile, crate 0.1.0
+Command: cargo run --release --bin rankbench -- 20000 500 8 275775489
+
+Timings are informational and machine-specific. The semantic checksums, match totals,
+emission totals, encoded byte counts, and fanout/result bounds are the compatibility pins.
+
+config: queries=20000 titles=500 shards=8 seed=0x0000000010700001 K=[10, 100, 1000, 10000]
+
+[ordinary]
+corpus: queries=20000 titles=500 build_ms=121.088
+matches/title: p50=1 p95=1 p99=1 total=500
+local delivery: emissions=500 unique=500 duplicates=0 dedup_ratio=0.000000
+encoded bytes: ids=3500 scores=7072 sources=45480 rank_ms=0.064
+cluster delivery: emissions=500 duplicates=0 dedup_ratio=0.000000 fanout_p50=3 fanout_p95=5 fanout_p99=5
+projection K=10: retained=500 max_rows/title=10 max_cluster_rows/title=80
+projection K=100: retained=500 max_rows/title=100 max_cluster_rows/title=800
+projection K=1000: retained=500 max_rows/title=1000 max_cluster_rows/title=8000
+projection K=10000: retained=500 max_rows/title=10000 max_cluster_rows/title=80000
+semantic checksum: local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
+
+[broad-heavy]
+corpus: queries=20000 titles=500 build_ms=123.117
+matches/title: p50=0 p95=254 p99=275 total=18313
+local delivery: emissions=18313 unique=18313 duplicates=0 dedup_ratio=0.000000
+encoded bytes: ids=100443 scores=229871 sources=798873 rank_ms=0.875
+cluster delivery: emissions=32693 duplicates=14380 dedup_ratio=0.439850 fanout_p50=3 fanout_p95=5 fanout_p99=5
+projection K=10: retained=856 max_rows/title=10 max_cluster_rows/title=80
+projection K=100: retained=7156 max_rows/title=100 max_cluster_rows/title=800
+projection K=1000: retained=18313 max_rows/title=1000 max_cluster_rows/title=8000
+projection K=10000: retained=18313 max_rows/title=10000 max_cluster_rows/title=80000
+semantic checksum: local=bb248a758615fda0 cluster=0b64b11f5259ff1c
+
+[body-duplicate]
+corpus: queries=20000 titles=500 build_ms=121.676
+matches/title: p50=0 p95=106 p99=106 total=7512
+local delivery: emissions=7512 unique=7512 duplicates=0 dedup_ratio=0.000000
+encoded bytes: ids=41118 scores=94002 sources=327458 rank_ms=0.349
+cluster delivery: emissions=10088 duplicates=2576 dedup_ratio=0.255353 fanout_p50=3 fanout_p95=5 fanout_p99=6
+projection K=10: retained=792 max_rows/title=10 max_cluster_rows/title=80
+projection K=100: retained=7160 max_rows/title=100 max_cluster_rows/title=800
+projection K=1000: retained=7512 max_rows/title=1000 max_cluster_rows/title=8000
+projection K=10000: retained=7512 max_rows/title=10000 max_cluster_rows/title=80000
+semantic checksum: local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
+
+[placement-duplicate]
+corpus: queries=20000 titles=1000 build_ms=140.340
+matches/title: p50=0 p95=1 p99=1 total=500
+local delivery: emissions=500 unique=500 duplicates=0 dedup_ratio=0.000000
+encoded bytes: ids=4500 scores=8071 sources=36351 rank_ms=0.039
+cluster delivery: emissions=931 duplicates=431 dedup_ratio=0.462943 fanout_p50=3 fanout_p95=5 fanout_p99=5
+projection K=10: retained=500 max_rows/title=10 max_cluster_rows/title=80
+projection K=100: retained=500 max_rows/title=100 max_cluster_rows/title=800
+projection K=1000: retained=500 max_rows/title=1000 max_cluster_rows/title=8000
+projection K=10000: retained=500 max_rows/title=10000 max_cluster_rows/title=80000
+semantic checksum: local=0ec5dda03607d01f cluster=77575a4edc1f29e7

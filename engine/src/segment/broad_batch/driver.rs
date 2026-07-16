@@ -272,13 +272,10 @@ fn match_batch_chunk<D: DeadlineCheck>(
         if force_inline {
             ms.feats_pos = feats_pos;
         }
-        if !any_columnar {
-            out.sort_unstable();
-            out.dedup();
-        }
     }
 
     if !any_columnar {
+        finalize_delivery(outs, b, stats);
         return Ok(());
     }
     if columnar {
@@ -422,11 +419,19 @@ fn match_batch_chunk<D: DeadlineCheck>(
     }
 
     // ---- merge: dedup each title's matches across lanes + segments ----
-    for v in outs.iter_mut().take(b) {
+    finalize_delivery(outs, b, stats);
+    Ok(())
+}
+
+/// Finalize each title's result collector and account for duplicate logical
+/// emissions. Kept in one helper so inline and columnar batches cannot drift.
+fn finalize_delivery(outs: &mut [Vec<u64>], titles: usize, stats: &mut MatchStats) {
+    for v in outs.iter_mut().take(titles) {
+        let emissions = v.len();
         v.sort_unstable();
         v.dedup();
+        stats.record_delivery(emissions, v.len());
     }
-    Ok(())
 }
 
 /// Advance the shared per-segment dedup epoch (each lane pass gets its own —

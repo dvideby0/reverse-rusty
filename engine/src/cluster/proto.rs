@@ -79,6 +79,10 @@ pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
         main_candidates: p.main_candidates,
         broad_candidates: p.broad_candidates,
         matches: p.matches,
+        // ADR-107 telemetry is intentionally not added to the compatibility
+        // protobuf. Remote shards report zero until the bounded v2 wire lands.
+        logical_emissions: 0,
+        duplicate_emissions: 0,
         probes_attempted: p.probes_attempted,
         probes_skipped: p.probes_skipped,
         broad_queries_evaluated: p.broad_queries_evaluated,

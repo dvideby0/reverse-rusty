@@ -48,6 +48,7 @@ pub mod index;
 pub mod loader;
 pub mod normalize;
 pub mod rank;
+pub mod result;
 pub mod segment;
 pub mod storage;
 pub mod tagdict;
@@ -65,6 +66,10 @@ pub use events::{
 pub use explain::ExplainDetail;
 pub use normalize::{Normalizer, NormalizerBuilder, PunctClass};
 pub use rank::{CompiledRankSpec, RankSpec};
+pub use result::{
+    QueryScope, ResultMode, TotalHits, TotalHitsRelation, DEFAULT_TOP_K,
+    DEFAULT_TRACK_TOTAL_HITS_UP_TO, MAX_TOP_K,
+};
 pub use segment::{
     AliasApplyReport, CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport,
     InsertOutcome, MatchStats,

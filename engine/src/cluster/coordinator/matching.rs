@@ -177,8 +177,10 @@ impl ClusterEngine {
             out.extend_from_slice(&ids);
             stats.merge(st);
         }
+        let shard_rows = out.len();
         out.sort_unstable();
         out.dedup();
+        stats.record_cross_source_duplicates(shard_rows, out.len());
         stats.matches = out.len() as u32;
         Ok((out, stats))
     }
@@ -254,8 +256,10 @@ impl ClusterEngine {
             out.extend_from_slice(&scored);
             stats.merge(st);
         }
+        let shard_rows = out.len();
         out.sort_unstable_by_key(|&(id, _)| id);
         out.dedup_by_key(|&mut (id, _)| id);
+        stats.record_cross_source_duplicates(shard_rows, out.len());
         stats.matches = out.len() as u32;
         Ok((out, stats))
     }

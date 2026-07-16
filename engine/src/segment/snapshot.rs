@@ -195,8 +195,10 @@ impl MatchView<'_> {
 
         // 4) dedup logical ids across segments (a logical id can live in more
         // than one segment, e.g. base + an updated copy in a later segment).
+        let emissions = out.len();
         out.sort_unstable();
         out.dedup();
+        stats.record_delivery(emissions, out.len());
 
         // restore the reusable buffers (the positive buffer only when it was used)
         s.feats = feats;

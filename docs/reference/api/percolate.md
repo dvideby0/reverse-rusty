@@ -2,6 +2,42 @@
 
 > Part of the [REST API reference](../api.md). Query language: [`dsl.md`](../dsl.md).
 
+## Reserved v2 ranked-search contract (not yet routed)
+
+ADR-107 reserves `POST /v2/_search` for a bounded ranked-search contract, but the route is
+**deliberately not registered yet**. The existing endpoints documented below remain the only serving
+surface and their request/response bytes are unchanged.
+
+The future request separates visibility from delivery:
+
+```json
+{
+  "document": {"title": "1996 Skybox Premium Michael Jordan PSA 10"},
+  "query_scope": "standard",
+  "result_mode": "top_k",
+  "size": 100,
+  "track_total_hits_up_to": 10000,
+  "allow_partial_results": false,
+  "rank": {
+    "priority_field": "priority",
+    "boosts": [{"key": "tenant", "value": "acme", "boost": 1000}]
+  },
+  "include_source": true,
+  "timeout_ms": 5000
+}
+```
+
+The future response will report `complete`, echo `query_scope`, include required-shard outcomes, and
+encode totals as `{"value": N, "relation": "eq"|"gte"}`. `complete=true` for `top_k` means the exact
+best K was computed across every required shard; it does not mean every true match is present in that
+page. A timeout, required-shard failure, or generation disagreement cannot become a successful exact
+response. `result_mode="terminated"` is explicitly approximate and always reports incomplete work.
+
+Reserved defaults are `result_mode="top_k"`, `query_scope="standard"`, `size=100`, maximum K 10,000,
+`track_total_hits_up_to=10000`, and `allow_partial_results=false`. Deep traversal will use a
+snapshot-bound opaque cursor rather than unbounded `from`. Typed rank storage and the bounded serving
+implementation are later increments; until they land, use the compatibility endpoints below.
+
 ## `POST /_search` — Percolate titles
 
 Match a single title against all stored queries:
@@ -270,4 +306,3 @@ especially with broad queries enabled. Both endpoints support `size`/`from` pagi
 block; reach for `/_search` when you want the rich, per-document observability it alone provides —
 per-slot `stats`, `explain`, and `profile`. Because the broad lane is amortized per batch, `/_mpercolate`
 deliberately does not produce per-document candidate/posting stats — only the batch-level `broad` summary.
-

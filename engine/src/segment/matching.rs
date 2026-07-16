@@ -88,17 +88,7 @@ impl Engine {
                 },
             )
             .reduce(MatchStats::default, |mut a, b| {
-                a.unique_candidates += b.unique_candidates;
-                a.postings_scanned += b.postings_scanned;
-                a.broad_postings_scanned += b.broad_postings_scanned;
-                a.main_candidates += b.main_candidates;
-                a.broad_candidates += b.broad_candidates;
-                a.matches += b.matches;
-                a.probes_attempted += b.probes_attempted;
-                a.probes_skipped += b.probes_skipped;
-                a.broad_queries_evaluated += b.broad_queries_evaluated;
-                a.broad_anchors_scanned += b.broad_anchors_scanned;
-                a.broad_batches += b.broad_batches;
+                a.merge(b);
                 a
             })
     }

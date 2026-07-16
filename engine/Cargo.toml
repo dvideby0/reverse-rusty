@@ -109,6 +109,10 @@ name = "bench"
 path = "src/bin/bench.rs"
 
 [[bin]]
+name = "rankbench"
+path = "src/bin/rankbench.rs"
+
+[[bin]]
 name = "demo"
 path = "src/bin/demo.rs"
 
