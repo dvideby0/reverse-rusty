@@ -6,7 +6,7 @@ use super::{
     infallible, BaseSegment, BatchMatchOptions, DeadlineAt, DeadlineCheck, EngineSnapshot,
     MatchCancelled, MatchScratch, MatchStats, NoDeadline, Segment,
 };
-use crate::collect::{AllCollector, MatchCollector};
+use crate::collect::{AllCollector, MatchCollector, TopKCollector};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::exact::TagPredicate;
@@ -95,10 +95,10 @@ impl MatchView<'_> {
     }
 
     /// Generic internal collector path. Public compatibility entry points use
-    /// `AllCollector`; bounded collectors remain disconnected from serving in
-    /// this increment.
+    /// `AllCollector`; bounded local ranking uses `TopKCollector` through the
+    /// same post-verification seam.
     #[inline]
-    fn match_title_collect<D: DeadlineCheck, C: MatchCollector>(
+    pub(in crate::segment) fn match_title_collect<D: DeadlineCheck, C: MatchCollector>(
         &self,
         title: &str,
         s: &mut MatchScratch,
@@ -552,6 +552,30 @@ impl EngineSnapshot {
         crate::rank::CompiledRankSpec::new(spec.priority_key.clone(), boosts)
     }
 
+    /// Compile the fixed typed bounded-ranking program. Only the canonical
+    /// `priority` field is admitted in Increment 2; boosts resolve to TagIds at
+    /// request setup so scoring remains integer-only.
+    pub fn compile_rank_program(
+        &self,
+        spec: &crate::rank::RankProgramSpec,
+    ) -> Result<crate::rank::CompiledRankProgram, crate::rank::RankProgramError> {
+        let use_priority = match spec.priority_field.as_deref() {
+            None => false,
+            Some("priority") => true,
+            Some(field) => {
+                return Err(crate::rank::RankProgramError::UnsupportedField(
+                    field.to_string(),
+                ));
+            }
+        };
+        let boosts = spec
+            .boosts
+            .iter()
+            .map(|(key, value, weight)| (self.tag_dict.get_or_synthetic(key, value), *weight))
+            .collect();
+        Ok(crate::rank::CompiledRankProgram::new(use_priority, boosts))
+    }
+
     /// The live `TagId` slice for a matched logical id, picking the NEWEST live
     /// copy. Ordering is newest-first at both levels: the memtable before the base
     /// segments (all writes land in the memtable), base segments newest→oldest
@@ -576,6 +600,114 @@ impl EngineSnapshot {
             }
         }
         None
+    }
+
+    /// Newest-live typed rank values and tags for a logical id. The same reverse
+    /// walk as compatibility ranking prevents an older physical duplicate from
+    /// determining score merely because it emitted first.
+    fn rank_metadata_for_logical(
+        &self,
+        logical_id: u64,
+    ) -> Option<(crate::rank::RankValues, &[crate::tagdict::TagId])> {
+        for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
+            if self.memtable.is_alive(local) {
+                let tags = self.memtable.tags_of(local);
+                let mut rank = self.memtable.rank_values(local);
+                if rank.priority == 0 {
+                    rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
+                }
+                return Some((rank, tags));
+            }
+        }
+        for seg in self.segments.iter().rev() {
+            for &local in seg.locals_for_logical(logical_id).iter().rev() {
+                if seg.is_alive(local) {
+                    let tags = seg.tags_of(local);
+                    let mut rank = seg.rank_values(local);
+                    if rank.priority == 0 {
+                        rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
+                    }
+                    return Some((rank, tags));
+                }
+            }
+        }
+        None
+    }
+
+    /// Bounded local ranked percolation over the scalar matcher. Collection is
+    /// `O(K + total-threshold)` and every score resolves newest-live metadata.
+    pub fn try_match_title_top_k(
+        &self,
+        title: &str,
+        options: crate::result::TopKOptions,
+        program: &crate::rank::CompiledRankProgram,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        deadline: Option<Instant>,
+    ) -> Result<crate::rank::RankedMatch, crate::rank::RankedMatchError> {
+        if options.size > crate::result::MAX_TOP_K {
+            return Err(crate::rank::RankedMatchError::Admission(
+                crate::result::TopKAdmissionError::SizeTooLarge {
+                    requested: options.size,
+                    max: crate::result::MAX_TOP_K,
+                },
+            ));
+        }
+        if options.track_total_hits_up_to > crate::result::DEFAULT_TRACK_TOTAL_HITS_UP_TO {
+            return Err(crate::rank::RankedMatchError::Admission(
+                crate::result::TopKAdmissionError::TotalHitsThresholdTooLarge {
+                    requested: options.track_total_hits_up_to,
+                    max: crate::result::DEFAULT_TRACK_TOTAL_HITS_UP_TO,
+                },
+            ));
+        }
+        let threshold =
+            usize::try_from(options.track_total_hits_up_to).unwrap_or(crate::result::MAX_TOP_K);
+        let mut collector = TopKCollector::new(options.size, threshold, |logical_id| {
+            self.rank_metadata_for_logical(logical_id)
+                .map_or(0, |(values, tags)| {
+                    crate::rank::score_program(values, tags, program)
+                })
+        });
+        let view = MatchView {
+            norm: &self.norm,
+            dict: &self.dict,
+            segments: &self.segments,
+            memtable: &self.memtable,
+            pred,
+        };
+        let include_broad = options.query_scope == crate::result::QueryScope::WithBroad;
+        let mut stats = match deadline {
+            Some(at) => view
+                .match_title_collect(
+                    title,
+                    scratch,
+                    &mut collector,
+                    include_broad,
+                    DeadlineAt(at),
+                )
+                .map_err(crate::rank::RankedMatchError::Cancelled)?,
+            None => infallible(view.match_title_collect(
+                title,
+                scratch,
+                &mut collector,
+                include_broad,
+                NoDeadline,
+            )),
+        };
+        let total_hits = collector.total_hits();
+        stats.matches = u32::try_from(total_hits.value).unwrap_or(u32::MAX);
+        let hits = collector
+            .winners()
+            .iter()
+            .map(|&(logical_id, score)| crate::rank::RankedHit { logical_id, score })
+            .collect();
+        Ok(crate::rank::RankedMatch {
+            hits,
+            total_hits,
+            stats,
+            rank_stats: collector.rank_stats(),
+        })
     }
 
     /// Score matched logical ids for ranking (ADR-049 §5.4 / ADR-059). Returns

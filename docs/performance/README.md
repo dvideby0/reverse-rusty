@@ -14,7 +14,8 @@ Measured results for Reverse Rusty (single core, aarch64 4-core / 3.8 GiB sandbo
 Full analysis, tables, bottlenecks, and the 100M extrapolation are in [`results.md`](results.md).
 The **benchmark runbook** — how to run each harness, the machine-independent **invariants** to
 verify, and the dated **capture log** — is in [`benchmark-results.txt`](benchmark-results.txt).
-The ADR-107 pre-collector ranked-delivery capture is in
+The ADR-107 pre-collector baseline and ADR-108 bounded K=10/100/1,000/10,000 post-integration
+latency, structural-memory, result-byte, and checksum capture are in
 [`ranked-percolation-baseline.txt`](ranked-percolation-baseline.txt).
 
 ## Reproduce
@@ -26,7 +27,7 @@ export CARGO_TARGET_DIR=/tmp/reverse-rusty-target                      # build o
 cargo test --release                                          # correctness oracle (zero false negatives)
 cargo run --release --bin bench -- 1000000 5000 0.0 2.0 60    # selective path benchmark
 cargo run --release --bin bench -- 1000000 5000 0.05 2.0 60   # with broad lane (shows its cost)
-cargo run --release --bin rankbench -- 20000 500 8 275775489  # ADR-107 ranked-delivery baseline
+cargo run --release --bin rankbench -- 20000 500 8 275775489  # ADR-107/108 ranked delivery + bounded top-K
 cargo run --release --bin learn -- 500000 50 0.30            # corpus feature learner
 cargo run --release --bin segbench -- 300000 3000 0.0        # read-amplification vs segment count
 ```

@@ -146,7 +146,13 @@ pub(crate) type EventSink = Arc<dyn Fn(&crate::events::EngineEvent) + Send + Syn
 /// `(logical, dsl, version, tag_ids)`. The version + tags ride the gather so the rebuild
 /// re-places each query at the version it was durably stored with (not reset to 1) and
 /// carries its tags (interned or post-freeze synthetic) to its new shard.
-pub(crate) type LiveTaggedQuery = (u64, String, u32, Vec<crate::tagdict::TagId>);
+pub(crate) type LiveTaggedQuery = (
+    u64,
+    String,
+    u32,
+    Vec<crate::tagdict::TagId>,
+    crate::rank::RankValues,
+);
 
 /// One shard, local or remote — the seam that lets a coordinator hold a mix of
 /// in-process and (eventually) networked shards behind one type.

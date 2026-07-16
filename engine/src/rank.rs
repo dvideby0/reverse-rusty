@@ -21,6 +21,128 @@
 use crate::tagdict::{TagDict, TagId};
 use crate::util::FastMap;
 
+/// Fixed typed rank columns stored beside the exact-verification rows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RankValues {
+    pub priority: i64,
+}
+
+/// Raw bounded-ranking program. Increment 2 supports one fixed typed field;
+/// boosts retain the existing integer tag-id scoring model.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RankProgramSpec {
+    pub priority_field: Option<String>,
+    pub boosts: Vec<(String, String, i64)>,
+}
+
+impl Default for RankProgramSpec {
+    fn default() -> Self {
+        Self {
+            priority_field: Some("priority".to_string()),
+            boosts: Vec::new(),
+        }
+    }
+}
+
+/// Integer-only compiled bounded-ranking program.
+#[derive(Clone, Debug, Default)]
+pub struct CompiledRankProgram {
+    use_priority: bool,
+    boosts: FastMap<TagId, i64>,
+}
+
+impl CompiledRankProgram {
+    pub(crate) fn new(use_priority: bool, boosts: FastMap<TagId, i64>) -> Self {
+        Self {
+            use_priority,
+            boosts,
+        }
+    }
+
+    #[must_use]
+    pub fn uses_priority(&self) -> bool {
+        self.use_priority
+    }
+
+    pub fn boosts(&self) -> impl Iterator<Item = (TagId, i64)> + '_ {
+        self.boosts.iter().map(|(&tag, &weight)| (tag, weight))
+    }
+}
+
+/// Compile-time rejection for rank fields not implemented by this increment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RankProgramError {
+    UnsupportedField(String),
+}
+
+impl std::fmt::Display for RankProgramError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedField(field) => write!(f, "unsupported rank field `{field}`"),
+        }
+    }
+}
+
+impl std::error::Error for RankProgramError {}
+
+/// Bounded-ranking collection telemetry, separate from Boolean match stats.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RankStats {
+    pub evaluations: u64,
+    pub heap_replacements: u64,
+}
+
+/// One winner under the deterministic `(score desc, logical_id asc)` order.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RankedHit {
+    pub logical_id: u64,
+    pub score: i64,
+}
+
+/// Complete local bounded-ranked result. Boolean matching statistics remain
+/// separate from collector/scoring telemetry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RankedMatch {
+    pub hits: Vec<RankedHit>,
+    pub total_hits: crate::result::TotalHits,
+    pub stats: crate::segment::MatchStats,
+    pub rank_stats: RankStats,
+}
+
+/// Failures from local bounded ranked matching.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RankedMatchError {
+    Admission(crate::result::TopKAdmissionError),
+    Cancelled(crate::segment::MatchCancelled),
+}
+
+impl std::fmt::Display for RankedMatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Admission(error) => error.fmt(f),
+            Self::Cancelled(_) => f.write_str("ranked match deadline exceeded"),
+        }
+    }
+}
+
+impl std::error::Error for RankedMatchError {}
+
+/// Score newest-live typed metadata and tag boosts with saturating addition.
+#[must_use]
+pub(crate) fn score_program(values: RankValues, tags: &[TagId], spec: &CompiledRankProgram) -> i64 {
+    let mut score = if spec.use_priority {
+        values.priority
+    } else {
+        0
+    };
+    for tag in tags {
+        if let Some(weight) = spec.boosts.get(tag) {
+            score = score.saturating_add(*weight);
+        }
+    }
+    score
+}
+
 /// A ranking request in raw, pre-resolution form (ADR-049 §5.4). Built from the
 /// REST `rank` block and compiled against a snapshot's tag space by
 /// [`EngineSnapshot::compile_rank_spec`](crate::EngineSnapshot::compile_rank_spec).

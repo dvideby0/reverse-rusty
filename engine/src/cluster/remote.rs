@@ -1097,6 +1097,7 @@ mod tests {
             version: 1,
             tags,
             tag_ids,
+            rank: crate::rank::RankValues::default(),
         }
     }
 

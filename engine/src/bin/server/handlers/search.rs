@@ -18,12 +18,14 @@ mod mpercolate;
 mod percolate;
 mod rank;
 mod resolve;
+mod v2;
 
 #[cfg(test)]
 mod tests;
 
 pub(crate) use mpercolate::mpercolate;
 pub(crate) use percolate::search;
+pub(crate) use v2::v2_search;
 // The request-resolution helper is shared with the coordinator-mode handlers
 // (ADR-070), so both modes parse the identical native + ES envelopes.
 pub(crate) use resolve::resolve_percolate;

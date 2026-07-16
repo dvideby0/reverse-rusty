@@ -469,6 +469,7 @@ impl ShardServer {
                     version: 1,
                     tags: Vec::new(),
                     tag_ids: Vec::new(),
+                    rank: crate::rank::RankValues::default(),
                 })
             })
             .collect();

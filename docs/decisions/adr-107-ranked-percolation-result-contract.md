@@ -1,6 +1,6 @@
 # ADR-107: Ranked percolation result contract and collector boundary
 
-- **Status:** Accepted (Increment 0–1)
+- **Status:** Accepted (Increment 0–2)
 - **Date:** 2026-07-16
 
 ## Context
@@ -34,9 +34,9 @@ Reserved v2 defaults are `top_k`, `size=100`, `max_top_k=10_000`,
 `track_total_hits_up_to=10_000`, `allow_partial_results=false`, `query_scope=standard`, and a
 server-configured timeout that arms cooperative compute cancellation.
 
-`/v2/_search` is reserved but **not registered** in Increment 0–1. Advertising a bounded v2 surface
-before typed ranking and bounded collection are connected would falsely imply a scale boundary. The
-existing `/_search` and `/_mpercolate` request/response bytes remain unchanged.
+Increment 2 registers single-document, single-node `/v2/_search` for exact `top_k` only under
+[ADR-108](adr-108-typed-priority-local-bounded-ranking.md). The existing `/_search` and
+`/_mpercolate` request/response bytes remain unchanged.
 
 ### Collection seam
 
@@ -48,8 +48,8 @@ candidate retrieval -> exact body verdict -> member alive/tag checks -> collecto
 
 - `AllCollector` preserves the current sorted, deduplicated `Vec<u64>` API.
 - `CountCollector` retains no hits and tracks unique totals only through a declared threshold.
-- `TopKCollector` keeps K winners under `(score desc, logical_id asc)` and is initially oracle-only;
-  it is not connected to REST, cluster RPCs, source lookup, or persistence.
+- `TopKCollector` keeps K winners under `(score desc, logical_id asc)`; Increment 2 connects it to
+  the scalar local matcher with newest-live typed scoring. It remains absent from cluster RPCs.
 
 Collector memory is reserved before matching. A top-K collector stores only the K heap members and
 their IDs. Because the test scorer is deterministic per logical ID and the competitive threshold can
@@ -85,7 +85,7 @@ sorting, and truncation across duplicates, ties, signed scores, K boundaries, an
 
 ## Deferred
 
-Typed numeric rank persistence, local v2 serving, deterministic distributed emission ownership,
-query-then-fetch, distributed title batching, PIT/cursors, exhaustive jobs/streams, and exact
-competitive pruning remain separate ADR-sized increments. No persistence, WAL, manifest, protobuf,
-or compatibility response format changes in Increment 0–1.
+Deterministic distributed emission ownership, query-then-fetch, distributed title batching,
+PIT/cursors, exhaustive jobs/streams, and exact competitive pruning remain separate ADR-sized
+increments. ADR-108 adds typed segment/WAL persistence while leaving manifest, protobuf, and
+compatibility response formats unchanged.

@@ -75,7 +75,7 @@ use handlers::{
     discover_and_record_aliases, flush, get_alias_feedback, get_aliases, get_doc, get_settings,
     get_vocab, health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
     mpercolate, prometheus_metrics, put_doc, put_settings, put_vocab, reset_alias_feedback, search,
-    stats, validate_and_apply_feedback,
+    stats, v2_search, validate_and_apply_feedback,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -370,12 +370,14 @@ async fn main() {
     let drain_timeout = cli.drain_timeout;
     let slow_threshold = cli.slow_query_threshold_ms;
     let initial_snapshot = Arc::new(engine.snapshot());
+    let ranked_workers = pool.current_num_threads().max(1);
     let state = Arc::new(AppState {
         engine: Mutex::new(engine),
         snapshot: ArcSwap::new(initial_snapshot),
         pool,
         search_permits: (cli.max_concurrent_searches > 0)
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
+        ranked_search_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(ranked_workers)),
         include_broad: cli.include_broad,
         prom,
         slow_query_threshold_ms: slow_threshold,
@@ -388,6 +390,7 @@ async fn main() {
         .route("/", get(api_root))
         .route("/_doc/{id}", get(get_doc).put(put_doc).delete(delete_doc))
         .route("/_search", post(search))
+        .route("/v2/_search", post(v2_search))
         .route("/_mpercolate", post(mpercolate))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))

@@ -584,7 +584,10 @@ fn rebuild_preserves_stored_query_version() {
         .upsert_query(5, "1995 fleer", 42)
         .expect("versioned upsert");
     let before = cluster.live_corpus_tagged().expect("gather");
-    let pre = before.iter().find(|(l, ..)| *l == 5).map(|&(_, _, v, _)| v);
+    let pre = before
+        .iter()
+        .find(|(l, ..)| *l == 5)
+        .map(|&(_, _, v, _, _)| v);
     assert_eq!(
         pre,
         Some(42),
@@ -598,7 +601,10 @@ fn rebuild_preserves_stored_query_version() {
 
     // After the rebuild id 5 must STILL carry version 42 (not reset to 1) and still match.
     let after = cluster.live_corpus_tagged().expect("gather after rebuild");
-    let post = after.iter().find(|(l, ..)| *l == 5).map(|&(_, _, v, _)| v);
+    let post = after
+        .iter()
+        .find(|(l, ..)| *l == 5)
+        .map(|&(_, _, v, _, _)| v);
     assert_eq!(
         post,
         Some(42),

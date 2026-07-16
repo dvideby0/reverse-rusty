@@ -92,6 +92,7 @@ impl ClusterEngine {
                             version: *version,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
+                            rank: crate::rank::RankValues::default(),
                         });
                     }
                 }
@@ -104,6 +105,7 @@ impl ClusterEngine {
                             version: *version,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
+                            rank: crate::rank::RankValues::default(),
                         });
                     }
                 }

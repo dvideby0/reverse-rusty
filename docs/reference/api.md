@@ -81,7 +81,7 @@ curl -X PUT localhost:9200/_doc/1 -H "Authorization: Bearer $RR_AUTH_TOKEN" \
 With a token configured (`RR_AUTH_TOKEN` env var or `--auth-token`; the env var is preferred — flag
 values appear in process listings), **every non-GET/HEAD request requires
 `Authorization: Bearer <token>`** except the read-via-POST percolate endpoints (`POST /_search`,
-`POST /_mpercolate`). That default-deny rule covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
+`POST /v2/_search`, `POST /_mpercolate`). That default-deny rule covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
 `_backup`, `_vocab` writes (including `/_vocab/learn*` and `/_vocab/aliases/*`), `_settings` writes — and any
 future mutating endpoint, which fails closed rather than open. Reads stay open unless
 `--auth-protect-reads` extends the gate to them too (stored queries are data worth protecting on an
@@ -130,7 +130,7 @@ curl localhost:9200/
 Endpoints are grouped by concern — open the one you need:
 
 - **[Documents](api/documents.md)** — register / retrieve / delete a stored query (`PUT`/`GET`/`DELETE /_doc/{id}`), incl. per-query metadata tags.
-- **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`, `POST /_mpercolate`), incl. filtered percolation.
+- **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`, local bounded `POST /v2/_search`, `POST /_mpercolate`), incl. filtered percolation.
 - **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`, `/_flush`, `/_compact`).
 - **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
 - **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias registry (`/_vocab/aliases*`, ADR-060).
@@ -148,6 +148,7 @@ The full method/path matrix is below.
 | `/_doc/{id}` | PUT | Register **or atomically replace** a query (201 created / 200 updated, ADR-067) |
 | `/_doc/{id}` | DELETE | Remove a stored query |
 | `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
+| `/v2/_search` | POST | Single-node, single-document exact bounded top-K ranked percolation (ADR-107/108) |
 | `/_mpercolate` | POST | Batch percolate (high throughput; columnar broad lane; `responses[]` envelope) |
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |
 | `/_flush` | POST | Flush memtable to immutable segment |

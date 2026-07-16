@@ -1,4 +1,4 @@
-//! Deterministic ranked-delivery baseline (ADR-107, Increment 0).
+//! Deterministic ranked-delivery baseline + bounded local capture (ADR-107/108).
 //!
 //! Measures the current collect-all/rank-after-match path and records stable
 //! semantic checksums alongside informational timings. The generated corpus is
@@ -8,7 +8,7 @@
 use reverse_rusty::cluster::{ClusterConfig, ClusterEngine};
 use reverse_rusty::gen::{generate, Dataset, GenConfig};
 use reverse_rusty::segment::{Engine, MatchScratch};
-use reverse_rusty::{Normalizer, RankSpec};
+use reverse_rusty::{Normalizer, QueryScope, RankProgramSpec, RankSpec, TopKOptions};
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
@@ -43,6 +43,17 @@ struct ClusterCapture {
     checksum: u64,
 }
 
+struct BoundedCapture {
+    k: usize,
+    retained: usize,
+    encoded_bytes: usize,
+    match_rank_time: Duration,
+    evaluations: u64,
+    replacements: u64,
+    collector_bound_entries: usize,
+    collector_payload_bytes: usize,
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let num_queries = arg_usize(&args, 1, DEFAULT_QUERIES);
@@ -50,7 +61,7 @@ fn main() {
     let shards = arg_usize(&args, 3, DEFAULT_SHARDS).max(1);
     let seed = arg_u64(&args, 4, DEFAULT_SEED);
 
-    println!("Reverse Rusty ranked-delivery synthetic baseline (ADR-107)");
+    println!("Reverse Rusty ranked-delivery synthetic baseline (ADR-107/108)");
     println!(
         "host: os={} arch={} profile={} crate={}",
         std::env::consts::OS,
@@ -202,6 +213,16 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
     let snap = engine.snapshot();
     let compiled = snap.compile_rank_spec(&rank);
     let capture = capture_local(&snap, &data.titles, &compiled);
+    let bounded_program = snap
+        .compile_rank_program(&RankProgramSpec {
+            priority_field: Some("priority".to_string()),
+            boosts: rank.boosts.clone(),
+        })
+        .expect("fixed priority rank program");
+    let bounded: Vec<BoundedCapture> = KS
+        .into_iter()
+        .map(|k| capture_bounded(&snap, &data.titles, &compiled, &bounded_program, k))
+        .collect();
 
     let cluster = ClusterEngine::build_with_tags(
         Normalizer::default_vocab().expect("built-in normalizer"),
@@ -259,17 +280,104 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
         percentile(&cluster_capture.fanouts, 95),
         percentile(&cluster_capture.fanouts, 99)
     );
-    for k in KS {
-        let retained: usize = counts.iter().map(|&n| n.min(k)).sum();
+    for capture in bounded {
+        let k = capture.k;
         let shard_bound = k.saturating_mul(shards);
         println!(
-            "projection K={k}: retained={retained} max_rows/title={k} max_cluster_rows/title={shard_bound}"
+            "bounded K={k}: retained={} match_rank_ms={:.3} encoded_bytes={} evaluations={} replacements={} collector_bound_entries={} collector_payload_bytes={} max_cluster_rows/title={shard_bound}",
+            capture.retained,
+            capture.match_rank_time.as_secs_f64() * 1_000.0,
+            capture.encoded_bytes,
+            capture.evaluations,
+            capture.replacements,
+            capture.collector_bound_entries,
+            capture.collector_payload_bytes,
         );
     }
     println!(
         "semantic checksum: local={:016x} cluster={:016x}",
         capture.checksum, cluster_capture.checksum
     );
+}
+
+fn capture_bounded(
+    snap: &reverse_rusty::EngineSnapshot,
+    titles: &[String],
+    compatibility_rank: &reverse_rusty::CompiledRankSpec,
+    program: &reverse_rusty::CompiledRankProgram,
+    k: usize,
+) -> BoundedCapture {
+    const THRESHOLD: usize = 10_000;
+    let mut scratch = MatchScratch::new();
+    let mut oracle_scratch = MatchScratch::new();
+    let mut oracle_ids = Vec::new();
+    let mut retained = 0usize;
+    let mut encoded_bytes = 0usize;
+    let mut match_rank_time = Duration::ZERO;
+    let mut evaluations = 0u64;
+    let mut replacements = 0u64;
+    for title in titles {
+        snap.match_title(title, &mut oracle_scratch, &mut oracle_ids, true);
+        let mut expected = snap.rank(&oracle_ids, compatibility_rank);
+        expected.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        expected.truncate(k);
+
+        let started = Instant::now();
+        let actual = snap
+            .try_match_title_top_k(
+                title,
+                TopKOptions {
+                    size: k,
+                    track_total_hits_up_to: THRESHOLD as u64,
+                    query_scope: QueryScope::WithBroad,
+                },
+                program,
+                &reverse_rusty::exact::TagPredicate::empty(),
+                &mut scratch,
+                None,
+            )
+            .expect("bounded ranked match");
+        match_rank_time += started.elapsed();
+        let rows: Vec<(u64, i64)> = actual
+            .hits
+            .iter()
+            .map(|hit| (hit.logical_id, hit.score))
+            .collect();
+        assert_eq!(rows, expected, "bounded result diverged at K={k}");
+        retained = retained.saturating_add(rows.len());
+        encoded_bytes = encoded_bytes.saturating_add(
+            serde_json::to_vec(&rows)
+                .expect("serialize bounded rows")
+                .len(),
+        );
+        evaluations = evaluations.saturating_add(actual.rank_stats.evaluations);
+        replacements = replacements.saturating_add(actual.rank_stats.heap_replacements);
+    }
+
+    // Structural payload bound: K heap rows + K heap-id entries + threshold+1
+    // total-id entries. Hash-table bucket/control overhead is allocator-specific,
+    // so report the portable payload bytes separately from the entry bound.
+    let collector_bound_entries = k
+        .saturating_mul(2)
+        .saturating_add(THRESHOLD.saturating_add(1));
+    let collector_payload_bytes = k
+        .saturating_mul(std::mem::size_of::<(u64, i64)>())
+        .saturating_add(k.saturating_mul(std::mem::size_of::<u64>()))
+        .saturating_add(
+            THRESHOLD
+                .saturating_add(1)
+                .saturating_mul(std::mem::size_of::<u64>()),
+        );
+    BoundedCapture {
+        k,
+        retained,
+        encoded_bytes,
+        match_rank_time,
+        evaluations,
+        replacements,
+        collector_bound_entries,
+        collector_payload_bytes,
+    }
 }
 
 fn capture_local(

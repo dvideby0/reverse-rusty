@@ -63,6 +63,10 @@ pub struct TagDict {
     map: FastMap<String, TagId>,
     /// `TagId` (dense) -> canonical `"key\u{1}value"`
     keys: Vec<String>,
+    /// Dense-only cache for the compatibility `priority` tag. `None` means the
+    /// tag has another key; `Some(0)` deliberately covers malformed legacy
+    /// priority values, preserving their historical score-zero semantics.
+    priority_values: Vec<Option<i64>>,
     finalized: bool,
 }
 
@@ -85,6 +89,8 @@ impl TagDict {
         let id = self.keys.len() as TagId;
         self.map.insert(c.clone(), id);
         self.keys.push(c);
+        self.priority_values
+            .push((key == "priority").then(|| value.parse::<i64>().unwrap_or(0)));
         id
     }
 
@@ -122,6 +128,24 @@ impl TagDict {
         self.keys
             .get(id as usize)
             .and_then(|c| c.split_once(TAG_SEP))
+    }
+
+    /// Integer-only compatibility lookup for the canonical legacy `priority`
+    /// tag. Synthetic ids intentionally return `None`: their source string is
+    /// not retained, so their documented compatibility score remains zero.
+    #[inline]
+    pub fn legacy_priority(&self, id: TagId) -> Option<i64> {
+        self.priority_values.get(id as usize).copied().flatten()
+    }
+
+    /// Resolve the first canonical priority tag in an already sorted/deduped
+    /// dense tag slice. This exactly mirrors compatibility ranking's first-tag
+    /// behavior without string lookup or parsing on the match path.
+    #[inline]
+    pub fn legacy_priority_for_tags(&self, tags: &[TagId]) -> i64 {
+        tags.iter()
+            .find_map(|&id| self.legacy_priority(id))
+            .unwrap_or(0)
     }
 
     pub fn is_finalized(&self) -> bool {
@@ -162,6 +186,7 @@ impl TagDict {
             + self.keys.capacity() * size_of::<String>()
             + map_key_chars
             + self.map.capacity() * size_of::<(String, TagId)>()
+            + self.priority_values.capacity() * size_of::<Option<i64>>()
     }
 }
 

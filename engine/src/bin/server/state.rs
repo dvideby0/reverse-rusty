@@ -37,6 +37,9 @@ pub(crate) struct AppState {
     /// actually ends (not when an abandoned join handle drops at timeout), so the
     /// semaphore reflects true pool occupancy. `None` ⇒ unbounded (default).
     pub(crate) search_permits: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    /// Always-bounded v2 ranked-search admission. Its default is the Rayon
+    /// worker count and is deliberately independent from compatibility routes.
+    pub(crate) ranked_search_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,
     pub(crate) slow_query_threshold_ms: u64,

@@ -1,4 +1,4 @@
-//! Monomorphized post-verification result collectors (ADR-107 Increment 1).
+//! Monomorphized post-verification result collectors (ADR-107).
 //!
 //! The matcher calls [`MatchSink::on_match`] only after Boolean verification and
 //! member-level alive/tag checks. Collectors therefore cannot affect candidate
@@ -259,7 +259,7 @@ impl PartialOrd for HeapHit {
     }
 }
 
-/// Bounded exact top-K collector used by the Increment-1 differential oracle.
+/// Bounded exact top-K collector used by local ranked percolation and its oracle.
 pub(crate) struct TopKCollector<F> {
     k: usize,
     scorer: F,
@@ -268,6 +268,8 @@ pub(crate) struct TopKCollector<F> {
     winners: Vec<(u64, i64)>,
     totals: TotalTracker,
     emissions: u64,
+    evaluations: u64,
+    heap_replacements: u64,
 }
 
 impl<F> TopKCollector<F>
@@ -285,11 +287,24 @@ where
             winners: Vec::with_capacity(k),
             totals: TotalTracker::new(total_threshold),
             emissions: 0,
+            evaluations: 0,
+            heap_replacements: 0,
         }
     }
 
     pub(crate) fn winners(&self) -> &[(u64, i64)] {
         &self.winners
+    }
+
+    pub(crate) fn rank_stats(&self) -> crate::rank::RankStats {
+        crate::rank::RankStats {
+            evaluations: self.evaluations,
+            heap_replacements: self.heap_replacements,
+        }
+    }
+
+    pub(crate) fn total_hits(&self) -> TotalHits {
+        self.totals.total_hits()
     }
 }
 
@@ -304,6 +319,7 @@ where
             return;
         }
 
+        self.evaluations = self.evaluations.saturating_add(1);
         let hit = HeapHit {
             logical_id,
             score: (self.scorer)(logical_id),
@@ -316,6 +332,7 @@ where
 
         let replace = self.heap.peek().is_some_and(|worst| better(hit, *worst));
         if replace {
+            self.heap_replacements = self.heap_replacements.saturating_add(1);
             if let Some(removed) = self.heap.pop() {
                 self.heap_ids.remove(&removed.logical_id);
             }
@@ -335,6 +352,8 @@ where
         self.winners.clear();
         self.totals.reset();
         self.emissions = 0;
+        self.evaluations = 0;
+        self.heap_replacements = 0;
     }
 
     fn finish(&mut self) -> CollectionSummary {

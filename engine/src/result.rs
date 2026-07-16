@@ -1,18 +1,58 @@
 //! Result-contract primitives for ranked percolation (ADR-107).
 //!
-//! These types describe the reserved v2 search contract. They do not register an
-//! HTTP route or change the compatibility APIs; the bounded serving path lands in
-//! a later increment. Keeping the primitives in the lean core gives the local,
-//! cluster, and server layers one vocabulary when that work begins.
+//! These types describe the local v2 search contract while leaving compatibility
+//! matching and ranking APIs unchanged. Keeping the primitives in the lean core
+//! gives future cluster and serving layers the same vocabulary.
 
 use serde::{Deserialize, Serialize};
 
-/// Reserved default number of winners for a v2 ranked-search request.
+/// Default number of winners for a v2 ranked-search request.
 pub const DEFAULT_TOP_K: usize = 100;
-/// Hard admission ceiling reserved for v2 ranked search.
+/// Hard admission ceiling for v2 ranked search.
 pub const MAX_TOP_K: usize = 10_000;
-/// Reserved default threshold above which total hits become a lower bound.
+/// Default threshold above which total hits become a lower bound.
 pub const DEFAULT_TRACK_TOTAL_HITS_UP_TO: u64 = 10_000;
+
+/// Admission-bounded options for one local ranked percolation request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TopKOptions {
+    pub size: usize,
+    pub track_total_hits_up_to: u64,
+    pub query_scope: QueryScope,
+}
+
+impl Default for TopKOptions {
+    fn default() -> Self {
+        Self {
+            size: DEFAULT_TOP_K,
+            track_total_hits_up_to: DEFAULT_TRACK_TOTAL_HITS_UP_TO,
+            query_scope: QueryScope::Standard,
+        }
+    }
+}
+
+/// Typed admission failures shared by the lean core and HTTP layer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TopKAdmissionError {
+    SizeTooLarge { requested: usize, max: usize },
+    TotalHitsThresholdTooLarge { requested: u64, max: u64 },
+}
+
+impl std::fmt::Display for TopKAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SizeTooLarge { requested, max } => {
+                write!(f, "size {requested} exceeds maximum {max}")
+            }
+            Self::TotalHitsThresholdTooLarge { requested, max } => write!(
+                f,
+                "track_total_hits_up_to {requested} exceeds maximum {max}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TopKAdmissionError {}
 
 /// Which accepted visibility classes a request asks the matcher to evaluate.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

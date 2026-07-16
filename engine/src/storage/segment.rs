@@ -41,10 +41,16 @@ const MAGIC: [u8; 4] = *b"PERC";
 // class-H entry, doubling as the same kind of rollback fence: a pre-ADR-105
 // binary never probes the hot index, so its entries would silently stop
 // matching; the unsupported-version refusal makes that loud. Hot-free segments
-// keep writing v3/v4 byte-identically.
+// keep writing v3/v4 byte-identically. v6 (ADR-108) appends one signed i64
+// priority per exact row, but is written only when at least one value is non-zero;
+// old v1-v5 rows lower their cached legacy priority tag at open/compaction time.
 const FORMAT_VERSION: u32 = 3;
 const FORMAT_VERSION_CLASS_D: u32 = 4;
 const FORMAT_VERSION_HOT: u32 = 5;
+/// v6 (ADR-108): exact section appends one `i64` priority per query. Written
+/// only when at least one value is non-zero, so all-zero segments retain their
+/// previous v3/v4/v5 rollback behavior and bytes.
+const FORMAT_VERSION_RANK: u32 = 6;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).

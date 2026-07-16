@@ -146,11 +146,36 @@ impl Segment {
         version: u32,
         knobs: CompileKnobs,
     ) -> Option<AddedCompiled> {
+        self.add_compiled_ranked(
+            ex,
+            tags,
+            dict,
+            logical,
+            version,
+            crate::rank::RankValues::default(),
+            knobs,
+        )
+    }
+
+    /// [`add_compiled`](Self::add_compiled) with the fixed typed rank columns.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_compiled_ranked(
+        &mut self,
+        ex: &Extracted,
+        tags: &[crate::tagdict::TagId],
+        dict: &Dict,
+        logical: u64,
+        version: u32,
+        rank: crate::rank::RankValues,
+        knobs: CompileKnobs,
+    ) -> Option<AddedCompiled> {
         let plan = build_signatures(ex, dict, knobs.hot_anchor_threshold);
         if rejects_class_d(plan.class, ex, knobs.accept_class_d) {
             return None;
         }
-        let local = self.exact.push(ex, tags, dict, version, logical);
+        let local = self
+            .exact
+            .push_ranked(ex, tags, dict, version, logical, rank);
 
         // Canonical-body dedup (Stage A): an entry whose SEMANTIC body equals an
         // existing leader's joins that group instead of inserting postings — it
@@ -223,6 +248,10 @@ impl Segment {
     /// `set_vocab` recompile so tags survive a vocabulary change.
     pub fn tags_of(&self, local_id: u32) -> &[crate::tagdict::TagId] {
         self.exact.tags_of(local_id)
+    }
+
+    pub fn rank_values(&self, local_id: u32) -> crate::rank::RankValues {
+        self.exact.rank_values(local_id)
     }
 
     /// The stored per-query version for a local id — read back for the cluster

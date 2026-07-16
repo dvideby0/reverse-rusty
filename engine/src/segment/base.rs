@@ -103,6 +103,14 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.tags_of(local_id),
         }
     }
+    /// Fixed typed rank values for a local row. Pre-v6 mmap segments expose
+    /// zero here until their legacy tag fallback is resolved by the snapshot.
+    pub fn rank_values(&self, local_id: u32) -> crate::rank::RankValues {
+        match self {
+            BaseSegment::Memory(s) => s.rank_values(local_id),
+            BaseSegment::Mmap(s) => s.rank_values(local_id),
+        }
+    }
     // Compatibility dispatch wrapper — signature stays byte-for-byte stable.
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(
@@ -202,10 +210,10 @@ impl BaseSegment {
 
     /// Convert to an owned in-memory Segment (needed by compact_from).
     /// Memory segments are returned directly; mmap segments are materialized.
-    pub(in crate::segment) fn into_memory(self) -> Segment {
+    pub(in crate::segment) fn into_memory(self, tag_dict: &crate::tagdict::TagDict) -> Segment {
         match self {
             BaseSegment::Memory(s) => s,
-            BaseSegment::Mmap(s) => s.to_memory_segment(),
+            BaseSegment::Mmap(s) => s.to_memory_segment(tag_dict),
         }
     }
 }

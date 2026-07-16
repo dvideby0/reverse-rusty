@@ -155,3 +155,9 @@ gauge, WAL size/pending gauges, cumulative flush/compaction-time counters, a
 `durability_failures_total{op}` counter (ADR-021), and — when bearer-token auth is enabled — an
 `auth_failures_total{reason="missing"|"invalid"}` counter for rejected requests (ADR-062).
 
+ADR-108 adds low-cardinality local bounded-ranking telemetry:
+`ranked_requests_total{outcome,scope}`, `rank_total_relation_total{relation}`,
+`rank_admission_rejections_total{reason}`, `rank_evaluations_total`,
+`rank_heap_replacements_total`, `rank_source_bytes_total`,
+`rank_true_match_lower_bound_total`, and the current `ranked_search_permits_in_use` gauge. Slow v2
+logs include K, scope, total relation, candidates, rank wall time, and cancellation outcome.

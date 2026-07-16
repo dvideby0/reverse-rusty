@@ -54,3 +54,38 @@ projection K=100: retained=500 max_rows/title=100 max_cluster_rows/title=800
 projection K=1000: retained=500 max_rows/title=1000 max_cluster_rows/title=8000
 projection K=10000: retained=500 max_rows/title=10000 max_cluster_rows/title=80000
 semantic checksum: local=0ec5dda03607d01f cluster=77575a4edc1f29e7
+
+--- ADR-108 Increment 2 post-integration capture ---
+Captured: 2026-07-16, macOS aarch64, release profile, crate 0.1.0
+Command: cargo run --release --bin rankbench -- 20000 500 8 275775489
+
+Each bounded row runs the real EngineSnapshot::try_match_title_top_k path and asserts it equals
+collect-all -> newest-live compatibility score -> full sort -> truncate. match_rank_ms is the
+whole local Boolean-match + bounded-rank compute for the workload. encoded_bytes is JSON for the
+retained (logical_id, score) rows. collector_payload_bytes is the portable payload floor for the
+K heap rows + K heap-id entries + 10,001 total-id entries; allocator-specific hash bucket/control
+overhead is deliberately excluded. Timings are informational and machine-specific.
+
+workload             K  retained  match_rank_ms  encoded_bytes  evaluations  replacements  bound_entries  payload_bytes
+ordinary            10       500          0.706           7072          500             0          10021          80248
+ordinary           100       500          0.658           7072          500             0          10201          82408
+ordinary          1000       500          0.660           7072          500             0          12001         104008
+ordinary         10000       500          0.928           7072          500             0          30001         320008
+broad-heavy         10       856          1.441          12192        18313          5259          10021          80248
+broad-heavy        100      7156          1.554          93387        18313          9277          10201          82408
+broad-heavy       1000     18313          1.567         229871        18313             0          12001         104008
+broad-heavy      10000     18313          1.893         229871        18313             0          30001         320008
+body-duplicate      10       792          0.994          11508         7512          3708          10021          80248
+body-duplicate     100      7160          1.000          90596         7512           352          10201          82408
+body-duplicate    1000      7512          1.067          94002         7512             0          12001         104008
+body-duplicate   10000      7512          1.372          94002         7512             0          30001         320008
+placement-duplicate 10       500          1.088           8071          500             0          10021          80248
+placement-duplicate 100      500          1.035           8071          500             0          10201          82408
+placement-duplicate 1000     500          1.042           8071          500             0          12001         104008
+placement-duplicate 10000    500          1.402           8071          500             0          30001         320008
+
+Compatibility pins unchanged from Increment 0:
+ordinary:            local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
+broad-heavy:         local=bb248a758615fda0 cluster=0b64b11f5259ff1c
+body-duplicate:      local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
+placement-duplicate: local=0ec5dda03607d01f cluster=77575a4edc1f29e7

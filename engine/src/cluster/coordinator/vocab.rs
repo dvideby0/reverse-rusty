@@ -157,15 +157,23 @@ impl ClusterEngine {
     pub(super) fn live_corpus_tagged(
         &self,
     ) -> Result<Vec<crate::cluster::shard::LiveTaggedQuery>, ShardError> {
-        let mut live: BTreeMap<u64, (String, u32, Vec<crate::tagdict::TagId>)> = BTreeMap::new();
+        let mut live: BTreeMap<
+            u64,
+            (
+                String,
+                u32,
+                Vec<crate::tagdict::TagId>,
+                crate::rank::RankValues,
+            ),
+        > = BTreeMap::new();
         for s in &self.shards {
-            for (logical, dsl, version, tag_ids) in s.live_sources_tagged()? {
-                live.entry(logical).or_insert((dsl, version, tag_ids));
+            for (logical, dsl, version, tag_ids, rank) in s.live_sources_tagged()? {
+                live.entry(logical).or_insert((dsl, version, tag_ids, rank));
             }
         }
         Ok(live
             .into_iter()
-            .map(|(logical, (dsl, version, tag_ids))| (logical, dsl, version, tag_ids))
+            .map(|(logical, (dsl, version, tag_ids, rank))| (logical, dsl, version, tag_ids, rank))
             .collect())
     }
 

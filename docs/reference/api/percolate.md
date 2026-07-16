@@ -2,13 +2,12 @@
 
 > Part of the [REST API reference](../api.md). Query language: [`dsl.md`](../dsl.md).
 
-## Reserved v2 ranked-search contract (not yet routed)
+## `POST /v2/_search` — Local bounded ranked percolation (ADR-107/108)
 
-ADR-107 reserves `POST /v2/_search` for a bounded ranked-search contract, but the route is
-**deliberately not registered yet**. The existing endpoints documented below remain the only serving
-surface and their request/response bytes are unchanged.
-
-The future request separates visibility from delivery:
+Single-node mode serves exact bounded top-K ranking without first materializing every matching ID.
+The route accepts exactly one `document`; cluster mode, batching, cursors/PIT, `from`, exhaustive
+`all`, and approximate `terminated` delivery are later increments and reject loudly. Existing
+`/_search` and `/_mpercolate` behavior and response bytes are unchanged.
 
 ```json
 {
@@ -17,26 +16,54 @@ The future request separates visibility from delivery:
   "result_mode": "top_k",
   "size": 100,
   "track_total_hits_up_to": 10000,
-  "allow_partial_results": false,
   "rank": {
     "priority_field": "priority",
     "boosts": [{"key": "tenant", "value": "acme", "boost": 1000}]
   },
   "include_source": true,
+  "explain": false,
+  "allow_partial_results": false,
   "timeout_ms": 5000
 }
 ```
 
-The future response will report `complete`, echo `query_scope`, include required-shard outcomes, and
-encode totals as `{"value": N, "relation": "eq"|"gte"}`. `complete=true` for `top_k` means the exact
-best K was computed across every required shard; it does not mean every true match is present in that
-page. A timeout, required-shard failure, or generation disagreement cannot become a successful exact
-response. `result_mode="terminated"` is explicitly approximate and always reports incomplete work.
+```json
+{
+  "took_ms": 0.31,
+  "complete": true,
+  "query_scope": "standard",
+  "_shards": {"total": 1, "successful": 1, "failed": 0},
+  "hits": {
+    "total": {"value": 17, "relation": "eq"},
+    "hits": [
+      {
+        "_id": 42,
+        "_score": 1050,
+        "_source": {"query": "michael jordan psa 10"}
+      }
+    ]
+  }
+}
+```
 
-Reserved defaults are `result_mode="top_k"`, `query_scope="standard"`, `size=100`, maximum K 10,000,
-`track_total_hits_up_to=10000`, and `allow_partial_results=false`. Deep traversal will use a
-snapshot-bound opaque cursor rather than unbounded `from`. Typed rank storage and the bounded serving
-implementation are later increments; until they land, use the compatibility endpoints below.
+`complete=true` means the exact best K was computed over the selected local visibility scope; it does
+not mean every true match appears in the page. Winner order is always `(score desc, _id asc)` and
+integer addition saturates at the `i64` bounds. Totals are exact while unique matches do not exceed
+`track_total_hits_up_to`; after the next distinct match the result is
+`{"value": threshold, "relation": "gte"}`. `size=0` returns no hits but still computes the
+thresholded total.
+
+Defaults are `result_mode="top_k"`, `query_scope="standard"`, `size=100`, typed `priority` ranking,
+`track_total_hits_up_to=10000`, `include_source=true`, `explain=false`,
+`allow_partial_results=false`, and `timeout_ms=5000`. Hard limits are `size <= 10000` and
+`track_total_hits_up_to <= 10000`. A native `filter` uses the same tag predicate as compatibility
+percolation. Requested source or explanation lookup is fail-closed. The timeout is compute-armed and
+includes waiting for the dedicated ranked-search permit; timeout returns 408 and cooperative matching
+receives the same deadline.
+
+The optional rank program supports only `priority_field="priority"` plus additive integer tag boosts.
+Unknown rank fields return `unsupported_rank_field`. `result_mode="all"` or `"terminated"`,
+`allow_partial_results=true`, `from`, `cursor`, `documents`, and `query` return explicit 400s.
 
 ## `POST /_search` — Percolate titles
 

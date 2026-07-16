@@ -61,15 +61,18 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   end-to-end through the cluster (ADR-055).
 - **Ranking + pagination** — opt-in post-match `Σ boosts + priority-tag value`, `from`/`size`
   (ADR-059); cluster rank-at-shard with compile-once-fan (ADR-075).
+- **Typed local bounded ranking** — signed `i64` priority column, newest-live integer scoring,
+  bounded `TopKCollector`, and single-document single-node `POST /v2/_search` with honest thresholded
+  totals + cooperative deadlines (ADR-107/108). Distributed top-K remains deferred.
 - **Explain** (`explain.rs`) — first-class; structured `ExplainDetail` over REST.
 
 ### Durability & storage
 
 - **LSM write path** (`segment/`) — memtable + immutable segments + tombstones + score-based
   compaction with auto-triggers (ADR-004, ADR-009).
-- **mmap'd `.seg` format** (v3/v4) + frozen hash tables (ADR-012); flat mmap'd logical-index
+- **mmap'd `.seg` format** (v3–v6) + frozen hash tables (ADR-012/105/108); flat mmap'd logical-index
   columns + lazy on-disk source store → resident ~4.5 B/query (ADR-020, ADR-014).
-- **WAL** (v5) — CRC-framed, crash recovery, configurable fsync (ADR-013); address-free logical
+- **WAL** (v6) — CRC-framed, crash recovery, configurable fsync (ADR-013/108); address-free logical
   deletes + per-segment dead-locals bitmaps make tombstones durable at the commit point (ADR-066);
   atomic upsert `PUT` (ADR-067); class-D op codes (ADR-068).
 - **Durable bulk ingest** — segment = artifact, manifest = commit (ADR-017); per-item outcomes

@@ -401,7 +401,8 @@ impl LocalShard {
     }
 
     /// An order-independent 128-bit fingerprint over this shard's LIVE query multiset —
-    /// `(logical_id, version, dsl, TagId*)`, the `live_sources_tagged` basis (memtable +
+    /// `(logical_id, version, dsl, TagId*, typed priority)`, the `live_sources_tagged` basis
+    /// (memtable +
     /// segments, live copies only) — plus the live count (ADR-097). Two logically-equal copies
     /// fingerprint equal regardless of insertion order, flush boundaries, segment layout, or
     /// compaction history (byte-level segment CRCs cannot say this — equal op streams produce
@@ -448,8 +449,8 @@ impl LocalShard {
         }
         let mut encoded: Vec<Vec<u8>> = entries
             .iter()
-            .map(|(logical, dsl, version, tags)| {
-                let mut e = Vec::with_capacity(8 + 4 + 8 + dsl.len() + 8 + 4 * tags.len());
+            .map(|(logical, dsl, version, tags, rank)| {
+                let mut e = Vec::with_capacity(8 + 4 + 8 + dsl.len() + 8 + 4 * tags.len() + 8);
                 e.extend_from_slice(&logical.to_le_bytes());
                 e.extend_from_slice(&version.to_le_bytes());
                 e.extend_from_slice(&(dsl.len() as u64).to_le_bytes());
@@ -457,6 +458,11 @@ impl LocalShard {
                 e.extend_from_slice(&(tags.len() as u64).to_le_bytes());
                 for t in tags {
                     e.extend_from_slice(&t.to_le_bytes());
+                }
+                // Preserve the pre-ADR-108 fingerprint for the overwhelmingly-common all-zero
+                // corpus while still making a typed-priority divergence force peer recovery.
+                if rank.priority != 0 {
+                    e.extend_from_slice(&rank.priority.to_le_bytes());
                 }
                 e
             })

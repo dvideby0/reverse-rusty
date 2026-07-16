@@ -467,6 +467,9 @@ pub struct PlacedQuery {
     /// ingest. In-process only: a synthetic id has no recoverable string, so this never crosses
     /// the dict-agnostic gRPC wire (`RemoteShard::ingest_extracted` fails loud). Empty ⇒ unused.
     pub tag_ids: Vec<crate::tagdict::TagId>,
+    /// Fixed typed rank values carried across in-process rebuild/resize. The
+    /// distributed wire remains unchanged in Increment 2 and supplies zero.
+    pub rank: crate::rank::RankValues,
 }
 
 /// Outcome of ingesting a batch of stored queries. Lets callers see how many

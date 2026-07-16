@@ -10,10 +10,10 @@ use std::sync::Arc;
 /// compaction). Unwraps the `Arc` in place when uniquely held; otherwise — when
 /// a published snapshot still references the segment — clones it out, leaving
 /// that snapshot's view intact.
-fn arc_into_memory(seg: Arc<BaseSegment>) -> Segment {
+fn arc_into_memory(seg: Arc<BaseSegment>, tag_dict: &crate::tagdict::TagDict) -> Segment {
     Arc::try_unwrap(seg)
         .unwrap_or_else(|a| (*a).clone())
-        .into_memory()
+        .into_memory(tag_dict)
 }
 
 impl Engine {
@@ -158,7 +158,7 @@ impl Engine {
             // Clone the alive entries out for the reseal WITHOUT consuming the
             // original (Arc::clone keeps it live), so a failed write can keep
             // serving — and keep on disk — the original segment.
-            let seg = arc_into_memory(Arc::clone(&arc));
+            let seg = arc_into_memory(Arc::clone(&arc), &self.tag_dict);
             let clean = Segment::compact_from(&[&seg]); // copies only alive entries
                                                         // An all-tombstoned segment compacts to empty — drop it rather than writing
                                                         // an empty `.seg` (and let its old file be cleaned up below).
@@ -313,7 +313,7 @@ impl Engine {
         // manifest write rolls straight back to the (still-durable) source segments.
         let memory_segs: Vec<Segment> = self.segments[lo..hi]
             .iter()
-            .map(|a| arc_into_memory(Arc::clone(a)))
+            .map(|a| arc_into_memory(Arc::clone(a), &self.tag_dict))
             .collect();
         let refs: Vec<&Segment> = memory_segs.iter().collect();
         // The "improve" merge (ADR-056) re-anchors drifted queries when enabled; the

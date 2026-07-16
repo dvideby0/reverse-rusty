@@ -29,6 +29,17 @@ use crate::index::CandidateIndex;
 use crate::segment::{MatchStats, Segment};
 
 impl MmapSegment {
+    /// Fixed typed rank values. Segment v6 replaces this compatibility default
+    /// with the mmap-backed column; older formats legitimately expose zero.
+    pub fn rank_values(&self, local: u32) -> crate::rank::RankValues {
+        let priority = self
+            .mmap_slice(self.priority_arr, self.priority_count)
+            .get(local as usize)
+            .copied()
+            .unwrap_or(0);
+        crate::rank::RankValues { priority }
+    }
+
     // ---- slice accessors (zero-cost, just pointer arithmetic) ----
 
     /// View `len` elements of `T` at `ptr` as a slice borrowed from `&self`.
@@ -713,7 +724,7 @@ impl MmapSegment {
 
     /// Reconstruct an in-memory Segment from this mmap'd segment. Used by
     /// compaction to produce source data for Segment::compact_from.
-    pub fn to_memory_segment(&self) -> Segment {
+    pub fn to_memory_segment(&self, tag_dict: &crate::tagdict::TagDict) -> Segment {
         use crate::exact::ExactStore;
         let n = self.num_queries as usize;
 
@@ -745,6 +756,12 @@ impl MmapSegment {
                     _ => &[],
                 };
 
+            let stored = self.rank_values(i as u32).priority;
+            let priority = if self.priority_count == 0 {
+                tag_dict.legacy_priority_for_tags(tags)
+            } else {
+                stored
+            };
             exact.push_raw(
                 rm,
                 fm,
@@ -760,6 +777,7 @@ impl MmapSegment {
                 tags,
                 ver,
                 log,
+                priority,
             );
 
             // SAFETY: `i < n == num_queries`, and `class_arr` is the

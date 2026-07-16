@@ -33,8 +33,7 @@
 )]
 
 pub mod cluster;
-// Increment 1 deliberately builds Count/TopK without connecting them to a
-// serving API yet; their unit oracle exercises that reserved internal surface.
+// Count stays internal; TopK is wired to the scalar local matcher by Increment 2.
 #[allow(dead_code)]
 mod collect;
 pub mod compile;
@@ -69,10 +68,13 @@ pub use events::{
 };
 pub use explain::ExplainDetail;
 pub use normalize::{Normalizer, NormalizerBuilder, PunctClass};
-pub use rank::{CompiledRankSpec, RankSpec};
+pub use rank::{
+    CompiledRankProgram, CompiledRankSpec, RankProgramError, RankProgramSpec, RankSpec, RankStats,
+    RankValues, RankedHit, RankedMatch, RankedMatchError,
+};
 pub use result::{
-    QueryScope, ResultMode, TotalHits, TotalHitsRelation, DEFAULT_TOP_K,
-    DEFAULT_TRACK_TOTAL_HITS_UP_TO, MAX_TOP_K,
+    QueryScope, ResultMode, TopKAdmissionError, TopKOptions, TotalHits, TotalHitsRelation,
+    DEFAULT_TOP_K, DEFAULT_TRACK_TOTAL_HITS_UP_TO, MAX_TOP_K,
 };
 pub use segment::{
     AliasApplyReport, CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport,
