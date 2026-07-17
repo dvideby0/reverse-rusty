@@ -126,6 +126,9 @@ pub struct ClusterState {
     /// handshake will coordinate on.
     pub dict_fingerprint: u64,
     pub model_version: u64,
+    /// ADR-109 logical placement identity. Bumped only by model/ring blue-green
+    /// rebuild transitions, never by physical assignment or checkpoint changes.
+    pub placement_generation: u64,
 }
 
 /// One atomic transition the control plane commits — the [`ClusterMutation`](super::clog)
@@ -271,9 +274,11 @@ pub(super) fn apply(state: &mut ClusterState, change: ClusterStateChange) {
         ClusterStateChange::BumpModelVersion { dict_fingerprint } => {
             state.dict_fingerprint = dict_fingerprint;
             state.model_version += 1;
+            state.placement_generation = state.placement_generation.saturating_add(1);
         }
         ClusterStateChange::SetShardCount { num_shards } => {
             state.num_shards = num_shards;
+            state.placement_generation = state.placement_generation.saturating_add(1);
             // Shrink: drop assignments for positions that no longer exist.
             state.assignments.retain(|a| a.position < num_shards);
             // Grow: add a default single-node assignment for each new position. A multi-node
@@ -322,6 +327,7 @@ pub(super) fn single_node_state(
         vnodes,
         dict_fingerprint,
         model_version: 0,
+        placement_generation: crate::ownership::PlacementGeneration::INITIAL.0,
     }
 }
 
@@ -357,6 +363,17 @@ impl InMemoryControlPlane {
     /// before ADR-037.
     pub fn single_node(num_shards: u32, vnodes: u32, dict_fingerprint: u64) -> Self {
         InMemoryControlPlane::new(single_node_state(num_shards, vnodes, dict_fingerprint))
+    }
+
+    pub(crate) fn single_node_with_generation(
+        num_shards: u32,
+        vnodes: u32,
+        dict_fingerprint: u64,
+        generation: crate::ownership::PlacementGeneration,
+    ) -> Self {
+        let mut state = single_node_state(num_shards, vnodes, dict_fingerprint);
+        state.placement_generation = generation.0;
+        InMemoryControlPlane::new(state)
     }
 
     /// Lock the document, recovering a poisoned guard rather than panicking (a prior writer

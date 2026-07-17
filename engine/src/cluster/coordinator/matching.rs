@@ -141,6 +141,12 @@ impl ClusterEngine {
         pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         let (targets, broad_eval_shard) = self.route(title);
+        let ownership = crate::ownership::OwnershipContext::new(
+            self.placement_generation(),
+            self.shards.len() as u32,
+            targets.iter().map(|&position| position as u32).collect(),
+            include_broad.then_some(broad_eval_shard as u32),
+        )?;
         // The broad lane is replicated to every shard (ADR-080) but evaluated on exactly ONE
         // shard per title — its broad-eval shard — so a broad query is counted once; the other
         // probed shards run with broad off (they would re-scan the same replicated lane). A
@@ -150,10 +156,12 @@ impl ClusterEngine {
             targets
                 .iter()
                 .map(|&s| {
-                    self.shards[s].percolate_filtered(
+                    self.shards[s].percolate_filtered_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
+                        &ownership,
+                        s as u32,
                     )
                 })
                 .collect::<Result<_, _>>()?
@@ -162,10 +170,12 @@ impl ClusterEngine {
             targets
                 .par_iter()
                 .map(|&s| {
-                    self.shards[s].percolate_filtered(
+                    self.shards[s].percolate_filtered_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         pred,
+                        &ownership,
+                        s as u32,
                     )
                 })
                 .collect::<Result<_, _>>()?
@@ -180,6 +190,11 @@ impl ClusterEngine {
         let shard_rows = out.len();
         out.sort_unstable();
         out.dedup();
+        debug_assert_eq!(
+            shard_rows,
+            out.len(),
+            "ADR-109 ownership-aware shard replies must not overlap"
+        );
         stats.record_cross_source_duplicates(shard_rows, out.len());
         stats.matches = out.len() as u32;
         Ok((out, stats))
@@ -221,17 +236,25 @@ impl ClusterEngine {
         let pred = self.compile_tag_predicate(filter);
         let spec = self.compile_rank_spec(rank);
         let (targets, broad_eval_shard) = self.route(title);
+        let ownership = crate::ownership::OwnershipContext::new(
+            self.placement_generation(),
+            self.shards.len() as u32,
+            targets.iter().map(|&position| position as u32).collect(),
+            include_broad.then_some(broad_eval_shard as u32),
+        )?;
         // Same fan-out + fail-loud shape as `percolate_inner` (a dropped shard probe
         // would shrink the union into a false negative); broad on the one broad-eval shard.
         let parts: Vec<(Vec<(u64, i64)>, MatchStats)> = if targets.len() <= 1 {
             targets
                 .iter()
                 .map(|&s| {
-                    self.shards[s].percolate_filtered_ranked(
+                    self.shards[s].percolate_filtered_ranked_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         &pred,
                         &spec,
+                        &ownership,
+                        s as u32,
                     )
                 })
                 .collect::<Result<_, _>>()?
@@ -240,11 +263,13 @@ impl ClusterEngine {
             targets
                 .par_iter()
                 .map(|&s| {
-                    self.shards[s].percolate_filtered_ranked(
+                    self.shards[s].percolate_filtered_ranked_owned(
                         title,
                         include_broad && s == broad_eval_shard,
                         &pred,
                         &spec,
+                        &ownership,
+                        s as u32,
                     )
                 })
                 .collect::<Result<_, _>>()?
@@ -259,6 +284,11 @@ impl ClusterEngine {
         let shard_rows = out.len();
         out.sort_unstable_by_key(|&(id, _)| id);
         out.dedup_by_key(|&mut (id, _)| id);
+        debug_assert_eq!(
+            shard_rows,
+            out.len(),
+            "ADR-109 ranked ownership-aware shard replies must not overlap"
+        );
         stats.record_cross_source_duplicates(shard_rows, out.len());
         stats.matches = out.len() as u32;
         Ok((out, stats))

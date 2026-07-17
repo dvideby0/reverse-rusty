@@ -21,6 +21,12 @@ use crate::normalize::Normalizer;
 use crate::tagdict::TagDict;
 
 impl ClusterEngine {
+    /// Current logical placement generation (ADR-109). Physical checkpoints,
+    /// compaction, replication, handoff, and node reassignment never change it.
+    pub fn placement_generation(&self) -> crate::ownership::PlacementGeneration {
+        crate::ownership::PlacementGeneration(self.placement_generation.load(Ordering::Acquire))
+    }
+
     /// Assemble a cluster from pre-built parts — the construction seam shared by
     /// [`Self::build`] (which supplies `LocalShard`s) and the distributed builder /
     /// gRPC integration test (which supply boxed `RemoteShard`s). `shards.len()` must
@@ -47,6 +53,11 @@ impl ClusterEngine {
                 ring.num_shards()
             )));
         }
+        let generation = durable.placement_generation;
+        let num_shards = ring.num_shards() as u32;
+        for (position, shard) in shards.iter().enumerate() {
+            shard.validate_ownership(position as u32, generation, num_shards)?;
+        }
         // Multi-word aliases are cluster-supported since ADR-076: `route` is P(T)-aware
         // (targets derived from the maximal positive view when multi-word aliases are
         // active), so a nested alias entity that lives only in `P(T)` still probes the
@@ -71,6 +82,7 @@ impl ClusterEngine {
             per_shard,
             log: durable.log,
             epoch: AtomicU64::new(durable.epoch),
+            placement_generation: AtomicU64::new(durable.placement_generation.0),
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
             control: durable.control,
@@ -284,11 +296,13 @@ impl ClusterEngine {
             log: Box::new(log),
             data_dir: Some(data_dir.clone()),
             epoch: manifest.epoch,
+            placement_generation: manifest.placement_generation,
             vnodes: manifest.vnodes,
-            control: Box::new(InMemoryControlPlane::single_node(
+            control: Box::new(InMemoryControlPlane::single_node_with_generation(
                 manifest.num_shards,
                 manifest.vnodes,
                 manifest.dict_fingerprint,
+                manifest.placement_generation,
             )),
         };
         let mut engine = Self::from_parts(

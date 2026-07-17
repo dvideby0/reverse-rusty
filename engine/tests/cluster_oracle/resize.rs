@@ -135,8 +135,15 @@ fn repeated_resize_round_trips_preserve_recall() {
         ..ClusterConfig::default()
     };
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+    let mut generation = cluster.placement_generation();
     for &k in &[8usize, 2, 8, 1, 5] {
         cluster.resize(k).expect("resize");
+        generation = generation.next().expect("generation capacity");
+        assert_eq!(
+            cluster.placement_generation(),
+            generation,
+            "each completed blue/green resize bumps placement exactly once"
+        );
         assert_eq!(cluster.num_shards(), k);
         assert_matches_refs(
             &cluster,
@@ -209,17 +216,24 @@ fn resize_noop_and_invalid_are_safe() {
         ..ClusterConfig::default()
     };
     let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+    let generation = cluster.placement_generation();
     assert_eq!(
         cluster.resize(4).expect("no-op"),
         0,
         "resize to the current count is a no-op (0 rebuilt)"
     );
     assert_eq!(cluster.num_shards(), 4);
+    assert_eq!(cluster.placement_generation(), generation);
     assert!(cluster.resize(0).is_err(), "resize to 0 must error");
     assert_eq!(
         cluster.num_shards(),
         4,
         "a rejected resize leaves the cluster unchanged"
+    );
+    assert_eq!(
+        cluster.placement_generation(),
+        generation,
+        "no-op and rejected resizes never bump placement generation"
     );
 }
 

@@ -31,6 +31,7 @@ use std::sync::Arc;
 use crate::vocab::{CorpusLearnConfig, Vocab};
 
 use super::ClusterEngine;
+use crate::cluster::control::ClusterStateChange;
 use crate::cluster::shard::ShardError;
 
 impl ClusterEngine {
@@ -104,7 +105,16 @@ impl ClusterEngine {
         //    `Some(vocab)` installs the new vocabulary and uses ITS equivalence groups; per-query
         //    tags carry through as stored `TagId`s (ADR-074). The resize path (ADR-078) calls the
         //    SAME core with a fresh ring instead of a new vocab.
-        let rebuilt = self.rebuild_from_live(new_norm, self.ring.clone(), Some(vocab))?;
+        let next_generation = self
+            .placement_generation()
+            .next()
+            .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
+        let rebuilt =
+            self.rebuild_from_live(new_norm, self.ring.clone(), Some(vocab), next_generation)?;
+
+        self.control.propose(ClusterStateChange::BumpModelVersion {
+            dict_fingerprint: self.dict.fingerprint(),
+        })?;
 
         // 4. Commit a durable cluster's rebuild via `checkpoint`: seal the green shards, write the
         //    new manifest (re-minted dict + serialized vocab + green segment registry — the atomic
@@ -164,16 +174,20 @@ impl ClusterEngine {
                 u32,
                 Vec<crate::tagdict::TagId>,
                 crate::rank::RankValues,
+                crate::ownership::QueryPlacement,
             ),
         > = BTreeMap::new();
         for s in &self.shards {
-            for (logical, dsl, version, tag_ids, rank) in s.live_sources_tagged()? {
-                live.entry(logical).or_insert((dsl, version, tag_ids, rank));
+            for (logical, dsl, version, tag_ids, rank, placement) in s.live_sources_tagged()? {
+                live.entry(logical)
+                    .or_insert((dsl, version, tag_ids, rank, placement));
             }
         }
         Ok(live
             .into_iter()
-            .map(|(logical, (dsl, version, tag_ids, rank))| (logical, dsl, version, tag_ids, rank))
+            .map(|(logical, (dsl, version, tag_ids, rank, placement))| {
+                (logical, dsl, version, tag_ids, rank, placement)
+            })
             .collect())
     }
 

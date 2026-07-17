@@ -108,6 +108,8 @@ impl ShardSlot {
 struct AdoptedSpace {
     dict: Arc<Dict>,
     tag_dict: Arc<TagDict>,
+    placement_generation: crate::ownership::PlacementGeneration,
+    num_shards: u32,
 }
 
 /// The map of shards this node hosts, keyed by `shard_id` (= global position, ADR-093).
@@ -124,6 +126,8 @@ fn node_space_cell(dict: Arc<Dict>, tag_dict: Arc<TagDict>) -> Arc<ArcSwapOption
     Arc::new(ArcSwapOption::from(Some(Arc::new(AdoptedSpace {
         dict,
         tag_dict,
+        placement_generation: crate::ownership::PlacementGeneration::INITIAL,
+        num_shards: 1,
     }))))
 }
 
@@ -242,7 +246,9 @@ impl ShardServer {
         sweep_dropped_trash(&data_dir);
         // The dict + tag space are ONE atomically-written blob (never desynced); absent
         // ⇒ a never-adopted durable node, which starts pending and adopts on connect.
-        let Some((dict_bytes, tag_bytes)) = read_adopted_space(&data_dir)? else {
+        let Some((dict_bytes, tag_bytes, placement_generation, num_shards)) =
+            read_adopted_space(&data_dir)?
+        else {
             return Ok(Self::pending_durable(norm, config, data_dir));
         };
         let dict = Arc::new(crate::storage::deserialize_dict(&dict_bytes).map_err(|e| {
@@ -266,7 +272,20 @@ impl ShardServer {
         // persisted one (a corpus/coordinator change across the restart, ADR-034 divergence); the
         // remedy is to wipe this node's data dir and let the coordinator re-seed it.
         let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
+        node_dict.store(Some(Arc::new(AdoptedSpace {
+            dict: Arc::clone(&dict),
+            tag_dict: Arc::clone(&tag_dict),
+            placement_generation,
+            num_shards,
+        })));
         let slots = restore_durable_slots(&data_dir, &norm, &dict, &tag_dict, &config)?;
+        for (&position, slot) in &slots {
+            if let Some(state) = slot.state.load_full() {
+                state
+                    .shard
+                    .validate_ownership(position, placement_generation, num_shards)?;
+            }
+        }
         Ok(ShardServer {
             norm,
             config,
@@ -375,6 +394,26 @@ impl ShardServer {
         Ok((slot, st))
     }
 
+    fn validate_placement_config(
+        &self,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), Status> {
+        let space = self.node_dict.load_full().ok_or_else(|| {
+            Status::failed_precondition("node has not adopted an ownership-aware feature space")
+        })?;
+        if space.placement_generation != generation || space.num_shards != num_shards {
+            return Err(Status::failed_precondition(format!(
+                "placement configuration mismatch: node generation {}/{} shards, request generation {}/{} shards",
+                space.placement_generation.0,
+                space.num_shards,
+                generation.0,
+                num_shards
+            )));
+        }
+        Ok(())
+    }
+
     /// Install (or replace) the slot for `shard_id`; the write-guard is released immediately.
     fn insert_slot(&self, shard_id: u32, slot: Arc<ShardSlot>) -> Result<(), Status> {
         self.shards
@@ -470,6 +509,7 @@ impl ShardServer {
                     tags: Vec::new(),
                     tag_ids: Vec::new(),
                     rank: crate::rank::RankValues::default(),
+                    placement: crate::ownership::QueryPlacement::standalone(),
                 })
             })
             .collect();

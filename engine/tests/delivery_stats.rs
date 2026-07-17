@@ -1,4 +1,4 @@
-//! ADR-107 delivery telemetry: exact-member emissions versus final logical IDs.
+//! ADR-107/109 delivery telemetry: local physical duplicates and unique cluster emission.
 
 use reverse_rusty::cluster::{ClusterConfig, ClusterEngine};
 use reverse_rusty::segment::{BatchMatchOptions, Engine, MatchScratch};
@@ -34,7 +34,7 @@ fn scalar_and_batch_count_duplicates_before_logical_dedup() {
 }
 
 #[test]
-fn coordinator_adds_cross_shard_duplicates_without_double_counting_emissions() {
+fn coordinator_ownership_suppresses_cross_shard_duplicate_emissions() {
     let query = "(zzdela,zzdelb,zzdelc,zzdeld,zzdele,zzdelf,zzdelg,zzdelh)";
     let title = "zzdela zzdelb zzdelc zzdeld zzdele zzdelf zzdelg zzdelh";
     // Fill the frozen top-64 with earlier seed features so the target any-of
@@ -58,13 +58,6 @@ fn coordinator_adds_cross_shard_duplicates_without_double_counting_emissions() {
     let (ids, stats) = cluster.percolate_with_stats(title).expect("percolate");
     assert_eq!(ids, vec![1_000]);
     assert_eq!(stats.matches, 1);
-    assert!(
-        stats.logical_emissions >= 2,
-        "both placed copies should emit before coordinator dedup"
-    );
-    assert_eq!(
-        stats.duplicate_emissions,
-        stats.logical_emissions - 1,
-        "every physical emission beyond the one logical result is duplicate delivery"
-    );
+    assert_eq!(stats.logical_emissions, 1, "exactly one owner emits");
+    assert_eq!(stats.duplicate_emissions, 0, "shard replies are disjoint");
 }

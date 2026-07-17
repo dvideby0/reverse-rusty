@@ -949,13 +949,14 @@ impl Engine {
             if rank.priority == 0 {
                 rank.priority = self.tag_dict.legacy_priority_for_tags(&tag_ids);
             }
-            if let Some(added) = seg.add_compiled_ranked(
+            if let Some(added) = seg.add_compiled_ranked_placed(
                 &item.ex,
                 &tag_ids,
                 &self.dict,
                 item.logical,
                 item.version,
                 rank,
+                &item.placement,
                 self.config.compile_knobs(),
             ) {
                 self.record_compiled(&added);
@@ -997,17 +998,38 @@ impl Engine {
         text: &str,
         tags: &[(String, String)],
     ) -> Option<u32> {
+        self.insert_extracted_with_placement(
+            ex,
+            logical,
+            version,
+            text,
+            tags,
+            &crate::ownership::QueryPlacement::standalone(),
+        )
+    }
+
+    /// Cluster write path carrying ADR-109 placement metadata into the memtable.
+    pub fn insert_extracted_with_placement(
+        &mut self,
+        ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Option<u32> {
         // Resolve tags read-only against the shared frozen tag space (ADR-055); never the CoW
         // `intern_tags`. Empty ⇒ empty slice ⇒ byte-identical to the pre-tag `&[]` path.
         let tag_ids = self.resolve_tags_readonly(tags);
         let rank = self.legacy_rank_values(&tag_ids);
-        let outcome = Arc::make_mut(&mut self.memtable).add_compiled_ranked(
+        let outcome = Arc::make_mut(&mut self.memtable).add_compiled_ranked_placed(
             ex,
             &tag_ids,
             &self.dict,
             logical,
             version,
             rank,
+            placement,
             self.config.compile_knobs(),
         );
         if let Some(added) = outcome {

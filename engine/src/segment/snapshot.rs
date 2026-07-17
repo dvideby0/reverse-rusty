@@ -90,21 +90,42 @@ impl MatchView<'_> {
         include_broad: bool,
         dl: D,
     ) -> Result<MatchStats, D::Cancelled> {
+        self.match_title_with_policy(title, s, out, include_broad, dl, crate::ownership::EmitAll)
+    }
+
+    #[inline]
+    pub(in crate::segment) fn match_title_with_policy<
+        D: DeadlineCheck,
+        P: crate::ownership::EmissionPolicy,
+    >(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        out: &mut Vec<u64>,
+        include_broad: bool,
+        dl: D,
+        emission: P,
+    ) -> Result<MatchStats, D::Cancelled> {
         let mut collector = AllCollector::new(out);
-        self.match_title_collect(title, s, &mut collector, include_broad, dl)
+        self.match_title_collect(title, s, &mut collector, include_broad, dl, emission)
     }
 
     /// Generic internal collector path. Public compatibility entry points use
     /// `AllCollector`; bounded local ranking uses `TopKCollector` through the
     /// same post-verification seam.
     #[inline]
-    pub(in crate::segment) fn match_title_collect<D: DeadlineCheck, C: MatchCollector>(
+    pub(in crate::segment) fn match_title_collect<
+        D: DeadlineCheck,
+        C: MatchCollector,
+        P: crate::ownership::EmissionPolicy,
+    >(
         &self,
         title: &str,
         s: &mut MatchScratch,
         collector: &mut C,
         include_broad: bool,
         dl: D,
+        emission: P,
     ) -> Result<MatchStats, D::Cancelled> {
         // per-segment seen-buffer sizing (base segments first, memtable last)
         let segments = self.segments;
@@ -189,6 +210,7 @@ impl MatchView<'_> {
                 },
                 self.pred,
                 &mut stats,
+                emission,
             );
         }
         if cancelled.is_none() {
@@ -206,6 +228,7 @@ impl MatchView<'_> {
                     },
                     self.pred,
                     &mut stats,
+                    emission,
                 ),
             }
         }
@@ -262,6 +285,29 @@ impl std::fmt::Debug for EngineSnapshot {
 }
 
 impl EngineSnapshot {
+    pub(crate) fn validate_ownership_for_shard(
+        &self,
+        position: u32,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), crate::ownership::OwnershipError> {
+        for segment in &self.segments {
+            for local in 0..segment.len() as u32 {
+                segment
+                    .placement(local)
+                    .to_owned()
+                    .validate_for_shard(position, generation, num_shards)?;
+            }
+        }
+        for local in 0..self.memtable.len() as u32 {
+            self.memtable
+                .placement(local)
+                .to_owned()
+                .validate_for_shard(position, generation, num_shards)?;
+        }
+        Ok(())
+    }
+
     pub fn normalizer(&self) -> &Normalizer {
         &self.norm
     }
@@ -485,6 +531,36 @@ impl EngineSnapshot {
         )
     }
 
+    /// Cluster-only scalar path: exact verification and member-level alive/tag
+    /// checks are unchanged, then ADR-109 suppresses non-owner emissions.
+    pub(crate) fn match_title_filtered_owned(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        out: &mut Vec<u64>,
+        include_broad: bool,
+        pred: &TagPredicate,
+        emission: crate::ownership::UniqueOwner<'_>,
+    ) -> MatchStats {
+        infallible(
+            MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+                pred,
+            }
+            .match_title_with_policy(
+                title,
+                s,
+                out,
+                include_broad,
+                NoDeadline,
+                emission,
+            ),
+        )
+    }
+
     /// [`match_title_filtered`](Self::match_title_filtered) with an optional cooperative
     /// deadline (ADR-099). `None` delegates to the unarmed path (byte-identical);
     /// `Some(d)` re-checks the clock at entry and at each segment boundary, and once
@@ -685,6 +761,7 @@ impl EngineSnapshot {
                     &mut collector,
                     include_broad,
                     DeadlineAt(at),
+                    crate::ownership::EmitAll,
                 )
                 .map_err(crate::rank::RankedMatchError::Cancelled)?,
             None => infallible(view.match_title_collect(
@@ -693,6 +770,7 @@ impl EngineSnapshot {
                 &mut collector,
                 include_broad,
                 NoDeadline,
+                crate::ownership::EmitAll,
             )),
         };
         let total_hits = collector.total_hits();

@@ -61,6 +61,7 @@ fn shard_error_response(context: &str, e: &ShardError) -> Response {
         ShardError::DictMismatch { .. } => {
             (StatusCode::INTERNAL_SERVER_ERROR, "feature_space_mismatch")
         }
+        ShardError::OwnershipMismatch(_) => (StatusCode::CONFLICT, "placement_generation_mismatch"),
         ShardError::ControlPlane(_) => (StatusCode::SERVICE_UNAVAILABLE, "control_plane_error"),
         ShardError::PartiallyApplied { .. } => (StatusCode::OK, "partially_applied"),
     };

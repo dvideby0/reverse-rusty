@@ -89,8 +89,7 @@ fn durable_hot_cluster_reopens_and_matches() {
 /// The θ-flip reopen: results identical on both modes (sealed v5 entries keep
 /// their recorded class and stay matchable); a NEW θ-hot add under the flipped
 /// knob classifies A instead (the counts drift, the matches don't). Plus the
-/// two fence pins: the ClusterManifest version stays 5 (deliberately NOT bumped
-/// — the negative pin against an accidental v6), and a forged future `.seg`
+/// two fence pins: the ClusterManifest is v6 for ownership, and a forged future `.seg`
 /// version refuses the whole cluster open (the fail-loud attach that makes the
 /// manifest bump unnecessary).
 #[test]
@@ -116,14 +115,13 @@ fn reopen_with_flipped_theta_is_result_identical_and_fences_hold() {
         )
     };
 
-    // The negative fence pin: hot-bearing data does NOT bump the cluster
-    // manifest (the v5 ADR-080 marker is the current word; the per-shard v5
-    // `.seg` files carry the hot fence).
+    // ADR-109 makes every durable cluster manifest v6; the per-shard v7
+    // `.seg` files carry ownership in addition to the hot fence.
     let mbytes = std::fs::read(dir.join(MANIFEST)).expect("manifest bytes");
     let version = u32::from_le_bytes(mbytes[4..8].try_into().expect("version word"));
     assert_eq!(
-        version, 5,
-        "the ClusterManifest must stay v5 — the hot fence lives in the segments"
+        version, 6,
+        "the ClusterManifest must carry the ADR-109 v6 ownership fence"
     );
 
     // Reopen θ=0: identical results, sealed H intact; a new θ-hot-shaped add

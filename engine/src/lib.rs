@@ -50,6 +50,7 @@ pub mod gen;
 pub mod index;
 pub mod loader;
 pub mod normalize;
+pub mod ownership;
 pub mod rank;
 pub mod result;
 pub mod segment;

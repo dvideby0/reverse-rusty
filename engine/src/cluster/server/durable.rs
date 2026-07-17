@@ -25,15 +25,21 @@ use super::{ServerState, ShardSlot};
 /// tagged reads after restart; review finding).
 pub(super) const ADOPTED_SPACE_FILE: &str = "feature_space.bin";
 
-/// Persist the adopted (already fingerprint-verified) dict + tag-space bytes under
-/// `dir` as one atomically-renamed blob: `dict_len u64 | dict | tag_dict`.
+/// Persist the adopted (already fingerprint-verified) feature space and ADR-109 placement
+/// configuration under `dir` as one atomically-renamed v2 blob.
 pub(super) fn persist_adopted_space(
     dir: &Path,
     dict_bytes: &[u8],
     tag_bytes: &[u8],
+    placement_generation: crate::ownership::PlacementGeneration,
+    num_shards: u32,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let mut blob = Vec::with_capacity(8 + dict_bytes.len() + tag_bytes.len());
+    let mut blob = Vec::with_capacity(28 + dict_bytes.len() + tag_bytes.len());
+    blob.extend_from_slice(b"RASP");
+    blob.extend_from_slice(&2u32.to_le_bytes());
+    blob.extend_from_slice(&placement_generation.0.to_le_bytes());
+    blob.extend_from_slice(&num_shards.to_le_bytes());
     blob.extend_from_slice(&(dict_bytes.len() as u64).to_le_bytes());
     blob.extend_from_slice(dict_bytes);
     blob.extend_from_slice(tag_bytes);
@@ -45,11 +51,10 @@ pub(super) fn persist_adopted_space(
 }
 
 /// The persisted dict + tag-space bytes, as read back from the feature-space blob.
-pub(super) type AdoptedSpaceBytes = (Vec<u8>, Vec<u8>);
+pub(super) type AdoptedSpaceBytes = (Vec<u8>, Vec<u8>, crate::ownership::PlacementGeneration, u32);
 
-/// Read back the persisted feature-space blob: `Some((dict_bytes, tag_bytes))` when
-/// present + well-framed, `None` when absent (a never-adopted durable node), an error
-/// on a corrupt/torn frame (fail loud rather than misparse).
+/// Read back the persisted feature-space blob plus generation/shard count when present and
+/// well-framed. Legacy, corrupt, or torn state fails loud rather than being guessed at.
 pub(super) fn read_adopted_space(dir: &Path) -> Result<Option<AdoptedSpaceBytes>, ShardError> {
     let path = dir.join(ADOPTED_SPACE_FILE);
     if !path.exists() {
@@ -57,16 +62,46 @@ pub(super) fn read_adopted_space(dir: &Path) -> Result<Option<AdoptedSpaceBytes>
     }
     let blob = std::fs::read(&path)
         .map_err(|e| ShardError::Log(format!("reading {}: {e}", path.display())))?;
+    if blob.get(0..4) != Some(b"RASP") {
+        return Err(ShardError::Log(format!(
+            "legacy adopted feature-space state {} predates ADR-109; wipe/reseed this data node",
+            path.display()
+        )));
+    }
+    let version = blob
+        .get(4..8)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_le_bytes)
+        .ok_or_else(|| ShardError::Log(format!("corrupt feature-space file {}", path.display())))?;
+    if version != 2 {
+        return Err(ShardError::Log(format!(
+            "unsupported adopted feature-space version {version} in {}",
+            path.display()
+        )));
+    }
+    let generation = blob
+        .get(8..16)
+        .and_then(|s| s.try_into().ok())
+        .map(u64::from_le_bytes)
+        .map(crate::ownership::PlacementGeneration)
+        .filter(|g| *g != crate::ownership::PlacementGeneration::STANDALONE)
+        .ok_or_else(|| ShardError::Log(format!("corrupt feature-space file {}", path.display())))?;
+    let num_shards = blob
+        .get(16..20)
+        .and_then(|s| s.try_into().ok())
+        .map(u32::from_le_bytes)
+        .filter(|&n| n > 0)
+        .ok_or_else(|| ShardError::Log(format!("corrupt feature-space file {}", path.display())))?;
     let dict_len = blob
-        .get(0..8)
+        .get(20..28)
         .and_then(|s| s.try_into().ok())
         .map(u64::from_le_bytes)
         .map(|n| n as usize)
-        .filter(|&n| 8 + n <= blob.len())
+        .filter(|&n| 28 + n <= blob.len())
         .ok_or_else(|| ShardError::Log(format!("corrupt feature-space file {}", path.display())))?;
-    let dict_bytes = blob[8..8 + dict_len].to_vec();
-    let tag_bytes = blob[8 + dict_len..].to_vec();
-    Ok(Some((dict_bytes, tag_bytes)))
+    let dict_bytes = blob[28..28 + dict_len].to_vec();
+    let tag_bytes = blob[28 + dict_len..].to_vec();
+    Ok(Some((dict_bytes, tag_bytes, generation, num_shards)))
 }
 
 /// Parse a `shard_<NNN>` directory name back to its `shard_id`, mirroring [`shard_dir`]'s `{:03}`
@@ -176,4 +211,48 @@ pub(super) fn restore_durable_slots(
         );
     }
     Ok(slots)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dir(tag: &str) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("rr_adopted_space_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    #[test]
+    fn adopted_space_v2_round_trips_generation_and_rejects_legacy_state() {
+        let path = dir("v2");
+        persist_adopted_space(
+            &path,
+            &[1, 2, 3],
+            &[4, 5],
+            crate::ownership::PlacementGeneration(11),
+            16,
+        )
+        .expect("persist v2");
+        let (dict, tags, generation, num_shards) =
+            read_adopted_space(&path).expect("read").expect("present");
+        assert_eq!(dict, vec![1, 2, 3]);
+        assert_eq!(tags, vec![4, 5]);
+        assert_eq!(generation, crate::ownership::PlacementGeneration(11));
+        assert_eq!(num_shards, 16);
+
+        // Legacy v1 had no magic/version or placement configuration.
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&3u64.to_le_bytes());
+        legacy.extend_from_slice(&[1, 2, 3, 4, 5]);
+        std::fs::write(path.join(ADOPTED_SPACE_FILE), legacy).expect("write legacy");
+        let error = read_adopted_space(&path).expect_err("legacy state must fail");
+        assert!(
+            error.to_string().contains("predates ADR-109")
+                && error.to_string().contains("wipe/reseed"),
+            "got: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&path);
+    }
 }

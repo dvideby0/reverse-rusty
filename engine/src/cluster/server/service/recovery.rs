@@ -32,6 +32,10 @@ pub(super) fn fetch_segments(
     request: Request<proto::FetchSegmentsRequest>,
 ) -> Result<Response<FetchSegmentsStream>, Status> {
     let req = request.into_inner();
+    server.validate_placement_config(
+        crate::ownership::PlacementGeneration(req.placement_generation),
+        req.num_shards,
+    )?;
     let (_slot, st) = server.loaded_slot(req.shard_id)?;
     let Some(root) = server.data_dir.clone() else {
         return Err(Status::failed_precondition(
@@ -85,6 +89,8 @@ pub(super) fn fetch_segments(
                     dict_fingerprint: fp,
                     has_sources,
                     up_to_seqno,
+                    placement_generation: req.placement_generation,
+                    num_shards: req.num_shards,
                 },
             )),
         };
@@ -109,6 +115,10 @@ pub(super) async fn recover_from(
     request: Request<proto::RecoverFromRequest>,
 ) -> Result<Response<proto::RecoverFromReply>, Status> {
     let req = request.into_inner();
+    server.validate_placement_config(
+        crate::ownership::PlacementGeneration(req.placement_generation),
+        req.num_shards,
+    )?;
     // `loaded_slot` returns owned `Arc`s (the map guard is already dropped), so holding `slot` across
     // the peer dial + stream `.await`s below never holds the std `RwLock`.
     let (slot, st) = server.loaded_slot(req.shard_id)?;
@@ -151,6 +161,8 @@ pub(super) async fn recover_from(
             // A relocation/replication keeps the SAME global position, so pull the source's slot of
             // the same shard-id we're recovering into (ADR-093).
             shard_id: req.shard_id,
+            placement_generation: req.placement_generation,
+            num_shards: req.num_shards,
         })
         .await?
         .into_inner();
@@ -158,8 +170,14 @@ pub(super) async fn recover_from(
     let seg_dir = dir.join("segments");
     std::fs::create_dir_all(&seg_dir)
         .map_err(|e| Status::internal(format!("creating {}: {e}", seg_dir.display())))?;
-    let (files, next_seg_id, up_to_seqno) =
-        drain_recovery_stream(&mut stream, &dir, &seg_dir).await?;
+    let (files, next_seg_id, up_to_seqno) = drain_recovery_stream(
+        &mut stream,
+        &dir,
+        &seg_dir,
+        req.placement_generation,
+        req.num_shards,
+    )
+    .await?;
 
     // Attach the received segments against our adopted dict (fail-loud on missing/corrupt).
     let mut sc = server.config.clone();
@@ -190,6 +208,8 @@ pub(super) async fn recover_from(
         segments_attached,
         num_queries,
         up_to_seqno,
+        placement_generation: req.placement_generation,
+        num_shards: req.num_shards,
     }))
 }
 
@@ -199,6 +219,10 @@ pub(super) fn fetch_translog(
     request: Request<proto::FetchTranslogRequest>,
 ) -> Result<Response<FetchTranslogStream>, Status> {
     let req = request.into_inner();
+    server.validate_placement_config(
+        crate::ownership::PlacementGeneration(req.placement_generation),
+        req.num_shards,
+    )?;
     let (_slot, st) = server.loaded_slot(req.shard_id)?;
     let fp = st.dict.fingerprint();
     if req.dict_fingerprint != fp {
@@ -313,6 +337,8 @@ async fn drain_recovery_stream(
     stream: &mut tonic::Streaming<proto::FetchSegmentsChunk>,
     dir: &std::path::Path,
     seg_dir: &std::path::Path,
+    placement_generation: u64,
+    num_shards: u32,
 ) -> Result<(Vec<String>, u64, u64), Status> {
     use std::io::Write as _;
     let final_path = |name: &str| -> PathBuf {
@@ -358,6 +384,12 @@ async fn drain_recovery_stream(
     }
     let manifest =
         manifest.ok_or_else(|| Status::internal("recovery stream had no manifest frame"))?;
+    if manifest.placement_generation != placement_generation || manifest.num_shards != num_shards {
+        return Err(Status::failed_precondition(format!(
+            "recovery manifest placement mismatch: expected generation {placement_generation}/{num_shards} shards, got generation {}/{} shards",
+            manifest.placement_generation, manifest.num_shards
+        )));
+    }
     validate_received(&manifest, &received)?;
     Ok((
         manifest.segment_files,
@@ -376,6 +408,10 @@ pub(super) fn content_fingerprint(
     request: Request<proto::ContentFingerprintRequest>,
 ) -> Result<Response<proto::ContentFingerprintReply>, Status> {
     let req = request.into_inner();
+    server.validate_placement_config(
+        crate::ownership::PlacementGeneration(req.placement_generation),
+        req.num_shards,
+    )?;
     let (_slot, st) = server.loaded_slot(req.shard_id)?;
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(
@@ -397,6 +433,8 @@ pub(super) fn content_fingerprint(
         fp_lo,
         fp_hi,
         live_count,
+        placement_generation: req.placement_generation,
+        num_shards: req.num_shards,
     }))
 }
 
@@ -413,6 +451,8 @@ mod tests {
             dict_fingerprint: 0,
             has_sources,
             up_to_seqno: 0,
+            placement_generation: 1,
+            num_shards: 1,
         }
     }
 

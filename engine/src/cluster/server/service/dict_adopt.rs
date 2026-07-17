@@ -29,6 +29,15 @@ pub(super) fn adopt_dict(
 ) -> Result<Response<proto::AdoptDictReply>, Status> {
     let req = request.into_inner();
     let shard_id = req.shard_id;
+    let placement_generation = crate::ownership::PlacementGeneration(req.placement_generation);
+    if placement_generation == crate::ownership::PlacementGeneration::STANDALONE
+        || req.num_shards == 0
+        || shard_id >= req.num_shards
+    {
+        return Err(Status::invalid_argument(
+            "AdoptDict requires a non-zero placement generation and an in-range shard_id",
+        ));
+    }
     let dict = crate::storage::deserialize_dict(&req.dict)
         .map_err(|e| Status::invalid_argument(format!("deserializing shipped dict: {e}")))?;
     let fp = dict.fingerprint();
@@ -56,7 +65,18 @@ pub(super) fn adopt_dict(
     if let Ok(slot) = server.slot(shard_id) {
         if let Some(st) = slot.state.load_full() {
             if st.dict.fingerprint() == fp && st.tag_dict.fingerprint() == tag_fp {
-                return Ok(adopt_reply(fp, tag_fp));
+                if let Some(node) = server.node_dict.load_full() {
+                    if node.placement_generation == placement_generation
+                        && node.num_shards == req.num_shards
+                    {
+                        return Ok(adopt_reply(
+                            fp,
+                            tag_fp,
+                            placement_generation,
+                            req.num_shards,
+                        ));
+                    }
+                }
             }
         }
     }
@@ -65,9 +85,12 @@ pub(super) fn adopt_dict(
     // already match (so every slot shares one `Arc<Dict>`), else (re)place the node dict — but only
     // when no slot holds data, since the dict is node-shared.
     let node = server.node_dict.load_full();
-    let node_matches = node
-        .as_deref()
-        .is_some_and(|s| s.dict.fingerprint() == fp && s.tag_dict.fingerprint() == tag_fp);
+    let node_matches = node.as_deref().is_some_and(|s| {
+        s.dict.fingerprint() == fp
+            && s.tag_dict.fingerprint() == tag_fp
+            && s.placement_generation == placement_generation
+            && s.num_shards == req.num_shards
+    });
     let (space_dict, space_tag) = if let (true, Some(s)) = (node_matches, node.as_deref()) {
         (Arc::clone(&s.dict), Arc::clone(&s.tag_dict))
     } else {
@@ -92,18 +115,25 @@ pub(super) fn adopt_dict(
     // cell lacks.
     if !node_matches {
         if let Some(root) = &server.data_dir {
-            super::super::durable::persist_adopted_space(root, &req.dict, &req.tag_dict).map_err(
-                |e| {
-                    Status::internal(format!(
-                        "persisting adopted dict under {}: {e}",
-                        root.display()
-                    ))
-                },
-            )?;
+            super::super::durable::persist_adopted_space(
+                root,
+                &req.dict,
+                &req.tag_dict,
+                placement_generation,
+                req.num_shards,
+            )
+            .map_err(|e| {
+                Status::internal(format!(
+                    "persisting adopted dict under {}: {e}",
+                    root.display()
+                ))
+            })?;
         }
         server.node_dict.store(Some(Arc::new(AdoptedSpace {
             dict: Arc::clone(&space_dict),
             tag_dict: Arc::clone(&space_tag),
+            placement_generation,
+            num_shards: req.num_shards,
         })));
     }
     server.insert_slot(
@@ -115,7 +145,12 @@ pub(super) fn adopt_dict(
         }),
     )?;
 
-    Ok(adopt_reply(fp, tag_fp))
+    Ok(adopt_reply(
+        fp,
+        tag_fp,
+        placement_generation,
+        req.num_shards,
+    ))
 }
 
 /// Build one shard slot's [`LocalShard`] over an already-resolved node-shared feature space — the
@@ -173,10 +208,17 @@ pub(super) fn build_slot_shard(
 
 /// The adopt reply — the server's frozen-dict + tag-dict fingerprints after adoption, plus the
 /// ADR-080 replicate-to-all layout attestation (this binary always serves it).
-fn adopt_reply(fp: u64, tag_fp: u64) -> Response<proto::AdoptDictReply> {
+fn adopt_reply(
+    fp: u64,
+    tag_fp: u64,
+    generation: crate::ownership::PlacementGeneration,
+    num_shards: u32,
+) -> Response<proto::AdoptDictReply> {
     Response::new(proto::AdoptDictReply {
         fingerprint: fp,
         tag_dict_fingerprint: tag_fp,
         broad_replicate_all: true,
+        placement_generation: generation.0,
+        num_shards,
     })
 }

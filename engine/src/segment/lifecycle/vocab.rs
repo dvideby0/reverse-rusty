@@ -341,6 +341,7 @@ impl Engine {
         u32,
         Vec<crate::tagdict::TagId>,
         crate::rank::RankValues,
+        crate::ownership::QueryPlacement,
     )> {
         let mut out = Vec::with_capacity(self.query_store.len());
         // One liveness scan per entry: `None` = no live copy in this engine (stale store
@@ -348,8 +349,8 @@ impl Engine {
         // untagged. The version is the live copy's stored version, carried through the rebuild
         // so a `set_vocab`/resize re-places at version N rather than resetting to 1 (ADR-074).
         self.query_store.for_each_live(|logical, text| {
-            if let Some((version, tags, rank)) = self.live_metadata_for(logical) {
-                out.push((logical, text.to_string(), version, tags, rank));
+            if let Some((version, tags, rank, placement)) = self.live_metadata_for(logical) {
+                out.push((logical, text.to_string(), version, tags, rank, placement));
             }
         });
         out.sort_unstable_by_key(|&(l, ..)| l);
@@ -366,7 +367,12 @@ impl Engine {
     fn live_metadata_for(
         &self,
         logical: u64,
-    ) -> Option<(u32, Vec<crate::tagdict::TagId>, crate::rank::RankValues)> {
+    ) -> Option<(
+        u32,
+        Vec<crate::tagdict::TagId>,
+        crate::rank::RankValues,
+        crate::ownership::QueryPlacement,
+    )> {
         for &local in self.memtable.locals_for_logical(logical).iter().rev() {
             if self.memtable.is_alive(local) {
                 let tags = self.memtable.tags_of(local);
@@ -374,7 +380,12 @@ impl Engine {
                 if rank.priority == 0 {
                     rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
                 }
-                return Some((self.memtable.version_of(local), tags.to_vec(), rank));
+                return Some((
+                    self.memtable.version_of(local),
+                    tags.to_vec(),
+                    rank,
+                    self.memtable.placement(local).to_owned(),
+                ));
             }
         }
         for seg in self.segments.iter().rev() {
@@ -385,7 +396,12 @@ impl Engine {
                     if rank.priority == 0 {
                         rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
                     }
-                    return Some((seg.version_of(local), tags.to_vec(), rank));
+                    return Some((
+                        seg.version_of(local),
+                        tags.to_vec(),
+                        rank,
+                        seg.placement(local).to_owned(),
+                    ));
                 }
             }
         }
@@ -431,11 +447,13 @@ impl Engine {
                 // drop the tags (ADR-049) nor reset the version to 1 (the version-preserving
                 // rebuild, ADR-074). `live_sources` only returns entries with a live copy, so
                 // the lookup cannot be `None` here; the default is unreachable belt-and-braces.
-                let (version, tags, rank) = self.live_metadata_for(*logical).unwrap_or((
-                    1,
-                    Vec::new(),
-                    crate::rank::RankValues::default(),
-                ));
+                let (version, tags, rank, placement) =
+                    self.live_metadata_for(*logical).unwrap_or((
+                        1,
+                        Vec::new(),
+                        crate::rank::RankValues::default(),
+                        crate::ownership::QueryPlacement::standalone(),
+                    ));
                 // `accept_class_d = true` unconditionally (ADR-068): a STORED query
                 // must survive a vocabulary change. A query whose positives vanish
                 // under the new vocab (re-classifying to D) is kept as an
@@ -446,9 +464,9 @@ impl Engine {
                     accept_class_d: true,
                     ..self.config.compile_knobs()
                 };
-                if let Some(added) =
-                    seg.add_compiled_ranked(&ex, &tags, &self.dict, *logical, version, rank, knobs)
-                {
+                if let Some(added) = seg.add_compiled_ranked_placed(
+                    &ex, &tags, &self.dict, *logical, version, rank, &placement, knobs,
+                ) {
                     self.record_compiled(&added);
                     recompiled += 1;
                 }

@@ -255,6 +255,28 @@ compaction merges regroup on the destination side by body — which makes compac
 only; the observe sketch (`bodies_total`/`dup_joined`/`distinct_bodies_est`) sizes Stage B —
 the persisted indirection this stage deliberately defers.
 
+### 4.3 One distributed emitter per logical match (ADR-109)
+
+Cluster placement can put one logical query on several shard positions. Candidate retrieval and exact
+verification still run wherever routing requires, but a post-verification `UniqueOwner` policy permits
+only one routed position to emit the logical ID:
+
+- selective A/B-any-of/H placement emits from the minimum position in
+  `placement_positions ∩ routed_positions`;
+- replicated-always-visible class-B pairs emit from the minimum routed position;
+- replicated-broad class C/D emits from the request's broad-evaluation position.
+
+The policy runs after exact positive/negative verification and after each member's own alive/tag
+checks, immediately before the collector. Canonical-body sharing therefore still verifies once, but
+each logical member independently decides whether it is alive, tag-eligible, and owned. Placement
+metadata never participates in signature retrieval, exact semantics, visibility, or score.
+
+Standalone matching monomorphizes the same code with `EmitAll`, preserving the prior hot path. Cluster
+reads pass one generation-fenced ownership context to every routed shard; filtered and compatibility-
+ranked paths use the identical context. The coordinator retains sort/dedup defensively, while
+`duplicate_emissions` asserts the shard replies are already disjoint. See the placement/persistence
+contract in [`clustering-and-scaling.md`](clustering-and-scaling.md) §7 and ADR-109.
+
 ---
 
 ## 5. Per-query metadata, filtered percolation, and ranking
@@ -271,9 +293,10 @@ the persisted indirection this stage deliberately defers.
 > read pattern is "percolate, then narrow to one category." Code: `src/tagdict.rs` (tag interning),
 > `src/exact.rs` (`TagPredicate` + SoA tag column + verify-stage filter), `src/rank.rs` (the post-match
 > scorer — ADR-059/108), `src/segment/` (ingest/match threading + `EngineSnapshot::{rank,
-> try_match_title_top_k}`), `src/storage/segment.rs` + `src/wal.rs` (`.seg`/WAL v6 typed priority), `src/bin/server/`
+> try_match_title_top_k}`), `src/storage/segment.rs` + `src/wal.rs` (`.seg`/WAL v6 typed priority;
+> `.seg` v7 distributed ownership columns), `src/bin/server/`
 > (the REST filter + rank/pagination surface), `src/cluster/` (`coordinator/{lifecycle,ingest,matching}` +
-> `clog` + `shard` + the gated `remote`/`server` — ADR-055).
+> `clog` + `shard` + the gated `remote`/`server` — ADR-055/109).
 
 Production percolators store **structured tags** alongside each query (a category, a status, secondary
 keys) and at match time **filter the percolated candidates by those tags** — and sometimes rank them.

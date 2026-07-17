@@ -21,6 +21,9 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > `ClusterEngine::open`) — **is built** (ADR-031), and **per-shard durable compiled segments** so reopen
 > **attaches-and-mmaps** instead of re-ingesting — **is built** (ADR-032); both proven by
 > `tests/cluster_durability_oracle.rs`.
+> **Deterministic distributed emission ownership is built** (ADR-109): every distributed row carries
+> generation-fenced placement identity, and exactly one routed shard position emits each matching
+> logical ID. Existing cluster result sets are unchanged; stale durable data or peers fail closed.
 >
 > **Architecture note (ADR-033):** this design follows the **shared-nothing** model of
 > Elasticsearch/Cassandra/Kafka — **local** per-shard segments + a **per-node/coordinator WAL** for
@@ -298,6 +301,29 @@ the broad lane lives on the **shards**, not the coordinator — a coordinator-lo
 "every matcher node" reading) is a deferred multi-coordinator optimization. The same replicate-to-all
 placement carries the opt-in class-D always-candidate lane (ADR-068) cluster-wide.
 
+### 7.1 Deterministic emission ownership (ADR-109)
+
+Replication for reachability must not imply duplicate logical delivery. Every distributed exact row
+therefore stores one compact placement mode plus a monotonic placement generation:
+
+- selective A/B-any-of/H rows store a sorted `u32` position list and emit from the minimum intersection
+  of that list with the request's routed positions;
+- replicated-always-visible class-B pairs emit from the minimum routed position;
+- replicated-broad class C/D emits from the request's one broad-evaluation position.
+
+The owner is a **logical shard position**, not a physical node. Replicas, failover, handoff,
+co-location, and node reassignment preserve it. Only a vocabulary blue/green rebuild or shard-count
+resize changes the placement function, so only those operations increment the generation and rewrite
+the whole corpus. Checkpoint/compaction/backup/recovery copy the identity verbatim.
+
+The coordinator fans one sorted routed-position set, broad evaluator, generation, and shard count to
+every participating shard. The shard applies ownership after exact/member checks and attests the
+policy in its reply; missing or mismatched attestation is a typed fail-closed error. Coordinator
+sort/dedup remains a backstop and asserts zero overlap. Segment v7 stores allocation-free SoA
+placement columns; cluster manifest v6, coordinator/translog v4, and adopted feature-space v2 carry
+the generation fence. Legacy durable cluster/data-node state must be rebuilt or wiped/reseeded;
+standalone engine segments v1–v6 remain readable.
+
 ---
 
 ## 8. What makes it *dead simple* (zero-config + self-tuning)
@@ -419,9 +445,11 @@ without operator action. The defaults are the product.
    - 3b. **Per-shard local durable segments.** ✅ **Done** (ADR-032): each shard is a segments-only
      durable engine (`shard_<i>/segments/*.seg` on **local disk**, no per-shard WAL/manifest);
      `ClusterEngine::open` **attaches-and-mmaps** each shard's committed compiled segments and replays only
-     the log tail — no re-ingest/recompile. The coordinator manifest (v2) is the single atomic commit point
+     the log tail — no re-ingest/recompile. The coordinator manifest (v6, ADR-109) is the single atomic commit point
      recording the per-shard segment registry + cursor; `checkpoint` re-seals tombstoned base segments so a
-     truncated `Remove` can't resurrect a query. Proven by `tests/cluster_durability_oracle.rs`. *(ADR-033:
+     truncated `Remove` can't resurrect a query. v6 also records the placement generation; legacy v1–v5
+     clustered state is a rebuild-only migration because it has no safe emission-owner identity. Proven by
+     `tests/cluster_durability_oracle.rs`. *(ADR-033:
      these local segments are the durable base — there is no object-store step; the **Raft-backed
      `ClusterLog`** still drops in behind the same seam, which the `apply` funnel + epoch were shaped for.)*
 4. **Per-shard replication + peer recovery** — a primary + N replicas per shard; a write fans out to the
@@ -446,7 +474,7 @@ without operator action. The defaults are the product.
    epoch; multi-process cluster.
    - 5a. **The control-plane seam.** ✅ **Done** (ADR-037): a dependency-free `trait ControlPlane`
      (document-mutation + linearizable-read — the `ClusterLog` sibling) + a `ClusterState` document
-     (ring + the shard→node map + membership + feature-model version + epoch) + an in-memory backend, wired
+     (ring + the shard→node map + membership + feature-model version + placement generation + epoch) + an in-memory backend, wired
      into the coordinator (default = one logical node ⇒ byte-identical). Its shape is fixed for openraft
      (membership distinct from `propose`, a `ForwardToLeader` error, snapshot-read, an app epoch distinct from
      the Raft term). Proven by `tests/cluster_control_plane_oracle.rs`. *(Consensus holds the cluster-state doc
@@ -470,7 +498,8 @@ without operator action. The defaults are the product.
      self-restarts from a per-shard checkpoint sidecar (`shard.ckpt`). Proven by
      `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_without_quiescing` + `replica.rs` in-process tests.
      **Distinct from the control-plane doc** — the control plane (5a/5b) holds cluster *state*, never the query
-     mutations this log carries.
+     mutations this log carries. ADR-109 advances both coordinator log and translog to v4 and persists the
+     write-time placement mode/set + generation on Add/Upsert; v1–v3 are rebuild-only.
    - 5d. **Translog retention + finalize.** ✅ **Done** (ADR-040): closes step 5c's two scope gaps. **Retention
      leases** (the Elasticsearch peer-recovery retention lease): the recovery source holds a lease set and
      `seal_for_checkpoint` trims the translog to `min(P, lease_floor)` instead of `P`, so a **concurrent** seal

@@ -64,13 +64,18 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **Typed local bounded ranking** — signed `i64` priority column, newest-live integer scoring,
   bounded `TopKCollector`, and single-document single-node `POST /v2/_search` with honest thresholded
   totals + cooperative deadlines (ADR-107/108). Distributed top-K remains deferred.
+- **Deterministic distributed emission ownership** — placement generation + compact placement modes
+  select exactly one routed shard position after exact/member checks; unfiltered, filtered, and
+  compatibility-ranked cluster results are unchanged while cross-shard duplicate emissions are zero.
+  Placement identity survives every durable/replicated lifecycle and stale data/peers fail closed
+  (ADR-109). Bounded distributed top-K remains the next ranked-percolation increment.
 - **Explain** (`explain.rs`) — first-class; structured `ExplainDetail` over REST.
 
 ### Durability & storage
 
 - **LSM write path** (`segment/`) — memtable + immutable segments + tombstones + score-based
   compaction with auto-triggers (ADR-004, ADR-009).
-- **mmap'd `.seg` format** (v3–v6) + frozen hash tables (ADR-012/105/108); flat mmap'd logical-index
+- **mmap'd `.seg` format** (v3–v7) + frozen hash tables (ADR-012/105/108/109); flat mmap'd logical-index
   columns + lazy on-disk source store → resident ~4.5 B/query (ADR-020, ADR-014).
 - **WAL** (v6) — CRC-framed, crash recovery, configurable fsync (ADR-013/108); address-free logical
   deletes + per-segment dead-locals bitmaps make tombstones durable at the commit point (ADR-066);
@@ -154,7 +159,8 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   real mechanism (ADR-078).
 - **gRPC transport** — `ShardServer`/`RemoteShard` (ADR-029); dict fingerprint handshake
   (ADR-030); dict + tag-dict shipping at connect (ADR-034, ADR-055); tag-dict fingerprint on all
-  six recovery RPCs (ADR-077).
+  six recovery RPCs (ADR-077); placement generation/configuration on every data/recovery boundary
+  plus ownership-applied read attestation (ADR-109).
 - **gRPC transport resilience** — client connect-timeout + per-call deadlines + HTTP/2 keepalive
   (shared dial helper, so shard + control + Raft-peer links harden together), bounded fail-loud
   retry of idempotent reads on a transient error, and per-RPC transport metrics on cluster-mode

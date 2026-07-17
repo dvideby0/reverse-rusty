@@ -544,7 +544,7 @@ fn class_d_segments_write_the_v4_rollback_fence() {
         .find(|p| p.extension().is_some_and(|x| x == "seg"))
         .expect("segment file");
     let mut bytes = std::fs::read(&seg_path).expect("read");
-    bytes[4..8].copy_from_slice(&7u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&8u32.to_le_bytes());
     // Re-seal the trailing whole-file CRC so the version check (which runs after
     // it) is what fires.
     let body = bytes.len() - 4;

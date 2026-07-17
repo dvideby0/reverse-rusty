@@ -26,13 +26,14 @@
 //!   header (once): magic "CMLG" (4) + format_version u32 (4)
 //!   per record:    total_len u32 | crc32 u32 | seq u64 | op u8 | payload
 //!     op ADD    (0): logical u64 | version u32 | dsl_len u32 | dsl [u8]
-//!                    [ tag_count u32 | (klen u32|k|vlen u32|v)* ]   (v2+, ADR-055)
+//!                    tag_count u32 | (klen u32|k|vlen u32|v)*
+//!                    placement_generation u64 | num_shards u32 | mode u8
+//!                    position_count u32 | positions [u32]           (v4, ADR-109)
 //!     op REMOVE (1): logical u64
-//!     op UPSERT (2): same payload as ADD (v3+, ADR-070 — atomic replace-by-id)
+//!     op UPSERT (2): same payload as ADD
 //! ```
-//! The ADD tag block is written only when a query carries tags, so an untagged record is
-//! byte-identical to a v1 frame; because every record is independently length-framed, an
-//! older (v1) ADD with no trailing tag bytes reads back as empty tags with no version gate.
+//! v4 requires explicit placement identity for ADD/UPSERT and therefore rejects v1–v3 logs with
+//! an actionable rebuild error; re-deriving ownership under a newer ring/generation would be unsafe.
 //! On recovery we scan forward, stopping at the first bad-CRC / truncated frame (a torn
 //! tail from a crash); the skipped byte count is surfaced as a diagnostic. The
 //! checkpoint *cursor* (which records are already captured by a base snapshot) and the
@@ -49,14 +50,10 @@ use super::shard::ShardError;
 use crate::storage::crc32;
 
 const CLOG_MAGIC: [u8; 4] = *b"CMLG";
-// v2 (ADR-055): an ADD record may carry an optional trailing tag block. Records are
-// length-framed, so a v1 file (no tag bytes) still reads back correctly; the bump is a
-// forward-compat signal. v3 (ADR-070): the UPSERT op — a single-frame atomic
-// replace-by-id (payload layout identical to ADD), so a crash between a would-be
-// Remove+Add pair can't lose the query. All versions are accepted on read; an OLD
-// binary reading a v3 log stops at the first Upsert frame (the standard
-// unknown-op-is-a-torn-tail posture), which the version bump signals.
-const CLOG_VERSION: u32 = 3;
+// v2 (ADR-055): optional trailing tags. v3 (ADR-070): atomic UPSERT. v4 (ADR-109):
+// mandatory write-time placement metadata for ADD/UPSERT. v1-v3 are now a migration fence:
+// without their original placement identity a new binary cannot choose one emission owner safely.
+const CLOG_VERSION: u32 = 4;
 const CLOG_HEADER_SIZE: usize = 8; // magic + version
 
 const OP_ADD: u8 = 0;
@@ -84,6 +81,9 @@ pub(crate) enum ClusterMutation {
         /// frozen shared tag space on apply/replay (the tags-on-wire analogue of raw DSL).
         /// Empty for an untagged query — the byte-identical pre-tag path.
         tags: Vec<(String, String)>,
+        /// ADR-109 write-time placement identity. Persisted so coordinator and
+        /// per-shard translog replay cannot re-materialize stale ownership.
+        placement: crate::ownership::QueryPlacement,
     },
     /// Remove every live entry for a logical id (idempotent).
     Remove { logical: u64 },
@@ -98,6 +98,7 @@ pub(crate) enum ClusterMutation {
         dsl: String,
         /// Raw `(key, value)` metadata tags for the NEW version (ADR-055 semantics).
         tags: Vec<(String, String)>,
+        placement: crate::ownership::QueryPlacement,
     },
 }
 
@@ -260,6 +261,7 @@ impl FileClusterLog {
             version: u32,
             dsl: &str,
             tags: &[(String, String)],
+            placement: &crate::ownership::QueryPlacement,
         ) {
             let dsl_bytes = dsl.as_bytes();
             body.push(op);
@@ -267,16 +269,21 @@ impl FileClusterLog {
             body.extend_from_slice(&version.to_le_bytes());
             body.extend_from_slice(&(dsl_bytes.len() as u32).to_le_bytes());
             body.extend_from_slice(dsl_bytes);
-            if !tags.is_empty() {
-                body.extend_from_slice(&(tags.len() as u32).to_le_bytes());
-                for (k, v) in tags {
-                    let kb = k.as_bytes();
-                    let vb = v.as_bytes();
-                    body.extend_from_slice(&(kb.len() as u32).to_le_bytes());
-                    body.extend_from_slice(kb);
-                    body.extend_from_slice(&(vb.len() as u32).to_le_bytes());
-                    body.extend_from_slice(vb);
-                }
+            body.extend_from_slice(&(tags.len() as u32).to_le_bytes());
+            for (k, v) in tags {
+                let kb = k.as_bytes();
+                let vb = v.as_bytes();
+                body.extend_from_slice(&(kb.len() as u32).to_le_bytes());
+                body.extend_from_slice(kb);
+                body.extend_from_slice(&(vb.len() as u32).to_le_bytes());
+                body.extend_from_slice(vb);
+            }
+            body.extend_from_slice(&placement.generation().0.to_le_bytes());
+            body.extend_from_slice(&placement.num_shards().to_le_bytes());
+            body.push(placement.mode() as u8);
+            body.extend_from_slice(&(placement.positions().len() as u32).to_le_bytes());
+            for position in placement.positions() {
+                body.extend_from_slice(&position.to_le_bytes());
             }
         }
         let mut body = Vec::new();
@@ -287,13 +294,17 @@ impl FileClusterLog {
                 version,
                 dsl,
                 tags,
-            } => encode_add_like(&mut body, OP_ADD, *logical, *version, dsl, tags),
+                placement,
+            } => encode_add_like(&mut body, OP_ADD, *logical, *version, dsl, tags, placement),
             ClusterMutation::Upsert {
                 logical,
                 version,
                 dsl,
                 tags,
-            } => encode_add_like(&mut body, OP_UPSERT, *logical, *version, dsl, tags),
+                placement,
+            } => encode_add_like(
+                &mut body, OP_UPSERT, *logical, *version, dsl, tags, placement,
+            ),
             ClusterMutation::Remove { logical } => {
                 body.push(OP_REMOVE);
                 body.extend_from_slice(&logical.to_le_bytes());
@@ -311,6 +322,21 @@ impl FileClusterLog {
         }
         if data[0..4] != CLOG_MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad clog magic"));
+        }
+        let version = u32::from_le_bytes(data[4..8].try_into().map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid cluster-log version")
+        })?);
+        if version != CLOG_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                if version < CLOG_VERSION {
+                    format!(
+                        "cluster log format v{version} predates ADR-109 ownership metadata; rebuild the cluster with this binary"
+                    )
+                } else {
+                    format!("unsupported cluster log format v{version}")
+                },
+            ));
         }
         Ok(Self::parse_entries(&data[CLOG_HEADER_SIZE..]))
     }
@@ -350,7 +376,15 @@ impl FileClusterLog {
         // [tag block]`); `None` on any malformed byte (treated as a torn tail by the
         // caller, mirroring the rest of the parse).
         #[allow(clippy::type_complexity)]
-        fn parse_add_like(payload: &[u8]) -> Option<(u64, u32, String, Vec<(String, String)>)> {
+        fn parse_add_like(
+            payload: &[u8],
+        ) -> Option<(
+            u64,
+            u32,
+            String,
+            Vec<(String, String)>,
+            crate::ownership::QueryPlacement,
+        )> {
             if payload.len() < 16 {
                 return None;
             }
@@ -362,16 +396,37 @@ impl FileClusterLog {
             // the DSL, so `toff == payload.len()` ⇒ empty tags.
             let mut toff = 16 + dsl_len;
             let mut tags: Vec<(String, String)> = Vec::new();
-            if toff < payload.len() {
-                let tag_count = get_u32(payload, toff)? as usize;
-                toff += 4;
-                for _ in 0..tag_count {
-                    let (k, v, next) = parse_tag(payload, toff)?;
-                    tags.push((k, v));
-                    toff = next;
-                }
+            let tag_count = get_u32(payload, toff)? as usize;
+            toff += 4;
+            for _ in 0..tag_count {
+                let (k, v, next) = parse_tag(payload, toff)?;
+                tags.push((k, v));
+                toff = next;
             }
-            Some((logical, version, dsl.to_string(), tags))
+            let generation = get_u64(payload, toff)?;
+            toff += 8;
+            let num_shards = get_u32(payload, toff)?;
+            toff += 4;
+            let mode = *payload.get(toff)?;
+            toff += 1;
+            let count = get_u32(payload, toff)? as usize;
+            toff += 4;
+            let mut positions = Vec::with_capacity(count);
+            for _ in 0..count {
+                positions.push(get_u32(payload, toff)?);
+                toff += 4;
+            }
+            if toff != payload.len() {
+                return None;
+            }
+            let placement = crate::ownership::QueryPlacement::from_raw(
+                crate::ownership::PlacementGeneration(generation),
+                num_shards,
+                mode,
+                positions,
+            )
+            .ok()?;
+            Some((logical, version, dsl.to_string(), tags, placement))
         }
 
         let mut entries = Vec::new();
@@ -402,20 +457,22 @@ impl FileClusterLog {
 
             let mutation = match op {
                 OP_ADD => match parse_add_like(payload) {
-                    Some((logical, version, dsl, tags)) => ClusterMutation::Add {
+                    Some((logical, version, dsl, tags, placement)) => ClusterMutation::Add {
                         logical,
                         version,
                         dsl,
                         tags,
+                        placement,
                     },
                     None => break,
                 },
                 OP_UPSERT => match parse_add_like(payload) {
-                    Some((logical, version, dsl, tags)) => ClusterMutation::Upsert {
+                    Some((logical, version, dsl, tags, placement)) => ClusterMutation::Upsert {
                         logical,
                         version,
                         dsl,
                         tags,
+                        placement,
                     },
                     None => break,
                 },

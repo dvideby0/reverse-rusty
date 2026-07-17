@@ -120,6 +120,17 @@ impl Shard for ToggleFailShard {
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         self.inner.percolate_filtered(t, b, pred)
     }
+    fn percolate_filtered_owned(
+        &self,
+        t: &str,
+        b: bool,
+        pred: &TagPredicate,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        self.inner
+            .percolate_filtered_owned(t, b, pred, context, current_position)
+    }
     fn percolate_filtered_ranked(
         &self,
         t: &str,
@@ -129,11 +140,32 @@ impl Shard for ToggleFailShard {
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
         self.inner.percolate_filtered_ranked(t, b, pred, spec)
     }
+    fn percolate_filtered_ranked_owned(
+        &self,
+        t: &str,
+        b: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        self.inner
+            .percolate_filtered_ranked_owned(t, b, pred, spec, context, current_position)
+    }
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.inner.num_queries()
     }
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         self.inner.class_counts()
+    }
+    fn validate_ownership(
+        &self,
+        position: u32,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), ShardError> {
+        self.inner
+            .validate_ownership(position, generation, num_shards)
     }
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         match self.write_err() {
@@ -154,6 +186,22 @@ impl Shard for ToggleFailShard {
             None => self
                 .inner
                 .insert_extracted_with_tags(ex, logical, version, text, tags),
+        }
+    }
+    fn insert_extracted_with_placement(
+        &self,
+        ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Result<Option<u32>, ShardError> {
+        match self.write_err() {
+            Some(e) => Err(e),
+            None => self
+                .inner
+                .insert_extracted_with_placement(ex, logical, version, text, tags, placement),
         }
     }
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {
@@ -587,7 +635,7 @@ fn rebuild_preserves_stored_query_version() {
     let pre = before
         .iter()
         .find(|(l, ..)| *l == 5)
-        .map(|&(_, _, v, _, _)| v);
+        .map(|(_, _, v, _, _, _)| *v);
     assert_eq!(
         pre,
         Some(42),
@@ -604,7 +652,7 @@ fn rebuild_preserves_stored_query_version() {
     let post = after
         .iter()
         .find(|(l, ..)| *l == 5)
-        .map(|&(_, _, v, _, _)| v);
+        .map(|(_, _, v, _, _, _)| *v);
     assert_eq!(
         post,
         Some(42),

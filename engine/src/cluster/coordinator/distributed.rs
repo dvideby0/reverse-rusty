@@ -169,6 +169,8 @@ impl ClusterEngine {
                     tag_dict_bytes.clone(),
                     expected_tag,
                     shard_id,
+                    crate::ownership::PlacementGeneration::INITIAL,
+                    config.num_shards as u32,
                     &security,
                 )?
             } else {
@@ -178,6 +180,8 @@ impl ClusterEngine {
                     expected,
                     expected_tag,
                     shard_id,
+                    crate::ownership::PlacementGeneration::INITIAL,
+                    config.num_shards as u32,
                     &security,
                 )?
             }
@@ -287,6 +291,8 @@ impl ClusterEngine {
                     tag_dict_bytes.clone(),
                     expected_tag,
                     shard_id,
+                    crate::ownership::PlacementGeneration::INITIAL,
+                    config.num_shards as u32,
                     &security,
                 )?
             } else {
@@ -296,6 +302,8 @@ impl ClusterEngine {
                     expected,
                     expected_tag,
                     shard_id,
+                    crate::ownership::PlacementGeneration::INITIAL,
+                    config.num_shards as u32,
                     &security,
                 )?
             }
@@ -311,6 +319,8 @@ impl ClusterEngine {
                         tag_dict_bytes.clone(),
                         expected_tag,
                         shard_id,
+                        crate::ownership::PlacementGeneration::INITIAL,
+                        config.num_shards as u32,
                         &security,
                     )?
                 } else {
@@ -320,6 +330,8 @@ impl ClusterEngine {
                         expected,
                         expected_tag,
                         shard_id,
+                        crate::ownership::PlacementGeneration::INITIAL,
+                        config.num_shards as u32,
                         &security,
                     )?
                 }
@@ -408,6 +420,8 @@ impl ClusterEngine {
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
                 shard_id,
+                self.placement_generation(),
+                self.num_shards() as u32,
                 &self.client_security,
             )?
             .with_metrics(Arc::clone(&self.transport_metrics));
@@ -590,6 +604,8 @@ impl ClusterEngine {
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
                 position as u32,
+                self.placement_generation(),
+                self.num_shards() as u32,
                 &self.client_security,
             )?
             .with_metrics(Arc::clone(&self.transport_metrics));

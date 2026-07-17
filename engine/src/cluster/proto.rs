@@ -28,6 +28,53 @@ pub(crate) fn tags_from_proto(tags: Vec<TagKv>) -> Vec<(String, String)> {
     tags.into_iter().map(|t| (t.key, t.value)).collect()
 }
 
+pub(crate) fn placement_to_proto(placement: &crate::ownership::QueryPlacement) -> QueryPlacement {
+    QueryPlacement {
+        placement_generation: placement.generation().0,
+        num_shards: placement.num_shards(),
+        mode: placement.mode() as u32,
+        positions: placement.positions().to_vec(),
+    }
+}
+
+pub(crate) fn placement_from_proto(
+    placement: Option<QueryPlacement>,
+) -> Result<crate::ownership::QueryPlacement, crate::ownership::OwnershipError> {
+    let placement = placement.ok_or(crate::ownership::OwnershipError::MissingGeneration)?;
+    let mode = u8::try_from(placement.mode)
+        .map_err(|_| crate::ownership::OwnershipError::UnknownMode(u8::MAX))?;
+    crate::ownership::QueryPlacement::from_raw(
+        crate::ownership::PlacementGeneration(placement.placement_generation),
+        placement.num_shards,
+        mode,
+        placement.positions,
+    )
+}
+
+pub(crate) fn ownership_to_proto(context: &crate::ownership::OwnershipContext) -> OwnershipContext {
+    OwnershipContext {
+        placement_generation: context.generation().0,
+        num_shards: context.num_shards(),
+        routed_positions: context.routed_positions().to_vec(),
+        broad_evaluator_plus_one: context
+            .broad_evaluator()
+            .and_then(|position| position.checked_add(1))
+            .unwrap_or(0),
+    }
+}
+
+pub(crate) fn ownership_from_proto(
+    context: Option<OwnershipContext>,
+) -> Result<crate::ownership::OwnershipContext, crate::ownership::OwnershipError> {
+    let context = context.ok_or(crate::ownership::OwnershipError::MissingGeneration)?;
+    crate::ownership::OwnershipContext::new(
+        crate::ownership::PlacementGeneration(context.placement_generation),
+        context.num_shards,
+        context.routed_positions,
+        context.broad_evaluator_plus_one.checked_sub(1),
+    )
+}
+
 /// Resolved [`TagPredicate`] → proto `TagGroup`s (ADR-055): the already-resolved `TagId` groups.
 /// They are globally consistent (frozen tag dict + synthetic hash), so the server rebuilds the
 /// predicate from the raw ids without re-resolving strings. Empty ⇒ unfiltered.
@@ -136,6 +183,7 @@ pub(crate) fn translog_entry_to_mutation(e: TranslogEntry) -> Option<(LogPos, Cl
             dsl: item.dsl,
             // Tags ride the translog entry (ADR-055), so a peer-recovered replica keeps them.
             tags: tags_from_proto(item.tags),
+            placement: placement_from_proto(item.placement).ok()?,
         },
         translog_entry::Op::RemoveLogical(logical) => ClusterMutation::Remove { logical },
     };
@@ -158,11 +206,13 @@ pub(crate) fn translog_entry_from_mutation(
             version,
             dsl,
             tags,
+            placement,
         } => translog_entry::Op::Add(AddItem {
             logical_id: *logical,
             dsl: dsl.clone(),
             version: *version,
             tags: tags_to_proto(tags),
+            placement: Some(placement_to_proto(placement)),
         }),
         ClusterMutation::Remove { logical } => translog_entry::Op::RemoveLogical(*logical),
         ClusterMutation::Upsert { .. } => return None,
@@ -301,6 +351,9 @@ mod tests {
                     dsl: "1994 topps".to_string(),
                     version: v,
                     tags: Vec::new(),
+                    placement: Some(super::placement_to_proto(
+                        &crate::ownership::QueryPlacement::standalone(),
+                    )),
                 })),
             };
             let got = translog_entry_to_mutation(e).expect("Add maps to a mutation");

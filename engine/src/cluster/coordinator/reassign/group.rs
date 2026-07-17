@@ -310,6 +310,8 @@ impl ClusterEngine {
                     tag_bytes.clone(),
                     expected_tag,
                     pos,
+                    self.placement_generation(),
+                    self.num_shards() as u32,
                     &self.client_security,
                 )?
                 .with_metrics(Arc::clone(&self.transport_metrics));
@@ -433,6 +435,8 @@ impl ClusterEngine {
                         tag_bytes.clone(),
                         expected_tag,
                         pos,
+                        self.placement_generation(),
+                        self.num_shards() as u32,
                         &self.client_security,
                     )?
                     .with_metrics(Arc::clone(&self.transport_metrics));

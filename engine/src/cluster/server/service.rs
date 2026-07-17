@@ -42,6 +42,9 @@ impl ShardService for ShardServer {
         // touched.
         let started = Instant::now();
         let req = request.into_inner();
+        let ownership = proto::ownership_from_proto(req.ownership.clone())
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
+        self.validate_placement_config(ownership.generation(), ownership.num_shards())?;
         // Rebuild the tag filter from the already-resolved `TagId` groups (ADR-055); empty ⇒
         // unfiltered. The ids are authoritative-from-coordinator, so the server never re-resolves
         // strings — immune to any server-side tag-space skew on reads.
@@ -54,7 +57,14 @@ impl ShardService for ShardServer {
             let spec = proto::rank_spec_from_proto(rank);
             let (scored, stats) = st
                 .shard
-                .percolate_filtered_ranked(&req.title, req.include_broad, &pred, &spec)
+                .percolate_filtered_ranked_owned(
+                    &req.title,
+                    req.include_broad,
+                    &pred,
+                    &spec,
+                    &ownership,
+                    req.shard_id,
+                )
                 .map_err(|e| Status::internal(e.to_string()))?;
             let (ids, scores) = scored.into_iter().unzip();
             slot.latency
@@ -65,11 +75,18 @@ impl ShardService for ShardServer {
                 stats: Some(proto::stats_from_engine(stats)),
                 scores,
                 ranked: true,
+                ownership_applied: true,
             }));
         }
         let (ids, stats) = st
             .shard
-            .percolate_filtered(&req.title, req.include_broad, &pred)
+            .percolate_filtered_owned(
+                &req.title,
+                req.include_broad,
+                &pred,
+                &ownership,
+                req.shard_id,
+            )
             .map_err(|e| Status::internal(e.to_string()))?;
         slot.latency.observe(ShardRpc::Percolate, started.elapsed());
         // Broad-lane cost accumulation (ADR-101): unconditional — include_broad=false stats carry
@@ -80,6 +97,7 @@ impl ShardService for ShardServer {
             stats: Some(proto::stats_from_engine(stats)),
             scores: Vec::new(),
             ranked: false,
+            ownership_applied: true,
         }))
     }
 
@@ -136,6 +154,8 @@ impl ShardService for ShardServer {
             // ADR-080: this binary serves the replicate-to-all broad layout. A pre-ADR-080
             // server omits the field (proto3 false), so a replicate-all coordinator refuses it.
             broad_replicate_all: true,
+            placement_generation: space.placement_generation.0,
+            num_shards: space.num_shards,
         }))
     }
 
@@ -183,6 +203,12 @@ impl ShardService for ShardServer {
         let mut rejected_parse = 0u64;
         let mut extracted: Vec<PlacedQuery> = Vec::with_capacity(items.len());
         for it in items {
+            let placement = proto::placement_from_proto(it.placement.clone())
+                .map_err(|error| Status::failed_precondition(error.to_string()))?;
+            self.validate_placement_config(placement.generation(), placement.num_shards())?;
+            placement
+                .validate_for_shard(req.shard_id, placement.generation(), placement.num_shards())
+                .map_err(|error| Status::failed_precondition(error.to_string()))?;
             match compile_item(&self.norm, &st.dict, &it.dsl, &mut lc) {
                 // Carry the raw tags forward; the shard's engine resolves them read-only against the
                 // adopted frozen tag space (ADR-055).
@@ -200,6 +226,7 @@ impl ShardService for ShardServer {
                     // The wire is dict-agnostic (raw tags only) — pre-resolved ids never arrive.
                     tag_ids: Vec::new(),
                     rank: crate::rank::RankValues::default(),
+                    placement,
                 }),
                 None => rejected_parse += 1,
             }
@@ -223,6 +250,12 @@ impl ShardService for ShardServer {
         let item = req
             .item
             .ok_or_else(|| Status::invalid_argument("InsertRequest.item is required"))?;
+        let placement = proto::placement_from_proto(item.placement.clone())
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
+        self.validate_placement_config(placement.generation(), placement.num_shards())?;
+        placement
+            .validate_for_shard(req.shard_id, placement.generation(), placement.num_shards())
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
         let mut lc = String::new();
         let Some(ex) = compile_item(&self.norm, &st.dict, &item.dsl, &mut lc) else {
             // The coordinator already parsed before placing, so this should not happen;
@@ -238,7 +271,14 @@ impl ShardService for ShardServer {
         // and must match the in-process / single-node store rather than be clamped to 1.
         let out = st
             .shard
-            .insert_extracted_with_tags(&ex, item.logical_id, item.version, &item.dsl, &tags)
+            .insert_extracted_with_placement(
+                &ex,
+                item.logical_id,
+                item.version,
+                &item.dsl,
+                &tags,
+                &placement,
+            )
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(proto::InsertReply {
             present: out.is_some(),
@@ -251,6 +291,10 @@ impl ShardService for ShardServer {
         request: Request<proto::DeleteRequest>,
     ) -> Result<Response<proto::DeleteReply>, Status> {
         let req = request.into_inner();
+        self.validate_placement_config(
+            crate::ownership::PlacementGeneration(req.placement_generation),
+            req.num_shards,
+        )?;
         let (slot, st) = self.loaded_slot(req.shard_id)?;
         slot.check_not_fenced()?;
         let removed = st
@@ -264,7 +308,12 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::FlushRequest>,
     ) -> Result<Response<proto::FlushReply>, Status> {
-        self.loaded_slot(request.into_inner().shard_id)?
+        let req = request.into_inner();
+        self.validate_placement_config(
+            crate::ownership::PlacementGeneration(req.placement_generation),
+            req.num_shards,
+        )?;
+        self.loaded_slot(req.shard_id)?
             .1
             .shard
             .flush()

@@ -225,11 +225,35 @@ pub struct ResyncReport {
 enum Target {
     /// Class D with `accept_class_d` off — no anchorable feature, stored nowhere.
     Reject,
-    /// The broad lane (class C / B arity-2 / accepted class D) → replicated to
-    /// EVERY shard (ADR-080); evaluated on one broad-eval shard per title.
-    Replicated,
+    /// A class-B pair is replicated to every shard but remains always-visible.
+    ReplicatedAlwaysVisible,
+    /// Class C / accepted class D is replicated to every shard and evaluated on
+    /// one broad-evaluation position per request.
+    ReplicatedBroad,
     /// Selective shards (class A / B any-of), sorted + deduped, non-empty.
     Selective(Vec<usize>),
+}
+
+impl Target {
+    fn placement(
+        &self,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<crate::ownership::QueryPlacement, ShardError> {
+        use crate::ownership::QueryPlacement;
+        match self {
+            Self::Reject => Ok(QueryPlacement::standalone()),
+            Self::ReplicatedAlwaysVisible => Ok(QueryPlacement::replicated_always_visible(
+                generation, num_shards,
+            )?),
+            Self::ReplicatedBroad => Ok(QueryPlacement::replicated_broad(generation, num_shards)?),
+            Self::Selective(positions) => Ok(QueryPlacement::selective(
+                generation,
+                num_shards,
+                positions.iter().map(|&position| position as u32).collect(),
+            )?),
+        }
+    }
 }
 
 /// The durability-related parts of a [`ClusterEngine`], grouped so the [`from_parts`]
@@ -246,6 +270,8 @@ pub(crate) struct ClusterDurable {
     /// The current checkpoint generation / log epoch (the future Raft term; lives in the
     /// manifest, the cluster-state document, not in the log).
     pub epoch: u64,
+    /// ADR-109 placement generation restored from the durable cluster fence.
+    pub placement_generation: crate::ownership::PlacementGeneration,
     /// Ring vnode count, captured so the manifest can re-derive a byte-identical ring.
     pub vnodes: u32,
     /// The cluster-state control plane (membership + shard→node map + ring params + model
@@ -263,6 +289,7 @@ impl ClusterDurable {
             log: Box::new(NullClusterLog::new()),
             data_dir: None,
             epoch: 0,
+            placement_generation: crate::ownership::PlacementGeneration::INITIAL,
             vnodes,
             control: Box::new(InMemoryControlPlane::single_node(
                 num_shards,
@@ -307,6 +334,9 @@ pub struct ClusterEngine {
     log: Box<dyn ClusterLog>,
     /// Checkpoint generation / log epoch (manifest-resident; bumped on `checkpoint`).
     epoch: AtomicU64,
+    /// Monotonic placement identity. Changes only on vocabulary or shard-count
+    /// blue/green rebuilds, never on checkpoints or physical data movement.
+    placement_generation: AtomicU64,
     /// Ring vnode count (for re-deriving the ring in the manifest on checkpoint).
     vnodes: u32,
     /// Replication factor (copies per shard position) — retained so a vocabulary
@@ -455,12 +485,12 @@ fn placement_of(
             // before fan-out — is load-bearing for `upsert`: a plan every shard would reject
             // must not tombstone the prior version first (a silent delete-with-no-replace).
             if accept_class_d && !ex.forbidden.is_empty() {
-                Target::Replicated
+                Target::ReplicatedBroad
             } else {
                 Target::Reject
             }
         }
-        CostClass::C => Target::Replicated,
+        CostClass::C => Target::ReplicatedBroad,
         CostClass::A | CostClass::B | CostClass::H => {
             // A class-B-arity-2 query's only main anchor is an all-hot PAIR (a len-2
             // group): no rare feature to hash on, so it joins the replicated lane.
@@ -475,7 +505,7 @@ fn placement_of(
                 .chain(ap.hot_anchors.iter())
                 .any(|g| g.len() != 1)
             {
-                return Target::Replicated;
+                return Target::ReplicatedAlwaysVisible;
             }
             let mut shards: Vec<usize> = ap
                 .main_anchors

@@ -470,6 +470,9 @@ pub struct PlacedQuery {
     /// Fixed typed rank values carried across in-process rebuild/resize. The
     /// distributed wire remains unchanged in Increment 2 and supplies zero.
     pub rank: crate::rank::RankValues,
+    /// Deterministic distributed emission placement (ADR-109). Standalone
+    /// engine callers use [`QueryPlacement::standalone`](crate::ownership::QueryPlacement::standalone).
+    pub placement: crate::ownership::QueryPlacement,
 }
 
 /// Outcome of ingesting a batch of stored queries. Lets callers see how many

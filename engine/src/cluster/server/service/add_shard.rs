@@ -44,7 +44,12 @@ pub(super) fn add_shard(
 
     // Attest the coordinator's frozen space equals the node's adopted one — a divergence would place a
     // slot whose `FeatureId`s do not line up with the coordinator's routing (a silent false negative).
-    if fp != req.dict_fingerprint || tag_fp != req.tag_dict_fingerprint {
+    if fp != req.dict_fingerprint
+        || tag_fp != req.tag_dict_fingerprint
+        || node.placement_generation.0 != req.placement_generation
+        || node.num_shards != req.num_shards
+        || shard_id >= req.num_shards
+    {
         return Err(Status::failed_precondition(format!(
             "AddShard fingerprint mismatch: node adopted dict {fp:#018x}/tag {tag_fp:#018x} but the \
              request attests {:#018x}/{:#018x} (the coordinator's frozen space diverges from this \
@@ -58,7 +63,12 @@ pub(super) fn add_shard(
     if let Ok(slot) = server.slot(shard_id) {
         if let Some(st) = slot.state.load_full() {
             if st.dict.fingerprint() == fp && st.tag_dict.fingerprint() == tag_fp {
-                return Ok(add_shard_reply(fp, tag_fp));
+                return Ok(add_shard_reply(
+                    fp,
+                    tag_fp,
+                    node.placement_generation,
+                    node.num_shards,
+                ));
             }
         }
     }
@@ -75,15 +85,27 @@ pub(super) fn add_shard(
         }),
     )?;
 
-    Ok(add_shard_reply(fp, tag_fp))
+    Ok(add_shard_reply(
+        fp,
+        tag_fp,
+        node.placement_generation,
+        node.num_shards,
+    ))
 }
 
 /// The add-shard reply — the node's frozen-dict + tag-dict fingerprints (equal the request's on
 /// success), plus the ADR-080 replicate-to-all attestation (this binary always serves it).
-fn add_shard_reply(fp: u64, tag_fp: u64) -> Response<proto::AddShardReply> {
+fn add_shard_reply(
+    fp: u64,
+    tag_fp: u64,
+    generation: crate::ownership::PlacementGeneration,
+    num_shards: u32,
+) -> Response<proto::AddShardReply> {
     Response::new(proto::AddShardReply {
         dict_fingerprint: fp,
         tag_dict_fingerprint: tag_fp,
         broad_replicate_all: true,
+        placement_generation: generation.0,
+        num_shards,
     })
 }

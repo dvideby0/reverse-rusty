@@ -249,6 +249,7 @@ mod tests {
             vnodes: 128,
             dict_fingerprint: 0,
             model_version: 0,
+            placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
         }
     }
 

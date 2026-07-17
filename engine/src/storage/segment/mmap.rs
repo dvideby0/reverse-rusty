@@ -13,9 +13,20 @@ use super::super::{crc32, read_u32_at, read_u64_at};
 use super::read::{
     parse_frozen_index, read_u16_slice, read_u32_slice, read_u64_slice, read_u8_slice,
 };
-use super::{FrozenSlot, FORMAT_VERSION_HOT, FORMAT_VERSION_RANK, HEADER_SIZE, MAGIC};
+use super::{
+    FrozenSlot, FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK, HEADER_SIZE,
+    MAGIC,
+};
 
 mod ops;
+
+fn slice_ptr<T>(slice: &[T]) -> *const T {
+    if slice.is_empty() {
+        std::ptr::NonNull::<T>::dangling().as_ptr().cast_const()
+    } else {
+        slice.as_ptr()
+    }
+}
 
 // ---- MmapSegment ----
 
@@ -47,7 +58,7 @@ enum MmapLogicalIndex {
 pub struct MmapSegment {
     mmap: Arc<memmap2::Mmap>,
     num_queries: u32,
-    /// The file's header format version (1..=5). v4 ⇔ the segment holds class-D
+    /// The file's header format version (1..=7). v4 ⇔ the segment holds class-D
     /// always-candidates (the ADR-068 rollback fence); v5 ⇔ it holds class-H
     /// hot-tier entries (the ADR-105 fence + the hot-index section) — surfaced so
     /// the manifest commit can propagate the fence to its own version word.
@@ -82,6 +93,15 @@ pub struct MmapSegment {
     // Optional v6 fixed typed-priority column. `priority_count == 0` pre-v6.
     priority_arr: *const i64,
     priority_count: usize,
+    // Optional v7 ADR-109 ownership columns. `placement_count == 0` pre-v7.
+    placement_generation: *const u64,
+    placement_num_shards: *const u32,
+    placement_mode: *const u8,
+    placement_off: *const u32,
+    placement_len: *const u32,
+    placement_blob: *const u32,
+    placement_blob_len: usize,
+    placement_count: usize,
     // Main index
     main_slots: *const FrozenSlot,
     main_cap: usize,
@@ -271,6 +291,14 @@ impl Clone for MmapSegment {
             logical_arr: self.logical_arr,
             priority_arr: self.priority_arr,
             priority_count: self.priority_count,
+            placement_generation: self.placement_generation,
+            placement_num_shards: self.placement_num_shards,
+            placement_mode: self.placement_mode,
+            placement_off: self.placement_off,
+            placement_len: self.placement_len,
+            placement_blob: self.placement_blob,
+            placement_blob_len: self.placement_blob_len,
+            placement_count: self.placement_count,
             main_slots: self.main_slots,
             main_cap: self.main_cap,
             main_mask: self.main_mask,
@@ -369,7 +397,7 @@ impl MmapSegment {
             // back with an empty tag column; v4 is layout-identical to v3 — the bump
             // is the class-D rollback fence, ADR-068; v5 adds the hot-index section,
             // ADR-105).
-            if !(1..=FORMAT_VERSION_RANK).contains(&version) {
+            if !(1..=FORMAT_VERSION_OWNERSHIP).contains(&version) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("unsupported format version {version}"),
@@ -428,8 +456,9 @@ impl MmapSegment {
         let (version_s, next) = read_u32_slice(data_for_parse, cursor)?;
         cursor = next;
         let (logical_s, after_logical) = read_u64_slice(data_for_parse, cursor)?;
-        let (priority_s, priority_count) = if format_version >= FORMAT_VERSION_RANK {
-            let (raw, _) = read_u64_slice(data_for_parse, after_logical)?;
+        let (priority_s, priority_count, after_priority) = if format_version >= FORMAT_VERSION_RANK
+        {
+            let (raw, next) = read_u64_slice(data_for_parse, after_logical)?;
             if raw.len() != num_queries as usize {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -440,15 +469,64 @@ impl MmapSegment {
             // is valid for both, and the immutable slice remains mmap-borrowed.
             let signed =
                 unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<i64>(), raw.len()) };
-            (signed, signed.len())
+            (signed, signed.len(), next)
         } else {
-            (&[][..], 0usize)
+            (&[][..], 0usize, after_logical)
         };
         let priority_ptr = if priority_count == 0 {
             std::ptr::NonNull::<i64>::dangling().as_ptr().cast_const()
         } else {
             priority_s.as_ptr()
         };
+
+        let (
+            placement_generation_s,
+            placement_num_shards_s,
+            placement_mode_s,
+            placement_off_s,
+            placement_len_s,
+            placement_blob_s,
+        ) = if format_version >= FORMAT_VERSION_OWNERSHIP {
+            let (generation, next) = read_u64_slice(data_for_parse, after_priority)?;
+            let (num_shards, next) = read_u32_slice(data_for_parse, next)?;
+            let (mode, next) = read_u8_slice(data_for_parse, next)?;
+            let (off, next) = read_u32_slice(data_for_parse, next)?;
+            let (len, next) = read_u32_slice(data_for_parse, next)?;
+            let (blob, _) = read_u32_slice(data_for_parse, next)?;
+            let n = num_queries as usize;
+            if generation.len() != n
+                || num_shards.len() != n
+                || mode.len() != n
+                || off.len() != n
+                || len.len() != n
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "segment ownership column length mismatch",
+                ));
+            }
+            for i in 0..n {
+                let start = off[i] as usize;
+                let count = len[i] as usize;
+                let positions = blob.get(start..start + count).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "segment ownership positions overrun placement blob",
+                    )
+                })?;
+                crate::ownership::QueryPlacement::from_raw(
+                    crate::ownership::PlacementGeneration(generation[i]),
+                    num_shards[i],
+                    mode[i],
+                    positions.to_vec(),
+                )
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            }
+            (generation, num_shards, mode, off, len, blob)
+        } else {
+            (&[][..], &[][..], &[][..], &[][..], &[][..], &[][..])
+        };
+        let placement_count = placement_generation_s.len();
 
         // ---- Parse main index ----
         let (main_slots_s, main_blob_s, main_cap) = parse_frozen_index(data_for_parse, main_off)?;
@@ -659,6 +737,14 @@ impl MmapSegment {
             logical_arr: logical_s.as_ptr(),
             priority_arr: priority_ptr,
             priority_count,
+            placement_generation: slice_ptr(placement_generation_s),
+            placement_num_shards: slice_ptr(placement_num_shards_s),
+            placement_mode: slice_ptr(placement_mode_s),
+            placement_off: slice_ptr(placement_off_s),
+            placement_len: slice_ptr(placement_len_s),
+            placement_blob: slice_ptr(placement_blob_s),
+            placement_blob_len: placement_blob_s.len(),
+            placement_count,
             main_slots: main_slots_s.as_ptr(),
             main_cap,
             main_mask: if main_cap > 0 {

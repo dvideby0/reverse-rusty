@@ -111,6 +111,13 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.rank_values(local_id),
         }
     }
+
+    pub fn placement(&self, local_id: u32) -> crate::ownership::QueryPlacementRef<'_> {
+        match self {
+            BaseSegment::Memory(s) => s.placement(local_id),
+            BaseSegment::Mmap(s) => s.placement(local_id),
+        }
+    }
     // Compatibility dispatch wrapper — signature stays byte-for-byte stable.
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(
@@ -126,11 +133,21 @@ impl BaseSegment {
     ) {
         let mut ignored_emissions = 0;
         let mut collector = VecSink::new(out, &mut ignored_emissions);
-        self.match_collect(view, dict, epoch, seen, &mut collector, lanes, pred, stats);
+        self.match_collect(
+            view,
+            dict,
+            epoch,
+            seen,
+            &mut collector,
+            lanes,
+            pred,
+            stats,
+            crate::ownership::EmitAll,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::segment) fn match_collect<C: MatchSink>(
+    pub(in crate::segment) fn match_collect<C: MatchSink, P: crate::ownership::EmissionPolicy>(
         &self,
         view: &crate::exact::TitleView,
         dict: &Dict,
@@ -140,13 +157,18 @@ impl BaseSegment {
         lanes: super::ProbeLanes,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
+        emission: P,
     ) {
         match self {
             BaseSegment::Memory(s) => {
-                s.match_collect(view, dict, epoch, seen, collector, lanes, pred, stats);
+                s.match_collect(
+                    view, dict, epoch, seen, collector, lanes, pred, stats, emission,
+                );
             }
             BaseSegment::Mmap(s) => {
-                s.match_collect(view, dict, epoch, seen, collector, lanes, pred, stats);
+                s.match_collect(
+                    view, dict, epoch, seen, collector, lanes, pred, stats, emission,
+                );
             }
         }
     }

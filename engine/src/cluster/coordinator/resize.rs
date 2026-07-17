@@ -42,6 +42,7 @@ use crate::compile::{extract, extract_readonly, Extracted};
 use crate::dict::Dict;
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
+use crate::ownership::PlacementGeneration;
 use crate::segment::PlacedQuery;
 use crate::tagdict::TagId;
 use crate::vocab::Vocab;
@@ -115,7 +116,11 @@ impl ClusterEngine {
         // Rebuild under the new ring, reusing the current normalizer + vocab (None ⇒ preserve
         // self.vocab and re-resolve ITS equivalences onto the re-minted dict).
         let new_norm = Arc::clone(&self.norm);
-        let rebuilt = self.rebuild_from_live(new_norm, new_ring, None)?;
+        let next_generation = self
+            .placement_generation()
+            .next()
+            .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
+        let rebuilt = self.rebuild_from_live(new_norm, new_ring, None, next_generation)?;
 
         // Keep the cluster-state document consistent with the new shard count so `collect_load`
         // / `assignment_for` (introspection + the autoscaler) see K′ positions, not a stale K.
@@ -166,6 +171,7 @@ impl ClusterEngine {
         new_norm: Arc<Normalizer>,
         new_ring: HashRing,
         new_vocab: Option<Vocab>,
+        new_generation: PlacementGeneration,
     ) -> Result<usize, ShardError> {
         // Gather the deduped live `(logical, dsl, tag_ids)` set across shards. A selective /
         // any-of query lives on several shards but has ONE dsl (and one tag set — every
@@ -203,7 +209,7 @@ impl ClusterEngine {
         )> = Vec::with_capacity(live.len());
         let new_dict = if Arc::ptr_eq(&new_norm, &self.norm) {
             let dict = Arc::clone(&self.dict);
-            for (logical, text, version, tag_ids, rank) in live {
+            for (logical, text, version, tag_ids, rank, _placement) in live {
                 if let Ok(ast) = crate::dsl::parse(&text) {
                     let ex = extract_readonly(&ast, &new_norm, &dict, &mut lc);
                     extracted.push((logical, ex, text, version, tag_ids, rank));
@@ -212,7 +218,7 @@ impl ClusterEngine {
             dict
         } else {
             let mut dict = Dict::new();
-            for (logical, text, version, tag_ids, rank) in live {
+            for (logical, text, version, tag_ids, rank, _placement) in live {
                 if let Ok(ast) = crate::dsl::parse(&text) {
                     let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
                     extracted.push((logical, ex, text, version, tag_ids, rank));
@@ -251,15 +257,17 @@ impl ClusterEngine {
             // (mirrors the single-node ADR-068 vocab recompile, which passes accept=true
             // unconditionally). The empty-forbidden guard in `placement_of` still rejects the
             // never-stored empty query, so passing `true` cannot resurrect one.
-            match placement_of(
+            let target = placement_of(
                 &new_dict,
                 &new_ring,
                 &ex,
                 true,
                 self.per_shard.hot_anchor_threshold,
-            ) {
+            );
+            let placement = target.placement(new_generation, num_shards as u32)?;
+            match target {
                 Target::Reject => {}
-                Target::Replicated => {
+                Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
                     // The broad lane is replicated to every shard (ADR-080). Carry the stored
                     // version through the rebuild so a re-placed query keeps version N rather
                     // than being reset to 1 (the version-preserving rebuild, ADR-074).
@@ -272,6 +280,7 @@ impl ClusterEngine {
                             tags: Vec::new(),
                             tag_ids: tag_ids.clone(),
                             rank,
+                            placement: placement.clone(),
                         });
                     }
                 }
@@ -285,6 +294,7 @@ impl ClusterEngine {
                             tags: Vec::new(),
                             tag_ids: tag_ids.clone(),
                             rank,
+                            placement: placement.clone(),
                         });
                     }
                 }
@@ -360,7 +370,9 @@ impl ClusterEngine {
                 }
                 copies.push(copy);
             }
-            shards.push(into_shard(copies)?);
+            let shard = into_shard(copies)?;
+            shard.validate_ownership(s as u32, new_generation, num_shards as u32)?;
+            shards.push(shard);
         }
 
         // Atomic swap (under `&mut self`, so no read observes a half-state). The normalizer is
@@ -370,6 +382,8 @@ impl ClusterEngine {
         self.dict = new_dict;
         self.ring = new_ring;
         self.shards = shards;
+        self.placement_generation
+            .store(new_generation.0, std::sync::atomic::Ordering::Release);
         if let Some(vocab) = new_vocab {
             self.vocab = Some(Arc::new(vocab));
         }

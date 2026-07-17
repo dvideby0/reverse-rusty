@@ -247,6 +247,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                     lanes,
                     view.pred,
                     stats,
+                    crate::ownership::EmitAll,
                 );
             }
             view.memtable.match_collect(
@@ -258,6 +259,7 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 lanes,
                 view.pred,
                 stats,
+                crate::ownership::EmitAll,
             );
         }
 

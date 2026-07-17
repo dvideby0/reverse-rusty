@@ -169,13 +169,39 @@ impl Segment {
         rank: crate::rank::RankValues,
         knobs: CompileKnobs,
     ) -> Option<AddedCompiled> {
+        self.add_compiled_ranked_placed(
+            ex,
+            tags,
+            dict,
+            logical,
+            version,
+            rank,
+            &crate::ownership::QueryPlacement::standalone(),
+            knobs,
+        )
+    }
+
+    /// [`add_compiled_ranked`](Self::add_compiled_ranked) carrying identity-only
+    /// distributed emission placement through dedup and compaction (ADR-109).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_compiled_ranked_placed(
+        &mut self,
+        ex: &Extracted,
+        tags: &[crate::tagdict::TagId],
+        dict: &Dict,
+        logical: u64,
+        version: u32,
+        rank: crate::rank::RankValues,
+        placement: &crate::ownership::QueryPlacement,
+        knobs: CompileKnobs,
+    ) -> Option<AddedCompiled> {
         let plan = build_signatures(ex, dict, knobs.hot_anchor_threshold);
         if rejects_class_d(plan.class, ex, knobs.accept_class_d) {
             return None;
         }
         let local = self
             .exact
-            .push_ranked(ex, tags, dict, version, logical, rank);
+            .push_ranked_with_placement(ex, tags, dict, version, logical, rank, placement);
 
         // Canonical-body dedup (Stage A): an entry whose SEMANTIC body equals an
         // existing leader's joins that group instead of inserting postings — it
@@ -254,6 +280,10 @@ impl Segment {
         self.exact.rank_values(local_id)
     }
 
+    pub fn placement(&self, local_id: u32) -> crate::ownership::QueryPlacementRef<'_> {
+        self.exact.placement(local_id)
+    }
+
     /// The stored per-query version for a local id — read back for the cluster
     /// rebuild gather (ADR-074) so a `set_vocab`/resize preserves a query's stored
     /// version rather than resetting it to 1.
@@ -298,7 +328,17 @@ impl Segment {
     ) {
         let mut ignored_emissions = 0;
         let mut collector = VecSink::new(out, &mut ignored_emissions);
-        self.match_collect(view, dict, epoch, seen, &mut collector, lanes, pred, stats);
+        self.match_collect(
+            view,
+            dict,
+            epoch,
+            seen,
+            &mut collector,
+            lanes,
+            pred,
+            stats,
+            crate::ownership::EmitAll,
+        );
     }
 
     /// Probe this segment for one title and emit matched LOGICAL ids.
@@ -309,7 +349,7 @@ impl Segment {
     /// present are skipped without touching the candidate index, cutting read
     /// amplification across multiple segments.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn match_collect<C: MatchSink>(
+    pub(crate) fn match_collect<C: MatchSink, P: crate::ownership::EmissionPolicy>(
         &self,
         view: &crate::exact::TitleView,
         dict: &Dict,
@@ -319,6 +359,7 @@ impl Segment {
         lanes: ProbeLanes,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
+        emission: P,
     ) {
         let filter = self.filter.as_ref();
         // Signatures are generated from the POSITIVE (superset) view so an overlapping alias
@@ -345,6 +386,7 @@ impl Segment {
                 pred,
                 stats,
                 ProbeLane::Main,
+                emission,
             );
         }
         // arity-2 signatures: {hot feature} x {every other feature}. Deliberately
@@ -374,6 +416,7 @@ impl Segment {
                             pred,
                             stats,
                             ProbeLane::Main,
+                            emission,
                         );
                     }
                 }
@@ -405,6 +448,7 @@ impl Segment {
                     pred,
                     stats,
                     ProbeLane::Hot,
+                    emission,
                 );
             }
         }
@@ -429,6 +473,7 @@ impl Segment {
                     pred,
                     stats,
                     ProbeLane::Broad,
+                    emission,
                 );
             }
             // Universal signature: class-D always-candidates (ADR-068). Probed
@@ -451,6 +496,7 @@ impl Segment {
                     pred,
                     stats,
                     ProbeLane::Broad,
+                    emission,
                 );
             }
         }
@@ -458,7 +504,7 @@ impl Segment {
 
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn probe<C: MatchSink>(
+    fn probe<C: MatchSink, P: crate::ownership::EmissionPolicy>(
         &self,
         key: u64,
         index: &CandidateIndex,
@@ -469,6 +515,7 @@ impl Segment {
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
         lane: ProbeLane,
+        emission: P,
     ) {
         // Dedup Stage A: on a segment with shared body groups, a posting entry is
         // a group LEADER — verified once per body, emitted per alive/tag-passing
@@ -500,7 +547,9 @@ impl Segment {
                         return; // tombstoned
                     }
                     // Tag filter (ADR-049) — applied post-candidate inside verify.
-                    if self.exact.verify(local, view, pred) {
+                    if self.exact.verify(local, view, pred)
+                        && emission.should_emit(self.exact.placement(local))
+                    {
                         collector.on_match(self.exact.logical(local));
                     }
                     return;
@@ -519,11 +568,17 @@ impl Segment {
                 {
                     return;
                 }
-                if self.alive[local as usize] && pred.matches(self.exact.tags_of(local)) {
+                if self.alive[local as usize]
+                    && pred.matches(self.exact.tags_of(local))
+                    && emission.should_emit(self.exact.placement(local))
+                {
                     collector.on_match(self.exact.logical(local));
                 }
                 for &m in members {
-                    if self.alive[m as usize] && pred.matches(self.exact.tags_of(m)) {
+                    if self.alive[m as usize]
+                        && pred.matches(self.exact.tags_of(m))
+                        && emission.should_emit(self.exact.placement(m))
+                    {
                         collector.on_match(self.exact.logical(m));
                     }
                 }

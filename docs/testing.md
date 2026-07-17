@@ -45,13 +45,14 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 | **Broad-lane batch** | `tests/broad_batch.rs` | Broad-lane **batch ≡ scalar** equivalence matrix — the load-bearing batch-correctness deliverable ([`design/matching.md`](design/matching.md) §4). |
 | Ranking | `tests/ranking.rs` + server handler tests | Compatibility ranking (ADR-059) plus bounded typed ranking (ADR-107/108): collect-all differential, signed/saturating scores, ties, filters/scopes, newest-live duplicate precedence, K/threshold bounds, strict HTTP ingest, permit deadlines, and winner-only fail-closed enrichment ([`design/matching.md`](design/matching.md) §5.4). |
 | Unit tests | `src/*.rs` | DSL parsing, vocab, WAL framing, loader, anchor filter (inline `#[cfg(test)]` modules). |
-| Persistence | `tests/persistence.rs` | Segment round-trip, WAL crash-recovery replay, mmap compaction, durability-failure events, and ADR-108 typed-priority v6/legacy-fallback migration + corruption refusal. |
+| Persistence | `tests/persistence.rs` + storage/cluster unit modules | Segment round-trip, WAL crash-recovery replay, mmap compaction, durability-failure events, ADR-108 typed-priority v6/legacy fallback, and ADR-109 segment-v7 / cluster-manifest-v6 / clog+translog-v4 / adopted-space-v2 round-trips, malformed-column refusal, and rebuild-only migration fences. Standalone segments v1–v6 remain readable. |
 | Hardening | `tests/hardening_fixes.rs` | Vocab-epoch staleness, fallible deserialization, reverse-index delete. |
 | Coverage gaps | `tests/coverage_gaps.rs` | Parallel matching, compaction, broad-lane isolation, edge cases. |
 | Error paths | `tests/error_paths.rs` | API error handling (parse errors, class-D rejection). |
 | **Pressure / soak** | `tests/stress.rs` | Mixed read/write/delete churn, parallel-vs-sequential agreement under mutation, metrics/event consistency, and the ADR-099 **proves-work-stopped** cancellation legs (self-calibrating: cancelled wall-clock asserted against the measured uncancelled runtime). Self-contained (seeded `gen`, no data files). |
-| **Cluster oracle** | `tests/cluster_oracle.rs` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}; every placement class + fan-out asserted; dynamic-vocabulary absorb-correctly (hashed new tokens don't broaden, declared + auto-learned aliases make both surface forms match). **Half the Cluster-v1 gate (below).** |
-| **Cluster durability** | `tests/cluster_durability_oracle.rs` | A `data_dir` cluster rebuilt from manifest + per-shard segments + coordinator log ≡ pre-crash ≡ brute, K∈{1,3,8} × broad; checkpoint, torn-tail recovery, fail-loud guards, alias-survives-reopen. **Half the Cluster-v1 gate (below).** |
+| **Cluster oracle** | `tests/cluster_oracle.rs` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}; every A/B/C/D/H placement class + fan-out asserted; filters/ranking/ties, any-of, canonical bodies, dynamic vocabulary, repeated resize, and ADR-109 owned replies with `duplicate_emissions == 0`. **Half the Cluster-v1 gate (below).** |
+| **Cluster durability** | `tests/cluster_durability_oracle.rs` | A `data_dir` cluster rebuilt from manifest + per-shard segments + coordinator log ≡ pre-crash ≡ brute, K∈{1,3,8} × broad; checkpoint, both compaction paths, backup/restore, torn-tail recovery, migration fences, vocabulary rebuild, resize/reopen, and ownership-generation preservation. **Half the Cluster-v1 gate (below).** |
+| **Distributed gRPC** | `tests/cluster_grpc_oracle.rs` | Localhost wire oracle for co-location, RF>1 failover, peer recovery under writes, retained-member fingerprints, live handoff/reassignment/reconcile, protocol ownership attestation, missing/stale peer refusal, and zero-FN result identity. Requires localhost TCP permission. |
 | **Cluster scale soak** | `tests/cluster_soak/` | The **≥20M multi-shard scale proof** (ADR-104, the scale half of Distributed-v1 criterion 12): a durable K=8 in-process cluster at 20M queries ≡ the single-node engine over 50k titles, planted absolute-FN sentinels, mirrored live mutations (incl. a synthetic-ID retrievability check), and a checkpoint → reopen re-verify. `#[ignore]`d, **run explicitly by name only — in no gate and no CI workflow** (a one-off acceptance run; numbers pinned in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)) — see [Pressure & soak](#pressure--soak-tests). |
 
 ### What the oracle does and does not verify
@@ -118,7 +119,9 @@ live — naming them here makes the contract explicit: keep them green, never we
 experimental distributed layers add three more oracles that `check.sh` runs in its
 `--features distributed` lane — `tests/cluster_grpc_oracle.rs` (gRPC transport + dict shipping +
 replication/recovery; the `block_on` **rayon-fanout** and **single-target-from-a-tokio-worker** guards;
-and **remote partial-apply detection** over the wire — ADR-047), `tests/cluster_control_raft_oracle.rs`
+**remote partial-apply detection** over the wire — ADR-047; and ADR-109 generation/configuration,
+ownership-applied reply, recovery/fingerprint, old-peer, and stale-peer guards),
+`tests/cluster_control_raft_oracle.rs`
 (openraft control plane), and `tests/cluster_autoscale_oracle.rs` (autoscaler). Those are
 oracle-proven **on localhost**, not a multi-machine gate. The partial-apply → `resync` **convergence**
 cycle (ADR-047) is proven deterministically in the lean core by `cluster/coordinator/tests.rs`

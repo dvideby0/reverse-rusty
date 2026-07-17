@@ -40,6 +40,40 @@ impl MmapSegment {
         crate::rank::RankValues { priority }
     }
 
+    /// Allocation-free ADR-109 placement view. Pre-v7 standalone segments expose
+    /// the reserved standalone identity without touching absent columns.
+    #[inline]
+    pub fn placement(&self, local: u32) -> crate::ownership::QueryPlacementRef<'_> {
+        if self.placement_count == 0 {
+            return crate::ownership::QueryPlacementRef {
+                generation: crate::ownership::PlacementGeneration::STANDALONE,
+                num_shards: 0,
+                mode: crate::ownership::PlacementMode::Standalone,
+                positions: &[],
+            };
+        }
+        let i = local as usize;
+        let generations = self.mmap_slice(self.placement_generation, self.placement_count);
+        let shard_counts = self.mmap_slice(self.placement_num_shards, self.placement_count);
+        let modes = self.mmap_slice(self.placement_mode, self.placement_count);
+        let offs = self.mmap_slice(self.placement_off, self.placement_count);
+        let lens = self.mmap_slice(self.placement_len, self.placement_count);
+        let blob = self.mmap_slice(self.placement_blob, self.placement_blob_len);
+        let off = offs[i] as usize;
+        let len = lens[i] as usize;
+        crate::ownership::QueryPlacementRef {
+            generation: crate::ownership::PlacementGeneration(generations[i]),
+            num_shards: shard_counts[i],
+            mode: match modes[i] {
+                1 => crate::ownership::PlacementMode::Selective,
+                2 => crate::ownership::PlacementMode::ReplicatedAlwaysVisible,
+                3 => crate::ownership::PlacementMode::ReplicatedBroad,
+                _ => crate::ownership::PlacementMode::Standalone,
+            },
+            positions: &blob[off..off + len],
+        }
+    }
+
     // ---- slice accessors (zero-cost, just pointer arithmetic) ----
 
     /// View `len` elements of `T` at `ptr` as a slice borrowed from `&self`.
@@ -576,11 +610,21 @@ impl MmapSegment {
     ) {
         let mut ignored_emissions = 0;
         let mut collector = VecSink::new(out, &mut ignored_emissions);
-        self.match_collect(view, dict, epoch, seen, &mut collector, lanes, pred, stats);
+        self.match_collect(
+            view,
+            dict,
+            epoch,
+            seen,
+            &mut collector,
+            lanes,
+            pred,
+            stats,
+            crate::ownership::EmitAll,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn match_collect<C: MatchSink>(
+    pub(crate) fn match_collect<C: MatchSink, P: crate::ownership::EmissionPolicy>(
         &self,
         view: &crate::exact::TitleView,
         dict: &crate::dict::Dict,
@@ -590,6 +634,7 @@ impl MmapSegment {
         lanes: crate::segment::ProbeLanes,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
+        emission: P,
     ) {
         let has_filter = self.filter_num_blocks > 0;
         // Retrieval uses the positive (superset) view; verify applies both (ADR-061).
@@ -603,7 +648,17 @@ impl MmapSegment {
                 stats.probes_skipped += 1;
                 continue;
             }
-            self.probe_index(key, Lane::Main, epoch, view, seen, collector, pred, stats);
+            self.probe_index(
+                key,
+                Lane::Main,
+                epoch,
+                view,
+                seen,
+                collector,
+                pred,
+                stats,
+                emission,
+            );
         }
         // arity-2 signatures
         for &h in feats {
@@ -626,6 +681,7 @@ impl MmapSegment {
                             collector,
                             pred,
                             stats,
+                            emission,
                         );
                     }
                 }
@@ -642,7 +698,17 @@ impl MmapSegment {
                     stats.probes_skipped += 1;
                     continue;
                 }
-                self.probe_index(key, Lane::Hot, epoch, view, seen, collector, pred, stats);
+                self.probe_index(
+                    key,
+                    Lane::Hot,
+                    epoch,
+                    view,
+                    seen,
+                    collector,
+                    pred,
+                    stats,
+                    emission,
+                );
             }
         }
         // broad lane
@@ -654,7 +720,17 @@ impl MmapSegment {
                     stats.probes_skipped += 1;
                     continue;
                 }
-                self.probe_index(key, Lane::Broad, epoch, view, seen, collector, pred, stats);
+                self.probe_index(
+                    key,
+                    Lane::Broad,
+                    epoch,
+                    view,
+                    seen,
+                    collector,
+                    pred,
+                    stats,
+                    emission,
+                );
             }
             // Universal signature: class-D always-candidates (ADR-068). Probed
             // unconditionally (the accept knob gates ingest, never visibility);
@@ -665,14 +741,24 @@ impl MmapSegment {
             if has_filter && !self.may_contain(key) {
                 stats.probes_skipped += 1;
             } else {
-                self.probe_index(key, Lane::Broad, epoch, view, seen, collector, pred, stats);
+                self.probe_index(
+                    key,
+                    Lane::Broad,
+                    epoch,
+                    view,
+                    seen,
+                    collector,
+                    pred,
+                    stats,
+                    emission,
+                );
             }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn probe_index<C: MatchSink>(
+    fn probe_index<C: MatchSink, P: crate::ownership::EmissionPolicy>(
         &self,
         key: u64,
         lane: Lane,
@@ -682,6 +768,7 @@ impl MmapSegment {
         collector: &mut C,
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
+        emission: P,
     ) {
         let (slots, blob, mask) = match lane {
             Lane::Main => (self.main_slots(), self.main_blob(), self.main_mask),
@@ -715,7 +802,7 @@ impl MmapSegment {
                     continue;
                 }
                 // Tag filter (ADR-049) — applied post-candidate inside verify.
-                if self.verify(local, view, pred) {
+                if self.verify(local, view, pred) && emission.should_emit(self.placement(local)) {
                     collector.on_match(self.logical(local));
                 }
             }
@@ -762,7 +849,8 @@ impl MmapSegment {
             } else {
                 stored
             };
-            exact.push_raw(
+            let placement = self.placement(i as u32).to_owned();
+            exact.push_raw_placed(
                 rm,
                 fm,
                 &self.req_blob()[ro..ro + rl],
@@ -778,6 +866,7 @@ impl MmapSegment {
                 ver,
                 log,
                 priority,
+                &placement,
             );
 
             // SAFETY: `i < n == num_queries`, and `class_arr` is the

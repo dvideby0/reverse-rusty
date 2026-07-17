@@ -29,6 +29,19 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.percolate_filtered(title, include_broad, pred))
     }
 
+    fn percolate_filtered_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        self.read(|shard| {
+            shard.percolate_filtered_owned(title, include_broad, pred, context, current_position)
+        })
+    }
+
     fn percolate_filtered_ranked(
         &self,
         title: &str,
@@ -41,12 +54,50 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.percolate_filtered_ranked(title, include_broad, pred, spec))
     }
 
+    fn percolate_filtered_ranked_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        self.read(|shard| {
+            shard.percolate_filtered_ranked_owned(
+                title,
+                include_broad,
+                pred,
+                spec,
+                context,
+                current_position,
+            )
+        })
+    }
+
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.read(|s| s.num_queries())
     }
 
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         self.read(|s| s.class_counts())
+    }
+
+    fn validate_ownership(
+        &self,
+        position: u32,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), ShardError> {
+        self.primary
+            .validate_ownership(position, generation, num_shards)?;
+        let replicas = self.replicas.lock().unwrap_or_else(PoisonError::into_inner);
+        for replica in replicas.iter() {
+            replica
+                .shard
+                .validate_ownership(position, generation, num_shards)?;
+        }
+        Ok(())
     }
 
     fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
@@ -118,6 +169,27 @@ impl Shard for ReplicatedShard {
             .insert_extracted_with_tags(ex, logical, version, text, tags)?;
         self.fan_to_replicas(|s| {
             s.insert_extracted_with_tags(ex, logical, version, text, tags)
+                .map(|_| ())
+        });
+        Ok(out)
+    }
+
+    fn insert_extracted_with_placement(
+        &self,
+        ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Result<Option<u32>, ShardError> {
+        let _g = self.lock();
+        let out = self
+            .primary
+            .insert_extracted_with_placement(ex, logical, version, text, tags, placement)?;
+        self.fan_to_replicas(|shard| {
+            shard
+                .insert_extracted_with_placement(ex, logical, version, text, tags, placement)
                 .map(|_| ())
         });
         Ok(out)

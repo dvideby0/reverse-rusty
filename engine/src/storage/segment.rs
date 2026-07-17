@@ -51,6 +51,9 @@ const FORMAT_VERSION_HOT: u32 = 5;
 /// only when at least one value is non-zero, so all-zero segments retain their
 /// previous v3/v4/v5 rollback behavior and bytes.
 const FORMAT_VERSION_RANK: u32 = 6;
+/// v7 (ADR-109): exact section appends allocation-free distributed placement
+/// columns. Standalone segments without placement continue to write v1-v6.
+const FORMAT_VERSION_OWNERSHIP: u32 = 7;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -84,4 +87,124 @@ struct FrozenSlot {
 /// Align a byte offset up to the next 8-byte boundary.
 fn align8(pos: u64) -> u64 {
     (pos + 7) & !7
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("u32 field"))
+    }
+
+    fn skip_array(bytes: &[u8], offset: usize, width: usize) -> usize {
+        let count = read_u32(bytes, offset) as usize;
+        let data = if width == 8 { offset + 8 } else { offset + 4 };
+        align8((data + count * width) as u64) as usize
+    }
+
+    fn reseal(bytes: &mut [u8]) {
+        let body = bytes.len() - 4;
+        let crc = crate::storage::crc32(&bytes[..body]);
+        bytes[body..].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    fn ownership_offsets(bytes: &[u8]) -> (usize, usize) {
+        let mut cursor =
+            u64::from_le_bytes(bytes[16..24].try_into().expect("exact offset")) as usize;
+        // Required/forbidden masks through logical ids.
+        for width in [8usize, 8, 4, 2, 4, 4, 2, 4, 4, 2, 4, 2, 4, 4, 8] {
+            cursor = skip_array(bytes, cursor, width);
+        }
+        cursor = skip_array(bytes, cursor, 8); // priority (always present in v7)
+        let generation_count = cursor;
+        cursor = skip_array(bytes, cursor, 8);
+        cursor = skip_array(bytes, cursor, 4); // placement num_shards
+        let mode_count = cursor;
+        (generation_count, mode_count)
+    }
+
+    fn v7_segment_bytes() -> (std::path::PathBuf, Vec<u8>) {
+        let norm = crate::normalize::Normalizer::default_vocab().expect("normalizer");
+        let mut dict = crate::dict::Dict::new();
+        let mut lc = String::new();
+        let ast = crate::dsl::parse("1994 topps").expect("query");
+        let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+        dict.finalize_mask();
+        let placement = crate::ownership::QueryPlacement::selective(
+            crate::ownership::PlacementGeneration(3),
+            4,
+            vec![2],
+        )
+        .expect("placement");
+        let mut segment = crate::segment::Segment::new();
+        segment
+            .add_compiled_ranked_placed(
+                &ex,
+                &[],
+                &dict,
+                99,
+                7,
+                crate::rank::RankValues::default(),
+                &placement,
+                crate::segment::CompileKnobs {
+                    accept_class_d: true,
+                    hot_anchor_threshold: 0,
+                    dedup_bodies: true,
+                },
+            )
+            .expect("accepted query");
+        let dir = std::env::temp_dir().join(format!(
+            "rr_segment_v7_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("ownership.seg");
+        write_segment(&segment, &path).expect("write v7 segment");
+        let bytes = std::fs::read(&path).expect("read segment");
+        (path, bytes)
+    }
+
+    #[test]
+    fn v7_ownership_columns_round_trip_and_malformed_columns_fail_loud() {
+        let (path, original) = v7_segment_bytes();
+        assert_eq!(read_u32(&original, 4), FORMAT_VERSION_OWNERSHIP);
+        {
+            let mmap = MmapSegment::open(&path).expect("open v7");
+            let placement = mmap.placement(0);
+            assert_eq!(
+                placement.generation,
+                crate::ownership::PlacementGeneration(3)
+            );
+            assert_eq!(placement.num_shards, 4);
+            assert_eq!(placement.positions, &[2]);
+        }
+
+        let (_, mode_count) = ownership_offsets(&original);
+        let mut bad_mode = original.clone();
+        bad_mode[mode_count + 4] = 0xff;
+        reseal(&mut bad_mode);
+        std::fs::write(&path, bad_mode).expect("write bad mode");
+        let error = MmapSegment::open(&path).expect_err("unknown mode must fail");
+        assert!(error.to_string().contains("UnknownMode"), "got: {error}");
+
+        let (generation_count, _) = ownership_offsets(&original);
+        let mut bad_len = original;
+        bad_len[generation_count..generation_count + 4].copy_from_slice(&0u32.to_le_bytes());
+        reseal(&mut bad_len);
+        std::fs::write(&path, bad_len).expect("write bad column length");
+        let error = MmapSegment::open(&path).expect_err("column mismatch must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("ownership column length mismatch"),
+            "got: {error}"
+        );
+
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }

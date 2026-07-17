@@ -18,6 +18,7 @@ use crate::cluster::shard::{LocalShard, Shard, ShardError};
 use crate::compile::{extract, Extracted};
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
+use crate::ownership::PlacementGeneration;
 use crate::segment::PlacedQuery;
 use crate::tagdict::TagDict;
 
@@ -230,15 +231,18 @@ impl ClusterEngine {
         let mut buckets: Vec<Vec<PlacedQuery>> =
             (0..config.num_shards).map(|_| Vec::new()).collect();
         for (logical, ex, text, qtags) in extracted {
-            match placement_of(
+            let target = placement_of(
                 &dict,
                 &ring,
                 &ex,
                 config.per_shard.accept_class_d,
                 config.per_shard.hot_anchor_threshold,
-            ) {
+            );
+            let placement =
+                target.placement(PlacementGeneration::INITIAL, config.num_shards as u32)?;
+            match target {
                 Target::Reject => {}
-                Target::Replicated => {
+                Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
                     // The broad lane is replicated to every shard (ADR-080).
                     for bucket in &mut buckets {
                         bucket.push(PlacedQuery {
@@ -249,6 +253,7 @@ impl ClusterEngine {
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
                             rank: crate::rank::RankValues::default(),
+                            placement: placement.clone(),
                         });
                     }
                 }
@@ -262,6 +267,7 @@ impl ClusterEngine {
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
                             rank: crate::rank::RankValues::default(),
+                            placement: placement.clone(),
                         });
                     }
                 }
@@ -376,6 +382,7 @@ impl ClusterEngine {
         }
         let manifest = crate::storage::ClusterManifest {
             epoch: 0,
+            placement_generation: PlacementGeneration::INITIAL,
             snapshot_pos: 0,
             dict_fingerprint: dict.fingerprint(),
             num_shards: ring.num_shards() as u32,
@@ -417,6 +424,7 @@ impl ClusterEngine {
             log: Box::new(log),
             data_dir: Some(dir.to_path_buf()),
             epoch: 0,
+            placement_generation: PlacementGeneration::INITIAL,
             vnodes: config.vnodes,
             control: Box::new(InMemoryControlPlane::single_node(
                 ring.num_shards() as u32,

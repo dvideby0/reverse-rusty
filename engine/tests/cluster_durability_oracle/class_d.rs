@@ -36,14 +36,14 @@ fn corpus_with_class_d(n_class_d: usize) -> (Vec<(u64, String)>, Vec<String>) {
 }
 
 /// Headline: a durable class-D cluster reopens ≡ pre-crash ≡ brute (segment base + clog
-/// tail), the build commit writes the v5 fence, across K ∈ {1, 3, 8}.
+/// tail), the build commit writes the v6 ownership fence, across K ∈ {1, 3, 8}.
 #[test]
 fn durable_cluster_class_d_reopens_and_matches() {
     let (queries, titles) = corpus_with_class_d(200);
     for &k in &[1usize, 3, 8] {
         let dir = unique_dir(&format!("class_d_k{k}"));
 
-        // Build durable (lane on): class-D sealed into the segment base + a v5 manifest. Add
+        // Build durable (lane on): class-D sealed into the segment base + a v6 manifest. Add
         // one more class-D live so the un-checkpointed clog tail also carries an
         // always-candidate (recovery replays it under the lane).
         let pre_crash: Vec<Vec<u64>> = {
@@ -59,11 +59,11 @@ fn durable_cluster_class_d_reopens_and_matches() {
             // drop — no checkpoint: recovery replays the clog tail (the live add).
         };
 
-        // The build-time commit wrote the v5 ADR-080 replicate-to-all marker.
+        // The build-time commit retains the ADR-080 replicate-to-all marker in v6.
         let m = read_cluster_manifest(&dir.join(MANIFEST)).expect("manifest");
         assert!(
             m.broad_replicate_all,
-            "k={k}: an ADR-080 cluster must write the v5 replicate-to-all marker"
+            "k={k}: an ADR-109 cluster must retain replicate-to-all"
         );
 
         // Reopen (lane on, consistent with build): class-D survives the segment base AND the
@@ -146,13 +146,10 @@ fn sealed_class_d_survives_reopen_with_knob_off_but_new_adds_rejected() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// ADR-080 FORWARD fence: a pre-ADR-080 durable cluster placed the broad lane on shard 0 only;
-/// this binary's rotating broad-eval shard would silently miss it. Such a cluster (manifest
-/// v<5, no replicate-to-all marker) must be REFUSED on open, not mis-routed. Modeled by
-/// downgrading a fresh v5 manifest's version word to v4 and re-sealing its CRC — the data is
-/// irrelevant; the version marker is the gate.
+/// ADR-109 migration fence: a legacy durable v5 cluster has no emission ownership
+/// columns and must be rebuilt rather than opened under unique-emitter reads.
 #[test]
-fn open_refuses_a_pre_adr080_cluster_loudly() {
+fn open_refuses_a_pre_adr109_v5_cluster_loudly() {
     let (queries, _titles) = corpus_with_class_d(20);
     let dir = unique_dir("pre_adr080");
     {
@@ -161,16 +158,15 @@ fn open_refuses_a_pre_adr080_cluster_loudly() {
         cluster.checkpoint().expect("checkpoint");
     }
 
-    // Downgrade the manifest version word 5 -> 4 (a legacy / pre-ADR-080 cluster) + re-seal the
-    // trailing whole-file CRC, so the layout fence — not the CRC — is what fires on open.
+    // Downgrade v6 -> v5 and re-seal so the migration fence, not CRC, fires.
     let mpath = dir.join(MANIFEST);
     let mut bytes = std::fs::read(&mpath).expect("read manifest");
     assert_eq!(
         u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
-        5,
-        "a fresh ADR-080 cluster commits manifest v5"
+        6,
+        "a fresh ADR-109 cluster commits manifest v6"
     );
-    bytes[4..8].copy_from_slice(&4u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&5u32.to_le_bytes());
     let body = bytes.len() - 4;
     let crc = reverse_rusty::storage::crc32(&bytes[..body]);
     bytes[body..].copy_from_slice(&crc.to_le_bytes());
@@ -180,15 +176,15 @@ fn open_refuses_a_pre_adr080_cluster_loudly() {
     let result = ClusterEngine::open(dir.clone(), vocab(), None);
     assert!(
         result.is_err(),
-        "open must refuse a pre-ADR-080 cluster, but it succeeded"
+        "open must refuse a pre-ADR-109 v5 cluster, but it succeeded"
     );
     if let Err(ShardError::Config(msg)) = result {
         assert!(
-            msg.contains("predates ADR-080") || msg.contains("rebuild"),
-            "expected a 'predates ADR-080 / rebuild' refusal, got: {msg}"
+            msg.contains("predates ADR-109") && msg.contains("rebuild"),
+            "expected a 'predates ADR-109 / rebuild' refusal, got: {msg}"
         );
     } else {
-        panic!("expected a ShardError::Config refusal for a pre-ADR-080 cluster");
+        panic!("expected a ShardError::Config refusal for a pre-ADR-109 cluster");
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
