@@ -348,13 +348,36 @@ impl ClusterEngine {
         // replaying the tail. Placement/replication legitimately expose the same row
         // on several shard positions, so collapse those physical copies here. Clusters
         // written by this version admitted at most one semantic row per id.
-        let mut committed_ids = Vec::new();
+        //
+        // A shard whose enumeration is INCOMPLETE (a source-less / partial store —
+        // a supported degraded reopen shape) must not fail the open OR seed a
+        // directory that under-holds live ids (insert-only admission would re-admit
+        // a live id — codex review): leave the directory UNAUTHORITATIVE instead,
+        // so serving works while `add_query` fails closed toward `upsert_query`,
+        // and surface the degradation as a durability event.
+        let mut committed_ids = Some(Vec::new());
         for shard in &engine.shards {
-            committed_ids.extend(shard.live_logical_ids()?);
+            match (shard.live_logical_ids(), &mut committed_ids) {
+                (Ok(ids), Some(collected)) => collected.extend(ids),
+                (Ok(_), None) => {}
+                (Err(e), collected) => {
+                    *collected = None;
+                    engine.emit(EngineEvent::DurabilityFailure {
+                        op: DurabilityOp::SourceStoreWrite,
+                        detail: "logical-id directory not seeded (partial/source-less store); \
+                                 insert-only add_query is disabled until a checkpointed reopen — \
+                                 use upsert_query"
+                            .to_string(),
+                        error: e.to_string(),
+                    });
+                }
+            }
         }
-        committed_ids.sort_unstable();
-        committed_ids.dedup();
-        engine.replace_logical_ids(committed_ids)?;
+        if let Some(mut committed_ids) = committed_ids {
+            committed_ids.sort_unstable();
+            committed_ids.dedup();
+            engine.replace_logical_ids(committed_ids)?;
+        }
 
         // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the
         // log tail strictly after snapshot_pos, through the SAME apply funnel as live

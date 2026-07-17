@@ -691,7 +691,23 @@ impl Shard for LocalShard {
     }
 
     fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
-        Ok(self.lock().live_logical_ids())
+        // The enumeration walks the source store; a source-less / partial
+        // `sources.dat` (a legacy or tampered restore) would under-enumerate and
+        // let insert-only admission re-admit a LIVE id — the ADR-097 fingerprint
+        // refusal for the same root cause. One lock hold = one point in time;
+        // `num_live_queries` is the index-side tombstone-aware count (codex review).
+        let (ids, live) = {
+            let eng = self.lock();
+            (eng.live_logical_ids(), eng.num_live_queries())
+        };
+        if ids.len() != live {
+            return Err(ShardError::Config(format!(
+                "logical-id enumeration covers {} of {live} live queries (a source-less \
+                 or partial store); refusing to seed insert-only admission from it",
+                ids.len()
+            )));
+        }
+        Ok(ids)
     }
 
     fn live_sources_tagged(&self) -> Result<Vec<super::LiveTaggedQuery>, ShardError> {

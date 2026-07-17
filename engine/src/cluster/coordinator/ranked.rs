@@ -170,7 +170,12 @@ impl ClusterEngine {
         let mut result_bytes = 0u64;
 
         for (position, part) in parts {
-            validate_part(position, options.size, &part)?;
+            validate_part(
+                position,
+                options.size,
+                options.track_total_hits_up_to,
+                &part,
+            )?;
             all_exact &= part.total_hits.relation == TotalHitsRelation::Eq;
             match exact_sum.checked_add(part.total_hits.value) {
                 Some(sum) => exact_sum = sum,
@@ -209,6 +214,10 @@ impl ClusterEngine {
                 .then_with(|| a.logical_id.cmp(&b.logical_id))
         });
         hits.truncate(options.size);
+        // The fan-out may complete just under the wire; the merge/sort above ran
+        // unchecked, so re-verify the absolute deadline before claiming success
+        // (codex review).
+        check_deadline(deadline)?;
         Ok(ClusterRankedMatch {
             hits,
             total_hits,
@@ -425,6 +434,7 @@ fn check_deadline(deadline: Option<Instant>) -> Result<(), ClusterRankedError> {
 fn validate_part(
     position: usize,
     requested_k: usize,
+    track_total_hits_up_to: u64,
     part: &ShardRankedMatch,
 ) -> Result<(), ClusterRankedError> {
     if part.hits.len() > requested_k {
@@ -433,6 +443,31 @@ fn validate_part(
             detail: format!(
                 "returned {} rows for requested K={requested_k}",
                 part.hits.len()
+            ),
+        });
+    }
+    // The total claim must be consistent with the bounded-collector contract
+    // (codex review): an honest shard reports Eq(v) with rows ≤ v ≤ threshold
+    // (v = its distinct matched count) or Gte(threshold) exactly. Anything else
+    // would let one faulty peer publish an exact count smaller than its own hit
+    // list or fabricate an unsupported lower bound through the merge.
+    let total = &part.total_hits;
+    let consistent = match total.relation {
+        crate::result::TotalHitsRelation::Eq => {
+            total.value <= track_total_hits_up_to
+                && total.value >= u64::try_from(part.hits.len()).unwrap_or(u64::MAX)
+        }
+        crate::result::TotalHitsRelation::Gte => total.value == track_total_hits_up_to,
+    };
+    if !consistent {
+        return Err(ClusterRankedError::InvalidShardReply {
+            position,
+            detail: format!(
+                "total claim {:?}({}) is inconsistent with {} rows under threshold {}",
+                total.relation,
+                total.value,
+                part.hits.len(),
+                track_total_hits_up_to
             ),
         });
     }

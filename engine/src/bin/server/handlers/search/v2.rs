@@ -254,6 +254,10 @@ impl EnrichmentBudget {
         self.used = next;
         Ok(())
     }
+
+    fn remaining(&self) -> usize {
+        self.limit.saturating_sub(self.used)
+    }
 }
 
 struct DeliveryResult {
@@ -364,13 +368,24 @@ pub(crate) async fn v2_search(
                             return Err(DeliveryError::Deadline);
                         }
                         let source = if include_source || include_explain {
-                            let source = snap.get_query_source(hit.logical_id).ok_or({
-                                if include_explain && !include_source {
-                                    DeliveryError::ExplanationUnavailable(hit.logical_id)
-                                } else {
-                                    DeliveryError::SourceUnavailable(hit.logical_id)
+                            // Bounded lookup: the store checks its borrowed value
+                            // against the REMAINING credit before cloning, so an
+                            // over-limit winner 413s without ever allocating the
+                            // full source `String` (codex review — peak-memory
+                            // bound).
+                            let source = match snap
+                                .get_query_source_bounded(hit.logical_id, budget.remaining())
+                            {
+                                Ok(Some(source)) => source,
+                                Ok(None) => {
+                                    return Err(if include_explain && !include_source {
+                                        DeliveryError::ExplanationUnavailable(hit.logical_id)
+                                    } else {
+                                        DeliveryError::SourceUnavailable(hit.logical_id)
+                                    });
                                 }
-                            })?;
+                                Err(_over_credit) => return Err(DeliveryError::EnrichmentLimit),
+                            };
                             budget
                                 .charge(source.len())
                                 .map_err(|()| DeliveryError::EnrichmentLimit)?;

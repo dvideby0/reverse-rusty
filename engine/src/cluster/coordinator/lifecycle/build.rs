@@ -333,7 +333,20 @@ impl ClusterEngine {
             config.per_shard.clone(),
             durable,
         )?;
-        engine.replace_logical_ids(accepted_ids)?;
+        // The duplicate-id gate above ran on the PLACEMENT-derived set, but the
+        // directory itself is derived from what the shards actually ingested:
+        // `ingest_local` can still drop a query (e.g. a tag set over `max_tags`),
+        // and reserving a dropped row's id would 409 a later valid add while a
+        // reopened coordinator (which enumerates live rows) accepted it
+        // (codex review). `accepted_ids` stays the loud duplicate check.
+        drop(accepted_ids);
+        let mut ingested_ids = Vec::new();
+        for shard in &engine.shards {
+            ingested_ids.extend(shard.live_logical_ids()?);
+        }
+        ingested_ids.sort_unstable();
+        ingested_ids.dedup();
+        engine.replace_logical_ids(ingested_ids)?;
         // Install the vocabulary on the engine (ADR-076): served by `GET /_vocab`,
         // merged-under by the learn paths, and re-persisted at every checkpoint.
         // (The durable manifest above already carries it.)

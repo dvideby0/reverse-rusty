@@ -406,8 +406,10 @@ impl EngineSnapshot {
 
     /// Winner-fetch lookup with pre-allocation byte credit. `Err(actual_len)`
     /// means the current source exists but does not fit; the source store checks
-    /// its borrowed resident/mmap value before cloning.
-    pub(crate) fn get_query_source_bounded(
+    /// its borrowed resident/mmap value before cloning. Public so the v2
+    /// handler's enrichment loop can enforce its byte budget BEFORE allocating
+    /// the source `String` (the peak-memory bound, ADR-108/110).
+    pub fn get_query_source_bounded(
         &self,
         logical_id: u64,
         max_bytes: usize,

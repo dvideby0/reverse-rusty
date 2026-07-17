@@ -1218,6 +1218,7 @@ impl Shard for RemoteShard {
         let client = self.client.clone();
         let generation = self.placement_generation.get();
         let num_shards = self.num_shards;
+        let requested_rows = logical_ids.len();
         self.call_until(RpcMethod::FetchMatches, absolute, move |remaining| {
             let mut client = client.clone();
             let mut body = base.clone();
@@ -1229,6 +1230,15 @@ impl Shard for RemoteShard {
                 let mut out = Vec::new();
                 let mut remaining_bytes = max_source_bytes;
                 while let Some(row) = stream.message().await? {
+                    // Fail as soon as a faulty peer over-streams: tiny sources
+                    // consume little byte credit, so without this cap the buffer
+                    // could grow far past the requested row count until the
+                    // deadline (codex review).
+                    if out.len() >= requested_rows {
+                        return Err(tonic::Status::out_of_range(
+                            "fetch_matches stream returned more rows than requested",
+                        ));
+                    }
                     if row.placement_generation != generation || row.num_shards != num_shards {
                         return Err(tonic::Status::failed_precondition(
                             "fetch_matches placement configuration mismatch",
