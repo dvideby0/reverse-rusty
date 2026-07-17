@@ -127,20 +127,52 @@ impl std::fmt::Display for RankedMatchError {
 
 impl std::error::Error for RankedMatchError {}
 
+/// ONE admission + compilation rule for the typed bounded-ranking program
+/// (ADR-108), shared by the single-node snapshot and the cluster coordinator so
+/// the two serving paths can never drift on which rank fields are admitted or
+/// how boosts resolve (review finding: it was duplicated verbatim in both).
+pub(crate) fn compile_rank_program(
+    tag_dict: &crate::tagdict::TagDict,
+    spec: &RankProgramSpec,
+) -> Result<CompiledRankProgram, RankProgramError> {
+    let use_priority = match spec.priority_field.as_deref() {
+        None => false,
+        Some("priority") => true,
+        Some(field) => return Err(RankProgramError::UnsupportedField(field.to_string())),
+    };
+    let boosts = spec
+        .boosts
+        .iter()
+        .map(|(key, value, weight)| (tag_dict.get_or_synthetic(key, value), *weight))
+        .collect();
+    Ok(CompiledRankProgram::new(use_priority, boosts))
+}
+
+/// The shared saturating boost sum — the ADR-059 compatibility scorer and the
+/// ADR-108 bounded scorer must contribute identical boost totals for the
+/// ranked-vs-brute oracles to stay meaningful, so there is exactly one loop.
+#[inline]
+fn boost_sum(tags: &[TagId], boosts: &FastMap<TagId, i64>) -> i64 {
+    let mut sum = 0i64;
+    if !boosts.is_empty() {
+        for tag in tags {
+            if let Some(weight) = boosts.get(tag) {
+                sum = sum.saturating_add(*weight);
+            }
+        }
+    }
+    sum
+}
+
 /// Score newest-live typed metadata and tag boosts with saturating addition.
 #[must_use]
 pub(crate) fn score_program(values: RankValues, tags: &[TagId], spec: &CompiledRankProgram) -> i64 {
-    let mut score = if spec.use_priority {
+    let base = if spec.use_priority {
         values.priority
     } else {
         0
     };
-    for tag in tags {
-        if let Some(weight) = spec.boosts.get(tag) {
-            score = score.saturating_add(*weight);
-        }
-    }
-    score
+    base.saturating_add(boost_sum(tags, &spec.boosts))
 }
 
 /// A ranking request in raw, pre-resolution form (ADR-049 §5.4). Built from the
@@ -213,14 +245,7 @@ impl CompiledRankSpec {
 /// pathological boost/priority sum from overflowing.
 #[must_use]
 pub fn score(tags: &[TagId], tag_dict: &TagDict, spec: &CompiledRankSpec) -> i64 {
-    let mut s: i64 = 0;
-    if !spec.boosts.is_empty() {
-        for t in tags {
-            if let Some(w) = spec.boosts.get(t) {
-                s = s.saturating_add(*w);
-            }
-        }
-    }
+    let mut s: i64 = boost_sum(tags, &spec.boosts);
     if let Some(pkey) = spec.priority_key.as_deref() {
         for &t in tags {
             if let Some((k, v)) = tag_dict.key_value(t) {

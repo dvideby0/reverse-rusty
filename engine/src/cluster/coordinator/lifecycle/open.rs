@@ -68,7 +68,7 @@ impl ClusterEngine {
         // out-of-band — the same consistency every vocabulary feature already relies
         // on; ADR-076 records that trust model and keeps LIVE vocab changes on a
         // remote cluster refused (`set_vocab` non-local guard).
-        Ok(ClusterEngine {
+        let engine = ClusterEngine {
             norm,
             dict,
             tag_dict,
@@ -122,7 +122,20 @@ impl ClusterEngine {
             // moves never happen (no `execute_handoff` in-process), so it is never contended.
             #[cfg(feature = "distributed")]
             move_ledger: crate::cluster::coordinator::reassign::MoveLedger::new(),
-        })
+        };
+        // A fresh assembly holding ZERO stored queries has an authoritative EMPTY
+        // id directory — nothing to enumerate. A populated assembly (the gRPC
+        // attach-to-existing-data shape) keeps it unauthoritative: `RemoteShard`
+        // has no live-id enumeration RPC yet, so insert-only admission cannot be
+        // verified there and `add_query` fails closed (directing to `upsert_query`).
+        // The durable `open` path replaces this with the real enumeration below.
+        // A count FAILURE also stays unauthoritative rather than failing the
+        // assembly: construction semantics predate this check, and unauthoritative
+        // is already the fail-closed disposition.
+        if matches!(engine.num_queries(), Ok(0)) {
+            engine.replace_logical_ids(Vec::new())?;
+        }
+        Ok(engine)
     }
     /// True if `data_dir` holds a committed cluster manifest — i.e. [`Self::open`]
     /// will reopen an existing durable cluster there; otherwise [`Self::build`] is the

@@ -157,6 +157,13 @@ impl ClusterEngine {
         // ships+adopts the node dict; every LATER position on that node reuses it via a lightweight
         // `AddShard` (no dict re-ship / re-deserialize). Routing stays position-indexed, so
         // co-location is transparent to it.
+        // INITIAL is EXACT here, not a placeholder: a remote cluster cannot bump the
+        // placement generation (`set_vocab`/`resize` refuse handoff-wrapped and
+        // non-local shards, and every builder below wraps positions in HandoffShard),
+        // so the generation a data node persisted at adopt time is always INITIAL. If
+        // a future increment lifts that refusal it must thread the real generation
+        // through these builders — the failure until then is a loud connect-time
+        // `adopt_dict` refusal, never a silent mismatch.
         let mut adopted: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (position, ep) in endpoints.iter().enumerate() {
             let shard_id = position as u32;

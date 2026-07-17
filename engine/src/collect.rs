@@ -155,11 +155,13 @@ struct TotalTracker {
 
 impl TotalTracker {
     fn new(threshold: usize) -> Self {
-        let mut seen = FastSet::default();
-        seen.reserve(threshold.saturating_add(1));
+        // Grow lazily: the typical selective title matches ~54 queries, so an
+        // eager `reserve(threshold + 1)` (~150 KB at the default 10k threshold)
+        // per collector bought nothing (review finding). `observe`'s threshold
+        // cap still bounds the resident set, so rehash cost is bounded too.
         Self {
             threshold,
-            seen,
+            seen: FastSet::default(),
             exceeded: false,
         }
     }

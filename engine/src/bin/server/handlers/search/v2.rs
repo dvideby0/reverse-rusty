@@ -743,6 +743,22 @@ pub(crate) async fn cluster_v2_search(
                 .with_label_values(&["v2_search", "408"])
                 .inc();
             record_outcome(&state.prom, "timeout", options.query_scope);
+            // Mirror the single-node timeout arm's slow-query accounting: a
+            // cluster timeout must not be invisible to the slow-query metric
+            // and structured log (review finding — the two handlers drifted).
+            let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            if elapsed_ms >= state.slow_query_threshold_ms as f64 {
+                state.prom.slow_queries_total.inc();
+            }
+            warn!(
+                k = options.size,
+                scope = ?options.query_scope,
+                relation = "unknown",
+                candidates = "unknown",
+                rank_time_ms = elapsed_ms,
+                cancellation = "deadline",
+                "distributed v2 ranked search timed out"
+            );
             return Err(ApiError::response(
                 StatusCode::REQUEST_TIMEOUT,
                 "timeout",

@@ -106,17 +106,7 @@ impl ClusterEngine {
         &self,
         spec: &RankProgramSpec,
     ) -> Result<CompiledRankProgram, RankProgramError> {
-        let use_priority = match spec.priority_field.as_deref() {
-            None => false,
-            Some("priority") => true,
-            Some(field) => return Err(RankProgramError::UnsupportedField(field.to_string())),
-        };
-        let boosts = spec
-            .boosts
-            .iter()
-            .map(|(key, value, weight)| (self.tag_dict.get_or_synthetic(key, value), *weight))
-            .collect();
-        Ok(CompiledRankProgram::new(use_priority, boosts))
+        crate::rank::compile_rank_program(&self.tag_dict, spec)
     }
 
     /// Exact distributed top K. Every required routed shard must succeed; shard

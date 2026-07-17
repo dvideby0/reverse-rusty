@@ -657,21 +657,7 @@ impl EngineSnapshot {
         &self,
         spec: &crate::rank::RankProgramSpec,
     ) -> Result<crate::rank::CompiledRankProgram, crate::rank::RankProgramError> {
-        let use_priority = match spec.priority_field.as_deref() {
-            None => false,
-            Some("priority") => true,
-            Some(field) => {
-                return Err(crate::rank::RankProgramError::UnsupportedField(
-                    field.to_string(),
-                ));
-            }
-        };
-        let boosts = spec
-            .boosts
-            .iter()
-            .map(|(key, value, weight)| (self.tag_dict.get_or_synthetic(key, value), *weight))
-            .collect();
-        Ok(crate::rank::CompiledRankProgram::new(use_priority, boosts))
+        crate::rank::compile_rank_program(&self.tag_dict, spec)
     }
 
     /// The live `TagId` slice for a matched logical id, picking the NEWEST live

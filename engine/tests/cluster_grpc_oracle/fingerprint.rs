@@ -173,7 +173,11 @@ fn grpc_desynced_retained_member_fingerprint_mismatches_and_heals() {
             rt.handle(),
         )
         .expect("side coordinator over B only");
-        side.add_query(rogue_id, &rogue_dsl)
+        // Upsert, not add: a coordinator attached to an already-populated remote
+        // has an unseeded logical-id directory, so insert-only `add_query` fails
+        // closed there (ADR-109 unique-id admission); the replacement path lands
+        // the same out-of-band rogue row.
+        side.upsert_query(rogue_id, &rogue_dsl, 1)
             .expect("rogue write to B");
     }
 

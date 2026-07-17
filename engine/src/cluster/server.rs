@@ -511,6 +511,25 @@ impl ShardServer {
         let Ok((_, st)) = self.loaded_slot(0) else {
             return;
         };
+        // Stamp the node space's REAL placement (selective at this slot), never
+        // `QueryPlacement::standalone()`: `owner()` returns `None` for standalone
+        // rows, so an ownership-suppressed cluster read would silently emit
+        // nothing for the whole preload — an OK-status zero-FN violation
+        // (review finding). The constructor cannot fail for a loaded slot
+        // (`num_shards >= 1`, generation >= INITIAL); skip-on-error mirrors the
+        // documented parse-failure behavior rather than panicking in lib code.
+        let space = self.node_dict.load();
+        let Some(space) = space.as_ref() else {
+            return;
+        };
+        let Ok(placement) = crate::ownership::QueryPlacement::selective(
+            space.placement_generation,
+            space.num_shards,
+            vec![0],
+        ) else {
+            debug_assert!(false, "slot-0 selective placement is always constructible");
+            return;
+        };
         let mut lc = String::new();
         let extracted: Vec<PlacedQuery> = items
             .iter()
@@ -525,7 +544,7 @@ impl ShardServer {
                     tags: Vec::new(),
                     tag_ids: Vec::new(),
                     rank: crate::rank::RankValues::default(),
-                    placement: crate::ownership::QueryPlacement::standalone(),
+                    placement: placement.clone(),
                 })
             })
             .collect();

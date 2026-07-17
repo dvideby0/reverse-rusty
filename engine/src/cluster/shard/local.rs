@@ -546,16 +546,7 @@ impl Shard for LocalShard {
         current_position: u32,
     ) -> Result<(Vec<u64>, MatchStats), ShardError> {
         context.validate()?;
-        if current_position >= context.num_shards()
-            || context
-                .routed_positions()
-                .binary_search(&current_position)
-                .is_err()
-        {
-            return Err(
-                crate::ownership::OwnershipError::LocalPositionMissing(current_position).into(),
-            );
-        }
+        context.require_routed(current_position)?;
         let mut scratch = MatchScratch::new();
         let mut out = Vec::new();
         let stats = self.snapshot().match_title_filtered_owned(
@@ -595,6 +586,7 @@ impl Shard for LocalShard {
         current_position: u32,
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
         context.validate()?;
+        context.require_routed(current_position)?;
         let mut scratch = MatchScratch::new();
         let mut out = Vec::new();
         let snap = self.snapshot();
@@ -621,16 +613,7 @@ impl Shard for LocalShard {
         deadline: Option<Instant>,
     ) -> Result<ShardRankedMatch, ShardError> {
         context.validate()?;
-        if current_position >= context.num_shards()
-            || context
-                .routed_positions()
-                .binary_search(&current_position)
-                .is_err()
-        {
-            return Err(
-                crate::ownership::OwnershipError::LocalPositionMissing(current_position).into(),
-            );
-        }
+        context.require_routed(current_position)?;
         options.query_scope = if include_broad {
             crate::result::QueryScope::WithBroad
         } else {

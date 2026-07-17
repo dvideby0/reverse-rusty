@@ -266,6 +266,20 @@ impl ClusterEngine {
         // The stripe closes the same-id check/reservation race without serializing
         // unrelated writes.
         let _logical_guard = self.logical_write_guard(id);
+        // A coordinator attached to an already-populated cluster it could not
+        // enumerate (the gRPC connect shape) has an unauthoritative directory, so
+        // the duplicate check below would be vacuous — fail closed instead of
+        // silently admitting a second physical row for a live id (review finding).
+        // `upsert_query` stays available: it re-drives replace-by-id on every
+        // shard and does not depend on the directory.
+        if !self.logical_ids_authoritative() {
+            return Err(ShardError::Config(
+                "insert-only add_query requires the logical-id directory, which this \
+                 coordinator could not seed from its (already-populated) remote shards; \
+                 use upsert_query"
+                    .to_string(),
+            ));
+        }
         if self.contains_logical_id(id) {
             return Err(ShardError::DuplicateLogicalId(id));
         }
@@ -747,6 +761,22 @@ impl ClusterEngine {
         let mut repaired = 0usize;
         let mut still_pending = 0usize;
         for (logical, pr) in pending {
+            // Serialize the whole per-id re-drive against same-id writers (the
+            // same stripe scope the live paths hold), and skip our drained copy
+            // when a concurrent writer queued fresher work for this id during
+            // the drain — `note_partial` overwrites, so a live map entry is
+            // strictly fresher than what we hold.
+            let _logical_guard = self.logical_write_guard(logical);
+            {
+                let guard = self
+                    .pending_repair
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if guard.contains_key(&logical) {
+                    still_pending += 1;
+                    continue;
+                }
+            }
             let mut still_failed = Vec::new();
             let mut first_err: Option<ShardError> = None;
             for &s in &pr.failed_shards {
@@ -765,6 +795,13 @@ impl ClusterEngine {
             }
             if still_failed.is_empty() {
                 repaired += 1;
+                // A converged Remove has now deleted the row everywhere, so the
+                // fail-closed reservation retained at the partial-apply point is
+                // releasable — without this, the id would 409 every future
+                // add_query until a coordinator reopen (review finding).
+                if matches!(pr.mutation, ClusterMutation::Remove { .. }) {
+                    self.remove_logical_id(logical);
+                }
                 continue;
             }
             still_pending += 1;

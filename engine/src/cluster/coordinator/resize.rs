@@ -251,6 +251,7 @@ impl ClusterEngine {
         // tags on whichever shard now holds it.
         let num_shards = new_ring.num_shards();
         let mut buckets: Vec<Vec<PlacedQuery>> = (0..num_shards).map(|_| Vec::new()).collect();
+        let mut accepted_ids = Vec::new();
         for (logical, ex, text, version, tag_ids, rank) in extracted {
             // Re-placing ALREADY-STORED queries: a stored class-D was accepted when it was
             // added, so a rebuild (resize / set_vocab) must never drop it via the current knob
@@ -265,6 +266,9 @@ impl ClusterEngine {
                 self.per_shard.hot_anchor_threshold,
             );
             let placement = target.placement(new_generation, num_shards as u32)?;
+            if !matches!(&target, Target::Reject) {
+                accepted_ids.push(logical);
+            }
             match target {
                 Target::Reject => {}
                 Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
@@ -375,6 +379,13 @@ impl ClusterEngine {
             shards.push(shard);
         }
 
+        // The directory mirrors the rebuilt corpus exactly, like reopen's
+        // live-enumeration seeding: a query whose re-extraction under the new
+        // vocab flips to `Target::Reject` is dropped from every new shard, so
+        // keeping its reservation would 409 a re-add on the LIVE coordinator
+        // while a REOPENED one accepts it (review finding). `&mut self` makes
+        // this race-free with every striped writer.
+        self.replace_logical_ids(accepted_ids)?;
         // Atomic swap (under `&mut self`, so no read observes a half-state). The normalizer is
         // `new_norm` (the SAME instance on a resize); `self.vocab` is replaced only when a new
         // vocab was supplied (set_vocab) — a resize passes `None` and preserves it.

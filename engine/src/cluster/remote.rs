@@ -546,7 +546,7 @@ impl RemoteShard {
             if timed_out || grpc_deadline_status(&status) {
                 ShardError::DeadlineExceeded
             } else {
-                rpc_err(&status)
+                ranked_rpc_err(&status)
             }
         })
     }
@@ -765,24 +765,62 @@ where
     }
 }
 
+/// Legacy transport error mapping (the pre-ADR-110 behavior): keep the typed
+/// deadline, preserve the server's message for everything else. Reconstructing
+/// typed errors by message inspection is reserved for the two ranked RPCs
+/// ([`ranked_rpc_err`]) whose server half (`read_status`) writes the matching
+/// strings — a NotFound from any other RPC (e.g. a relocated/GC'd slot's
+/// "shard N is not hosted on this node") must surface verbatim, not be retyped
+/// into a phantom rank-fetch source loss (review finding).
 fn rpc_err(status: &tonic::Status) -> ShardError {
     if status.code() == tonic::Code::DeadlineExceeded {
         ShardError::DeadlineExceeded
-    } else if status.code() == tonic::Code::NotFound {
-        ShardError::SourceUnavailable(0)
-    } else if status.code() == tonic::Code::ResourceExhausted
-        && status.message().contains("ranked enrichment byte credit")
-    {
-        ShardError::EnrichmentLimit { limit: 0 }
-    } else if status
-        .message()
-        .contains("placement configuration mismatch")
-        || status.message().contains("ownership")
-    {
-        ShardError::OwnershipMismatch(crate::ownership::OwnershipError::PlacementDecisionMismatch)
     } else {
         ShardError::Remote(status.to_string())
     }
+}
+
+/// ADR-110 ranked-seam inverse of the server's `read_status`: reconstruct the
+/// typed errors the coordinator's no-partial contract branches on (enrichment
+/// limit → 413, ownership/config mismatch → 503, per-id source loss). Every arm
+/// requires BOTH the status code and the server's message form; anything else
+/// stays a message-preserving `Remote` rather than a mistyped reconstruction.
+fn ranked_rpc_err(status: &tonic::Status) -> ShardError {
+    let message = status.message();
+    match status.code() {
+        tonic::Code::DeadlineExceeded => ShardError::DeadlineExceeded,
+        tonic::Code::NotFound => match parse_source_unavailable(message) {
+            Some(logical) => ShardError::SourceUnavailable(logical),
+            None => ShardError::Remote(status.to_string()),
+        },
+        tonic::Code::ResourceExhausted if message.contains("ranked enrichment byte credit") => {
+            ShardError::EnrichmentLimit { limit: 0 }
+        }
+        tonic::Code::FailedPrecondition
+            if message.contains("placement configuration mismatch")
+                || message.contains("ownership") =>
+        {
+            ShardError::OwnershipMismatch(
+                crate::ownership::OwnershipError::PlacementDecisionMismatch,
+            )
+        }
+        _ => ShardError::Remote(status.to_string()),
+    }
+}
+
+/// Parse the id out of `read_status`'s "source unavailable for logical id N"
+/// not-found form (the `ShardError::SourceUnavailable` Display), so the
+/// coordinator's diagnostics keep the real id instead of a fabricated 0.
+fn parse_source_unavailable(message: &str) -> Option<u64> {
+    message
+        .rsplit_once("source unavailable for logical id ")
+        .and_then(|(_, tail)| {
+            let digits: &str = tail
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap_or("");
+            (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+        })
 }
 
 fn remaining_micros(remaining: Duration) -> u64 {
@@ -1470,8 +1508,21 @@ impl Shard for RemoteShard {
                 let mut stream = client.fetch_translog(req).await?.into_inner();
                 let mut out = Vec::new();
                 while let Some(entry) = stream.message().await? {
-                    if let Some(pm) = proto::translog_entry_to_mutation(entry) {
-                        out.push(pm);
+                    // Fail the recovery LOUD on an undecodable frame (unset op /
+                    // invalid placement), mirroring the source side's refusal to
+                    // ship an unrepresentable frame: silently skipping would
+                    // shorten the tail and hand back a replica missing acked
+                    // writes. Unreachable from a fenced same-version peer — this
+                    // is a regression tripwire, not a tolerated input.
+                    let seqno = entry.seqno;
+                    match proto::translog_entry_to_mutation(entry) {
+                        Some(pm) => out.push(pm),
+                        None => {
+                            return Err(tonic::Status::internal(format!(
+                                "translog entry {seqno} is undecodable (unset op or \
+                                 invalid placement); refusing a shortened recovery tail"
+                            )))
+                        }
                     }
                 }
                 Ok(out)
@@ -1749,5 +1800,54 @@ mod tests {
         assert!(!is_transient(&tonic::Status::invalid_argument("x")));
         assert!(!is_transient(&tonic::Status::internal("x")));
         assert!(!is_transient(&tonic::Status::deadline_exceeded("x")));
+    }
+
+    /// The legacy seam preserves server messages; only the ranked seam
+    /// reconstructs typed errors, and only when code AND message form agree
+    /// (review finding: a relocated slot's NotFound was retyped into a phantom
+    /// "source unavailable for logical id 0" on every RPC).
+    #[test]
+    fn legacy_rpc_err_preserves_messages_ranked_seam_reconstructs() {
+        let slot_missing = tonic::Status::not_found("shard 3 is not hosted on this node");
+        assert!(matches!(
+            rpc_err(&slot_missing),
+            ShardError::Remote(ref m) if m.contains("not hosted")
+        ));
+        assert!(matches!(
+            rpc_err(&tonic::Status::internal("ownership sweep failed")),
+            ShardError::Remote(_)
+        ));
+        assert!(matches!(
+            rpc_err(&tonic::Status::deadline_exceeded("x")),
+            ShardError::DeadlineExceeded
+        ));
+
+        assert!(matches!(
+            ranked_rpc_err(&tonic::Status::not_found(
+                "source unavailable for logical id 42"
+            )),
+            ShardError::SourceUnavailable(42)
+        ));
+        assert!(matches!(
+            ranked_rpc_err(&slot_missing),
+            ShardError::Remote(ref m) if m.contains("not hosted")
+        ));
+        assert!(matches!(
+            ranked_rpc_err(&tonic::Status::resource_exhausted(
+                "ranked enrichment byte credit exhausted before source materialization"
+            )),
+            ShardError::EnrichmentLimit { .. }
+        ));
+        assert!(matches!(
+            ranked_rpc_err(&tonic::Status::failed_precondition(
+                "placement configuration mismatch"
+            )),
+            ShardError::OwnershipMismatch(_)
+        ));
+        // Code gating: an internal error mentioning ownership stays Remote.
+        assert!(matches!(
+            ranked_rpc_err(&tonic::Status::internal("ownership sweep failed")),
+            ShardError::Remote(_)
+        ));
     }
 }

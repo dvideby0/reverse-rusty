@@ -906,3 +906,42 @@ fn grpc_result_cap_can_only_be_lowered_within_static_bounds() {
     let server = ShardServer::pending(n, EngineConfig::default());
     assert!(server.with_max_grpc_result_bytes(1).is_ok());
 }
+
+/// `ingest_dsl` preloads must be emitted under ownership-suppressed cluster reads:
+/// stamping them `QueryPlacement::standalone()` made `owner()` return `None` for
+/// every preloaded row, so the whole preload silently vanished from percolation
+/// (OK status, zero ids — a zero-FN violation; review finding). The preload now
+/// stamps the node space's real slot-0 selective placement.
+#[test]
+fn ingest_dsl_preload_is_emitted_under_ownership() {
+    use crate::cluster::shard::Shard;
+
+    let norm = norm();
+    let dict = Arc::new(frozen_dict(&["1994 topps"], &norm));
+    let server = ShardServer::new(Arc::clone(&norm), dict, EngineConfig::default());
+    server.ingest_dsl(&[(7u64, "1994 topps".to_string())]);
+
+    let (_, st) = server.loaded_slot(0).expect("slot 0 loaded");
+    let context = crate::ownership::OwnershipContext::new(
+        crate::ownership::PlacementGeneration::INITIAL,
+        1,
+        vec![0],
+        None,
+    )
+    .expect("context");
+    let (ids, _) = st
+        .shard
+        .percolate_filtered_owned(
+            "1994 topps baseball",
+            true,
+            &crate::exact::TagPredicate::empty(),
+            &context,
+            0,
+        )
+        .expect("owned percolate");
+    assert_eq!(
+        ids,
+        vec![7],
+        "preloaded row must be emitted, not suppressed"
+    );
+}

@@ -958,3 +958,236 @@ fn reopened_cluster_rebuilds_unique_id_directory() {
     drop(reopened);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// The three `_owned` read paths share one routed-membership guard
+/// (`OwnershipContext::require_routed`): a request naming a position outside the
+/// routed set (or the shard space) must fail loud with `LocalPositionMissing`,
+/// never silently emit zero rows. The ranked path originally omitted the guard —
+/// an unrouted position can never equal `owner()`, so it returned an empty scored
+/// set where its siblings error (review finding).
+#[test]
+fn owned_read_paths_fail_loud_on_unrouted_position() {
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        ..Default::default()
+    };
+    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
+    let shard = LocalShard::new(
+        Arc::clone(&real.norm),
+        Arc::clone(&real.dict),
+        Arc::clone(&real.tag_dict),
+        cfg.per_shard.clone(),
+    );
+    let context = crate::ownership::OwnershipContext::new(
+        crate::ownership::PlacementGeneration::INITIAL,
+        4,
+        vec![0, 2],
+        None,
+    )
+    .expect("context");
+    let pred = TagPredicate::empty();
+    let spec = crate::rank::CompiledRankSpec::default();
+    let program = crate::rank::CompiledRankProgram::default();
+    // Position 1 is in-range but unrouted; position 7 is out of the shard space.
+    for position in [1u32, 7] {
+        let unrouted = |r: Result<(), ShardError>| {
+            assert!(
+                matches!(
+                    r,
+                    Err(ShardError::OwnershipMismatch(
+                        crate::ownership::OwnershipError::LocalPositionMissing(p)
+                    )) if p == position
+                ),
+                "position {position} must fail loud"
+            );
+        };
+        unrouted(
+            shard
+                .percolate_filtered_owned("1994 topps baseball", true, &pred, &context, position)
+                .map(|_| ()),
+        );
+        unrouted(
+            shard
+                .percolate_filtered_ranked_owned(
+                    "1994 topps baseball",
+                    true,
+                    &pred,
+                    &spec,
+                    &context,
+                    position,
+                )
+                .map(|_| ()),
+        );
+        unrouted(
+            shard
+                .percolate_top_k_owned(
+                    "1994 topps baseball",
+                    true,
+                    &pred,
+                    &program,
+                    crate::result::TopKOptions::default(),
+                    &context,
+                    position,
+                    None,
+                )
+                .map(|_| ()),
+        );
+    }
+}
+
+/// A coordinator attached to an already-populated cluster it could not enumerate
+/// (the gRPC connect shape — `RemoteShard` has no live-id enumeration RPC) must
+/// not run insert-only admission against an empty directory: `add_query` fails
+/// closed with a `Config` error directing to `upsert_query`, which stays fully
+/// usable because it re-drives replace-by-id on every shard (review finding).
+#[test]
+fn add_query_fails_closed_when_directory_is_unseeded() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![(1u64, "1994 topps".to_string())];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
+    assert!(cluster.logical_ids_authoritative());
+
+    // Simulate the connect-to-populated-cluster shape: corpus present, directory
+    // unseeded.
+    cluster.unseed_logical_ids_for_test();
+    assert!(!cluster.logical_ids_authoritative());
+    let err = cluster.add_query(2, "1994 topps").unwrap_err();
+    assert!(
+        matches!(err, ShardError::Config(ref m) if m.contains("upsert_query")),
+        "expected the fail-closed Config error, got {err:?}"
+    );
+
+    // The replacement path is directory-independent and stays available.
+    cluster
+        .upsert_query(2, "1994 topps", 1)
+        .expect("upsert works unseeded");
+    assert!(cluster
+        .percolate("1994 topps")
+        .expect("percolate")
+        .contains(&2));
+}
+
+/// A partially-applied remove retains its logical-id reservation (fail-closed),
+/// and `resync` — the documented repair path — must RELEASE it once the delete
+/// converges everywhere. Without the release the id answered 409
+/// `DuplicateLogicalId` to every future `add_query` until a coordinator reopen
+/// (review finding).
+#[test]
+fn resync_releases_reservation_after_repairing_a_remove() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
+    let norm = Arc::clone(&real.norm);
+    let dict = Arc::clone(&real.dict);
+    let tag_dict = Arc::clone(&real.tag_dict);
+
+    let fail = Arc::new(AtomicBool::new(false));
+    let shards: Vec<Box<dyn Shard>> = (0..cfg.num_shards)
+        .map(|_| {
+            let ls = LocalShard::new(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                Arc::clone(&tag_dict),
+                cfg.per_shard.clone(),
+            );
+            Box::new(ToggleFailShard::new(ls, Arc::clone(&fail))) as Box<dyn Shard>
+        })
+        .collect();
+    let ring = HashRing::new(cfg.num_shards, cfg.vnodes).expect("ring");
+    let durable = ClusterDurable::in_memory(cfg.num_shards as u32, cfg.vnodes, dict.fingerprint());
+    let cluster = ClusterEngine::from_parts(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        ring,
+        shards,
+        cfg.include_broad,
+        1,
+        cfg.per_shard.clone(),
+        durable,
+    )
+    .expect("from_parts cluster");
+
+    let dsl = "zznovelaterm";
+    cluster.add_query(5, dsl).expect("healthy add");
+
+    // Fail the delete: the remove is durably logged, partially applied, and the
+    // id stays reserved (fail-closed) — a re-add must refuse.
+    fail.store(true, Ordering::Release);
+    assert!(
+        matches!(
+            cluster.remove_query(5),
+            Err(ShardError::PartiallyApplied { .. })
+        ),
+        "the remove must partially apply while the shard is failing"
+    );
+    assert!(
+        matches!(
+            cluster.add_query(5, dsl),
+            Err(ShardError::DuplicateLogicalId(5))
+        ),
+        "a partially-removed id must stay reserved"
+    );
+
+    // The shard recovers; resync converges the delete and must free the id.
+    fail.store(false, Ordering::Release);
+    let report = cluster.resync();
+    assert_eq!(report.repaired, 1, "the queued remove must converge");
+    assert_eq!(cluster.pending_repairs(), 0);
+    cluster
+        .add_query(5, dsl)
+        .expect("a repaired remove must release the id for re-add");
+    assert!(
+        cluster.percolate(dsl).expect("percolate").contains(&5),
+        "the re-added query must be matchable"
+    );
+}
+
+/// `rebuild_from_live` (resize / set_vocab) must rebuild the logical-id directory
+/// from the corpus it actually re-placed, mirroring reopen's live-enumeration
+/// seeding. Before the fix the directory survived the rebuild untouched, so a
+/// reservation with no surviving row (the leak family: a query dropped by
+/// re-placement, or a stale reservation) 409'd every re-add on the LIVE
+/// coordinator while a REOPENED one accepted it (review finding).
+#[test]
+fn rebuild_from_live_reseeds_the_logical_id_directory() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![
+        (1u64, "1994 topps baseball".to_string()),
+        (2u64, "1995 fleer baseball".to_string()),
+    ];
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
+
+    // Plant a stale reservation with no live row (the leak shape).
+    assert!(cluster.insert_logical_id(99));
+    assert!(matches!(
+        cluster.add_query(99, "1994 topps baseball"),
+        Err(ShardError::DuplicateLogicalId(99))
+    ));
+
+    // The rebuild reseeds the directory from the re-placed corpus: live ids stay
+    // reserved, the stale one is healed away.
+    let rebuilt = cluster.resize(5).expect("resize rebuilds");
+    assert_eq!(rebuilt, 2);
+    assert!(matches!(
+        cluster.add_query(1, "1994 topps baseball"),
+        Err(ShardError::DuplicateLogicalId(1))
+    ));
+    cluster
+        .add_query(99, "1994 topps baseball")
+        .expect("stale reservation must be healed by the rebuild");
+    assert!(cluster
+        .percolate("1994 topps baseball")
+        .expect("p")
+        .contains(&99));
+}

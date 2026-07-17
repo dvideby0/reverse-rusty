@@ -25,6 +25,13 @@ pub(super) struct LogicalIdDirectory {
     base: Vec<u64>,
     added: FastSet<u64>,
     removed: FastSet<u64>,
+    /// True only when this directory was installed from an authoritative source
+    /// (build/bulk-ingest/durable-open enumeration, or a provably-empty fresh
+    /// assembly). A coordinator attached to an already-populated cluster it
+    /// cannot enumerate (the gRPC connect shape — `RemoteShard` has no live-id
+    /// enumeration RPC yet) stays unauthoritative, and insert-only admission
+    /// fails closed instead of vacuously admitting duplicates.
+    authoritative: bool,
 }
 
 impl LogicalIdDirectory {
@@ -34,6 +41,7 @@ impl LogicalIdDirectory {
             base: ids,
             added: FastSet::default(),
             removed: FastSet::default(),
+            authoritative: true,
         })
     }
 
@@ -78,6 +86,7 @@ impl LogicalIdDirectory {
             base,
             added,
             removed,
+            authoritative: _,
         } = self;
         base.retain(|logical| !removed.contains(logical));
         base.extend(added.drain());
@@ -140,6 +149,19 @@ impl ClusterEngine {
 
     pub(super) fn contains_logical_id(&self, logical: u64) -> bool {
         read_directory(&self.logical_ids).contains(logical)
+    }
+
+    /// Whether the directory reflects the full committed corpus (see
+    /// [`LogicalIdDirectory::authoritative`]).
+    pub(super) fn logical_ids_authoritative(&self) -> bool {
+        read_directory(&self.logical_ids).authoritative
+    }
+
+    /// Test hook: simulate the connect-to-populated-cluster shape, where the
+    /// coordinator cannot enumerate the corpus and the directory is unseeded.
+    #[cfg(test)]
+    pub(super) fn unseed_logical_ids_for_test(&self) {
+        *write_directory(&self.logical_ids) = LogicalIdDirectory::default();
     }
 
     /// Reserve an id for a committed add/upsert. Returns true when it was fresh.

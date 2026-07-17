@@ -4,7 +4,10 @@
 //! participates in candidate retrieval or exact verification. Cluster reads use
 //! it only after a row has matched to select the one routed shard position that
 //! may emit that logical query. Standalone rows carry [`QueryPlacement::standalone`]
-//! and retain the pre-ADR-109 emit-all behavior.
+//! and keep their pre-ADR-109 behavior only on standalone (non-ownership) reads;
+//! under an ownership-suppressed cluster read [`OwnershipContext::owner`] returns
+//! `None` for them, i.e. they are never emitted — cluster ingestion paths must
+//! stamp real placement.
 
 use std::fmt;
 
@@ -313,6 +316,22 @@ impl OwnershipContext {
             if self.routed_positions.binary_search(&position).is_err() {
                 return Err(OwnershipError::BroadEvaluatorNotRouted(position));
             }
+        }
+        Ok(())
+    }
+
+    /// Fail loud when this shard's own position is absent from the routed set.
+    /// `owner()` can only ever select a routed position, so an unrouted local
+    /// position would silently emit nothing — a false-negative surface — instead
+    /// of surfacing the mis-targeted request.
+    pub fn require_routed(&self, current_position: u32) -> Result<(), OwnershipError> {
+        if current_position >= self.num_shards
+            || self
+                .routed_positions
+                .binary_search(&current_position)
+                .is_err()
+        {
+            return Err(OwnershipError::LocalPositionMissing(current_position));
         }
         Ok(())
     }
