@@ -47,6 +47,7 @@ fn replay_wal_tail(
                 version,
                 text,
                 tags,
+                priority,
                 class_d_accepted,
                 ..
             } => {
@@ -57,7 +58,14 @@ fn replay_wal_tail(
                 // flip; a legacy op-0 frame may have been acknowledged as rejected
                 // (pre-v5 binaries logged before classifying) and must not
                 // resurrect.
-                engine.replay_insert(&text, logical, version, &tags, class_d_accepted);
+                engine.replay_insert(
+                    &text,
+                    logical,
+                    version,
+                    &tags,
+                    priority.map(|priority| crate::rank::RankValues { priority }),
+                    class_d_accepted,
+                );
             }
             WalEntry::Tombstone {
                 seq,
@@ -97,6 +105,7 @@ fn replay_wal_tail(
                 version,
                 text,
                 tags,
+                priority,
                 class_d_accepted,
             } => {
                 // ADR-067: the insert half ALWAYS replays — the new memtable copy
@@ -114,6 +123,7 @@ fn replay_wal_tail(
                     logical,
                     version,
                     &tags,
+                    priority.map(|priority| crate::rank::RankValues { priority }),
                     seq > watermark,
                     class_d_accepted,
                 );

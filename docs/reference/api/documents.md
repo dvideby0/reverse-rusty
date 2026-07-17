@@ -43,7 +43,7 @@ regardless.
 A stored query may carry **structured tags** — `(key, value)` metadata used to *narrow* percolated
 results later (see [filtered percolation](percolate.md#filtered-percolation-adr-049) below). Provide them either as
 a canonical `tags` object or, Elasticsearch-style, as sibling fields of `query` (anything that isn't
-`query`/`version`/`tags`). The two forms are merged.
+`query`/`version`/`tags`/`rank_fields`). The two forms are merged.
 
 A value may be a **string, number, bool, or an array of those** (ADR-073). Numbers and bools coerce
 to their canonical JSON text — `7` → `"7"`, `true` → `"true"`, the ES keyword behavior — and the
@@ -69,6 +69,25 @@ curl -X PUT localhost:9200/_doc/1 -H 'Content-Type: application/json' \
 Tags are interned to integers, stored as a hot-path SoA column, and persisted (they survive reopen and
 crash recovery). They **never** affect *which* queries a title matches — only the optional filter below
 can narrow an already-correct result set, so they cannot introduce a false negative.
+
+### Typed priority (ADR-108)
+
+Local bounded ranking has one fixed signed `i64` field. Supply it separately from permissive tags:
+
+```bash
+curl -X PUT localhost:9200/_doc/1 -H 'Content-Type: application/json' \
+  -d '{"query":"topps chrome","rank_fields":{"priority":50}}'
+```
+
+`rank_fields.priority` accepts an integer JSON value or a signed decimal string fitting `i64`.
+Floats, booleans, nulls, arrays/objects, overflow, and unknown rank fields return a structured 400
+(`invalid_rank_value` or `unsupported_rank_field`). The server mirrors the typed value into the
+canonical `priority` tag for compatibility ranking and rollback. If `tags.priority` is also supplied,
+there must be exactly one numerically-equal value; a conflict is rejected.
+
+Without `rank_fields`, existing `tags.priority` behavior is unchanged: a numeric legacy value lowers
+into the typed column, while a malformed value remains legal and scores zero. The same rules apply per
+item in `POST /_bulk`.
 
 ## `GET /_doc/{id}` — Retrieve a query
 
@@ -101,4 +120,3 @@ If the query ID doesn't exist (or was already deleted):
 ```json
 {"_id": 1, "result": "not_found"}
 ```
-

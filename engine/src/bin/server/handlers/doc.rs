@@ -8,7 +8,7 @@ use std::time::Instant;
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -93,7 +93,76 @@ struct BulkItemInner {
 mod tests;
 
 /// Reserved top-level fields on an ingest body that are NOT metadata tags.
-const RESERVED_INGEST_FIELDS: [&str; 3] = ["query", "version", "tags"];
+const RESERVED_INGEST_FIELDS: [&str; 4] = ["query", "version", "tags", "rank_fields"];
+type RankedIngest = (Vec<(String, String)>, Option<reverse_rusty::RankValues>);
+type RankedIngestError = (&'static str, String);
+
+fn parse_priority_value(value: &serde_json::Value) -> Result<i64, String> {
+    match value {
+        serde_json::Value::Number(number) => number.as_i64().ok_or_else(|| {
+            "rank_fields.priority must be an integer JSON value fitting signed i64".to_string()
+        }),
+        serde_json::Value::String(value) => value.parse::<i64>().map_err(|_| {
+            "rank_fields.priority string must be signed decimal fitting i64".to_string()
+        }),
+        other => Err(format!(
+            "rank_fields.priority must be an integer or signed decimal string (got {})",
+            json_type_name(other)
+        )),
+    }
+}
+
+/// Parse strict typed rank metadata and mirror it into the canonical legacy tag.
+/// The returned optional value distinguishes an explicit typed zero from absence.
+pub(crate) fn extract_ranked_ingest(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Result<RankedIngest, RankedIngestError> {
+    let mut tags = extract_ingest_tags(obj).map_err(|reason| ("invalid_tag_value", reason))?;
+    let Some(raw_fields) = obj.get("rank_fields") else {
+        return Ok((tags, None));
+    };
+    let fields = raw_fields.as_object().ok_or_else(|| {
+        (
+            "invalid_rank_value",
+            format!(
+                "rank_fields must be an object (got {})",
+                json_type_name(raw_fields)
+            ),
+        )
+    })?;
+    if let Some(field) = fields.keys().find(|key| key.as_str() != "priority") {
+        return Err((
+            "unsupported_rank_field",
+            format!("unsupported rank field `{field}`; only `priority` is available"),
+        ));
+    }
+    let Some(raw_priority) = fields.get("priority") else {
+        return Ok((tags, None));
+    };
+    let priority =
+        parse_priority_value(raw_priority).map_err(|reason| ("invalid_rank_value", reason))?;
+    let legacy: Vec<&str> = tags
+        .iter()
+        .filter_map(|(key, value)| (key == "priority").then_some(value.as_str()))
+        .collect();
+    match legacy.as_slice() {
+        [] => tags.push(("priority".to_string(), priority.to_string())),
+        [value] if value.parse::<i64>().ok() == Some(priority) => {}
+        [_] => {
+            return Err((
+                "invalid_rank_value",
+                "rank_fields.priority conflicts with legacy tags.priority".to_string(),
+            ));
+        }
+        _ => {
+            return Err((
+                "invalid_rank_value",
+                "typed priority requires at most one legacy tags.priority value".to_string(),
+            ));
+        }
+    }
+    Ok((tags, Some(reverse_rusty::RankValues { priority })))
+}
 
 /// Canonical scalar coercion shared by tag ingest and the filter parsers (ADR-073,
 /// closing ADR-064 item 4): a string is itself; a number or bool coerces to its
@@ -213,13 +282,13 @@ pub(crate) async fn put_doc(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
     Json(body): Json<PutDocBody>,
-) -> impl IntoResponse {
+) -> Response {
     let start = Instant::now();
     // A malformed tag value is a caller error: 400 before any engine work
     // (ADR-073 — never silently drop a tag the caller asked for).
-    let tags = match extract_ingest_tags(&body.rest) {
-        Ok(t) => t,
-        Err(msg) => {
+    let (tags, rank) = match extract_ranked_ingest(&body.rest) {
+        Ok(value) => value,
+        Err((error_type, msg)) => {
             warn!(query_id = id, error = %msg, "invalid tag value");
             state
                 .prom
@@ -234,19 +303,23 @@ pub(crate) async fn put_doc(
                 .http_request_duration
                 .with_label_values(&["put_doc"])
                 .observe(start.elapsed().as_secs_f64());
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(PutDocResponse {
-                    _id: id,
-                    result: "error",
-                    error: Some(msg),
-                }),
-            );
+            if error_type == "invalid_tag_value" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(PutDocResponse {
+                        _id: id,
+                        result: "error",
+                        error: Some(msg),
+                    }),
+                )
+                    .into_response();
+            }
+            return ApiError::response(StatusCode::BAD_REQUEST, error_type, msg).into_response();
         }
     };
     let result = {
         let mut engine = state.engine.lock();
-        match engine.try_upsert_live_with_tags(&body.query, id, body.version, &tags) {
+        match engine.try_upsert_live_ranked(&body.query, id, body.version, &tags, rank) {
             Ok(reverse_rusty::segment::UpsertOutcome::Created(_)) => {
                 info!(query_id = id, "query registered");
                 state
@@ -338,7 +411,7 @@ pub(crate) async fn put_doc(
         .http_request_duration
         .with_label_values(&["put_doc"])
         .observe(start.elapsed().as_secs_f64());
-    result
+    result.into_response()
 }
 
 /// GET /_doc/{id} — retrieve a stored query by logical ID.
@@ -500,6 +573,7 @@ pub(crate) async fn bulk_ingest(
     let mut pairs: Vec<(u64, String)> = Vec::new();
     // Per-query metadata tags (ADR-049), parallel to `pairs`.
     let mut tags_per_pair: Vec<Vec<(String, String)>> = Vec::new();
+    let mut ranks_per_pair: Vec<Option<reverse_rusty::RankValues>> = Vec::new();
     // For each entry in `pairs`, the index of its provisional item in `items`,
     // so the engine's per-item outcome can be mapped back to the right slot.
     let mut pair_item_idx: Vec<usize> = Vec::new();
@@ -592,15 +666,15 @@ pub(crate) async fn bulk_ingest(
 
         // A malformed tag value fails the ITEM loud (ADR-073), mirroring the
         // parse-error per-item contract — never ingest with silently fewer tags.
-        let tags = match source.as_object().map(extract_ingest_tags).transpose() {
-            Ok(t) => t.unwrap_or_default(),
-            Err(msg) => {
+        let (tags, rank) = match source.as_object().map(extract_ranked_ingest).transpose() {
+            Ok(value) => value.unwrap_or_default(),
+            Err((error_type, msg)) => {
                 has_errors = true;
                 items.push(BulkItem {
                     index: BulkItemInner {
                         _id: id,
                         status: 400,
-                        error: Some(msg),
+                        error: Some(format!("{error_type}: {msg}")),
                     },
                 });
                 continue;
@@ -609,6 +683,7 @@ pub(crate) async fn bulk_ingest(
 
         pairs.push((id, query));
         tags_per_pair.push(tags);
+        ranks_per_pair.push(rank);
         // Provisional success; the engine outcome (below) may downgrade this
         // item to a 400 once the batch is compiled.
         pair_item_idx.push(items.len());
@@ -625,7 +700,11 @@ pub(crate) async fn bulk_ingest(
     if !pairs.is_empty() {
         let result = {
             let mut engine = state.engine.lock();
-            engine.try_bulk_ingest_detailed_with_tags(&pairs, &tags_per_pair)
+            engine.try_bulk_ingest_detailed_with_tags_and_ranks(
+                &pairs,
+                &tags_per_pair,
+                &ranks_per_pair,
+            )
         };
 
         let (report, item_status) = match result {

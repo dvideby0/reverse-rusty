@@ -71,6 +71,27 @@ pub enum ShardError {
     /// against that shard would *silently* drop results — fail loud instead. This is the
     /// one false-negative path the otherwise-fallible seam cannot catch (ADR-029).
     DictMismatch { expected: u64, actual: u64 },
+    /// Placement generation or per-row ownership metadata disagrees with the
+    /// shard position/configuration. Serving it could duplicate or suppress a
+    /// logical result, so ADR-109 requires a fail-closed typed error.
+    OwnershipMismatch(crate::ownership::OwnershipError),
+    /// A bounded read reached its one request deadline. No partial result is
+    /// returned; the coordinator fails the exact request closed.
+    DeadlineExceeded,
+    /// A bounded read violated its static K/total admission contract.
+    Admission(crate::result::TopKAdmissionError),
+    /// A shard returned a malformed or dishonest bounded reply (for example,
+    /// more than K rows or a missing bounded/ownership attestation).
+    Protocol(String),
+    /// Winner enrichment could not find the source on the owning shard.
+    SourceUnavailable(u64),
+    /// A cluster write attempted to create a second live row under one logical
+    /// id. Distributed exact top-K requires logical ids to be unique; callers
+    /// replace an existing row through `upsert_query`.
+    DuplicateLogicalId(u64),
+    /// Winner source materialization exceeded the caller's cumulative byte
+    /// credit. This is distinct from the per-message transport cap.
+    EnrichmentLimit { limit: usize },
     /// A cluster mutation could not be durably logged (the coordinator's externalized
     /// `ClusterLog`, ADR-031). The mutation is *rejected*, not applied — surfacing it
     /// rather than acknowledging an unlogged write is load-bearing for the
@@ -116,6 +137,20 @@ impl std::fmt::Display for ShardError {
                 "dict fingerprint mismatch: coordinator {expected:#018x} != shard \
                  {actual:#018x} (every shard must share the coordinator's frozen dict)"
             ),
+            ShardError::OwnershipMismatch(error) => write!(f, "{error}"),
+            ShardError::DeadlineExceeded => f.write_str("shard read deadline exceeded"),
+            ShardError::Admission(error) => error.fmt(f),
+            ShardError::Protocol(detail) => write!(f, "shard protocol error: {detail}"),
+            ShardError::SourceUnavailable(logical) => {
+                write!(f, "source unavailable for logical id {logical}")
+            }
+            ShardError::DuplicateLogicalId(logical) => write!(
+                f,
+                "logical id {logical} already exists; use upsert_query to replace it"
+            ),
+            ShardError::EnrichmentLimit { limit } => {
+                write!(f, "ranked winner enrichment exceeds {limit} bytes")
+            }
             ShardError::Log(m) => write!(f, "cluster log durability error: {m}"),
             ShardError::ControlPlane(m) => write!(f, "cluster control-plane error: {m}"),
             ShardError::PartiallyApplied {
@@ -135,6 +170,39 @@ impl std::fmt::Display for ShardError {
 
 impl std::error::Error for ShardError {}
 
+impl From<crate::ownership::OwnershipError> for ShardError {
+    fn from(value: crate::ownership::OwnershipError) -> Self {
+        Self::OwnershipMismatch(value)
+    }
+}
+
+impl From<crate::rank::RankedMatchError> for ShardError {
+    fn from(value: crate::rank::RankedMatchError) -> Self {
+        match value {
+            crate::rank::RankedMatchError::Admission(error) => Self::Admission(error),
+            crate::rank::RankedMatchError::Cancelled(_) => Self::DeadlineExceeded,
+        }
+    }
+}
+
+/// One ownership-filtered, bounded shard result. `result_bytes` is the exact
+/// protobuf encoded size for remote replies and zero for in-process shards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ShardRankedMatch {
+    pub(crate) hits: Vec<crate::rank::RankedHit>,
+    pub(crate) total_hits: crate::result::TotalHits,
+    pub(crate) stats: MatchStats,
+    pub(crate) rank_stats: crate::rank::RankStats,
+    pub(crate) result_bytes: u64,
+}
+
+/// One current-view source returned by the owning shard during phase two.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FetchedMatch {
+    pub(crate) logical_id: u64,
+    pub(crate) source: String,
+}
+
 /// Sink for shard-level observability events (e.g. a [`ReplicatedShard`] replica
 /// dropping out of its in-sync set). The `Arc` analogue of the engine's event
 /// observer; the coordinator fans its observer in via `ClusterEngine::set_observer`.
@@ -142,11 +210,19 @@ impl std::error::Error for ShardError {}
 /// [`ReplicatedShard`]: super::replica::ReplicatedShard
 pub(crate) type EventSink = Arc<dyn Fn(&crate::events::EngineEvent) + Send + Sync>;
 
-/// One live query as gathered for a blue/green rebuild (`set_vocab` / resize, ADR-074):
-/// `(logical, dsl, version, tag_ids)`. The version + tags ride the gather so the rebuild
+/// One live query as gathered for a blue/green rebuild (`set_vocab` / resize, ADR-074/109):
+/// `(logical, dsl, version, tag_ids, rank, placement)`. The metadata rides the gather so the rebuild
 /// re-places each query at the version it was durably stored with (not reset to 1) and
-/// carries its tags (interned or post-freeze synthetic) to its new shard.
-pub(crate) type LiveTaggedQuery = (u64, String, u32, Vec<crate::tagdict::TagId>);
+/// carries tags/rank to its new shard; the old placement is available for fingerprints but a
+/// rebuild deliberately derives a fresh placement under its one new generation.
+pub(crate) type LiveTaggedQuery = (
+    u64,
+    String,
+    u32,
+    Vec<crate::tagdict::TagId>,
+    crate::rank::RankValues,
+    crate::ownership::QueryPlacement,
+);
 
 /// One shard, local or remote — the seam that lets a coordinator hold a mix of
 /// in-process and (eventually) networked shards behind one type.
@@ -173,12 +249,28 @@ pub(crate) trait Shard: Send + Sync {
     ///
     /// [`percolate`]: crate::cluster::ClusterEngine::percolate
     /// [`percolate_filtered`]: crate::cluster::ClusterEngine::percolate_filtered
+    #[allow(dead_code)]
     fn percolate_filtered(
         &self,
         title: &str,
         include_broad: bool,
         pred: &TagPredicate,
     ) -> Result<(Vec<u64>, MatchStats), ShardError>;
+    /// Ownership-aware cluster probe. Legacy/test shards must fail closed unless
+    /// they attest by implementing this method.
+    fn percolate_filtered_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        let _ = (title, include_broad, pred, context, current_position);
+        Err(ShardError::OwnershipMismatch(
+            crate::ownership::OwnershipError::PlacementDecisionMismatch,
+        ))
+    }
     /// [`percolate_filtered`](Self::percolate_filtered) plus a per-id ranking score
     /// (ADR-059/075): the coordinator compiles the request's `rank` block ONCE against
     /// the shared frozen tag space (exactly like the `TagPredicate`) and fans the same
@@ -189,6 +281,7 @@ pub(crate) trait Shard: Send + Sync {
     /// `EngineSnapshot::rank` contract). Copies of one logical id are version-identical
     /// across shards (identical op streams), so every shard reports the same score for
     /// the same id and the coordinator's dedup is order-safe.
+    #[allow(dead_code)]
     fn percolate_filtered_ranked(
         &self,
         title: &str,
@@ -196,11 +289,79 @@ pub(crate) trait Shard: Send + Sync {
         pred: &TagPredicate,
         spec: &crate::rank::CompiledRankSpec,
     ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError>;
+    fn percolate_filtered_ranked_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        let _ = (title, include_broad, pred, spec, context, current_position);
+        Err(ShardError::OwnershipMismatch(
+            crate::ownership::OwnershipError::PlacementDecisionMismatch,
+        ))
+    }
+    /// Ownership-aware bounded typed ranking (ADR-110). The default is a loud
+    /// refusal so a legacy/test shard cannot silently masquerade as bounded.
+    #[allow(clippy::too_many_arguments)]
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        let _ = (
+            title,
+            include_broad,
+            pred,
+            program,
+            options,
+            context,
+            current_position,
+            deadline,
+        );
+        Err(ShardError::Protocol(
+            "bounded top-k is not implemented by this shard".into(),
+        ))
+    }
+    /// Batch-fetch current source text for final winners. Implementations must
+    /// return exactly one row per requested id, in request order, or fail loud.
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        max_source_bytes: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        let _ = (logical_ids, max_source_bytes, deadline);
+        Err(ShardError::Config(
+            "winner source fetch is not implemented by this shard".into(),
+        ))
+    }
     /// Physical query count held by this shard (a replicated/any-of query is counted
     /// once per local entry, so it is counted on each shard holding it).
     fn num_queries(&self) -> Result<usize, ShardError>;
     /// Per-class entry tally `[A, B, C, D]` for this shard (introspection/tests).
     fn class_counts(&self) -> Result<[u64; 5], ShardError>;
+    /// Validate every published row against the coordinator's logical position
+    /// before the shard becomes reachable (ADR-109).
+    fn validate_ownership(
+        &self,
+        position: u32,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), ShardError> {
+        let _ = (position, generation, num_shards);
+        Err(ShardError::OwnershipMismatch(
+            crate::ownership::OwnershipError::PlacementDecisionMismatch,
+        ))
+    }
 
     /// This shard's live `(logical_id, dsl)` source set — the corpus the shard's
     /// index is a materialized view of. Used by `ClusterEngine::set_vocab` to
@@ -212,6 +373,14 @@ pub(crate) trait Shard: Send + Sync {
     fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
         Err(ShardError::Config(
             "live_sources is only supported for in-process shards".into(),
+        ))
+    }
+
+    /// This shard's live logical-id set without materializing query source text.
+    /// Used during durable coordinator open to rebuild unique-id admission state.
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        Err(ShardError::Config(
+            "live_logical_ids is only supported for in-process shards".into(),
         ))
     }
 
@@ -282,6 +451,24 @@ pub(crate) trait Shard: Send + Sync {
         text: &str,
         tags: &[(String, String)],
     ) -> Result<Option<u32>, ShardError>;
+    /// ADR-109 write path. Implementations must persist and replicate the supplied
+    /// placement exactly; the default preserves standalone test doubles only.
+    fn insert_extracted_with_placement(
+        &self,
+        ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Result<Option<u32>, ShardError> {
+        if placement.mode() != crate::ownership::PlacementMode::Standalone {
+            return Err(ShardError::OwnershipMismatch(
+                crate::ownership::OwnershipError::InvalidStandalone,
+            ));
+        }
+        self.insert_extracted_with_tags(ex, logical, version, text, tags)
+    }
     /// Tombstone every live entry for `logical` (idempotent; a cheap no-op on a shard
     /// that doesn't hold it).
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError>;
@@ -388,6 +575,11 @@ pub(crate) fn apply_mutation(
     norm: &Normalizer,
     dict: &Dict,
     m: &ClusterMutation,
+    // The target's shard position when the CALLER knows it (the resync repair
+    // loop); `None` when coverage holds by construction (a replica catch-up
+    // replays its own position's translog). Used to gate an Upsert's insert
+    // half to covered positions only — see the Upsert arm.
+    position: Option<u32>,
 ) -> Result<(), ShardError> {
     match m {
         ClusterMutation::Add {
@@ -395,13 +587,16 @@ pub(crate) fn apply_mutation(
             version,
             dsl,
             tags,
+            placement,
         } => {
             // Only parseable DSL is ever logged, but stay defensive: an unparseable record
             // carries no applicable mutation, so skip it rather than fail the whole replay.
             if let Ok(ast) = crate::dsl::parse(dsl) {
                 let mut lc = String::new();
                 let ex = extract_readonly(&ast, norm, dict, &mut lc);
-                shard.insert_extracted_with_tags(&ex, *logical, *version, dsl, tags)?;
+                shard.insert_extracted_with_placement(
+                    &ex, *logical, *version, dsl, tags, placement,
+                )?;
             }
         }
         ClusterMutation::Remove { logical } => {
@@ -412,17 +607,28 @@ pub(crate) fn apply_mutation(
             version,
             dsl,
             tags,
+            placement,
         } => {
             // Replace-by-id ON THIS SHARD: tombstone any prior copy, then insert the new
-            // version. Per-shard replay/repair has no placement context, so a shard whose
-            // only involvement was the delete half gains a (correctness-benign) extra copy —
-            // exact verification still gates it and the coordinator merge dedups; the next
-            // reopen's coordinator-level replay re-derives exact placement and heals it.
+            // version — but only where the placement actually STORES the row. An upsert's
+            // delete half fans to every shard, so a repair can legitimately target a
+            // delete-only position; ADR-109 made shard-side inserts validate placement
+            // coverage, so re-driving the insert there is refused (`LocalPositionMissing`)
+            // and would wedge `resync` on that mutation forever (multi-machine harness
+            // catch). Replicated modes cover every position; only Selective restricts.
             shard.delete_by_logical_id(*logical)?;
-            if let Ok(ast) = crate::dsl::parse(dsl) {
-                let mut lc = String::new();
-                let ex = extract_readonly(&ast, norm, dict, &mut lc);
-                shard.insert_extracted_with_tags(&ex, *logical, *version, dsl, tags)?;
+            let covered = position.is_none_or(|p| {
+                placement.mode() != crate::ownership::PlacementMode::Selective
+                    || placement.positions().binary_search(&p).is_ok()
+            });
+            if covered {
+                if let Ok(ast) = crate::dsl::parse(dsl) {
+                    let mut lc = String::new();
+                    let ex = extract_readonly(&ast, norm, dict, &mut lc);
+                    shard.insert_extracted_with_placement(
+                        &ex, *logical, *version, dsl, tags, placement,
+                    )?;
+                }
             }
         }
     }

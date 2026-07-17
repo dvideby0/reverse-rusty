@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, PoisonError};
 
 use crate::cluster::clog::{ClusterMutation, LogPos};
-use crate::cluster::shard::{EventSink, Shard, ShardError};
+use crate::cluster::shard::{EventSink, FetchedMatch, Shard, ShardError, ShardRankedMatch};
 use crate::compile::Extracted;
 use crate::config::EngineConfig;
 use crate::dict::Dict;
@@ -29,6 +29,19 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.percolate_filtered(title, include_broad, pred))
     }
 
+    fn percolate_filtered_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        self.read(|shard| {
+            shard.percolate_filtered_owned(title, include_broad, pred, context, current_position)
+        })
+    }
+
     fn percolate_filtered_ranked(
         &self,
         title: &str,
@@ -41,6 +54,61 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.percolate_filtered_ranked(title, include_broad, pred, spec))
     }
 
+    fn percolate_filtered_ranked_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        self.read(|shard| {
+            shard.percolate_filtered_ranked_owned(
+                title,
+                include_broad,
+                pred,
+                spec,
+                context,
+                current_position,
+            )
+        })
+    }
+
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        self.read(|shard| {
+            shard.percolate_top_k_owned(
+                title,
+                include_broad,
+                pred,
+                program,
+                options,
+                context,
+                current_position,
+                deadline,
+            )
+        })
+    }
+
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        max_source_bytes: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        self.read(|shard| shard.fetch_matches(logical_ids, max_source_bytes, deadline))
+    }
+
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.read(|s| s.num_queries())
     }
@@ -49,10 +117,33 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.class_counts())
     }
 
+    fn validate_ownership(
+        &self,
+        position: u32,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), ShardError> {
+        self.primary
+            .validate_ownership(position, generation, num_shards)?;
+        let replicas = self.replicas.lock().unwrap_or_else(PoisonError::into_inner);
+        for replica in replicas.iter() {
+            replica
+                .shard
+                .validate_ownership(position, generation, num_shards)?;
+        }
+        Ok(())
+    }
+
     fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
         // Replicas are set-equal copies of the primary, so any in-sync copy yields
         // the same source set — read with the same in-sync failover as `num_queries`.
         self.read(|s| s.live_sources())
+    }
+
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        // Replicas are set-equal; avoid copying source text while rebuilding the
+        // coordinator's compact admission directory on durable open.
+        self.read(|s| s.live_logical_ids())
     }
 
     fn live_sources_tagged(
@@ -118,6 +209,27 @@ impl Shard for ReplicatedShard {
             .insert_extracted_with_tags(ex, logical, version, text, tags)?;
         self.fan_to_replicas(|s| {
             s.insert_extracted_with_tags(ex, logical, version, text, tags)
+                .map(|_| ())
+        });
+        Ok(out)
+    }
+
+    fn insert_extracted_with_placement(
+        &self,
+        ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Result<Option<u32>, ShardError> {
+        let _g = self.lock();
+        let out = self
+            .primary
+            .insert_extracted_with_placement(ex, logical, version, text, tags, placement)?;
+        self.fan_to_replicas(|shard| {
+            shard
+                .insert_extracted_with_placement(ex, logical, version, text, tags, placement)
                 .map(|_| ())
         });
         Ok(out)

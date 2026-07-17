@@ -79,6 +79,17 @@ pub(crate) struct PrometheusMetrics {
     /// Search permits currently held (ADR-099) — 0 permanently when
     /// `--max-concurrent-searches` is unset.
     pub(crate) search_permits_in_use: IntGauge,
+    pub(crate) ranked_search_permits_in_use: IntGauge,
+    pub(crate) ranked_requests_total: IntCounterVec,
+    pub(crate) rank_evaluations_total: IntCounter,
+    pub(crate) rank_heap_replacements_total: IntCounter,
+    pub(crate) rank_total_relation_total: IntCounterVec,
+    pub(crate) rank_admission_rejections_total: IntCounterVec,
+    pub(crate) rank_source_bytes_total: IntCounter,
+    pub(crate) rank_true_match_lower_bound_total: IntCounter,
+    pub(crate) rank_shard_rows_received_total: IntCounter,
+    pub(crate) rank_shard_result_bytes_total: IntCounter,
+    pub(crate) rank_enrichment_rejections_total: IntCounter,
 
     // Cluster gRPC transport metrics (ADR-085), set on each /_metrics scrape from the
     // coordinator's TransportMetrics snapshot; labeled by RPC `method`. Cumulative values in
@@ -313,6 +324,70 @@ impl PrometheusMetrics {
             "Search-concurrency permits currently held (--max-concurrent-searches)",
         ))
         .unwrap();
+        let ranked_search_permits_in_use = IntGauge::with_opts(Opts::new(
+            "ranked_search_permits_in_use",
+            "v2 ranked-search permits currently held",
+        ))
+        .unwrap();
+        let ranked_requests_total = IntCounterVec::new(
+            Opts::new(
+                "ranked_requests_total",
+                "v2 ranked-search requests by outcome and visibility scope",
+            ),
+            &["outcome", "scope"],
+        )
+        .unwrap();
+        let rank_evaluations_total = IntCounter::with_opts(Opts::new(
+            "rank_evaluations_total",
+            "Logical-id score evaluations performed by bounded ranking",
+        ))
+        .unwrap();
+        let rank_heap_replacements_total = IntCounter::with_opts(Opts::new(
+            "rank_heap_replacements_total",
+            "Competitive winner-heap replacements in bounded ranking",
+        ))
+        .unwrap();
+        let rank_total_relation_total = IntCounterVec::new(
+            Opts::new(
+                "rank_total_relation_total",
+                "v2 ranked-search total-hit relation outcomes",
+            ),
+            &["relation"],
+        )
+        .unwrap();
+        let rank_admission_rejections_total = IntCounterVec::new(
+            Opts::new(
+                "rank_admission_rejections_total",
+                "v2 ranked-search admission rejections by bounded reason",
+            ),
+            &["reason"],
+        )
+        .unwrap();
+        let rank_source_bytes_total = IntCounter::with_opts(Opts::new(
+            "rank_source_bytes_total",
+            "Winner source bytes enriched after bounded ranking",
+        ))
+        .unwrap();
+        let rank_true_match_lower_bound_total = IntCounter::with_opts(Opts::new(
+            "rank_true_match_lower_bound_total",
+            "Sum of exact or thresholded true-match lower bounds reported by v2",
+        ))
+        .unwrap();
+        let rank_shard_rows_received_total = IntCounter::with_opts(Opts::new(
+            "rank_shard_rows_received_total",
+            "Bounded ranked rows received by coordinators from routed shards",
+        ))
+        .unwrap();
+        let rank_shard_result_bytes_total = IntCounter::with_opts(Opts::new(
+            "rank_shard_result_bytes_total",
+            "Exact protobuf bytes received in distributed top-k shard replies",
+        ))
+        .unwrap();
+        let rank_enrichment_rejections_total = IntCounter::with_opts(Opts::new(
+            "rank_enrichment_rejections_total",
+            "Ranked responses rejected by the static winner-enrichment byte limit",
+        ))
+        .unwrap();
 
         // --- Broad-lane batch metrics (POST /_mpercolate) ---
 
@@ -489,6 +564,39 @@ impl PrometheusMetrics {
         registry
             .register(Box::new(search_permits_in_use.clone()))
             .unwrap();
+        registry
+            .register(Box::new(ranked_search_permits_in_use.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(ranked_requests_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(rank_evaluations_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(rank_heap_replacements_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(rank_total_relation_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(rank_admission_rejections_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(rank_source_bytes_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(rank_true_match_lower_bound_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(rank_shard_rows_received_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(rank_shard_result_bytes_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(rank_enrichment_rejections_total.clone()))
+            .unwrap();
         registry.register(Box::new(wal_size_bytes.clone())).unwrap();
         registry
             .register(Box::new(wal_pending_entries.clone()))
@@ -573,6 +681,17 @@ impl PrometheusMetrics {
             slow_queries_total,
             match_cancellations_total,
             search_permits_in_use,
+            ranked_search_permits_in_use,
+            ranked_requests_total,
+            rank_evaluations_total,
+            rank_heap_replacements_total,
+            rank_total_relation_total,
+            rank_admission_rejections_total,
+            rank_source_bytes_total,
+            rank_true_match_lower_bound_total,
+            rank_shard_rows_received_total,
+            rank_shard_result_bytes_total,
+            rank_enrichment_rejections_total,
             transport_rpc_calls,
             transport_rpc_errors,
             transport_rpc_timeouts,

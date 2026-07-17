@@ -72,6 +72,13 @@ pub struct MatchStats {
     pub main_candidates: u32,
     pub broad_candidates: u32,
     pub matches: u32,
+    /// Logical-id emissions after exact verification and member-level alive/tag
+    /// checks, before result-level logical-id deduplication (ADR-107). This is
+    /// delivery telemetry only: it never participates in matching decisions.
+    pub logical_emissions: u64,
+    /// Duplicate logical-id emissions removed locally or by a cluster coordinator.
+    /// Kept out of compatibility response DTOs; used by the ranked-delivery baseline.
+    pub duplicate_emissions: u64,
     pub probes_attempted: u32, // total signature probes (before filter)
     pub probes_skipped: u32,   // probes skipped by anchor filter (definitely-not-present)
     // ---- broad-lane batch/columnar accounting (0 on the per-title path) ----
@@ -111,6 +118,8 @@ impl MatchStats {
         self.main_candidates += other.main_candidates;
         self.broad_candidates += other.broad_candidates;
         self.matches += other.matches;
+        self.logical_emissions += other.logical_emissions;
+        self.duplicate_emissions += other.duplicate_emissions;
         self.probes_attempted += other.probes_attempted;
         self.probes_skipped += other.probes_skipped;
         self.broad_queries_evaluated += other.broad_queries_evaluated;
@@ -123,6 +132,15 @@ impl MatchStats {
         self.hot_anchors_scanned += other.hot_anchors_scanned;
         self.hot_batches += other.hot_batches;
         self.hot_prefilter_skipped += other.hot_prefilter_skipped;
+    }
+
+    /// Record duplicates removed by a higher-level union whose child collectors
+    /// already accounted for their own emissions (for example, shard fan-in).
+    pub(crate) fn record_cross_source_duplicates(&mut self, emissions: usize, unique: usize) {
+        debug_assert!(unique <= emissions);
+        self.duplicate_emissions = self
+            .duplicate_emissions
+            .saturating_add(u64::try_from(emissions.saturating_sub(unique)).unwrap_or(u64::MAX));
     }
 }
 
@@ -449,6 +467,12 @@ pub struct PlacedQuery {
     /// ingest. In-process only: a synthetic id has no recoverable string, so this never crosses
     /// the dict-agnostic gRPC wire (`RemoteShard::ingest_extracted` fails loud). Empty ⇒ unused.
     pub tag_ids: Vec<crate::tagdict::TagId>,
+    /// Fixed typed rank values carried across in-process rebuild/resize. The
+    /// distributed wire remains unchanged in Increment 2 and supplies zero.
+    pub rank: crate::rank::RankValues,
+    /// Deterministic distributed emission placement (ADR-109). Standalone
+    /// engine callers use [`QueryPlacement::standalone`](crate::ownership::QueryPlacement::standalone).
+    pub placement: crate::ownership::QueryPlacement,
 }
 
 /// Outcome of ingesting a batch of stored queries. Lets callers see how many

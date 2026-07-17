@@ -5,8 +5,9 @@
 
 use crate::harness::*;
 use reverse_rusty::cluster::{ClusterConfig, ClusterEngine};
+use reverse_rusty::config::EngineConfig;
 use reverse_rusty::segment::{Engine, MatchScratch};
-use reverse_rusty::RankSpec;
+use reverse_rusty::{QueryScope, RankProgramSpec, RankSpec, TopKOptions};
 use std::collections::HashSet;
 
 /// Corpus tags extended with a numeric `priority` tag on a slice of queries — interned
@@ -34,6 +35,308 @@ fn rank_spec() -> RankSpec {
             ("status".to_string(), "active".to_string(), 250),
         ],
     }
+}
+
+fn rank_program() -> RankProgramSpec {
+    RankProgramSpec {
+        priority_field: Some("priority".to_string()),
+        boosts: vec![
+            ("category".to_string(), "cards".to_string(), 1_000),
+            ("status".to_string(), "active".to_string(), -250),
+        ],
+    }
+}
+
+/// ADR-110's load-bearing differential: ownership filtering happens before each
+/// shard heap, so merging at most K rows per routed shard must equal standalone
+/// collect-all semantics for every K/threshold combination (including count-only).
+#[test]
+fn distributed_bounded_top_k_matches_single_node() {
+    let (queries, titles) = build_corpus();
+    let tags = ranked_tags_parallel(&queries);
+    let program = rank_program();
+
+    let mut reference = Engine::new(vocab());
+    reference
+        .try_build_from_queries_with_tags(&queries, &tags)
+        .expect("tagged reference build");
+    let reference = reference.snapshot();
+    let reference_program = reference
+        .compile_rank_program(&program)
+        .expect("reference rank program");
+    let predicate = reverse_rusty::exact::TagPredicate::empty();
+    let mut scratch = MatchScratch::new();
+
+    for &shards in &[1usize, 3, 8] {
+        let cfg = ClusterConfig {
+            num_shards: shards,
+            include_broad: true,
+            ..ClusterConfig::default()
+        };
+        let cluster = ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags)
+            .expect("tagged cluster build");
+        let cluster_program = cluster
+            .compile_rank_program(&program)
+            .expect("cluster rank program");
+
+        for title in titles.iter().take(40) {
+            for &size in &[0usize, 1, 3, 16] {
+                for &threshold in &[0u64, 1, 10_000] {
+                    let options = TopKOptions {
+                        size,
+                        track_total_hits_up_to: threshold,
+                        query_scope: QueryScope::WithBroad,
+                    };
+                    let want = reference
+                        .try_match_title_top_k(
+                            title,
+                            options,
+                            &reference_program,
+                            &predicate,
+                            &mut scratch,
+                            None,
+                        )
+                        .expect("standalone top k");
+                    let got = cluster
+                        .try_percolate_filtered_top_k(title, &[], options, &cluster_program, None)
+                        .expect("distributed top k");
+                    let got_rows: Vec<(u64, i64)> = got
+                        .hits
+                        .iter()
+                        .map(|hit| (hit.logical_id, hit.score))
+                        .collect();
+                    let want_rows: Vec<(u64, i64)> = want
+                        .hits
+                        .iter()
+                        .map(|hit| (hit.logical_id, hit.score))
+                        .collect();
+                    assert_eq!(got_rows, want_rows, "shards={shards}, K={size}");
+                    assert_eq!(got.total_hits, want.total_hits, "shards={shards}, K={size}");
+                    assert!(
+                        got.shard_rows_received <= size.saturating_mul(got.routed_shards),
+                        "coordinator received more than K rows per routed position"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Pin every placement/cost class in the bounded differential, including the
+/// opt-in universal class-D lane and ADR-105's always-visible class-H tier.
+#[test]
+fn distributed_top_k_covers_every_visibility_and_cost_class() {
+    const THETA: u32 = 32;
+    let (mut queries, mut titles) = build_corpus();
+    queries.push((99_999_999, "-autograph".to_string()));
+    titles.push("1994 topps chrome psa 10".to_string());
+    titles.push("1994 topps chrome autograph psa 10".to_string());
+    let tags = ranked_tags_parallel(&queries);
+    let engine_config = EngineConfig {
+        accept_class_d: true,
+        hot_anchor_threshold: THETA,
+        ..EngineConfig::default()
+    };
+    let mut reference = Engine::with_config(vocab(), engine_config.clone());
+    reference
+        .try_build_from_queries_with_tags(&queries, &tags)
+        .expect("all-class reference build");
+    let reference_counts = reference.class_counts();
+    for (class, count) in ["A", "B", "C", "D", "H"].into_iter().zip(reference_counts) {
+        assert!(count > 0, "fixture stored no class-{class} queries");
+    }
+    let reference = reference.snapshot();
+    let raw_program = rank_program();
+    let reference_program = reference
+        .compile_rank_program(&raw_program)
+        .expect("reference program");
+
+    let mut config = ClusterConfig {
+        num_shards: 8,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    config.per_shard = engine_config;
+    let cluster = ClusterEngine::build_with_tags(vocab(), &config, &queries, &tags)
+        .expect("all-class cluster build");
+    let cluster_counts = cluster.class_counts().expect("class counts");
+    for (class, count) in ["A", "B", "C", "D", "H"].into_iter().zip(cluster_counts) {
+        assert!(count > 0, "cluster stored no class-{class} queries");
+    }
+    let cluster_program = cluster
+        .compile_rank_program(&raw_program)
+        .expect("cluster program");
+    let options = TopKOptions {
+        size: 32,
+        track_total_hits_up_to: 10_000,
+        query_scope: QueryScope::WithBroad,
+    };
+    let mut scratch = MatchScratch::new();
+    for title in titles.iter().take(80).chain(titles.iter().rev().take(2)) {
+        let want = reference
+            .try_match_title_top_k(
+                title,
+                options,
+                &reference_program,
+                &reverse_rusty::exact::TagPredicate::empty(),
+                &mut scratch,
+                None,
+            )
+            .expect("reference top k");
+        let got = cluster
+            .try_percolate_filtered_top_k(title, &[], options, &cluster_program, None)
+            .expect("cluster top k");
+        assert_eq!(
+            got.hits
+                .iter()
+                .map(|hit| (hit.logical_id, hit.score))
+                .collect::<Vec<_>>(),
+            want.hits
+                .iter()
+                .map(|hit| (hit.logical_id, hit.score))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(got.total_hits, want.total_hits);
+        assert!(got.shard_rows_received <= options.size * got.routed_shards);
+    }
+}
+
+#[test]
+fn global_threshold_overflow_and_generation_drift_fail_closed() {
+    let queries: Vec<(u64, String)> = (0..100u64)
+        .map(|id| (id + 1, format!("zzthreshold{id}")))
+        .collect();
+    let title = (0..100u64)
+        .map(|id| format!("zzthreshold{id}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("cluster build");
+    let program = cluster
+        .compile_rank_program(&RankProgramSpec {
+            priority_field: None,
+            boosts: Vec::new(),
+        })
+        .expect("rank program");
+    let exact = cluster
+        .try_percolate_filtered_top_k(
+            &title,
+            &[],
+            TopKOptions {
+                size: 100,
+                track_total_hits_up_to: 10_000,
+                query_scope: QueryScope::WithBroad,
+            },
+            &program,
+            None,
+        )
+        .expect("exact owner census");
+    assert_eq!(exact.total_hits, reverse_rusty::TotalHits::exact(100));
+    let mut owner_counts = [0u64; 3];
+    for hit in &exact.hits {
+        owner_counts[hit.owner_position as usize] += 1;
+    }
+    let threshold = *owner_counts.iter().max().expect("owners");
+    assert!(threshold < 100, "fixture must distribute ownership");
+    let bounded = cluster
+        .try_percolate_filtered_top_k(
+            &title,
+            &[],
+            TopKOptions {
+                size: 5,
+                track_total_hits_up_to: threshold,
+                query_scope: QueryScope::WithBroad,
+            },
+            &program,
+            None,
+        )
+        .expect("thresholded top k");
+    assert_eq!(
+        bounded.total_hits,
+        reverse_rusty::TotalHits::lower_bound(threshold),
+        "individually exact shard totals whose global sum crosses the threshold must merge to gte"
+    );
+
+    cluster.resize(4).expect("in-process resize");
+    assert!(
+        cluster.fetch_ranked_sources(&exact, None).is_err(),
+        "phase-two enrichment must reject placement generation drift"
+    );
+}
+
+#[test]
+fn top_k_preserves_dynamic_vocab_canonical_members_and_current_view_fetch() {
+    let seed = vec![(1u64, "seedterm".to_string())];
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..ClusterConfig::default()
+    };
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster build");
+    cluster
+        .add_query_with_tags(
+            10,
+            "zzdynamicterm",
+            &[("tier".to_string(), "gold".to_string())],
+        )
+        .expect("dynamic add 10");
+    cluster
+        .add_query_with_tags(
+            11,
+            "zzdynamicterm",
+            &[("tier".to_string(), "silver".to_string())],
+        )
+        .expect("canonical-body member 11");
+    let raw = RankProgramSpec {
+        priority_field: None,
+        boosts: vec![
+            ("tier".to_string(), "gold".to_string(), 20),
+            ("tier".to_string(), "silver".to_string(), -5),
+        ],
+    };
+    let program = cluster.compile_rank_program(&raw).expect("rank program");
+    let ranked = cluster
+        .try_percolate_filtered_top_k(
+            "zzdynamicterm",
+            &[],
+            TopKOptions {
+                size: 10,
+                track_total_hits_up_to: 10_000,
+                query_scope: QueryScope::Standard,
+            },
+            &program,
+            None,
+        )
+        .expect("dynamic top k");
+    let rows: Vec<(u64, i64)> = ranked
+        .hits
+        .iter()
+        .map(|hit| (hit.logical_id, hit.score))
+        .collect();
+    assert_eq!(rows, vec![(10, 20), (11, -5)]);
+    assert_eq!(
+        cluster.fetch_ranked_sources(&ranked, None).expect("fetch"),
+        vec!["zzdynamicterm".to_string(), "zzdynamicterm".to_string()]
+    );
+    assert!(matches!(
+        cluster.fetch_ranked_sources_bounded(&ranked, 2 * "zzdynamicterm".len() - 1, None),
+        Err(reverse_rusty::cluster::ClusterRankedError::EnrichmentLimit { .. })
+    ));
+    assert_eq!(
+        cluster
+            .fetch_ranked_sources_bounded(&ranked, 2 * "zzdynamicterm".len(), None)
+            .expect("exact byte credit"),
+        vec!["zzdynamicterm".to_string(), "zzdynamicterm".to_string()]
+    );
+
+    cluster.remove_query(10).expect("delete winner");
+    assert!(
+        cluster.fetch_ranked_sources(&ranked, None).is_err(),
+        "a missing current-view winner source invalidates all enrichment"
+    );
 }
 
 /// The cluster ranking differential: across K, for a sample of titles, the cluster's

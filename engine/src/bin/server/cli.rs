@@ -72,6 +72,12 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = 0)]
     pub(crate) max_concurrent_searches: usize,
 
+    /// Maximum source bytes fetched while enriching the final winners of one
+    /// local or cluster `POST /v2/_search`. The response fails with 413 before
+    /// returning partial enrichment when this bound is exceeded.
+    #[arg(long, default_value_t = crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES)]
+    pub(crate) max_ranked_enrichment_bytes: usize,
+
     /// Graceful shutdown drain timeout in seconds.
     #[arg(long, default_value_t = 30)]
     pub(crate) drain_timeout: u64,

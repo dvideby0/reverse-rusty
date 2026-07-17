@@ -61,6 +61,31 @@ impl Engine {
         ids
     }
 
+    fn legacy_rank_values(&self, tag_ids: &[TagId]) -> crate::rank::RankValues {
+        crate::rank::RankValues {
+            priority: self.tag_dict.legacy_priority_for_tags(tag_ids),
+        }
+    }
+
+    /// Cluster logs/translogs already persist raw tags, so a post-freeze typed
+    /// priority mirrored into `tags.priority` can be reconstructed without a
+    /// durable-format change. Exactly one parseable raw value wins; ambiguous
+    /// legacy tag sets retain the established TagDict behavior.
+    fn cluster_rank_values(
+        &self,
+        raw_tags: &[(String, String)],
+        tag_ids: &[TagId],
+    ) -> crate::rank::RankValues {
+        let mut priorities = raw_tags
+            .iter()
+            .filter(|(key, _)| key == "priority")
+            .filter_map(|(_, value)| value.parse::<i64>().ok());
+        match (priorities.next(), priorities.next()) {
+            (Some(priority), None) => crate::rank::RankValues { priority },
+            _ => self.legacy_rank_values(tag_ids),
+        }
+    }
+
     /// Resolve a query's raw `(key,value)` tags to a sorted + deduped `TagId` slice **read-only**
     /// against the engine's tag dict — the cluster-shard analogue of [`intern_tags`](Self::intern_tags)
     /// (ADR-055). Uses `get_or_synthetic` and NEVER `Arc::make_mut`, so the coordinator's frozen,
@@ -207,7 +232,8 @@ impl Engine {
                 report.rejected_parse += 1;
                 continue;
             }
-            match seg.add_compiled(ex, qtag_ids, &self.dict, *logical, 1, knobs) {
+            let rank = self.legacy_rank_values(qtag_ids);
+            match seg.add_compiled_ranked(ex, qtag_ids, &self.dict, *logical, 1, rank, knobs) {
                 None => {
                     self.rejected_class_d += 1;
                     report.rejected_class_d += 1;
@@ -302,6 +328,22 @@ impl Engine {
         version: u32,
         tags: &[(String, String)],
     ) -> Result<InsertOutcome, crate::error::WriteError> {
+        // Interning happens in the shared implementation after validation; raw
+        // legacy priority is re-derived from the resulting dense ids there.
+        self.try_insert_live_ranked(text, logical, version, tags, None)
+    }
+
+    /// Typed-rank insert used by the v2 ingest surface. `None` preserves the
+    /// permissive legacy tag behavior; `Some` stores the caller-validated fixed
+    /// priority and appends it to WAL v6.
+    pub fn try_insert_live_ranked(
+        &mut self,
+        text: &str,
+        logical: u64,
+        version: u32,
+        tags: &[(String, String)],
+        rank: Option<crate::rank::RankValues>,
+    ) -> Result<InsertOutcome, crate::error::WriteError> {
         // Parse first: a malformed query is a caller error and must never reach
         // the WAL (it carries no replayable mutation). Enforce the configured
         // complexity limits here, at the front door.
@@ -339,10 +381,15 @@ impl Engine {
         // marker that lets replay store it unconditionally while legacy frames
         // (logged before classification by pre-v5 binaries) keep the old gate.
         if let Some(ref mut wal) = self.wal {
-            let appended = if class == crate::compile::CostClass::D {
-                wal.append_insert_class_d(logical, version, text, tags)
-            } else {
-                wal.append_insert(logical, version, text, tags)
+            let appended = match (class == crate::compile::CostClass::D, rank) {
+                (true, Some(values)) => {
+                    wal.append_insert_class_d_ranked(logical, version, text, tags, values.priority)
+                }
+                (false, Some(values)) => {
+                    wal.append_insert_ranked(logical, version, text, tags, values.priority)
+                }
+                (true, None) => wal.append_insert_class_d(logical, version, text, tags),
+                (false, None) => wal.append_insert(logical, version, text, tags),
             };
             if let Err(e) = appended {
                 self.wal_healthy = false;
@@ -350,12 +397,13 @@ impl Engine {
             }
         }
         let tag_ids = self.intern_tags(tags);
+        let rank = rank.unwrap_or_else(|| self.legacy_rank_values(&tag_ids));
         let knobs = crate::segment::CompileKnobs {
             accept_class_d: true, // gated pre-WAL above (ADR-068)
             ..self.config.compile_knobs()
         };
         let outcome = Arc::make_mut(&mut self.memtable)
-            .add_compiled(&ex, &tag_ids, &self.dict, logical, version, knobs);
+            .add_compiled_ranked(&ex, &tag_ids, &self.dict, logical, version, rank, knobs);
         if let Some(added) = outcome {
             self.record_compiled(&added);
             self.query_store.insert(logical, text.to_string());
@@ -405,6 +453,18 @@ impl Engine {
         version: u32,
         tags: &[(String, String)],
     ) -> Result<UpsertOutcome, crate::error::WriteError> {
+        self.try_upsert_live_ranked(text, logical, version, tags, None)
+    }
+
+    /// Typed-rank atomic upsert; see [`try_insert_live_ranked`](Self::try_insert_live_ranked).
+    pub fn try_upsert_live_ranked(
+        &mut self,
+        text: &str,
+        logical: u64,
+        version: u32,
+        tags: &[(String, String)],
+        rank: Option<crate::rank::RankValues>,
+    ) -> Result<UpsertOutcome, crate::error::WriteError> {
         // Parse first: a malformed query is a caller error and must never reach
         // the WAL — and must never tombstone the prior version.
         let ast = crate::dsl::parse_with_limits(text, &self.config.parse_limits())
@@ -440,17 +500,22 @@ impl Engine {
         // resurrect the new version, it would tombstone the acknowledged-live prior
         // one — a false negative.
         if let Some(ref mut wal) = self.wal {
-            let appended = if class == crate::compile::CostClass::D {
-                wal.append_upsert_class_d(logical, version, text, tags)
-            } else {
-                wal.append_upsert(logical, version, text, tags)
+            let appended = match (class == crate::compile::CostClass::D, rank) {
+                (true, Some(values)) => {
+                    wal.append_upsert_class_d_ranked(logical, version, text, tags, values.priority)
+                }
+                (false, Some(values)) => {
+                    wal.append_upsert_ranked(logical, version, text, tags, values.priority)
+                }
+                (true, None) => wal.append_upsert_class_d(logical, version, text, tags),
+                (false, None) => wal.append_upsert(logical, version, text, tags),
             };
             if let Err(e) = appended {
                 self.wal_healthy = false;
                 return Err(crate::error::WriteError::Wal(e));
             }
         }
-        let outcome = self.apply_upsert(&ex, text, logical, version, tags, true, true);
+        let outcome = self.apply_upsert(&ex, text, logical, version, tags, rank, true, true);
         if matches!(
             outcome,
             UpsertOutcome::Created(_) | UpsertOutcome::Updated { .. }
@@ -492,6 +557,7 @@ impl Engine {
         logical: u64,
         version: u32,
         tags: &[(String, String)],
+        rank: Option<crate::rank::RankValues>,
         tombstone_in_segments: bool,
         accept_class_d: bool,
     ) -> UpsertOutcome {
@@ -520,12 +586,13 @@ impl Engine {
         }
 
         let tag_ids = self.intern_tags(tags);
+        let rank = rank.unwrap_or_else(|| self.legacy_rank_values(&tag_ids));
         let knobs = crate::segment::CompileKnobs {
             accept_class_d,
             ..self.config.compile_knobs()
         };
         let Some(added) = Arc::make_mut(&mut self.memtable)
-            .add_compiled(ex, &tag_ids, &self.dict, logical, version, knobs)
+            .add_compiled_ranked(ex, &tag_ids, &self.dict, logical, version, rank, knobs)
         else {
             // The new version is class D and not marked accepted (a legacy op-4
             // frame on replay, or an effectively empty query): leave the prior
@@ -560,12 +627,14 @@ impl Engine {
     /// default-parse-ceiling rule as [`replay_insert`](Self::replay_insert).
     /// `tombstone_in_segments` is `seq > wal_seq_watermark` at the dispatch site —
     /// see [`apply_upsert`](Self::apply_upsert) for the two state domains.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::segment) fn replay_upsert(
         &mut self,
         text: &str,
         logical: u64,
         version: u32,
         tags: &[(String, String)],
+        rank: Option<crate::rank::RankValues>,
         tombstone_in_segments: bool,
         class_d_accepted: bool,
     ) {
@@ -581,6 +650,7 @@ impl Engine {
                 logical,
                 version,
                 tags,
+                rank,
                 tombstone_in_segments,
                 class_d_accepted,
             );
@@ -748,6 +818,18 @@ impl Engine {
         queries: &[(u64, String)],
         tags: &[Vec<(String, String)>],
     ) -> std::io::Result<(IngestReport, Vec<IngestItemStatus>)> {
+        self.try_bulk_ingest_detailed_with_tags_and_ranks(queries, tags, &[])
+    }
+
+    /// Bulk ingest with optional fixed typed rank values parallel to `queries`.
+    /// An absent entry lowers permissive legacy `tags.priority`; a present value
+    /// is stored verbatim after the HTTP layer has validated/mirrored it.
+    pub fn try_bulk_ingest_detailed_with_tags_and_ranks(
+        &mut self,
+        queries: &[(u64, String)],
+        tags: &[Vec<(String, String)>],
+        ranks: &[Option<crate::rank::RankValues>],
+    ) -> std::io::Result<(IngestReport, Vec<IngestItemStatus>)> {
         let mut report = IngestReport::default();
         let mut lc = String::new();
         let mut extracted: Vec<(usize, u64, Extracted, &str)> = Vec::with_capacity(queries.len());
@@ -812,7 +894,12 @@ impl Engine {
                 ));
                 continue;
             }
-            match seg.add_compiled(ex, qtag_ids, &self.dict, *logical, 1, knobs) {
+            let rank = ranks
+                .get(*idx)
+                .copied()
+                .flatten()
+                .unwrap_or_else(|| self.legacy_rank_values(qtag_ids));
+            match seg.add_compiled_ranked(ex, qtag_ids, &self.dict, *logical, 1, rank, knobs) {
                 None => {
                     self.rejected_class_d += 1;
                     report.rejected_class_d += 1;
@@ -877,12 +964,18 @@ impl Engine {
                 tag_ids.sort_unstable();
                 tag_ids.dedup();
             }
-            if let Some(added) = seg.add_compiled(
+            let mut rank = item.rank;
+            if rank.priority == 0 {
+                rank = self.cluster_rank_values(&item.tags, &tag_ids);
+            }
+            if let Some(added) = seg.add_compiled_ranked_placed(
                 &item.ex,
                 &tag_ids,
                 &self.dict,
                 item.logical,
                 item.version,
+                rank,
+                &item.placement,
                 self.config.compile_knobs(),
             ) {
                 self.record_compiled(&added);
@@ -924,15 +1017,38 @@ impl Engine {
         text: &str,
         tags: &[(String, String)],
     ) -> Option<u32> {
+        self.insert_extracted_with_placement(
+            ex,
+            logical,
+            version,
+            text,
+            tags,
+            &crate::ownership::QueryPlacement::standalone(),
+        )
+    }
+
+    /// Cluster write path carrying ADR-109 placement metadata into the memtable.
+    pub fn insert_extracted_with_placement(
+        &mut self,
+        ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Option<u32> {
         // Resolve tags read-only against the shared frozen tag space (ADR-055); never the CoW
         // `intern_tags`. Empty ⇒ empty slice ⇒ byte-identical to the pre-tag `&[]` path.
         let tag_ids = self.resolve_tags_readonly(tags);
-        let outcome = Arc::make_mut(&mut self.memtable).add_compiled(
+        let rank = self.cluster_rank_values(tags, &tag_ids);
+        let outcome = Arc::make_mut(&mut self.memtable).add_compiled_ranked_placed(
             ex,
             &tag_ids,
             &self.dict,
             logical,
             version,
+            rank,
+            placement,
             self.config.compile_knobs(),
         );
         if let Some(added) = outcome {
@@ -965,10 +1081,12 @@ impl Engine {
         logical: u64,
         version: u32,
         tags: &[(String, String)],
+        rank: Option<crate::rank::RankValues>,
         class_d_accepted: bool,
     ) {
         if let Ok(ast) = crate::dsl::parse(text) {
             let tag_ids = self.intern_tags(tags);
+            let rank = rank.unwrap_or_else(|| self.legacy_rank_values(&tag_ids));
             let mut lc = String::new();
             let ex = {
                 let dict = Arc::make_mut(&mut self.dict);
@@ -979,7 +1097,7 @@ impl Engine {
                 ..self.config.compile_knobs()
             };
             if let Some(added) = Arc::make_mut(&mut self.memtable)
-                .add_compiled(&ex, &tag_ids, &self.dict, logical, version, knobs)
+                .add_compiled_ranked(&ex, &tag_ids, &self.dict, logical, version, rank, knobs)
             {
                 self.record_compiled(&added);
                 self.query_store.insert(logical, text.to_string());

@@ -21,9 +21,11 @@
 
 mod broad_cost;
 mod latency;
+mod rank_delivery;
 
 pub(crate) use broad_cost::{BroadCostSnapshot, SlotBroadCost};
 pub(crate) use latency::{LatencySnapshot, ShardRpc, SlotLatency, LATENCY_LE, SHARD_RPC_LABELS};
+pub(crate) use rank_delivery::{RankDeliverySnapshot, SlotRankDelivery};
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -48,6 +50,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(2);
 /// per-read timeout only fires when NO bytes arrive). 8 KiB is far above any real GET line (a scrape
 /// is < 200 bytes); an over-long / newline-less line just fails `is_metrics_get` and gets a 404.
 const MAX_REQUEST_BYTES: u64 = 8 * 1024;
+
+type BroadCounter = (&'static str, &'static str, fn(&BroadCostSnapshot) -> u64);
+type RankDeliveryCounter = (&'static str, &'static str, fn(&RankDeliverySnapshot) -> u64);
 
 // ---- text-exposition writer --------------------------------------------------------------------
 
@@ -148,6 +153,8 @@ pub(crate) struct ShardSample {
     /// Cumulative broad-lane cost totals for this slot (ADR-101). All-zero on a slot that has
     /// served no percolates — the families still render, so the series exist from the first scrape.
     pub broad: BroadCostSnapshot,
+    /// ADR-110 bounded result/fetch/cap/cancellation counters.
+    pub ranked: RankDeliverySnapshot,
 }
 
 /// Render a shard node's `/_metrics` body over ALL the node's loaded slots (ADR-093 multi-shard). A
@@ -314,7 +321,7 @@ pub(crate) fn render_shards(samples: &[ShardSample]) -> String {
     // `queries_evaluated`/`batches` are structurally 0 on today's per-title Percolate wire (the
     // columnar evaluator only runs under match_titles_batch, which no shard RPC reaches); they
     // render anyway for name symmetry — a future batch RPC lights them up without a rename.
-    for (name, help, get) in [
+    let broad_counters: [BroadCounter; 8] = [
         (
             "reverse_rusty_broad_candidates_total",
             "Broad-lane candidates retrieved by percolates on this shard.",
@@ -357,11 +364,63 @@ pub(crate) fn render_shards(samples: &[ShardSample]) -> String {
             "Hot-tier columnar sub-batches processed on this shard.",
             |b: &BroadCostSnapshot| b.hot_batches,
         ),
-    ] {
+    ];
+    for (name, help, get) in broad_counters {
         e.header_typed(name, help, "counter");
         for (s, sid) in samples.iter().zip(&sids) {
             e.sample(name, &[("shard", sid)], get(&s.broad));
         }
+    }
+
+    let rank_counters: [RankDeliveryCounter; 5] = [
+        (
+            "reverse_rusty_shard_top_k_hits_total",
+            "Owned bounded hits returned by top-k RPCs on this shard.",
+            |r: &RankDeliverySnapshot| r.top_k_hits,
+        ),
+        (
+            "reverse_rusty_shard_top_k_result_bytes_total",
+            "Exact encoded protobuf bytes returned by top-k RPCs on this shard.",
+            |r: &RankDeliverySnapshot| r.top_k_result_bytes,
+        ),
+        (
+            "reverse_rusty_shard_source_fetch_bytes_total",
+            "Current source-text bytes returned by winner fetches on this shard.",
+            |r: &RankDeliverySnapshot| r.fetch_source_bytes,
+        ),
+        (
+            "reverse_rusty_shard_rank_cancellations_total",
+            "Bounded rank or fetch work cancelled by an expired request deadline.",
+            |r: &RankDeliverySnapshot| r.cancellations,
+        ),
+        (
+            "reverse_rusty_shard_result_cap_rejections_total",
+            "Result messages rejected for exceeding the configured encoded protobuf cap.",
+            |r: &RankDeliverySnapshot| r.cap_rejections,
+        ),
+    ];
+    for (name, help, get) in rank_counters {
+        e.header_typed(name, help, "counter");
+        for (s, sid) in samples.iter().zip(&sids) {
+            e.sample(name, &[("shard", sid)], get(&s.ranked));
+        }
+    }
+    e.header_typed(
+        "reverse_rusty_shard_rank_total_relation_total",
+        "Top-k shard total-hit relation outcomes.",
+        "counter",
+    );
+    for (s, sid) in samples.iter().zip(&sids) {
+        e.sample(
+            "reverse_rusty_shard_rank_total_relation_total",
+            &[("shard", sid), ("relation", "eq")],
+            s.ranked.total_eq,
+        );
+        e.sample(
+            "reverse_rusty_shard_rank_total_relation_total",
+            &[("shard", sid), ("relation", "gte")],
+            s.ranked.total_gte,
+        );
     }
 
     // Every slot handed to this renderer holds a serving `ServerState` (the caller filters to loaded

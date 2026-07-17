@@ -15,6 +15,19 @@ use crate::normalize::Normalizer;
 use crate::storage::serialize_dict;
 use crate::tagdict::TagDict;
 
+const TEST_NUM_SHARDS: u32 = 16;
+
+fn placed_at(shard_id: u32, num_shards: u32) -> proto::QueryPlacement {
+    proto::placement_to_proto(
+        &crate::ownership::QueryPlacement::selective(
+            crate::ownership::PlacementGeneration::INITIAL,
+            num_shards,
+            vec![shard_id],
+        )
+        .expect("valid test placement"),
+    )
+}
+
 fn norm() -> Arc<Normalizer> {
     Arc::new(Normalizer::default_vocab().expect("built-in vocab"))
 }
@@ -47,6 +60,8 @@ fn adopt_req_shard(dict: &Dict, shard_id: u32) -> Request<proto::AdoptDictReques
         tag_dict: Vec::new(),
         tag_dict_fingerprint: empty_tag_fp(),
         shard_id,
+        placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
+        num_shards: TEST_NUM_SHARDS,
     })
 }
 
@@ -110,6 +125,8 @@ fn adopt_dict_state_machine() {
         tag_dict: Vec::new(),
         tag_dict_fingerprint: empty_tag_fp(),
         shard_id: 0,
+        placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
+        num_shards: TEST_NUM_SHARDS,
     });
     assert_eq!(
         rt.block_on(srv.adopt_dict(bad))
@@ -151,8 +168,22 @@ fn insert_req(shard_id: u32, id: u64, dsl: &str) -> Request<proto::InsertRequest
             dsl: dsl.to_string(),
             version: 1,
             tags: Vec::new(),
+            placement: Some(placed_at(shard_id, TEST_NUM_SHARDS)),
         }),
         shard_id,
+    })
+}
+
+fn insert_req_single(id: u64, dsl: &str) -> Request<proto::InsertRequest> {
+    Request::new(proto::InsertRequest {
+        item: Some(proto::AddItem {
+            logical_id: id,
+            dsl: dsl.to_string(),
+            version: 1,
+            tags: Vec::new(),
+            placement: Some(placed_at(0, 1)),
+        }),
+        shard_id: 0,
     })
 }
 
@@ -176,7 +207,7 @@ fn fence_rejects_writes_but_serves_reads() {
     srv.ingest_dsl(&[(1u64, "1994 upper deck".to_string())]);
 
     // Before the fence: a write succeeds.
-    rt.block_on(srv.insert_extracted(insert_req(0, 2, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req_single(2, "psa 10")))
         .expect("insert before fence");
 
     // Fence at generation 5.
@@ -186,6 +217,8 @@ fn fence_rejects_writes_but_serves_reads() {
             dict_fingerprint: fp,
             tag_dict_fingerprint: tag_fp,
             shard_id: 0,
+            placement_generation: 1,
+            num_shards: 1,
         })))
         .expect("fence")
         .into_inner()
@@ -194,7 +227,7 @@ fn fence_rejects_writes_but_serves_reads() {
 
     // After the fence: every data-mutating write is rejected.
     assert_eq!(
-        rt.block_on(srv.insert_extracted(insert_req(0, 3, "psa 10")))
+        rt.block_on(srv.insert_extracted(insert_req_single(3, "psa 10")))
             .expect_err("insert after fence")
             .code(),
         Code::FailedPrecondition
@@ -203,6 +236,8 @@ fn fence_rejects_writes_but_serves_reads() {
         rt.block_on(srv.delete(Request::new(proto::DeleteRequest {
             logical_id: 1,
             shard_id: 0,
+            placement_generation: 1,
+            num_shards: 1,
         })))
         .expect_err("delete after fence")
         .code(),
@@ -225,13 +260,24 @@ fn fence_rejects_writes_but_serves_reads() {
         .into_inner()
         .count;
     assert!(cnt >= 1, "reads stay served while fenced: {cnt}");
-    rt.block_on(srv.percolate(Request::new(proto::PercolateRequest {
-        title: "1994 upper deck".to_string(),
-        include_broad: false,
-        filter: Vec::new(),
-        rank: None,
-        shard_id: 0,
-    })))
+    rt.block_on(
+        srv.percolate(Request::new(proto::PercolateRequest {
+            title: "1994 upper deck".to_string(),
+            include_broad: false,
+            filter: Vec::new(),
+            rank: None,
+            shard_id: 0,
+            ownership: Some(proto::ownership_to_proto(
+                &crate::ownership::OwnershipContext::new(
+                    crate::ownership::PlacementGeneration::INITIAL,
+                    1,
+                    vec![0],
+                    None,
+                )
+                .expect("ownership context"),
+            )),
+        })),
+    )
     .expect("percolate after fence");
 
     // Monotonic: a stale, lower-generation fence never lowers the fence.
@@ -241,13 +287,15 @@ fn fence_rejects_writes_but_serves_reads() {
             dict_fingerprint: fp,
             tag_dict_fingerprint: tag_fp,
             shard_id: 0,
+            placement_generation: 1,
+            num_shards: 1,
         })))
         .expect("stale fence")
         .into_inner()
         .fenced_at_generation;
     assert_eq!(after_stale, 5, "a lower-gen fence must not lower the fence");
     assert_eq!(
-        rt.block_on(srv.insert_extracted(insert_req(0, 4, "psa 10")))
+        rt.block_on(srv.insert_extracted(insert_req_single(4, "psa 10")))
             .expect_err("still fenced after a stale fence")
             .code(),
         Code::FailedPrecondition
@@ -260,6 +308,8 @@ fn fence_rejects_writes_but_serves_reads() {
             dict_fingerprint: fp ^ 0xDEAD_BEEF,
             tag_dict_fingerprint: tag_fp,
             shard_id: 0,
+            placement_generation: 1,
+            num_shards: 1,
         })))
         .expect_err("fence fp mismatch")
         .code(),
@@ -300,6 +350,8 @@ fn per_shard_fence_isolation() {
             dict_fingerprint: fp,
             tag_dict_fingerprint: tag_fp,
             shard_id: 0,
+            placement_generation: 1,
+            num_shards: TEST_NUM_SHARDS,
         })))
         .expect("fence slot 0")
         .into_inner()
@@ -324,6 +376,8 @@ fn per_shard_fence_isolation() {
             dict_fingerprint: fp,
             tag_dict_fingerprint: tag_fp,
             shard_id: 0,
+            placement_generation: 1,
+            num_shards: TEST_NUM_SHARDS,
         })))
         .expect("unfence slot 0")
         .into_inner()
@@ -339,6 +393,8 @@ fn add_shard_req(shard_id: u32, fp: u64, tag_fp: u64) -> Request<proto::AddShard
         shard_id,
         dict_fingerprint: fp,
         tag_dict_fingerprint: tag_fp,
+        placement_generation: 1,
+        num_shards: TEST_NUM_SHARDS,
     })
 }
 
@@ -518,6 +574,8 @@ fn drop_req(
         expected_fence_generation: expected_gen,
         dict_fingerprint: fp,
         tag_dict_fingerprint: tag_fp,
+        placement_generation: 1,
+        num_shards: 1,
     })
 }
 
@@ -535,13 +593,15 @@ fn list_shards_reports_slots_fence_and_counts() {
         td.fingerprint()
     };
     let srv = ShardServer::new(Arc::clone(&n), Arc::new(d), EngineConfig::default());
-    rt.block_on(srv.insert_extracted(insert_req(0, 10, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req_single(10, "psa 10")))
         .expect("write slot 0");
     rt.block_on(srv.fence(Request::new(proto::FenceRequest {
         generation: 7,
         dict_fingerprint: fp,
         tag_dict_fingerprint: tag_fp,
         shard_id: 0,
+        placement_generation: 1,
+        num_shards: 1,
     })))
     .expect("fence slot 0");
 
@@ -597,6 +657,8 @@ fn drop_shard_guards_refuse_unarmed_mismatched_and_divergent() {
         dict_fingerprint: fp,
         tag_dict_fingerprint: tag_fp,
         shard_id: 0,
+        placement_generation: 1,
+        num_shards: 1,
     })))
     .expect("fence");
     let err = rt
@@ -638,6 +700,8 @@ fn drop_shard_refuses_held_retention_lease_then_drops_after_release() {
         dict_fingerprint: fp,
         tag_dict_fingerprint: tag_fp,
         shard_id: 0,
+        placement_generation: 1,
+        num_shards: 1,
     })))
     .expect("fence");
     // Acquire a lease through the real RPC (the default TTL is 1800s — never expires in-test).
@@ -650,6 +714,8 @@ fn drop_shard_refuses_held_retention_lease_then_drops_after_release() {
                 dict_fingerprint: fp,
                 tag_dict_fingerprint: tag_fp,
                 shard_id: 0,
+                placement_generation: 1,
+                num_shards: 1,
             })),
         )
         .expect("acquire lease")
@@ -669,6 +735,8 @@ fn drop_shard_refuses_held_retention_lease_then_drops_after_release() {
             dict_fingerprint: fp,
             tag_dict_fingerprint: tag_fp,
             shard_id: 0,
+            placement_generation: 1,
+            num_shards: 1,
         })),
     )
     .expect("release lease");
@@ -698,10 +766,14 @@ fn drop_shard_removes_slot_and_dir_and_is_idempotent() {
         dir.clone(),
     )
     .expect("durable server");
-    rt.block_on(srv.insert_extracted(insert_req(0, 10, "psa 10")))
+    rt.block_on(srv.insert_extracted(insert_req_single(10, "psa 10")))
         .expect("write slot 0");
-    rt.block_on(srv.flush(Request::new(proto::FlushRequest { shard_id: 0 })))
-        .expect("flush to disk");
+    rt.block_on(srv.flush(Request::new(proto::FlushRequest {
+        shard_id: 0,
+        placement_generation: 1,
+        num_shards: 1,
+    })))
+    .expect("flush to disk");
     assert!(
         dir.join("shard_000").exists(),
         "the slot dir exists on disk"
@@ -719,6 +791,8 @@ fn drop_shard_removes_slot_and_dir_and_is_idempotent() {
         dict_fingerprint: fp,
         tag_dict_fingerprint: fenced_tag_fp,
         shard_id: 0,
+        placement_generation: 1,
+        num_shards: 1,
     })))
     .expect("fence");
 
@@ -793,6 +867,8 @@ fn unfence_refuses_to_clear_the_drop_tombstone() {
         dict_fingerprint: fp,
         tag_dict_fingerprint: tag_fp,
         shard_id: 0,
+        placement_generation: 1,
+        num_shards: 1,
     })))
     .expect("fence to the tombstone value");
 
@@ -803,6 +879,8 @@ fn unfence_refuses_to_clear_the_drop_tombstone() {
             dict_fingerprint: fp,
             tag_dict_fingerprint: tag_fp,
             shard_id: 0,
+            placement_generation: 1,
+            num_shards: 1,
         })))
         .expect("unfence call succeeds (as a no-op)")
         .into_inner()
@@ -811,5 +889,59 @@ fn unfence_refuses_to_clear_the_drop_tombstone() {
         after,
         u64::MAX,
         "the tombstone survives an exact-value unfence — a mid-drop slot can never be re-armed"
+    );
+}
+
+#[test]
+fn grpc_result_cap_can_only_be_lowered_within_static_bounds() {
+    let n = norm();
+    let server = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
+    assert!(server.with_max_grpc_result_bytes(0).is_err());
+
+    let server = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
+    assert!(server
+        .with_max_grpc_result_bytes(super::MAX_GRPC_RESULT_BYTES + 1)
+        .is_err());
+
+    let server = ShardServer::pending(n, EngineConfig::default());
+    assert!(server.with_max_grpc_result_bytes(1).is_ok());
+}
+
+/// `ingest_dsl` preloads must be emitted under ownership-suppressed cluster reads:
+/// stamping them `QueryPlacement::standalone()` made `owner()` return `None` for
+/// every preloaded row, so the whole preload silently vanished from percolation
+/// (OK status, zero ids — a zero-FN violation; review finding). The preload now
+/// stamps the node space's real slot-0 selective placement.
+#[test]
+fn ingest_dsl_preload_is_emitted_under_ownership() {
+    use crate::cluster::shard::Shard;
+
+    let norm = norm();
+    let dict = Arc::new(frozen_dict(&["1994 topps"], &norm));
+    let server = ShardServer::new(Arc::clone(&norm), dict, EngineConfig::default());
+    server.ingest_dsl(&[(7u64, "1994 topps".to_string())]);
+
+    let (_, st) = server.loaded_slot(0).expect("slot 0 loaded");
+    let context = crate::ownership::OwnershipContext::new(
+        crate::ownership::PlacementGeneration::INITIAL,
+        1,
+        vec![0],
+        None,
+    )
+    .expect("context");
+    let (ids, _) = st
+        .shard
+        .percolate_filtered_owned(
+            "1994 topps baseball",
+            true,
+            &crate::exact::TagPredicate::empty(),
+            &context,
+            0,
+        )
+        .expect("owned percolate");
+    assert_eq!(
+        ids,
+        vec![7],
+        "preloaded row must be emitted, not suppressed"
     );
 }

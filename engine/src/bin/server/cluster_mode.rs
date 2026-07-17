@@ -43,7 +43,7 @@ use crate::handlers::{
     cluster_mpercolate, cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign,
     cluster_rebalance, cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback,
     cluster_resize, cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
-    cluster_validate_and_apply_feedback,
+    cluster_v2_search, cluster_validate_and_apply_feedback,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -312,6 +312,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         .num_threads(cli.threads.unwrap_or(0))
         .build()
         .expect("failed to build rayon thread pool");
+    let ranked_workers = pool.current_num_threads().max(1);
 
     let state = Arc::new(ClusterAppState {
         cluster: RwLock::new(cluster),
@@ -319,6 +320,8 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         pool,
         search_permits: (cli.max_concurrent_searches > 0)
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
+        ranked_search_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(ranked_workers)),
+        max_ranked_enrichment_bytes: cli.max_ranked_enrichment_bytes,
         include_broad: cli.include_broad,
         prom,
         slow_query_threshold_ms: cli.slow_query_threshold_ms,
@@ -334,6 +337,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
                 .delete(cluster_delete_doc),
         )
         .route("/_search", post(cluster_search))
+        .route("/v2/_search", post(cluster_v2_search))
         .route("/_mpercolate", post(cluster_mpercolate))
         .route("/_bulk", post(cluster_bulk))
         .route("/_flush", post(cluster_flush))

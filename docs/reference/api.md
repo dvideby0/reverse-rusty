@@ -28,6 +28,7 @@ Options:
 | `--vocab-file` | — | Load vocabulary from a JSON file at startup |
 | `--threads` | *(physical cores)* | Number of rayon worker threads |
 | `--max-concurrent-searches` | 0 *(unbounded)* | Max `/_search`+`/_mpercolate` requests occupying the match pool at once; excess queue within their own `timeout_ms` (ADR-099) |
+| `--max-ranked-enrichment-bytes` | 16777216 (16 MiB) | Maximum winner source bytes fetched by one local or cluster `/v2/_search`; overflow fails the whole response with `413 rank_enrichment_limit` (ADR-110) |
 | `--include-broad` | false | Include broad-lane (class C) queries in results |
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |
@@ -81,7 +82,7 @@ curl -X PUT localhost:9200/_doc/1 -H "Authorization: Bearer $RR_AUTH_TOKEN" \
 With a token configured (`RR_AUTH_TOKEN` env var or `--auth-token`; the env var is preferred — flag
 values appear in process listings), **every non-GET/HEAD request requires
 `Authorization: Bearer <token>`** except the read-via-POST percolate endpoints (`POST /_search`,
-`POST /_mpercolate`). That default-deny rule covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
+`POST /v2/_search`, `POST /_mpercolate`). That default-deny rule covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
 `_backup`, `_vocab` writes (including `/_vocab/learn*` and `/_vocab/aliases/*`), `_settings` writes — and any
 future mutating endpoint, which fails closed rather than open. Reads stay open unless
 `--auth-protect-reads` extends the gate to them too (stored queries are data worth protecting on an
@@ -130,7 +131,7 @@ curl localhost:9200/
 Endpoints are grouped by concern — open the one you need:
 
 - **[Documents](api/documents.md)** — register / retrieve / delete a stored query (`PUT`/`GET`/`DELETE /_doc/{id}`), incl. per-query metadata tags.
-- **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`, `POST /_mpercolate`), incl. filtered percolation.
+- **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`, local/cluster bounded `POST /v2/_search`, `POST /_mpercolate`), incl. filtered percolation.
 - **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`, `/_flush`, `/_compact`).
 - **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
 - **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias registry (`/_vocab/aliases*`, ADR-060).
@@ -148,6 +149,7 @@ The full method/path matrix is below.
 | `/_doc/{id}` | PUT | Register **or atomically replace** a query (201 created / 200 updated, ADR-067) |
 | `/_doc/{id}` | DELETE | Remove a stored query |
 | `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
+| `/v2/_search` | POST | Single-node or cluster, single-document exact bounded top-K + winner-only enrichment (ADR-107/108/110) |
 | `/_mpercolate` | POST | Batch percolate (high throughput; columnar broad lane; `responses[]` envelope) |
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |
 | `/_flush` | POST | Flush memtable to immutable segment |
@@ -204,7 +206,10 @@ then use `https://`), `--grpc-tls-domain` (SNI/verification override for raw-IP 
 from the HTTP `--auth-token`). The server side of the mesh is configured on
 `shardserver`/`controlserver` (`--tls-cert`/`--tls-key`/`--cluster-token`; both also take the
 client half `--tls-ca`/`--tls-domain` — the controlserver for its peer Raft links, the
-shardserver for the `RecoverFrom` outbound pull from a peer source). `--data-dir` makes
+shardserver for the `RecoverFrom` outbound pull from a peer source). `shardserver` also takes
+`--max-grpc-result-bytes` (default/hard ceiling 4 MiB; any positive lower byte bound is valid),
+enforced against exact protobuf size for compatibility replies, top-K replies, and every fetched
+source stream item (ADR-110). `--data-dir` makes
 an **in-process** cluster durable (build once, reopen on restart — `--load-file` is skipped with a
 warning when the reopened cluster is already populated). A **remote** coordinator is stateless and
 refuses `--data-dir`: durability lives on the shard nodes (`shardserver --data-dir`, the per-shard
@@ -223,8 +228,16 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   boundary: a **post-freeze (live-added) `priority` tag scores 0** — priority reads the tag's value
   string, which only a build-time interned tag has; boosts fire for both (id-equality). `explain` is
   rejected with 400 — never silently ignored. `profile` works (merged cross-shard `MatchStats`).
-- **`include_source` defaults to `false`** (`_source` costs a per-hit source probe); explicitly
-  requesting it on a remote cluster answers 501 (remote shards expose no source readback in v1).
+  This paragraph describes compatibility `/_search`/`/_mpercolate`.
+- **`/v2/_search` uses ADR-110 bounded delivery** — at most K owned hits per routed position,
+  exact coordinator merge, honest thresholded totals, current-source fetch for final winners, and
+  coordinator-compiled explanations. It defaults `include_source=true`, supports remote shards, and
+  fails the whole response on timeout, stale placement, missing source, fetch/protocol failure, or
+  enrichment overflow; partial results are unsupported. Strict typed `rank_fields.priority` remains
+  signed and available after tag-dict freeze.
+- **Compatibility `include_source` defaults to `false`** (`_source` costs a per-hit source probe);
+  explicitly requesting it on a remote cluster answers 501. ADR-110 source streaming applies only to
+  `/v2/_search`.
 - **`GET /_settings` works in cluster mode** — it returns the live cluster + per-shard configuration
   (`mode`, `shards`, `replication_factor`, `include_broad`, `durable`, and the assembled `per_shard`
   `EngineConfig`). Only **`PUT /_settings`** is 501 in cluster mode (see below).

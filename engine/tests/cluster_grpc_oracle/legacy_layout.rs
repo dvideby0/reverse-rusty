@@ -1,18 +1,17 @@
-//! ADR-080 layout handshake (P1, codex review): a coordinator that routes the broad lane on a
-//! per-title broad-eval shard ASSUMES every shard holds the replicated lane. So it must REFUSE a
-//! remote shard server that does not attest the replicate-to-all layout (`broad_replicate_all`
-//! false — a pre-ADR-080 server keeps broad only on shard 0), else broad matches off shard 0 are
-//! silently dropped (a false negative — the cardinal sin). A real ADR-080 `ShardServer` attests
-//! `true`, so the happy path is exercised by EVERY other oracle in this suite (they all connect to
-//! real servers); here we stand up a MOCK service that attests `false` — a stand-in for a populated
-//! pre-ADR-080 server — and prove BOTH connect paths (`connect` and `connect_and_adopt`) fail loud,
-//! with a real server as the control. Mirrors the dict / tag-dict fingerprint handshake refusals.
+//! ADR-109 ownership handshake: a coordinator must refuse a pre-ADR-109 server that cannot attest
+//! its placement generation and shard count, and a server carrying a stale generation must fail
+//! closed on adoption. Otherwise the coordinator could trust a reply whose rows use a different
+//! emission-owner function. A real `ShardServer` attests both fields, so the happy path is exercised
+//! by every other oracle in this suite; this file supplies the old/stale peer controls.
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use raw::shard_service_server::{ShardService, ShardServiceServer};
-use reverse_rusty::cluster::{RemoteShard, ShardError, ShardServer};
+use reverse_rusty::cluster::{
+    ClusterConfig, ClusterEngine, ClusterRankedError, RemoteShard, ShardError, ShardServer,
+};
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty_shard_proto as raw;
 use tokio_stream::Stream;
@@ -21,17 +20,18 @@ use tonic::{Request, Response, Status};
 
 use crate::harness::*;
 
-/// A minimal mock `ShardService` that answers the connect-time handshake with MATCHING dict +
-/// tag-dict fingerprints but `broad_replicate_all = false` — i.e. it looks like a populated
-/// pre-ADR-080 server (the dict identity checks pass; only the layout attestation differs). Every
-/// other RPC is `unimplemented`: the connect guard rejects before any of them is reached.
-struct LegacyLayoutServer {
+/// A minimal mock `ShardService` with matching feature-space fingerprints and a configurable
+/// ownership attestation. Every other RPC is unimplemented: the connect guard rejects first.
+struct LegacyOwnershipServer {
     dict_fp: u64,
     tag_fp: u64,
+    placement_generation: u64,
+    num_shards: u32,
+    top_k_delay: Option<Duration>,
 }
 
 #[tonic::async_trait]
-impl ShardService for LegacyLayoutServer {
+impl ShardService for LegacyOwnershipServer {
     async fn dict_fingerprint(
         &self,
         _req: Request<raw::Empty>,
@@ -39,8 +39,9 @@ impl ShardService for LegacyLayoutServer {
         Ok(Response::new(raw::DictFingerprintReply {
             fingerprint: self.dict_fp,
             tag_dict_fingerprint: self.tag_fp,
-            // The crux: a pre-ADR-080 server omits the field (proto3 false).
-            broad_replicate_all: false,
+            broad_replicate_all: true,
+            placement_generation: self.placement_generation,
+            num_shards: self.num_shards,
         }))
     }
 
@@ -48,13 +49,14 @@ impl ShardService for LegacyLayoutServer {
         &self,
         req: Request<raw::AdoptDictRequest>,
     ) -> Result<Response<raw::AdoptDictReply>, Status> {
-        // Echo the shipped fingerprints (so the fingerprint checks pass) but attest the OLD layout,
-        // so connect_and_adopt is rejected by the layout guard, not the fingerprint guard.
+        // Echo the shipped fingerprints so only the ownership attestation decides the result.
         let r = req.into_inner();
         Ok(Response::new(raw::AdoptDictReply {
             fingerprint: r.fingerprint,
             tag_dict_fingerprint: r.tag_dict_fingerprint,
-            broad_replicate_all: false,
+            broad_replicate_all: true,
+            placement_generation: self.placement_generation,
+            num_shards: self.num_shards,
         }))
     }
 
@@ -69,6 +71,37 @@ impl ShardService for LegacyLayoutServer {
         &self,
         _req: Request<raw::PercolateRequest>,
     ) -> Result<Response<raw::PercolateReply>, Status> {
+        Err(Status::unimplemented("legacy mock"))
+    }
+    async fn percolate_top_k(
+        &self,
+        req: Request<raw::PercolateTopKRequest>,
+    ) -> Result<Response<raw::PercolateTopKReply>, Status> {
+        let Some(delay) = self.top_k_delay else {
+            return Err(Status::unimplemented("legacy mock"));
+        };
+        tokio::time::sleep(delay).await;
+        let request = req.into_inner();
+        Ok(Response::new(raw::PercolateTopKReply {
+            hits: Vec::new(),
+            total_hits: Some(raw::BoundedTotalHits {
+                value: 0,
+                exact: true,
+            }),
+            stats: Some(raw::MatchStats::default()),
+            rank_stats: Some(raw::BoundedRankStats::default()),
+            bounded: true,
+            ownership_applied: true,
+            requested_size: request.size,
+            placement_generation: self.placement_generation,
+            num_shards: self.num_shards,
+        }))
+    }
+    type FetchMatchesStream = Pin<Box<dyn Stream<Item = Result<raw::FetchMatch, Status>> + Send>>;
+    async fn fetch_matches(
+        &self,
+        _req: Request<raw::FetchMatchesRequest>,
+    ) -> Result<Response<Self::FetchMatchesStream>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
     async fn num_queries(
@@ -169,10 +202,10 @@ impl ShardService for LegacyLayoutServer {
     }
 }
 
-/// Both connect paths refuse a server that does not attest the replicate-to-all broad layout;
-/// a real ADR-080 server (the control) connects cleanly.
+/// Both connect paths refuse an old peer with no ownership attestation; adoption also refuses a
+/// nonzero but stale generation. A real ADR-109 server is the positive control.
 #[test]
-fn grpc_connect_refuses_a_pre_adr080_broad_layout() {
+fn grpc_connect_refuses_missing_or_stale_ownership_attestation() {
     let norm = Arc::new(vocab());
     let dict = frozen_dict_with(&[], &norm);
     let dict_fp = dict.fingerprint();
@@ -180,42 +213,55 @@ fn grpc_connect_refuses_a_pre_adr080_broad_layout() {
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    // The legacy mock: matching fingerprints, but broad_replicate_all = false.
-    let legacy_addr = {
+    let start_mock = |placement_generation, num_shards| {
         let _enter = rt.enter();
         let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
         let addr = incoming.local_addr().expect("addr");
-        let svc = ShardServiceServer::new(LegacyLayoutServer { dict_fp, tag_fp });
+        let svc = ShardServiceServer::new(LegacyOwnershipServer {
+            dict_fp,
+            tag_fp,
+            placement_generation,
+            num_shards,
+            top_k_delay: None,
+        });
         rt.spawn(
             tonic::transport::Server::builder()
                 .add_service(svc)
                 .serve_with_incoming(incoming),
         );
-        addr
+        wait_until_listening(addr);
+        format!("http://{addr}")
     };
-    wait_until_listening(legacy_addr);
-    let legacy_ep = format!("http://{legacy_addr}");
+    let legacy_ep = start_mock(0, 0);
 
-    let names_the_layout = |e: &ShardError| {
-        let m = e.to_string();
-        m.contains("replicate-to-all") || m.contains("broad_replicate_all")
-    };
-
-    // 1. The bare `connect` handshake refuses the legacy layout, naming the cause.
+    // 1. The bare handshake refuses a proto3-defaulted pre-ADR-109 peer.
     match RemoteShard::connect(&legacy_ep, rt.handle().clone(), dict_fp, tag_fp, 0) {
-        Err(e) => assert!(
-            names_the_layout(&e),
-            "connect refusal must name the layout: {e}"
-        ),
-        Ok(_) => panic!("connect SUCCEEDED against a pre-ADR-080 broad layout"),
+        Err(ShardError::OwnershipMismatch(_)) => {}
+        Err(e) => panic!("expected typed ownership refusal, got {e}"),
+        Ok(_) => panic!("connect SUCCEEDED against a pre-ADR-109 peer"),
     }
 
-    // 2. The connect_and_adopt path refuses it too — a populated old server whose dict matches ours
-    // would otherwise adopt as an idempotent no-op and slip past the fingerprint checks.
+    // 2. The adopt path refuses the same old peer.
     let dict_bytes = reverse_rusty::storage::serialize_dict(&dict);
     let tag_bytes = reverse_rusty::storage::serialize_tagdict(&empty_tag_dict());
     match RemoteShard::connect_and_adopt(
         &legacy_ep,
+        rt.handle().clone(),
+        dict_bytes.clone(),
+        dict_fp,
+        tag_bytes.clone(),
+        tag_fp,
+        0,
+    ) {
+        Err(ShardError::OwnershipMismatch(_)) => {}
+        Err(e) => panic!("expected typed ownership refusal, got {e}"),
+        Ok(_) => panic!("connect_and_adopt SUCCEEDED against a pre-ADR-109 peer"),
+    }
+
+    // 3. A nonzero but stale peer is also refused; zero-only checking would miss this.
+    let stale_ep = start_mock(2, 1);
+    match RemoteShard::connect_and_adopt(
+        &stale_ep,
         rt.handle().clone(),
         dict_bytes,
         dict_fp,
@@ -223,14 +269,12 @@ fn grpc_connect_refuses_a_pre_adr080_broad_layout() {
         tag_fp,
         0,
     ) {
-        Err(e) => assert!(
-            names_the_layout(&e),
-            "adopt-path refusal must name the layout: {e}"
-        ),
-        Ok(_) => panic!("connect_and_adopt SUCCEEDED against a pre-ADR-080 broad layout"),
+        Err(ShardError::OwnershipMismatch(_)) => {}
+        Err(e) => panic!("expected stale-generation ownership refusal, got {e}"),
+        Ok(_) => panic!("connect_and_adopt SUCCEEDED against a stale ownership generation"),
     }
 
-    // Control: a REAL ADR-080 ShardServer attests the layout, so connect succeeds.
+    // Control: a real ADR-109 server attests generation + shard count, so connect succeeds.
     let real_addr = {
         let _enter = rt.enter();
         let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
@@ -246,5 +290,123 @@ fn grpc_connect_refuses_a_pre_adr080_broad_layout() {
     wait_until_listening(real_addr);
     let real_ep = format!("http://{real_addr}");
     RemoteShard::connect(&real_ep, rt.handle().clone(), dict_fp, tag_fp, 0)
-        .expect("a real ADR-080 server attests the replicate-to-all layout");
+        .expect("a real ADR-109 server attests ownership configuration");
+}
+
+/// A peer can satisfy ADR-109 ownership yet predate ADR-110. The additive RPC
+/// must fail loud with UNIMPLEMENTED; the coordinator never falls back to the
+/// unbounded compatibility percolate and presents it as an exact bounded result.
+#[test]
+fn distributed_top_k_refuses_pre_adr_110_peer() {
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_with(&[], &norm);
+    let tag_dict = empty_tag_dict();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let endpoint = {
+        let _enter = rt.enter();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let address = incoming.local_addr().expect("address");
+        let service = ShardServiceServer::new(LegacyOwnershipServer {
+            dict_fp: dict.fingerprint(),
+            tag_fp: tag_dict.fingerprint(),
+            placement_generation: 1,
+            num_shards: 1,
+            top_k_delay: None,
+        });
+        rt.spawn(
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming),
+        );
+        wait_until_listening(address);
+        format!("http://{address}")
+    };
+    let cluster = ClusterEngine::connect_remote(
+        norm,
+        dict,
+        tag_dict,
+        &ClusterConfig {
+            num_shards: 1,
+            ..ClusterConfig::default()
+        },
+        &[endpoint],
+        rt.handle(),
+    )
+    .expect("ADR-109 handshake succeeds");
+    let program = cluster
+        .compile_rank_program(&reverse_rusty::RankProgramSpec::default())
+        .expect("rank program");
+    let error = cluster
+        .try_percolate_filtered_top_k(
+            "topps chrome",
+            &[],
+            reverse_rusty::TopKOptions::default(),
+            &program,
+            None,
+        )
+        .expect_err("pre-ADR-110 peer must be refused");
+    assert!(matches!(
+        error,
+        ClusterRankedError::Shard(ShardError::Remote(_))
+    ));
+}
+
+#[test]
+fn distributed_top_k_keeps_one_absolute_deadline_across_transport() {
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_with(&[], &norm);
+    let tag_dict = empty_tag_dict();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let endpoint = {
+        let _enter = rt.enter();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let address = incoming.local_addr().expect("address");
+        let service = ShardServiceServer::new(LegacyOwnershipServer {
+            dict_fp: dict.fingerprint(),
+            tag_fp: tag_dict.fingerprint(),
+            placement_generation: 1,
+            num_shards: 1,
+            top_k_delay: Some(Duration::from_millis(100)),
+        });
+        rt.spawn(
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming),
+        );
+        wait_until_listening(address);
+        format!("http://{address}")
+    };
+    let cluster = ClusterEngine::connect_remote(
+        norm,
+        dict,
+        tag_dict,
+        &ClusterConfig {
+            num_shards: 1,
+            ..ClusterConfig::default()
+        },
+        &[endpoint],
+        rt.handle(),
+    )
+    .expect("remote cluster");
+    let program = cluster
+        .compile_rank_program(&reverse_rusty::RankProgramSpec::default())
+        .expect("rank program");
+    let started = Instant::now();
+    let error = cluster
+        .try_percolate_filtered_top_k(
+            "topps chrome",
+            &[],
+            reverse_rusty::TopKOptions::default(),
+            &program,
+            Some(Instant::now() + Duration::from_millis(15)),
+        )
+        .expect_err("delayed shard must exceed the request deadline");
+    assert!(
+        matches!(error, ClusterRankedError::DeadlineExceeded),
+        "unexpected deadline error: {error:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(90),
+        "transport did not honor the original absolute deadline"
+    );
 }

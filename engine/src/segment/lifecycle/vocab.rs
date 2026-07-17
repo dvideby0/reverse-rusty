@@ -319,11 +319,26 @@ impl Engine {
     pub fn live_sources(&self) -> Vec<(u64, String)> {
         let mut out: Vec<(u64, String)> = Vec::with_capacity(self.query_store.len());
         self.query_store.for_each_live(|logical, text| {
-            if self.live_tag_ids_for(logical).is_some() {
+            if self.live_metadata_for(logical).is_some() {
                 out.push((logical, text.to_string()));
             }
         });
         out.sort_unstable_by_key(|&(l, _)| l);
+        out
+    }
+
+    /// The current live logical-id set without copying query source text.
+    /// Durable cluster open uses this to rebuild its compact unique-id directory;
+    /// the same liveness cross-check as [`Self::live_sources`] excludes stale
+    /// source-store residue.
+    pub(crate) fn live_logical_ids(&self) -> Vec<u64> {
+        let mut out = Vec::with_capacity(self.query_store.len());
+        self.query_store.for_each_live(|logical, _| {
+            if self.live_metadata_for(logical).is_some() {
+                out.push(logical);
+            }
+        });
+        out.sort_unstable();
         out
     }
 
@@ -333,16 +348,24 @@ impl Engine {
     /// dense or post-freeze synthetic — are carried verbatim: the tag space is preserved
     /// across a vocabulary change, so they stay valid (the same ADR-049 carry-through
     /// [`recompile_stale_segments`](Self::recompile_stale_segments) uses in-place).
-    pub fn live_sources_tagged(&self) -> Vec<(u64, String, u32, Vec<crate::tagdict::TagId>)> {
-        let mut out: Vec<(u64, String, u32, Vec<crate::tagdict::TagId>)> =
-            Vec::with_capacity(self.query_store.len());
+    pub fn live_sources_tagged(
+        &self,
+    ) -> Vec<(
+        u64,
+        String,
+        u32,
+        Vec<crate::tagdict::TagId>,
+        crate::rank::RankValues,
+        crate::ownership::QueryPlacement,
+    )> {
+        let mut out = Vec::with_capacity(self.query_store.len());
         // One liveness scan per entry: `None` = no live copy in this engine (stale store
         // residue — skipped, see `live_sources`), `Some((version, tags))` = live, possibly
         // untagged. The version is the live copy's stored version, carried through the rebuild
         // so a `set_vocab`/resize re-places at version N rather than resetting to 1 (ADR-074).
         self.query_store.for_each_live(|logical, text| {
-            if let Some((version, tags)) = self.live_tag_ids_for(logical) {
-                out.push((logical, text.to_string(), version, tags));
+            if let Some((version, tags, rank, placement)) = self.live_metadata_for(logical) {
+                out.push((logical, text.to_string(), version, tags, rank, placement));
             }
         });
         out.sort_unstable_by_key(|&(l, ..)| l);
@@ -356,19 +379,44 @@ impl Engine {
     /// query has NO live copy in this engine (distinct from `Some(vec![])` — live but
     /// untagged): conflating the two is exactly what let a stale store entry shadow a
     /// moved query's tagged copy (codex retro-review, ADR-074).
-    fn live_tag_ids_for(&self, logical: u64) -> Option<(u32, Vec<crate::tagdict::TagId>)> {
-        for &local in self.memtable.locals_for_logical(logical) {
+    fn live_metadata_for(
+        &self,
+        logical: u64,
+    ) -> Option<(
+        u32,
+        Vec<crate::tagdict::TagId>,
+        crate::rank::RankValues,
+        crate::ownership::QueryPlacement,
+    )> {
+        for &local in self.memtable.locals_for_logical(logical).iter().rev() {
             if self.memtable.is_alive(local) {
+                let tags = self.memtable.tags_of(local);
+                let mut rank = self.memtable.rank_values(local);
+                if rank.priority == 0 {
+                    rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
+                }
                 return Some((
                     self.memtable.version_of(local),
-                    self.memtable.tags_of(local).to_vec(),
+                    tags.to_vec(),
+                    rank,
+                    self.memtable.placement(local).to_owned(),
                 ));
             }
         }
-        for seg in &self.segments {
-            for &local in seg.locals_for_logical(logical) {
+        for seg in self.segments.iter().rev() {
+            for &local in seg.locals_for_logical(logical).iter().rev() {
                 if seg.is_alive(local) {
-                    return Some((seg.version_of(local), seg.tags_of(local).to_vec()));
+                    let tags = seg.tags_of(local);
+                    let mut rank = seg.rank_values(local);
+                    if rank.priority == 0 {
+                        rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
+                    }
+                    return Some((
+                        seg.version_of(local),
+                        tags.to_vec(),
+                        rank,
+                        seg.placement(local).to_owned(),
+                    ));
                 }
             }
         }
@@ -414,7 +462,13 @@ impl Engine {
                 // drop the tags (ADR-049) nor reset the version to 1 (the version-preserving
                 // rebuild, ADR-074). `live_sources` only returns entries with a live copy, so
                 // the lookup cannot be `None` here; the default is unreachable belt-and-braces.
-                let (version, tags) = self.live_tag_ids_for(*logical).unwrap_or((1, Vec::new()));
+                let (version, tags, rank, placement) =
+                    self.live_metadata_for(*logical).unwrap_or((
+                        1,
+                        Vec::new(),
+                        crate::rank::RankValues::default(),
+                        crate::ownership::QueryPlacement::standalone(),
+                    ));
                 // `accept_class_d = true` unconditionally (ADR-068): a STORED query
                 // must survive a vocabulary change. A query whose positives vanish
                 // under the new vocab (re-classifying to D) is kept as an
@@ -425,9 +479,9 @@ impl Engine {
                     accept_class_d: true,
                     ..self.config.compile_knobs()
                 };
-                if let Some(added) =
-                    seg.add_compiled(&ex, &tags, &self.dict, *logical, version, knobs)
-                {
+                if let Some(added) = seg.add_compiled_ranked_placed(
+                    &ex, &tags, &self.dict, *logical, version, rank, &placement, knobs,
+                ) {
                     self.record_compiled(&added);
                     recompiled += 1;
                 }

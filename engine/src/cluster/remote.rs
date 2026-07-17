@@ -34,7 +34,7 @@ use super::clog::{ClusterMutation, LogPos};
 use super::proto;
 use super::proto::shard_service_client::ShardServiceClient;
 use super::security::{configure_endpoint, ClientSecurity, MeshAuthInject, MeshTransport};
-use super::shard::{Shard, ShardError};
+use super::shard::{FetchedMatch, Shard, ShardError, ShardRankedMatch};
 use super::transport_metrics::{RpcMethod, RpcOutcome, TransportMetrics};
 
 /// The mesh-aware client channel (ADR-071): every RPC flows through the
@@ -81,6 +81,8 @@ pub struct RemoteShard {
     /// to the right slot. In the 1:1 deployment this is the endpoint's position. It flows via `self`
     /// (never through the `call` seam), so the ADR-085 instrumentation is unchanged.
     shard_id: u32,
+    placement_generation: crate::ownership::PlacementGeneration,
+    num_shards: u32,
     /// Transport-resilience knobs (ADR-085): per-call deadlines + bounded read-retry,
     /// cloned from the [`ClientSecurity`] this shard was connected with.
     transport: MeshTransport,
@@ -145,7 +147,7 @@ impl RemoteShard {
         let reply = block_on_in_context(&handle, async move {
             probe.dict_fingerprint(proto::Empty {}).await
         })
-        .map_err(rpc_err)?
+        .map_err(|status| rpc_err(&status))?
         .into_inner();
         if reply.fingerprint != expected_fp {
             return Err(ShardError::DictMismatch {
@@ -163,6 +165,11 @@ impl RemoteShard {
         if !reply.broad_replicate_all {
             return Err(legacy_broad_layout_err(endpoint));
         }
+        if reply.placement_generation == 0 || reply.num_shards == 0 {
+            return Err(ShardError::OwnershipMismatch(
+                crate::ownership::OwnershipError::MissingGeneration,
+            ));
+        }
         Ok(RemoteShard {
             client,
             handle,
@@ -170,6 +177,8 @@ impl RemoteShard {
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
             shard_id,
+            placement_generation: crate::ownership::PlacementGeneration(reply.placement_generation),
+            num_shards: reply.num_shards,
             transport: security.transport.clone(),
             metrics: Arc::new(TransportMetrics::new()),
         })
@@ -203,6 +212,8 @@ impl RemoteShard {
             tag_dict_bytes,
             expected_tag_fp,
             shard_id,
+            crate::ownership::PlacementGeneration::INITIAL,
+            shard_id.saturating_add(1),
             &ClientSecurity::default(),
         )
     }
@@ -218,6 +229,8 @@ impl RemoteShard {
         tag_dict_bytes: Vec<u8>,
         expected_tag_fp: u64,
         shard_id: u32,
+        placement_generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
         security: &ClientSecurity,
     ) -> Result<Self, ShardError> {
         let client = connect_channel(endpoint, &handle, security)?;
@@ -231,12 +244,20 @@ impl RemoteShard {
             tag_dict: tag_dict_bytes,
             tag_dict_fingerprint: expected_tag_fp,
             shard_id,
+            placement_generation: placement_generation.0,
+            num_shards,
         };
-        let (adopted, adopted_tag, adopted_replicate_all) =
+        let (adopted, adopted_tag, adopted_replicate_all, adopted_generation, adopted_num_shards) =
             match block_on_in_context(&handle, async move { shipper.adopt_dict(req).await }) {
                 Ok(reply) => {
                     let r = reply.into_inner();
-                    (r.fingerprint, r.tag_dict_fingerprint, r.broad_replicate_all)
+                    (
+                        r.fingerprint,
+                        r.tag_dict_fingerprint,
+                        r.broad_replicate_all,
+                        r.placement_generation,
+                        r.num_shards,
+                    )
                 }
                 // The server holds data under a different dict and refused ours. Read its actual
                 // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
@@ -274,6 +295,14 @@ impl RemoteShard {
         if !adopted_replicate_all {
             return Err(legacy_broad_layout_err(endpoint));
         }
+        if adopted_generation != placement_generation.0 || adopted_num_shards != num_shards {
+            return Err(ShardError::OwnershipMismatch(
+                crate::ownership::OwnershipError::GenerationMismatch {
+                    expected: placement_generation,
+                    actual: crate::ownership::PlacementGeneration(adopted_generation),
+                },
+            ));
+        }
         Ok(RemoteShard {
             client,
             handle,
@@ -281,6 +310,8 @@ impl RemoteShard {
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
             shard_id,
+            placement_generation,
+            num_shards,
             transport: security.transport.clone(),
             metrics: Arc::new(TransportMetrics::new()),
         })
@@ -305,18 +336,23 @@ impl RemoteShard {
             expected_fp,
             expected_tag_fp,
             shard_id,
+            crate::ownership::PlacementGeneration::INITIAL,
+            shard_id.saturating_add(1),
             &ClientSecurity::default(),
         )
     }
 
     /// [`connect_and_add_shard`](Self::connect_and_add_shard) over a secured mesh link (ADR-071). A
     /// default (empty) security config is byte-identical.
+    #[allow(clippy::too_many_arguments)]
     pub fn connect_and_add_shard_with_security(
         endpoint: &str,
         handle: Handle,
         expected_fp: u64,
         expected_tag_fp: u64,
         shard_id: u32,
+        placement_generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
         security: &ClientSecurity,
     ) -> Result<Self, ShardError> {
         let client = connect_channel(endpoint, &handle, security)?;
@@ -326,8 +362,10 @@ impl RemoteShard {
             shard_id,
             dict_fingerprint: expected_fp,
             tag_dict_fingerprint: expected_tag_fp,
+            placement_generation: placement_generation.0,
+            num_shards,
         };
-        let (added, added_tag, added_replicate_all) =
+        let (added, added_tag, added_replicate_all, added_generation, added_num_shards) =
             match block_on_in_context(&handle, async move { shipper.add_shard(req).await }) {
                 Ok(reply) => {
                     let r = reply.into_inner();
@@ -335,6 +373,8 @@ impl RemoteShard {
                         r.dict_fingerprint,
                         r.tag_dict_fingerprint,
                         r.broad_replicate_all,
+                        r.placement_generation,
+                        r.num_shards,
                     )
                 }
                 // The node's adopted dict differs from ours (or it adopted none). Read its actual
@@ -370,6 +410,14 @@ impl RemoteShard {
         if !added_replicate_all {
             return Err(legacy_broad_layout_err(endpoint));
         }
+        if added_generation != placement_generation.0 || added_num_shards != num_shards {
+            return Err(ShardError::OwnershipMismatch(
+                crate::ownership::OwnershipError::GenerationMismatch {
+                    expected: placement_generation,
+                    actual: crate::ownership::PlacementGeneration(added_generation),
+                },
+            ));
+        }
         Ok(RemoteShard {
             client,
             handle,
@@ -377,6 +425,8 @@ impl RemoteShard {
             dict_fp: expected_fp,
             tag_dict_fp: expected_tag_fp,
             shard_id,
+            placement_generation,
+            num_shards,
             transport: security.transport.clone(),
             metrics: Arc::new(TransportMetrics::new()),
         })
@@ -453,9 +503,61 @@ impl RemoteShard {
                     deadline.unwrap_or_default()
                 ))
             } else {
-                rpc_err(status)
+                rpc_err(&status)
             }
         })
+    }
+
+    /// ADR-110 read seam: unlike the compatibility per-call timeout above,
+    /// every retry shares one absolute caller deadline. The factory receives
+    /// the current remaining budget so it can set both `grpc-timeout` and the
+    /// cooperative `remaining_micros` request field.
+    fn call_until<R, Fut, MkFut>(
+        &self,
+        method: RpcMethod,
+        deadline: Instant,
+        mk: MkFut,
+    ) -> Result<R, ShardError>
+    where
+        MkFut: Fn(Duration) -> Fut + Send,
+        Fut: Future<Output = Result<R, tonic::Status>> + Send,
+        R: Send,
+    {
+        let started = Instant::now();
+        let (result, attempts, timed_out) = self.block_on(run_with_retry_until(
+            mk,
+            deadline,
+            self.transport.read_retries,
+        ));
+        // tonic can surface a client-side `Request::set_timeout` expiry as
+        // CANCELLED/"Timeout expired" rather than DEADLINE_EXCEEDED. It is still
+        // the same request deadline and must retain the typed cancellation path.
+        let deadline_status = result.as_ref().err().is_some_and(grpc_deadline_status);
+        let outcome = if result.is_ok() {
+            RpcOutcome::Ok
+        } else if timed_out || deadline_status {
+            RpcOutcome::Timeout
+        } else {
+            RpcOutcome::Error
+        };
+        self.metrics
+            .record(method, outcome, started.elapsed(), attempts);
+        result.map_err(|status| {
+            if timed_out || grpc_deadline_status(&status) {
+                ShardError::DeadlineExceeded
+            } else {
+                ranked_rpc_err(&status)
+            }
+        })
+    }
+
+    fn bounded_deadline(&self, deadline: Option<Instant>) -> Result<Instant, ShardError> {
+        match deadline {
+            Some(at) => Ok(at),
+            None => Instant::now()
+                .checked_add(self.transport.read_timeout)
+                .ok_or_else(|| ShardError::Config("read timeout is out of range".into())),
+        }
     }
 
     /// Drive this remote node's `RecoverFrom` RPC (ADR-036): it pulls `source_endpoint`'s sealed
@@ -475,6 +577,8 @@ impl RemoteShard {
             source_endpoint: source_endpoint.to_string(),
             dict_fingerprint: dict_fp,
             shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         // Long-running server-side pull — no per-call deadline (keepalive-guarded), no retry.
         let client = self.client.clone();
@@ -488,6 +592,11 @@ impl RemoteShard {
                     .map(tonic::Response::into_inner)
             }
         })?;
+        self.validate_ownership(
+            self.shard_id,
+            crate::ownership::PlacementGeneration(reply.placement_generation),
+            reply.num_shards,
+        )?;
         Ok((
             reply.segments_attached,
             reply.num_queries,
@@ -507,6 +616,8 @@ impl RemoteShard {
             generation,
             dict_fingerprint: self.dict_fp,
             shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Fence, CallKind::Write, move || {
@@ -528,6 +639,8 @@ impl RemoteShard {
             generation,
             dict_fingerprint: self.dict_fp,
             shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Unfence, CallKind::Write, move || {
@@ -568,6 +681,8 @@ impl RemoteShard {
             expected_fence_generation,
             dict_fingerprint: self.dict_fp,
             tag_dict_fingerprint: self.tag_dict_fp,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         let client = self.client.clone();
         self.call(RpcMethod::DropShard, CallKind::Write, move || {
@@ -591,6 +706,8 @@ impl RemoteShard {
             shard_id: self.shard_id,
             dict_fingerprint: self.dict_fp,
             tag_dict_fingerprint: self.tag_dict_fp,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::ContentFingerprint, CallKind::Read, move || {
@@ -602,8 +719,18 @@ impl RemoteShard {
                     .map(tonic::Response::into_inner)
             }
         })?;
+        self.validate_ownership(
+            self.shard_id,
+            crate::ownership::PlacementGeneration(reply.placement_generation),
+            reply.num_shards,
+        )?;
         Ok((reply.fp_lo, reply.fp_hi, reply.live_count))
     }
+}
+
+fn grpc_deadline_status(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::DeadlineExceeded
+        || (status.code() == tonic::Code::Cancelled && status.message().contains("Timeout expired"))
 }
 
 /// Drive `fut` on `handle` from a SYNCHRONOUS caller, dispatching on the caller's tokio
@@ -638,8 +765,68 @@ where
     }
 }
 
-fn rpc_err<E: std::fmt::Display>(e: E) -> ShardError {
-    ShardError::Remote(e.to_string())
+/// Legacy transport error mapping (the pre-ADR-110 behavior): keep the typed
+/// deadline, preserve the server's message for everything else. Reconstructing
+/// typed errors by message inspection is reserved for the two ranked RPCs
+/// ([`ranked_rpc_err`]) whose server half (`read_status`) writes the matching
+/// strings — a NotFound from any other RPC (e.g. a relocated/GC'd slot's
+/// "shard N is not hosted on this node") must surface verbatim, not be retyped
+/// into a phantom rank-fetch source loss (review finding).
+fn rpc_err(status: &tonic::Status) -> ShardError {
+    if status.code() == tonic::Code::DeadlineExceeded {
+        ShardError::DeadlineExceeded
+    } else {
+        ShardError::Remote(status.to_string())
+    }
+}
+
+/// ADR-110 ranked-seam inverse of the server's `read_status`: reconstruct the
+/// typed errors the coordinator's no-partial contract branches on (enrichment
+/// limit → 413, ownership/config mismatch → 503, per-id source loss). Every arm
+/// requires BOTH the status code and the server's message form; anything else
+/// stays a message-preserving `Remote` rather than a mistyped reconstruction.
+fn ranked_rpc_err(status: &tonic::Status) -> ShardError {
+    let message = status.message();
+    match status.code() {
+        tonic::Code::DeadlineExceeded => ShardError::DeadlineExceeded,
+        tonic::Code::NotFound => match parse_source_unavailable(message) {
+            Some(logical) => ShardError::SourceUnavailable(logical),
+            None => ShardError::Remote(status.to_string()),
+        },
+        tonic::Code::ResourceExhausted if message.contains("ranked enrichment byte credit") => {
+            ShardError::EnrichmentLimit { limit: 0 }
+        }
+        tonic::Code::FailedPrecondition
+            if message.contains("placement configuration mismatch")
+                || message.contains("ownership") =>
+        {
+            ShardError::OwnershipMismatch(
+                crate::ownership::OwnershipError::PlacementDecisionMismatch,
+            )
+        }
+        _ => ShardError::Remote(status.to_string()),
+    }
+}
+
+/// Parse the id out of `read_status`'s "source unavailable for logical id N"
+/// not-found form (the `ShardError::SourceUnavailable` Display), so the
+/// coordinator's diagnostics keep the real id instead of a fabricated 0.
+fn parse_source_unavailable(message: &str) -> Option<u64> {
+    message
+        .rsplit_once("source unavailable for logical id ")
+        .and_then(|(_, tail)| {
+            let digits: &str = tail
+                .split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap_or("");
+            (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+        })
+}
+
+fn remaining_micros(remaining: Duration) -> u64 {
+    u64::try_from(remaining.as_micros())
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 /// How [`RemoteShard::call`] treats an RPC (ADR-085): a unary read (deadline + bounded
@@ -691,6 +878,76 @@ where
                 }
                 return (
                     Err(tonic::Status::deadline_exceeded("rpc timeout")),
+                    attempts,
+                    true,
+                );
+            }
+        }
+    }
+}
+
+/// Absolute-deadline retry core for ADR-110. Backoff, attempts, transport, and
+/// shard compute all consume the same budget; a retry never resets the clock.
+async fn run_with_retry_until<R, Fut, MkFut>(
+    mk: MkFut,
+    deadline: Instant,
+    max_retries: u32,
+) -> (Result<R, tonic::Status>, u32, bool)
+where
+    MkFut: Fn(Duration) -> Fut,
+    Fut: Future<Output = Result<R, tonic::Status>>,
+{
+    let mut attempts = 0u32;
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return (
+                Err(tonic::Status::deadline_exceeded(
+                    "request deadline exhausted",
+                )),
+                attempts,
+                true,
+            );
+        };
+        if remaining.is_zero() {
+            return (
+                Err(tonic::Status::deadline_exceeded(
+                    "request deadline exhausted",
+                )),
+                attempts,
+                true,
+            );
+        }
+        match tokio::time::timeout(remaining, mk(remaining)).await {
+            Ok(Ok(value)) => return (Ok(value), attempts, false),
+            Ok(Err(status)) if attempts < max_retries && is_transient(&status) => {
+                attempts += 1;
+                let delay = backoff_delay(attempts);
+                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                    return (
+                        Err(tonic::Status::deadline_exceeded(
+                            "request deadline exhausted",
+                        )),
+                        attempts,
+                        true,
+                    );
+                };
+                if left <= delay {
+                    return (
+                        Err(tonic::Status::deadline_exceeded(
+                            "request deadline exhausted",
+                        )),
+                        attempts,
+                        true,
+                    );
+                }
+                tokio::time::sleep(delay).await;
+            }
+            Ok(Err(status)) => return (Err(status), attempts, false),
+            Err(_) => {
+                return (
+                    Err(tonic::Status::deadline_exceeded(
+                        "request deadline exhausted",
+                    )),
                     attempts,
                     true,
                 );
@@ -751,6 +1008,7 @@ impl Shard for RemoteShard {
             filter: proto::tag_predicate_to_proto(pred),
             rank: None,
             shard_id: self.shard_id,
+            ownership: None,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Percolate, CallKind::Read, move || {
@@ -758,6 +1016,38 @@ impl Shard for RemoteShard {
             let req = req.clone();
             async move { client.percolate(req).await.map(tonic::Response::into_inner) }
         })?;
+        let stats = reply.stats.map(proto::stats_to_engine).unwrap_or_default();
+        Ok((reply.ids, stats))
+    }
+
+    fn percolate_filtered_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        self.validate_ownership(current_position, context.generation(), context.num_shards())?;
+        let req = proto::PercolateRequest {
+            title: title.to_string(),
+            include_broad,
+            filter: proto::tag_predicate_to_proto(pred),
+            rank: None,
+            shard_id: self.shard_id,
+            ownership: Some(proto::ownership_to_proto(context)),
+        };
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Percolate, CallKind::Read, move || {
+            let mut client = client.clone();
+            let req = req.clone();
+            async move { client.percolate(req).await.map(tonic::Response::into_inner) }
+        })?;
+        if !reply.ownership_applied {
+            return Err(ShardError::OwnershipMismatch(
+                crate::ownership::OwnershipError::PlacementDecisionMismatch,
+            ));
+        }
         let stats = reply.stats.map(proto::stats_to_engine).unwrap_or_default();
         Ok((reply.ids, stats))
     }
@@ -777,6 +1067,7 @@ impl Shard for RemoteShard {
             // key, exactly like the filter groups — the server never re-resolves strings.
             rank: Some(proto::rank_spec_to_proto(spec)),
             shard_id: self.shard_id,
+            ownership: None,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::PercolateRanked, CallKind::Read, move || {
@@ -799,6 +1090,174 @@ impl Shard for RemoteShard {
         }
         let stats = reply.stats.map(proto::stats_to_engine).unwrap_or_default();
         Ok((reply.ids.into_iter().zip(reply.scores).collect(), stats))
+    }
+
+    fn percolate_filtered_ranked_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        self.validate_ownership(current_position, context.generation(), context.num_shards())?;
+        let req = proto::PercolateRequest {
+            title: title.to_string(),
+            include_broad,
+            filter: proto::tag_predicate_to_proto(pred),
+            rank: Some(proto::rank_spec_to_proto(spec)),
+            shard_id: self.shard_id,
+            ownership: Some(proto::ownership_to_proto(context)),
+        };
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::PercolateRanked, CallKind::Read, move || {
+            let mut client = client.clone();
+            let req = req.clone();
+            async move { client.percolate(req).await.map(tonic::Response::into_inner) }
+        })?;
+        if !reply.ownership_applied || !reply.ranked || reply.scores.len() != reply.ids.len() {
+            return Err(ShardError::OwnershipMismatch(
+                crate::ownership::OwnershipError::PlacementDecisionMismatch,
+            ));
+        }
+        let stats = reply.stats.map(proto::stats_to_engine).unwrap_or_default();
+        Ok((reply.ids.into_iter().zip(reply.scores).collect(), stats))
+    }
+
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        self.validate_ownership(current_position, context.generation(), context.num_shards())?;
+        let absolute = self.bounded_deadline(deadline)?;
+        let base = proto::PercolateTopKRequest {
+            title: title.to_string(),
+            include_broad,
+            filter: proto::tag_predicate_to_proto(pred),
+            rank: Some(proto::rank_program_to_proto(program)),
+            size: options.size as u32,
+            track_total_hits_up_to: options.track_total_hits_up_to,
+            remaining_micros: 0,
+            shard_id: self.shard_id,
+            ownership: Some(proto::ownership_to_proto(context)),
+        };
+        let client = self.client.clone();
+        let reply = self.call_until(RpcMethod::PercolateTopK, absolute, move |remaining| {
+            let mut client = client.clone();
+            let mut body = base.clone();
+            body.remaining_micros = remaining_micros(remaining);
+            let mut request = tonic::Request::new(body);
+            request.set_timeout(remaining);
+            async move {
+                client
+                    .percolate_top_k(request)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
+        if !reply.bounded
+            || !reply.ownership_applied
+            || reply.requested_size != options.size as u32
+            || reply.placement_generation != context.generation().get()
+            || reply.num_shards != context.num_shards()
+            || reply.hits.len() > options.size
+        {
+            return Err(ShardError::Protocol(
+                "top-k reply failed bounded/ownership/configuration attestation".into(),
+            ));
+        }
+        let total_hits = reply
+            .total_hits
+            .map(proto::total_hits_from_proto)
+            .ok_or_else(|| ShardError::Protocol("top-k reply omitted total hits".into()))?;
+        let rank_stats = reply
+            .rank_stats
+            .map(proto::rank_stats_from_proto)
+            .ok_or_else(|| ShardError::Protocol("top-k reply omitted rank stats".into()))?;
+        let result_bytes =
+            u64::try_from(reverse_rusty_shard_proto::encoded_len(&reply)).unwrap_or(u64::MAX);
+        Ok(ShardRankedMatch {
+            hits: reply
+                .hits
+                .into_iter()
+                .map(|hit| crate::rank::RankedHit {
+                    logical_id: hit.logical_id,
+                    score: hit.score,
+                })
+                .collect(),
+            total_hits,
+            stats: reply.stats.map(proto::stats_to_engine).unwrap_or_default(),
+            rank_stats,
+            result_bytes,
+        })
+    }
+
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        max_source_bytes: usize,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        let absolute = self.bounded_deadline(deadline)?;
+        let base = proto::FetchMatchesRequest {
+            logical_ids: logical_ids.to_vec(),
+            shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
+            remaining_micros: 0,
+            max_source_bytes: u64::try_from(max_source_bytes).unwrap_or(u64::MAX),
+        };
+        let client = self.client.clone();
+        let generation = self.placement_generation.get();
+        let num_shards = self.num_shards;
+        let requested_rows = logical_ids.len();
+        self.call_until(RpcMethod::FetchMatches, absolute, move |remaining| {
+            let mut client = client.clone();
+            let mut body = base.clone();
+            body.remaining_micros = remaining_micros(remaining);
+            let mut request = tonic::Request::new(body);
+            request.set_timeout(remaining);
+            async move {
+                let mut stream = client.fetch_matches(request).await?.into_inner();
+                let mut out = Vec::new();
+                let mut remaining_bytes = max_source_bytes;
+                while let Some(row) = stream.message().await? {
+                    // Fail as soon as a faulty peer over-streams: tiny sources
+                    // consume little byte credit, so without this cap the buffer
+                    // could grow far past the requested row count until the
+                    // deadline (codex review).
+                    if out.len() >= requested_rows {
+                        return Err(tonic::Status::out_of_range(
+                            "fetch_matches stream returned more rows than requested",
+                        ));
+                    }
+                    if row.placement_generation != generation || row.num_shards != num_shards {
+                        return Err(tonic::Status::failed_precondition(
+                            "fetch_matches placement configuration mismatch",
+                        ));
+                    }
+                    if row.source.len() > remaining_bytes {
+                        return Err(tonic::Status::resource_exhausted(
+                            "ranked enrichment byte credit exceeded by fetch stream",
+                        ));
+                    }
+                    remaining_bytes -= row.source.len();
+                    out.push(FetchedMatch {
+                        logical_id: row.logical_id,
+                        source: row.source,
+                    });
+                }
+                Ok(out)
+            }
+        })
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {
@@ -847,6 +1306,32 @@ impl Shard for RemoteShard {
         Ok([c[0], c[1], c[2], c[3], reply.hot])
     }
 
+    fn validate_ownership(
+        &self,
+        position: u32,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), ShardError> {
+        if position != self.shard_id {
+            return Err(crate::ownership::OwnershipError::LocalPositionMissing(position).into());
+        }
+        if generation != self.placement_generation {
+            return Err(crate::ownership::OwnershipError::GenerationMismatch {
+                expected: generation,
+                actual: self.placement_generation,
+            }
+            .into());
+        }
+        if num_shards != self.num_shards {
+            return Err(crate::ownership::OwnershipError::ShardCountMismatch {
+                expected: num_shards,
+                actual: self.num_shards,
+            }
+            .into());
+        }
+        Ok(())
+    }
+
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         refuse_wire_tag_ids(items)?;
         // Send raw DSL + raw tags, NOT the pre-extracted feature ids: the server re-compiles
@@ -860,6 +1345,7 @@ impl Shard for RemoteShard {
                     dsl: q.dsl.clone(),
                     version: q.version,
                     tags: proto::tags_to_proto(&q.tags),
+                    placement: Some(proto::placement_to_proto(&q.placement)),
                 })
                 .collect(),
             shard_id: self.shard_id,
@@ -896,6 +1382,43 @@ impl Shard for RemoteShard {
                 dsl: text.to_string(),
                 version,
                 tags: proto::tags_to_proto(tags),
+                placement: Some(proto::placement_to_proto(
+                    &crate::ownership::QueryPlacement::standalone(),
+                )),
+            }),
+            shard_id: self.shard_id,
+        };
+        let client = self.client.clone();
+        let reply = self.call(RpcMethod::Insert, CallKind::Write, move || {
+            let mut client = client.clone();
+            let req = req.clone();
+            async move {
+                client
+                    .insert_extracted(req)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
+        Ok(reply.present.then_some(reply.local_id))
+    }
+
+    fn insert_extracted_with_placement(
+        &self,
+        _ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Result<Option<u32>, ShardError> {
+        placement.validate_for_shard(self.shard_id, self.placement_generation, self.num_shards)?;
+        let req = proto::InsertRequest {
+            item: Some(proto::AddItem {
+                logical_id: logical,
+                dsl: text.to_string(),
+                version,
+                tags: proto::tags_to_proto(tags),
+                placement: Some(proto::placement_to_proto(placement)),
             }),
             shard_id: self.shard_id,
         };
@@ -917,6 +1440,8 @@ impl Shard for RemoteShard {
         let req = proto::DeleteRequest {
             logical_id: logical,
             shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::Delete, CallKind::Write, move || {
@@ -929,11 +1454,17 @@ impl Shard for RemoteShard {
     fn flush(&self) -> Result<(), ShardError> {
         let client = self.client.clone();
         let shard_id = self.shard_id;
+        let placement_generation = self.placement_generation.get();
+        let num_shards = self.num_shards;
         self.call(RpcMethod::Flush, CallKind::Write, move || {
             let mut client = client.clone();
             async move {
                 client
-                    .flush(proto::FlushRequest { shard_id })
+                    .flush(proto::FlushRequest {
+                        shard_id,
+                        placement_generation,
+                        num_shards,
+                    })
                     .await
                     .map(tonic::Response::into_inner)
             }
@@ -975,6 +1506,8 @@ impl Shard for RemoteShard {
             after_seqno: from.0,
             dict_fingerprint: self.dict_fp,
             shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         // A long server-stream drain — no per-call deadline (keepalive-guarded), no retry
         // (the catch-up loop is the coordinator's; re-streaming mid-recovery is unsafe).
@@ -985,8 +1518,21 @@ impl Shard for RemoteShard {
                 let mut stream = client.fetch_translog(req).await?.into_inner();
                 let mut out = Vec::new();
                 while let Some(entry) = stream.message().await? {
-                    if let Some(pm) = proto::translog_entry_to_mutation(entry) {
-                        out.push(pm);
+                    // Fail the recovery LOUD on an undecodable frame (unset op /
+                    // invalid placement), mirroring the source side's refusal to
+                    // ship an unrepresentable frame: silently skipping would
+                    // shorten the tail and hand back a replica missing acked
+                    // writes. Unreachable from a fenced same-version peer — this
+                    // is a regression tripwire, not a tolerated input.
+                    let seqno = entry.seqno;
+                    match proto::translog_entry_to_mutation(entry) {
+                        Some(pm) => out.push(pm),
+                        None => {
+                            return Err(tonic::Status::internal(format!(
+                                "translog entry {seqno} is undecodable (unset op or \
+                                 invalid placement); refusing a shortened recovery tail"
+                            )))
+                        }
                     }
                 }
                 Ok(out)
@@ -1003,6 +1549,8 @@ impl Shard for RemoteShard {
             pos: 0,
             dict_fingerprint: self.dict_fp,
             shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         let client = self.client.clone();
         let reply = self.call(RpcMethod::RetentionLease, CallKind::Write, move || {
@@ -1025,6 +1573,8 @@ impl Shard for RemoteShard {
             pos: to.0,
             dict_fingerprint: self.dict_fp,
             shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         let client = self.client.clone();
         self.call(RpcMethod::RetentionLease, CallKind::Write, move || {
@@ -1047,6 +1597,8 @@ impl Shard for RemoteShard {
             pos: 0,
             dict_fingerprint: self.dict_fp,
             shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
         };
         let client = self.client.clone();
         self.call(RpcMethod::RetentionLease, CallKind::Write, move || {
@@ -1097,6 +1649,8 @@ mod tests {
             version: 1,
             tags,
             tag_ids,
+            rank: crate::rank::RankValues::default(),
+            placement: crate::ownership::QueryPlacement::standalone(),
         }
     }
 
@@ -1256,5 +1810,54 @@ mod tests {
         assert!(!is_transient(&tonic::Status::invalid_argument("x")));
         assert!(!is_transient(&tonic::Status::internal("x")));
         assert!(!is_transient(&tonic::Status::deadline_exceeded("x")));
+    }
+
+    /// The legacy seam preserves server messages; only the ranked seam
+    /// reconstructs typed errors, and only when code AND message form agree
+    /// (review finding: a relocated slot's NotFound was retyped into a phantom
+    /// "source unavailable for logical id 0" on every RPC).
+    #[test]
+    fn legacy_rpc_err_preserves_messages_ranked_seam_reconstructs() {
+        let slot_missing = tonic::Status::not_found("shard 3 is not hosted on this node");
+        assert!(matches!(
+            rpc_err(&slot_missing),
+            ShardError::Remote(ref m) if m.contains("not hosted")
+        ));
+        assert!(matches!(
+            rpc_err(&tonic::Status::internal("ownership sweep failed")),
+            ShardError::Remote(_)
+        ));
+        assert!(matches!(
+            rpc_err(&tonic::Status::deadline_exceeded("x")),
+            ShardError::DeadlineExceeded
+        ));
+
+        assert!(matches!(
+            ranked_rpc_err(&tonic::Status::not_found(
+                "source unavailable for logical id 42"
+            )),
+            ShardError::SourceUnavailable(42)
+        ));
+        assert!(matches!(
+            ranked_rpc_err(&slot_missing),
+            ShardError::Remote(ref m) if m.contains("not hosted")
+        ));
+        assert!(matches!(
+            ranked_rpc_err(&tonic::Status::resource_exhausted(
+                "ranked enrichment byte credit exhausted before source materialization"
+            )),
+            ShardError::EnrichmentLimit { .. }
+        ));
+        assert!(matches!(
+            ranked_rpc_err(&tonic::Status::failed_precondition(
+                "placement configuration mismatch"
+            )),
+            ShardError::OwnershipMismatch(_)
+        ));
+        // Code gating: an internal error mentioning ownership stays Remote.
+        assert!(matches!(
+            ranked_rpc_err(&tonic::Status::internal("ownership sweep failed")),
+            ShardError::Remote(_)
+        ));
     }
 }

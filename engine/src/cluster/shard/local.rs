@@ -24,7 +24,7 @@ use crate::segment::{Engine, EngineSnapshot, IngestReport, MatchScratch, MatchSt
 use crate::tagdict::TagDict;
 
 use super::retention::{resolve_lease_ttl, RetentionLeases};
-use super::{EventSink, Shard, ShardError};
+use super::{EventSink, FetchedMatch, Shard, ShardError, ShardRankedMatch};
 
 /// One in-process shard: owned engine for writes + lock-free snapshot for reads, plus a
 /// per-shard durable query log (the translog, ADR-039). The translog is a no-op
@@ -268,11 +268,14 @@ impl LocalShard {
                 version,
                 dsl,
                 tags,
+                placement,
             } => {
                 if let Ok(ast) = crate::dsl::parse(dsl) {
                     let mut lc = String::new();
                     let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                    eng.insert_extracted(&ex, *logical, *version, dsl, tags);
+                    eng.insert_extracted_with_placement(
+                        &ex, *logical, *version, dsl, tags, placement,
+                    );
                 }
             }
             ClusterMutation::Remove { logical } => {
@@ -288,12 +291,15 @@ impl LocalShard {
                 version,
                 dsl,
                 tags,
+                placement,
             } => {
                 eng.delete_by_logical_id(*logical).unwrap_or(0);
                 if let Ok(ast) = crate::dsl::parse(dsl) {
                     let mut lc = String::new();
                     let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                    eng.insert_extracted(&ex, *logical, *version, dsl, tags);
+                    eng.insert_extracted_with_placement(
+                        &ex, *logical, *version, dsl, tags, placement,
+                    );
                 }
             }
         }
@@ -401,7 +407,9 @@ impl LocalShard {
     }
 
     /// An order-independent 128-bit fingerprint over this shard's LIVE query multiset —
-    /// `(logical_id, version, dsl, TagId*)`, the `live_sources_tagged` basis (memtable +
+    /// `(logical_id, version, dsl, TagId*, typed priority, placement)`, the
+    /// `live_sources_tagged` basis
+    /// (memtable +
     /// segments, live copies only) — plus the live count (ADR-097). Two logically-equal copies
     /// fingerprint equal regardless of insertion order, flush boundaries, segment layout, or
     /// compaction history (byte-level segment CRCs cannot say this — equal op streams produce
@@ -448,8 +456,8 @@ impl LocalShard {
         }
         let mut encoded: Vec<Vec<u8>> = entries
             .iter()
-            .map(|(logical, dsl, version, tags)| {
-                let mut e = Vec::with_capacity(8 + 4 + 8 + dsl.len() + 8 + 4 * tags.len());
+            .map(|(logical, dsl, version, tags, rank, placement)| {
+                let mut e = Vec::with_capacity(8 + 4 + 8 + dsl.len() + 8 + 4 * tags.len() + 8);
                 e.extend_from_slice(&logical.to_le_bytes());
                 e.extend_from_slice(&version.to_le_bytes());
                 e.extend_from_slice(&(dsl.len() as u64).to_le_bytes());
@@ -457,6 +465,20 @@ impl LocalShard {
                 e.extend_from_slice(&(tags.len() as u64).to_le_bytes());
                 for t in tags {
                     e.extend_from_slice(&t.to_le_bytes());
+                }
+                // Preserve the pre-ADR-108 fingerprint for the overwhelmingly-common all-zero
+                // corpus while still making a typed-priority divergence force peer recovery.
+                if rank.priority != 0 {
+                    e.extend_from_slice(&rank.priority.to_le_bytes());
+                }
+                if placement.mode() != crate::ownership::PlacementMode::Standalone {
+                    e.extend_from_slice(&placement.generation().get().to_le_bytes());
+                    e.extend_from_slice(&placement.num_shards().to_le_bytes());
+                    e.push(placement.mode() as u8);
+                    e.extend_from_slice(&(placement.positions().len() as u32).to_le_bytes());
+                    for position in placement.positions() {
+                        e.extend_from_slice(&position.to_le_bytes());
+                    }
                 }
                 e
             })
@@ -515,6 +537,29 @@ impl Shard for LocalShard {
         Ok((out, stats))
     }
 
+    fn percolate_filtered_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        context.validate()?;
+        context.require_routed(current_position)?;
+        let mut scratch = MatchScratch::new();
+        let mut out = Vec::new();
+        let stats = self.snapshot().match_title_filtered_owned(
+            title,
+            &mut scratch,
+            &mut out,
+            include_broad,
+            pred,
+            crate::ownership::UniqueOwner::new(context, current_position),
+        );
+        Ok((out, stats))
+    }
+
     fn percolate_filtered_ranked(
         &self,
         title: &str,
@@ -531,6 +576,97 @@ impl Shard for LocalShard {
         Ok((snap.rank(&out, spec), stats))
     }
 
+    fn percolate_filtered_ranked_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        context.validate()?;
+        context.require_routed(current_position)?;
+        let mut scratch = MatchScratch::new();
+        let mut out = Vec::new();
+        let snap = self.snapshot();
+        let stats = snap.match_title_filtered_owned(
+            title,
+            &mut scratch,
+            &mut out,
+            include_broad,
+            pred,
+            crate::ownership::UniqueOwner::new(context, current_position),
+        );
+        Ok((snap.rank(&out, spec), stats))
+    }
+
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        mut options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        context.validate()?;
+        context.require_routed(current_position)?;
+        options.query_scope = if include_broad {
+            crate::result::QueryScope::WithBroad
+        } else {
+            crate::result::QueryScope::Standard
+        };
+        let snap = self.snapshot();
+        let mut scratch = MatchScratch::new();
+        let ranked = snap.try_match_title_top_k_owned(
+            title,
+            options,
+            program,
+            pred,
+            &mut scratch,
+            deadline,
+            crate::ownership::UniqueOwner::new(context, current_position),
+        )?;
+        Ok(ShardRankedMatch {
+            hits: ranked.hits,
+            total_hits: ranked.total_hits,
+            stats: ranked.stats,
+            rank_stats: ranked.rank_stats,
+            result_bytes: 0,
+        })
+    }
+
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        max_source_bytes: usize,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        // One immutable current-view snapshot for the whole group: concurrent
+        // writes cannot make different winners in one response observe different
+        // source-store generations.
+        let snap = self.snapshot();
+        let mut out = Vec::with_capacity(logical_ids.len());
+        let mut remaining = max_source_bytes;
+        for &logical_id in logical_ids {
+            if deadline.is_some_and(|at| Instant::now() >= at) {
+                return Err(ShardError::DeadlineExceeded);
+            }
+            let source = snap
+                .get_query_source_bounded(logical_id, remaining)
+                .map_err(|_| ShardError::EnrichmentLimit {
+                    limit: max_source_bytes,
+                })?
+                .ok_or(ShardError::SourceUnavailable(logical_id))?;
+            remaining -= source.len();
+            out.push(FetchedMatch { logical_id, source });
+        }
+        Ok(out)
+    }
+
     fn num_queries(&self) -> Result<usize, ShardError> {
         Ok(self.snapshot.load().num_queries())
     }
@@ -539,8 +675,39 @@ impl Shard for LocalShard {
         Ok(self.snapshot.load().class_counts())
     }
 
+    fn validate_ownership(
+        &self,
+        position: u32,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), ShardError> {
+        self.snapshot()
+            .validate_ownership_for_shard(position, generation, num_shards)
+            .map_err(ShardError::from)
+    }
+
     fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
         Ok(self.lock().live_sources())
+    }
+
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        // The enumeration walks the source store; a source-less / partial
+        // `sources.dat` (a legacy or tampered restore) would under-enumerate and
+        // let insert-only admission re-admit a LIVE id — the ADR-097 fingerprint
+        // refusal for the same root cause. One lock hold = one point in time;
+        // `num_live_queries` is the index-side tombstone-aware count (codex review).
+        let (ids, live) = {
+            let eng = self.lock();
+            (eng.live_logical_ids(), eng.num_live_queries())
+        };
+        if ids.len() != live {
+            return Err(ShardError::Config(format!(
+                "logical-id enumeration covers {} of {live} live queries (a source-less \
+                 or partial store); refusing to seed insert-only admission from it",
+                ids.len()
+            )));
+        }
+        Ok(ids)
     }
 
     fn live_sources_tagged(&self) -> Result<Vec<super::LiveTaggedQuery>, ShardError> {
@@ -581,8 +748,32 @@ impl Shard for LocalShard {
             version,
             dsl: text.to_string(),
             tags: tags.to_vec(),
+            placement: crate::ownership::QueryPlacement::standalone(),
         })?;
         let out = eng.insert_extracted(ex, logical, version, text, tags);
+        Self::publish(&eng, &self.snapshot);
+        Ok(out)
+    }
+
+    fn insert_extracted_with_placement(
+        &self,
+        ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Result<Option<u32>, ShardError> {
+        placement.validate()?;
+        let mut eng = self.lock();
+        self.translog.append(&ClusterMutation::Add {
+            logical,
+            version,
+            dsl: text.to_string(),
+            tags: tags.to_vec(),
+            placement: placement.clone(),
+        })?;
+        let out = eng.insert_extracted_with_placement(ex, logical, version, text, tags, placement);
         Self::publish(&eng, &self.snapshot);
         Ok(out)
     }

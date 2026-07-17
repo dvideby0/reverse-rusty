@@ -50,11 +50,19 @@ pub(crate) const LATENCY_LE: [(u64, &str); 22] = [
 pub(crate) enum ShardRpc {
     Percolate = 0,
     PercolateRanked = 1,
-    Ingest = 2,
+    PercolateTopK = 2,
+    FetchMatches = 3,
+    Ingest = 4,
 }
 
 /// The `method` label value per [`ShardRpc`] discriminant.
-pub(crate) const SHARD_RPC_LABELS: [&str; 3] = ["percolate", "percolate_ranked", "ingest"];
+pub(crate) const SHARD_RPC_LABELS: [&str; 5] = [
+    "percolate",
+    "percolate_ranked",
+    "percolate_top_k",
+    "fetch_matches",
+    "ingest",
+];
 
 /// A lean fixed-bucket latency histogram: lock-free `AtomicU64`s, `Relaxed` everywhere (each
 /// counter is an independent monotone total — the `transport_metrics` pattern). Buckets are
@@ -149,6 +157,8 @@ impl SlotLatency {
                 LatencyHistogram::new(),
                 LatencyHistogram::new(),
                 LatencyHistogram::new(),
+                LatencyHistogram::new(),
+                LatencyHistogram::new(),
             ],
         }
     }
@@ -158,11 +168,7 @@ impl SlotLatency {
     }
 
     pub(crate) fn snapshot(&self) -> [LatencySnapshot; SHARD_RPC_LABELS.len()] {
-        [
-            self.per_rpc[0].snapshot(),
-            self.per_rpc[1].snapshot(),
-            self.per_rpc[2].snapshot(),
-        ]
+        std::array::from_fn(|index| self.per_rpc[index].snapshot())
     }
 }
 
@@ -215,9 +221,11 @@ mod tests {
         sl.observe(ShardRpc::Percolate, Duration::from_micros(3));
         sl.observe(ShardRpc::Percolate, Duration::from_micros(3));
         sl.observe(ShardRpc::Ingest, Duration::from_millis(2));
-        let [p, pr, i] = sl.snapshot();
+        let [p, pr, top_k, fetch, i] = sl.snapshot();
         assert_eq!(p.count, 2);
         assert_eq!(pr.count, 0);
+        assert_eq!(top_k.count, 0);
+        assert_eq!(fetch.count, 0);
         assert_eq!(i.count, 1);
     }
 }

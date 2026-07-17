@@ -33,6 +33,10 @@
 //!   replace-by-id. ONE frame captures "tombstone every prior live copy of `logical`,
 //!   then insert this version", so a crash can never recover the delete half without
 //!   the insert half (the no-match window the DELETE-then-PUT recipe had).
+//! WAL v6 (ADR-108): Insert/Upsert payloads may append one signed `priority: i64`
+//!   after tags. The header version remains informational: old readers stop after
+//!   the tag section and retain the mirrored canonical priority tag; new readers
+//!   derive an absent extension from that precompiled tag value.
 //!
 //! On recovery, we scan forward from the beginning, skipping entries with bad CRC
 //! (torn writes from a crash). Entries before the last FlushCheckpoint are skipped
@@ -69,8 +73,9 @@ const WAL_MAGIC: [u8; 4] = *b"PWAL";
 // acknowledged as RejectedClassD — replay applies the legacy ops under the old reject
 // gate (reproducing the writer's decision) and only the op-5/6 frames as accepted.
 // Same rollback story as v3/v4: an old binary stops at the first op-5/6 frame and
-// reports skipped bytes.
-const WAL_VERSION: u32 = 5;
+// reports skipped bytes. v6 (ADR-108) adds no opcode: an optional trailing i64
+// extends insert-shaped payloads, so old readers safely ignore it after tags.
+const WAL_VERSION: u32 = 6;
 const WAL_HEADER_SIZE: usize = 8; // magic + version
 
 const OP_INSERT: u8 = 0;
@@ -92,6 +97,9 @@ pub enum WalEntry {
         /// Per-query metadata tags (ADR-049), `(key, value)` pairs. Empty for a v1 entry
         /// or an untagged insert. Not derivable from `text`, so logged explicitly.
         tags: Vec<(String, String)>,
+        /// Optional fixed typed priority appended by WAL v6. Legacy frames leave
+        /// this absent and replay derives the compatibility value from tags.
+        priority: Option<i64>,
         /// `true` ⇔ the frame's op is `OP_INSERT_CLASS_D` (WAL v5, ADR-068): the write
         /// was accepted under the class-D lane, so replay stores it unconditionally.
         /// A legacy op-0 frame (`false`) replays under the old reject gate — binaries
@@ -127,6 +135,8 @@ pub enum WalEntry {
         text: String,
         /// Per-query metadata tags (ADR-049), `(key, value)` pairs.
         tags: Vec<(String, String)>,
+        /// Optional fixed typed priority appended by WAL v6.
+        priority: Option<i64>,
         /// `true` ⇔ op `OP_UPSERT_CLASS_D` (WAL v5, ADR-068) — see
         /// [`Insert::class_d_accepted`](WalEntry::Insert). Doubly load-bearing here:
         /// replaying a legacy logged-but-rejected upsert as accepted would not just
@@ -243,7 +253,18 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_INSERT, logical, version, text, tags)
+        self.append_insert_like(OP_INSERT, logical, version, text, tags, None)
+    }
+
+    pub fn append_insert_ranked(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        priority: i64,
+    ) -> io::Result<u64> {
+        self.append_insert_like(OP_INSERT, logical, version, text, tags, Some(priority))
     }
 
     /// Append an Insert accepted under the class-D lane (WAL v5, ADR-068). Same
@@ -258,7 +279,25 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_INSERT_CLASS_D, logical, version, text, tags)
+        self.append_insert_like(OP_INSERT_CLASS_D, logical, version, text, tags, None)
+    }
+
+    pub fn append_insert_class_d_ranked(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        priority: i64,
+    ) -> io::Result<u64> {
+        self.append_insert_like(
+            OP_INSERT_CLASS_D,
+            logical,
+            version,
+            text,
+            tags,
+            Some(priority),
+        )
     }
 
     /// Append an Upsert entry (WAL v4, ADR-067) — the atomic replace-by-id. Same
@@ -271,7 +310,18 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_UPSERT, logical, version, text, tags)
+        self.append_insert_like(OP_UPSERT, logical, version, text, tags, None)
+    }
+
+    pub fn append_upsert_ranked(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        priority: i64,
+    ) -> io::Result<u64> {
+        self.append_insert_like(OP_UPSERT, logical, version, text, tags, Some(priority))
     }
 
     /// Append an Upsert accepted under the class-D lane (WAL v5, ADR-068) — see
@@ -283,7 +333,25 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_UPSERT_CLASS_D, logical, version, text, tags)
+        self.append_insert_like(OP_UPSERT_CLASS_D, logical, version, text, tags, None)
+    }
+
+    pub fn append_upsert_class_d_ranked(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        priority: i64,
+    ) -> io::Result<u64> {
+        self.append_insert_like(
+            OP_UPSERT_CLASS_D,
+            logical,
+            version,
+            text,
+            tags,
+            Some(priority),
+        )
     }
 
     /// Shared encoder for the two insert-shaped ops (Insert / Upsert): identical
@@ -295,6 +363,7 @@ impl Wal {
         version: u32,
         text: &str,
         tags: &[(String, String)],
+        priority: Option<i64>,
     ) -> io::Result<u64> {
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -312,7 +381,8 @@ impl Wal {
             tag_bytes.extend_from_slice(vb);
         }
         // payload: logical(8) + version(4) + text_len(4) + text + tag section
-        let payload_len = 8 + 4 + 4 + text_bytes.len() + tag_bytes.len();
+        let payload_len =
+            8 + 4 + 4 + text_bytes.len() + tag_bytes.len() + priority.map_or(0, |_| 8);
         // entry body: seq(8) + op(1) + payload
         let body_len = 8 + 1 + payload_len;
 
@@ -324,6 +394,9 @@ impl Wal {
         body.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
         body.extend_from_slice(text_bytes);
         body.extend_from_slice(&tag_bytes);
+        if let Some(value) = priority {
+            body.extend_from_slice(&value.to_le_bytes());
+        }
 
         let crc = crc32(&body);
         self.file.write_all(&(body.len() as u32).to_le_bytes())?;
@@ -469,6 +542,11 @@ impl Wal {
                 .and_then(|s| s.try_into().ok())
                 .map(u64::from_le_bytes)
         }
+        fn get_i64(buf: &[u8], off: usize) -> Option<i64> {
+            buf.get(off..off + 8)
+                .and_then(|s| s.try_into().ok())
+                .map(i64::from_le_bytes)
+        }
 
         let mut entries = Vec::new();
         let mut cursor = 0usize;
@@ -565,6 +643,11 @@ impl Wal {
                             tags.push((key, value));
                         }
                     }
+                    // WAL v6 appends one optional i64 after the complete tag
+                    // section. Old readers stop after tags and safely ignore it.
+                    let priority = (payload.len().saturating_sub(p) == 8)
+                        .then(|| get_i64(payload, p))
+                        .flatten();
                     entries.push(if op == OP_INSERT || op == OP_INSERT_CLASS_D {
                         WalEntry::Insert {
                             seq,
@@ -572,6 +655,7 @@ impl Wal {
                             version,
                             text,
                             tags,
+                            priority,
                             class_d_accepted: op == OP_INSERT_CLASS_D,
                         }
                     } else {
@@ -581,6 +665,7 @@ impl Wal {
                             version,
                             text,
                             tags,
+                            priority,
                             class_d_accepted: op == OP_UPSERT_CLASS_D,
                         }
                     });
@@ -776,6 +861,40 @@ mod tests {
             other => panic!("expected Insert, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn typed_priority_extension_round_trips_without_new_opcode() {
+        let path = scratch_path("priority_roundtrip");
+        {
+            let mut wal = Wal::open(&path, true).unwrap();
+            wal.append_insert_ranked(
+                7,
+                3,
+                "topps chrome",
+                &[("priority".to_string(), "-55".to_string())],
+                -55,
+            )
+            .unwrap();
+            wal.append_upsert_ranked(
+                7,
+                4,
+                "topps chrome refractor",
+                &[("priority".to_string(), "99".to_string())],
+                99,
+            )
+            .unwrap();
+        }
+        let recovered = Wal::recover(&path).unwrap();
+        match &recovered.entries[0] {
+            WalEntry::Insert { priority, .. } => assert_eq!(*priority, Some(-55)),
+            other => panic!("expected Insert, got {other:?}"),
+        }
+        match &recovered.entries[1] {
+            WalEntry::Upsert { priority, .. } => assert_eq!(*priority, Some(99)),
+            other => panic!("expected Upsert, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

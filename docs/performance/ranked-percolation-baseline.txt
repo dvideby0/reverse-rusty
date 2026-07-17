@@ -1,0 +1,126 @@
+Ranked percolation / exhaustive-delivery baseline (ADR-107 Increment 0)
+Captured: 2026-07-16, macOS aarch64, release profile, crate 0.1.0
+Command: cargo run --release --bin rankbench -- 20000 500 8 275775489
+
+Timings are informational and machine-specific. The semantic checksums, match totals,
+emission totals, encoded byte counts, and fanout/result bounds are the compatibility pins.
+
+config: queries=20000 titles=500 shards=8 seed=0x0000000010700001 K=[10, 100, 1000, 10000]
+
+[ordinary]
+corpus: queries=20000 titles=500 build_ms=121.088
+matches/title: p50=1 p95=1 p99=1 total=500
+local delivery: emissions=500 unique=500 duplicates=0 dedup_ratio=0.000000
+encoded bytes: ids=3500 scores=7072 sources=45480 rank_ms=0.064
+cluster delivery: emissions=500 duplicates=0 dedup_ratio=0.000000 fanout_p50=3 fanout_p95=5 fanout_p99=5
+projection K=10: retained=500 max_rows/title=10 max_cluster_rows/title=80
+projection K=100: retained=500 max_rows/title=100 max_cluster_rows/title=800
+projection K=1000: retained=500 max_rows/title=1000 max_cluster_rows/title=8000
+projection K=10000: retained=500 max_rows/title=10000 max_cluster_rows/title=80000
+semantic checksum: local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
+
+[broad-heavy]
+corpus: queries=20000 titles=500 build_ms=123.117
+matches/title: p50=0 p95=254 p99=275 total=18313
+local delivery: emissions=18313 unique=18313 duplicates=0 dedup_ratio=0.000000
+encoded bytes: ids=100443 scores=229871 sources=798873 rank_ms=0.875
+cluster delivery: emissions=32693 duplicates=14380 dedup_ratio=0.439850 fanout_p50=3 fanout_p95=5 fanout_p99=5
+projection K=10: retained=856 max_rows/title=10 max_cluster_rows/title=80
+projection K=100: retained=7156 max_rows/title=100 max_cluster_rows/title=800
+projection K=1000: retained=18313 max_rows/title=1000 max_cluster_rows/title=8000
+projection K=10000: retained=18313 max_rows/title=10000 max_cluster_rows/title=80000
+semantic checksum: local=bb248a758615fda0 cluster=0b64b11f5259ff1c
+
+[body-duplicate]
+corpus: queries=20000 titles=500 build_ms=121.676
+matches/title: p50=0 p95=106 p99=106 total=7512
+local delivery: emissions=7512 unique=7512 duplicates=0 dedup_ratio=0.000000
+encoded bytes: ids=41118 scores=94002 sources=327458 rank_ms=0.349
+cluster delivery: emissions=10088 duplicates=2576 dedup_ratio=0.255353 fanout_p50=3 fanout_p95=5 fanout_p99=6
+projection K=10: retained=792 max_rows/title=10 max_cluster_rows/title=80
+projection K=100: retained=7160 max_rows/title=100 max_cluster_rows/title=800
+projection K=1000: retained=7512 max_rows/title=1000 max_cluster_rows/title=8000
+projection K=10000: retained=7512 max_rows/title=10000 max_cluster_rows/title=80000
+semantic checksum: local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
+
+[placement-duplicate]
+corpus: queries=20000 titles=1000 build_ms=140.340
+matches/title: p50=0 p95=1 p99=1 total=500
+local delivery: emissions=500 unique=500 duplicates=0 dedup_ratio=0.000000
+encoded bytes: ids=4500 scores=8071 sources=36351 rank_ms=0.039
+cluster delivery: emissions=931 duplicates=431 dedup_ratio=0.462943 fanout_p50=3 fanout_p95=5 fanout_p99=5
+projection K=10: retained=500 max_rows/title=10 max_cluster_rows/title=80
+projection K=100: retained=500 max_rows/title=100 max_cluster_rows/title=800
+projection K=1000: retained=500 max_rows/title=1000 max_cluster_rows/title=8000
+projection K=10000: retained=500 max_rows/title=10000 max_cluster_rows/title=80000
+semantic checksum: local=0ec5dda03607d01f cluster=77575a4edc1f29e7
+
+--- ADR-108 Increment 2 post-integration capture ---
+Captured: 2026-07-16, macOS aarch64, release profile, crate 0.1.0
+Command: cargo run --release --bin rankbench -- 20000 500 8 275775489
+
+Each bounded row runs the real EngineSnapshot::try_match_title_top_k path and asserts it equals
+collect-all -> newest-live compatibility score -> full sort -> truncate. match_rank_ms is the
+whole local Boolean-match + bounded-rank compute for the workload. encoded_bytes is JSON for the
+retained (logical_id, score) rows. collector_payload_bytes is the portable payload floor for the
+K heap rows + K heap-id entries + 10,001 total-id entries; allocator-specific hash bucket/control
+overhead is deliberately excluded. Timings are informational and machine-specific.
+
+workload             K  retained  match_rank_ms  encoded_bytes  evaluations  replacements  bound_entries  payload_bytes
+ordinary            10       500          0.706           7072          500             0          10021          80248
+ordinary           100       500          0.658           7072          500             0          10201          82408
+ordinary          1000       500          0.660           7072          500             0          12001         104008
+ordinary         10000       500          0.928           7072          500             0          30001         320008
+broad-heavy         10       856          1.441          12192        18313          5259          10021          80248
+broad-heavy        100      7156          1.554          93387        18313          9277          10201          82408
+broad-heavy       1000     18313          1.567         229871        18313             0          12001         104008
+broad-heavy      10000     18313          1.893         229871        18313             0          30001         320008
+body-duplicate      10       792          0.994          11508         7512          3708          10021          80248
+body-duplicate     100      7160          1.000          90596         7512           352          10201          82408
+body-duplicate    1000      7512          1.067          94002         7512             0          12001         104008
+body-duplicate   10000      7512          1.372          94002         7512             0          30001         320008
+placement-duplicate 10       500          1.088           8071          500             0          10021          80248
+placement-duplicate 100      500          1.035           8071          500             0          10201          82408
+placement-duplicate 1000     500          1.042           8071          500             0          12001         104008
+placement-duplicate 10000    500          1.402           8071          500             0          30001         320008
+
+Compatibility pins unchanged from Increment 0:
+ordinary:            local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
+broad-heavy:         local=bb248a758615fda0 cluster=0b64b11f5259ff1c
+body-duplicate:      local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
+placement-duplicate: local=0ec5dda03607d01f cluster=77575a4edc1f29e7
+
+--- ADR-110 Increment 4 post-integration capture ---
+Captured: 2026-07-16, Apple M4 Max (12P+4E), 48 GiB, macOS aarch64, release profile
+Command: cargo run --release --bin rankbench -- 20000 500 8 275775489
+
+Every bounded row runs both the local collector and the actual in-process distributed collector.
+The benchmark asserts both equal collect-all -> full-sort -> truncate, their totals agree, and
+`shard_rows <= K * routed_positions`. `routed_positions` is the workload sum across titles;
+`shard_result_bytes=0` is expected for an in-process cluster (the real-gRPC oracle measures exact
+protobuf bytes). Fetch columns measure current source for final winners only. Timings are
+informational and machine-specific.
+
+workload              K retained local_ms shard_rows routed_positions shard_result_bytes collect_merge_ms fetch_bytes fetch_ms
+ordinary             10      500    1.421        500             1597                  0           27.099       25908    0.572
+ordinary            100      500    1.378        500             1597                  0           24.254       25908    0.475
+ordinary           1000      500    1.145        500             1597                  0           23.022       25908    0.449
+ordinary          10000      500    1.271        500             1597                  0           28.119       25908    0.482
+broad-heavy          10      856    2.225        878             1586                  0           24.951        6185    0.301
+broad-heavy         100     7156    3.139       7178             1586                  0           27.451       44099    0.933
+broad-heavy        1000    18313    2.321      18313             1586                  0           28.172      111177    1.510
+broad-heavy       10000    18313    2.742      18313             1586                  0           34.746      111177    1.887
+body-duplicate       10      792    1.967        792             1605                  0           26.661        5304    0.394
+body-duplicate      100     7160    1.598       7160             1605                  0           25.274       43536    0.716
+body-duplicate     1000     7512    1.555       7512             1605                  0           25.607       45656    0.674
+body-duplicate    10000     7512    1.999       7512             1605                  0           31.272       45656    0.973
+placement-duplicate  10      500    1.953        500             2954                  0           45.435       15780    0.505
+placement-duplicate 100      500    1.741        500             2954                  0           40.367       15780    0.458
+placement-duplicate 1000     500    1.847        500             2954                  0           45.612       15780    0.500
+placement-duplicate 10000    500    2.018        500             2954                  0           52.322       15780    0.489
+
+Compatibility pins remain unchanged from Increment 0:
+ordinary:            local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
+broad-heavy:         local=bb248a758615fda0 cluster=0b64b11f5259ff1c
+body-duplicate:      local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
+placement-duplicate: local=0ec5dda03607d01f cluster=77575a4edc1f29e7

@@ -61,7 +61,7 @@ use crate::segment::{IngestReport, MatchStats, PlacedQuery};
 use crate::tagdict::TagDict;
 
 use super::clog::{ClusterMutation, LogPos};
-use super::shard::{EventSink, Shard, ShardError};
+use super::shard::{EventSink, FetchedMatch, Shard, ShardError, ShardRankedMatch};
 
 /// A [`Shard`] whose backing is one boxed shard that can be atomically replaced at runtime.
 ///
@@ -144,6 +144,23 @@ impl Shard for Arc<HandoffShard> {
             .percolate_filtered(title, include_broad, pred)
     }
 
+    fn percolate_filtered_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        self.current.load().percolate_filtered_owned(
+            title,
+            include_broad,
+            pred,
+            context,
+            current_position,
+        )
+    }
+
     fn percolate_filtered_ranked(
         &self,
         title: &str,
@@ -156,12 +173,76 @@ impl Shard for Arc<HandoffShard> {
             .percolate_filtered_ranked(title, include_broad, pred, spec)
     }
 
+    fn percolate_filtered_ranked_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        spec: &crate::rank::CompiledRankSpec,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        self.current.load().percolate_filtered_ranked_owned(
+            title,
+            include_broad,
+            pred,
+            spec,
+            context,
+            current_position,
+        )
+    }
+
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        self.current.load().percolate_top_k_owned(
+            title,
+            include_broad,
+            pred,
+            program,
+            options,
+            context,
+            current_position,
+            deadline,
+        )
+    }
+
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        max_source_bytes: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        self.current
+            .load()
+            .fetch_matches(logical_ids, max_source_bytes, deadline)
+    }
+
     fn num_queries(&self) -> Result<usize, ShardError> {
         self.current.load().num_queries()
     }
 
     fn class_counts(&self) -> Result<[u64; 5], ShardError> {
         self.current.load().class_counts()
+    }
+
+    fn validate_ownership(
+        &self,
+        position: u32,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), ShardError> {
+        self.current
+            .load()
+            .validate_ownership(position, generation, num_shards)
     }
 
     fn live_endpoints(&self) -> Vec<String> {
@@ -187,6 +268,20 @@ impl Shard for Arc<HandoffShard> {
         self.current
             .load()
             .insert_extracted_with_tags(ex, logical, version, text, tags)
+    }
+
+    fn insert_extracted_with_placement(
+        &self,
+        ex: &Extracted,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Result<Option<u32>, ShardError> {
+        self.current
+            .load()
+            .insert_extracted_with_placement(ex, logical, version, text, tags, placement)
     }
 
     fn delete_by_logical_id(&self, logical: u64) -> Result<usize, ShardError> {

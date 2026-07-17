@@ -12,6 +12,7 @@ use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, ShardGroup, ShardServ
 use reverse_rusty::compile::extract;
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::Dict;
+use reverse_rusty::{QueryScope, RankProgramSpec, TopKOptions};
 use tonic::transport::server::TcpIncoming;
 
 use crate::harness::*;
@@ -120,6 +121,23 @@ fn grpc_replicated_failover_and_peer_recovery() {
     cluster
         .ingest(&queries)
         .expect("ingest over gRPC (fans to primary + replica)");
+    let rank_program = cluster
+        .compile_rank_program(&RankProgramSpec {
+            priority_field: None,
+            boosts: Vec::new(),
+        })
+        .expect("rank program");
+    let rank_options = TopKOptions {
+        size: 10,
+        track_total_hits_up_to: 10_000,
+        query_scope: QueryScope::WithBroad,
+    };
+    let ranked_before_failover = cluster
+        .try_percolate_filtered_top_k(&titles[0], &[], rank_options, &rank_program, None)
+        .expect("ranked read before failover");
+    let sources_before_failover = cluster
+        .fetch_ranked_sources(&ranked_before_failover, None)
+        .expect("winner fetch before failover");
 
     let cc = cluster.class_counts().expect("class_counts over gRPC");
     assert!(
@@ -144,6 +162,23 @@ fn grpc_replicated_failover_and_peer_recovery() {
     // broad lane), so every read must now fail over to position 0's replica and still match.
     primary_handles[0].abort();
     wait_until_not_listening(all_addrs[0][0]);
+    let ranked_after_failover = cluster
+        .try_percolate_filtered_top_k(&titles[0], &[], rank_options, &rank_program, None)
+        .expect("bounded ranked read fails over to replica");
+    assert_eq!(
+        ranked_after_failover.hits, ranked_before_failover.hits,
+        "RF>1 failover preserves global winners"
+    );
+    assert_eq!(
+        ranked_after_failover.total_hits,
+        ranked_before_failover.total_hits
+    );
+    assert_eq!(
+        cluster
+            .fetch_ranked_sources(&ranked_after_failover, None)
+            .expect("winner fetch fails over to replica"),
+        sources_before_failover
+    );
     for (i, title) in titles.iter().enumerate() {
         let got: HashSet<u64> = cluster
             .percolate(title)
@@ -203,6 +238,19 @@ fn grpc_replicated_failover_and_peer_recovery() {
         rt.handle(),
     )
     .expect("verify cluster over the recovered node");
+    let verify_program = verify
+        .compile_rank_program(&RankProgramSpec {
+            priority_field: None,
+            boosts: Vec::new(),
+        })
+        .expect("verify rank program");
+    let recovered_ranked = verify
+        .try_percolate_filtered_top_k(&titles[0], &[], rank_options, &verify_program, None)
+        .expect("recovered node bounded read");
+    assert_eq!(recovered_ranked.hits, ranked_before_failover.hits);
+    verify
+        .fetch_ranked_sources(&recovered_ranked, None)
+        .expect("recovered node winner fetch");
     for (i, title) in titles.iter().enumerate() {
         let got: HashSet<u64> = verify
             .percolate(title)

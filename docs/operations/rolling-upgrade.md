@@ -34,7 +34,7 @@ Durable formats are **versioned and fail loud, never corrupt silently** — an i
 a refused open with a versioned error, and a refusal is always recoverable by restoring the
 pre-upgrade backup:
 
-- **Segments** (`.seg` v3/v4/v5) and **manifests** (engine v3/v4/v5, cluster v4/v5): newer minor
+- **Segments** (`.seg` v3–v7) and **manifests** (engine v3–v5, cluster v4–v6): newer minor
   formats read older files back; an *older* binary refuses a *newer* file it cannot honor. The
   "fence" versions exist precisely to make a semantic change loud — e.g. a
   class-D-bearing segment is written v4 so a pre-ADR-068 binary refuses it rather than silently
@@ -44,16 +44,33 @@ pre-upgrade backup:
   (ADR-080: the old binary refuses v5; the new binary refuses a v<5 shard-0-only-broad layout).
   The *cluster* manifest deliberately does NOT bump for the hot tier: cluster shards attach
   their registered segments fail-loud, so the per-shard `.seg` v5 word alone fences an old
-  binary (ADR-105).
+  binary (ADR-105). ADR-108 adds `.seg` v6 priority columns. ADR-109 adds `.seg` v7 ownership
+  columns and cluster-manifest v6; standalone `.seg` v1–v6 remains readable by the new binary,
+  but clustered manifests v1–v5 are intentionally rebuild-only because they cannot identify a
+  unique emission owner.
 - **Same-θ contract (ADR-105):** in remote cluster mode, run every `shardserver` (and the
   coordinator) with the same `--hot-anchor-threshold`. Divergence can never drop a match —
   class A and class H are both always-visible and place identically — it only decides which
   node re-inherits the un-quarantined fat-posting scans; the coordinator warns at startup when
   θ is set in remote mode.
-- **WAL** frames (v3–v5) replay forward compatibly (ADR-066/067/068).
-- **The mesh wire** is protobuf-additive (unknown fields ignored; absent fields default), so a
-  bounded mixed-version window during the roll is safe: RPCs fail loud (`InvalidArgument` /
-  `FailedPrecondition`), never silently drop matches (ADR-072's fail-loud posture).
+- **Logs:** the standalone WAL is v6 (ADR-108). ADR-109 advances the coordinator log and per-shard
+  translog to v4; clustered v1–v3 logs are rebuild-only because their writes lack placement
+  identity.
+- **Adopted shard state:** ADR-109 adopted feature-space v2 records placement generation and shard
+  count. Legacy adopted data-node state must be wiped and reseeded.
+- **The mesh wire:** ADR-109 fields are protobuf-additive syntactically, but semantically mandatory.
+  Missing/stale placement configuration or `ownership_applied` attestation fails closed. Do not run
+  an ADR-109 coordinator against pre-ADR-109 shard peers.
+- **ADR-110 ranked delivery:** no durable format changes. `PercolateTopK` and `FetchMatches` are
+  additive RPCs, so compatibility percolation continues during a mixed-version roll, but cluster
+  `/v2/_search` against an old shard fails closed (`UNIMPLEMENTED` → 502) with no partial hits. Enable
+  or route v2 traffic only after every shard is upgraded; keep each shard's
+  `--max-grpc-result-bytes` at or below 4 MiB.
+
+An ADR-109 upgrade is therefore **not a normal rolling mixed-version upgrade**. Back up, stop the
+cluster, rebuild clustered data under the new binary (or wipe/reseed remote shard volumes from the
+authoritative corpus), then restart a version-homogeneous mesh. Ordinary later upgrades may use the
+rolling procedure only when their release notes preserve the ADR-109 format/wire contract.
 
 Operationally: **rollback within the same formats is a plain redeploy; rollback across a format
 bump is a restore.** The fence tells you which case you are in — by refusing.

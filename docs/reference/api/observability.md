@@ -155,3 +155,25 @@ gauge, WAL size/pending gauges, cumulative flush/compaction-time counters, a
 `durability_failures_total{op}` counter (ADR-021), and — when bearer-token auth is enabled — an
 `auth_failures_total{reason="missing"|"invalid"}` counter for rejected requests (ADR-062).
 
+ADR-108 adds low-cardinality local bounded-ranking telemetry:
+`ranked_requests_total{outcome,scope}`, `rank_total_relation_total{relation}`,
+`rank_admission_rejections_total{reason}`, `rank_evaluations_total`,
+`rank_heap_replacements_total`, `rank_source_bytes_total`,
+`rank_true_match_lower_bound_total`, and the current `ranked_search_permits_in_use` gauge. Slow v2
+logs include K, scope, total relation, candidates, rank wall time, and cancellation outcome.
+
+ADR-110 uses the same families for cluster `/v2/_search` and adds
+`rank_shard_rows_received_total`, `rank_shard_result_bytes_total`, and
+`rank_enrichment_rejections_total`. Coordinator transport families expose fixed method labels
+`percolate_top_k` and `fetch_matches` for calls/errors/timeouts/retries/latency.
+
+On each shard node, `reverse_rusty_shard_rpc_duration_seconds{shard,method,le}` includes
+`percolate_top_k` and `fetch_matches`. The following fixed-cardinality counters make bounded delivery
+and its fail-closed limits visible:
+
+- `reverse_rusty_shard_top_k_hits_total{shard}`
+- `reverse_rusty_shard_top_k_result_bytes_total{shard}`
+- `reverse_rusty_shard_source_fetch_bytes_total{shard}`
+- `reverse_rusty_shard_rank_total_relation_total{shard,relation="eq"|"gte"}`
+- `reverse_rusty_shard_rank_cancellations_total{shard}`
+- `reverse_rusty_shard_result_cap_rejections_total{shard}`

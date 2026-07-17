@@ -2,8 +2,8 @@
 
 use super::{
     is_metrics_get, render_control, render_shard_pending, render_shards, serve_metrics,
-    BroadCostSnapshot, ControlMetricsView, LatencySnapshot, ShardSample, LATENCY_LE,
-    SHARD_RPC_LABELS,
+    BroadCostSnapshot, ControlMetricsView, LatencySnapshot, RankDeliverySnapshot, ShardSample,
+    LATENCY_LE, SHARD_RPC_LABELS,
 };
 use crate::events::{EngineMetrics, SegmentInfo, SegmentKind};
 use std::io::{Read, Write};
@@ -22,6 +22,7 @@ fn sample(
         class,
         rpc_latency: [LatencySnapshot::zero(); SHARD_RPC_LABELS.len()],
         broad: BroadCostSnapshot::default(),
+        ranked: RankDeliverySnapshot::default(),
     }
 }
 
@@ -247,6 +248,30 @@ fn render_shards_emits_broad_cost_counters() {
     assert!(out.contains("reverse_rusty_broad_queries_evaluated_total{shard=\"1\"} 0"));
     assert!(out.contains("reverse_rusty_broad_batches_total{shard=\"1\"} 0"));
     assert!(out.contains("reverse_rusty_broad_candidates_total{shard=\"4\"} 0"));
+}
+
+#[test]
+fn render_shards_emits_bounded_rank_delivery_counters() {
+    let mut s = sample(2, sample_metrics(), vec![seg(0)], [1, 0, 0, 0, 0]);
+    s.ranked = RankDeliverySnapshot {
+        top_k_hits: 7,
+        top_k_result_bytes: 321,
+        fetch_source_bytes: 654,
+        total_eq: 3,
+        total_gte: 2,
+        cancellations: 1,
+        cap_rejections: 4,
+    };
+    let out = render_shards(&[s]);
+    assert!(out.contains("reverse_rusty_shard_top_k_hits_total{shard=\"2\"} 7"));
+    assert!(out.contains("reverse_rusty_shard_top_k_result_bytes_total{shard=\"2\"} 321"));
+    assert!(out.contains("reverse_rusty_shard_source_fetch_bytes_total{shard=\"2\"} 654"));
+    assert!(out
+        .contains("reverse_rusty_shard_rank_total_relation_total{shard=\"2\",relation=\"eq\"} 3"));
+    assert!(out
+        .contains("reverse_rusty_shard_rank_total_relation_total{shard=\"2\",relation=\"gte\"} 2"));
+    assert!(out.contains("reverse_rusty_shard_rank_cancellations_total{shard=\"2\"} 1"));
+    assert!(out.contains("reverse_rusty_shard_result_cap_rejections_total{shard=\"2\"} 4"));
 }
 
 #[test]

@@ -20,6 +20,7 @@ fn add(logical: u64, dsl: &str) -> ClusterMutation {
         version: 1,
         dsl: dsl.to_string(),
         tags: Vec::new(),
+        placement: crate::ownership::QueryPlacement::standalone(),
     }
 }
 
@@ -59,12 +60,14 @@ fn upsert_frame_round_trips_with_and_without_tags() {
         version: 2,
         dsl: "psa 10 charizard".to_string(),
         tags: vec![("category".into(), "cards".into())],
+        placement: crate::ownership::QueryPlacement::standalone(),
     };
     let untagged = ClusterMutation::Upsert {
         logical: 8,
         version: 1,
         dsl: "topps chrome".to_string(),
         tags: Vec::new(),
+        placement: crate::ownership::QueryPlacement::standalone(),
     };
     {
         let log = FileClusterLog::open(&path, true, LogPos(0)).unwrap();
@@ -79,6 +82,49 @@ fn upsert_frame_round_trips_with_and_without_tags() {
     assert_eq!(replay.entries.len(), 3);
     assert_eq!(replay.entries[1].1, tagged);
     assert_eq!(replay.entries[2].1, untagged);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn v4_round_trips_ownership_and_v3_is_refused() {
+    let path = scratch_path("ownership_v4");
+    let placement = crate::ownership::QueryPlacement::selective(
+        crate::ownership::PlacementGeneration(9),
+        16,
+        vec![2, 7, 11],
+    )
+    .expect("placement");
+    let mutation = ClusterMutation::Add {
+        logical: 44,
+        version: 5,
+        dsl: "1994 upper deck".into(),
+        tags: vec![("category".into(), "cards".into())],
+        placement,
+    };
+    {
+        let log = FileClusterLog::open(&path, true, LogPos(0)).expect("open v4");
+        log.append(&mutation).expect("append");
+        assert_eq!(
+            log.replay(LogPos(0)).expect("replay").entries[0].1,
+            mutation
+        );
+    }
+    let bytes = std::fs::read(&path).expect("read log");
+    assert_eq!(
+        u32::from_le_bytes(bytes[4..8].try_into().expect("version")),
+        4
+    );
+
+    let mut legacy = bytes;
+    legacy[4..8].copy_from_slice(&3u32.to_le_bytes());
+    std::fs::write(&path, legacy).expect("write legacy header");
+    let error = FileClusterLog::open(&path, false, LogPos(0))
+        .err()
+        .expect("v3 must fail");
+    assert!(
+        error.to_string().contains("predates ADR-109") && error.to_string().contains("rebuild"),
+        "got: {error}"
+    );
     let _ = std::fs::remove_file(&path);
 }
 

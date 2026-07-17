@@ -45,4 +45,5 @@ mod replication;
 mod replication_colocation;
 mod routing;
 mod security;
+mod top_k;
 mod transport;

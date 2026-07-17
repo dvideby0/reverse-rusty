@@ -115,7 +115,13 @@ fn checkpoint_then_reopen_matches_oracle() {
 
     let log_path = dir.join("cluster.log");
     let log_before = std::fs::metadata(&log_path).expect("log").len();
+    let placement_generation = cluster.placement_generation();
     cluster.checkpoint().expect("checkpoint");
+    assert_eq!(
+        cluster.placement_generation(),
+        placement_generation,
+        "checkpoint changes physical durability state, never logical placement"
+    );
     assert_eq!(cluster.epoch(), 1, "checkpoint bumps the epoch");
     let log_after = std::fs::metadata(&log_path).expect("log").len();
     assert!(

@@ -76,6 +76,10 @@ pub(super) fn drop_shard(
     request: Request<proto::DropShardRequest>,
 ) -> Result<Response<proto::DropShardReply>, Status> {
     let req = request.into_inner();
+    server.validate_placement_config(
+        crate::ownership::PlacementGeneration(req.placement_generation),
+        req.num_shards,
+    )?;
     // Guard 1: node fingerprints (never GC against a divergent feature/tag space).
     let Some(space) = server.node_dict.load_full() else {
         return Err(Status::failed_precondition(

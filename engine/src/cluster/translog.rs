@@ -241,6 +241,7 @@ mod tests {
             version: 1,
             dsl: dsl.to_string(),
             tags: Vec::new(),
+            placement: crate::ownership::QueryPlacement::standalone(),
         }
     }
 
@@ -256,6 +257,36 @@ mod tests {
         let replay = log.replay(LogPos(0)).unwrap();
         assert_eq!(replay.entries.len(), 2);
         assert_eq!(replay.entries[0].1, add(1, "a"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn translog_v4_round_trips_selective_placement() {
+        let dir = scratch_dir("ownership_v4");
+        let placement = crate::ownership::QueryPlacement::selective(
+            crate::ownership::PlacementGeneration(4),
+            8,
+            vec![1, 6],
+        )
+        .expect("placement");
+        let mutation = ClusterMutation::Add {
+            logical: 8,
+            version: 2,
+            dsl: "psa 10".into(),
+            tags: Vec::new(),
+            placement,
+        };
+        let log = open_fresh(&dir, true).expect("open");
+        log.append(&mutation).expect("append");
+        assert_eq!(
+            log.replay(LogPos(0)).expect("replay").entries[0].1,
+            mutation
+        );
+        let bytes = std::fs::read(dir.join(TRANSLOG_FILE)).expect("read translog");
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().expect("version")),
+            4
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

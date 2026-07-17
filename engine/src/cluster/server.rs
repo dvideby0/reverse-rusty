@@ -28,6 +28,11 @@ use super::proto::shard_service_server::ShardServiceServer;
 use super::security::{ClientSecurity, MeshAuthVerify, ServerSecurity, TlsServerIdentity};
 use super::shard::{LocalShard, Shard, ShardError};
 
+/// Tonic's default receive-message ceiling. Operators may lower the application
+/// cap but ADR-110 deliberately does not permit raising this transport cliff.
+pub const DEFAULT_MAX_GRPC_RESULT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_GRPC_RESULT_BYTES: usize = DEFAULT_MAX_GRPC_RESULT_BYTES;
+
 mod durable;
 mod metrics_source;
 mod service;
@@ -67,6 +72,8 @@ struct ShardSlot {
     /// Cumulative broad-lane cost counters (ADR-101), accumulated from each percolate's
     /// `MatchStats` at the handler boundary — same slot-lifetime semantics as `latency`.
     broad: super::node_metrics::SlotBroadCost,
+    /// Bounded rank-delivery counters (ADR-110), slot-lifetime like latency.
+    ranked: super::node_metrics::SlotRankDelivery,
 }
 
 impl ShardSlot {
@@ -77,6 +84,7 @@ impl ShardSlot {
             fenced_at_generation: AtomicU64::new(0),
             latency: super::node_metrics::SlotLatency::new(),
             broad: super::node_metrics::SlotBroadCost::new(),
+            ranked: super::node_metrics::SlotRankDelivery::new(),
         })
     }
 
@@ -108,6 +116,8 @@ impl ShardSlot {
 struct AdoptedSpace {
     dict: Arc<Dict>,
     tag_dict: Arc<TagDict>,
+    placement_generation: crate::ownership::PlacementGeneration,
+    num_shards: u32,
 }
 
 /// The map of shards this node hosts, keyed by `shard_id` (= global position, ADR-093).
@@ -124,6 +134,8 @@ fn node_space_cell(dict: Arc<Dict>, tag_dict: Arc<TagDict>) -> Arc<ArcSwapOption
     Arc::new(ArcSwapOption::from(Some(Arc::new(AdoptedSpace {
         dict,
         tag_dict,
+        placement_generation: crate::ownership::PlacementGeneration::INITIAL,
+        num_shards: 1,
     }))))
 }
 
@@ -171,6 +183,9 @@ pub struct ShardServer {
     /// plaintext port for Kubernetes liveness/readiness probes (ADR-084). `None` (default)
     /// ⇒ no second listener — byte-identical to the historical single-port behavior.
     health_addr: Option<SocketAddr>,
+    /// Exact protobuf encoded-result cap for unary result messages and each
+    /// `FetchMatches` stream item (ADR-110).
+    max_grpc_result_bytes: usize,
 }
 
 impl ShardServer {
@@ -203,6 +218,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         }
     }
 
@@ -220,6 +236,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         }
     }
 
@@ -242,7 +259,9 @@ impl ShardServer {
         sweep_dropped_trash(&data_dir);
         // The dict + tag space are ONE atomically-written blob (never desynced); absent
         // ⇒ a never-adopted durable node, which starts pending and adopts on connect.
-        let Some((dict_bytes, tag_bytes)) = read_adopted_space(&data_dir)? else {
+        let Some((dict_bytes, tag_bytes, placement_generation, num_shards)) =
+            read_adopted_space(&data_dir)?
+        else {
             return Ok(Self::pending_durable(norm, config, data_dir));
         };
         let dict = Arc::new(crate::storage::deserialize_dict(&dict_bytes).map_err(|e| {
@@ -266,7 +285,20 @@ impl ShardServer {
         // persisted one (a corpus/coordinator change across the restart, ADR-034 divergence); the
         // remedy is to wipe this node's data dir and let the coordinator re-seed it.
         let node_dict = node_space_cell(Arc::clone(&dict), Arc::clone(&tag_dict));
+        node_dict.store(Some(Arc::new(AdoptedSpace {
+            dict: Arc::clone(&dict),
+            tag_dict: Arc::clone(&tag_dict),
+            placement_generation,
+            num_shards,
+        })));
         let slots = restore_durable_slots(&data_dir, &norm, &dict, &tag_dict, &config)?;
+        for (&position, slot) in &slots {
+            if let Some(state) = slot.state.load_full() {
+                state
+                    .shard
+                    .validate_ownership(position, placement_generation, num_shards)?;
+            }
+        }
         Ok(ShardServer {
             norm,
             config,
@@ -276,6 +308,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         })
     }
 
@@ -293,6 +326,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         }
     }
 
@@ -331,6 +365,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         })
     }
 
@@ -373,6 +408,26 @@ impl ShardServer {
         let slot = self.slot(shard_id)?;
         let st = slot.loaded_state()?;
         Ok((slot, st))
+    }
+
+    fn validate_placement_config(
+        &self,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), Status> {
+        let space = self.node_dict.load_full().ok_or_else(|| {
+            Status::failed_precondition("node has not adopted an ownership-aware feature space")
+        })?;
+        if space.placement_generation != generation || space.num_shards != num_shards {
+            return Err(Status::failed_precondition(format!(
+                "placement configuration mismatch: node generation {}/{} shards, request generation {}/{} shards",
+                space.placement_generation.0,
+                space.num_shards,
+                generation.0,
+                num_shards
+            )));
+        }
+        Ok(())
     }
 
     /// Install (or replace) the slot for `shard_id`; the write-guard is released immediately.
@@ -456,6 +511,25 @@ impl ShardServer {
         let Ok((_, st)) = self.loaded_slot(0) else {
             return;
         };
+        // Stamp the node space's REAL placement (selective at this slot), never
+        // `QueryPlacement::standalone()`: `owner()` returns `None` for standalone
+        // rows, so an ownership-suppressed cluster read would silently emit
+        // nothing for the whole preload — an OK-status zero-FN violation
+        // (review finding). The constructor cannot fail for a loaded slot
+        // (`num_shards >= 1`, generation >= INITIAL); skip-on-error mirrors the
+        // documented parse-failure behavior rather than panicking in lib code.
+        let space = self.node_dict.load();
+        let Some(space) = space.as_ref() else {
+            return;
+        };
+        let Ok(placement) = crate::ownership::QueryPlacement::selective(
+            space.placement_generation,
+            space.num_shards,
+            vec![0],
+        ) else {
+            debug_assert!(false, "slot-0 selective placement is always constructible");
+            return;
+        };
         let mut lc = String::new();
         let extracted: Vec<PlacedQuery> = items
             .iter()
@@ -469,6 +543,8 @@ impl ShardServer {
                     version: 1,
                     tags: Vec::new(),
                     tag_ids: Vec::new(),
+                    rank: crate::rank::RankValues::default(),
+                    placement: placement.clone(),
                 })
             })
             .collect();
@@ -503,6 +579,32 @@ impl ShardServer {
     pub fn with_health_addr(mut self, addr: SocketAddr) -> Self {
         self.health_addr = Some(addr);
         self
+    }
+
+    /// Set the static exact encoded-result cap. It may be lowered to any
+    /// positive byte count but never raised above tonic's 4 MiB default.
+    pub fn with_max_grpc_result_bytes(mut self, bytes: usize) -> Result<Self, ShardError> {
+        if !(1..=MAX_GRPC_RESULT_BYTES).contains(&bytes) {
+            return Err(ShardError::Config(format!(
+                "max gRPC result bytes must be within 1..={MAX_GRPC_RESULT_BYTES}, got {bytes}"
+            )));
+        }
+        self.max_grpc_result_bytes = bytes;
+        Ok(self)
+    }
+
+    pub(in crate::cluster::server) fn check_result_bytes(
+        &self,
+        encoded: usize,
+    ) -> Result<(), Status> {
+        if encoded > self.max_grpc_result_bytes {
+            Err(Status::resource_exhausted(format!(
+                "encoded result is {encoded} bytes; configured maximum is {}",
+                self.max_grpc_result_bytes
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// Build the tonic server (TLS applied when configured) + the token-verified

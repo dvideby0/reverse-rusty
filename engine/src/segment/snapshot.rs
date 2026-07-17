@@ -6,6 +6,7 @@ use super::{
     infallible, BaseSegment, BatchMatchOptions, DeadlineAt, DeadlineCheck, EngineSnapshot,
     MatchCancelled, MatchScratch, MatchStats, NoDeadline, Segment,
 };
+use crate::collect::{AllCollector, MatchCollector, TopKCollector};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::exact::TagPredicate;
@@ -89,6 +90,43 @@ impl MatchView<'_> {
         include_broad: bool,
         dl: D,
     ) -> Result<MatchStats, D::Cancelled> {
+        self.match_title_with_policy(title, s, out, include_broad, dl, crate::ownership::EmitAll)
+    }
+
+    #[inline]
+    pub(in crate::segment) fn match_title_with_policy<
+        D: DeadlineCheck,
+        P: crate::ownership::EmissionPolicy,
+    >(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        out: &mut Vec<u64>,
+        include_broad: bool,
+        dl: D,
+        emission: P,
+    ) -> Result<MatchStats, D::Cancelled> {
+        let mut collector = AllCollector::new(out);
+        self.match_title_collect(title, s, &mut collector, include_broad, dl, emission)
+    }
+
+    /// Generic internal collector path. Public compatibility entry points use
+    /// `AllCollector`; bounded local ranking uses `TopKCollector` through the
+    /// same post-verification seam.
+    #[inline]
+    pub(in crate::segment) fn match_title_collect<
+        D: DeadlineCheck,
+        C: MatchCollector,
+        P: crate::ownership::EmissionPolicy,
+    >(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        collector: &mut C,
+        include_broad: bool,
+        dl: D,
+        emission: P,
+    ) -> Result<MatchStats, D::Cancelled> {
         // per-segment seen-buffer sizing (base segments first, memtable last)
         let segments = self.segments;
         let n_base = segments.len();
@@ -105,7 +143,7 @@ impl MatchView<'_> {
             s.epoch = 1;
         }
         let epoch = s.epoch;
-        out.clear();
+        collector.reset();
 
         // Cooperative-deadline entry check (ADR-099): a match that spent its whole
         // budget queued on the rayon pool dies here, before doing any work. The
@@ -158,12 +196,12 @@ impl MatchView<'_> {
                 cancelled = Some(c);
                 break;
             }
-            base.match_into(
+            base.match_collect(
                 &view,
                 self.dict,
                 epoch,
                 &mut s.seen[i],
-                out,
+                collector,
                 // The scalar path evaluates the always-visible hot tier INLINE
                 // (include_hot is a batch-driver cost switch, never visibility).
                 crate::segment::ProbeLanes {
@@ -172,31 +210,28 @@ impl MatchView<'_> {
                 },
                 self.pred,
                 &mut stats,
+                emission,
             );
         }
         if cancelled.is_none() {
             match dl.check() {
                 Err(c) => cancelled = Some(c),
-                Ok(()) => self.memtable.match_into(
+                Ok(()) => self.memtable.match_collect(
                     &view,
                     self.dict,
                     epoch,
                     &mut s.seen[n_base],
-                    out,
+                    collector,
                     crate::segment::ProbeLanes {
                         include_broad,
                         include_hot: true,
                     },
                     self.pred,
                     &mut stats,
+                    emission,
                 ),
             }
         }
-
-        // 4) dedup logical ids across segments (a logical id can live in more
-        // than one segment, e.g. base + an updated copy in a later segment).
-        out.sort_unstable();
-        out.dedup();
 
         // restore the reusable buffers (the positive buffer only when it was used)
         s.feats = feats;
@@ -206,10 +241,19 @@ impl MatchView<'_> {
         if let Some(c) = cancelled {
             // Anti-partial guarantee at the lowest level: a cancelled match returns
             // NO ids, never a truncated union (ADR-099).
-            out.clear();
+            collector.abort();
             return Err(c);
         }
-        stats.matches = out.len() as u32;
+        // 4) finalize after every lane and segment has emitted. A logical id can
+        // live in more than one segment (for example base + an updated copy).
+        let summary = collector.finish();
+        stats.logical_emissions = stats
+            .logical_emissions
+            .saturating_add(summary.logical_emissions);
+        stats.duplicate_emissions = stats
+            .duplicate_emissions
+            .saturating_add(summary.duplicate_emissions.unwrap_or(0));
+        stats.matches = summary.retained as u32;
         Ok(stats)
     }
 
@@ -241,6 +285,29 @@ impl std::fmt::Debug for EngineSnapshot {
 }
 
 impl EngineSnapshot {
+    pub(crate) fn validate_ownership_for_shard(
+        &self,
+        position: u32,
+        generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+    ) -> Result<(), crate::ownership::OwnershipError> {
+        for segment in &self.segments {
+            for local in 0..segment.len() as u32 {
+                segment
+                    .placement(local)
+                    .to_owned()
+                    .validate_for_shard(position, generation, num_shards)?;
+            }
+        }
+        for local in 0..self.memtable.len() as u32 {
+            self.memtable
+                .placement(local)
+                .to_owned()
+                .validate_for_shard(position, generation, num_shards)?;
+        }
+        Ok(())
+    }
+
     pub fn normalizer(&self) -> &Normalizer {
         &self.norm
     }
@@ -337,15 +404,39 @@ impl EngineSnapshot {
         self.query_store.get(logical_id)
     }
 
+    /// Winner-fetch lookup with pre-allocation byte credit. `Err(actual_len)`
+    /// means the current source exists but does not fit; the source store checks
+    /// its borrowed resident/mmap value before cloning. Public so the v2
+    /// handler's enrichment loop can enforce its byte budget BEFORE allocating
+    /// the source `String` (the peak-memory bound, ADR-108/110).
+    pub fn get_query_source_bounded(
+        &self,
+        logical_id: u64,
+        max_bytes: usize,
+    ) -> Result<Option<String>, usize> {
+        self.query_store.get_bounded(logical_id, max_bytes)
+    }
+
     pub fn explain_hit(
         &self,
         logical_id: u64,
         title: &str,
     ) -> Option<crate::explain::ExplainDetail> {
         let source = self.get_query_source(logical_id)?;
+        self.explain_source(logical_id, &source, title)
+    }
+
+    /// Compile a structured explanation from already-fetched current source.
+    /// Ranked delivery uses this to fetch and budget each winner source once.
+    pub fn explain_source(
+        &self,
+        logical_id: u64,
+        source: &str,
+        title: &str,
+    ) -> Option<crate::explain::ExplainDetail> {
         let mut lc = String::new();
         let cq = crate::compile::compile_one_readonly(
-            &source,
+            source,
             logical_id,
             &self.norm,
             &self.dict,
@@ -464,6 +555,36 @@ impl EngineSnapshot {
         )
     }
 
+    /// Cluster-only scalar path: exact verification and member-level alive/tag
+    /// checks are unchanged, then ADR-109 suppresses non-owner emissions.
+    pub(crate) fn match_title_filtered_owned(
+        &self,
+        title: &str,
+        s: &mut MatchScratch,
+        out: &mut Vec<u64>,
+        include_broad: bool,
+        pred: &TagPredicate,
+        emission: crate::ownership::UniqueOwner<'_>,
+    ) -> MatchStats {
+        infallible(
+            MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+                pred,
+            }
+            .match_title_with_policy(
+                title,
+                s,
+                out,
+                include_broad,
+                NoDeadline,
+                emission,
+            ),
+        )
+    }
+
     /// [`match_title_filtered`](Self::match_title_filtered) with an optional cooperative
     /// deadline (ADR-099). `None` delegates to the unarmed path (byte-identical);
     /// `Some(d)` re-checks the clock at entry and at each segment boundary, and once
@@ -531,6 +652,16 @@ impl EngineSnapshot {
         crate::rank::CompiledRankSpec::new(spec.priority_key.clone(), boosts)
     }
 
+    /// Compile the fixed typed bounded-ranking program. Only the canonical
+    /// `priority` field is admitted in Increment 2; boosts resolve to TagIds at
+    /// request setup so scoring remains integer-only.
+    pub fn compile_rank_program(
+        &self,
+        spec: &crate::rank::RankProgramSpec,
+    ) -> Result<crate::rank::CompiledRankProgram, crate::rank::RankProgramError> {
+        crate::rank::compile_rank_program(&self.tag_dict, spec)
+    }
+
     /// The live `TagId` slice for a matched logical id, picking the NEWEST live
     /// copy. Ordering is newest-first at both levels: the memtable before the base
     /// segments (all writes land in the memtable), base segments newest→oldest
@@ -555,6 +686,158 @@ impl EngineSnapshot {
             }
         }
         None
+    }
+
+    /// Newest-live typed rank values and tags for a logical id. The same reverse
+    /// walk as compatibility ranking prevents an older physical duplicate from
+    /// determining score merely because it emitted first.
+    fn rank_metadata_for_logical(
+        &self,
+        logical_id: u64,
+    ) -> Option<(crate::rank::RankValues, &[crate::tagdict::TagId])> {
+        for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
+            if self.memtable.is_alive(local) {
+                let tags = self.memtable.tags_of(local);
+                let mut rank = self.memtable.rank_values(local);
+                if rank.priority == 0 {
+                    rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
+                }
+                return Some((rank, tags));
+            }
+        }
+        for seg in self.segments.iter().rev() {
+            for &local in seg.locals_for_logical(logical_id).iter().rev() {
+                if seg.is_alive(local) {
+                    let tags = seg.tags_of(local);
+                    let mut rank = seg.rank_values(local);
+                    if rank.priority == 0 {
+                        rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
+                    }
+                    return Some((rank, tags));
+                }
+            }
+        }
+        None
+    }
+
+    /// Bounded local ranked percolation over the scalar matcher. Collection is
+    /// `O(K + total-threshold)` and every score resolves newest-live metadata.
+    pub fn try_match_title_top_k(
+        &self,
+        title: &str,
+        options: crate::result::TopKOptions,
+        program: &crate::rank::CompiledRankProgram,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        deadline: Option<Instant>,
+    ) -> Result<crate::rank::RankedMatch, crate::rank::RankedMatchError> {
+        self.try_match_title_top_k_with_policy(
+            title,
+            options,
+            program,
+            pred,
+            scratch,
+            deadline,
+            crate::ownership::EmitAll,
+        )
+    }
+
+    /// Cluster-only bounded ranked path. Boolean verification is identical to
+    /// [`try_match_title_top_k`](Self::try_match_title_top_k); ADR-109's
+    /// [`UniqueOwner`](crate::ownership::UniqueOwner) policy is applied only at
+    /// the final emission boundary, before the bounded collector observes a row.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_match_title_top_k_owned(
+        &self,
+        title: &str,
+        options: crate::result::TopKOptions,
+        program: &crate::rank::CompiledRankProgram,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        deadline: Option<Instant>,
+        emission: crate::ownership::UniqueOwner<'_>,
+    ) -> Result<crate::rank::RankedMatch, crate::rank::RankedMatchError> {
+        self.try_match_title_top_k_with_policy(
+            title, options, program, pred, scratch, deadline, emission,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_match_title_top_k_with_policy<P: crate::ownership::EmissionPolicy>(
+        &self,
+        title: &str,
+        options: crate::result::TopKOptions,
+        program: &crate::rank::CompiledRankProgram,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        deadline: Option<Instant>,
+        emission: P,
+    ) -> Result<crate::rank::RankedMatch, crate::rank::RankedMatchError> {
+        if options.size > crate::result::MAX_TOP_K {
+            return Err(crate::rank::RankedMatchError::Admission(
+                crate::result::TopKAdmissionError::SizeTooLarge {
+                    requested: options.size,
+                    max: crate::result::MAX_TOP_K,
+                },
+            ));
+        }
+        if options.track_total_hits_up_to > crate::result::DEFAULT_TRACK_TOTAL_HITS_UP_TO {
+            return Err(crate::rank::RankedMatchError::Admission(
+                crate::result::TopKAdmissionError::TotalHitsThresholdTooLarge {
+                    requested: options.track_total_hits_up_to,
+                    max: crate::result::DEFAULT_TRACK_TOTAL_HITS_UP_TO,
+                },
+            ));
+        }
+        let threshold =
+            usize::try_from(options.track_total_hits_up_to).unwrap_or(crate::result::MAX_TOP_K);
+        let mut collector = TopKCollector::new(options.size, threshold, |logical_id| {
+            self.rank_metadata_for_logical(logical_id)
+                .map_or(0, |(values, tags)| {
+                    crate::rank::score_program(values, tags, program)
+                })
+        });
+        let view = MatchView {
+            norm: &self.norm,
+            dict: &self.dict,
+            segments: &self.segments,
+            memtable: &self.memtable,
+            pred,
+        };
+        let include_broad = options.query_scope == crate::result::QueryScope::WithBroad;
+        let mut stats = match deadline {
+            Some(at) => view
+                .match_title_collect(
+                    title,
+                    scratch,
+                    &mut collector,
+                    include_broad,
+                    DeadlineAt(at),
+                    emission,
+                )
+                .map_err(crate::rank::RankedMatchError::Cancelled)?,
+            None => infallible(view.match_title_collect(
+                title,
+                scratch,
+                &mut collector,
+                include_broad,
+                NoDeadline,
+                emission,
+            )),
+        };
+        let total_hits = collector.total_hits();
+        stats.matches = u32::try_from(total_hits.value).unwrap_or(u32::MAX);
+        let hits = collector
+            .winners()
+            .iter()
+            .map(|&(logical_id, score)| crate::rank::RankedHit { logical_id, score })
+            .collect();
+        Ok(crate::rank::RankedMatch {
+            hits,
+            total_hits,
+            stats,
+            rank_stats: collector.rank_stats(),
+        })
     }
 
     /// Score matched logical ids for ranking (ADR-049 §5.4 / ADR-059). Returns

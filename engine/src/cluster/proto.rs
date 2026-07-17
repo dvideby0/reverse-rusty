@@ -28,6 +28,53 @@ pub(crate) fn tags_from_proto(tags: Vec<TagKv>) -> Vec<(String, String)> {
     tags.into_iter().map(|t| (t.key, t.value)).collect()
 }
 
+pub(crate) fn placement_to_proto(placement: &crate::ownership::QueryPlacement) -> QueryPlacement {
+    QueryPlacement {
+        placement_generation: placement.generation().0,
+        num_shards: placement.num_shards(),
+        mode: placement.mode() as u32,
+        positions: placement.positions().to_vec(),
+    }
+}
+
+pub(crate) fn placement_from_proto(
+    placement: Option<QueryPlacement>,
+) -> Result<crate::ownership::QueryPlacement, crate::ownership::OwnershipError> {
+    let placement = placement.ok_or(crate::ownership::OwnershipError::MissingGeneration)?;
+    let mode = u8::try_from(placement.mode)
+        .map_err(|_| crate::ownership::OwnershipError::UnknownMode(u8::MAX))?;
+    crate::ownership::QueryPlacement::from_raw(
+        crate::ownership::PlacementGeneration(placement.placement_generation),
+        placement.num_shards,
+        mode,
+        placement.positions,
+    )
+}
+
+pub(crate) fn ownership_to_proto(context: &crate::ownership::OwnershipContext) -> OwnershipContext {
+    OwnershipContext {
+        placement_generation: context.generation().0,
+        num_shards: context.num_shards(),
+        routed_positions: context.routed_positions().to_vec(),
+        broad_evaluator_plus_one: context
+            .broad_evaluator()
+            .and_then(|position| position.checked_add(1))
+            .unwrap_or(0),
+    }
+}
+
+pub(crate) fn ownership_from_proto(
+    context: Option<OwnershipContext>,
+) -> Result<crate::ownership::OwnershipContext, crate::ownership::OwnershipError> {
+    let context = context.ok_or(crate::ownership::OwnershipError::MissingGeneration)?;
+    crate::ownership::OwnershipContext::new(
+        crate::ownership::PlacementGeneration(context.placement_generation),
+        context.num_shards,
+        context.routed_positions,
+        context.broad_evaluator_plus_one.checked_sub(1),
+    )
+}
+
 /// Resolved [`TagPredicate`] → proto `TagGroup`s (ADR-055): the already-resolved `TagId` groups.
 /// They are globally consistent (frozen tag dict + synthetic hash), so the server rebuilds the
 /// predicate from the raw ids without re-resolving strings. Empty ⇒ unfiltered.
@@ -70,6 +117,53 @@ pub(crate) fn rank_spec_from_proto(p: RankSpec) -> crate::rank::CompiledRankSpec
     crate::rank::CompiledRankSpec::new(priority_key, boosts)
 }
 
+/// Typed bounded rank program to/from the additive ADR-110 wire.
+pub(crate) fn rank_program_to_proto(spec: &crate::rank::CompiledRankProgram) -> RankProgram {
+    RankProgram {
+        use_priority: spec.uses_priority(),
+        boosts: spec
+            .boosts()
+            .map(|(tag_id, weight)| RankBoost { tag_id, weight })
+            .collect(),
+    }
+}
+
+pub(crate) fn rank_program_from_proto(p: RankProgram) -> crate::rank::CompiledRankProgram {
+    crate::rank::CompiledRankProgram::new(
+        p.use_priority,
+        p.boosts.into_iter().map(|b| (b.tag_id, b.weight)).collect(),
+    )
+}
+
+pub(crate) fn total_hits_to_proto(total: crate::result::TotalHits) -> BoundedTotalHits {
+    BoundedTotalHits {
+        value: total.value,
+        exact: total.relation == crate::result::TotalHitsRelation::Eq,
+    }
+}
+
+pub(crate) fn total_hits_from_proto(total: BoundedTotalHits) -> crate::result::TotalHits {
+    if total.exact {
+        crate::result::TotalHits::exact(total.value)
+    } else {
+        crate::result::TotalHits::lower_bound(total.value)
+    }
+}
+
+pub(crate) fn rank_stats_to_proto(stats: crate::rank::RankStats) -> BoundedRankStats {
+    BoundedRankStats {
+        evaluations: stats.evaluations,
+        heap_replacements: stats.heap_replacements,
+    }
+}
+
+pub(crate) fn rank_stats_from_proto(stats: BoundedRankStats) -> crate::rank::RankStats {
+    crate::rank::RankStats {
+        evaluations: stats.evaluations,
+        heap_replacements: stats.heap_replacements,
+    }
+}
+
 /// Proto wire `MatchStats` → engine [`MatchStats`]. Field order pinned to `segment.rs`.
 pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
     EngineStats {
@@ -79,6 +173,10 @@ pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
         main_candidates: p.main_candidates,
         broad_candidates: p.broad_candidates,
         matches: p.matches,
+        // ADR-107 telemetry is intentionally not added to the compatibility
+        // protobuf. Remote shards report zero until the bounded v2 wire lands.
+        logical_emissions: 0,
+        duplicate_emissions: 0,
         probes_attempted: p.probes_attempted,
         probes_skipped: p.probes_skipped,
         broad_queries_evaluated: p.broad_queries_evaluated,
@@ -132,6 +230,7 @@ pub(crate) fn translog_entry_to_mutation(e: TranslogEntry) -> Option<(LogPos, Cl
             dsl: item.dsl,
             // Tags ride the translog entry (ADR-055), so a peer-recovered replica keeps them.
             tags: tags_from_proto(item.tags),
+            placement: placement_from_proto(item.placement).ok()?,
         },
         translog_entry::Op::RemoveLogical(logical) => ClusterMutation::Remove { logical },
     };
@@ -154,11 +253,13 @@ pub(crate) fn translog_entry_from_mutation(
             version,
             dsl,
             tags,
+            placement,
         } => translog_entry::Op::Add(AddItem {
             logical_id: *logical,
             dsl: dsl.clone(),
             version: *version,
             tags: tags_to_proto(tags),
+            placement: Some(placement_to_proto(placement)),
         }),
         ClusterMutation::Remove { logical } => translog_entry::Op::RemoveLogical(*logical),
         ClusterMutation::Upsert { .. } => return None,
@@ -188,6 +289,10 @@ mod tests {
             main_candidates: VALS[3],
             broad_candidates: VALS[4],
             matches: VALS[5],
+            // ADR-107 delivery telemetry is deliberately absent from the frozen
+            // protobuf contract; transport mapping leaves both counters zero.
+            logical_emissions: 0,
+            duplicate_emissions: 0,
             probes_attempted: VALS[6],
             probes_skipped: VALS[7],
             broad_queries_evaluated: VALS[8],
@@ -293,6 +398,9 @@ mod tests {
                     dsl: "1994 topps".to_string(),
                     version: v,
                     tags: Vec::new(),
+                    placement: Some(super::placement_to_proto(
+                        &crate::ownership::QueryPlacement::standalone(),
+                    )),
                 })),
             };
             let got = translog_entry_to_mutation(e).expect("Add maps to a mutation");

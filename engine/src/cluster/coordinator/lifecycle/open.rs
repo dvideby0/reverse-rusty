@@ -21,6 +21,12 @@ use crate::normalize::Normalizer;
 use crate::tagdict::TagDict;
 
 impl ClusterEngine {
+    /// Current logical placement generation (ADR-109). Physical checkpoints,
+    /// compaction, replication, handoff, and node reassignment never change it.
+    pub fn placement_generation(&self) -> crate::ownership::PlacementGeneration {
+        crate::ownership::PlacementGeneration(self.placement_generation.load(Ordering::Acquire))
+    }
+
     /// Assemble a cluster from pre-built parts — the construction seam shared by
     /// [`Self::build`] (which supplies `LocalShard`s) and the distributed builder /
     /// gRPC integration test (which supply boxed `RemoteShard`s). `shards.len()` must
@@ -47,6 +53,11 @@ impl ClusterEngine {
                 ring.num_shards()
             )));
         }
+        let generation = durable.placement_generation;
+        let num_shards = ring.num_shards() as u32;
+        for (position, shard) in shards.iter().enumerate() {
+            shard.validate_ownership(position as u32, generation, num_shards)?;
+        }
         // Multi-word aliases are cluster-supported since ADR-076: `route` is P(T)-aware
         // (targets derived from the maximal positive view when multi-word aliases are
         // active), so a nested alias entity that lives only in `P(T)` still probes the
@@ -57,7 +68,7 @@ impl ClusterEngine {
         // out-of-band — the same consistency every vocabulary feature already relies
         // on; ADR-076 records that trust model and keeps LIVE vocab changes on a
         // remote cluster refused (`set_vocab` non-local guard).
-        Ok(ClusterEngine {
+        let engine = ClusterEngine {
             norm,
             dict,
             tag_dict,
@@ -66,11 +77,19 @@ impl ClusterEngine {
             vocab: None,
             ring,
             shards,
+            logical_ids: std::sync::RwLock::new(
+                super::super::logical_ids::LogicalIdDirectory::default(),
+            ),
+            logical_write_stripes: (0..super::super::logical_ids::LOGICAL_WRITE_STRIPES)
+                .map(|_| Mutex::new(()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             include_broad,
             replication_factor: replication_factor.max(1),
             per_shard,
             log: durable.log,
             epoch: AtomicU64::new(durable.epoch),
+            placement_generation: AtomicU64::new(durable.placement_generation.0),
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
             control: durable.control,
@@ -103,7 +122,20 @@ impl ClusterEngine {
             // moves never happen (no `execute_handoff` in-process), so it is never contended.
             #[cfg(feature = "distributed")]
             move_ledger: crate::cluster::coordinator::reassign::MoveLedger::new(),
-        })
+        };
+        // A fresh assembly holding ZERO stored queries has an authoritative EMPTY
+        // id directory — nothing to enumerate. A populated assembly (the gRPC
+        // attach-to-existing-data shape) keeps it unauthoritative: `RemoteShard`
+        // has no live-id enumeration RPC yet, so insert-only admission cannot be
+        // verified there and `add_query` fails closed (directing to `upsert_query`).
+        // The durable `open` path replaces this with the real enumeration below.
+        // A count FAILURE also stays unauthoritative rather than failing the
+        // assembly: construction semantics predate this check, and unauthoritative
+        // is already the fail-closed disposition.
+        if matches!(engine.num_queries(), Ok(0)) {
+            engine.replace_logical_ids(Vec::new())?;
+        }
+        Ok(engine)
     }
     /// True if `data_dir` holds a committed cluster manifest — i.e. [`Self::open`]
     /// will reopen an existing durable cluster there; otherwise [`Self::build`] is the
@@ -284,11 +316,13 @@ impl ClusterEngine {
             log: Box::new(log),
             data_dir: Some(data_dir.clone()),
             epoch: manifest.epoch,
+            placement_generation: manifest.placement_generation,
             vnodes: manifest.vnodes,
-            control: Box::new(InMemoryControlPlane::single_node(
+            control: Box::new(InMemoryControlPlane::single_node_with_generation(
                 manifest.num_shards,
                 manifest.vnodes,
                 manifest.dict_fingerprint,
+                manifest.placement_generation,
             )),
         };
         let mut engine = Self::from_parts(
@@ -308,6 +342,41 @@ impl ClusterEngine {
         // (`apply_add` → `note_tags`) additionally latches it for any un-checkpointed tagged add.
         if !engine.tag_dict.is_empty() {
             engine.tags_present.store(true, Ordering::Relaxed);
+        }
+
+        // Rebuild the compact logical-id directory from the committed base before
+        // replaying the tail. Placement/replication legitimately expose the same row
+        // on several shard positions, so collapse those physical copies here. Clusters
+        // written by this version admitted at most one semantic row per id.
+        //
+        // A shard whose enumeration is INCOMPLETE (a source-less / partial store —
+        // a supported degraded reopen shape) must not fail the open OR seed a
+        // directory that under-holds live ids (insert-only admission would re-admit
+        // a live id — codex review): leave the directory UNAUTHORITATIVE instead,
+        // so serving works while `add_query` fails closed toward `upsert_query`,
+        // and surface the degradation as a durability event.
+        let mut committed_ids = Some(Vec::new());
+        for shard in &engine.shards {
+            match (shard.live_logical_ids(), &mut committed_ids) {
+                (Ok(ids), Some(collected)) => collected.extend(ids),
+                (Ok(_), None) => {}
+                (Err(e), collected) => {
+                    *collected = None;
+                    engine.emit(EngineEvent::DurabilityFailure {
+                        op: DurabilityOp::SourceStoreWrite,
+                        detail: "logical-id directory not seeded (partial/source-less store); \
+                                 insert-only add_query is disabled until a checkpointed reopen — \
+                                 use upsert_query"
+                            .to_string(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(mut committed_ids) = committed_ids {
+            committed_ids.sort_unstable();
+            committed_ids.dedup();
+            engine.replace_logical_ids(committed_ids)?;
         }
 
         // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the

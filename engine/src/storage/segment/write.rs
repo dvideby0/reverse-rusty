@@ -15,8 +15,8 @@ use crate::segment::Segment;
 
 use super::super::{crc32, durable_rename, write_u32, write_u64};
 use super::{
-    align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_HOT, HEADER_SIZE,
-    MAGIC,
+    align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_HOT,
+    FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK, HEADER_SIZE, MAGIC,
 };
 
 /// Build a frozen hash table + posting blob from an in-memory CandidateIndex.
@@ -115,6 +115,16 @@ fn write_u64_array(w: &mut (impl Write + Seek), data: &[u64]) -> io::Result<()> 
     Ok(())
 }
 
+/// Write an i64 array with the same aligned representation as `u64`.
+fn write_i64_array(w: &mut (impl Write + Seek), data: &[i64]) -> io::Result<()> {
+    write_u32(w, data.len() as u32)?;
+    w.write_all(&[0u8; 4])?;
+    // SAFETY: every i64 bit pattern is valid bytes; the view is read-only and
+    // bounded by `data`.
+    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), data.len() * 8) };
+    w.write_all(bytes)
+}
+
 /// Write a slice of u8 values: [count: u32, data: [u8; count], pad_to_8].
 fn write_u8_array(w: &mut (impl Write + Seek), data: &[u8]) -> io::Result<()> {
     write_u32(w, data.len() as u32)?;
@@ -135,7 +145,13 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     // ---- Exact section ----
     pad_to_8(&mut f)?;
     let exact_off = f.stream_position()?;
-    write_exact_section(&mut f, seg)?;
+    let has_ownership = seg
+        .exact_store()
+        .placement_modes()
+        .iter()
+        .any(|&mode| mode != 0);
+    let has_priority = has_ownership || seg.exact_store().priorities().iter().any(|&v| v != 0);
+    write_exact_section(&mut f, seg, has_priority, has_ownership)?;
 
     // ---- Main index ----
     pad_to_8(&mut f)?;
@@ -215,7 +231,11 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
         .any(|c| matches!(c, crate::compile::CostClass::D));
     write_u32(
         &mut f,
-        if has_hot {
+        if has_ownership {
+            FORMAT_VERSION_OWNERSHIP
+        } else if has_priority {
+            FORMAT_VERSION_RANK
+        } else if has_hot {
             FORMAT_VERSION_HOT
         } else if has_class_d {
             FORMAT_VERSION_CLASS_D
@@ -249,7 +269,12 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
 
 /// Write the ExactStore arrays from a Segment. Accesses internal state through
 /// the public accessor methods we'll add to ExactStore.
-fn write_exact_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Result<()> {
+fn write_exact_section(
+    w: &mut (impl Write + Seek),
+    seg: &Segment,
+    write_priority: bool,
+    write_ownership: bool,
+) -> io::Result<()> {
     let exact = seg.exact_store();
     write_u64_array(w, exact.req_masks())?;
     write_u64_array(w, exact.forb_masks())?;
@@ -266,6 +291,17 @@ fn write_exact_section(w: &mut (impl Write + Seek), seg: &Segment) -> io::Result
     write_u32_array(w, exact.anyof_blobs())?;
     write_u32_array(w, exact.versions())?;
     write_u64_array(w, exact.logicals())?;
+    if write_priority {
+        write_i64_array(w, exact.priorities())?;
+    }
+    if write_ownership {
+        write_u64_array(w, exact.placement_generations())?;
+        write_u32_array(w, exact.placement_num_shards())?;
+        write_u8_array(w, exact.placement_modes())?;
+        write_u32_array(w, exact.placement_offs())?;
+        write_u32_array(w, exact.placement_lens())?;
+        write_u32_array(w, exact.placement_blobs())?;
+    }
     Ok(())
 }
 

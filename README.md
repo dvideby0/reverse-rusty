@@ -145,6 +145,12 @@ curl -X PUT localhost:9200/_doc/1 -H 'Content-Type: application/json' \
   -d '{"query": "(laptop,notebook) 16gb -refurbished"}'
 curl -X POST localhost:9200/_search -H 'Content-Type: application/json' \
   -d '{"document": {"title": "Dell XPS 15 Laptop 16GB RAM 512GB SSD New"}}'
+
+# Exact bounded top-K ranking, also available under server --cluster (ADR-107/108/110):
+curl -X PUT localhost:9200/_doc/2 -H 'Content-Type: application/json' \
+  -d '{"query":"dell laptop 16gb","rank_fields":{"priority":50}}'
+curl -X POST localhost:9200/v2/_search -H 'Content-Type: application/json' \
+  -d '{"document":{"title":"Dell XPS 15 Laptop 16GB RAM"},"size":10}'
 ```
 
 Full endpoint and flag reference: [`docs/reference/api.md`](docs/reference/api.md). Query language:

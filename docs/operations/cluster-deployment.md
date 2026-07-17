@@ -258,7 +258,10 @@ the production compose binds shards on `9100` and control nodes on `9101` on the
 `reverse_rusty_shard_ready`, plus the per-shard RPC latency histogram
 `reverse_rusty_shard_rpc_duration_seconds{shard,method,le}` (ADR-100) and the per-shard broad-lane
 cost counters `reverse_rusty_broad_{candidates,postings_scanned,queries_evaluated,batches}_total{shard}`
-(ADR-101 — the coordinator's counter names, `{shard}`-labeled); control nodes report
+(ADR-101 — the coordinator's counter names, `{shard}`-labeled). ADR-110 adds top-K/fetch latency
+methods plus per-shard bounded-hit/result-byte, source-fetch-byte, total-relation, cancellation, and
+result-cap counters; the coordinator reports actual shard rows/bytes and enrichment-cap rejections.
+Control nodes report
 `reverse_rusty_control_{term,is_leader,state,last_log_index,last_applied,voters}`. High-signal
 coordinator alerts:
 

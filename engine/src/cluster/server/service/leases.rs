@@ -18,6 +18,10 @@ pub(super) fn retention_lease(
     request: Request<proto::RetentionLeaseRequest>,
 ) -> Result<Response<proto::RetentionLeaseReply>, Status> {
     let req = request.into_inner();
+    server.validate_placement_config(
+        crate::ownership::PlacementGeneration(req.placement_generation),
+        req.num_shards,
+    )?;
     let (_slot, st) = server.loaded_slot(req.shard_id)?;
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(
@@ -64,6 +68,10 @@ pub(super) fn fence(
     request: Request<proto::FenceRequest>,
 ) -> Result<Response<proto::FenceReply>, Status> {
     let req = request.into_inner();
+    server.validate_placement_config(
+        crate::ownership::PlacementGeneration(req.placement_generation),
+        req.num_shards,
+    )?;
     let (slot, st) = server.loaded_slot(req.shard_id)?;
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(
@@ -92,6 +100,10 @@ pub(super) fn unfence(
     request: Request<proto::UnfenceRequest>,
 ) -> Result<Response<proto::UnfenceReply>, Status> {
     let req = request.into_inner();
+    server.validate_placement_config(
+        crate::ownership::PlacementGeneration(req.placement_generation),
+        req.num_shards,
+    )?;
     let (slot, st) = server.loaded_slot(req.shard_id)?;
     if req.dict_fingerprint != st.dict.fingerprint() {
         return Err(Status::failed_precondition(

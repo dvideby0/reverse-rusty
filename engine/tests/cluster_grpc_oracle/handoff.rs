@@ -14,6 +14,7 @@ use reverse_rusty::cluster::{
 };
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::events::{DurabilityOp, EngineEvent};
+use reverse_rusty::{QueryScope, RankProgramSpec, TopKOptions};
 use tonic::transport::server::TcpIncoming;
 
 use crate::harness::*;
@@ -118,6 +119,23 @@ fn grpc_live_handoff_under_sustained_writes() {
     )
     .expect("connect source cluster");
     cluster.ingest(&queries).expect("ingest corpus");
+    let rank_program = cluster
+        .compile_rank_program(&RankProgramSpec {
+            priority_field: None,
+            boosts: Vec::new(),
+        })
+        .expect("rank program");
+    let rank_options = TopKOptions {
+        size: 10,
+        track_total_hits_up_to: 10_000,
+        query_scope: QueryScope::WithBroad,
+    };
+    let ranked_before = cluster
+        .try_percolate_filtered_top_k(&titles[0], &[], rank_options, &rank_program, None)
+        .expect("top k before handoff");
+    cluster
+        .fetch_ranked_sources(&ranked_before, None)
+        .expect("winner fetch before handoff");
     assert_eq!(
         cluster.handoff_generations(),
         vec![0],
@@ -184,6 +202,17 @@ fn grpc_live_handoff_under_sustained_writes() {
         0,
         "every fence-window write must converge via resync after the flip"
     );
+
+    let ranked_after = cluster
+        .try_percolate_filtered_top_k(&titles[0], &[], rank_options, &rank_program, None)
+        .expect("top k after handoff");
+    assert_eq!(
+        ranked_after.hits, ranked_before.hits,
+        "zero-score top winners remain deterministic across the backing swap"
+    );
+    cluster
+        .fetch_ranked_sources(&ranked_after, None)
+        .expect("winner fetch after handoff");
 
     // Over EVERY title the cluster (now serving from the new owner) matches the brute oracle over the
     // final live set — zero false negatives across a live data move under concurrent writes.

@@ -255,6 +255,28 @@ compaction merges regroup on the destination side by body — which makes compac
 only; the observe sketch (`bodies_total`/`dup_joined`/`distinct_bodies_est`) sizes Stage B —
 the persisted indirection this stage deliberately defers.
 
+### 4.3 One distributed emitter per logical match (ADR-109)
+
+Cluster placement can put one logical query on several shard positions. Candidate retrieval and exact
+verification still run wherever routing requires, but a post-verification `UniqueOwner` policy permits
+only one routed position to emit the logical ID:
+
+- selective A/B-any-of/H placement emits from the minimum position in
+  `placement_positions ∩ routed_positions`;
+- replicated-always-visible class-B pairs emit from the minimum routed position;
+- replicated-broad class C/D emits from the request's broad-evaluation position.
+
+The policy runs after exact positive/negative verification and after each member's own alive/tag
+checks, immediately before the collector. Canonical-body sharing therefore still verifies once, but
+each logical member independently decides whether it is alive, tag-eligible, and owned. Placement
+metadata never participates in signature retrieval, exact semantics, visibility, or score.
+
+Standalone matching monomorphizes the same code with `EmitAll`, preserving the prior hot path. Cluster
+reads pass one generation-fenced ownership context to every routed shard; filtered and compatibility-
+ranked paths use the identical context. The coordinator retains sort/dedup defensively, while
+`duplicate_emissions` asserts the shard replies are already disjoint. See the placement/persistence
+contract in [`clustering-and-scaling.md`](clustering-and-scaling.md) §7 and ADR-109.
+
 ---
 
 ## 5. Per-query metadata, filtered percolation, and ranking
@@ -264,16 +286,17 @@ the persisted indirection this stage deliberately defers.
 > **end-to-end through the cluster** (in-process + the experimental gRPC path) — one frozen `TagDict`
 > shared into every shard like the `Dict`, raw tags in the log + read-only `get_or_synthetic`
 > resolution, the filter resolved once at the coordinator + shipped as `TagId` groups
-> ([ADR-055](../DECISIONS.md), 2026-06-04); **ranking + pagination (§5.4) are now built single-node**
+> ([ADR-055](../DECISIONS.md), 2026-06-04); **compatibility ranking + pagination (§5.4) are built single-node**
 > ([ADR-059](../DECISIONS.md), 2026-06-04) **and through the cluster** ([ADR-075](../DECISIONS.md),
 > 2026-06-11 — rank-at-shard + compile-once-fan). Motivated by the reference
 > workload in [`../research/percolator-workload.md`](../research/percolator-workload.md), whose dominant
 > read pattern is "percolate, then narrow to one category." Code: `src/tagdict.rs` (tag interning),
 > `src/exact.rs` (`TagPredicate` + SoA tag column + verify-stage filter), `src/rank.rs` (the post-match
-> scorer — ADR-059), `src/segment/` (ingest/match threading + `EngineSnapshot::rank`),
-> `src/storage/segment.rs` + `src/wal.rs` (`.seg` v3 / WAL v2 persistence), `src/bin/server/`
+> scorer — ADR-059/108), `src/segment/` (ingest/match threading + `EngineSnapshot::{rank,
+> try_match_title_top_k}`), `src/storage/segment.rs` + `src/wal.rs` (`.seg`/WAL v6 typed priority;
+> `.seg` v7 distributed ownership columns), `src/bin/server/`
 > (the REST filter + rank/pagination surface), `src/cluster/` (`coordinator/{lifecycle,ingest,matching}` +
-> `clog` + `shard` + the gated `remote`/`server` — ADR-055).
+> `clog` + `shard` + the gated `remote`/`server` — ADR-055/109).
 
 Production percolators store **structured tags** alongside each query (a category, a status, secondary
 keys) and at match time **filter the percolated candidates by those tags** — and sometimes rank them.
@@ -325,10 +348,37 @@ live copy** of each id (memtable first, then base segments newest→oldest). **C
 ([ADR-075](../DECISIONS.md)): the coordinator compiles the `RankSpec` once against the shared frozen tag
 space (the [ADR-055](../DECISIONS.md) compile-once-fan pattern), each probed shard scores its own matched
 ids via the same `EngineSnapshot::rank`, and the merge dedups by id — copies of a logical are
-version-identical across shards, so every shard reports the same score. One boundary, pinned: a
-post-freeze (synthetic) `priority` tag scores 0 (priority reads the tag's value string, which only an
-interned tag has); boosts fire for both (id-equality). Consistent with the reference workload, where
-ranking is a presentation-surface concern, not a matching-core one.
+version-identical across shards, so every shard reports the same score. One **compatibility-RankSpec**
+boundary, pinned: a post-freeze (synthetic) `priority` tag scores 0 (that path reads the tag's value
+string, which only an interned tag has); boosts fire for both (id-equality). ADR-108/110's strict typed
+`rank_fields.priority` instead stores/reconstructs a signed integer row value, including after tag-dict
+freeze. Ranking remains a presentation-surface concern, not a matching-core one.
+
+**Bounded local + distributed ranking (ADR-107/108/110).** `ExactStore` also carries one fixed signed
+`i64` priority column. `RankProgramSpec` compiles the priority field and tag boosts to an integer-only
+`CompiledRankProgram`; addition saturates. `EngineSnapshot::try_match_title_top_k` connects the
+post-verification `TopKCollector` directly to the scalar matcher and retains only
+`O(K + total-threshold)` state. The scorer deliberately receives only `logical_id`: it then resolves
+priority + tags from the newest live copy, so segment probe order or an older duplicate cannot change
+rank. `MatchSink::on_match(logical_id)` stays unchanged, keeping all metadata work out of unranked and
+compatibility collectors. Local `POST /v2/_search` exposes this path for one document with deterministic
+`(score desc, logical_id asc)` winners and honest `eq`/`gte` totals. Source/explain enrichment is
+winner-only and fail-closed.
+
+ADR-110 generalizes the same snapshot path over the post-verify `EmissionPolicy`: standalone uses
+`EmitAll`, while a cluster shard applies ADR-109 `UniqueOwner` **before** its `TopKCollector`. Each
+routed position therefore returns at most K owned rows. The coordinator rejects overlap, malformed
+ordering, or stale attestations, merges by the same total order, and truncates to K. The merge is exact:
+if a global winner were below its owner's local K, that owner alone would contain K globally better
+rows. Exact shard totals are summed; global `eq` is returned only when every shard is exact and the sum
+does not cross the threshold, otherwise the result is the request threshold with relation `gte`.
+
+Cluster `/v2/_search` then performs query-then-fetch: final winner IDs are grouped by owning logical
+position and only their current source is fetched. Missing source, placement-generation drift, a
+malformed/failing stream, deadline expiry, or enrichment-cap overflow invalidates the whole response.
+Explanations are compiled at the coordinator from fetched source under its authoritative normalizer and
+dictionary; explanation objects never cross the shard wire. This is deliberately a current-view
+contract, not PIT consistency. ADR-075 compatibility cluster ranking remains available and unchanged.
 
 ### 5.5 Alternatives (documented, deferred)
 

@@ -26,6 +26,8 @@ fn state() -> Arc<AppState> {
         snapshot: arc_swap::ArcSwap::new(snap),
         pool,
         search_permits: None,
+        ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+        max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
         include_broad: true,
         prom: PrometheusMetrics::new(),
         slow_query_threshold_ms: 0,
@@ -128,6 +130,8 @@ async fn put_doc_honors_memtable_flush_threshold() {
         snapshot: arc_swap::ArcSwap::new(snap),
         pool,
         search_permits: None,
+        ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+        max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
         include_broad: true,
         prom: PrometheusMetrics::new(),
         slow_query_threshold_ms: 0,
@@ -221,6 +225,106 @@ fn empty_tag_keys_fail_loud() {
         tags_of(&serde_json::json!({"query": "q", "": "v"})).is_err(),
         "an empty sibling-field key must reject too"
     );
+}
+
+#[test]
+fn typed_priority_is_strict_mirrored_and_conflict_checked() {
+    let object = serde_json::json!({
+        "query": "topps chrome",
+        "rank_fields": {"priority": "-50"},
+        "tags": {"tenant": "acme"}
+    });
+    let (tags, rank) =
+        super::extract_ranked_ingest(object.as_object().expect("object")).expect("typed priority");
+    assert_eq!(rank, Some(reverse_rusty::RankValues { priority: -50 }));
+    assert!(tags.contains(&("priority".to_string(), "-50".to_string())));
+
+    let matching = serde_json::json!({
+        "query": "topps chrome",
+        "rank_fields": {"priority": 50},
+        "tags": {"priority": "50"}
+    });
+    assert!(super::extract_ranked_ingest(matching.as_object().expect("object")).is_ok());
+
+    let conflict = serde_json::json!({
+        "query": "topps chrome",
+        "rank_fields": {"priority": 50},
+        "tags": {"priority": "49"}
+    });
+    let (kind, _) =
+        super::extract_ranked_ingest(conflict.as_object().expect("object")).expect_err("conflict");
+    assert_eq!(kind, "invalid_rank_value");
+}
+
+#[test]
+fn typed_priority_rejects_non_integer_json_and_overflow() {
+    for value in [
+        serde_json::json!(1.5),
+        serde_json::json!(true),
+        serde_json::Value::Null,
+        serde_json::json!([]),
+        serde_json::json!({}),
+        serde_json::json!("9223372036854775808"),
+    ] {
+        let object = serde_json::json!({
+            "query": "topps chrome",
+            "rank_fields": {"priority": value}
+        });
+        let (kind, _) = super::extract_ranked_ingest(object.as_object().expect("object"))
+            .expect_err("invalid typed rank");
+        assert_eq!(kind, "invalid_rank_value");
+    }
+}
+
+#[tokio::test]
+async fn put_doc_typed_priority_reaches_bounded_ranker_and_errors_are_structured() {
+    let state = state();
+    let body: super::PutDocBody = serde_json::from_value(serde_json::json!({
+        "query": "topps chrome",
+        "rank_fields": {"priority": 50}
+    }))
+    .expect("typed body");
+    let response = put_doc(State(Arc::clone(&state)), Path(77), Json(body))
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    let snap = state.snapshot.load();
+    let program = snap
+        .compile_rank_program(&reverse_rusty::RankProgramSpec::default())
+        .expect("priority program");
+    let ranked = snap
+        .try_match_title_top_k(
+            "2020 topps chrome",
+            reverse_rusty::TopKOptions::default(),
+            &program,
+            &reverse_rusty::exact::TagPredicate::empty(),
+            &mut MatchScratch::new(),
+            None,
+        )
+        .expect("ranked match");
+    assert_eq!(
+        ranked.hits[0],
+        reverse_rusty::RankedHit {
+            logical_id: 77,
+            score: 50
+        }
+    );
+
+    let invalid: super::PutDocBody = serde_json::from_value(serde_json::json!({
+        "query": "topps chrome",
+        "rank_fields": {"priority": 1.5}
+    }))
+    .expect("invalid rank still decodes at DTO layer");
+    let response = put_doc(State(Arc::clone(&state)), Path(78), Json(invalid))
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(json["error"]["type"], "invalid_rank_value");
 }
 
 #[test]

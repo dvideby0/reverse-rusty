@@ -9,7 +9,7 @@
 //!
 //! The protected set is **default-deny**: every non-GET/HEAD request requires
 //! the token unless its path is one of the read-via-POST percolate endpoints
-//! (`/_search`, `/_mpercolate`). A future mutating endpoint is therefore
+//! (`/_search`, `/v2/_search`, `/_mpercolate`). A future mutating endpoint is therefore
 //! covered without anyone remembering to list it here.
 
 use std::sync::Arc;
@@ -111,7 +111,7 @@ pub(crate) fn requires_auth(method: &Method, path: &str, protect_reads: bool) ->
         return false;
     }
     // Read-only percolation via POST — the service's primary read path.
-    !matches!(path, "/_search" | "/_mpercolate")
+    !matches!(path, "/_search" | "/v2/_search" | "/_mpercolate")
 }
 
 /// Constant-time byte equality. The fold has no data-dependent branch, so a
@@ -234,6 +234,7 @@ mod tests {
             (Method::GET, "/"),
             (Method::GET, "/_doc/1"),
             (Method::POST, "/_search"),
+            (Method::POST, "/v2/_search"),
             (Method::POST, "/_mpercolate"),
             (Method::GET, "/_stats"),
             (Method::GET, "/_cat/segments"),
@@ -338,6 +339,8 @@ mod tests {
             snapshot: arc_swap::ArcSwap::new(snap),
             pool,
             search_permits: None,
+            ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+            max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
             include_broad: false,
             prom: PrometheusMetrics::new(),
             slow_query_threshold_ms: 0,

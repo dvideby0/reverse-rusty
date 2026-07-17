@@ -33,7 +33,7 @@ pub(crate) use cluster::{
     cluster_validate_and_apply_feedback,
 };
 pub(crate) use doc::{bulk_ingest, delete_doc, get_doc, put_doc};
-pub(crate) use search::{mpercolate, search};
+pub(crate) use search::{cluster_v2_search, mpercolate, search, v2_search};
 pub(crate) use vocab::{
     get_settings, get_vocab, learn_and_apply_vocab, learn_vocab, put_settings, put_vocab,
 };

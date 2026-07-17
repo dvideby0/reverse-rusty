@@ -3,6 +3,7 @@
 //! `segment` module root.
 
 use super::{BaseSegment, MatchStats, Segment};
+use crate::collect::{MatchSink, VecSink};
 use crate::dict::Dict;
 
 impl BaseSegment {
@@ -102,7 +103,22 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.tags_of(local_id),
         }
     }
-    // Dispatch wrapper — signature must mirror the inner segment's match_into.
+    /// Fixed typed rank values for a local row. Pre-v6 mmap segments expose
+    /// zero here until their legacy tag fallback is resolved by the snapshot.
+    pub fn rank_values(&self, local_id: u32) -> crate::rank::RankValues {
+        match self {
+            BaseSegment::Memory(s) => s.rank_values(local_id),
+            BaseSegment::Mmap(s) => s.rank_values(local_id),
+        }
+    }
+
+    pub fn placement(&self, local_id: u32) -> crate::ownership::QueryPlacementRef<'_> {
+        match self {
+            BaseSegment::Memory(s) => s.placement(local_id),
+            BaseSegment::Mmap(s) => s.placement(local_id),
+        }
+    }
+    // Compatibility dispatch wrapper — signature stays byte-for-byte stable.
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(
         &self,
@@ -115,12 +131,44 @@ impl BaseSegment {
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
     ) {
+        let mut ignored_emissions = 0;
+        let mut collector = VecSink::new(out, &mut ignored_emissions);
+        self.match_collect(
+            view,
+            dict,
+            epoch,
+            seen,
+            &mut collector,
+            lanes,
+            pred,
+            stats,
+            crate::ownership::EmitAll,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::segment) fn match_collect<C: MatchSink, P: crate::ownership::EmissionPolicy>(
+        &self,
+        view: &crate::exact::TitleView,
+        dict: &Dict,
+        epoch: u32,
+        seen: &mut [u32],
+        collector: &mut C,
+        lanes: super::ProbeLanes,
+        pred: &crate::exact::TagPredicate,
+        stats: &mut MatchStats,
+        emission: P,
+    ) {
         match self {
             BaseSegment::Memory(s) => {
-                s.match_into(view, dict, epoch, seen, out, lanes, pred, stats);
+                s.match_collect(
+                    view, dict, epoch, seen, collector, lanes, pred, stats, emission,
+                );
             }
             BaseSegment::Mmap(s) => {
-                s.match_into(view, dict, epoch, seen, out, lanes, pred, stats);
+                s.match_collect(
+                    view, dict, epoch, seen, collector, lanes, pred, stats, emission,
+                );
             }
         }
     }
@@ -184,10 +232,10 @@ impl BaseSegment {
 
     /// Convert to an owned in-memory Segment (needed by compact_from).
     /// Memory segments are returned directly; mmap segments are materialized.
-    pub(in crate::segment) fn into_memory(self) -> Segment {
+    pub(in crate::segment) fn into_memory(self, tag_dict: &crate::tagdict::TagDict) -> Segment {
         match self {
             BaseSegment::Memory(s) => s,
-            BaseSegment::Mmap(s) => s.to_memory_segment(),
+            BaseSegment::Mmap(s) => s.to_memory_segment(tag_dict),
         }
     }
 }

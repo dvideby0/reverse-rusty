@@ -25,6 +25,9 @@ impl ClusterEngine {
     /// segments and replays only the (now shorter) tail — also correct.
     pub fn checkpoint(&self) -> Result<(), ShardError> {
         let Some(dir) = self.data_dir.clone() else {
+            // Even an in-memory checkpoint remains a useful explicit maintenance
+            // boundary for the derived unique-id directory.
+            self.compact_logical_ids();
             return Ok(());
         };
         let up_to = self.log.last_pos()?;
@@ -68,6 +71,7 @@ impl ClusterEngine {
             // shard). Writes v5: the two-way fence (a pre-ADR-080 binary refuses it on open; this
             // binary refuses a pre-ADR-080 v<5 cluster on open, whose broad is on shard 0 only).
             broad_replicate_all: true,
+            placement_generation: self.placement_generation(),
             segment_registry: segment_registry.clone(),
             next_seg_ids,
             dict_data: crate::storage::serialize_dict(&self.dict),
@@ -93,6 +97,7 @@ impl ClusterEngine {
             });
         }
         self.gc_orphan_segments(&dir, &segment_registry);
+        self.compact_logical_ids();
         Ok(())
     }
 

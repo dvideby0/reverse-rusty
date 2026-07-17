@@ -44,6 +44,7 @@ fn declared_alias_makes_both_surface_forms_match() {
             ..ClusterConfig::default()
         };
         let mut cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build cluster");
+        let generation_before = cluster.placement_generation();
 
         // Before the alias the two forms are distinct: the canonical-form title does
         // not match the abbreviation query, and vice versa.
@@ -58,6 +59,11 @@ fn declared_alias_makes_both_surface_forms_match() {
 
         // Declare the alias + rebuild the cluster under the new normalizer.
         let rebuilt = cluster.set_vocab(make_vocab()).expect("set_vocab");
+        assert_eq!(
+            cluster.placement_generation(),
+            generation_before.next().expect("generation capacity"),
+            "a vocabulary blue/green rebuild bumps placement exactly once"
+        );
         assert!(
             rebuilt > 100,
             "K={k}: set_vocab should rebuild the whole live corpus, not just the 2 added \

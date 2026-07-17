@@ -298,7 +298,6 @@ const CLUSTER_MANIFEST_MAGIC: [u8; 4] = *b"RCMN";
 // v4 (ADR-049): appends `tag_dict_data` — the serialized frozen tag space (`TagDict`)
 // behind filtered percolation, so interned tag ids survive reopen. A v2/v3 manifest
 // reads back with an empty `tag_dict_data` (no tags).
-const CLUSTER_MANIFEST_VERSION: u32 = 4;
 // v5 (ADR-080): the replicate-to-all broad-layout marker (layout-identical to v4 — the version
 // word IS the marker). The broad lane (class C + B-arity-2 + opt-in class D) now lives on EVERY
 // shard, evaluated on one broad-eval shard per title (not pinned to shard 0), so EVERY ADR-080
@@ -310,6 +309,9 @@ const CLUSTER_MANIFEST_VERSION: u32 = 4;
 //   (2) FORWARD — the new binary refuses to OPEN a v<5 cluster, whose broad lives on shard 0 only
 //       and would be mis-routed by the rotating broad-eval shard. Such a cluster must be rebuilt.
 const CLUSTER_MANIFEST_VERSION_REPLICATE_ALL: u32 = 5;
+/// v6 (ADR-109): appends the monotonic placement generation and fences out
+/// durable clusters whose segments do not carry emission-ownership metadata.
+const CLUSTER_MANIFEST_VERSION_OWNERSHIP: u32 = 6;
 
 /// The coordinator's cluster-state document (the analogue of what a Raft quorum will
 /// later hold). Written atomically (tmp + CRC + rename) — the SINGLE commit point that
@@ -333,6 +335,8 @@ pub struct ClusterManifest {
     /// `ClusterEngine::open` requires (a v<5 / legacy-layout cluster is refused). Set from the
     /// version on read.
     pub broad_replicate_all: bool,
+    /// Logical placement generation shared by every registered segment row.
+    pub placement_generation: crate::ownership::PlacementGeneration,
     /// Per-shard committed base: `segment_registry[i]` is the list of `.seg` filenames
     /// (relative to `shard_<i>/segments/`) that constitute shard `i`'s base. This is the
     /// atomic-commit replacement for the v1 raw-DSL snapshot — on open a shard
@@ -360,14 +364,7 @@ pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Re
     let tmp = path.with_extension("cmanifest.tmp");
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(&CLUSTER_MANIFEST_MAGIC)?;
-    write_u32(
-        &mut f,
-        if manifest.broad_replicate_all {
-            CLUSTER_MANIFEST_VERSION_REPLICATE_ALL
-        } else {
-            CLUSTER_MANIFEST_VERSION
-        },
-    )?;
+    write_u32(&mut f, CLUSTER_MANIFEST_VERSION_OWNERSHIP)?;
     write_u64(&mut f, manifest.epoch)?;
     write_u64(&mut f, manifest.snapshot_pos)?;
     write_u64(&mut f, manifest.dict_fingerprint)?;
@@ -397,6 +394,7 @@ pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Re
     // v4: the serialized tag dict (empty when no tags; ADR-049).
     write_u32(&mut f, manifest.tag_dict_data.len() as u32)?;
     f.write_all(&manifest.tag_dict_data)?;
+    write_u64(&mut f, manifest.placement_generation.0)?;
     f.sync_all()?;
     drop(f);
     // Read back for the trailing CRC (same simple approach as write_manifest).
@@ -433,12 +431,18 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         ));
     }
     let version = read_u32_at(&data, 4)?;
-    // v2, v3 and v4 are accepted; v3 appends `vocab_data` (ADR-046) and v4 appends
-    // `tag_dict_data` (ADR-049), each absent in the earlier versions.
-    if !(2..=CLUSTER_MANIFEST_VERSION_REPLICATE_ALL).contains(&version) {
+    // ADR-109 is a rebuild-only cluster migration: v1-v5 have no durable emission-owner
+    // generation, while a future version must never be guessed at.
+    if version != CLUSTER_MANIFEST_VERSION_OWNERSHIP {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("unsupported cluster manifest version {version}"),
+            if version <= CLUSTER_MANIFEST_VERSION_REPLICATE_ALL {
+                format!(
+                    "cluster manifest v{version} predates ADR-109 ownership metadata; rebuild the durable cluster with this binary"
+                )
+            } else {
+                format!("unsupported cluster manifest version {version}")
+            },
         ));
     }
     let mut cursor = 8usize;
@@ -510,12 +514,22 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
     let tag_dict_data = if version >= 4 {
         let tlen = read_u32_at(&data, cursor)? as usize;
         cursor += 4;
-        data.get(cursor..cursor + tlen)
+        let tags = data
+            .get(cursor..cursor + tlen)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated tag-dict blob"))?
-            .to_vec()
+            .to_vec();
+        cursor += tlen;
+        tags
     } else {
         Vec::new()
     };
+    let placement_generation = crate::ownership::PlacementGeneration(read_u64_at(&data, cursor)?);
+    if placement_generation == crate::ownership::PlacementGeneration::STANDALONE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cluster manifest has standalone placement generation zero",
+        ));
+    }
 
     Ok(ClusterManifest {
         epoch,
@@ -525,6 +539,7 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         vnodes,
         include_broad,
         broad_replicate_all: version >= CLUSTER_MANIFEST_VERSION_REPLICATE_ALL,
+        placement_generation,
         segment_registry,
         next_seg_ids,
         dict_data,
@@ -640,12 +655,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The v4 cluster manifest's nested per-shard registry + next-seg-id columns + the
+    /// The v6 cluster manifest's nested per-shard registry + next-seg-id columns + the
     /// appended vocab and tag-dict blobs must round-trip byte-exactly (varied per-shard
     /// file counts, including an empty shard). The hand-rolled length-prefixed encoding is
     /// easy to get cursor-wrong, so pin it.
     #[test]
-    fn cluster_manifest_v4_round_trips_registry_vocab_and_tagdict() {
+    fn cluster_manifest_v6_round_trips_registry_vocab_tagdict_and_generation() {
         let dir = std::env::temp_dir().join(format!("rr_cmanifest_rt_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("cluster_manifest.bin");
@@ -657,7 +672,8 @@ mod tests {
             num_shards: 3,
             vnodes: 64,
             include_broad: true,
-            broad_replicate_all: false,
+            broad_replicate_all: true,
+            placement_generation: crate::ownership::PlacementGeneration(7),
             segment_registry: vec![
                 vec!["seg_000001.seg".to_string(), "seg_000004.seg".to_string()],
                 vec![], // an empty shard (no committed segments)
@@ -678,12 +694,12 @@ mod tests {
         assert_eq!(got.vnodes, manifest.vnodes);
         assert_eq!(got.include_broad, manifest.include_broad);
         assert_eq!(got.broad_replicate_all, manifest.broad_replicate_all);
-        // A non-replicate-all (legacy-shaped) manifest writes the v4 version word.
+        assert_eq!(got.placement_generation, manifest.placement_generation);
         let raw = std::fs::read(&path).expect("read raw for version");
         assert_eq!(
             read_u32_at(&raw, 4).unwrap(),
-            4,
-            "broad_replicate_all=false ⇒ v4"
+            6,
+            "ADR-109 durable clusters always write manifest v6"
         );
         assert_eq!(got.segment_registry, manifest.segment_registry);
         assert_eq!(got.next_seg_ids, manifest.next_seg_ids);
@@ -704,12 +720,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The cluster v5 ADR-080 replicate-to-all marker: an ADR-080 commit writes the v5 version
-    /// word (round-tripping `broad_replicate_all`), and a pre-ADR-080 binary — modeled by a
-    /// forged FUTURE version — fails loud rather than mis-decoding (the loud refusal the two-way
-    /// fence exists for; the cluster has no per-shard manifest to carry it instead).
+    /// The ADR-109 migration fence: v6 round-trips ownership generation, v5 is
+    /// rejected with an actionable rebuild error, and a future version is refused.
     #[test]
-    fn cluster_manifest_v5_replicate_all_marker_round_trips_and_unknown_version_fails_loud() {
+    fn cluster_manifest_v6_ownership_fences_v5_and_future_versions() {
         let dir = std::env::temp_dir().join(format!("rr_cmanifest_v5_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("cluster_manifest_v5.bin");
@@ -722,6 +736,7 @@ mod tests {
             vnodes: 64,
             include_broad: true,
             broad_replicate_all: true, // an ADR-080 replicate-to-all cluster
+            placement_generation: crate::ownership::PlacementGeneration::INITIAL,
             segment_registry: vec![vec![], vec![], vec![], vec![]],
             next_seg_ids: vec![1, 1, 1, 1],
             dict_data: vec![1, 2, 3],
@@ -733,21 +748,36 @@ mod tests {
         let raw = std::fs::read(&path).expect("read raw");
         assert_eq!(
             read_u32_at(&raw, 4).unwrap(),
-            5,
-            "ADR-080 replicate-to-all ⇒ cluster manifest v5"
+            6,
+            "ADR-109 ownership metadata ⇒ cluster manifest v6"
         );
         let got = read_cluster_manifest(&path).expect("read");
-        assert!(got.broad_replicate_all, "v5 reads back as replicate-to-all");
+        assert!(got.broad_replicate_all, "v6 retains replicate-to-all");
+        assert_eq!(
+            got.placement_generation,
+            crate::ownership::PlacementGeneration::INITIAL
+        );
         assert_eq!(got.segment_registry, manifest.segment_registry);
 
-        // Forge a v6 (future) version word + re-seal the trailing whole-file CRC, so the
-        // version range check is what fires: an unsupported version must error.
+        // Forge legacy v5 + re-seal: the selected migration policy requires a rebuild.
         let mut bytes = raw.clone();
-        bytes[4..8].copy_from_slice(&6u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&5u32.to_le_bytes());
         let body = bytes.len() - 4;
         let crc = crc32(&bytes[..body]);
         bytes[body..].copy_from_slice(&crc.to_le_bytes());
         std::fs::write(&path, &bytes).expect("rewrite");
+        match read_cluster_manifest(&path) {
+            Err(e) => assert!(
+                e.to_string().contains("predates ADR-109") && e.to_string().contains("rebuild"),
+                "got: {e}"
+            ),
+            Ok(_) => panic!("legacy v5 cluster manifest must fail loud"),
+        }
+
+        bytes[4..8].copy_from_slice(&7u32.to_le_bytes());
+        let crc = crc32(&bytes[..body]);
+        bytes[body..].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, &bytes).expect("rewrite future");
         match read_cluster_manifest(&path) {
             Err(e) => assert!(
                 e.to_string()

@@ -125,7 +125,7 @@ fn grpc_colocated_shards_match_single_node_and_oracle() {
 
     // The differential contract, over the co-located gRPC cluster, for every title.
     for (i, title) in titles.iter().enumerate() {
-        let (ids, grpc_stats) = cluster
+        let (ids, mut grpc_stats) = cluster
             .percolate_with_stats(title)
             .expect("percolate over gRPC");
         let got: HashSet<u64> = ids.into_iter().collect();
@@ -138,9 +138,15 @@ fn grpc_colocated_shards_match_single_node_and_oracle() {
             "co-located cluster vs single-node on {title:?}"
         );
 
-        let (_, local_stats) = local
+        let (_, mut local_stats) = local
             .percolate_with_stats(title)
             .expect("percolate local cluster");
+        // ADR-107 delivery telemetry is intentionally local-only until a later
+        // protobuf revision. Compare the frozen wire compatibility profile.
+        grpc_stats.logical_emissions = 0;
+        grpc_stats.duplicate_emissions = 0;
+        local_stats.logical_emissions = 0;
+        local_stats.duplicate_emissions = 0;
         assert_eq!(
             grpc_stats, local_stats,
             "co-located gRPC vs local-cluster MatchStats (wire round-trip) on {title:?}"

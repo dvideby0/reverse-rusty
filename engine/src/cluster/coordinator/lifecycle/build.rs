@@ -18,6 +18,7 @@ use crate::cluster::shard::{LocalShard, Shard, ShardError};
 use crate::compile::{extract, Extracted};
 use crate::dict::Dict;
 use crate::normalize::Normalizer;
+use crate::ownership::PlacementGeneration;
 use crate::segment::PlacedQuery;
 use crate::tagdict::TagDict;
 
@@ -229,16 +230,23 @@ impl ClusterEngine {
         // than as a raw-DSL snapshot.
         let mut buckets: Vec<Vec<PlacedQuery>> =
             (0..config.num_shards).map(|_| Vec::new()).collect();
+        let mut accepted_ids = Vec::with_capacity(extracted.len());
         for (logical, ex, text, qtags) in extracted {
-            match placement_of(
+            let target = placement_of(
                 &dict,
                 &ring,
                 &ex,
                 config.per_shard.accept_class_d,
                 config.per_shard.hot_anchor_threshold,
-            ) {
+            );
+            let placement =
+                target.placement(PlacementGeneration::INITIAL, config.num_shards as u32)?;
+            if !matches!(&target, Target::Reject) {
+                accepted_ids.push(logical);
+            }
+            match target {
                 Target::Reject => {}
-                Target::Replicated => {
+                Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
                     // The broad lane is replicated to every shard (ADR-080).
                     for bucket in &mut buckets {
                         bucket.push(PlacedQuery {
@@ -248,6 +256,8 @@ impl ClusterEngine {
                             version: 1,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
+                            rank: crate::rank::RankValues::default(),
+                            placement: placement.clone(),
                         });
                     }
                 }
@@ -260,11 +270,14 @@ impl ClusterEngine {
                             version: 1,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
+                            rank: crate::rank::RankValues::default(),
+                            placement: placement.clone(),
                         });
                     }
                 }
             }
         }
+        super::super::logical_ids::sort_and_check_unique(&mut accepted_ids)?;
         // Ingest the same bucket into EVERY copy of the owning position (identical op stream
         // ⇒ all copies set-equal by construction).
         for (s, bucket) in buckets.into_iter().enumerate() {
@@ -320,6 +333,20 @@ impl ClusterEngine {
             config.per_shard.clone(),
             durable,
         )?;
+        // The duplicate-id gate above ran on the PLACEMENT-derived set, but the
+        // directory itself is derived from what the shards actually ingested:
+        // `ingest_local` can still drop a query (e.g. a tag set over `max_tags`),
+        // and reserving a dropped row's id would 409 a later valid add while a
+        // reopened coordinator (which enumerates live rows) accepted it
+        // (codex review). `accepted_ids` stays the loud duplicate check.
+        drop(accepted_ids);
+        let mut ingested_ids = Vec::new();
+        for shard in &engine.shards {
+            ingested_ids.extend(shard.live_logical_ids()?);
+        }
+        ingested_ids.sort_unstable();
+        ingested_ids.dedup();
+        engine.replace_logical_ids(ingested_ids)?;
         // Install the vocabulary on the engine (ADR-076): served by `GET /_vocab`,
         // merged-under by the learn paths, and re-persisted at every checkpoint.
         // (The durable manifest above already carries it.)
@@ -374,6 +401,7 @@ impl ClusterEngine {
         }
         let manifest = crate::storage::ClusterManifest {
             epoch: 0,
+            placement_generation: PlacementGeneration::INITIAL,
             snapshot_pos: 0,
             dict_fingerprint: dict.fingerprint(),
             num_shards: ring.num_shards() as u32,
@@ -415,6 +443,7 @@ impl ClusterEngine {
             log: Box::new(log),
             data_dir: Some(dir.to_path_buf()),
             epoch: 0,
+            placement_generation: PlacementGeneration::INITIAL,
             vnodes: config.vnodes,
             control: Box::new(InMemoryControlPlane::single_node(
                 ring.num_shards() as u32,

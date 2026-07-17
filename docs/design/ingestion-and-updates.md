@@ -272,7 +272,23 @@ follows the existing query-storage model with no new moving parts:
 
 ---
 
-## 12. Bottom line (best-in-class, tailored to us)
+## 12. Distributed ownership persistence (ADR-109)
+
+Cluster rows add placement identity beside the exact SoA, downstream of matching semantics. Segment
+v7 appends parallel generation (`u64`), shard-count (`u32`), mode (`u8`), position offset/length, and
+sorted `u32` position-blob columns. Open validates every column count, mode, range, ordering, and local
+membership before publishing the segment. Flush and both compaction paths carry the columns; canonical-
+body members retain independent placement rows. Placement is included in content fingerprints so peer
+recovery cannot skip a copy solely because semantic query bodies agree.
+
+Standalone segments v1–v6 remain readable and continue to use `EmitAll`; v7 is written only when a
+segment contains distributed placement. Cluster persistence uses a deliberately stricter migration:
+cluster manifest v6 records the current placement generation, coordinator log and per-shard translog
+v4 persist the write-time placement on Add/Upsert, and adopted feature-space v2 records generation +
+shard count. Older clustered formats are rejected with rebuild/wipe guidance because reconstructing
+their placement under the current ring could change the unique emitter.
+
+## 13. Bottom line (best-in-class, tailored to us)
 
 - **Log-structured, append-only, immutable segments** — the proven Lucene/LSM/Aurora write path.
 - **Deltas + eventual merge, but *read-optimized*:** bound the segment count and add per-segment anchor

@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 const METHOD_LABELS: [&str; TransportMetrics::SLOTS] = [
     "percolate",
     "percolate_ranked",
+    "percolate_top_k",
+    "fetch_matches",
     "num_queries",
     "class_counts",
     "ingest",
@@ -58,7 +60,7 @@ impl Default for TransportMetrics {
 
 impl TransportMetrics {
     /// Number of distinct RPC kinds tracked (the counter-array length).
-    pub(crate) const SLOTS: usize = 16;
+    pub(crate) const SLOTS: usize = 18;
 
     /// A fresh, all-zero collector.
     pub fn new() -> Self {
@@ -169,6 +171,8 @@ pub struct MethodStat {
 pub(crate) enum RpcMethod {
     Percolate,
     PercolateRanked,
+    PercolateTopK,
+    FetchMatches,
     NumQueries,
     ClassCounts,
     Ingest,

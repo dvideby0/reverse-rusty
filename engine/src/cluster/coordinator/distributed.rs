@@ -157,6 +157,13 @@ impl ClusterEngine {
         // ships+adopts the node dict; every LATER position on that node reuses it via a lightweight
         // `AddShard` (no dict re-ship / re-deserialize). Routing stays position-indexed, so
         // co-location is transparent to it.
+        // INITIAL is EXACT here, not a placeholder: a remote cluster cannot bump the
+        // placement generation (`set_vocab`/`resize` refuse handoff-wrapped and
+        // non-local shards, and every builder below wraps positions in HandoffShard),
+        // so the generation a data node persisted at adopt time is always INITIAL. If
+        // a future increment lifts that refusal it must thread the real generation
+        // through these builders — the failure until then is a loud connect-time
+        // `adopt_dict` refusal, never a silent mismatch.
         let mut adopted: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for (position, ep) in endpoints.iter().enumerate() {
             let shard_id = position as u32;
@@ -169,6 +176,8 @@ impl ClusterEngine {
                     tag_dict_bytes.clone(),
                     expected_tag,
                     shard_id,
+                    crate::ownership::PlacementGeneration::INITIAL,
+                    config.num_shards as u32,
                     &security,
                 )?
             } else {
@@ -178,6 +187,8 @@ impl ClusterEngine {
                     expected,
                     expected_tag,
                     shard_id,
+                    crate::ownership::PlacementGeneration::INITIAL,
+                    config.num_shards as u32,
                     &security,
                 )?
             }
@@ -287,6 +298,8 @@ impl ClusterEngine {
                     tag_dict_bytes.clone(),
                     expected_tag,
                     shard_id,
+                    crate::ownership::PlacementGeneration::INITIAL,
+                    config.num_shards as u32,
                     &security,
                 )?
             } else {
@@ -296,6 +309,8 @@ impl ClusterEngine {
                     expected,
                     expected_tag,
                     shard_id,
+                    crate::ownership::PlacementGeneration::INITIAL,
+                    config.num_shards as u32,
                     &security,
                 )?
             }
@@ -311,6 +326,8 @@ impl ClusterEngine {
                         tag_dict_bytes.clone(),
                         expected_tag,
                         shard_id,
+                        crate::ownership::PlacementGeneration::INITIAL,
+                        config.num_shards as u32,
                         &security,
                     )?
                 } else {
@@ -320,6 +337,8 @@ impl ClusterEngine {
                         expected,
                         expected_tag,
                         shard_id,
+                        crate::ownership::PlacementGeneration::INITIAL,
+                        config.num_shards as u32,
                         &security,
                     )?
                 }
@@ -408,6 +427,8 @@ impl ClusterEngine {
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
                 shard_id,
+                self.placement_generation(),
+                self.num_shards() as u32,
                 &self.client_security,
             )?
             .with_metrics(Arc::clone(&self.transport_metrics));
@@ -590,6 +611,8 @@ impl ClusterEngine {
                 crate::storage::serialize_tagdict(&self.tag_dict),
                 self.tag_dict.fingerprint(),
                 position as u32,
+                self.placement_generation(),
+                self.num_shards() as u32,
                 &self.client_security,
             )?
             .with_metrics(Arc::clone(&self.transport_metrics));

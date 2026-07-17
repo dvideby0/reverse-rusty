@@ -283,6 +283,8 @@ mod tests {
             snapshot: arc_swap::ArcSwap::new(snap),
             pool,
             search_permits: None,
+            ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+            max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
             include_broad: false,
             prom: PrometheusMetrics::new(),
             slow_query_threshold_ms: 0,

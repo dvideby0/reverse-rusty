@@ -270,6 +270,8 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: wrong_tag_fp,
                 shard_id: 0,
+                placement_generation: 1,
+                num_shards: 1,
             })
             .await
             .expect_err("Fence must refuse a divergent tag dict");
@@ -282,6 +284,8 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: wrong_tag_fp,
                 shard_id: 0,
+                placement_generation: 1,
+                num_shards: 1,
             })
             .await
             .expect_err("Unfence must refuse a divergent tag dict");
@@ -295,6 +299,8 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: wrong_tag_fp,
                 shard_id: 0,
+                placement_generation: 1,
+                num_shards: 1,
             })
             .await
             .expect_err("RetentionLease must refuse a divergent tag dict");
@@ -306,6 +312,8 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: wrong_tag_fp,
                 shard_id: 0,
+                placement_generation: 1,
+                num_shards: 1,
             })
             .await
             .expect_err("FetchTranslog must refuse a divergent tag dict");
@@ -318,6 +326,8 @@ fn grpc_recovery_handshakes_reject_divergent_tag_dict() {
                 dict_fingerprint: dict_fp,
                 tag_dict_fingerprint: tag_fp,
                 shard_id: 0,
+                placement_generation: 1,
+                num_shards: 1,
             })
             .await
             .expect("fence with the matching tag fingerprint")

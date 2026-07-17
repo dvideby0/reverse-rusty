@@ -9,6 +9,8 @@
 use super::{eval_batch_slices, query_passes_tags, TagPredicate, TitleView};
 use crate::compile::Extracted;
 use crate::dict::{Dict, FeatureId, NO_MASK_BIT};
+use crate::ownership::{PlacementGeneration, PlacementMode, QueryPlacement, QueryPlacementRef};
+use crate::rank::RankValues;
 use crate::tagdict::TagId;
 
 #[derive(Clone, Default)]
@@ -35,6 +37,16 @@ pub struct ExactStore {
     tag_off: Vec<u32>,
     tag_len: Vec<u16>,
     tag_blob: Vec<TagId>,
+    // Fixed signed typed rank column (ADR-108), parallel to logical/version.
+    priority: Vec<i64>,
+    // Distributed emission ownership (ADR-109). The fixed-width columns are
+    // parallel to identity; selective positions are sliced from placement_blob.
+    placement_generation: Vec<u64>,
+    placement_num_shards: Vec<u32>,
+    placement_mode: Vec<u8>,
+    placement_off: Vec<u32>,
+    placement_len: Vec<u32>,
+    placement_blob: Vec<u32>,
     // identity, resolved only on a confirmed match
     version: Vec<u32>,
     logical: Vec<u64>,
@@ -73,6 +85,43 @@ impl ExactStore {
         dict: &Dict,
         version: u32,
         logical: u64,
+    ) -> u32 {
+        self.push_ranked(ex, tags, dict, version, logical, RankValues::default())
+    }
+
+    /// Append a compiled query with its fixed typed rank values.
+    pub fn push_ranked(
+        &mut self,
+        ex: &Extracted,
+        tags: &[TagId],
+        dict: &Dict,
+        version: u32,
+        logical: u64,
+        rank: RankValues,
+    ) -> u32 {
+        self.push_ranked_with_placement(
+            ex,
+            tags,
+            dict,
+            version,
+            logical,
+            rank,
+            &QueryPlacement::standalone(),
+        )
+    }
+
+    /// Append a compiled query and its write-time distributed placement
+    /// metadata. The metadata is identity-only and does not enter verification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_ranked_with_placement(
+        &mut self,
+        ex: &Extracted,
+        tags: &[TagId],
+        dict: &Dict,
+        version: u32,
+        logical: u64,
+        rank: RankValues,
+        placement: &QueryPlacement,
     ) -> u32 {
         let id = self.req_mask.len() as u32;
 
@@ -129,7 +178,19 @@ impl ExactStore {
 
         self.version.push(version);
         self.logical.push(logical);
+        self.priority.push(rank.priority);
+        self.push_placement(placement);
         id
+    }
+
+    fn push_placement(&mut self, placement: &QueryPlacement) {
+        let off = self.placement_blob.len() as u32;
+        self.placement_blob.extend_from_slice(placement.positions());
+        self.placement_generation.push(placement.generation().0);
+        self.placement_num_shards.push(placement.num_shards());
+        self.placement_mode.push(placement.mode() as u8);
+        self.placement_off.push(off);
+        self.placement_len.push(placement.positions().len() as u32);
     }
 
     #[inline]
@@ -139,6 +200,31 @@ impl ExactStore {
     #[inline]
     pub fn version(&self, id: u32) -> u32 {
         self.version[id as usize]
+    }
+    #[inline]
+    pub fn rank_values(&self, id: u32) -> RankValues {
+        RankValues {
+            priority: self.priority[id as usize],
+        }
+    }
+    #[inline]
+    pub fn placement(&self, id: u32) -> QueryPlacementRef<'_> {
+        let i = id as usize;
+        let off = self.placement_off[i] as usize;
+        let len = self.placement_len[i] as usize;
+        QueryPlacementRef {
+            generation: PlacementGeneration(self.placement_generation[i]),
+            num_shards: self.placement_num_shards[i],
+            // ExactStore rows can only be populated by validated constructors or
+            // the validated mmap decoder.
+            mode: match self.placement_mode[i] {
+                1 => PlacementMode::Selective,
+                2 => PlacementMode::ReplicatedAlwaysVisible,
+                3 => PlacementMode::ReplicatedBroad,
+                _ => PlacementMode::Standalone,
+            },
+            positions: &self.placement_blob[off..off + len],
+        }
     }
     /// The sorted `TagId` slice for query `id` (ADR-049). Used by the `set_vocab`
     /// recompile to carry a query's tags forward unchanged (same tag space).
@@ -471,6 +557,8 @@ impl ExactStore {
         // identity
         dest.version.push(self.version[i]);
         dest.logical.push(self.logical[i]);
+        dest.priority.push(self.priority[i]);
+        dest.push_placement(&self.placement(id).to_owned());
         new_id
     }
 
@@ -571,6 +659,27 @@ impl ExactStore {
     pub fn logicals(&self) -> &[u64] {
         &self.logical
     }
+    pub fn priorities(&self) -> &[i64] {
+        &self.priority
+    }
+    pub fn placement_generations(&self) -> &[u64] {
+        &self.placement_generation
+    }
+    pub fn placement_num_shards(&self) -> &[u32] {
+        &self.placement_num_shards
+    }
+    pub fn placement_modes(&self) -> &[u8] {
+        &self.placement_mode
+    }
+    pub fn placement_offs(&self) -> &[u32] {
+        &self.placement_off
+    }
+    pub fn placement_lens(&self) -> &[u32] {
+        &self.placement_len
+    }
+    pub fn placement_blobs(&self) -> &[u32] {
+        &self.placement_blob
+    }
     pub fn tag_offs(&self) -> &[u32] {
         &self.tag_off
     }
@@ -596,6 +705,36 @@ impl ExactStore {
         tags: &[TagId],
         version: u32,
         logical: u64,
+        priority: i64,
+    ) -> u32 {
+        self.push_raw_placed(
+            rmask,
+            fmask,
+            req_tail,
+            forb_tail,
+            groups,
+            tags,
+            version,
+            logical,
+            priority,
+            &QueryPlacement::standalone(),
+        )
+    }
+
+    /// Raw-row reconstruction including validated v7 ownership metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_raw_placed(
+        &mut self,
+        rmask: u64,
+        fmask: u64,
+        req_tail: &[u32],
+        forb_tail: &[u32],
+        groups: (usize, usize, &[u32], &[u16], &[u32]),
+        tags: &[TagId],
+        version: u32,
+        logical: u64,
+        priority: i64,
+        placement: &QueryPlacement,
     ) -> u32 {
         let id = self.req_mask.len() as u32;
         self.req_mask.push(rmask);
@@ -631,6 +770,8 @@ impl ExactStore {
 
         self.version.push(version);
         self.logical.push(logical);
+        self.priority.push(priority);
+        self.push_placement(placement);
         id
     }
 
@@ -654,5 +795,12 @@ impl ExactStore {
             + self.tag_blob.capacity() * size_of::<TagId>()
             + self.version.capacity() * size_of::<u32>()
             + self.logical.capacity() * size_of::<u64>()
+            + self.priority.capacity() * size_of::<i64>()
+            + self.placement_generation.capacity() * size_of::<u64>()
+            + self.placement_num_shards.capacity() * size_of::<u32>()
+            + self.placement_mode.capacity() * size_of::<u8>()
+            + self.placement_off.capacity() * size_of::<u32>()
+            + self.placement_len.capacity() * size_of::<u32>()
+            + self.placement_blob.capacity() * size_of::<u32>()
     }
 }

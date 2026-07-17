@@ -38,6 +38,10 @@ impl ClusterEngine {
         queries: &[(u64, String)],
         tags: &[Vec<(String, String)>],
     ) -> Result<(), ShardError> {
+        // Initial bulk load is one exclusive logical-id admission boundary. A
+        // concurrent incremental mutation cannot slip between the empty check,
+        // directory install, and shard writes.
+        let _logical_guards = self.logical_bulk_write_guards();
         // ingest re-indexes from scratch; on a populated cluster it would create duplicate
         // entries. Refuse loudly instead (the doc contract: a freshly assembled cluster).
         if self.num_queries()? > 0 {
@@ -75,14 +79,21 @@ impl ClusterEngine {
         let mut buckets: Vec<Vec<PlacedQuery>> =
             (0..self.ring.num_shards()).map(|_| Vec::new()).collect();
         let mut lc = String::new();
+        let mut accepted_ids = Vec::with_capacity(entries.len());
         for (logical, version, text, qtags) in entries {
             let Ok(ast) = crate::dsl::parse(text) else {
                 continue;
             };
             let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-            match self.placement(&ex) {
+            let target = self.placement(&ex);
+            let placement =
+                target.placement(self.placement_generation(), self.shards.len() as u32)?;
+            if !matches!(&target, Target::Reject) {
+                accepted_ids.push(*logical);
+            }
+            match target {
                 Target::Reject => {}
-                Target::Replicated => {
+                Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
                     // The broad lane is replicated to every shard (ADR-080).
                     for bucket in &mut buckets {
                         bucket.push(PlacedQuery {
@@ -92,6 +103,8 @@ impl ClusterEngine {
                             version: *version,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
+                            rank: crate::rank::RankValues::default(),
+                            placement: placement.clone(),
                         });
                     }
                 }
@@ -104,11 +117,20 @@ impl ClusterEngine {
                             version: *version,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
+                            rank: crate::rank::RankValues::default(),
+                            placement: placement.clone(),
                         });
                     }
                 }
             }
         }
+        super::logical_ids::sort_and_check_unique(&mut accepted_ids)?;
+        // Reserve the complete semantic corpus BEFORE the first shard mutation.
+        // If a remote bulk write fails part-way, retaining these reservations is
+        // fail-closed: an incremental Add cannot coexist with a physical row that
+        // may already have landed. Retrying ingest on the still-empty cluster may
+        // replace this directory with the same corpus and continue.
+        self.replace_logical_ids(accepted_ids)?;
         for (s, bucket) in buckets.into_iter().enumerate() {
             if !bucket.is_empty() {
                 self.shards[s].ingest_extracted(&bucket)?;
@@ -233,16 +255,45 @@ impl ClusterEngine {
         if let Err(e) = Self::check_column_limit(&ex) {
             return Ok(AddOutcome::RejectedParse(e));
         }
-        if matches!(self.placement(&ex), Target::Reject) {
+        let target = self.placement(&ex);
+        if matches!(target, Target::Reject) {
             return Ok(AddOutcome::RejectedClassD);
         }
+        let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        // ADR-110's bounded merge requires one live distributed row per logical id.
+        // Content-derived placement cannot guarantee a common owner for two different
+        // rows sharing an id, so cluster adds are insert-only; replacements use upsert.
+        // The stripe closes the same-id check/reservation race without serializing
+        // unrelated writes.
+        let _logical_guard = self.logical_write_guard(id);
+        // A coordinator attached to an already-populated cluster it could not
+        // enumerate (the gRPC connect shape) has an unauthoritative directory, so
+        // the duplicate check below would be vacuous — fail closed instead of
+        // silently admitting a second physical row for a live id (review finding).
+        // `upsert_query` stays available: it re-drives replace-by-id on every
+        // shard and does not depend on the directory.
+        if !self.logical_ids_authoritative() {
+            return Err(ShardError::Config(
+                "insert-only add_query requires the logical-id directory, which this \
+                 coordinator could not seed from its (already-populated) remote shards; \
+                 use upsert_query"
+                    .to_string(),
+            ));
+        }
+        if self.contains_logical_id(id) {
+            return Err(ShardError::DuplicateLogicalId(id));
+        }
+        let inserted = self.insert_logical_id(id);
+        debug_assert!(inserted);
         let m = ClusterMutation::Add {
             logical: id,
             version: 1,
             dsl: dsl.to_string(),
             tags: tags.to_vec(),
+            placement: placement.clone(),
         };
         if let Err(e) = self.log.append(&m) {
+            self.remove_logical_id(id);
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::WalAppend,
                 detail: format!("cluster add_query(id={id}) not durably logged; rejected"),
@@ -250,7 +301,7 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_add(id, 1, dsl, tags)
+        self.apply_add(id, 1, dsl, tags, &placement)
     }
 
     /// Atomically replace a query by logical id — ES `index` semantics at the cluster
@@ -309,16 +360,27 @@ impl ClusterEngine {
         if let Err(e) = Self::check_column_limit(&ex) {
             return Ok((0, AddOutcome::RejectedParse(e)));
         }
-        if matches!(self.placement(&ex), Target::Reject) {
+        let target = self.placement(&ex);
+        if matches!(target, Target::Reject) {
             return Ok((0, AddOutcome::RejectedClassD));
         }
+        let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        // Serialize against an insert-only add/remove for the same id. An upsert
+        // keeps the id present; a fresh upsert reserves it before the log append so
+        // a concurrent add cannot create a second physical row.
+        let _logical_guard = self.logical_write_guard(id);
+        let fresh_id = self.insert_logical_id(id);
         let m = ClusterMutation::Upsert {
             logical: id,
             version,
             dsl: dsl.to_string(),
             tags: tags.to_vec(),
+            placement: placement.clone(),
         };
         if let Err(e) = self.log.append(&m) {
+            if fresh_id {
+                self.remove_logical_id(id);
+            }
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::WalAppend,
                 detail: format!("cluster upsert_query(id={id}) not durably logged; rejected"),
@@ -326,7 +388,7 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_upsert(id, version, dsl, tags)
+        self.apply_upsert(id, version, dsl, tags, &placement)
     }
 
     /// Apply an UPSERT to the shards — the state-machine `apply` for replace-by-id,
@@ -345,6 +407,7 @@ impl ClusterEngine {
         version: u32,
         dsl: &str,
         tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
     ) -> Result<(usize, AddOutcome), ShardError> {
         self.note_tags(tags);
         let ast = match crate::dsl::parse(dsl) {
@@ -358,17 +421,24 @@ impl ClusterEngine {
         // placement is configuration-independent — a knob flip on reopen neither drops nor
         // resurrects (codex review). The empty-class-D guard in `placement_of` still rejects a
         // never-stored empty query defensively.
-        let (insert_shards, outcome) = match placement_of(
+        let target = placement_of(
             &self.dict,
             &self.ring,
             &ex,
             true,
             self.per_shard.hot_anchor_threshold,
-        ) {
+        );
+        let expected = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        if &expected != placement {
+            return Err(crate::ownership::OwnershipError::PlacementDecisionMismatch.into());
+        }
+        let (insert_shards, outcome) = match target {
             Target::Reject => return Ok((0, AddOutcome::RejectedClassD)),
             // The broad lane is replicated to every shard (ADR-080); pass 1 already tombstones
             // every shard, so pass 2 re-inserts the new version on every shard.
-            Target::Replicated => ((0..self.shards.len()).collect(), AddOutcome::Replicated),
+            Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
+                ((0..self.shards.len()).collect(), AddOutcome::Replicated)
+            }
             Target::Selective(shards) => (
                 shards.clone(),
                 AddOutcome::Placed {
@@ -397,7 +467,9 @@ impl ClusterEngine {
             if failed.contains(&s) {
                 continue;
             }
-            match self.shards[s].insert_extracted_with_tags(&ex, id, version, dsl, tags) {
+            match self.shards[s]
+                .insert_extracted_with_placement(&ex, id, version, dsl, tags, placement)
+            {
                 Ok(_) => inserted.push(s),
                 Err(e) => {
                     failed.push(s);
@@ -418,6 +490,7 @@ impl ClusterEngine {
                     version,
                     dsl: dsl.to_string(),
                     tags: tags.to_vec(),
+                    placement: placement.clone(),
                 },
                 id,
                 inserted,
@@ -434,6 +507,7 @@ impl ClusterEngine {
     /// or any-of query may live on several shards; a re-add may have moved it).
     /// WAL-first, like [`Self::add_query`].
     pub fn remove_query(&self, id: u64) -> Result<usize, ShardError> {
+        let _logical_guard = self.logical_write_guard(id);
         let m = ClusterMutation::Remove { logical: id };
         if let Err(e) = self.log.append(&m) {
             self.emit(EngineEvent::DurabilityFailure {
@@ -443,7 +517,14 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_remove(id)
+        let removed = self.apply_remove(id);
+        // A partially-applied remove keeps the id reserved: allowing a fresh Add
+        // before repair could coexist with an old row on the failed shard. Upsert
+        // remains available because it re-drives delete+insert on every shard.
+        if removed.is_ok() {
+            self.remove_logical_id(id);
+        }
+        removed
     }
 
     /// Insert a compiled query on a set of target shards, collecting partial-apply failures
@@ -463,13 +544,16 @@ impl ClusterEngine {
         version: u32,
         dsl: &str,
         tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
         success: AddOutcome,
     ) -> Result<AddOutcome, ShardError> {
         let mut applied = Vec::with_capacity(shards.len());
         let mut failed = Vec::new();
         let mut first_err: Option<ShardError> = None;
         for &s in shards {
-            match self.shards[s].insert_extracted_with_tags(ex, id, version, dsl, tags) {
+            match self.shards[s]
+                .insert_extracted_with_placement(ex, id, version, dsl, tags, placement)
+            {
                 Ok(_) => applied.push(s),
                 Err(e) => {
                     failed.push(s);
@@ -484,6 +568,7 @@ impl ClusterEngine {
                     version,
                     dsl: dsl.to_string(),
                     tags: tags.to_vec(),
+                    placement: placement.clone(),
                 },
                 id,
                 applied,
@@ -504,6 +589,7 @@ impl ClusterEngine {
         version: u32,
         dsl: &str,
         tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
     ) -> Result<AddOutcome, ShardError> {
         // Latch tags_present (ADR-055, `/_stats` introspection) — covers both the live add
         // (`add_query_with_tags`) and a tagged log-tail entry replayed on `open`.
@@ -518,13 +604,18 @@ impl ClusterEngine {
         // reproduces the writer's decision regardless of the current knob, so a knob flip on
         // reopen cannot drop or resurrect a class-D write (codex review). Rejected writes never
         // reach the log (classified out in add_query), so the Reject arm is defensive.
-        let outcome = match placement_of(
+        let target = placement_of(
             &self.dict,
             &self.ring,
             &ex,
             true,
             self.per_shard.hot_anchor_threshold,
-        ) {
+        );
+        let expected = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        if &expected != placement {
+            return Err(crate::ownership::OwnershipError::PlacementDecisionMismatch.into());
+        }
+        let outcome = match target {
             // Defensive: an effectively-empty query is rejected before logging, so a logged
             // mutation never lands here; a replayed no-op (stored nowhere) is still safe.
             Target::Reject => return Ok(AddOutcome::RejectedClassD),
@@ -532,9 +623,18 @@ impl ClusterEngine {
             // (ADR-080). Same fail-collect fan-out as Selective, so a mid-fan-out remote failure
             // is queued for repair rather than a silent partial. In-process inserts are infallible
             // ⇒ the outcome is byte-identical save that the entry now lands on every shard.
-            Target::Replicated => {
+            Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
                 let all: Vec<usize> = (0..self.shards.len()).collect();
-                self.insert_on_shards(&all, &ex, id, version, dsl, tags, AddOutcome::Replicated)?
+                self.insert_on_shards(
+                    &all,
+                    &ex,
+                    id,
+                    version,
+                    dsl,
+                    tags,
+                    placement,
+                    AddOutcome::Replicated,
+                )?
             }
             Target::Selective(shards) => self.insert_on_shards(
                 &shards,
@@ -543,6 +643,7 @@ impl ClusterEngine {
                 version,
                 dsl,
                 tags,
+                placement,
                 AddOutcome::Placed {
                     shards: shards.clone(),
                 },
@@ -660,6 +761,22 @@ impl ClusterEngine {
         let mut repaired = 0usize;
         let mut still_pending = 0usize;
         for (logical, pr) in pending {
+            // Serialize the whole per-id re-drive against same-id writers (the
+            // same stripe scope the live paths hold), and skip our drained copy
+            // when a concurrent writer queued fresher work for this id during
+            // the drain — `note_partial` overwrites, so a live map entry is
+            // strictly fresher than what we hold.
+            let _logical_guard = self.logical_write_guard(logical);
+            {
+                let guard = self
+                    .pending_repair
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if guard.contains_key(&logical) {
+                    still_pending += 1;
+                    continue;
+                }
+            }
             let mut still_failed = Vec::new();
             let mut first_err: Option<ShardError> = None;
             for &s in &pr.failed_shards {
@@ -668,6 +785,7 @@ impl ClusterEngine {
                     &self.norm,
                     &self.dict,
                     &pr.mutation,
+                    Some(s as u32),
                 ) {
                     Ok(()) => {}
                     Err(e) => {
@@ -678,6 +796,13 @@ impl ClusterEngine {
             }
             if still_failed.is_empty() {
                 repaired += 1;
+                // A converged Remove has now deleted the row everywhere, so the
+                // fail-closed reservation retained at the partial-apply point is
+                // releasable — without this, the id would 409 every future
+                // add_query until a coordinator reopen (review finding).
+                if matches!(pr.mutation, ClusterMutation::Remove { .. }) {
+                    self.remove_logical_id(logical);
+                }
                 continue;
             }
             still_pending += 1;
@@ -728,19 +853,26 @@ impl ClusterEngine {
                 version,
                 dsl,
                 tags,
+                placement,
             } => {
-                self.apply_add(logical, version, &dsl, &tags)?;
+                if !self.insert_logical_id(logical) {
+                    return Err(ShardError::DuplicateLogicalId(logical));
+                }
+                self.apply_add(logical, version, &dsl, &tags, &placement)?;
             }
             ClusterMutation::Remove { logical } => {
                 self.apply_remove(logical)?;
+                self.remove_logical_id(logical);
             }
             ClusterMutation::Upsert {
                 logical,
                 version,
                 dsl,
                 tags,
+                placement,
             } => {
-                self.apply_upsert(logical, version, &dsl, &tags)?;
+                self.insert_logical_id(logical);
+                self.apply_upsert(logical, version, &dsl, &tags, &placement)?;
             }
         }
         Ok(())
@@ -751,6 +883,7 @@ impl ClusterEngine {
         for s in &self.shards {
             s.flush()?;
         }
+        self.compact_logical_ids();
         Ok(())
     }
 }

@@ -63,7 +63,12 @@ fn cluster_matches_single_node_and_oracle() {
         assert!(cc[2] > 0, "K={k}: no class-C (broad) queries");
 
         for (i, title) in titles.iter().enumerate() {
-            let got: HashSet<u64> = cluster.percolate(title).unwrap().into_iter().collect();
+            let (owned, stats) = cluster.percolate_with_stats(title).unwrap();
+            assert_eq!(
+                stats.duplicate_emissions, 0,
+                "K={k}: ownership-aware shard replies overlap on {title:?}"
+            );
+            let got: HashSet<u64> = owned.into_iter().collect();
             assert_eq!(
                 got, oracle[i],
                 "K={k} broad=on: cluster vs brute-force oracle on {title:?}"
