@@ -98,11 +98,28 @@ fn open_rejects_manifest_with_divergent_dict_fingerprint() {
 struct ToggleFailShard {
     inner: LocalShard,
     fail_writes: Arc<AtomicBool>,
+    /// `Some(p)` mimics the gRPC server seam, which validates placement
+    /// coverage for its own position on every insert (`validate_for_shard`) —
+    /// the check an in-process `LocalShard` cannot run (it does not know its
+    /// position). Lets in-process tests reproduce remote-only refusals.
+    position: Option<u32>,
 }
 
 impl ToggleFailShard {
     fn new(inner: LocalShard, fail_writes: Arc<AtomicBool>) -> Self {
-        ToggleFailShard { inner, fail_writes }
+        ToggleFailShard {
+            inner,
+            fail_writes,
+            position: None,
+        }
+    }
+
+    fn with_position(inner: LocalShard, fail_writes: Arc<AtomicBool>, position: u32) -> Self {
+        ToggleFailShard {
+            inner,
+            fail_writes,
+            position: Some(position),
+        }
     }
     fn write_err(&self) -> Option<ShardError> {
         self.fail_writes
@@ -197,6 +214,13 @@ impl Shard for ToggleFailShard {
         tags: &[(String, String)],
         placement: &crate::ownership::QueryPlacement,
     ) -> Result<Option<u32>, ShardError> {
+        if let Some(p) = self.position {
+            if placement.mode() == crate::ownership::PlacementMode::Selective
+                && placement.positions().binary_search(&p).is_err()
+            {
+                return Err(crate::ownership::OwnershipError::LocalPositionMissing(p).into());
+            }
+        }
         match self.write_err() {
             Some(e) => Err(e),
             None => self
@@ -1190,4 +1214,84 @@ fn rebuild_from_live_reseeds_the_logical_id_directory() {
         .percolate("1994 topps baseball")
         .expect("p")
         .contains(&99));
+}
+
+/// The multi-machine-harness wedge: an upsert's DELETE half fans to every
+/// shard, so a kill window can queue a repair at a position the placement does
+/// not store. Re-driving the full upsert there is refused by ADR-109's
+/// shard-side placement validation (`LocalPositionMissing`), so `resync` could
+/// never converge that mutation. The repair now re-drives only the delete half
+/// on uncovered positions.
+#[test]
+fn resync_converges_an_upsert_queued_at_a_delete_only_shard() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
+    let norm = Arc::clone(&real.norm);
+    let dict = Arc::clone(&real.dict);
+    let tag_dict = Arc::clone(&real.tag_dict);
+
+    let fail = Arc::new(AtomicBool::new(false));
+    let shards: Vec<Box<dyn Shard>> = (0..cfg.num_shards)
+        .map(|position| {
+            let ls = LocalShard::new(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                Arc::clone(&tag_dict),
+                cfg.per_shard.clone(),
+            );
+            // Position-aware: reproduce the gRPC server's coverage validation,
+            // which is what wedged the harness (LocalShard alone cannot).
+            Box::new(ToggleFailShard::with_position(
+                ls,
+                Arc::clone(&fail),
+                position as u32,
+            )) as Box<dyn Shard>
+        })
+        .collect();
+    let ring = HashRing::new(cfg.num_shards, cfg.vnodes).expect("ring");
+    let durable = ClusterDurable::in_memory(cfg.num_shards as u32, cfg.vnodes, dict.fingerprint());
+    let cluster = ClusterEngine::from_parts(
+        Arc::clone(&norm),
+        Arc::clone(&dict),
+        Arc::clone(&tag_dict),
+        ring,
+        shards,
+        cfg.include_broad,
+        1,
+        cfg.per_shard.clone(),
+        durable,
+    )
+    .expect("from_parts cluster");
+
+    // A selective (single-shard) query: its upsert's delete half still fans to
+    // ALL THREE shards, so two positions are delete-only.
+    let dsl = "zznovelaterm";
+    cluster.add_query(5, dsl).expect("healthy add");
+
+    // Fail everything mid-upsert: delete-only positions land in the repair
+    // queue holding the FULL upsert mutation.
+    fail.store(true, Ordering::Release);
+    assert!(
+        cluster.upsert_query(5, dsl, 2).is_err(),
+        "the upsert must partially apply while shards are failing"
+    );
+    assert!(cluster.pending_repairs() > 0, "repairs must be queued");
+
+    // Shards recover: resync must converge EVERY queued mutation, including the
+    // delete-only positions (previously wedged on LocalPositionMissing).
+    fail.store(false, Ordering::Release);
+    let report = cluster.resync();
+    assert_eq!(
+        report.still_pending, 0,
+        "no repair may stay wedged: {report:?}"
+    );
+    assert_eq!(cluster.pending_repairs(), 0);
+    assert!(
+        cluster.percolate(dsl).expect("percolate").contains(&5),
+        "the upserted query must be matchable after convergence"
+    );
 }

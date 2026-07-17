@@ -575,6 +575,11 @@ pub(crate) fn apply_mutation(
     norm: &Normalizer,
     dict: &Dict,
     m: &ClusterMutation,
+    // The target's shard position when the CALLER knows it (the resync repair
+    // loop); `None` when coverage holds by construction (a replica catch-up
+    // replays its own position's translog). Used to gate an Upsert's insert
+    // half to covered positions only — see the Upsert arm.
+    position: Option<u32>,
 ) -> Result<(), ShardError> {
     match m {
         ClusterMutation::Add {
@@ -605,17 +610,25 @@ pub(crate) fn apply_mutation(
             placement,
         } => {
             // Replace-by-id ON THIS SHARD: tombstone any prior copy, then insert the new
-            // version. Per-shard replay/repair has no placement context, so a shard whose
-            // only involvement was the delete half gains a (correctness-benign) extra copy —
-            // exact verification still gates it and the coordinator merge dedups; the next
-            // reopen's coordinator-level replay re-derives exact placement and heals it.
+            // version — but only where the placement actually STORES the row. An upsert's
+            // delete half fans to every shard, so a repair can legitimately target a
+            // delete-only position; ADR-109 made shard-side inserts validate placement
+            // coverage, so re-driving the insert there is refused (`LocalPositionMissing`)
+            // and would wedge `resync` on that mutation forever (multi-machine harness
+            // catch). Replicated modes cover every position; only Selective restricts.
             shard.delete_by_logical_id(*logical)?;
-            if let Ok(ast) = crate::dsl::parse(dsl) {
-                let mut lc = String::new();
-                let ex = extract_readonly(&ast, norm, dict, &mut lc);
-                shard.insert_extracted_with_placement(
-                    &ex, *logical, *version, dsl, tags, placement,
-                )?;
+            let covered = position.is_none_or(|p| {
+                placement.mode() != crate::ownership::PlacementMode::Selective
+                    || placement.positions().binary_search(&p).is_ok()
+            });
+            if covered {
+                if let Ok(ast) = crate::dsl::parse(dsl) {
+                    let mut lc = String::new();
+                    let ex = extract_readonly(&ast, norm, dict, &mut lc);
+                    shard.insert_extracted_with_placement(
+                        &ex, *logical, *version, dsl, tags, placement,
+                    )?;
+                }
             }
         }
     }

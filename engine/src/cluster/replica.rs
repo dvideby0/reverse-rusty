@@ -316,7 +316,9 @@ pub(crate) fn catch_up_replica(
     let tail = source.translog_tail(from)?;
     let mut hwm = from;
     for (pos, m) in &tail {
-        apply_mutation(target, norm, dict, m)?;
+        // `None`: a translog entry was stored AT this position by the source, so
+        // placement coverage holds by construction for its replica.
+        apply_mutation(target, norm, dict, m, None)?;
         hwm = (*pos).max(hwm);
     }
     Ok(hwm)

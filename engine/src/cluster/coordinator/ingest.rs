@@ -785,6 +785,7 @@ impl ClusterEngine {
                     &self.norm,
                     &self.dict,
                     &pr.mutation,
+                    Some(s as u32),
                 ) {
                     Ok(()) => {}
                     Err(e) => {
