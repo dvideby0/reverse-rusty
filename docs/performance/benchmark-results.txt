@@ -43,12 +43,14 @@ HOW TO RUN
   cargo run --release --bin segbench -- 300000 3000 0.0     # read-amp vs 1/2/4/8 segments
   cargo run --release --bin snapbench -- 1000000 200        # snapshot-publish cost (ADR-016)
   cargo run --release --bin clusterbench -- 100000 5000 8 0.05  # CLUSTER fan-out + candidate structure
+  cargo run --release --bin rankbench -- 20000 500 8 275775489  # local/distributed bounded top-K + fetch
   cargo run --release --bin learn -- 500000 50 0.30         # NPMI corpus learner (see appendix)
 
   bench args:        <num_queries> <num_titles> <broad_frac> <skew> <seed> [reps]
   segbench args:     <num_queries> <num_titles> <broad_frac> <seed>
   snapbench args:    <num_queries> <iters>
   clusterbench args: <num_queries> <num_titles> <num_shards> <broad_frac> <seed>
+  rankbench args:    <num_queries> <num_titles> <num_shards> <seed>
   Seeds default to 0x00C0FFEE so runs are reproducible. Budget: each is <~30s except the 5M+
   bench memory passes (they build the corpus to disk twice — a few minutes) and the 10M soak.
 
@@ -150,6 +152,30 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-07-16] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64. ADR-110 DISTRIBUTED
+              TOP-K + QUERY-THEN-FETCH. rankbench 20000 500 8 275775489, release.
+              Full table: ranked-percolation-baseline.txt. Timings are indicative;
+              checksums/row bounds/byte totals are seed-fixed.
+  INVARIANTS:
+    semantic checksums UNCHANGED from Increment 0:
+      ordinary            local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
+      broad-heavy         local=bb248a758615fda0 cluster=0b64b11f5259ff1c
+      body-duplicate      local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
+      placement-duplicate local=0ec5dda03607d01f cluster=77575a4edc1f29e7
+    every title/K asserted distributed winners + totals == local collect-all/full-sort/truncate;
+      rows_received <= K × routed_shards (all workloads/K); ADR-109 compatibility emissions now
+      have duplicates=0 while the compatibility checksum stays byte-identical
+    actual bounded shard rows for K=10/100/1000/10000:
+      ordinary 500/500/500/500; broad-heavy 878/7178/18313/18313;
+      body-duplicate 792/7160/7512/7512; placement-duplicate 500/500/500/500
+    winner fetch bytes for K=10/100/1000/10000:
+      ordinary 25908 each; broad-heavy 6185/44099/111177/111177;
+      body-duplicate 5304/43536/45656/45656; placement-duplicate 15780 each
+    shard_result_bytes=0 is expected here: rankbench uses the in-process cluster seam; exact remote
+      protobuf bytes are measured and cap-checked by the real-gRPC oracle
+  TIMINGS (indicative): distributed collect+merge across all titles ranged 23.0–52.3 ms by
+    workload/K; winner fetch ranged 0.30–1.89 ms. Local bounded match+rank ranged 1.15–3.14 ms.
+
 [2026-07-03] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64.  20M COMBINED RECOVERY
               (hot tier ADR-105 + dedup Stage A ADR-106 — Broad-Query Cost Program
               increments 1+2, measured together per the corrected reading: the corpus's

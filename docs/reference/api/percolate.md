@@ -2,12 +2,12 @@
 
 > Part of the [REST API reference](../api.md). Query language: [`dsl.md`](../dsl.md).
 
-## `POST /v2/_search` — Local bounded ranked percolation (ADR-107/108)
+## `POST /v2/_search` — Exact bounded ranked percolation (ADR-107/108/110)
 
-Single-node mode serves exact bounded top-K ranking without first materializing every matching ID.
-The route accepts exactly one `document`; cluster mode, batching, cursors/PIT, `from`, exhaustive
-`all`, and approximate `terminated` delivery are later increments and reject loudly. Existing
-`/_search` and `/_mpercolate` behavior and response bytes are unchanged.
+Single-node and cluster-coordinator modes serve exact bounded top-K ranking without first
+materializing every matching ID. The route accepts exactly one `document`; batching, cursors/PIT,
+`from`, exhaustive `all`, and approximate `terminated` delivery are later increments and reject
+loudly. Existing `/_search` and `/_mpercolate` behavior and response bytes are unchanged.
 
 ```json
 {
@@ -46,8 +46,8 @@ The route accepts exactly one `document`; cluster mode, batching, cursors/PIT, `
 }
 ```
 
-`complete=true` means the exact best K was computed over the selected local visibility scope; it does
-not mean every true match appears in the page. Winner order is always `(score desc, _id asc)` and
+`complete=true` means the exact best K was computed over the selected visibility scope; it does not
+mean every true match appears in the page. Winner order is always `(score desc, _id asc)` and
 integer addition saturates at the `i64` bounds. Totals are exact while unique matches do not exceed
 `track_total_hits_up_to`; after the next distinct match the result is
 `{"value": threshold, "relation": "gte"}`. `size=0` returns no hits but still computes the
@@ -60,6 +60,20 @@ Defaults are `result_mode="top_k"`, `query_scope="standard"`, `size=100`, typed 
 percolation. Requested source or explanation lookup is fail-closed. The timeout is compute-armed and
 includes waiting for the dedicated ranked-search permit; timeout returns 408 and cooperative matching
 receives the same deadline.
+
+In cluster mode, ADR-109 ownership is applied before each shard's heap. Every routed logical position
+returns at most K sorted owned hits; the coordinator validates disjointness, performs the exact global
+merge, and reports routed positions in `_shards` (physical replicas do not inflate the count). Exact
+shard totals are summed; `eq` is returned only when every shard is exact and the global sum remains
+within the threshold. The coordinator then fetches **current** source only for final winners, grouped
+by owning position, and compiles explanations locally. A shard/fetch failure, missing source,
+placement-generation drift, timeout, or malformed reply fails the whole response—partial hits never
+escape. This current-view enrichment is not a PIT guarantee.
+
+Winner source text is charged once against `--max-ranked-enrichment-bytes` (default 16 MiB), even when
+both `_source` and explanation use it. Exceeding the cap returns `413 rank_enrichment_limit` with no
+partial response. Cluster transport/protocol failures return 502; stale placement or unavailable
+cluster configuration returns 503. `allow_partial_results=true` remains a 400.
 
 The optional rank program supports only `priority_field="priority"` plus additive integer tag boosts.
 Unknown rank fields return `unsupported_rank_field`. `result_mode="all"` or `"terminated"`,
@@ -264,8 +278,8 @@ curl -X POST localhost:9200/_search -H 'Content-Type: application/json' -d '{
 
 `rank` works on `/_search` (single + multi-document) and `/_mpercolate` (each document's hits ranked
 independently), composes with `filter`, and is **opt-in**: with no `rank` block the response is
-byte-identical to before — no `_score` field, engine order preserved. Cluster (multi-shard) ranking is
-not yet available; the REST endpoints rank against the single-node engine.
+byte-identical to before — no `_score` field, engine order preserved. Compatibility cluster endpoints
+use ADR-075 rank-at-shard/full-union merge; `/v2/_search` uses ADR-110's bounded exact merge.
 
 ## `POST /_mpercolate` — Batch percolate (high throughput)
 

@@ -117,6 +117,53 @@ pub(crate) fn rank_spec_from_proto(p: RankSpec) -> crate::rank::CompiledRankSpec
     crate::rank::CompiledRankSpec::new(priority_key, boosts)
 }
 
+/// Typed bounded rank program to/from the additive ADR-110 wire.
+pub(crate) fn rank_program_to_proto(spec: &crate::rank::CompiledRankProgram) -> RankProgram {
+    RankProgram {
+        use_priority: spec.uses_priority(),
+        boosts: spec
+            .boosts()
+            .map(|(tag_id, weight)| RankBoost { tag_id, weight })
+            .collect(),
+    }
+}
+
+pub(crate) fn rank_program_from_proto(p: RankProgram) -> crate::rank::CompiledRankProgram {
+    crate::rank::CompiledRankProgram::new(
+        p.use_priority,
+        p.boosts.into_iter().map(|b| (b.tag_id, b.weight)).collect(),
+    )
+}
+
+pub(crate) fn total_hits_to_proto(total: crate::result::TotalHits) -> BoundedTotalHits {
+    BoundedTotalHits {
+        value: total.value,
+        exact: total.relation == crate::result::TotalHitsRelation::Eq,
+    }
+}
+
+pub(crate) fn total_hits_from_proto(total: BoundedTotalHits) -> crate::result::TotalHits {
+    if total.exact {
+        crate::result::TotalHits::exact(total.value)
+    } else {
+        crate::result::TotalHits::lower_bound(total.value)
+    }
+}
+
+pub(crate) fn rank_stats_to_proto(stats: crate::rank::RankStats) -> BoundedRankStats {
+    BoundedRankStats {
+        evaluations: stats.evaluations,
+        heap_replacements: stats.heap_replacements,
+    }
+}
+
+pub(crate) fn rank_stats_from_proto(stats: BoundedRankStats) -> crate::rank::RankStats {
+    crate::rank::RankStats {
+        evaluations: stats.evaluations,
+        heap_replacements: stats.heap_replacements,
+    }
+}
+
 /// Proto wire `MatchStats` → engine [`MatchStats`]. Field order pinned to `segment.rs`.
 pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
     EngineStats {

@@ -34,7 +34,7 @@ use super::clog::{ClusterMutation, LogPos};
 use super::proto;
 use super::proto::shard_service_client::ShardServiceClient;
 use super::security::{configure_endpoint, ClientSecurity, MeshAuthInject, MeshTransport};
-use super::shard::{Shard, ShardError};
+use super::shard::{FetchedMatch, Shard, ShardError, ShardRankedMatch};
 use super::transport_metrics::{RpcMethod, RpcOutcome, TransportMetrics};
 
 /// The mesh-aware client channel (ADR-071): every RPC flows through the
@@ -508,6 +508,58 @@ impl RemoteShard {
         })
     }
 
+    /// ADR-110 read seam: unlike the compatibility per-call timeout above,
+    /// every retry shares one absolute caller deadline. The factory receives
+    /// the current remaining budget so it can set both `grpc-timeout` and the
+    /// cooperative `remaining_micros` request field.
+    fn call_until<R, Fut, MkFut>(
+        &self,
+        method: RpcMethod,
+        deadline: Instant,
+        mk: MkFut,
+    ) -> Result<R, ShardError>
+    where
+        MkFut: Fn(Duration) -> Fut + Send,
+        Fut: Future<Output = Result<R, tonic::Status>> + Send,
+        R: Send,
+    {
+        let started = Instant::now();
+        let (result, attempts, timed_out) = self.block_on(run_with_retry_until(
+            mk,
+            deadline,
+            self.transport.read_retries,
+        ));
+        // tonic can surface a client-side `Request::set_timeout` expiry as
+        // CANCELLED/"Timeout expired" rather than DEADLINE_EXCEEDED. It is still
+        // the same request deadline and must retain the typed cancellation path.
+        let deadline_status = result.as_ref().err().is_some_and(grpc_deadline_status);
+        let outcome = if result.is_ok() {
+            RpcOutcome::Ok
+        } else if timed_out || deadline_status {
+            RpcOutcome::Timeout
+        } else {
+            RpcOutcome::Error
+        };
+        self.metrics
+            .record(method, outcome, started.elapsed(), attempts);
+        result.map_err(|status| {
+            if timed_out || grpc_deadline_status(&status) {
+                ShardError::DeadlineExceeded
+            } else {
+                rpc_err(&status)
+            }
+        })
+    }
+
+    fn bounded_deadline(&self, deadline: Option<Instant>) -> Result<Instant, ShardError> {
+        match deadline {
+            Some(at) => Ok(at),
+            None => Instant::now()
+                .checked_add(self.transport.read_timeout)
+                .ok_or_else(|| ShardError::Config("read timeout is out of range".into())),
+        }
+    }
+
     /// Drive this remote node's `RecoverFrom` RPC (ADR-036): it pulls `source_endpoint`'s sealed
     /// segments (via that peer's `FetchSegments`), writes them under its own data_dir, attaches
     /// them, and starts serving — the cross-node peer-recovery primitive. `dict_fp` must equal
@@ -676,6 +728,11 @@ impl RemoteShard {
     }
 }
 
+fn grpc_deadline_status(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::DeadlineExceeded
+        || (status.code() == tonic::Code::Cancelled && status.message().contains("Timeout expired"))
+}
+
 /// Drive `fut` on `handle` from a SYNCHRONOUS caller, dispatching on the caller's tokio
 /// context so the bridge never panics with the nested-runtime error (ADR-047):
 /// - **off any runtime** (a rayon fan-out worker, the in-process build path, a plain thread):
@@ -709,7 +766,11 @@ where
 }
 
 fn rpc_err(status: &tonic::Status) -> ShardError {
-    if status
+    if status.code() == tonic::Code::DeadlineExceeded {
+        ShardError::DeadlineExceeded
+    } else if status.code() == tonic::Code::NotFound {
+        ShardError::SourceUnavailable(0)
+    } else if status
         .message()
         .contains("placement configuration mismatch")
         || status.message().contains("ownership")
@@ -718,6 +779,12 @@ fn rpc_err(status: &tonic::Status) -> ShardError {
     } else {
         ShardError::Remote(status.to_string())
     }
+}
+
+fn remaining_micros(remaining: Duration) -> u64 {
+    u64::try_from(remaining.as_micros())
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 /// How [`RemoteShard::call`] treats an RPC (ADR-085): a unary read (deadline + bounded
@@ -769,6 +836,76 @@ where
                 }
                 return (
                     Err(tonic::Status::deadline_exceeded("rpc timeout")),
+                    attempts,
+                    true,
+                );
+            }
+        }
+    }
+}
+
+/// Absolute-deadline retry core for ADR-110. Backoff, attempts, transport, and
+/// shard compute all consume the same budget; a retry never resets the clock.
+async fn run_with_retry_until<R, Fut, MkFut>(
+    mk: MkFut,
+    deadline: Instant,
+    max_retries: u32,
+) -> (Result<R, tonic::Status>, u32, bool)
+where
+    MkFut: Fn(Duration) -> Fut,
+    Fut: Future<Output = Result<R, tonic::Status>>,
+{
+    let mut attempts = 0u32;
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return (
+                Err(tonic::Status::deadline_exceeded(
+                    "request deadline exhausted",
+                )),
+                attempts,
+                true,
+            );
+        };
+        if remaining.is_zero() {
+            return (
+                Err(tonic::Status::deadline_exceeded(
+                    "request deadline exhausted",
+                )),
+                attempts,
+                true,
+            );
+        }
+        match tokio::time::timeout(remaining, mk(remaining)).await {
+            Ok(Ok(value)) => return (Ok(value), attempts, false),
+            Ok(Err(status)) if attempts < max_retries && is_transient(&status) => {
+                attempts += 1;
+                let delay = backoff_delay(attempts);
+                let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                    return (
+                        Err(tonic::Status::deadline_exceeded(
+                            "request deadline exhausted",
+                        )),
+                        attempts,
+                        true,
+                    );
+                };
+                if left <= delay {
+                    return (
+                        Err(tonic::Status::deadline_exceeded(
+                            "request deadline exhausted",
+                        )),
+                        attempts,
+                        true,
+                    );
+                }
+                tokio::time::sleep(delay).await;
+            }
+            Ok(Err(status)) => return (Err(status), attempts, false),
+            Err(_) => {
+                return (
+                    Err(tonic::Status::deadline_exceeded(
+                        "request deadline exhausted",
+                    )),
                     attempts,
                     true,
                 );
@@ -944,6 +1081,122 @@ impl Shard for RemoteShard {
         }
         let stats = reply.stats.map(proto::stats_to_engine).unwrap_or_default();
         Ok((reply.ids.into_iter().zip(reply.scores).collect(), stats))
+    }
+
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        self.validate_ownership(current_position, context.generation(), context.num_shards())?;
+        let absolute = self.bounded_deadline(deadline)?;
+        let base = proto::PercolateTopKRequest {
+            title: title.to_string(),
+            include_broad,
+            filter: proto::tag_predicate_to_proto(pred),
+            rank: Some(proto::rank_program_to_proto(program)),
+            size: options.size as u32,
+            track_total_hits_up_to: options.track_total_hits_up_to,
+            remaining_micros: 0,
+            shard_id: self.shard_id,
+            ownership: Some(proto::ownership_to_proto(context)),
+        };
+        let client = self.client.clone();
+        let reply = self.call_until(RpcMethod::PercolateTopK, absolute, move |remaining| {
+            let mut client = client.clone();
+            let mut body = base.clone();
+            body.remaining_micros = remaining_micros(remaining);
+            let mut request = tonic::Request::new(body);
+            request.set_timeout(remaining);
+            async move {
+                client
+                    .percolate_top_k(request)
+                    .await
+                    .map(tonic::Response::into_inner)
+            }
+        })?;
+        if !reply.bounded
+            || !reply.ownership_applied
+            || reply.requested_size != options.size as u32
+            || reply.placement_generation != context.generation().get()
+            || reply.num_shards != context.num_shards()
+            || reply.hits.len() > options.size
+        {
+            return Err(ShardError::Protocol(
+                "top-k reply failed bounded/ownership/configuration attestation".into(),
+            ));
+        }
+        let total_hits = reply
+            .total_hits
+            .map(proto::total_hits_from_proto)
+            .ok_or_else(|| ShardError::Protocol("top-k reply omitted total hits".into()))?;
+        let rank_stats = reply
+            .rank_stats
+            .map(proto::rank_stats_from_proto)
+            .ok_or_else(|| ShardError::Protocol("top-k reply omitted rank stats".into()))?;
+        let result_bytes =
+            u64::try_from(reverse_rusty_shard_proto::encoded_len(&reply)).unwrap_or(u64::MAX);
+        Ok(ShardRankedMatch {
+            hits: reply
+                .hits
+                .into_iter()
+                .map(|hit| crate::rank::RankedHit {
+                    logical_id: hit.logical_id,
+                    score: hit.score,
+                })
+                .collect(),
+            total_hits,
+            stats: reply.stats.map(proto::stats_to_engine).unwrap_or_default(),
+            rank_stats,
+            result_bytes,
+        })
+    }
+
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        deadline: Option<Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        let absolute = self.bounded_deadline(deadline)?;
+        let base = proto::FetchMatchesRequest {
+            logical_ids: logical_ids.to_vec(),
+            shard_id: self.shard_id,
+            placement_generation: self.placement_generation.get(),
+            num_shards: self.num_shards,
+            remaining_micros: 0,
+        };
+        let client = self.client.clone();
+        let generation = self.placement_generation.get();
+        let num_shards = self.num_shards;
+        self.call_until(RpcMethod::FetchMatches, absolute, move |remaining| {
+            let mut client = client.clone();
+            let mut body = base.clone();
+            body.remaining_micros = remaining_micros(remaining);
+            let mut request = tonic::Request::new(body);
+            request.set_timeout(remaining);
+            async move {
+                let mut stream = client.fetch_matches(request).await?.into_inner();
+                let mut out = Vec::new();
+                while let Some(row) = stream.message().await? {
+                    if row.placement_generation != generation || row.num_shards != num_shards {
+                        return Err(tonic::Status::failed_precondition(
+                            "fetch_matches placement configuration mismatch",
+                        ));
+                    }
+                    out.push(FetchedMatch {
+                        logical_id: row.logical_id,
+                        source: row.source,
+                    });
+                }
+                Ok(out)
+            }
+        })
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {

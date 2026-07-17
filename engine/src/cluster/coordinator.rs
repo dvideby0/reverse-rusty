@@ -46,10 +46,12 @@ mod control_plane;
 mod ingest;
 mod lifecycle;
 mod matching;
+mod ranked;
 mod resize;
 mod topology;
 mod vocab;
 
+pub use ranked::{ClusterRankedError, ClusterRankedHit, ClusterRankedMatch};
 pub use resize::recommended_shard_count;
 pub use topology::{resolve_topology, route_topology, seed_position_preserving, ShardEndpoints};
 

@@ -61,14 +61,19 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   end-to-end through the cluster (ADR-055).
 - **Ranking + pagination** — opt-in post-match `Σ boosts + priority-tag value`, `from`/`size`
   (ADR-059); cluster rank-at-shard with compile-once-fan (ADR-075).
-- **Typed local bounded ranking** — signed `i64` priority column, newest-live integer scoring,
-  bounded `TopKCollector`, and single-document single-node `POST /v2/_search` with honest thresholded
-  totals + cooperative deadlines (ADR-107/108). Distributed top-K remains deferred.
+- **Typed bounded ranking** — signed `i64` priority column, newest-live integer scoring, bounded
+  `TopKCollector`, and single-document `POST /v2/_search` with honest thresholded totals + cooperative
+  deadlines in both single-node and cluster coordinator modes (ADR-107/108/110).
 - **Deterministic distributed emission ownership** — placement generation + compact placement modes
   select exactly one routed shard position after exact/member checks; unfiltered, filtered, and
   compatibility-ranked cluster results are unchanged while cross-shard duplicate emissions are zero.
   Placement identity survives every durable/replicated lifecycle and stale data/peers fail closed
-  (ADR-109). Bounded distributed top-K remains the next ranked-percolation increment.
+  (ADR-109).
+- **Exact distributed top-K + query-then-fetch** — ownership is applied before each shard's bounded
+  collector; the coordinator validates/merges at most K sorted disjoint rows per routed position,
+  then fetches current source only for global winners and compiles explanations centrally. One
+  deadline, no partial results, static HTTP/gRPC byte caps, cluster `POST /v2/_search`, and bounded
+  delivery metrics; no durable-format change (ADR-110).
 - **Explain** (`explain.rs`) — first-class; structured `ExplainDetail` over REST.
 
 ### Durability & storage
@@ -101,7 +106,8 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   coordinator mode** `--cluster`, in-process or remote, cluster-atomic upsert (ADR-070);
   **cooperative match cancellation + bounded search concurrency** — an explicit `timeout_ms`
   stops the work at coarse boundaries, `--max-concurrent-searches` bounds pool occupancy, both
-  defaults byte-identical (ADR-099).
+  defaults byte-identical (ADR-099); local and cluster v2 winner enrichment share
+  `--max-ranked-enrichment-bytes` (16 MiB default, ADR-110).
 - **Gate & CI** — `check.sh` is the one gate, CI runs it (ADR-024); lean-core feature gate
   (ADR-028).
 - **Security review** (Phase 0 item 5, ADR-089) — a [threat model](operations/threat-model.md) (trust
@@ -160,7 +166,8 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **gRPC transport** — `ShardServer`/`RemoteShard` (ADR-029); dict fingerprint handshake
   (ADR-030); dict + tag-dict shipping at connect (ADR-034, ADR-055); tag-dict fingerprint on all
   six recovery RPCs (ADR-077); placement generation/configuration on every data/recovery boundary
-  plus ownership-applied read attestation (ADR-109).
+  plus ownership-applied read attestation (ADR-109); bounded `PercolateTopK` and streaming
+  `FetchMatches`, each under the request's absolute deadline and exact result cap (ADR-110).
 - **gRPC transport resilience** — client connect-timeout + per-call deadlines + HTTP/2 keepalive
   (shared dial helper, so shard + control + Raft-peer links harden together), bounded fail-loud
   retry of idempotent reads on a transient error, and per-RPC transport metrics on cluster-mode
@@ -175,7 +182,9 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   boundary (percolate / percolate_ranked / ingest) — p95/p99 via `histogram_quantile()`. Plus
   **per-shard broad-lane cost counters** (ADR-101): the coordinator's
   `reverse_rusty_broad_*_total` names, `{shard}`-labeled, accumulated from each percolate's
-  `MatchStats` at the same handler boundary.
+  `MatchStats` at the same handler boundary. ADR-110 extends the histogram with top-K/fetch and adds
+  fixed-cardinality shard hit/result-byte, source-byte, total-relation, cancellation, and cap-rejection
+  counters; coordinator metrics record shard rows/bytes and enrichment rejections.
 - **Replication + recovery over gRPC** — `FetchSegments`/`RecoverFrom` (ADR-036); per-shard
   translog, no-quiesce peer recovery, durable self-restart (ADR-039); retention leases + finalize
   (ADR-040) with lease TTL reaping (ADR-048).

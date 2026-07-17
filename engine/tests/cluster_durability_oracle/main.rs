@@ -23,6 +23,7 @@ mod checkpoint;
 mod class_d;
 mod core;
 mod hot;
+mod ranked;
 mod replication;
 mod resize;
 mod torn_tail;

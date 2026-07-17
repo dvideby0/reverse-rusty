@@ -89,3 +89,38 @@ ordinary:            local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
 broad-heavy:         local=bb248a758615fda0 cluster=0b64b11f5259ff1c
 body-duplicate:      local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
 placement-duplicate: local=0ec5dda03607d01f cluster=77575a4edc1f29e7
+
+--- ADR-110 Increment 4 post-integration capture ---
+Captured: 2026-07-16, Apple M4 Max (12P+4E), 48 GiB, macOS aarch64, release profile
+Command: cargo run --release --bin rankbench -- 20000 500 8 275775489
+
+Every bounded row runs both the local collector and the actual in-process distributed collector.
+The benchmark asserts both equal collect-all -> full-sort -> truncate, their totals agree, and
+`shard_rows <= K * routed_positions`. `routed_positions` is the workload sum across titles;
+`shard_result_bytes=0` is expected for an in-process cluster (the real-gRPC oracle measures exact
+protobuf bytes). Fetch columns measure current source for final winners only. Timings are
+informational and machine-specific.
+
+workload              K retained local_ms shard_rows routed_positions shard_result_bytes collect_merge_ms fetch_bytes fetch_ms
+ordinary             10      500    1.421        500             1597                  0           27.099       25908    0.572
+ordinary            100      500    1.378        500             1597                  0           24.254       25908    0.475
+ordinary           1000      500    1.145        500             1597                  0           23.022       25908    0.449
+ordinary          10000      500    1.271        500             1597                  0           28.119       25908    0.482
+broad-heavy          10      856    2.225        878             1586                  0           24.951        6185    0.301
+broad-heavy         100     7156    3.139       7178             1586                  0           27.451       44099    0.933
+broad-heavy        1000    18313    2.321      18313             1586                  0           28.172      111177    1.510
+broad-heavy       10000    18313    2.742      18313             1586                  0           34.746      111177    1.887
+body-duplicate       10      792    1.967        792             1605                  0           26.661        5304    0.394
+body-duplicate      100     7160    1.598       7160             1605                  0           25.274       43536    0.716
+body-duplicate     1000     7512    1.555       7512             1605                  0           25.607       45656    0.674
+body-duplicate    10000     7512    1.999       7512             1605                  0           31.272       45656    0.973
+placement-duplicate  10      500    1.953        500             2954                  0           45.435       15780    0.505
+placement-duplicate 100      500    1.741        500             2954                  0           40.367       15780    0.458
+placement-duplicate 1000     500    1.847        500             2954                  0           45.612       15780    0.500
+placement-duplicate 10000    500    2.018        500             2954                  0           52.322       15780    0.489
+
+Compatibility pins remain unchanged from Increment 0:
+ordinary:            local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
+broad-heavy:         local=bb248a758615fda0 cluster=0b64b11f5259ff1c
+body-duplicate:      local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
+placement-duplicate: local=0ec5dda03607d01f cluster=77575a4edc1f29e7

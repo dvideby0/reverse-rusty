@@ -52,6 +52,12 @@ struct BoundedCapture {
     replacements: u64,
     collector_bound_entries: usize,
     collector_payload_bytes: usize,
+    shard_rows_received: usize,
+    routed_shards: usize,
+    shard_result_bytes: u64,
+    collect_merge_time: Duration,
+    fetch_bytes: usize,
+    fetch_time: Duration,
 }
 
 fn main() {
@@ -61,7 +67,7 @@ fn main() {
     let shards = arg_usize(&args, 3, DEFAULT_SHARDS).max(1);
     let seed = arg_u64(&args, 4, DEFAULT_SEED);
 
-    println!("Reverse Rusty ranked-delivery synthetic baseline (ADR-107/108)");
+    println!("Reverse Rusty ranked-delivery synthetic baseline (ADR-107/108/110)");
     println!(
         "host: os={} arch={} profile={} crate={}",
         std::env::consts::OS,
@@ -213,16 +219,13 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
     let snap = engine.snapshot();
     let compiled = snap.compile_rank_spec(&rank);
     let capture = capture_local(&snap, &data.titles, &compiled);
+    let program_spec = RankProgramSpec {
+        priority_field: Some("priority".to_string()),
+        boosts: rank.boosts.clone(),
+    };
     let bounded_program = snap
-        .compile_rank_program(&RankProgramSpec {
-            priority_field: Some("priority".to_string()),
-            boosts: rank.boosts.clone(),
-        })
+        .compile_rank_program(&program_spec)
         .expect("fixed priority rank program");
-    let bounded: Vec<BoundedCapture> = KS
-        .into_iter()
-        .map(|k| capture_bounded(&snap, &data.titles, &compiled, &bounded_program, k))
-        .collect();
 
     let cluster = ClusterEngine::build_with_tags(
         Normalizer::default_vocab().expect("built-in normalizer"),
@@ -235,6 +238,23 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
         &tags,
     )
     .expect("synthetic tagged cluster build");
+    let cluster_program = cluster
+        .compile_rank_program(&program_spec)
+        .expect("cluster priority rank program");
+    let bounded: Vec<BoundedCapture> = KS
+        .into_iter()
+        .map(|k| {
+            capture_bounded(
+                &snap,
+                &cluster,
+                &data.titles,
+                &compiled,
+                &bounded_program,
+                &cluster_program,
+                k,
+            )
+        })
+        .collect();
     let cluster_capture = capture_cluster(&cluster, &data.titles);
 
     let mut counts = capture.match_counts.clone();
@@ -284,7 +304,7 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
         let k = capture.k;
         let shard_bound = k.saturating_mul(shards);
         println!(
-            "bounded K={k}: retained={} match_rank_ms={:.3} encoded_bytes={} evaluations={} replacements={} collector_bound_entries={} collector_payload_bytes={} max_cluster_rows/title={shard_bound}",
+            "bounded K={k}: retained={} match_rank_ms={:.3} encoded_bytes={} evaluations={} replacements={} collector_bound_entries={} collector_payload_bytes={} shard_rows={} routed_shards={} shard_result_bytes={} collect_merge_ms={:.3} fetch_bytes={} fetch_ms={:.3} max_cluster_rows/title={shard_bound}",
             capture.retained,
             capture.match_rank_time.as_secs_f64() * 1_000.0,
             capture.encoded_bytes,
@@ -292,6 +312,12 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
             capture.replacements,
             capture.collector_bound_entries,
             capture.collector_payload_bytes,
+            capture.shard_rows_received,
+            capture.routed_shards,
+            capture.shard_result_bytes,
+            capture.collect_merge_time.as_secs_f64() * 1_000.0,
+            capture.fetch_bytes,
+            capture.fetch_time.as_secs_f64() * 1_000.0,
         );
     }
     println!(
@@ -302,9 +328,11 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
 
 fn capture_bounded(
     snap: &reverse_rusty::EngineSnapshot,
+    cluster: &ClusterEngine,
     titles: &[String],
     compatibility_rank: &reverse_rusty::CompiledRankSpec,
     program: &reverse_rusty::CompiledRankProgram,
+    cluster_program: &reverse_rusty::CompiledRankProgram,
     k: usize,
 ) -> BoundedCapture {
     const THRESHOLD: usize = 10_000;
@@ -316,6 +344,12 @@ fn capture_bounded(
     let mut match_rank_time = Duration::ZERO;
     let mut evaluations = 0u64;
     let mut replacements = 0u64;
+    let mut shard_rows_received = 0usize;
+    let mut routed_shards = 0usize;
+    let mut shard_result_bytes = 0u64;
+    let mut collect_merge_time = Duration::ZERO;
+    let mut fetch_bytes = 0usize;
+    let mut fetch_time = Duration::ZERO;
     for title in titles {
         snap.match_title(title, &mut oracle_scratch, &mut oracle_ids, true);
         let mut expected = snap.rank(&oracle_ids, compatibility_rank);
@@ -352,6 +386,45 @@ fn capture_bounded(
         );
         evaluations = evaluations.saturating_add(actual.rank_stats.evaluations);
         replacements = replacements.saturating_add(actual.rank_stats.heap_replacements);
+
+        let cluster_started = Instant::now();
+        let distributed = cluster
+            .try_percolate_filtered_top_k(
+                title,
+                &[],
+                TopKOptions {
+                    size: k,
+                    track_total_hits_up_to: THRESHOLD as u64,
+                    query_scope: QueryScope::WithBroad,
+                },
+                cluster_program,
+                None,
+            )
+            .expect("distributed bounded ranked match");
+        collect_merge_time += cluster_started.elapsed();
+        let distributed_rows: Vec<(u64, i64)> = distributed
+            .hits
+            .iter()
+            .map(|hit| (hit.logical_id, hit.score))
+            .collect();
+        assert_eq!(
+            distributed_rows, expected,
+            "distributed result diverged at K={k}"
+        );
+        assert_eq!(distributed.total_hits, actual.total_hits);
+        assert!(
+            distributed.shard_rows_received <= k.saturating_mul(distributed.routed_shards),
+            "rows_received exceeded K × routed_shards at K={k}"
+        );
+        shard_rows_received = shard_rows_received.saturating_add(distributed.shard_rows_received);
+        routed_shards = routed_shards.saturating_add(distributed.routed_shards);
+        shard_result_bytes = shard_result_bytes.saturating_add(distributed.shard_result_bytes);
+        let fetch_started = Instant::now();
+        let sources = cluster
+            .fetch_ranked_sources(&distributed, None)
+            .expect("winner fetch");
+        fetch_time += fetch_started.elapsed();
+        fetch_bytes = fetch_bytes.saturating_add(sources.iter().map(String::len).sum::<usize>());
     }
 
     // Structural payload bound: K heap rows + K heap-id entries + threshold+1
@@ -377,6 +450,12 @@ fn capture_bounded(
         replacements,
         collector_bound_entries,
         collector_payload_bytes,
+        shard_rows_received,
+        routed_shards,
+        shard_result_bytes,
+        collect_merge_time,
+        fetch_bytes,
+        fetch_time,
     }
 }
 

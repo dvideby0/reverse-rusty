@@ -22,6 +22,13 @@
 
 tonic::include_proto!("reverse_rusty.shard.v1");
 
+/// Exact protobuf encoded size without allocating an intermediate buffer.
+/// Kept in this crate so the engine can enforce result caps without adding a
+/// second direct `prost` dependency to its distributed feature.
+pub fn encoded_len<M: prost::Message>(message: &M) -> usize {
+    message.encoded_len()
+}
+
 /// The standard `grpc.health.v1` health-checking service (ADR-084), namespaced so its
 /// generic message names (`HealthCheckRequest`, etc.) don't collide with the shard
 /// types at the crate root. Served on a separate plaintext port for k8s probes.

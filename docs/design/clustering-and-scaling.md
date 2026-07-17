@@ -24,6 +24,10 @@ in [`../research/corpus-feature-learning.md`](../research/corpus-feature-learnin
 > **Deterministic distributed emission ownership is built** (ADR-109): every distributed row carries
 > generation-fenced placement identity, and exactly one routed shard position emits each matching
 > logical ID. Existing cluster result sets are unchanged; stale durable data or peers fail closed.
+> **Exact distributed top-K and query-then-fetch are built** (ADR-110): each routed position returns
+> at most K owned rows, the coordinator performs an exact bounded merge, and only final winners cross
+> the source-fetch boundary. Cluster `POST /v2/_search` is fail-closed under one deadline and returns
+> no partial results.
 >
 > **Architecture note (ADR-033):** this design follows the **shared-nothing** model of
 > Elasticsearch/Cassandra/Kafka — **local** per-shard segments + a **per-node/coordinator WAL** for
@@ -323,6 +327,32 @@ sort/dedup remains a backstop and asserts zero overlap. Segment v7 stores alloca
 placement columns; cluster manifest v6, coordinator/translog v4, and adopted feature-space v2 carry
 the generation fence. Legacy durable cluster/data-node state must be rebuilt or wiped/reseeded;
 standalone engine segments v1–v6 remain readable.
+
+### 7.2 Exact bounded top-K and winner fetch (ADR-110)
+
+ADR-109 ownership is applied before each shard's `TopKCollector`, so a routed position returns at
+most K logical rows and no logical ID can consume heap/network space on two positions. The coordinator
+validates the bounded/ownership/configuration attestations, rejects overlapping IDs, merges the sorted
+rows by `(score desc, logical_id asc)`, and truncates to K. This local-K merge is exact: a row excluded
+by its owner's local K already has K globally better rows ahead of it on that owner. The observable
+bound is `shard_rows_received <= K × routed_shards`.
+
+Owned totals are disjoint. The coordinator returns an exact summed total only when every shard was
+exact and the sum is at most the request threshold; every other case returns the threshold with
+relation `gte`. A threshold crossed only by the cross-shard sum is therefore never mislabeled exact.
+
+Delivery is two-phase. `PercolateTopK` carries the compiled integer rank program, filter, ownership
+context, K/threshold, and remaining absolute-deadline budget. After merge, winner IDs are grouped by
+their owning logical positions and server-streaming `FetchMatches` returns current source one row per
+ID. Replicas and handoffs keep their normal read failover. Placement drift, missing source, a malformed
+stream, timeout, or any shard failure invalidates the whole response; partial results are not supported.
+Explanations are compiled at the coordinator under the authoritative normalizer/dictionary.
+
+The phase-two contract is deliberately current-view rather than PIT-consistent. The phase-one
+placement generation/shard count is still fenced through fetch so a layout rebuild cannot enrich an
+old winner set through a new placement. PIT/cursors are the later snapshot-consistency increment.
+No durable format changes: the source store and ADR-109 placement columns/log frames already carry all
+required state.
 
 ---
 

@@ -115,6 +115,7 @@ most once. Every distributed row pays fixed SoA metadata plus selective placemen
 `u32` list; replicated rows store no list. Cluster persistence and the internal wire require a
 coordinated ADR-109 rebuild/upgrade.
 
-Bounded distributed top-K, query-then-fetch enrichment, distributed title batching, PIT/cursors,
-exhaustive jobs/streams, and approximate termination remain separate increments. This ADR provides
-their necessary one-logical-emission foundation without introducing a new response contract.
+Bounded distributed top-K and query-then-fetch enrichment are delivered separately by
+[ADR-110](adr-110-distributed-top-k-query-then-fetch.md). Distributed title batching, PIT/cursors,
+exhaustive jobs/streams, and approximate termination remain later increments. This ADR provides the
+one-logical-emission foundation without itself introducing a new response contract.

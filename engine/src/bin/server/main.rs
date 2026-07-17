@@ -378,6 +378,7 @@ async fn main() {
         search_permits: (cli.max_concurrent_searches > 0)
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
         ranked_search_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(ranked_workers)),
+        max_ranked_enrichment_bytes: cli.max_ranked_enrichment_bytes,
         include_broad: cli.include_broad,
         prom,
         slow_query_threshold_ms: slow_threshold,

@@ -410,9 +410,20 @@ impl EngineSnapshot {
         title: &str,
     ) -> Option<crate::explain::ExplainDetail> {
         let source = self.get_query_source(logical_id)?;
+        self.explain_source(logical_id, &source, title)
+    }
+
+    /// Compile a structured explanation from already-fetched current source.
+    /// Ranked delivery uses this to fetch and budget each winner source once.
+    pub fn explain_source(
+        &self,
+        logical_id: u64,
+        source: &str,
+        title: &str,
+    ) -> Option<crate::explain::ExplainDetail> {
         let mut lc = String::new();
         let cq = crate::compile::compile_one_readonly(
-            &source,
+            source,
             logical_id,
             &self.norm,
             &self.dict,
@@ -721,6 +732,48 @@ impl EngineSnapshot {
         scratch: &mut MatchScratch,
         deadline: Option<Instant>,
     ) -> Result<crate::rank::RankedMatch, crate::rank::RankedMatchError> {
+        self.try_match_title_top_k_with_policy(
+            title,
+            options,
+            program,
+            pred,
+            scratch,
+            deadline,
+            crate::ownership::EmitAll,
+        )
+    }
+
+    /// Cluster-only bounded ranked path. Boolean verification is identical to
+    /// [`try_match_title_top_k`](Self::try_match_title_top_k); ADR-109's
+    /// [`UniqueOwner`](crate::ownership::UniqueOwner) policy is applied only at
+    /// the final emission boundary, before the bounded collector observes a row.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_match_title_top_k_owned(
+        &self,
+        title: &str,
+        options: crate::result::TopKOptions,
+        program: &crate::rank::CompiledRankProgram,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        deadline: Option<Instant>,
+        emission: crate::ownership::UniqueOwner<'_>,
+    ) -> Result<crate::rank::RankedMatch, crate::rank::RankedMatchError> {
+        self.try_match_title_top_k_with_policy(
+            title, options, program, pred, scratch, deadline, emission,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_match_title_top_k_with_policy<P: crate::ownership::EmissionPolicy>(
+        &self,
+        title: &str,
+        options: crate::result::TopKOptions,
+        program: &crate::rank::CompiledRankProgram,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        deadline: Option<Instant>,
+        emission: P,
+    ) -> Result<crate::rank::RankedMatch, crate::rank::RankedMatchError> {
         if options.size > crate::result::MAX_TOP_K {
             return Err(crate::rank::RankedMatchError::Admission(
                 crate::result::TopKAdmissionError::SizeTooLarge {
@@ -761,7 +814,7 @@ impl EngineSnapshot {
                     &mut collector,
                     include_broad,
                     DeadlineAt(at),
-                    crate::ownership::EmitAll,
+                    emission,
                 )
                 .map_err(crate::rank::RankedMatchError::Cancelled)?,
             None => infallible(view.match_title_collect(
@@ -770,7 +823,7 @@ impl EngineSnapshot {
                 &mut collector,
                 include_broad,
                 NoDeadline,
-                crate::ownership::EmitAll,
+                emission,
             )),
         };
         let total_hits = collector.total_hits();

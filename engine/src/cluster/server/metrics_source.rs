@@ -52,6 +52,7 @@ impl ShardMetricsSource {
                     class: snap.class_counts(),
                     rpc_latency: slot.latency.snapshot(),
                     broad: slot.broad.snapshot(),
+                    ranked: slot.ranked.snapshot(),
                 }
             })
             .collect();

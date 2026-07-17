@@ -75,6 +75,16 @@ pub enum ShardError {
     /// shard position/configuration. Serving it could duplicate or suppress a
     /// logical result, so ADR-109 requires a fail-closed typed error.
     OwnershipMismatch(crate::ownership::OwnershipError),
+    /// A bounded read reached its one request deadline. No partial result is
+    /// returned; the coordinator fails the exact request closed.
+    DeadlineExceeded,
+    /// A bounded read violated its static K/total admission contract.
+    Admission(crate::result::TopKAdmissionError),
+    /// A shard returned a malformed or dishonest bounded reply (for example,
+    /// more than K rows or a missing bounded/ownership attestation).
+    Protocol(String),
+    /// Winner enrichment could not find the source on the owning shard.
+    SourceUnavailable(u64),
     /// A cluster mutation could not be durably logged (the coordinator's externalized
     /// `ClusterLog`, ADR-031). The mutation is *rejected*, not applied — surfacing it
     /// rather than acknowledging an unlogged write is load-bearing for the
@@ -121,6 +131,12 @@ impl std::fmt::Display for ShardError {
                  {actual:#018x} (every shard must share the coordinator's frozen dict)"
             ),
             ShardError::OwnershipMismatch(error) => write!(f, "{error}"),
+            ShardError::DeadlineExceeded => f.write_str("shard read deadline exceeded"),
+            ShardError::Admission(error) => error.fmt(f),
+            ShardError::Protocol(detail) => write!(f, "shard protocol error: {detail}"),
+            ShardError::SourceUnavailable(logical) => {
+                write!(f, "source unavailable for logical id {logical}")
+            }
             ShardError::Log(m) => write!(f, "cluster log durability error: {m}"),
             ShardError::ControlPlane(m) => write!(f, "cluster control-plane error: {m}"),
             ShardError::PartiallyApplied {
@@ -144,6 +160,33 @@ impl From<crate::ownership::OwnershipError> for ShardError {
     fn from(value: crate::ownership::OwnershipError) -> Self {
         Self::OwnershipMismatch(value)
     }
+}
+
+impl From<crate::rank::RankedMatchError> for ShardError {
+    fn from(value: crate::rank::RankedMatchError) -> Self {
+        match value {
+            crate::rank::RankedMatchError::Admission(error) => Self::Admission(error),
+            crate::rank::RankedMatchError::Cancelled(_) => Self::DeadlineExceeded,
+        }
+    }
+}
+
+/// One ownership-filtered, bounded shard result. `result_bytes` is the exact
+/// protobuf encoded size for remote replies and zero for in-process shards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ShardRankedMatch {
+    pub(crate) hits: Vec<crate::rank::RankedHit>,
+    pub(crate) total_hits: crate::result::TotalHits,
+    pub(crate) stats: MatchStats,
+    pub(crate) rank_stats: crate::rank::RankStats,
+    pub(crate) result_bytes: u64,
+}
+
+/// One current-view source returned by the owning shard during phase two.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FetchedMatch {
+    pub(crate) logical_id: u64,
+    pub(crate) source: String,
 }
 
 /// Sink for shard-level observability events (e.g. a [`ReplicatedShard`] replica
@@ -244,6 +287,46 @@ pub(crate) trait Shard: Send + Sync {
         let _ = (title, include_broad, pred, spec, context, current_position);
         Err(ShardError::OwnershipMismatch(
             crate::ownership::OwnershipError::PlacementDecisionMismatch,
+        ))
+    }
+    /// Ownership-aware bounded typed ranking (ADR-110). The default is a loud
+    /// refusal so a legacy/test shard cannot silently masquerade as bounded.
+    #[allow(clippy::too_many_arguments)]
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        let _ = (
+            title,
+            include_broad,
+            pred,
+            program,
+            options,
+            context,
+            current_position,
+            deadline,
+        );
+        Err(ShardError::Protocol(
+            "bounded top-k is not implemented by this shard".into(),
+        ))
+    }
+    /// Batch-fetch current source text for final winners. Implementations must
+    /// return exactly one row per requested id, in request order, or fail loud.
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        let _ = (logical_ids, deadline);
+        Err(ShardError::Config(
+            "winner source fetch is not implemented by this shard".into(),
         ))
     }
     /// Physical query count held by this shard (a replicated/any-of query is counted

@@ -46,6 +46,7 @@ fn state_with(eng: Engine, include_broad: bool) -> Arc<AppState> {
         pool,
         search_permits: None,
         ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+        max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
         include_broad,
         prom: PrometheusMetrics::new(),
         slow_query_threshold_ms: 0,
@@ -883,4 +884,24 @@ async fn v2_deadline_includes_ranked_permit_queue() {
     .expect("permit queue must consume the deadline");
     assert_eq!(error.0, axum::http::StatusCode::REQUEST_TIMEOUT);
     assert_eq!(state.prom.ranked_search_permits_in_use.get(), 0);
+}
+
+#[tokio::test]
+async fn v2_enrichment_cap_is_shared_and_fail_closed() {
+    let mut state = state_with(ranked_engine(), false);
+    Arc::get_mut(&mut state)
+        .expect("unique state")
+        .max_ranked_enrichment_bytes = 1;
+    let error = v2_search(
+        State(Arc::clone(&state)),
+        Json(v2_body(serde_json::json!({
+            "document": {"title": "topps chrome"}
+        }))),
+    )
+    .await
+    .err()
+    .expect("winner source exceeds one-byte enrichment cap");
+    assert_eq!(error.0, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    let json = serde_json::to_value(error.1 .0).expect("error json");
+    assert_eq!(json["error"]["type"], "rank_enrichment_limit");
 }

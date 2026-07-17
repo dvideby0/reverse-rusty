@@ -67,6 +67,25 @@ impl Engine {
         }
     }
 
+    /// Cluster logs/translogs already persist raw tags, so a post-freeze typed
+    /// priority mirrored into `tags.priority` can be reconstructed without a
+    /// durable-format change. Exactly one parseable raw value wins; ambiguous
+    /// legacy tag sets retain the established TagDict behavior.
+    fn cluster_rank_values(
+        &self,
+        raw_tags: &[(String, String)],
+        tag_ids: &[TagId],
+    ) -> crate::rank::RankValues {
+        let mut priorities = raw_tags
+            .iter()
+            .filter(|(key, _)| key == "priority")
+            .filter_map(|(_, value)| value.parse::<i64>().ok());
+        match (priorities.next(), priorities.next()) {
+            (Some(priority), None) => crate::rank::RankValues { priority },
+            _ => self.legacy_rank_values(tag_ids),
+        }
+    }
+
     /// Resolve a query's raw `(key,value)` tags to a sorted + deduped `TagId` slice **read-only**
     /// against the engine's tag dict — the cluster-shard analogue of [`intern_tags`](Self::intern_tags)
     /// (ADR-055). Uses `get_or_synthetic` and NEVER `Arc::make_mut`, so the coordinator's frozen,
@@ -947,7 +966,7 @@ impl Engine {
             }
             let mut rank = item.rank;
             if rank.priority == 0 {
-                rank.priority = self.tag_dict.legacy_priority_for_tags(&tag_ids);
+                rank = self.cluster_rank_values(&item.tags, &tag_ids);
             }
             if let Some(added) = seg.add_compiled_ranked_placed(
                 &item.ex,
@@ -1021,7 +1040,7 @@ impl Engine {
         // Resolve tags read-only against the shared frozen tag space (ADR-055); never the CoW
         // `intern_tags`. Empty ⇒ empty slice ⇒ byte-identical to the pre-tag `&[]` path.
         let tag_ids = self.resolve_tags_readonly(tags);
-        let rank = self.legacy_rank_values(&tag_ids);
+        let rank = self.cluster_rank_values(tags, &tag_ids);
         let outcome = Arc::make_mut(&mut self.memtable).add_compiled_ranked_placed(
             ex,
             &tag_ids,

@@ -28,6 +28,11 @@ use super::proto::shard_service_server::ShardServiceServer;
 use super::security::{ClientSecurity, MeshAuthVerify, ServerSecurity, TlsServerIdentity};
 use super::shard::{LocalShard, Shard, ShardError};
 
+/// Tonic's default receive-message ceiling. Operators may lower the application
+/// cap but ADR-110 deliberately does not permit raising this transport cliff.
+pub const DEFAULT_MAX_GRPC_RESULT_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_GRPC_RESULT_BYTES: usize = DEFAULT_MAX_GRPC_RESULT_BYTES;
+
 mod durable;
 mod metrics_source;
 mod service;
@@ -67,6 +72,8 @@ struct ShardSlot {
     /// Cumulative broad-lane cost counters (ADR-101), accumulated from each percolate's
     /// `MatchStats` at the handler boundary — same slot-lifetime semantics as `latency`.
     broad: super::node_metrics::SlotBroadCost,
+    /// Bounded rank-delivery counters (ADR-110), slot-lifetime like latency.
+    ranked: super::node_metrics::SlotRankDelivery,
 }
 
 impl ShardSlot {
@@ -77,6 +84,7 @@ impl ShardSlot {
             fenced_at_generation: AtomicU64::new(0),
             latency: super::node_metrics::SlotLatency::new(),
             broad: super::node_metrics::SlotBroadCost::new(),
+            ranked: super::node_metrics::SlotRankDelivery::new(),
         })
     }
 
@@ -175,6 +183,9 @@ pub struct ShardServer {
     /// plaintext port for Kubernetes liveness/readiness probes (ADR-084). `None` (default)
     /// ⇒ no second listener — byte-identical to the historical single-port behavior.
     health_addr: Option<SocketAddr>,
+    /// Exact protobuf encoded-result cap for unary result messages and each
+    /// `FetchMatches` stream item (ADR-110).
+    max_grpc_result_bytes: usize,
 }
 
 impl ShardServer {
@@ -207,6 +218,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         }
     }
 
@@ -224,6 +236,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         }
     }
 
@@ -295,6 +308,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         })
     }
 
@@ -312,6 +326,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         }
     }
 
@@ -350,6 +365,7 @@ impl ShardServer {
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
+            max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
         })
     }
 
@@ -544,6 +560,32 @@ impl ShardServer {
     pub fn with_health_addr(mut self, addr: SocketAddr) -> Self {
         self.health_addr = Some(addr);
         self
+    }
+
+    /// Set the static exact encoded-result cap. It may be lowered to any
+    /// positive byte count but never raised above tonic's 4 MiB default.
+    pub fn with_max_grpc_result_bytes(mut self, bytes: usize) -> Result<Self, ShardError> {
+        if !(1..=MAX_GRPC_RESULT_BYTES).contains(&bytes) {
+            return Err(ShardError::Config(format!(
+                "max gRPC result bytes must be within 1..={MAX_GRPC_RESULT_BYTES}, got {bytes}"
+            )));
+        }
+        self.max_grpc_result_bytes = bytes;
+        Ok(self)
+    }
+
+    pub(in crate::cluster::server) fn check_result_bytes(
+        &self,
+        encoded: usize,
+    ) -> Result<(), Status> {
+        if encoded > self.max_grpc_result_bytes {
+            Err(Status::resource_exhausted(format!(
+                "encoded result is {encoded} bytes; configured maximum is {}",
+                self.max_grpc_result_bytes
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// Build the tonic server (TLS applied when configured) + the token-verified

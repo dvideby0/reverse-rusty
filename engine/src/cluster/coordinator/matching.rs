@@ -26,7 +26,7 @@ impl ClusterEngine {
     /// N(T)` means fan-out only ever widens, and only on alias-bearing titles; with
     /// no active multi-word alias `P(T) == N(T)` and this takes the single-view
     /// path, byte-identical to the pre-ADR-076 routing.
-    fn route(&self, title: &str) -> (Vec<usize>, usize) {
+    pub(in crate::cluster::coordinator) fn route(&self, title: &str) -> (Vec<usize>, usize) {
         let mut lc = String::new();
         let mut sc = crate::normalize::NormScratch::new();
         let mut feats: Vec<FeatureId> = Vec::new();

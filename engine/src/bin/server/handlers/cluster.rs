@@ -55,7 +55,9 @@ pub(crate) use vocab::{
 /// double-log).
 fn shard_error_response(context: &str, e: &ShardError) -> Response {
     let (status, kind) = match e {
-        ShardError::Config(_) => (StatusCode::BAD_REQUEST, "validation_error"),
+        ShardError::Config(_) | ShardError::Admission(_) => {
+            (StatusCode::BAD_REQUEST, "validation_error")
+        }
         ShardError::Log(_) => (StatusCode::SERVICE_UNAVAILABLE, "durability_unavailable"),
         ShardError::Remote(_) => (StatusCode::BAD_GATEWAY, "shard_unreachable"),
         ShardError::DictMismatch { .. } => {
@@ -63,6 +65,9 @@ fn shard_error_response(context: &str, e: &ShardError) -> Response {
         }
         ShardError::OwnershipMismatch(_) => (StatusCode::CONFLICT, "placement_generation_mismatch"),
         ShardError::ControlPlane(_) => (StatusCode::SERVICE_UNAVAILABLE, "control_plane_error"),
+        ShardError::DeadlineExceeded => (StatusCode::REQUEST_TIMEOUT, "deadline_exceeded"),
+        ShardError::Protocol(_) => (StatusCode::BAD_GATEWAY, "invalid_shard_response"),
+        ShardError::SourceUnavailable(_) => (StatusCode::BAD_GATEWAY, "source_unavailable"),
         ShardError::PartiallyApplied { .. } => (StatusCode::OK, "partially_applied"),
     };
     ApiError::response(status, kind, format!("{context}: {e}")).into_response()

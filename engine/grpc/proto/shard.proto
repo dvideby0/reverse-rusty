@@ -20,6 +20,10 @@ service ShardService {
   // wire-decodable. Node-level RPCs (`DictFingerprint`, `AdoptDict`'s reply) carry no `shard_id` — the
   // dict/tag-dict fingerprints are a node-wide content invariant, shared across every slot.
   rpc Percolate   (PercolateRequest) returns (PercolateReply);
+  // ADR-110: exact bounded typed ranking after ADR-109 ownership suppression.
+  rpc PercolateTopK (PercolateTopKRequest) returns (PercolateTopKReply);
+  // ADR-110 query-then-fetch: source text only for finalized global winners.
+  rpc FetchMatches (FetchMatchesRequest) returns (stream FetchMatch);
   rpc NumQueries  (ShardRef)         returns (CountReply);
   rpc ClassCounts (ShardRef)         returns (ClassCountsReply);
   // ---- writes ----
@@ -184,6 +188,72 @@ message PercolateReply {
   // unranked results as ranked (version-skew honesty).
   bool ranked = 4;
   bool ownership_applied = 5;
+}
+
+// Integer-only bounded rank program. The coordinator resolves boost tags once
+// against the shared frozen tag space; the shard never sees request strings.
+message RankProgram {
+  bool use_priority = 1;
+  repeated RankBoost boosts = 2;
+}
+
+message PercolateTopKRequest {
+  string title = 1;
+  bool include_broad = 2;
+  repeated TagGroup filter = 3;
+  RankProgram rank = 4;
+  uint32 size = 5;
+  uint64 track_total_hits_up_to = 6;
+  // Remaining budget from the coordinator's one absolute request deadline.
+  // grpc-timeout carries the same budget at transport level; this field arms
+  // cooperative segment-boundary cancellation inside the shard matcher.
+  uint64 remaining_micros = 7;
+  uint32 shard_id = 8;
+  OwnershipContext ownership = 9;
+}
+
+message RankedHit {
+  uint64 logical_id = 1;
+  int64 score = 2;
+}
+
+message BoundedTotalHits {
+  uint64 value = 1;
+  bool exact = 2;
+}
+
+message BoundedRankStats {
+  uint64 evaluations = 1;
+  uint64 heap_replacements = 2;
+}
+
+message PercolateTopKReply {
+  repeated RankedHit hits = 1;
+  BoundedTotalHits total_hits = 2;
+  MatchStats stats = 3;
+  BoundedRankStats rank_stats = 4;
+  // Version-skew honesty: both must be true and requested_size must echo the
+  // request. A peer that cannot prove bounded ownership is rejected.
+  bool bounded = 5;
+  bool ownership_applied = 6;
+  uint32 requested_size = 7;
+  uint64 placement_generation = 8;
+  uint32 num_shards = 9;
+}
+
+message FetchMatchesRequest {
+  repeated uint64 logical_ids = 1;
+  uint32 shard_id = 2;
+  uint64 placement_generation = 3;
+  uint32 num_shards = 4;
+  uint64 remaining_micros = 5;
+}
+
+message FetchMatch {
+  uint64 logical_id = 1;
+  string source = 2;
+  uint64 placement_generation = 3;
+  uint32 num_shards = 4;
 }
 
 // Field order pinned to engine `segment.rs` MatchStats (11 u32 fields). The

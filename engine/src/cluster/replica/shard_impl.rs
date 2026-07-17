@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, PoisonError};
 
 use crate::cluster::clog::{ClusterMutation, LogPos};
-use crate::cluster::shard::{EventSink, Shard, ShardError};
+use crate::cluster::shard::{EventSink, FetchedMatch, Shard, ShardError, ShardRankedMatch};
 use crate::compile::Extracted;
 use crate::config::EngineConfig;
 use crate::dict::Dict;
@@ -73,6 +73,39 @@ impl Shard for ReplicatedShard {
                 current_position,
             )
         })
+    }
+
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        self.read(|shard| {
+            shard.percolate_top_k_owned(
+                title,
+                include_broad,
+                pred,
+                program,
+                options,
+                context,
+                current_position,
+                deadline,
+            )
+        })
+    }
+
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        self.read(|shard| shard.fetch_matches(logical_ids, deadline))
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {

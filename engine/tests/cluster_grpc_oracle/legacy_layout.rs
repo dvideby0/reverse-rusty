@@ -6,9 +6,12 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use raw::shard_service_server::{ShardService, ShardServiceServer};
-use reverse_rusty::cluster::{RemoteShard, ShardError, ShardServer};
+use reverse_rusty::cluster::{
+    ClusterConfig, ClusterEngine, ClusterRankedError, RemoteShard, ShardError, ShardServer,
+};
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty_shard_proto as raw;
 use tokio_stream::Stream;
@@ -24,6 +27,7 @@ struct LegacyOwnershipServer {
     tag_fp: u64,
     placement_generation: u64,
     num_shards: u32,
+    top_k_delay: Option<Duration>,
 }
 
 #[tonic::async_trait]
@@ -67,6 +71,37 @@ impl ShardService for LegacyOwnershipServer {
         &self,
         _req: Request<raw::PercolateRequest>,
     ) -> Result<Response<raw::PercolateReply>, Status> {
+        Err(Status::unimplemented("legacy mock"))
+    }
+    async fn percolate_top_k(
+        &self,
+        req: Request<raw::PercolateTopKRequest>,
+    ) -> Result<Response<raw::PercolateTopKReply>, Status> {
+        let Some(delay) = self.top_k_delay else {
+            return Err(Status::unimplemented("legacy mock"));
+        };
+        tokio::time::sleep(delay).await;
+        let request = req.into_inner();
+        Ok(Response::new(raw::PercolateTopKReply {
+            hits: Vec::new(),
+            total_hits: Some(raw::BoundedTotalHits {
+                value: 0,
+                exact: true,
+            }),
+            stats: Some(raw::MatchStats::default()),
+            rank_stats: Some(raw::BoundedRankStats::default()),
+            bounded: true,
+            ownership_applied: true,
+            requested_size: request.size,
+            placement_generation: self.placement_generation,
+            num_shards: self.num_shards,
+        }))
+    }
+    type FetchMatchesStream = Pin<Box<dyn Stream<Item = Result<raw::FetchMatch, Status>> + Send>>;
+    async fn fetch_matches(
+        &self,
+        _req: Request<raw::FetchMatchesRequest>,
+    ) -> Result<Response<Self::FetchMatchesStream>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
     async fn num_queries(
@@ -187,6 +222,7 @@ fn grpc_connect_refuses_missing_or_stale_ownership_attestation() {
             tag_fp,
             placement_generation,
             num_shards,
+            top_k_delay: None,
         });
         rt.spawn(
             tonic::transport::Server::builder()
@@ -255,4 +291,122 @@ fn grpc_connect_refuses_missing_or_stale_ownership_attestation() {
     let real_ep = format!("http://{real_addr}");
     RemoteShard::connect(&real_ep, rt.handle().clone(), dict_fp, tag_fp, 0)
         .expect("a real ADR-109 server attests ownership configuration");
+}
+
+/// A peer can satisfy ADR-109 ownership yet predate ADR-110. The additive RPC
+/// must fail loud with UNIMPLEMENTED; the coordinator never falls back to the
+/// unbounded compatibility percolate and presents it as an exact bounded result.
+#[test]
+fn distributed_top_k_refuses_pre_adr_110_peer() {
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_with(&[], &norm);
+    let tag_dict = empty_tag_dict();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let endpoint = {
+        let _enter = rt.enter();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let address = incoming.local_addr().expect("address");
+        let service = ShardServiceServer::new(LegacyOwnershipServer {
+            dict_fp: dict.fingerprint(),
+            tag_fp: tag_dict.fingerprint(),
+            placement_generation: 1,
+            num_shards: 1,
+            top_k_delay: None,
+        });
+        rt.spawn(
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming),
+        );
+        wait_until_listening(address);
+        format!("http://{address}")
+    };
+    let cluster = ClusterEngine::connect_remote(
+        norm,
+        dict,
+        tag_dict,
+        &ClusterConfig {
+            num_shards: 1,
+            ..ClusterConfig::default()
+        },
+        &[endpoint],
+        rt.handle(),
+    )
+    .expect("ADR-109 handshake succeeds");
+    let program = cluster
+        .compile_rank_program(&reverse_rusty::RankProgramSpec::default())
+        .expect("rank program");
+    let error = cluster
+        .try_percolate_filtered_top_k(
+            "topps chrome",
+            &[],
+            reverse_rusty::TopKOptions::default(),
+            &program,
+            None,
+        )
+        .expect_err("pre-ADR-110 peer must be refused");
+    assert!(matches!(
+        error,
+        ClusterRankedError::Shard(ShardError::Remote(_))
+    ));
+}
+
+#[test]
+fn distributed_top_k_keeps_one_absolute_deadline_across_transport() {
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_with(&[], &norm);
+    let tag_dict = empty_tag_dict();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let endpoint = {
+        let _enter = rt.enter();
+        let incoming = TcpIncoming::bind("127.0.0.1:0".parse().unwrap()).expect("bind");
+        let address = incoming.local_addr().expect("address");
+        let service = ShardServiceServer::new(LegacyOwnershipServer {
+            dict_fp: dict.fingerprint(),
+            tag_fp: tag_dict.fingerprint(),
+            placement_generation: 1,
+            num_shards: 1,
+            top_k_delay: Some(Duration::from_millis(100)),
+        });
+        rt.spawn(
+            tonic::transport::Server::builder()
+                .add_service(service)
+                .serve_with_incoming(incoming),
+        );
+        wait_until_listening(address);
+        format!("http://{address}")
+    };
+    let cluster = ClusterEngine::connect_remote(
+        norm,
+        dict,
+        tag_dict,
+        &ClusterConfig {
+            num_shards: 1,
+            ..ClusterConfig::default()
+        },
+        &[endpoint],
+        rt.handle(),
+    )
+    .expect("remote cluster");
+    let program = cluster
+        .compile_rank_program(&reverse_rusty::RankProgramSpec::default())
+        .expect("rank program");
+    let started = Instant::now();
+    let error = cluster
+        .try_percolate_filtered_top_k(
+            "topps chrome",
+            &[],
+            reverse_rusty::TopKOptions::default(),
+            &program,
+            Some(Instant::now() + Duration::from_millis(15)),
+        )
+        .expect_err("delayed shard must exceed the request deadline");
+    assert!(
+        matches!(error, ClusterRankedError::DeadlineExceeded),
+        "unexpected deadline error: {error:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(90),
+        "transport did not honor the original absolute deadline"
+    );
 }

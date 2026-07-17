@@ -65,7 +65,8 @@ pub use control::{
 };
 pub use coordinator::{
     recommended_shard_count, resolve_topology, route_topology, seed_position_preserving,
-    AddOutcome, ClusterConfig, ClusterEngine, ResyncReport, ShardEndpoints,
+    AddOutcome, ClusterConfig, ClusterEngine, ClusterRankedError, ClusterRankedHit,
+    ClusterRankedMatch, ResyncReport, ShardEndpoints,
 };
 pub use ring::{HashRing, DEFAULT_VNODES};
 pub use shard::ShardError;
@@ -95,4 +96,6 @@ pub use security::{
     TlsServerIdentity,
 };
 #[cfg(feature = "distributed")]
-pub use server::{ShardMetricsSource, ShardServer};
+pub use server::{
+    ShardMetricsSource, ShardServer, DEFAULT_MAX_GRPC_RESULT_BYTES, MAX_GRPC_RESULT_BYTES,
+};

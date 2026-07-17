@@ -61,7 +61,7 @@ use crate::segment::{IngestReport, MatchStats, PlacedQuery};
 use crate::tagdict::TagDict;
 
 use super::clog::{ClusterMutation, LogPos};
-use super::shard::{EventSink, Shard, ShardError};
+use super::shard::{EventSink, FetchedMatch, Shard, ShardError, ShardRankedMatch};
 
 /// A [`Shard`] whose backing is one boxed shard that can be atomically replaced at runtime.
 ///
@@ -190,6 +190,37 @@ impl Shard for Arc<HandoffShard> {
             context,
             current_position,
         )
+    }
+
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        self.current.load().percolate_top_k_owned(
+            title,
+            include_broad,
+            pred,
+            program,
+            options,
+            context,
+            current_position,
+            deadline,
+        )
+    }
+
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        self.current.load().fetch_matches(logical_ids, deadline)
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {

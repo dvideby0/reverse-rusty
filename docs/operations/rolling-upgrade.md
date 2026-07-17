@@ -61,6 +61,11 @@ pre-upgrade backup:
 - **The mesh wire:** ADR-109 fields are protobuf-additive syntactically, but semantically mandatory.
   Missing/stale placement configuration or `ownership_applied` attestation fails closed. Do not run
   an ADR-109 coordinator against pre-ADR-109 shard peers.
+- **ADR-110 ranked delivery:** no durable format changes. `PercolateTopK` and `FetchMatches` are
+  additive RPCs, so compatibility percolation continues during a mixed-version roll, but cluster
+  `/v2/_search` against an old shard fails closed (`UNIMPLEMENTED` → 502) with no partial hits. Enable
+  or route v2 traffic only after every shard is upgraded; keep each shard's
+  `--max-grpc-result-bytes` at or below 4 MiB.
 
 An ADR-109 upgrade is therefore **not a normal rolling mixed-version upgrade**. Back up, stop the
 cluster, rebuild clustered data under the new binary (or wipe/reseed remote shard volumes from the

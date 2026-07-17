@@ -24,7 +24,7 @@ use crate::segment::{Engine, EngineSnapshot, IngestReport, MatchScratch, MatchSt
 use crate::tagdict::TagDict;
 
 use super::retention::{resolve_lease_ttl, RetentionLeases};
-use super::{EventSink, Shard, ShardError};
+use super::{EventSink, FetchedMatch, Shard, ShardError, ShardRankedMatch};
 
 /// One in-process shard: owned engine for writes + lock-free snapshot for reads, plus a
 /// per-shard durable query log (the translog, ADR-039). The translog is a no-op
@@ -607,6 +607,72 @@ impl Shard for LocalShard {
             crate::ownership::UniqueOwner::new(context, current_position),
         );
         Ok((snap.rank(&out, spec), stats))
+    }
+
+    fn percolate_top_k_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        mut options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        context.validate()?;
+        if current_position >= context.num_shards()
+            || context
+                .routed_positions()
+                .binary_search(&current_position)
+                .is_err()
+        {
+            return Err(
+                crate::ownership::OwnershipError::LocalPositionMissing(current_position).into(),
+            );
+        }
+        options.query_scope = if include_broad {
+            crate::result::QueryScope::WithBroad
+        } else {
+            crate::result::QueryScope::Standard
+        };
+        let snap = self.snapshot();
+        let mut scratch = MatchScratch::new();
+        let ranked = snap.try_match_title_top_k_owned(
+            title,
+            options,
+            program,
+            pred,
+            &mut scratch,
+            deadline,
+            crate::ownership::UniqueOwner::new(context, current_position),
+        )?;
+        Ok(ShardRankedMatch {
+            hits: ranked.hits,
+            total_hits: ranked.total_hits,
+            stats: ranked.stats,
+            rank_stats: ranked.rank_stats,
+            result_bytes: 0,
+        })
+    }
+
+    fn fetch_matches(
+        &self,
+        logical_ids: &[u64],
+        deadline: Option<Instant>,
+    ) -> Result<Vec<FetchedMatch>, ShardError> {
+        let snap = self.snapshot();
+        let mut out = Vec::with_capacity(logical_ids.len());
+        for &logical_id in logical_ids {
+            if deadline.is_some_and(|at| Instant::now() >= at) {
+                return Err(ShardError::DeadlineExceeded);
+            }
+            let source = snap
+                .get_query_source(logical_id)
+                .ok_or(ShardError::SourceUnavailable(logical_id))?;
+            out.push(FetchedMatch { logical_id, source });
+        }
+        Ok(out)
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {

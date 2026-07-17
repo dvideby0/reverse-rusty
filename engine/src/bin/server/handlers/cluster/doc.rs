@@ -19,7 +19,9 @@ use tracing::{error, info, instrument, warn};
 use reverse_rusty::cluster::{AddOutcome, ShardError};
 
 use crate::dto::{ApiError, HitSource};
-use crate::handlers::doc::{extract_bulk_id, extract_ingest_tags, PutDocBody, CLASS_D_REJECT_MSG};
+use crate::handlers::doc::{
+    extract_bulk_id, extract_ranked_ingest, PutDocBody, CLASS_D_REJECT_MSG,
+};
 use crate::state::ClusterAppState;
 
 use super::shard_error_response;
@@ -115,9 +117,9 @@ pub(crate) async fn cluster_put_doc(
     let start = Instant::now();
     // A malformed tag value is a caller error: 400 before any coordinator work
     // (ADR-073 — never silently drop a tag the caller asked for).
-    let tags = match extract_ingest_tags(&body.rest) {
-        Ok(t) => t,
-        Err(msg) => {
+    let tags = match extract_ranked_ingest(&body.rest) {
+        Ok((tags, _rank)) => tags,
+        Err((error_type, msg)) => {
             warn!(query_id = id, error = %msg, "invalid tag value");
             state
                 .prom
@@ -131,15 +133,18 @@ pub(crate) async fn cluster_put_doc(
                 .http_request_duration
                 .with_label_values(&["put_doc"])
                 .observe(start.elapsed().as_secs_f64());
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ClusterPutDocResponse {
-                    _id: id,
-                    result: "error",
-                    error: Some(msg),
-                }),
-            )
-                .into_response();
+            if error_type == "invalid_tag_value" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ClusterPutDocResponse {
+                        _id: id,
+                        result: "error",
+                        error: Some(msg),
+                    }),
+                )
+                    .into_response();
+            }
+            return ApiError::response(StatusCode::BAD_REQUEST, error_type, msg).into_response();
         }
     };
     let result = {
@@ -459,15 +464,15 @@ pub(crate) async fn cluster_bulk(
         };
         // A malformed tag value fails the ITEM loud (ADR-073), mirroring the
         // parse-error per-item contract — never ingest with silently fewer tags.
-        let tags = match source.as_object().map(extract_ingest_tags).transpose() {
-            Ok(t) => t.unwrap_or_default(),
-            Err(msg) => {
+        let tags = match source.as_object().map(extract_ranked_ingest).transpose() {
+            Ok(value) => value.unwrap_or_default().0,
+            Err((error_type, msg)) => {
                 has_errors = true;
                 items.push(ClusterBulkItem {
                     index: ClusterBulkItemInner {
                         _id: id,
                         status: 400,
-                        error: Some(msg),
+                        error: Some(format!("{error_type}: {msg}")),
                     },
                 });
                 continue;

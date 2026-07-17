@@ -891,3 +891,18 @@ fn unfence_refuses_to_clear_the_drop_tombstone() {
         "the tombstone survives an exact-value unfence — a mid-drop slot can never be re-armed"
     );
 }
+
+#[test]
+fn grpc_result_cap_can_only_be_lowered_within_static_bounds() {
+    let n = norm();
+    let server = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
+    assert!(server.with_max_grpc_result_bytes(0).is_err());
+
+    let server = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
+    assert!(server
+        .with_max_grpc_result_bytes(super::MAX_GRPC_RESULT_BYTES + 1)
+        .is_err());
+
+    let server = ShardServer::pending(n, EngineConfig::default());
+    assert!(server.with_max_grpc_result_bytes(1).is_ok());
+}

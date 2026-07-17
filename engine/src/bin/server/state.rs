@@ -27,6 +27,9 @@ use reverse_rusty::vocab::AliasFeedback;
 use crate::auth::AuthConfig;
 use crate::metrics::PrometheusMetrics;
 
+/// Static winner-enrichment budget shared by local and coordinator v2 search.
+pub(crate) const DEFAULT_MAX_RANKED_ENRICHMENT_BYTES: usize = 16 * 1024 * 1024;
+
 pub(crate) struct AppState {
     pub(crate) engine: Mutex<Engine>,
     pub(crate) snapshot: ArcSwap<EngineSnapshot>,
@@ -40,6 +43,7 @@ pub(crate) struct AppState {
     /// Always-bounded v2 ranked-search admission. Its default is the Rayon
     /// worker count and is deliberately independent from compatibility routes.
     pub(crate) ranked_search_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) max_ranked_enrichment_bytes: usize,
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,
     pub(crate) slow_query_threshold_ms: u64,
@@ -91,6 +95,9 @@ pub(crate) struct ClusterAppState {
     /// actually ends (not when an abandoned join handle drops at timeout), so the
     /// semaphore reflects true pool occupancy. `None` ⇒ unbounded (default).
     pub(crate) search_permits: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    /// Always-bounded v2 ranked-search admission, symmetric with local mode.
+    pub(crate) ranked_search_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) max_ranked_enrichment_bytes: usize,
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,
     pub(crate) slow_query_threshold_ms: u64,

@@ -25,10 +25,13 @@ use crate::segment::PlacedQuery;
 
 use super::{compile_item, ShardServer};
 
+type ShardServiceStream = Pin<Box<dyn Stream<Item = Result<proto::FetchMatch, Status>> + Send>>;
+
 mod add_shard;
 mod dict_adopt;
 mod gc;
 mod leases;
+mod ranked;
 mod recovery;
 
 #[tonic::async_trait]
@@ -70,13 +73,20 @@ impl ShardService for ShardServer {
             slot.latency
                 .observe(ShardRpc::PercolateRanked, started.elapsed());
             slot.broad.record(&stats);
-            return Ok(Response::new(proto::PercolateReply {
+            let reply = proto::PercolateReply {
                 ids,
                 stats: Some(proto::stats_from_engine(stats)),
                 scores,
                 ranked: true,
                 ownership_applied: true,
-            }));
+            };
+            if let Err(status) =
+                self.check_result_bytes(reverse_rusty_shard_proto::encoded_len(&reply))
+            {
+                slot.ranked.record_cap_rejection();
+                return Err(status);
+            }
+            return Ok(Response::new(reply));
         }
         let (ids, stats) = st
             .shard
@@ -92,13 +102,35 @@ impl ShardService for ShardServer {
         // Broad-lane cost accumulation (ADR-101): unconditional — include_broad=false stats carry
         // all-zero broad fields, and a fetch_add(0) is branch-free noise.
         slot.broad.record(&stats);
-        Ok(Response::new(proto::PercolateReply {
+        let reply = proto::PercolateReply {
             ids,
             stats: Some(proto::stats_from_engine(stats)),
             scores: Vec::new(),
             ranked: false,
             ownership_applied: true,
-        }))
+        };
+        if let Err(status) = self.check_result_bytes(reverse_rusty_shard_proto::encoded_len(&reply))
+        {
+            slot.ranked.record_cap_rejection();
+            return Err(status);
+        }
+        Ok(Response::new(reply))
+    }
+
+    async fn percolate_top_k(
+        &self,
+        request: Request<proto::PercolateTopKRequest>,
+    ) -> Result<Response<proto::PercolateTopKReply>, Status> {
+        ranked::percolate_top_k(self, request)
+    }
+
+    type FetchMatchesStream = ShardServiceStream;
+
+    async fn fetch_matches(
+        &self,
+        request: Request<proto::FetchMatchesRequest>,
+    ) -> Result<Response<Self::FetchMatchesStream>, Status> {
+        ranked::fetch_matches(self, request)
     }
 
     async fn num_queries(
