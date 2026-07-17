@@ -31,6 +31,11 @@ position. Each shard returns at most K owned rows, strictly ordered by
 `(score desc, logical_id asc)`, plus its thresholded total, match/rank statistics, and bounded/
 ownership/configuration attestations.
 
+ADR-109's unique logical-id admission is part of this proof boundary. An additive second semantic row
+under one id is rejected during cluster build/ingest/add; otherwise disjoint content placements could
+choose different owners, consume multiple local heaps, and make both local-K truncation and summed
+totals inexact. Replacements use the atomic cluster upsert path.
+
 The coordinator rejects an oversized, unordered, stale, or unattested reply and rejects any logical
 ID emitted by more than one position. It merges the disjoint rows with the same total order and
 truncates to K. This is exact: if a global winner were below its owner's local K, that one owner would
@@ -60,6 +65,13 @@ message. A missing source, generation/configuration drift, malformed stream, or 
 invalidates the whole response. Explanations never cross the wire: the coordinator recompiles each
 fetched source with its authoritative normalizer/dictionary and builds `ExplainDetail` locally.
 
+The bounded HTTP path calls `fetch_ranked_sources_bounded` with the request's static source credit.
+Owner groups are drained sequentially so the credit is global rather than independently spendable by
+every shard. The credit rides `FetchMatchesRequest`; a data node checks the borrowed source length
+before cloning, then emits through an eight-item bounded channel. Thus gRPC flow control supplies real
+backpressure and neither side prebuilds the complete source stream. The unbounded library helper
+remains available for explicit offline callers.
+
 Cluster HTTP ingest uses ADR-108's strict `rank_fields.priority` parser and mirrors the signed value
 into the already-durable raw `tags.priority`. Cluster shard ingest reconstructs the typed value from
 that raw tag, including post-freeze synthetic tag IDs. This preserves signed priority over live,
@@ -80,7 +92,8 @@ Two static response limits bound enrichment and compatibility traffic:
 
 - `server --max-ranked-enrichment-bytes`, default 16 MiB, charges winner source text once even when
   both `_source` and explanation use it. Local and cluster `/v2/_search` return
-  `413 rank_enrichment_limit` before emitting any partial response.
+  `413 rank_enrichment_limit` before emitting any partial response. Cluster phase two spends this
+  credit while fetching, not after source materialization.
 - `shardserver --max-grpc-result-bytes`, default 4 MiB and constrained to `1..=4 MiB`, checks exact
   protobuf encoded size for compatibility percolate replies, top-K replies, and each fetch-stream
   item. Overflow is gRPC `RESOURCE_EXHAUSTED`; the cap can be lowered but never raised past tonic's

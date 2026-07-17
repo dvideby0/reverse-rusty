@@ -22,7 +22,9 @@ identity metadata and a generation fence.
 
 ### Placement identity and owner function
 
-Every distributed query row carries a `PlacementGeneration`, the shard count, and one placement mode:
+Every distributed query row carries a `PlacementGeneration`, the shard count, and one placement mode.
+A cluster admits at most one live semantic row for each `logical_id`; the several rows discussed below
+are the placement/replica copies of that one semantic row:
 
 | Mode | Stored positions | Sole eligible emitter |
 |---|---|---|
@@ -40,6 +42,30 @@ incremented exactly once by either blue/green vocabulary replacement or shard-co
 those operations recompile or re-place the full corpus. Checkpoint, flush, compaction, backup,
 replication, recovery, handoff, co-location, node reassignment, and control-plane topology changes do
 not increment it. The generation is recorded in both the coordinator state and durable manifest.
+
+### Unique logical-id admission
+
+Distributed bounded reduction needs group-key locality: every semantic row contributing one logical
+result must reach the same local collector. Reverse Rusty's placement is derived from query content,
+so two different additive rows reusing one `logical_id` can have disjoint placement/routing sets; no
+owner function can select one shard that necessarily sees both rows. Coordinator-side deduplication is
+too late because duplicates can consume local-K slots and shard totals before the coordinator sees them.
+
+The cluster therefore treats `logical_id` as a unique key. `build` and empty-cluster `ingest` reject a
+second accepted row with the same id; `add_query` is insert-only and rejects an id that is already live;
+`upsert_query` is the replacement operation; a successful remove permits reuse. Same-id mutations use
+striped locks. The coordinator tracks the committed corpus in a sorted `u64` directory (eight bytes per
+logical row) plus live add/remove overlays, folds those overlays into the sorted base at flush/checkpoint
+maintenance boundaries, and reconstructs it from the durable base before replaying the coordinator-log
+tail.
+
+This follows the locality requirement used by mature distributed search systems: the
+[SolrCloud sharding guide](https://solr.apache.org/guide/solr/latest/deployment-guide/solrcloud-shards-indexing.html)
+routes each unique key to one shard, and the
+[Elasticsearch collapse guide](https://www.elastic.co/docs/reference/elasticsearch/rest-apis/collapse-search-results)
+recommends routing every collapse key to one shard for reliable global ordering. Standalone `Engine`
+ingestion remains additive; the stricter rule is a cluster invariant required by exact bounded
+reduction.
 
 ### Lifecycle propagation and validation
 
@@ -96,8 +122,8 @@ generations. This is intentionally stricter than standalone segment compatibilit
 Ownership is downstream of exact matching and cannot influence signatures, routing, MUST_NOT
 handling, tag filtering, or ranking scores. For every matching distributed row, the owner function is
 deterministic and selects at most one routed position; the placement/routing cover ensures the
-eligible set is non-empty for visible matches. Therefore suppressing non-owners preserves the full
-logical union while removing duplicate physical emissions.
+eligible set is non-empty for visible matches. Together with unique logical-id admission, suppressing
+non-owners preserves the full logical union while removing duplicate physical emissions.
 
 Tests exhaustively compare selective ownership with the mathematical minimum intersection and cover
 invalid modes, unsorted/out-of-range positions, empty routes, stale generations, and malformed

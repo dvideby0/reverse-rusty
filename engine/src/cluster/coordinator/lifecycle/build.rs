@@ -230,6 +230,7 @@ impl ClusterEngine {
         // than as a raw-DSL snapshot.
         let mut buckets: Vec<Vec<PlacedQuery>> =
             (0..config.num_shards).map(|_| Vec::new()).collect();
+        let mut accepted_ids = Vec::with_capacity(extracted.len());
         for (logical, ex, text, qtags) in extracted {
             let target = placement_of(
                 &dict,
@@ -240,6 +241,9 @@ impl ClusterEngine {
             );
             let placement =
                 target.placement(PlacementGeneration::INITIAL, config.num_shards as u32)?;
+            if !matches!(&target, Target::Reject) {
+                accepted_ids.push(logical);
+            }
             match target {
                 Target::Reject => {}
                 Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
@@ -273,6 +277,7 @@ impl ClusterEngine {
                 }
             }
         }
+        super::super::logical_ids::sort_and_check_unique(&mut accepted_ids)?;
         // Ingest the same bucket into EVERY copy of the owning position (identical op stream
         // ⇒ all copies set-equal by construction).
         for (s, bucket) in buckets.into_iter().enumerate() {
@@ -328,6 +333,7 @@ impl ClusterEngine {
             config.per_shard.clone(),
             durable,
         )?;
+        engine.replace_logical_ids(accepted_ids)?;
         // Install the vocabulary on the engine (ADR-076): served by `GET /_vocab`,
         // merged-under by the learn paths, and re-persisted at every checkpoint.
         // (The durable manifest above already carries it.)

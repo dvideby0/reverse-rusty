@@ -232,6 +232,27 @@ fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
         .expect_err("oversize top-k reply must fail");
     assert!(matches!(error, ClusterRankedError::Shard(_)));
 
+    // Aggregate source credit is enforced while the server stream is drained,
+    // independently of the larger per-item protobuf cap. Two 12-byte sources do
+    // not fit in 23 bytes; the stream fails closed rather than buffering all rows.
+    let bounded = cluster
+        .try_percolate_filtered_top_k(
+            "topps chrome",
+            &[],
+            TopKOptions {
+                size: 3,
+                track_total_hits_up_to: 10_000,
+                query_scope: QueryScope::Standard,
+            },
+            &program,
+            None,
+        )
+        .expect("small bounded reply");
+    assert!(matches!(
+        cluster.fetch_ranked_sources_bounded(&bounded, 23, None),
+        Err(ClusterRankedError::EnrichmentLimit { .. })
+    ));
+
     // A separate node's top-k reply fits, but one winner source stream item does not.
     let long_source = format!("({})", vec!["zzlongsource"; 30].join(","));
     let long_queries = vec![(999u64, long_source.clone())];

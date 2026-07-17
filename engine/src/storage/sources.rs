@@ -61,25 +61,45 @@ impl LazyBase {
         read_u64_at(&self.mmap, self.index_off + i * SRC_IDX_REC).ok()
     }
 
-    fn get(&self, logical: u64) -> Option<String> {
+    /// Read one source only when it fits the caller's remaining byte credit.
+    /// The mmap length is checked before `to_owned`, so an over-budget source is
+    /// rejected without allocating its text.
+    fn get_bounded(&self, logical: u64, max_bytes: usize) -> Result<Option<String>, usize> {
         let data: &[u8] = &self.mmap;
         let (mut lo, mut hi) = (0usize, self.count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            match self.logical_at(mid)?.cmp(&logical) {
+            let Some(found) = self.logical_at(mid) else {
+                return Ok(None);
+            };
+            match found.cmp(&logical) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
                 std::cmp::Ordering::Equal => {
                     let rec = self.index_off + mid * SRC_IDX_REC;
-                    let boff = read_u64_at(data, rec + 8).ok()? as usize;
-                    let len = read_u32_at(data, rec + 16).ok()? as usize;
-                    let start = self.blob_off + boff;
-                    let bytes = data.get(start..start + len)?;
-                    return std::str::from_utf8(bytes).ok().map(str::to_owned);
+                    let Some(boff) = read_u64_at(data, rec + 8).ok().map(|v| v as usize) else {
+                        return Ok(None);
+                    };
+                    let Some(len) = read_u32_at(data, rec + 16).ok().map(|v| v as usize) else {
+                        return Ok(None);
+                    };
+                    if len > max_bytes {
+                        return Err(len);
+                    }
+                    let Some(start) = self.blob_off.checked_add(boff) else {
+                        return Ok(None);
+                    };
+                    let Some(end) = start.checked_add(len) else {
+                        return Ok(None);
+                    };
+                    let Some(bytes) = data.get(start..end) else {
+                        return Ok(None);
+                    };
+                    return Ok(std::str::from_utf8(bytes).ok().map(str::to_owned));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     /// The `(logical, text)` pair at index `i`, with the text borrowed from the
@@ -145,15 +165,38 @@ impl SourceStore {
     }
 
     pub fn get(&self, logical: u64) -> Option<String> {
+        self.get_bounded(logical, usize::MAX).ok().flatten()
+    }
+
+    /// Return the source only if it fits in `max_bytes`. The size check happens
+    /// while the resident/mmap source is still borrowed, before cloning it into
+    /// the phase-two response. `Err(actual_len)` distinguishes an over-budget
+    /// source from an absent one.
+    pub(crate) fn get_bounded(
+        &self,
+        logical: u64,
+        max_bytes: usize,
+    ) -> Result<Option<String>, usize> {
         match self {
-            SourceStore::Resident(m) => rw_read(m).get(&logical).cloned(),
+            SourceStore::Resident(m) => match rw_read(m).get(&logical) {
+                Some(source) if source.len() > max_bytes => Err(source.len()),
+                Some(source) => Ok(Some(source.clone())),
+                None => Ok(None),
+            },
             SourceStore::Lazy { base, overlay } => {
                 // Overlay (post-flush mutations) wins over the mmap base; a `None`
                 // overlay entry is a tombstone (deleted since the last flush).
                 if let Some(v) = rw_read(overlay).get(&logical) {
-                    return v.clone();
+                    return match v {
+                        Some(source) if source.len() > max_bytes => Err(source.len()),
+                        Some(source) => Ok(Some(source.clone())),
+                        None => Ok(None),
+                    };
                 }
-                base.as_ref().and_then(|b| b.get(logical))
+                match base {
+                    Some(base) => base.get_bounded(logical, max_bytes),
+                    None => Ok(None),
+                }
             }
         }
     }
@@ -467,4 +510,45 @@ pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, S
         }
     }
     Ok(store)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SourceStore;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn bounded_resident_lookup_checks_length_before_clone() {
+        let store = SourceStore::new_resident();
+        store.insert(7, "0123456789".to_string());
+        assert_eq!(store.get_bounded(7, 9), Err(10));
+        assert_eq!(
+            store.get_bounded(7, 10).expect("fits"),
+            Some("0123456789".to_string())
+        );
+        assert_eq!(store.get_bounded(8, 0).expect("absent"), None);
+    }
+
+    #[test]
+    fn bounded_lazy_lookup_checks_mmap_length_before_clone() {
+        let path = std::env::temp_dir().join(format!(
+            "reverse-rusty-bounded-sources-{}-{}.dat",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        let resident = SourceStore::new_resident();
+        resident.insert(7, "0123456789".to_string());
+        resident.write_to(&path).expect("write v2 sources");
+
+        let lazy = SourceStore::open(&path, false).expect("mmap sources");
+        assert_eq!(lazy.get_bounded(7, 9), Err(10));
+        assert_eq!(
+            lazy.get_bounded(7, 10).expect("fits"),
+            Some("0123456789".to_string())
+        );
+
+        std::fs::remove_file(path).expect("remove test sources");
+    }
 }

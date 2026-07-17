@@ -315,6 +315,12 @@ therefore stores one compact placement mode plus a monotonic placement generatio
 - replicated-always-visible class-B pairs emit from the minimum routed position;
 - replicated-broad class C/D emits from the request's one broad-evaluation position.
 
+The cluster admits one live semantic row per `logical_id`. This is distinct from the expected
+placement/replica copies above. Because placement is content-derived, two different rows reusing one
+id may have no common routed shard; coordinator dedup cannot repair local-K truncation or summed totals.
+Build/ingest/add therefore reject duplicate live ids, while `upsert_query` replaces and remove permits
+reuse. A compact sorted id directory plus live overlays enforces the rule off the match path.
+
 The owner is a **logical shard position**, not a physical node. Replicas, failover, handoff,
 co-location, and node reassignment preserve it. Only a vocabulary blue/green rebuild or shard-count
 resize changes the placement function, so only those operations increment the generation and rewrite

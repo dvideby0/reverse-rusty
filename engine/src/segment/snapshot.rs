@@ -404,6 +404,17 @@ impl EngineSnapshot {
         self.query_store.get(logical_id)
     }
 
+    /// Winner-fetch lookup with pre-allocation byte credit. `Err(actual_len)`
+    /// means the current source exists but does not fit; the source store checks
+    /// its borrowed resident/mmap value before cloning.
+    pub(crate) fn get_query_source_bounded(
+        &self,
+        logical_id: u64,
+        max_bytes: usize,
+    ) -> Result<Option<String>, usize> {
+        self.query_store.get_bounded(logical_id, max_bytes)
+    }
+
     pub fn explain_hit(
         &self,
         logical_id: u64,

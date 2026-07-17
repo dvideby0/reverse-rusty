@@ -103,9 +103,10 @@ impl Shard for ReplicatedShard {
     fn fetch_matches(
         &self,
         logical_ids: &[u64],
+        max_source_bytes: usize,
         deadline: Option<std::time::Instant>,
     ) -> Result<Vec<FetchedMatch>, ShardError> {
-        self.read(|shard| shard.fetch_matches(logical_ids, deadline))
+        self.read(|shard| shard.fetch_matches(logical_ids, max_source_bytes, deadline))
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {
@@ -137,6 +138,12 @@ impl Shard for ReplicatedShard {
         // Replicas are set-equal copies of the primary, so any in-sync copy yields
         // the same source set — read with the same in-sync failover as `num_queries`.
         self.read(|s| s.live_sources())
+    }
+
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        // Replicas are set-equal; avoid copying source text while rebuilding the
+        // coordinator's compact admission directory on durable open.
+        self.read(|s| s.live_logical_ids())
     }
 
     fn live_sources_tagged(

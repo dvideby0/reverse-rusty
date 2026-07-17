@@ -247,6 +247,10 @@ message FetchMatchesRequest {
   uint64 placement_generation = 3;
   uint32 num_shards = 4;
   uint64 remaining_micros = 5;
+  // Cumulative source-text credit for this stream. The server checks each
+  // source before cloning/sending and terminates with RESOURCE_EXHAUSTED rather
+  // than materializing an over-budget response.
+  uint64 max_source_bytes = 6;
 }
 
 message FetchMatch {

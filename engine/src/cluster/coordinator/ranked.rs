@@ -57,6 +57,7 @@ pub enum ClusterRankedError {
     DeadlineExceeded,
     InvalidShardReply { position: usize, detail: String },
     DuplicateLogicalId(u64),
+    EnrichmentLimit { limit: usize },
 }
 
 impl std::fmt::Display for ClusterRankedError {
@@ -72,6 +73,9 @@ impl std::fmt::Display for ClusterRankedError {
                 f,
                 "ownership violation: logical id {logical} was emitted by multiple shards"
             ),
+            Self::EnrichmentLimit { limit } => {
+                write!(f, "ranked winner enrichment exceeds {limit} bytes")
+            }
         }
     }
 }
@@ -83,6 +87,7 @@ impl From<ShardError> for ClusterRankedError {
         match value {
             ShardError::DeadlineExceeded => Self::DeadlineExceeded,
             ShardError::Admission(error) => Self::Admission(error),
+            ShardError::EnrichmentLimit { limit } => Self::EnrichmentLimit { limit },
             other => Self::Shard(other),
         }
     }
@@ -235,6 +240,28 @@ impl ClusterEngine {
         ranked: &ClusterRankedMatch,
         deadline: Option<Instant>,
     ) -> Result<Vec<String>, ClusterRankedError> {
+        self.fetch_ranked_sources_inner(ranked, None, deadline)
+    }
+
+    /// [`Self::fetch_ranked_sources`] with a cumulative source-text credit.
+    /// Shards receive only the remaining credit and are drained sequentially, so
+    /// the limit bounds materialized source memory across the whole distributed
+    /// phase rather than being checked after every shard has returned.
+    pub fn fetch_ranked_sources_bounded(
+        &self,
+        ranked: &ClusterRankedMatch,
+        max_source_bytes: usize,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<String>, ClusterRankedError> {
+        self.fetch_ranked_sources_inner(ranked, Some(max_source_bytes), deadline)
+    }
+
+    fn fetch_ranked_sources_inner(
+        &self,
+        ranked: &ClusterRankedMatch,
+        max_source_bytes: Option<usize>,
+        deadline: Option<Instant>,
+    ) -> Result<Vec<String>, ClusterRankedError> {
         check_deadline(deadline)?;
         if self.placement_generation() != ranked.placement_generation
             || self.shards.len() as u32 != ranked.num_shards
@@ -268,18 +295,48 @@ impl ClusterEngine {
             .enumerate()
             .filter(|(_, rows)| !rows.is_empty())
             .collect();
-        let fetch_one = |(position, requested): &(usize, Vec<(usize, u64)>)| {
+        let fetch_one = |(position, requested): &(usize, Vec<(usize, u64)>), limit: usize| {
             let ids: Vec<u64> = requested.iter().map(|&(_, id)| id).collect();
             self.shards[*position]
-                .fetch_matches(&ids, deadline)
+                .fetch_matches(&ids, limit, deadline)
                 .map(|fetched| (*position, requested.clone(), fetched))
                 .map_err(ClusterRankedError::from)
         };
-        let fetched: Vec<FetchedGroup> = if active.len() <= 1 {
-            active.iter().map(fetch_one).collect::<Result<_, _>>()?
+        let fetched: Vec<FetchedGroup> = if let Some(limit) = max_source_bytes {
+            // Credit is handed to one owner group at a time. This retains the exact
+            // whole-request bound; independent per-shard limits would allow N×limit
+            // bytes to materialize before the coordinator noticed the aggregate.
+            let mut remaining = limit;
+            let mut groups = Vec::with_capacity(active.len());
+            for request in &active {
+                let group = match fetch_one(request, remaining) {
+                    Err(ClusterRankedError::EnrichmentLimit { .. }) => {
+                        return Err(ClusterRankedError::EnrichmentLimit { limit });
+                    }
+                    other => other?,
+                };
+                let bytes = group
+                    .2
+                    .iter()
+                    .try_fold(0usize, |sum, row| sum.checked_add(row.source.len()));
+                let Some(bytes) = bytes.filter(|&bytes| bytes <= remaining) else {
+                    return Err(ClusterRankedError::EnrichmentLimit { limit });
+                };
+                remaining -= bytes;
+                groups.push(group);
+            }
+            groups
+        } else if active.len() <= 1 {
+            active
+                .iter()
+                .map(|request| fetch_one(request, usize::MAX))
+                .collect::<Result<_, _>>()?
         } else {
             use rayon::prelude::*;
-            active.par_iter().map(fetch_one).collect::<Result<_, _>>()?
+            active
+                .par_iter()
+                .map(|request| fetch_one(request, usize::MAX))
+                .collect::<Result<_, _>>()?
         };
         check_deadline(deadline)?;
 

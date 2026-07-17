@@ -45,6 +45,7 @@ mod autoscale;
 mod control_plane;
 mod ingest;
 mod lifecycle;
+mod logical_ids;
 mod matching;
 mod ranked;
 mod resize;
@@ -76,7 +77,7 @@ mod tests;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::compile::{anchor_plan, CostClass, Extracted};
 use crate::config::EngineConfig;
@@ -331,6 +332,13 @@ pub struct ClusterEngine {
     vocab: Option<Arc<crate::vocab::Vocab>>,
     ring: HashRing,
     shards: Vec<Box<dyn Shard>>,
+    /// Exact live logical-id directory. Distributed bounded ranking requires one
+    /// live query row per logical id; content-derived placement cannot co-route
+    /// arbitrary duplicate-id rows to one emission owner.
+    logical_ids: RwLock<logical_ids::LogicalIdDirectory>,
+    /// Same-id mutation serialization without globally serializing independent
+    /// writes. See `logical_ids` for the compact base + overlay directory.
+    logical_write_stripes: Box<[Mutex<()>]>,
     include_broad: bool,
     /// The durable mutation log (the tail); a `NullClusterLog` when in-memory.
     log: Box<dyn ClusterLog>,

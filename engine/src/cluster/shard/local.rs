@@ -659,17 +659,26 @@ impl Shard for LocalShard {
     fn fetch_matches(
         &self,
         logical_ids: &[u64],
+        max_source_bytes: usize,
         deadline: Option<Instant>,
     ) -> Result<Vec<FetchedMatch>, ShardError> {
+        // One immutable current-view snapshot for the whole group: concurrent
+        // writes cannot make different winners in one response observe different
+        // source-store generations.
         let snap = self.snapshot();
         let mut out = Vec::with_capacity(logical_ids.len());
+        let mut remaining = max_source_bytes;
         for &logical_id in logical_ids {
             if deadline.is_some_and(|at| Instant::now() >= at) {
                 return Err(ShardError::DeadlineExceeded);
             }
             let source = snap
-                .get_query_source(logical_id)
+                .get_query_source_bounded(logical_id, remaining)
+                .map_err(|_| ShardError::EnrichmentLimit {
+                    limit: max_source_bytes,
+                })?
                 .ok_or(ShardError::SourceUnavailable(logical_id))?;
+            remaining -= source.len();
             out.push(FetchedMatch { logical_id, source });
         }
         Ok(out)
@@ -696,6 +705,10 @@ impl Shard for LocalShard {
 
     fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
         Ok(self.lock().live_sources())
+    }
+
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        Ok(self.lock().live_logical_ids())
     }
 
     fn live_sources_tagged(&self) -> Result<Vec<super::LiveTaggedQuery>, ShardError> {

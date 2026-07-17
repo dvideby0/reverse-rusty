@@ -321,6 +321,16 @@ fn top_k_preserves_dynamic_vocab_canonical_members_and_current_view_fetch() {
         cluster.fetch_ranked_sources(&ranked, None).expect("fetch"),
         vec!["zzdynamicterm".to_string(), "zzdynamicterm".to_string()]
     );
+    assert!(matches!(
+        cluster.fetch_ranked_sources_bounded(&ranked, 2 * "zzdynamicterm".len() - 1, None),
+        Err(reverse_rusty::cluster::ClusterRankedError::EnrichmentLimit { .. })
+    ));
+    assert_eq!(
+        cluster
+            .fetch_ranked_sources_bounded(&ranked, 2 * "zzdynamicterm".len(), None)
+            .expect("exact byte credit"),
+        vec!["zzdynamicterm".to_string(), "zzdynamicterm".to_string()]
+    );
 
     cluster.remove_query(10).expect("delete winner");
     assert!(

@@ -38,6 +38,10 @@ impl ClusterEngine {
         queries: &[(u64, String)],
         tags: &[Vec<(String, String)>],
     ) -> Result<(), ShardError> {
+        // Initial bulk load is one exclusive logical-id admission boundary. A
+        // concurrent incremental mutation cannot slip between the empty check,
+        // directory install, and shard writes.
+        let _logical_guards = self.logical_bulk_write_guards();
         // ingest re-indexes from scratch; on a populated cluster it would create duplicate
         // entries. Refuse loudly instead (the doc contract: a freshly assembled cluster).
         if self.num_queries()? > 0 {
@@ -75,6 +79,7 @@ impl ClusterEngine {
         let mut buckets: Vec<Vec<PlacedQuery>> =
             (0..self.ring.num_shards()).map(|_| Vec::new()).collect();
         let mut lc = String::new();
+        let mut accepted_ids = Vec::with_capacity(entries.len());
         for (logical, version, text, qtags) in entries {
             let Ok(ast) = crate::dsl::parse(text) else {
                 continue;
@@ -83,6 +88,9 @@ impl ClusterEngine {
             let target = self.placement(&ex);
             let placement =
                 target.placement(self.placement_generation(), self.shards.len() as u32)?;
+            if !matches!(&target, Target::Reject) {
+                accepted_ids.push(*logical);
+            }
             match target {
                 Target::Reject => {}
                 Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
@@ -116,6 +124,13 @@ impl ClusterEngine {
                 }
             }
         }
+        super::logical_ids::sort_and_check_unique(&mut accepted_ids)?;
+        // Reserve the complete semantic corpus BEFORE the first shard mutation.
+        // If a remote bulk write fails part-way, retaining these reservations is
+        // fail-closed: an incremental Add cannot coexist with a physical row that
+        // may already have landed. Retrying ingest on the still-empty cluster may
+        // replace this directory with the same corpus and continue.
+        self.replace_logical_ids(accepted_ids)?;
         for (s, bucket) in buckets.into_iter().enumerate() {
             if !bucket.is_empty() {
                 self.shards[s].ingest_extracted(&bucket)?;
@@ -245,6 +260,17 @@ impl ClusterEngine {
             return Ok(AddOutcome::RejectedClassD);
         }
         let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        // ADR-110's bounded merge requires one live distributed row per logical id.
+        // Content-derived placement cannot guarantee a common owner for two different
+        // rows sharing an id, so cluster adds are insert-only; replacements use upsert.
+        // The stripe closes the same-id check/reservation race without serializing
+        // unrelated writes.
+        let _logical_guard = self.logical_write_guard(id);
+        if self.contains_logical_id(id) {
+            return Err(ShardError::DuplicateLogicalId(id));
+        }
+        let inserted = self.insert_logical_id(id);
+        debug_assert!(inserted);
         let m = ClusterMutation::Add {
             logical: id,
             version: 1,
@@ -253,6 +279,7 @@ impl ClusterEngine {
             placement: placement.clone(),
         };
         if let Err(e) = self.log.append(&m) {
+            self.remove_logical_id(id);
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::WalAppend,
                 detail: format!("cluster add_query(id={id}) not durably logged; rejected"),
@@ -324,6 +351,11 @@ impl ClusterEngine {
             return Ok((0, AddOutcome::RejectedClassD));
         }
         let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        // Serialize against an insert-only add/remove for the same id. An upsert
+        // keeps the id present; a fresh upsert reserves it before the log append so
+        // a concurrent add cannot create a second physical row.
+        let _logical_guard = self.logical_write_guard(id);
+        let fresh_id = self.insert_logical_id(id);
         let m = ClusterMutation::Upsert {
             logical: id,
             version,
@@ -332,6 +364,9 @@ impl ClusterEngine {
             placement: placement.clone(),
         };
         if let Err(e) = self.log.append(&m) {
+            if fresh_id {
+                self.remove_logical_id(id);
+            }
             self.emit(EngineEvent::DurabilityFailure {
                 op: DurabilityOp::WalAppend,
                 detail: format!("cluster upsert_query(id={id}) not durably logged; rejected"),
@@ -458,6 +493,7 @@ impl ClusterEngine {
     /// or any-of query may live on several shards; a re-add may have moved it).
     /// WAL-first, like [`Self::add_query`].
     pub fn remove_query(&self, id: u64) -> Result<usize, ShardError> {
+        let _logical_guard = self.logical_write_guard(id);
         let m = ClusterMutation::Remove { logical: id };
         if let Err(e) = self.log.append(&m) {
             self.emit(EngineEvent::DurabilityFailure {
@@ -467,7 +503,14 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_remove(id)
+        let removed = self.apply_remove(id);
+        // A partially-applied remove keeps the id reserved: allowing a fresh Add
+        // before repair could coexist with an old row on the failed shard. Upsert
+        // remains available because it re-drives delete+insert on every shard.
+        if removed.is_ok() {
+            self.remove_logical_id(id);
+        }
+        removed
     }
 
     /// Insert a compiled query on a set of target shards, collecting partial-apply failures
@@ -774,10 +817,14 @@ impl ClusterEngine {
                 tags,
                 placement,
             } => {
+                if !self.insert_logical_id(logical) {
+                    return Err(ShardError::DuplicateLogicalId(logical));
+                }
                 self.apply_add(logical, version, &dsl, &tags, &placement)?;
             }
             ClusterMutation::Remove { logical } => {
                 self.apply_remove(logical)?;
+                self.remove_logical_id(logical);
             }
             ClusterMutation::Upsert {
                 logical,
@@ -786,6 +833,7 @@ impl ClusterEngine {
                 tags,
                 placement,
             } => {
+                self.insert_logical_id(logical);
                 self.apply_upsert(logical, version, &dsl, &tags, &placement)?;
             }
         }
@@ -797,6 +845,7 @@ impl ClusterEngine {
         for s in &self.shards {
             s.flush()?;
         }
+        self.compact_logical_ids();
         Ok(())
     }
 }

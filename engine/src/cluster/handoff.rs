@@ -218,9 +218,12 @@ impl Shard for Arc<HandoffShard> {
     fn fetch_matches(
         &self,
         logical_ids: &[u64],
+        max_source_bytes: usize,
         deadline: Option<std::time::Instant>,
     ) -> Result<Vec<FetchedMatch>, ShardError> {
-        self.current.load().fetch_matches(logical_ids, deadline)
+        self.current
+            .load()
+            .fetch_matches(logical_ids, max_source_bytes, deadline)
     }
 
     fn num_queries(&self) -> Result<usize, ShardError> {

@@ -68,6 +68,10 @@ fn shard_error_response(context: &str, e: &ShardError) -> Response {
         ShardError::DeadlineExceeded => (StatusCode::REQUEST_TIMEOUT, "deadline_exceeded"),
         ShardError::Protocol(_) => (StatusCode::BAD_GATEWAY, "invalid_shard_response"),
         ShardError::SourceUnavailable(_) => (StatusCode::BAD_GATEWAY, "source_unavailable"),
+        ShardError::DuplicateLogicalId(_) => (StatusCode::CONFLICT, "logical_id_conflict"),
+        ShardError::EnrichmentLimit { .. } => {
+            (StatusCode::PAYLOAD_TOO_LARGE, "rank_enrichment_limit")
+        }
         ShardError::PartiallyApplied { .. } => (StatusCode::OK, "partially_applied"),
     };
     ApiError::response(status, kind, format!("{context}: {e}")).into_response()

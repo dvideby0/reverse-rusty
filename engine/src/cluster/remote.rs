@@ -770,6 +770,10 @@ fn rpc_err(status: &tonic::Status) -> ShardError {
         ShardError::DeadlineExceeded
     } else if status.code() == tonic::Code::NotFound {
         ShardError::SourceUnavailable(0)
+    } else if status.code() == tonic::Code::ResourceExhausted
+        && status.message().contains("ranked enrichment byte credit")
+    {
+        ShardError::EnrichmentLimit { limit: 0 }
     } else if status
         .message()
         .contains("placement configuration mismatch")
@@ -1161,6 +1165,7 @@ impl Shard for RemoteShard {
     fn fetch_matches(
         &self,
         logical_ids: &[u64],
+        max_source_bytes: usize,
         deadline: Option<Instant>,
     ) -> Result<Vec<FetchedMatch>, ShardError> {
         let absolute = self.bounded_deadline(deadline)?;
@@ -1170,6 +1175,7 @@ impl Shard for RemoteShard {
             placement_generation: self.placement_generation.get(),
             num_shards: self.num_shards,
             remaining_micros: 0,
+            max_source_bytes: u64::try_from(max_source_bytes).unwrap_or(u64::MAX),
         };
         let client = self.client.clone();
         let generation = self.placement_generation.get();
@@ -1183,12 +1189,19 @@ impl Shard for RemoteShard {
             async move {
                 let mut stream = client.fetch_matches(request).await?.into_inner();
                 let mut out = Vec::new();
+                let mut remaining_bytes = max_source_bytes;
                 while let Some(row) = stream.message().await? {
                     if row.placement_generation != generation || row.num_shards != num_shards {
                         return Err(tonic::Status::failed_precondition(
                             "fetch_matches placement configuration mismatch",
                         ));
                     }
+                    if row.source.len() > remaining_bytes {
+                        return Err(tonic::Status::resource_exhausted(
+                            "ranked enrichment byte credit exceeded by fetch stream",
+                        ));
+                    }
+                    remaining_bytes -= row.source.len();
                     out.push(FetchedMatch {
                         logical_id: row.logical_id,
                         source: row.source,

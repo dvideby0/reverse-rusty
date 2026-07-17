@@ -327,6 +327,21 @@ impl Engine {
         out
     }
 
+    /// The current live logical-id set without copying query source text.
+    /// Durable cluster open uses this to rebuild its compact unique-id directory;
+    /// the same liveness cross-check as [`Self::live_sources`] excludes stale
+    /// source-store residue.
+    pub(crate) fn live_logical_ids(&self) -> Vec<u64> {
+        let mut out = Vec::with_capacity(self.query_store.len());
+        self.query_store.for_each_live(|logical, _| {
+            if self.live_metadata_for(logical).is_some() {
+                out.push(logical);
+            }
+        });
+        out.sort_unstable();
+        out
+    }
+
     /// [`live_sources`](Self::live_sources) plus each live query's current `TagId`s — the
     /// gather behind the CLUSTER blue/green rebuild (`ClusterEngine::set_vocab`, ADR-074),
     /// which re-places every query and must carry its tags to the new shard. Ids — interned

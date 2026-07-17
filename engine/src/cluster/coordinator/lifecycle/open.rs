@@ -77,6 +77,13 @@ impl ClusterEngine {
             vocab: None,
             ring,
             shards,
+            logical_ids: std::sync::RwLock::new(
+                super::super::logical_ids::LogicalIdDirectory::default(),
+            ),
+            logical_write_stripes: (0..super::super::logical_ids::LOGICAL_WRITE_STRIPES)
+                .map(|_| Mutex::new(()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             include_broad,
             replication_factor: replication_factor.max(1),
             per_shard,
@@ -323,6 +330,18 @@ impl ClusterEngine {
         if !engine.tag_dict.is_empty() {
             engine.tags_present.store(true, Ordering::Relaxed);
         }
+
+        // Rebuild the compact logical-id directory from the committed base before
+        // replaying the tail. Placement/replication legitimately expose the same row
+        // on several shard positions, so collapse those physical copies here. Clusters
+        // written by this version admitted at most one semantic row per id.
+        let mut committed_ids = Vec::new();
+        for shard in &engine.shards {
+            committed_ids.extend(shard.live_logical_ids()?);
+        }
+        committed_ids.sort_unstable();
+        committed_ids.dedup();
+        engine.replace_logical_ids(committed_ids)?;
 
         // The attached segments ARE the base (all entries ≤ snapshot_pos). Replay only the
         // log tail strictly after snapshot_pos, through the SAME apply funnel as live

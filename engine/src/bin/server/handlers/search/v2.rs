@@ -659,25 +659,28 @@ pub(crate) async fn cluster_v2_search(
                     .map_err(DeliveryError::Cluster)?;
                 let sources = if include_source || include_explain {
                     cluster
-                        .fetch_ranked_sources(&ranked, Some(deadline))
-                        .map_err(DeliveryError::Cluster)?
+                        .fetch_ranked_sources_bounded(&ranked, enrichment_limit, Some(deadline))
+                        .map_err(|error| match error {
+                            reverse_rusty::cluster::ClusterRankedError::EnrichmentLimit {
+                                ..
+                            } => DeliveryError::EnrichmentLimit,
+                            other => DeliveryError::Cluster(other),
+                        })?
                 } else {
                     Vec::new()
                 };
-                let mut budget = EnrichmentBudget::new(enrichment_limit);
+                let source_bytes = sources.iter().map(String::len).sum();
+                let mut sources = sources.into_iter();
                 let mut hits = Vec::with_capacity(ranked.hits.len());
-                for (index, hit) in ranked.hits.iter().enumerate() {
+                for hit in &ranked.hits {
                     if deadline_expired(deadline) {
                         return Err(DeliveryError::Deadline);
                     }
                     let source = if include_source || include_explain {
                         let source = sources
-                            .get(index)
+                            .next()
                             .ok_or(DeliveryError::SourceUnavailable(hit.logical_id))?;
-                        budget
-                            .charge(source.len())
-                            .map_err(|()| DeliveryError::EnrichmentLimit)?;
-                        Some(source.as_str())
+                        Some(source)
                     } else {
                         None
                     };
@@ -686,9 +689,9 @@ pub(crate) async fn cluster_v2_search(
                             cluster
                                 .explain_ranked_source(
                                     hit.logical_id,
-                                    source.ok_or(DeliveryError::ExplanationUnavailable(
-                                        hit.logical_id,
-                                    ))?,
+                                    source.as_deref().ok_or(
+                                        DeliveryError::ExplanationUnavailable(hit.logical_id),
+                                    )?,
                                     &title_for_work,
                                 )
                                 .ok_or(DeliveryError::ExplanationUnavailable(hit.logical_id))?,
@@ -700,9 +703,7 @@ pub(crate) async fn cluster_v2_search(
                         _id: hit.logical_id,
                         _score: hit.score,
                         _source: if include_source {
-                            source.map(|query| HitSource {
-                                query: query.to_string(),
-                            })
+                            source.map(|query| HitSource { query })
                         } else {
                             None
                         },
@@ -720,7 +721,7 @@ pub(crate) async fn cluster_v2_search(
                     routed_shards: ranked.routed_shards,
                     shard_rows_received: ranked.shard_rows_received,
                     shard_result_bytes: ranked.shard_result_bytes,
-                    source_bytes: budget.used,
+                    source_bytes,
                 })
             })
         })
@@ -893,6 +894,12 @@ fn cluster_error_status(
             "admission",
         ),
         ClusterRankedError::DeadlineExceeded => (StatusCode::REQUEST_TIMEOUT, "timeout", "timeout"),
+        ClusterRankedError::EnrichmentLimit { .. }
+        | ClusterRankedError::Shard(ShardError::EnrichmentLimit { .. }) => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "rank_enrichment_limit",
+            "enrichment_limit",
+        ),
         ClusterRankedError::InvalidShardReply { .. }
         | ClusterRankedError::DuplicateLogicalId(_)
         | ClusterRankedError::Shard(ShardError::Remote(_) | ShardError::Protocol(_)) => {
@@ -914,6 +921,7 @@ fn cluster_error_status(
             | ShardError::DictMismatch { .. }
             | ShardError::Log(_)
             | ShardError::ControlPlane(_)
+            | ShardError::DuplicateLogicalId(_)
             | ShardError::PartiallyApplied { .. },
         ) => (
             StatusCode::SERVICE_UNAVAILABLE,

@@ -85,6 +85,13 @@ pub enum ShardError {
     Protocol(String),
     /// Winner enrichment could not find the source on the owning shard.
     SourceUnavailable(u64),
+    /// A cluster write attempted to create a second live row under one logical
+    /// id. Distributed exact top-K requires logical ids to be unique; callers
+    /// replace an existing row through `upsert_query`.
+    DuplicateLogicalId(u64),
+    /// Winner source materialization exceeded the caller's cumulative byte
+    /// credit. This is distinct from the per-message transport cap.
+    EnrichmentLimit { limit: usize },
     /// A cluster mutation could not be durably logged (the coordinator's externalized
     /// `ClusterLog`, ADR-031). The mutation is *rejected*, not applied — surfacing it
     /// rather than acknowledging an unlogged write is load-bearing for the
@@ -136,6 +143,13 @@ impl std::fmt::Display for ShardError {
             ShardError::Protocol(detail) => write!(f, "shard protocol error: {detail}"),
             ShardError::SourceUnavailable(logical) => {
                 write!(f, "source unavailable for logical id {logical}")
+            }
+            ShardError::DuplicateLogicalId(logical) => write!(
+                f,
+                "logical id {logical} already exists; use upsert_query to replace it"
+            ),
+            ShardError::EnrichmentLimit { limit } => {
+                write!(f, "ranked winner enrichment exceeds {limit} bytes")
             }
             ShardError::Log(m) => write!(f, "cluster log durability error: {m}"),
             ShardError::ControlPlane(m) => write!(f, "cluster control-plane error: {m}"),
@@ -322,9 +336,10 @@ pub(crate) trait Shard: Send + Sync {
     fn fetch_matches(
         &self,
         logical_ids: &[u64],
+        max_source_bytes: usize,
         deadline: Option<std::time::Instant>,
     ) -> Result<Vec<FetchedMatch>, ShardError> {
-        let _ = (logical_ids, deadline);
+        let _ = (logical_ids, max_source_bytes, deadline);
         Err(ShardError::Config(
             "winner source fetch is not implemented by this shard".into(),
         ))
@@ -358,6 +373,14 @@ pub(crate) trait Shard: Send + Sync {
     fn live_sources(&self) -> Result<Vec<(u64, String)>, ShardError> {
         Err(ShardError::Config(
             "live_sources is only supported for in-process shards".into(),
+        ))
+    }
+
+    /// This shard's live logical-id set without materializing query source text.
+    /// Used during durable coordinator open to rebuild unique-id admission state.
+    fn live_logical_ids(&self) -> Result<Vec<u64>, ShardError> {
+        Err(ShardError::Config(
+            "live_logical_ids is only supported for in-process shards".into(),
         ))
     }
 

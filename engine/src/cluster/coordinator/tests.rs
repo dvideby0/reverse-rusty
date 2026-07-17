@@ -403,8 +403,22 @@ fn resync_requeues_when_shard_still_failing() {
     )
     .expect("from_parts cluster");
 
-    // Fail the add, then resync while STILL failing — the mutation must stay queued.
+    // A failed initial bulk load reserves its ids before the first shard write.
+    // Even though this injected failure landed no row, the coordinator cannot
+    // generally know whether a remote multi-shard load was partial; fail closed
+    // against an incremental semantic duplicate.
     fail.store(true, Ordering::Release);
+    let failed_bulk = vec![(88u64, "zznovelaterm".to_string())];
+    assert!(matches!(
+        cluster.ingest(&failed_bulk),
+        Err(ShardError::Remote(_))
+    ));
+    assert!(matches!(
+        cluster.add_query(88, "zznovelaterm"),
+        Err(ShardError::DuplicateLogicalId(88))
+    ));
+
+    // Fail a regular add, then resync while STILL failing — the mutation must stay queued.
     assert!(matches!(
         cluster.add_query(7, "zznovelaterm"),
         Err(ShardError::PartiallyApplied { .. })
@@ -798,4 +812,149 @@ fn rebuild_preserves_stored_tags_under_tightened_max_tags() {
         matches!(outcome, AddOutcome::RejectedParse(ref e) if e.kind == crate::error::ParseErrorKind::TooManyTags),
         "a fresh over-limit raw-tag add must still be rejected, got {outcome:?}"
     );
+}
+
+/// Distributed local-K/global-K assumes one semantic row per logical id. Query
+/// placement is content-derived, so two different rows under one id can have no
+/// common routed owner. Reject the invalid state at every cluster load boundary;
+/// callers use the existing atomic upsert API to replace an id.
+#[test]
+fn cluster_load_boundaries_reject_duplicate_logical_ids() {
+    let cfg = ClusterConfig {
+        num_shards: 5,
+        ..Default::default()
+    };
+    let duplicates = vec![
+        (42u64, "1994 topps".to_string()),
+        (42u64, "1995 fleer".to_string()),
+    ];
+    assert!(matches!(
+        ClusterEngine::build(vocab(), &cfg, &duplicates),
+        Err(ShardError::DuplicateLogicalId(42))
+    ));
+
+    let empty = ClusterEngine::build(vocab(), &cfg, &[]).expect("empty cluster");
+    assert!(matches!(
+        empty.ingest(&duplicates),
+        Err(ShardError::DuplicateLogicalId(42))
+    ));
+    assert_eq!(empty.num_queries().expect("count"), 0);
+}
+
+#[test]
+fn incremental_add_is_insert_only_and_remove_allows_reuse() {
+    let cfg = ClusterConfig {
+        num_shards: 8,
+        ..Default::default()
+    };
+    let seed = vec![(42u64, "1994 topps rareplayer0".to_string())];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster");
+
+    assert!(matches!(
+        cluster.add_query(42, "1995 fleer rareplayer1000"),
+        Err(ShardError::DuplicateLogicalId(42))
+    ));
+    assert_eq!(
+        cluster.percolate("1994 topps rareplayer0").expect("old"),
+        vec![42]
+    );
+    assert!(cluster
+        .percolate("1995 fleer rareplayer1000")
+        .expect("rejected new")
+        .is_empty());
+
+    cluster.remove_query(42).expect("remove");
+    cluster
+        .add_query(42, "1995 fleer rareplayer1000")
+        .expect("id can be reused after delete");
+    assert!(cluster
+        .percolate("1994 topps rareplayer0")
+        .expect("old removed")
+        .is_empty());
+    assert_eq!(
+        cluster.percolate("1995 fleer rareplayer1000").expect("new"),
+        vec![42]
+    );
+}
+
+#[test]
+fn concurrent_same_id_adds_admit_exactly_one_row() {
+    use std::sync::{Arc, Barrier};
+
+    let cfg = ClusterConfig {
+        num_shards: 8,
+        ..Default::default()
+    };
+    let seed = vec![
+        (1u64, "1994 topps rareplayer0".to_string()),
+        (2u64, "1995 fleer rareplayer1000".to_string()),
+    ];
+    let cluster = Arc::new(ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster"));
+    let barrier = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for dsl in ["1994 topps rareplayer0", "1995 fleer rareplayer1000"] {
+        let cluster = Arc::clone(&cluster);
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            cluster.add_query(99, dsl)
+        }));
+    }
+    barrier.wait();
+    let outcomes: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().expect("worker"))
+        .collect();
+    assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, Err(ShardError::DuplicateLogicalId(99))))
+            .count(),
+        1
+    );
+
+    let matches = [
+        cluster
+            .percolate("1994 topps rareplayer0")
+            .expect("first")
+            .contains(&99),
+        cluster
+            .percolate("1995 fleer rareplayer1000")
+            .expect("second")
+            .contains(&99),
+    ];
+    assert_eq!(matches.into_iter().filter(|matched| *matched).count(), 1);
+}
+
+#[test]
+fn reopened_cluster_rebuilds_unique_id_directory() {
+    let dir = scratch_dir("logical_ids");
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let seed = vec![(77u64, "1994 topps rareplayer0".to_string())];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("build");
+    cluster.checkpoint().expect("checkpoint");
+    drop(cluster);
+
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), Some(&cfg)).expect("open");
+    assert!(matches!(
+        reopened.add_query(77, "1995 fleer rareplayer1000"),
+        Err(ShardError::DuplicateLogicalId(77))
+    ));
+    reopened.remove_query(77).expect("remove");
+    reopened
+        .add_query(77, "1995 fleer rareplayer1000")
+        .expect("reuse after remove");
+    assert_eq!(
+        reopened
+            .percolate("1995 fleer rareplayer1000")
+            .expect("match"),
+        vec![77]
+    );
+    drop(reopened);
+    let _ = std::fs::remove_dir_all(dir);
 }

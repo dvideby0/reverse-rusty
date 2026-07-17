@@ -60,8 +60,10 @@
   through the WAL-less segment path — out of scope). The in-process `insert_live` /
   `try_insert_live*` APIs are unchanged (additive, the cluster's building block). **Cluster upsert is
   deferred** to the Distributed-v1 program (ADR-065 — the cluster REST surface lands first;
-  `ClusterEngine::add_query` remains additive, its log replay being the cluster's own ordering
-  problem).
+  `ClusterEngine::add_query` remains additive in this increment, its log replay being the cluster's
+  own ordering problem). **Superseded for clustered data by ADR-109/110:** exact distributed bounded
+  reduction makes the cluster method insert-only under a unique logical-id invariant; standalone
+  engine ingestion remains additive, and cluster replacement uses `upsert_query`.
 
 - **Alternatives.** (1) *DELETE-then-PUT inside the handler* — rejected: two WAL frames (the crash
   window between them recovers the delete without the insert), two engine mutations with an

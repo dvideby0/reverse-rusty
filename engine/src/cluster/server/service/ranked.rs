@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::cluster::node_metrics::ShardRpc;
@@ -112,48 +113,75 @@ pub(super) fn fetch_matches(
     }
     let deadline = deadline_from_remaining(req.remaining_micros)?;
     let (slot, state) = server.loaded_slot(req.shard_id)?;
-    let rows = match state.shard.fetch_matches(&req.logical_ids, Some(deadline)) {
-        Ok(rows) => rows,
-        Err(error) => {
-            if matches!(error, ShardError::DeadlineExceeded) {
+    let max_source_bytes = usize::try_from(req.max_source_bytes)
+        .map_err(|_| Status::invalid_argument("max_source_bytes is out of range"))?;
+    let max_result_bytes = server.max_grpc_result_bytes;
+    let placement_generation = req.placement_generation;
+    let num_shards = req.num_shards;
+    let logical_ids = req.logical_ids;
+    // Retain one lock-free current-view snapshot for the whole stream. A write
+    // published during delivery must not mix source generations within a group.
+    let snapshot = state.shard.metrics_snapshot();
+
+    // A small bounded channel makes tonic/HTTP2 flow control effective: at most
+    // eight source messages are queued while a slow coordinator drains the stream.
+    // Sources are looked up one at a time with the request's remaining byte credit,
+    // so neither a Vec<FetchedMatch> nor a Vec<FetchMatch> materializes the response.
+    let (tx, rx) = tokio::sync::mpsc::channel(8);
+    tokio::task::spawn_blocking(move || {
+        let mut remaining = max_source_bytes;
+        let mut source_bytes = 0usize;
+        for logical_id in logical_ids {
+            if Instant::now() >= deadline {
                 slot.ranked.record_cancellation();
+                drop(tx.blocking_send(Err(read_status(&ShardError::DeadlineExceeded))));
+                return;
             }
-            return Err(read_status(&error));
+            let source = match snapshot.get_query_source_bounded(logical_id, remaining) {
+                Ok(Some(source)) => source,
+                Ok(None) => {
+                    drop(
+                        tx.blocking_send(Err(read_status(&ShardError::SourceUnavailable(
+                            logical_id,
+                        )))),
+                    );
+                    return;
+                }
+                Err(_) => {
+                    drop(
+                        tx.blocking_send(Err(read_status(&ShardError::EnrichmentLimit {
+                            limit: max_source_bytes,
+                        }))),
+                    );
+                    return;
+                }
+            };
+            let bytes = source.len();
+            remaining -= bytes;
+            source_bytes = source_bytes.saturating_add(bytes);
+            let message = proto::FetchMatch {
+                logical_id,
+                source,
+                placement_generation,
+                num_shards,
+            };
+            let encoded = reverse_rusty_shard_proto::encoded_len(&message);
+            if encoded > max_result_bytes {
+                slot.ranked.record_cap_rejection();
+                drop(tx.blocking_send(Err(Status::resource_exhausted(format!(
+                    "encoded result is {encoded} bytes; configured maximum is {max_result_bytes}"
+                )))));
+                return;
+            }
+            if tx.blocking_send(Ok(message)).is_err() {
+                return;
+            }
         }
-    };
-    if rows.len() != req.logical_ids.len() {
-        return Err(Status::internal(
-            "source fetch did not return exactly one row per winner",
-        ));
-    }
-    let mut messages = Vec::with_capacity(rows.len());
-    let mut source_bytes = 0usize;
-    for (expected, row) in req.logical_ids.into_iter().zip(rows) {
-        if row.logical_id != expected {
-            return Err(Status::internal(
-                "source fetch returned rows out of request order",
-            ));
-        }
-        source_bytes = source_bytes.saturating_add(row.source.len());
-        let message = proto::FetchMatch {
-            logical_id: row.logical_id,
-            source: row.source,
-            placement_generation: req.placement_generation,
-            num_shards: req.num_shards,
-        };
-        if let Err(status) =
-            server.check_result_bytes(reverse_rusty_shard_proto::encoded_len(&message))
-        {
-            slot.ranked.record_cap_rejection();
-            return Err(status);
-        }
-        messages.push(Ok(message));
-    }
-    slot.ranked.record_fetch(source_bytes);
-    slot.latency
-        .observe(ShardRpc::FetchMatches, started.elapsed());
-    let stream: super::ShardServiceStream = Box::pin(tokio_stream::iter(messages));
-    Ok(Response::new(stream))
+        slot.ranked.record_fetch(source_bytes);
+        slot.latency
+            .observe(ShardRpc::FetchMatches, started.elapsed());
+    });
+    Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
 }
 
 fn deadline_from_remaining(micros: u64) -> Result<Instant, Status> {
@@ -173,6 +201,9 @@ fn read_status(error: &ShardError) -> Status {
             Status::failed_precondition(error.to_string())
         }
         ShardError::SourceUnavailable(_) => Status::not_found(error.to_string()),
+        ShardError::EnrichmentLimit { .. } => Status::resource_exhausted(
+            "ranked enrichment byte credit exhausted before source materialization",
+        ),
         _ => Status::internal(error.to_string()),
     }
 }
