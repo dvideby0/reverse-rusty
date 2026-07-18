@@ -187,6 +187,47 @@ validation (ADR-103 — the title→query stream as behavioral evidence, opt-in 
     [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the advertise-URL; the
     `shardserver --accept-class-d` item was a phantom — remote shards force-accept class-D, the
     coordinator is the sole gate.)
+- **Ranked percolation / distributed top-K follow-ups (the ADR-107..110 review residue,
+  [PR #111](https://github.com/dvideby0/reverse-rusty/pull/111))** — verified findings from the
+  dual review (multi-agent + codex), deliberately deferred; each is self-contained:
+  - **`LiveLogicalIds` enumeration RPC + connect-time directory seeding.** A coordinator attached
+    over gRPC to already-populated shard servers cannot enumerate the corpus, so its ADR-109
+    logical-id admission directory stays **unauthoritative** and `add_query` fails closed toward
+    `upsert_query` (the shipped interim guard). Close it properly: a per-shard enumeration RPC in
+    `shard.proto` over `Engine::live_logical_ids`, a `RemoteShard` impl (+ `HandoffShard`/
+    `ReplicatedShard` delegation), and the same collect–sort–dedup–`replace_logical_ids` seeding
+    `open` uses — keeping the fail-closed guard as the fallback when enumeration fails. Oracle
+    leg: reconnect a fresh coordinator to populated durable servers; an existing id must 409, a
+    new id must insert.
+  - **v2 search delivery unification + typed wire errors + one comparator.** `cluster_v2_search`
+    is a ~300-line near-clone of `v2_search` (drift already caught + patched once: the cluster
+    timeout arm's slow-query accounting) — extract one shared delivery pipeline with the
+    HTTP mapping owned by the error type, and resolve the deliberate-or-not v1-vs-v2 status
+    divergence (`shard_error_response` 409 vs `cluster_error_status` 503 for the same
+    `ShardError` variants). Replace the ranked seam's message-substring error reconstruction
+    (`ranked_rpc_err` ↔ `read_status`, a three-string coupling) with a structured code in tonic
+    `Status` metadata. Define ONE public `(score desc, logical_id asc)` comparator (the ADR-110
+    exactness order currently lives in four places: `collect.rs` ×2, the coordinator merge,
+    `order_and_page`), and consider unifying the bounded fetch-credit kernel duplicated between
+    `LocalShard::fetch_matches` and the gRPC stream body.
+  - **Per-logical-id write lock table.** The 256 striped mutexes serializing same-id cluster
+    writes are held across the WAL append (fsync) AND the full shard fan-out (sequential gRPC per
+    shard), so two unrelated ids colliding on a stripe serialize whole distributed writes and one
+    stalled shard is contagious. **Constraint (review-verified): narrowing the hold scope is
+    UNSAFE** — same-id ordering depends on holding through apply (a remove fanning deletes before
+    an add's inserts land diverges replay from live; two same-id upserts can interleave their
+    delete/insert passes). The fix is a per-id in-flight lock table (only true same-id writers
+    serialize, full hold scope preserved), keeping `logical_bulk_write_guards`' whole-directory
+    exclusivity for bulk load.
+  - **Ranked-path perf polish** (all review-confirmed, none load-bearing yet): move
+    `validate`/`validate_for_shard` onto `QueryPlacementRef` so the whole-corpus ownership sweep
+    at every durable open/resize/attach stops allocating one `Vec` per row; memoize the top-K
+    scorer's per-logical `rank_metadata_for_logical` walk inside `TopKCollector` (**constraint:**
+    ADR-108 requires scoring the newest live copy, so resolving at the emission site is
+    forbidden) + pool the collector/scratch in `percolate_top_k_owned` like the v2 handler's
+    thread-local; replace the coordinator merge's worst-case reserve + full sort with a bounded
+    S-way merge over the already-sorted shard runs; drop `fetch_one`'s per-shard O(K) clone of
+    the requested group. Baseline with `rankbench` before/after.
 - **Feature-model versioning + blue/green re-materialize** — frozen common-mask across minor
   versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
 - **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying
@@ -330,6 +371,17 @@ Low-priority polish and micro-optimizations — none are production blockers.
   matcher changes (declined as a per-PR gate in ADR-063 for wall-clock cost).
 - **Messy variants of the cluster oracles** — thread `messify_dataset` through
   `tests/cluster_oracle` + the durability oracle (the harnesses already take a `Dataset`).
+
+**Code hygiene (ADR-110 review residue)**
+- **Delete the dead legacy `Shard` read paths** — `percolate_filtered`/`percolate_filtered_ranked`
+  are `#[allow(dead_code)]` on the trait (the coordinator calls only the `_owned` variants),
+  leaving four per-type forwarding impls maintaining an unreachable parallel read path; tests
+  needing emit-all can pass an all-positions `OwnershipContext`.
+- **650-line splits from the ADR-110 branch** — `handlers/search/v2.rs` (~966, split AFTER the
+  Tier-3 handler unification above), `segment/seg.rs` (625→730), `cluster/handoff.rs` (577→672).
+- **Reuse the storage LE-read primitives in `server/durable.rs`** — `read_adopted_space`
+  hand-rolls the truncated-LE-read idiom three times; make `read_u32_at`/`read_u64_at`
+  `pub(crate)` and delete the copies.
 
 **Robustness**
 - **Durable-ingest segment-write failures surface as `ingest_rollback`, not `segment_write`** —
