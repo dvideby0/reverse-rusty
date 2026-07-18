@@ -8,7 +8,9 @@
 //! eval itself lives in [`super::kernel`].
 
 use super::kernel::{eval_one_segment, Lane};
-use crate::collect::{AllBatchCollector, BatchMatchSink, CollectionSummary, VecSink};
+use crate::collect::{
+    AllBatchCollector, BatchMatchCollector, BatchMatchSink, CollectionSummary, VecSink,
+};
 use crate::dict::FeatureId;
 use crate::segment::snapshot::MatchView;
 use crate::segment::{

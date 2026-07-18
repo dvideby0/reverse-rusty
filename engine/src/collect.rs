@@ -4,10 +4,12 @@
 //! member-level alive/tag checks. Collectors therefore cannot affect candidate
 //! retrieval or the lossless signature cover.
 
-use crate::result::{ranked_beats, ranked_order, TotalHits, TotalHitsRelation};
+use crate::result::{TotalHits, TotalHitsRelation};
 use crate::util::FastSet;
-use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+
+mod top_k;
+
+pub(crate) use top_k::TopKCollector;
 
 /// Summary returned when a collector finalizes one exact matching pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -99,6 +101,14 @@ pub(crate) trait BatchMatchSink {
     fn on_match(&mut self, title_index: usize, logical_id: u64);
 }
 
+/// Lifecycle implemented by a complete batch collector — the indexed analogue
+/// of [`MatchCollector`], so the batch driver can finalize or abort without
+/// knowing which collection policy it is running.
+pub(crate) trait BatchMatchCollector: BatchMatchSink {
+    fn finish(&mut self) -> CollectionSummary;
+    fn abort(&mut self);
+}
+
 /// Reusable compatibility collector over one output vector per batch title.
 pub(crate) struct AllBatchCollector<'a> {
     outs: &'a mut [Vec<u64>],
@@ -110,8 +120,10 @@ impl<'a> AllBatchCollector<'a> {
         debug_assert_eq!(outs.len(), emissions.len());
         Self { outs, emissions }
     }
+}
 
-    pub(crate) fn finish(&mut self) -> CollectionSummary {
+impl BatchMatchCollector for AllBatchCollector<'_> {
+    fn finish(&mut self) -> CollectionSummary {
         let mut unique = 0u64;
         let mut emitted = 0u64;
         for (out, &count) in self.outs.iter_mut().zip(self.emissions.iter()) {
@@ -128,7 +140,7 @@ impl<'a> AllBatchCollector<'a> {
         }
     }
 
-    pub(crate) fn abort(&mut self) {
+    fn abort(&mut self) {
         for out in self.outs.iter_mut() {
             out.clear();
         }
@@ -238,154 +250,6 @@ impl MatchCollector for CountCollector {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct HeapHit {
-    logical_id: u64,
-    score: i64,
-}
-
-// BinaryHeap keeps its greatest value at the root. Under `ranked_order`,
-// "precedes" is Less, so the max-heap root is always the current worst winner.
-impl Ord for HeapHit {
-    fn cmp(&self, other: &Self) -> Ordering {
-        ranked_order(
-            (self.score, self.logical_id),
-            (other.score, other.logical_id),
-        )
-    }
-}
-
-impl PartialOrd for HeapHit {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Bounded exact top-K collector used by local ranked percolation and its oracle.
-pub(crate) struct TopKCollector<F> {
-    k: usize,
-    scorer: F,
-    heap: BinaryHeap<HeapHit>,
-    heap_ids: FastSet<u64>,
-    winners: Vec<(u64, i64)>,
-    totals: TotalTracker,
-    emissions: u64,
-    evaluations: u64,
-    heap_replacements: u64,
-}
-
-impl<F> TopKCollector<F>
-where
-    F: FnMut(u64) -> i64,
-{
-    pub(crate) fn new(k: usize, total_threshold: usize, scorer: F) -> Self {
-        let mut heap_ids = FastSet::default();
-        heap_ids.reserve(k);
-        Self {
-            k,
-            scorer,
-            heap: BinaryHeap::with_capacity(k),
-            heap_ids,
-            winners: Vec::with_capacity(k),
-            totals: TotalTracker::new(total_threshold),
-            emissions: 0,
-            evaluations: 0,
-            heap_replacements: 0,
-        }
-    }
-
-    pub(crate) fn winners(&self) -> &[(u64, i64)] {
-        &self.winners
-    }
-
-    pub(crate) fn rank_stats(&self) -> crate::rank::RankStats {
-        crate::rank::RankStats {
-            evaluations: self.evaluations,
-            heap_replacements: self.heap_replacements,
-        }
-    }
-
-    pub(crate) fn total_hits(&self) -> TotalHits {
-        self.totals.total_hits()
-    }
-}
-
-impl<F> MatchSink for TopKCollector<F>
-where
-    F: FnMut(u64) -> i64,
-{
-    fn on_match(&mut self, logical_id: u64) {
-        self.emissions = self.emissions.saturating_add(1);
-        self.totals.observe(logical_id);
-        if self.k == 0 || self.heap_ids.contains(&logical_id) {
-            return;
-        }
-
-        self.evaluations = self.evaluations.saturating_add(1);
-        let hit = HeapHit {
-            logical_id,
-            score: (self.scorer)(logical_id),
-        };
-        if self.heap.len() < self.k {
-            self.heap.push(hit);
-            self.heap_ids.insert(logical_id);
-            return;
-        }
-
-        let replace = self.heap.peek().is_some_and(|worst| better(hit, *worst));
-        if replace {
-            self.heap_replacements = self.heap_replacements.saturating_add(1);
-            if let Some(removed) = self.heap.pop() {
-                self.heap_ids.remove(&removed.logical_id);
-            }
-            self.heap.push(hit);
-            self.heap_ids.insert(logical_id);
-        }
-    }
-}
-
-impl<F> MatchCollector for TopKCollector<F>
-where
-    F: FnMut(u64) -> i64,
-{
-    fn reset(&mut self) {
-        self.heap.clear();
-        self.heap_ids.clear();
-        self.winners.clear();
-        self.totals.reset();
-        self.emissions = 0;
-        self.evaluations = 0;
-        self.heap_replacements = 0;
-    }
-
-    fn finish(&mut self) -> CollectionSummary {
-        self.winners.clear();
-        self.winners
-            .extend(self.heap.drain().map(|hit| (hit.logical_id, hit.score)));
-        self.heap_ids.clear();
-        self.winners
-            .sort_unstable_by(|a, b| ranked_order((a.1, a.0), (b.1, b.0)));
-        let total_hits = self.totals.total_hits();
-        CollectionSummary {
-            retained: self.winners.len(),
-            total_hits,
-            logical_emissions: self.emissions,
-            duplicate_emissions: exact_duplicates(self.emissions, total_hits),
-        }
-    }
-
-    fn abort(&mut self) {
-        self.reset();
-    }
-}
-
-fn better(candidate: HeapHit, worst: HeapHit) -> bool {
-    ranked_beats(
-        (candidate.score, candidate.logical_id),
-        (worst.score, worst.logical_id),
-    )
-}
-
 fn exact_duplicates(emissions: u64, total_hits: TotalHits) -> Option<u64> {
     (total_hits.relation == TotalHitsRelation::Eq)
         .then(|| emissions.saturating_sub(total_hits.value))
@@ -394,68 +258,6 @@ fn exact_duplicates(emissions: u64, total_hits: TotalHits) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            let mut x = self.0;
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            self.0 = x;
-            x
-        }
-    }
-
-    fn score(id: u64) -> i64 {
-        ((id.wrapping_mul(0x9E37_79B9) ^ (id >> 3)) % 41) as i64 - 20
-    }
-
-    #[test]
-    fn randomized_top_k_equals_collect_all_sort_and_truncate() {
-        for seed in 1..=64u64 {
-            let mut rng = Rng(seed);
-            let stream: Vec<u64> = (0..2_000).map(|_| rng.next() % 317).collect();
-            for &k in &[0usize, 1, 3, 10, 100, 1_000] {
-                for &threshold in &[0usize, 1, 10, 100, 10_000] {
-                    let mut collector = TopKCollector::new(k, threshold, score);
-                    collector.reset();
-                    for &id in &stream {
-                        collector.on_match(id);
-                        assert!(collector.heap.len() <= k);
-                        assert!(collector.heap_ids.len() <= k);
-                        assert!(collector.totals.tracked_len() <= threshold.saturating_add(1));
-                    }
-                    let summary = collector.finish();
-
-                    let mut expected_ids = stream.clone();
-                    expected_ids.sort_unstable();
-                    expected_ids.dedup();
-                    let exact_total = expected_ids.len();
-                    let mut expected: Vec<(u64, i64)> =
-                        expected_ids.into_iter().map(|id| (id, score(id))).collect();
-                    expected.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                    expected.truncate(k);
-
-                    assert_eq!(collector.winners(), expected);
-                    assert_eq!(summary.retained, expected.len());
-                    assert_eq!(summary.logical_emissions, stream.len() as u64);
-                    let expected_total = if exact_total > threshold {
-                        TotalHits::lower_bound(threshold as u64)
-                    } else {
-                        TotalHits::exact(exact_total as u64)
-                    };
-                    assert_eq!(summary.total_hits, expected_total);
-                    assert_eq!(
-                        summary.duplicate_emissions,
-                        (exact_total <= threshold)
-                            .then(|| stream.len() as u64 - exact_total as u64)
-                    );
-                }
-            }
-        }
-    }
 
     #[test]
     fn count_collector_is_bounded_and_abort_discards_state() {
