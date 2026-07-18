@@ -19,6 +19,7 @@ use super::DocBody;
 
 mod delivery;
 mod mpercolate;
+mod page;
 
 #[cfg(test)]
 pub(crate) use mpercolate::V2MPercolateBody;
@@ -59,6 +60,12 @@ impl RankProgramBody {
     }
 }
 
+/// A PIT reference on a page-one cursor request (ADR-113).
+#[derive(Deserialize)]
+struct PitRefBody {
+    id: String,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct V2SearchBody {
     document: Option<DocBody>,
@@ -72,10 +79,15 @@ pub(crate) struct V2SearchBody {
     explain: Option<bool>,
     allow_partial_results: Option<bool>,
     timeout_ms: Option<u64>,
+    /// ADR-113 page one: bind this search to an open PIT and return
+    /// `next_cursor`.
+    pit: Option<PitRefBody>,
+    /// ADR-113 page N: continue a cursor (the same document/rank/filter/scope
+    /// must be resent; the cursor names its PIT internally).
+    cursor: Option<serde_json::Value>,
     // Named unsupported shapes produce a stable 400 rather than being ignored.
     #[serde(rename = "from")]
     page_from: Option<serde_json::Value>,
-    cursor: Option<serde_json::Value>,
     documents: Option<serde_json::Value>,
     query: Option<serde_json::Value>,
 }
@@ -110,6 +122,10 @@ pub(crate) struct V2SearchResponse {
     query_scope: reverse_rusty::QueryScope,
     _shards: Shards,
     hits: RankedHitsBody,
+    /// ADR-113: present only on a full pit-bound page — the opaque token that
+    /// continues the ranked stream. `null`/absent means the stream is done.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
 }
 
 fn validation(reason: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -141,6 +157,9 @@ struct PreparedSearch {
     include_source: bool,
     include_explain: bool,
     timeout: Duration,
+    /// ADR-113 page shape (tokens still unverified — verification is
+    /// mode-side, where the registry lives).
+    page: page::PageRequest,
 }
 
 enum PrepareFailure {
@@ -167,15 +186,28 @@ impl PrepareFailure {
 /// serving. Keeping this lowering shared is what makes their defaults and 400s
 /// identical as the delivery implementations evolve independently.
 fn prepare(body: V2SearchBody) -> Result<PreparedSearch, PrepareFailure> {
-    if body.page_from.is_some()
-        || body.cursor.is_some()
-        || body.documents.is_some()
-        || body.query.is_some()
-    {
+    if body.page_from.is_some() || body.documents.is_some() || body.query.is_some() {
         return Err(PrepareFailure::Validation(validation(
-            "v2 ranked search accepts one `document`; from, cursor, documents and query are not supported",
+            "v2 ranked search accepts one `document`; from, documents and query are not supported",
         )));
     }
+    let page = match (body.pit, body.cursor) {
+        (None, None) => page::PageRequest::None,
+        (Some(_), Some(_)) => {
+            return Err(PrepareFailure::Validation(validation(
+                "`pit` and `cursor` are mutually exclusive; the cursor already names its PIT",
+            )));
+        }
+        (Some(pit), None) => page::PageRequest::Pit(pit.id),
+        (None, Some(cursor)) => match cursor.as_str() {
+            Some(token) => page::PageRequest::Cursor(token.to_string()),
+            None => {
+                return Err(PrepareFailure::Validation(validation(
+                    "`cursor` must be the opaque string returned as next_cursor",
+                )));
+            }
+        },
+    };
     if body.allow_partial_results == Some(true) {
         return Err(PrepareFailure::Validation(validation(
             "allow_partial_results=true is not supported for exact top_k",
@@ -195,6 +227,7 @@ fn prepare(body: V2SearchBody) -> Result<PreparedSearch, PrepareFailure> {
     let (_, _, filter) = resolve_percolate(Some(document), None, body.filter, None)
         .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
     let options = reverse_rusty::TopKOptions {
+        search_after: None,
         size: body.size.unwrap_or(reverse_rusty::DEFAULT_TOP_K),
         track_total_hits_up_to: body
             .track_total_hits_up_to
@@ -240,6 +273,7 @@ fn prepare(body: V2SearchBody) -> Result<PreparedSearch, PrepareFailure> {
         include_source: body.include_source.unwrap_or(true),
         include_explain: body.explain.unwrap_or(false),
         timeout: Duration::from_millis(body.timeout_ms.unwrap_or(5_000)),
+        page,
     })
 }
 
@@ -281,9 +315,28 @@ pub(crate) async fn v2_search(
         include_source,
         include_explain,
         timeout,
+        page,
     } = prepared;
 
-    let snap = Arc::clone(&state.snapshot.load());
+    // Resolve the page BEFORE compiling: a pit/cursor page must compile its
+    // rank program and predicate against the PINNED snapshot, not the live one.
+    let plan = match page::resolve_local(
+        &state,
+        &page,
+        &title,
+        options.query_scope,
+        &raw_program,
+        &filter,
+    ) {
+        Ok(plan) => plan,
+        Err(response) => return Err(response),
+    };
+    let snap = plan.snapshot;
+    let options = reverse_rusty::TopKOptions {
+        search_after: plan.search_after,
+        ..options
+    };
+    let mint = plan.mint;
     let program = match snap.compile_rank_program(&raw_program) {
         Ok(program) => program,
         Err(error) => {
@@ -302,6 +355,7 @@ pub(crate) async fn v2_search(
         return Err(validation("timeout_ms is too large"));
     };
     let enrichment_limit = state.max_ranked_enrichment_bytes;
+    let mint_state = Arc::clone(&state);
     let work = move || {
         RANKED_SCRATCH.with(|cell| {
             delivery::local_delivery(
@@ -318,6 +372,12 @@ pub(crate) async fn v2_search(
                     deadline,
                 },
             )
+            .map(|mut result| {
+                if let Some(mint) = &mint {
+                    page::attach_next_cursor(&mint_state.pit_tokens, mint, options, &mut result);
+                }
+                result
+            })
         })
     };
     delivery::drive(state, started, options, timeout, deadline, work).await
@@ -345,17 +405,82 @@ pub(crate) async fn cluster_v2_search(
         include_source,
         include_explain,
         timeout,
+        page,
     } = prepared;
-    let program = match state.cluster.read().compile_rank_program(&rank) {
-        Ok(program) => program,
-        Err(error) => {
-            record_outcome(&state.prom, "validation", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::BAD_REQUEST,
-                "unsupported_rank_field",
-                error.to_string(),
-            ));
-        }
+    // Verify page tokens (pure — no lock). Garbled ⇒ 400; foreign key ⇒ 409.
+    let (pit, search_after, expected_fingerprint) = match &page {
+        page::PageRequest::None => (None, None, None),
+        page::PageRequest::Pit(token) => match state.pit_tokens.verify_pit(token) {
+            Ok(pit) => (Some(pit), None, None),
+            Err(error) => {
+                record_outcome(&state.prom, "validation", options.query_scope);
+                return Err(crate::pit::token_failure_response(error));
+            }
+        },
+        page::PageRequest::Cursor(token) => match state.pit_tokens.verify_cursor(token) {
+            Ok(payload) => (
+                Some(payload.pit),
+                Some(payload.after),
+                Some(payload.fingerprint),
+            ),
+            Err(error) => {
+                record_outcome(&state.prom, "validation", options.query_scope);
+                return Err(crate::pit::token_failure_response(error));
+            }
+        },
+    };
+    // One brief read-lock scope (the existing compile pattern — sync, never
+    // across an await): compile + PIT pre-check + fingerprint. The stale gate
+    // runs BEFORE the fingerprint so a rebuilt normalizer cannot mis-classify
+    // a dead cursor as a client mismatch; the kernel re-gates inside the
+    // blocking closure, so the gap between here and there stays fail-closed.
+    let (program, mint) = {
+        let cluster = state.cluster.read();
+        let program = match cluster.compile_rank_program(&rank) {
+            Ok(program) => program,
+            Err(error) => {
+                record_outcome(&state.prom, "validation", options.query_scope);
+                return Err(ApiError::response(
+                    StatusCode::BAD_REQUEST,
+                    "unsupported_rank_field",
+                    error.to_string(),
+                ));
+            }
+        };
+        let mint = match pit {
+            None => None,
+            Some(pit) => {
+                if let Err(error) = cluster.check_pit(pit, Instant::now()) {
+                    let (status, kind, outcome) = error.v2_http_class();
+                    record_outcome(&state.prom, outcome, options.query_scope);
+                    return Err(ApiError::response(
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                        kind,
+                        error.to_string(),
+                    ));
+                }
+                let fingerprint = crate::pit::request_fingerprint(
+                    cluster.normalizer(),
+                    cluster.dict(),
+                    &title,
+                    options.query_scope,
+                    &rank,
+                    &filter,
+                );
+                if let Some(expected) = expected_fingerprint {
+                    if fingerprint != expected {
+                        record_outcome(&state.prom, "cursor_mismatch", options.query_scope);
+                        return Err(crate::pit::cursor_mismatch_response());
+                    }
+                }
+                Some(page::MintCtx { pit, fingerprint })
+            }
+        };
+        (program, mint)
+    };
+    let options = reverse_rusty::TopKOptions {
+        search_after,
+        ..options
     };
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         record_outcome(&state.prom, "validation", options.query_scope);
@@ -370,6 +495,7 @@ pub(crate) async fn cluster_v2_search(
         let cluster = cluster_state.cluster.read();
         delivery::cluster_delivery(
             &cluster,
+            mint.as_ref().map(|mint| mint.pit),
             &program,
             &filter,
             &delivery::DeliverySpec {
@@ -381,6 +507,12 @@ pub(crate) async fn cluster_v2_search(
                 deadline,
             },
         )
+        .map(|mut result| {
+            if let Some(mint) = &mint {
+                page::attach_next_cursor(&cluster_state.pit_tokens, mint, options, &mut result);
+            }
+            result
+        })
     };
     delivery::drive(state, started, options, timeout, deadline, work).await
 }

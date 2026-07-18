@@ -326,6 +326,12 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         prom,
         slow_query_threshold_ms: cli.slow_query_threshold_ms,
         auth: auth_config,
+        pit_tokens: crate::pit::PitTokens::generate(),
+        pit_config: reverse_rusty::PitConfig {
+            default_keep_alive: std::time::Duration::from_secs(cli.pit_default_keep_alive_secs),
+            max_keep_alive: std::time::Duration::from_secs(cli.pit_max_keep_alive_secs),
+            max_open: cli.max_open_pits,
+        },
     });
 
     let app = Router::new()
@@ -339,6 +345,10 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         .route("/_search", post(cluster_search))
         .route("/v2/_search", post(cluster_v2_search))
         .route("/v2/_mpercolate", post(cluster_v2_mpercolate))
+        .route(
+            "/v2/_pit",
+            post(crate::handlers::cluster_open_pit).delete(crate::handlers::cluster_close_pit),
+        )
         .route("/_mpercolate", post(cluster_mpercolate))
         .route("/_bulk", post(cluster_bulk))
         .route("/_flush", post(cluster_flush))

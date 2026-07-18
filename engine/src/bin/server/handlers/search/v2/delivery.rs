@@ -69,6 +69,13 @@ pub(super) struct DeliveryResult {
     pub(super) shard_rows_received: usize,
     pub(super) shard_result_bytes: u64,
     pub(super) source_bytes: usize,
+    /// ADR-113: the continuation token a pit-bound full page mints (attached
+    /// by the mode closure, passed through the epilogue untouched).
+    pub(super) next_cursor: Option<String>,
+    /// The last winner's `(score, logical_id)` in ranked order — the boundary
+    /// a continuation cursor encodes (kept as data so minting need not read
+    /// back the serialized `_`-prefixed response fields).
+    pub(super) last_ranked: Option<(i64, u64)>,
 }
 
 /// Delivery failure, generic over the mode's backend error — a local handler
@@ -313,26 +320,42 @@ pub(super) fn local_delivery(
         shard_rows_received: 0,
         shard_result_bytes: 0,
         source_bytes: budget.used,
+        next_cursor: None,
+        last_ranked: ranked.hits.last().map(|hit| (hit.score, hit.logical_id)),
     })
 }
 
-/// Coordinator kernel: exact bounded distributed top-K, then the phase-two
-/// winner fetch under one global credit, then assembly.
+/// Coordinator kernel: exact bounded distributed top-K — from the current
+/// view, or from an ADR-113 PIT's pinned per-shard snapshots when `pit` is
+/// set — then the phase-two winner fetch under one global credit, then
+/// assembly. A stale PIT surfaces as `Backend(StalePit)` and rides the
+/// existing classification (409 via `v2_http_class`) with no new driver arms.
 pub(super) fn cluster_delivery(
     cluster: &ClusterEngine,
+    pit: Option<reverse_rusty::PitId>,
     program: &CompiledRankProgram,
     filter: &[(String, Vec<String>)],
     spec: &DeliverySpec<'_>,
 ) -> Result<DeliveryResult, DeliveryError<ClusterRankedError>> {
-    let ranked = cluster
-        .try_percolate_filtered_top_k(
+    let ranked = match pit {
+        None => cluster.try_percolate_filtered_top_k(
             spec.title,
             filter,
             spec.options,
             program,
             Some(spec.deadline),
-        )
-        .map_err(DeliveryError::Backend)?;
+        ),
+        Some(pit) => cluster.try_percolate_filtered_top_k_pit(
+            pit,
+            spec.title,
+            filter,
+            spec.options,
+            program,
+            Some(spec.deadline),
+            Instant::now(),
+        ),
+    }
+    .map_err(DeliveryError::Backend)?;
     let sources = if spec.include_source || spec.include_explain {
         cluster
             .fetch_ranked_sources_bounded(&ranked, spec.enrichment_limit, Some(spec.deadline))
@@ -367,6 +390,8 @@ pub(super) fn cluster_delivery(
         shard_rows_received: ranked.shard_rows_received,
         shard_result_bytes: ranked.shard_result_bytes,
         source_bytes,
+        next_cursor: None,
+        last_ranked: ranked.hits.last().map(|hit| (hit.score, hit.logical_id)),
     })
 }
 
@@ -622,6 +647,7 @@ where
             total: delivered.total_hits,
             hits: delivered.hits,
         },
+        next_cursor: delivered.next_cursor,
     }))
 }
 

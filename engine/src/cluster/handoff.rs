@@ -215,6 +215,42 @@ impl Shard for Arc<HandoffShard> {
         )
     }
 
+    // ---- ADR-113 PIT: forwarded to the CURRENT backing. A handoff swap
+    // replaces the backing, so its pins vanish and a mid-cursor page fails
+    // typed (PitNotFound → 409 stale) instead of serving the new generation.
+    fn open_pit(&self, pit: u64) -> Result<(), ShardError> {
+        self.current.load().open_pit(pit)
+    }
+
+    fn close_pit(&self, pit: u64) -> Result<(), ShardError> {
+        self.current.load().close_pit(pit)
+    }
+
+    fn percolate_top_k_owned_pit(
+        &self,
+        pit: u64,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        self.current.load().percolate_top_k_owned_pit(
+            pit,
+            title,
+            include_broad,
+            pred,
+            program,
+            options,
+            context,
+            current_position,
+            deadline,
+        )
+    }
+
     fn percolate_top_k_batch_owned(
         &self,
         titles: &[crate::cluster::shard::BatchTitleRequest<'_>],

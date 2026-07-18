@@ -21,6 +21,8 @@ mod resolve;
 mod v2;
 
 #[cfg(test)]
+mod pit_tests;
+#[cfg(test)]
 mod tests;
 
 pub(crate) use mpercolate::mpercolate;

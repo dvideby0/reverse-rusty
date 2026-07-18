@@ -38,6 +38,12 @@ impl ClusterEngine {
         queries: &[(u64, String)],
         tags: &[Vec<(String, String)>],
     ) -> Result<(), ShardError> {
+        // ADR-113: bulk load is a mutation like any other for the PIT-open
+        // barrier — a pin fan interleaving mid-load would freeze half a corpus.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Initial bulk load is one exclusive logical-id admission boundary. A
         // concurrent incremental mutation cannot slip between the empty check,
         // directory install, and shard writes.
@@ -409,6 +415,13 @@ impl ClusterEngine {
         tags: &[(String, String)],
         placement: &crate::ownership::QueryPlacement,
     ) -> Result<(usize, AddOutcome), ShardError> {
+        // ADR-113: exclude PIT opens for the duration of this mutation's full
+        // shard fan-out (see `pit_open_barrier` on the struct) — a pin fan
+        // interleaving mid-mutation would freeze a torn cross-shard view.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.note_tags(tags);
         let ast = match crate::dsl::parse(dsl) {
             Ok(a) => a,
@@ -591,6 +604,13 @@ impl ClusterEngine {
         tags: &[(String, String)],
         placement: &crate::ownership::QueryPlacement,
     ) -> Result<AddOutcome, ShardError> {
+        // ADR-113: exclude PIT opens for the duration of this mutation's full
+        // shard fan-out (see `pit_open_barrier` on the struct) — a pin fan
+        // interleaving mid-mutation would freeze a torn cross-shard view.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Latch tags_present (ADR-055, `/_stats` introspection) — covers both the live add
         // (`add_query_with_tags`) and a tagged log-tail entry replayed on `open`.
         self.note_tags(tags);
@@ -659,6 +679,13 @@ impl ClusterEngine {
     /// memtable/segment liveness is the authority; there is no separate coordinator live
     /// set to keep in sync (the durable base is the per-shard segments — ADR-032).
     fn apply_remove(&self, id: u64) -> Result<usize, ShardError> {
+        // ADR-113: exclude PIT opens for the duration of this mutation's full
+        // shard fan-out (see `pit_open_barrier` on the struct) — a pin fan
+        // interleaving mid-mutation would freeze a torn cross-shard view.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Remove fans the idempotent delete out to EVERY shard. Try them all (don't bail on the
         // first error) and collect failures, so a partial remove is repairable rather than a
         // silent half-delete (ADR-047). In-process deletes are infallible ⇒ `failed` stays empty

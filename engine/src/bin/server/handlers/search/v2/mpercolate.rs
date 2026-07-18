@@ -55,6 +55,9 @@ pub(crate) struct V2MPercolateBody {
     #[serde(rename = "from")]
     page_from: Option<serde_json::Value>,
     cursor: Option<serde_json::Value>,
+    /// ADR-113: PIT paging is single-title; the batch surface names the reject
+    /// (previously an unknown `pit` key was silently ignored).
+    pit: Option<serde_json::Value>,
     allow_partial_results: Option<serde_json::Value>,
     document: Option<serde_json::Value>,
     query: Option<serde_json::Value>,
@@ -106,13 +109,14 @@ fn prepare_batch(body: V2MPercolateBody) -> Result<PreparedBatch, PrepareFailure
     }
     if body.page_from.is_some()
         || body.cursor.is_some()
+        || body.pit.is_some()
         || body.allow_partial_results.is_some()
         || body.document.is_some()
         || body.query.is_some()
     {
         return Err(PrepareFailure::Validation(validation(
-            "v2 batch percolate accepts `documents`; from, cursor, allow_partial_results, \
-             document and query are not supported",
+            "v2 batch percolate accepts `documents`; from, cursor, pit, allow_partial_results, \
+             document and query are not supported — page per title via /v2/_search",
         )));
     }
     if body.result_mode.unwrap_or_default() != reverse_rusty::ResultMode::TopK {
@@ -145,6 +149,7 @@ fn prepare_batch(body: V2MPercolateBody) -> Result<PreparedBatch, PrepareFailure
     let (titles, _, filter) = resolve_percolate(None, Some(documents), body.filter, None)
         .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
     let options = reverse_rusty::TopKOptions {
+        search_after: None,
         size: body.size.unwrap_or(reverse_rusty::DEFAULT_TOP_K),
         track_total_hits_up_to: body
             .track_total_hits_up_to

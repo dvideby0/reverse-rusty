@@ -68,6 +68,15 @@ impl ClusterEngine {
         deadline: Option<Instant>,
     ) -> Result<ClusterBatchRankedMatch, ClusterRankedError> {
         validate_options(options)?;
+        // ADR-113: a pagination boundary is a single-title cursor primitive.
+        // Reject it HERE, before routing — an empty batch would otherwise
+        // short-circuit to success, and a remote shard's wire cannot carry a
+        // boundary at all (it would silently return unpaged rows).
+        if options.search_after.is_some() {
+            return Err(ClusterRankedError::Admission(
+                TopKAdmissionError::BatchSearchAfterUnsupported,
+            ));
+        }
         if titles.len() > MAX_RANKED_BATCH_TITLES {
             return Err(ClusterRankedError::Admission(
                 TopKAdmissionError::BatchTitlesTooLarge {
@@ -195,6 +204,9 @@ impl ClusterEngine {
                     *position,
                     options.size,
                     options.track_total_hits_up_to,
+                    // No boundary on the batch path — enforced by this
+                    // method's own entry guard above.
+                    None,
                     &title_result.hits,
                     &title_result.total_hits,
                 )?;

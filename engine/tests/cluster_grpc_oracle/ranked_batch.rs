@@ -115,6 +115,7 @@ fn grpc_batch_top_k_matches_single_rpcs_and_reference() {
     for scope in [QueryScope::Standard, QueryScope::WithBroad] {
         for &size in &[0usize, 1, 7, 25] {
             let options = TopKOptions {
+                search_after: None,
                 size,
                 track_total_hits_up_to: 13,
                 query_scope: scope,
@@ -212,6 +213,7 @@ fn grpc_batch_caps_reject_oversize_frames() {
             &titles,
             &[],
             TopKOptions {
+                search_after: None,
                 size: 300,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::Standard,
@@ -315,6 +317,7 @@ fn grpc_batch_fetch_chunks_oversized_owner_groups() {
             &titles,
             &[],
             TopKOptions {
+                search_after: None,
                 size: 6_500,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::Standard,

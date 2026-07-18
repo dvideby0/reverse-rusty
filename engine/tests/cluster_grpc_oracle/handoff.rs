@@ -126,6 +126,7 @@ fn grpc_live_handoff_under_sustained_writes() {
         })
         .expect("rank program");
     let rank_options = TopKOptions {
+        search_after: None,
         size: 10,
         track_total_hits_up_to: 10_000,
         query_scope: QueryScope::WithBroad,

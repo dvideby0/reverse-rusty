@@ -21,6 +21,7 @@ mod differential;
 mod dynamic_vocab;
 mod filtered;
 mod hot;
+mod pit;
 mod placement;
 mod ranked_batch;
 mod ranking;

@@ -83,6 +83,7 @@ fn distributed_bounded_top_k_matches_single_node() {
             for &size in &[0usize, 1, 3, 16] {
                 for &threshold in &[0u64, 1, 10_000] {
                     let options = TopKOptions {
+                        search_after: None,
                         size,
                         track_total_hits_up_to: threshold,
                         query_scope: QueryScope::WithBroad,
@@ -167,6 +168,7 @@ fn distributed_top_k_covers_every_visibility_and_cost_class() {
         .compile_rank_program(&raw_program)
         .expect("cluster program");
     let options = TopKOptions {
+        search_after: None,
         size: 32,
         track_total_hits_up_to: 10_000,
         query_scope: QueryScope::WithBroad,
@@ -227,6 +229,7 @@ fn global_threshold_overflow_and_generation_drift_fail_closed() {
             &title,
             &[],
             TopKOptions {
+                search_after: None,
                 size: 100,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::WithBroad,
@@ -247,6 +250,7 @@ fn global_threshold_overflow_and_generation_drift_fail_closed() {
             &title,
             &[],
             TopKOptions {
+                search_after: None,
                 size: 5,
                 track_total_hits_up_to: threshold,
                 query_scope: QueryScope::WithBroad,
@@ -303,6 +307,7 @@ fn top_k_preserves_dynamic_vocab_canonical_members_and_current_view_fetch() {
             "zzdynamicterm",
             &[],
             TopKOptions {
+                search_after: None,
                 size: 10,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::Standard,

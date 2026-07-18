@@ -27,6 +27,13 @@ pub struct TopKOptions {
     pub size: usize,
     pub track_total_hits_up_to: u64,
     pub query_scope: QueryScope,
+    /// Exclusive pagination boundary under [`ranked_order`] (ADR-113): when
+    /// `Some((score, logical_id))`, only rows strictly AFTER the boundary are
+    /// retained by the collector. Totals are unaffected — every verified
+    /// emission still counts, so a point-in-time snapshot reports the same
+    /// total on every page. `None` (the default) is byte-identical to the
+    /// pre-ADR-113 behavior.
+    pub search_after: Option<(i64, u64)>,
 }
 
 impl Default for TopKOptions {
@@ -35,6 +42,7 @@ impl Default for TopKOptions {
             size: DEFAULT_TOP_K,
             track_total_hits_up_to: DEFAULT_TRACK_TOTAL_HITS_UP_TO,
             query_scope: QueryScope::Standard,
+            search_after: None,
         }
     }
 }
@@ -60,6 +68,9 @@ pub enum TopKAdmissionError {
         requested_rows: u64,
         max: u64,
     },
+    /// ADR-113: `search_after` is a single-title cursor primitive; batch
+    /// requests reject it loudly rather than silently ignoring a boundary.
+    BatchSearchAfterUnsupported,
 }
 
 impl std::fmt::Display for TopKAdmissionError {
@@ -81,6 +92,10 @@ impl std::fmt::Display for TopKAdmissionError {
             } => write!(
                 f,
                 "batch heap budget of {requested_rows} rows (size x titles) exceeds maximum {max}"
+            ),
+            Self::BatchSearchAfterUnsupported => write!(
+                f,
+                "search_after is not supported on batch requests; page per title via /v2/_search"
             ),
         }
     }

@@ -94,6 +94,7 @@ fn grpc_top_k_and_winner_fetch_match_single_node() {
     for &size in &[0usize, 1, 7, 25] {
         for &threshold in &[0u64, 13, 10_000] {
             let options = TopKOptions {
+                search_after: None,
                 size,
                 track_total_hits_up_to: threshold,
                 query_scope: QueryScope::Standard,
@@ -172,6 +173,7 @@ fn grpc_top_k_and_winner_fetch_match_single_node() {
             "zzwirepriority",
             &[],
             TopKOptions {
+                search_after: None,
                 size: 1,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::Standard,
@@ -222,6 +224,7 @@ fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
             "topps chrome",
             &[],
             TopKOptions {
+                search_after: None,
                 size: 300,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::Standard,
@@ -240,6 +243,7 @@ fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
             "topps chrome",
             &[],
             TopKOptions {
+                search_after: None,
                 size: 3,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::Standard,
@@ -284,6 +288,7 @@ fn grpc_caps_reject_oversize_top_k_and_fetch_items() {
             "zzlongsource",
             &[],
             TopKOptions {
+                search_after: None,
                 size: 1,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::WithBroad,

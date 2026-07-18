@@ -29,6 +29,9 @@ Options:
 | `--threads` | *(physical cores)* | Number of rayon worker threads |
 | `--max-concurrent-searches` | 0 *(unbounded)* | Max `/_search`+`/_mpercolate` requests occupying the match pool at once; excess queue within their own `timeout_ms` (ADR-099) |
 | `--max-ranked-enrichment-bytes` | 16777216 (16 MiB) | Maximum winner source bytes fetched by one local or cluster `/v2/_search`; overflow fails the whole response with `413 rank_enrichment_limit` (ADR-110) |
+| `--pit-default-keep-alive-secs` | 60 | Keep-alive for a `POST /v2/_pit` point-in-time when the request names none; renewed on every use (ADR-113) |
+| `--pit-max-keep-alive-secs` | 600 | Ceiling on a requested PIT keep-alive; over-ask is a 400 (ADR-113) |
+| `--max-open-pits` | 64 | Concurrently open PITs; a breach is `429 pit_limit_exceeded`, never an eviction (ADR-113) |
 | `--include-broad` | false | Include broad-lane (class C) queries in results |
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |
@@ -149,7 +152,8 @@ The full method/path matrix is below.
 | `/_doc/{id}` | PUT | Register **or atomically replace** a query (201 created / 200 updated, ADR-067) |
 | `/_doc/{id}` | DELETE | Remove a stored query |
 | `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
-| `/v2/_search` | POST | Single-node or cluster, single-document exact bounded top-K + winner-only enrichment (ADR-107/108/110) |
+| `/v2/_search` | POST | Single-node or cluster, single-document exact bounded top-K + winner-only enrichment (ADR-107/108/110); accepts `pit`/`cursor` pages (ADR-113) |
+| `/v2/_pit` | POST/DELETE | Open / close a point-in-time snapshot for cursor pagination (in-process modes; remote assemblies 501 — ADR-113) |
 | `/_mpercolate` | POST | Batch percolate (high throughput; columnar broad lane; `responses[]` envelope) |
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |
 | `/_flush` | POST | Flush memtable to immutable segment |

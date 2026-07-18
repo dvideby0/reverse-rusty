@@ -95,6 +95,11 @@ impl EngineSnapshot {
         deadline: Option<Instant>,
         policy_for: &(impl Fn(usize, usize) -> P + Sync),
     ) -> Result<BatchRankedMatch, RankedMatchError> {
+        if options.search_after.is_some() {
+            return Err(RankedMatchError::Admission(
+                TopKAdmissionError::BatchSearchAfterUnsupported,
+            ));
+        }
         if options.size > MAX_TOP_K {
             return Err(RankedMatchError::Admission(
                 TopKAdmissionError::SizeTooLarge {

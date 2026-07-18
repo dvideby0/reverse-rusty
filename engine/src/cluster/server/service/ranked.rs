@@ -37,6 +37,9 @@ pub(super) fn percolate_top_k(
         } else {
             QueryScope::Standard
         },
+        // The wire never carries a pagination boundary: PIT paging is an
+        // in-process concern and RemoteShard refuses pit reads (ADR-113).
+        search_after: None,
     };
     let ranked = match state.shard.percolate_top_k_owned(
         &req.title,

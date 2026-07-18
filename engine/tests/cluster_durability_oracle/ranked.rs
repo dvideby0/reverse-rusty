@@ -24,6 +24,7 @@ fn ranked_view(cluster: &ClusterEngine) -> RankedView {
         })
         .expect("rank program");
     let options = TopKOptions {
+        search_after: None,
         size: 7,
         track_total_hits_up_to: 10_000,
         query_scope: QueryScope::WithBroad,

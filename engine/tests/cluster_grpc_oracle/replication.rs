@@ -128,6 +128,7 @@ fn grpc_replicated_failover_and_peer_recovery() {
         })
         .expect("rank program");
     let rank_options = TopKOptions {
+        search_after: None,
         size: 10,
         track_total_hits_up_to: 10_000,
         query_scope: QueryScope::WithBroad,

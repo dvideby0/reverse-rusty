@@ -33,6 +33,9 @@ fn state() -> Arc<AppState> {
         slow_query_threshold_ms: 0,
         auth: None,
         feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
+        pit_tokens: crate::pit::PitTokens::generate(),
+        pits: parking_lot::Mutex::new(reverse_rusty::PitRegistry::new()),
+        pit_config: reverse_rusty::PitConfig::default(),
     })
 }
 
@@ -137,6 +140,9 @@ async fn put_doc_honors_memtable_flush_threshold() {
         slow_query_threshold_ms: 0,
         auth: None,
         feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
+        pit_tokens: crate::pit::PitTokens::generate(),
+        pits: parking_lot::Mutex::new(reverse_rusty::PitRegistry::new()),
+        pit_config: reverse_rusty::PitConfig::default(),
     });
 
     do_put(&state, 1, "michael jordan").await;
