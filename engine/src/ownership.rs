@@ -452,6 +452,63 @@ impl EmissionPolicy for UniqueOwner<'_> {
     }
 }
 
+/// Per-title emission policy for the batch matcher (ADR-112): the batch
+/// analogue of [`EmissionPolicy`], indexed by chunk-local title position.
+/// `title_policy` hands the per-title scalar lanes their [`EmissionPolicy`];
+/// `should_emit` is the columnar kernel's per-(title, candidate) check.
+pub(crate) trait BatchEmissionPolicy: Copy {
+    type TitlePolicy: EmissionPolicy;
+    fn title_policy(self, title_index: usize) -> Self::TitlePolicy;
+    fn should_emit(self, title_index: usize, placement: QueryPlacementRef<'_>) -> bool;
+}
+
+impl BatchEmissionPolicy for EmitAll {
+    type TitlePolicy = EmitAll;
+    #[inline]
+    fn title_policy(self, _title_index: usize) -> EmitAll {
+        EmitAll
+    }
+    #[inline]
+    fn should_emit(self, _title_index: usize, _placement: QueryPlacementRef<'_>) -> bool {
+        true
+    }
+}
+
+/// One [`OwnershipContext`] per batch title, index-aligned with the title
+/// chunk the kernel is evaluating. A mixed-up index would silently move a
+/// logical row's emission to the wrong title's owner, so the driver slices
+/// contexts and titles from the same chunk base.
+// Constructed by the cluster shard's batch read (the gRPC-wire commit); until
+// that lands only the snapshot `_owned` entry references it.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PerTitleUniqueOwner<'a> {
+    contexts: &'a [OwnershipContext],
+    current_position: u32,
+}
+
+#[allow(dead_code)]
+impl<'a> PerTitleUniqueOwner<'a> {
+    pub(crate) fn new(contexts: &'a [OwnershipContext], current_position: u32) -> Self {
+        Self {
+            contexts,
+            current_position,
+        }
+    }
+}
+
+impl<'a> BatchEmissionPolicy for PerTitleUniqueOwner<'a> {
+    type TitlePolicy = UniqueOwner<'a>;
+    #[inline]
+    fn title_policy(self, title_index: usize) -> UniqueOwner<'a> {
+        UniqueOwner::new(&self.contexts[title_index], self.current_position)
+    }
+    #[inline]
+    fn should_emit(self, title_index: usize, placement: QueryPlacementRef<'_>) -> bool {
+        self.title_policy(title_index).should_emit(placement)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

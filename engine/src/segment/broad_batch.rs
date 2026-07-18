@@ -35,6 +35,7 @@
 
 mod driver;
 mod kernel;
+mod ranked;
 
 // Re-export the batch entry points so the module's external surface
 // (`super::broad_batch::batch_results` etc., as consumed by `matching.rs` and
@@ -42,3 +43,4 @@ mod kernel;
 pub(in crate::segment) use driver::{
     batch_results, batch_results_with_stats, batch_stats, try_batch_results_with_stats,
 };
+pub(in crate::segment) use ranked::try_batch_top_k;

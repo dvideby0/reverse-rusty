@@ -109,6 +109,25 @@ pub struct RankedMatch {
     pub rank_stats: RankStats,
 }
 
+/// One title's bounded ranked result inside a batch (ADR-112) — the per-slot
+/// projection of [`RankedMatch`] (match statistics are batch-aggregate on the
+/// columnar path, so they live on [`BatchRankedMatch`], not here).
+#[derive(Clone, Debug)]
+pub struct BatchRankedTitle {
+    pub hits: Vec<RankedHit>,
+    pub total_hits: crate::result::TotalHits,
+    pub rank_stats: RankStats,
+}
+
+/// Bounded ranked batch result (ADR-112): per-title winners/totals in request
+/// order plus the batch-aggregate match statistics (`stats.matches` is the
+/// saturating sum of per-title total values).
+#[derive(Clone, Debug)]
+pub struct BatchRankedMatch {
+    pub titles: Vec<BatchRankedTitle>,
+    pub stats: crate::segment::MatchStats,
+}
+
 /// Failures from local bounded ranked matching.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RankedMatchError {

@@ -720,6 +720,21 @@ impl EngineSnapshot {
         None
     }
 
+    /// Build the newest-live integer scorer for one compiled rank program —
+    /// the ONE closure the scalar and batch bounded collectors both score
+    /// through (`Fn`, so a batch can share it across per-title slots).
+    pub(in crate::segment) fn program_scorer<'a>(
+        &'a self,
+        program: &'a crate::rank::CompiledRankProgram,
+    ) -> impl Fn(u64) -> i64 + Sync + 'a {
+        move |logical_id| {
+            self.rank_metadata_for_logical(logical_id)
+                .map_or(0, |(values, tags)| {
+                    crate::rank::score_program(values, tags, program)
+                })
+        }
+    }
+
     /// Bounded local ranked percolation over the scalar matcher. Collection is
     /// `O(K + total-threshold)` and every score resolves newest-live metadata.
     pub fn try_match_title_top_k(
@@ -791,12 +806,8 @@ impl EngineSnapshot {
         }
         let threshold =
             usize::try_from(options.track_total_hits_up_to).unwrap_or(crate::result::MAX_TOP_K);
-        let mut collector = TopKCollector::new(options.size, threshold, |logical_id| {
-            self.rank_metadata_for_logical(logical_id)
-                .map_or(0, |(values, tags)| {
-                    crate::rank::score_program(values, tags, program)
-                })
-        });
+        let mut collector =
+            TopKCollector::new(options.size, threshold, self.program_scorer(program));
         let view = MatchView {
             norm: &self.norm,
             dict: &self.dict,

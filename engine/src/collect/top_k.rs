@@ -212,15 +212,11 @@ where
 /// Per-title bounded top-K over the indexed batch seam (ADR-112): one
 /// [`TopKState`] slot per batch title, ONE shared scorer (the rank program is
 /// per-request, not per-title, so scores cannot diverge across slots).
-// Constructed by the ranked-batch driver entry points (next commit); until
-// they land only the differential tests exercise it.
-#[allow(dead_code)]
 pub(crate) struct BatchTopKCollector<F> {
     slots: Vec<TopKState>,
     scorer: F,
 }
 
-#[allow(dead_code)]
 impl<F> BatchTopKCollector<F>
 where
     F: FnMut(u64) -> i64,

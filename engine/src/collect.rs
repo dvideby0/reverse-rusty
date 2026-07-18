@@ -9,7 +9,7 @@ use crate::util::FastSet;
 
 mod top_k;
 
-pub(crate) use top_k::TopKCollector;
+pub(crate) use top_k::{BatchTopKCollector, TopKCollector};
 
 /// Summary returned when a collector finalizes one exact matching pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
