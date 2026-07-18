@@ -28,9 +28,20 @@ use super::{
     RankedHitsBody, Shards,
 };
 
+/// Batch document DTO: unlike the permissive shared `DocBody`, unknown fields
+/// are captured and rejected as a named 400 — the contract says per-document
+/// options are unsupported, and silently discarding `{"title":x,"size":1}`
+/// would apply the batch-wide K while looking honored (codex review).
+#[derive(Deserialize)]
+pub(crate) struct V2BatchDoc {
+    title: String,
+    #[serde(flatten)]
+    extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct V2MPercolateBody {
-    documents: Option<Vec<super::super::DocBody>>,
+    documents: Option<Vec<V2BatchDoc>>,
     filter: Option<serde_json::Value>,
     result_mode: Option<reverse_rusty::ResultMode>,
     query_scope: Option<reverse_rusty::QueryScope>,
@@ -111,7 +122,26 @@ fn prepare_batch(body: V2MPercolateBody) -> Result<PreparedBatch, PrepareFailure
             "v2 batch percolate supports result_mode=top_k only",
         )));
     }
-    let documents = body.documents.unwrap_or_default();
+    // A MISSING field must 400 (a misspelled request must not look like a
+    // successful empty batch); an explicit `documents: []` stays the 200 no-op.
+    let Some(documents) = body.documents else {
+        return Err(PrepareFailure::Validation(validation(
+            "request must include 'documents'",
+        )));
+    };
+    for (index, document) in documents.iter().enumerate() {
+        if let Some(key) = document.extra.keys().next() {
+            return Err(PrepareFailure::Validation(validation(format!(
+                "documents[{index}] carries unsupported per-document option `{key}`;                  options are batch-wide on /v2/_mpercolate"
+            ))));
+        }
+    }
+    let documents: Vec<super::super::DocBody> = documents
+        .into_iter()
+        .map(|document| super::super::DocBody {
+            title: document.title,
+        })
+        .collect();
     let (titles, _, filter) = resolve_percolate(None, Some(documents), body.filter, None)
         .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
     let options = reverse_rusty::TopKOptions {

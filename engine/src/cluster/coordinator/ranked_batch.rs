@@ -116,6 +116,22 @@ impl ClusterEngine {
             .enumerate()
             .filter(|(_, indices)| !indices.is_empty())
             .collect();
+        // Post-routing admission (codex review): each title occupies one eager
+        // K-reservation per ROUTED shard and the sub-batches run concurrently,
+        // so the honest heap charge is routed title-shard pairs, not titles.
+        let routed_rows = active
+            .iter()
+            .map(|(_, indices)| indices.len() as u64)
+            .sum::<u64>()
+            .saturating_mul(options.size as u64);
+        if routed_rows > MAX_RANKED_BATCH_HEAP_ROWS {
+            return Err(ClusterRankedError::Admission(
+                TopKAdmissionError::BatchHeapBudgetExceeded {
+                    requested_rows: routed_rows,
+                    max: MAX_RANKED_BATCH_HEAP_ROWS,
+                },
+            ));
+        }
 
         let collect_one = |(position, title_indices): &(usize, Vec<usize>)| {
             let requests: Vec<BatchTitleRequest<'_>> = title_indices
@@ -273,45 +289,50 @@ impl ClusterEngine {
             .collect();
 
         // Sequential one-credit draining, exactly like the single-title fetch:
-        // the remaining credit is handed to one owner group at a time.
+        // the remaining credit is handed to one owner group at a time. Groups
+        // are chunked to the shard request ceiling (codex review): a batch may
+        // legitimately hold more than MAX_TOP_K distinct winners on one owner,
+        // and the gRPC fetch handler rejects oversized id lists.
         let mut sources: FastMap<u64, String> = fast_map();
         let mut remaining = max_source_bytes;
-        for (position, ids) in &active {
-            let rows = match self.shards[*position].fetch_matches(ids, remaining, deadline) {
-                Err(ShardError::EnrichmentLimit { .. }) => {
-                    return Err(ClusterRankedError::EnrichmentLimit {
-                        limit: max_source_bytes,
-                    });
-                }
-                other => other.map_err(ClusterRankedError::from)?,
-            };
-            if rows.len() != ids.len() {
-                return Err(ClusterRankedError::InvalidShardReply {
-                    position: *position,
-                    detail: format!(
-                        "source stream returned {} rows for {} requested winners",
-                        rows.len(),
-                        ids.len()
-                    ),
-                });
-            }
-            for (&expected_id, row) in ids.iter().zip(rows) {
-                if row.logical_id != expected_id {
+        for (position, group_ids) in &active {
+            for ids in group_ids.chunks(crate::result::MAX_TOP_K) {
+                let rows = match self.shards[*position].fetch_matches(ids, remaining, deadline) {
+                    Err(ShardError::EnrichmentLimit { .. }) => {
+                        return Err(ClusterRankedError::EnrichmentLimit {
+                            limit: max_source_bytes,
+                        });
+                    }
+                    other => other.map_err(ClusterRankedError::from)?,
+                };
+                if rows.len() != ids.len() {
                     return Err(ClusterRankedError::InvalidShardReply {
                         position: *position,
                         detail: format!(
-                            "source stream returned id {} where {expected_id} was requested",
-                            row.logical_id
+                            "source stream returned {} rows for {} requested winners",
+                            rows.len(),
+                            ids.len()
                         ),
                     });
                 }
-                let Some(next) = remaining.checked_sub(row.source.len()) else {
-                    return Err(ClusterRankedError::EnrichmentLimit {
-                        limit: max_source_bytes,
-                    });
-                };
-                remaining = next;
-                sources.insert(row.logical_id, row.source);
+                for (&expected_id, row) in ids.iter().zip(rows) {
+                    if row.logical_id != expected_id {
+                        return Err(ClusterRankedError::InvalidShardReply {
+                            position: *position,
+                            detail: format!(
+                                "source stream returned id {} where {expected_id} was requested",
+                                row.logical_id
+                            ),
+                        });
+                    }
+                    let Some(next) = remaining.checked_sub(row.source.len()) else {
+                        return Err(ClusterRankedError::EnrichmentLimit {
+                            limit: max_source_bytes,
+                        });
+                    };
+                    remaining = next;
+                    sources.insert(row.logical_id, row.source);
+                }
             }
         }
         check_deadline(deadline)?;

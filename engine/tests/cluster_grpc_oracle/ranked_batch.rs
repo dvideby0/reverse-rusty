@@ -269,3 +269,74 @@ fn grpc_batch_expired_deadline_fails_the_whole_batch() {
         .expect_err("expired deadline must fail the whole batch");
     assert!(matches!(err, ClusterRankedError::DeadlineExceeded));
 }
+
+/// Codex-review regression: a batch can hold more than `MAX_TOP_K` distinct
+/// winners on ONE owner (disjoint per-title winner sets), and the wire fetch
+/// handler rejects id lists above that ceiling — the coordinator must chunk
+/// owner groups while carrying the one credit forward.
+#[test]
+fn grpc_batch_fetch_chunks_oversized_owner_groups() {
+    let mut queries: Vec<(u64, String)> = (1..=6_500u64)
+        .map(|id| (id, "topps chrome".to_string()))
+        .collect();
+    queries.extend((6_501..=13_000u64).map(|id| (id, "bowman draft".to_string())));
+    let norm = Arc::new(vocab());
+    let dict = frozen_dict_over(&queries, &norm);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let endpoints = spawn_pending(
+        &rt,
+        &norm,
+        1,
+        reverse_rusty::cluster::DEFAULT_MAX_GRPC_RESULT_BYTES,
+    );
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        ..ClusterConfig::default()
+    };
+    let cluster = ClusterEngine::connect_remote(
+        Arc::clone(&norm),
+        dict,
+        empty_tag_dict(),
+        &cfg,
+        &endpoints,
+        rt.handle(),
+    )
+    .expect("remote cluster");
+    cluster.ingest(&queries).expect("ingest");
+    let cluster_program = cluster
+        .compile_rank_program(&RankProgramSpec::default())
+        .expect("program");
+    let titles = vec![
+        "2020 topps chrome update".to_string(),
+        "bowman draft chrome".to_string(),
+    ];
+    let batch = cluster
+        .try_percolate_filtered_top_k_batch(
+            &titles,
+            &[],
+            TopKOptions {
+                size: 6_500,
+                track_total_hits_up_to: 10_000,
+                query_scope: QueryScope::Standard,
+            },
+            &cluster_program,
+            None,
+        )
+        .expect("batch top k");
+    let distinct: std::collections::HashSet<u64> = batch
+        .titles
+        .iter()
+        .flat_map(|title| title.hits.iter().map(|hit| hit.logical_id))
+        .collect();
+    assert!(
+        distinct.len() > reverse_rusty::MAX_TOP_K,
+        "fixture must exceed the per-request fetch ceiling (got {})",
+        distinct.len()
+    );
+    let sources = cluster
+        .fetch_ranked_sources_batch_bounded(&batch, 64 * 1024 * 1024, None)
+        .expect("oversized owner group must be chunked, not rejected");
+    for (i, title_sources) in sources.iter().enumerate() {
+        assert_eq!(title_sources.len(), batch.titles[i].hits.len());
+    }
+}

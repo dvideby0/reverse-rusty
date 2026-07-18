@@ -26,6 +26,24 @@ pub(in crate::segment) struct RankedSlot {
     pub(in crate::segment) rank_stats: RankStats,
 }
 
+/// Per-chunk resident bound for the lazy per-title total trackers (codex
+/// review): a chunk's collector can hold up to `chunk_len × (threshold + 1)`
+/// tracked ids while the chunk is in flight, so the ranked path clamps its
+/// chunk length to keep that product bounded regardless of the operator's
+/// `broad_batch_size` knob. At the default threshold (10 000) the clamp is
+/// ~419 titles — above the default 256-chunk, so default behavior is
+/// unchanged; only adversarially large knob settings are bounded.
+const RANKED_TRACKER_CHUNK_ROWS: usize = 1 << 22;
+
+/// The ranked chunk length: the configured batch chunk, clamped by the
+/// tracker-residency budget for this request's total threshold.
+fn ranked_chunk_len(configured: usize, total_threshold: usize) -> usize {
+    let tracker_rows = total_threshold.saturating_add(1);
+    configured
+        .max(1)
+        .min((RANKED_TRACKER_CHUNK_ROWS / tracker_rows).max(1))
+}
+
 /// Bounded ranked batch match: per-title slots in request order + aggregate
 /// stats. `policy_for(chunk_base, chunk_len)` builds each chunk's emission
 /// policy over the SAME base the chunk's titles were sliced from — the
@@ -46,7 +64,7 @@ where
     F: Fn(u64) -> i64 + Sync,
     T: AsRef<str> + Sync,
 {
-    let chunk = opts.broad_batch_size.max(1);
+    let chunk = ranked_chunk_len(opts.broad_batch_size, total_threshold);
     let Some(d) = deadline else {
         let per_chunk: Vec<(Vec<RankedSlot>, MatchStats)> = titles
             .par_chunks(chunk)
@@ -137,4 +155,20 @@ fn merge_chunks(
         stats.merge(st);
     }
     (slots, stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ranked_chunk_len;
+
+    #[test]
+    fn ranked_chunk_clamp_bounds_tracker_residency_without_touching_defaults() {
+        // Default knob (256) at the default threshold stays unchanged.
+        assert_eq!(ranked_chunk_len(256, 10_000), 256);
+        // An adversarially large knob is clamped by the tracker budget.
+        assert_eq!(ranked_chunk_len(10_000, 10_000), (1 << 22) / 10_001);
+        // A tiny threshold leaves the knob in charge.
+        assert_eq!(ranked_chunk_len(256, 0), 256);
+        assert_eq!(ranked_chunk_len(0, 10_000), 1);
+    }
 }

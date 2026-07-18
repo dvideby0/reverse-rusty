@@ -254,4 +254,35 @@ fn batch_admission_rejects_before_fanning() {
         err,
         ClusterRankedError::Admission(TopKAdmissionError::BatchHeapBudgetExceeded { .. })
     ));
+
+    // Codex-review regression: the honest charge is routed title-shard PAIRS.
+    // Two-anchor titles route to ~2 shards each, so 60 titles × fanout ≈ 120
+    // routed pairs × K=10_000 exceeds the 2^20 budget even though the naive
+    // titles × K charge (600k rows) admits.
+    let two_anchor: Vec<String> = (0..60).map(|_| "topps chrome".to_string()).collect();
+    match cluster.try_percolate_filtered_top_k_batch(
+        &two_anchor,
+        &[],
+        TopKOptions {
+            size: reverse_rusty::MAX_TOP_K,
+            track_total_hits_up_to: 10_000,
+            query_scope: QueryScope::Standard,
+        },
+        &program,
+        None,
+    ) {
+        Err(ClusterRankedError::Admission(TopKAdmissionError::BatchHeapBudgetExceeded {
+            requested_rows,
+            ..
+        })) => assert!(
+            requested_rows > (60u64 * reverse_rusty::MAX_TOP_K as u64),
+            "the routed charge must exceed the naive per-title charge"
+        ),
+        Ok(batch) => {
+            // Routing collapsed to one shard per title on this corpus: the
+            // routed charge equals the admitted naive charge — verify.
+            assert!(batch.titles.iter().all(|title| title.routed_shards <= 1));
+        }
+        Err(other) => panic!("unexpected admission outcome: {other:?}"),
+    }
 }

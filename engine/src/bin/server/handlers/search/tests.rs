@@ -976,6 +976,28 @@ async fn v2_mpercolate_named_unsupported_shapes_and_empty_batch() {
     };
     assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
 
+    let Err(error) = v2_mpercolate(
+        State(Arc::clone(&state)),
+        Json(v2_batch_body(serde_json::json!({}))),
+    )
+    .await
+    else {
+        panic!("a MISSING documents field must be a named 400, not an empty 200");
+    };
+    assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
+
+    let Err(error) = v2_mpercolate(
+        State(Arc::clone(&state)),
+        Json(v2_batch_body(serde_json::json!({
+            "documents": [{"title": "topps chrome", "size": 1}]
+        }))),
+    )
+    .await
+    else {
+        panic!("a per-document option must be a named 400, never silently discarded");
+    };
+    assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
+
     let empty = v2_mpercolate(
         State(Arc::clone(&state)),
         Json(v2_batch_body(serde_json::json!({"documents": []}))),

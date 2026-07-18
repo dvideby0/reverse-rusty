@@ -109,6 +109,7 @@ pub(super) fn percolate_top_k_batch(
     // fails the call instead of truncating a stream mid-flight.
     let mut frames: Vec<Result<proto::PercolateTopKBatchFrame, Status>> =
         Vec::with_capacity(ranked.titles.len() + 1);
+    let mut pending_counts: Vec<(usize, usize, bool)> = Vec::with_capacity(ranked.titles.len());
     for (index, title) in ranked.titles.into_iter().enumerate() {
         let exact = title.total_hits.relation == TotalHitsRelation::Eq;
         let frame = proto::PercolateTopKBatchFrame {
@@ -142,10 +143,9 @@ pub(super) fn percolate_top_k_batch(
             Some(proto::percolate_top_k_batch_frame::Frame::Title(result)) => result.hits.len(),
             _ => 0,
         };
-        // Per-title accounting through the existing fixed-cardinality
-        // counters: a batch of N titles records N rows/relations, exactly as N
-        // single top-K calls would.
-        slot.ranked.record_top_k(hits, encoded, exact);
+        // Deferred: counters commit only after EVERY frame passes validation
+        // (codex review — a later cap failure must not leave phantom results).
+        pending_counts.push((hits, encoded, exact));
         frames.push(Ok(frame));
     }
     let summary = proto::PercolateTopKBatchFrame {
@@ -164,6 +164,14 @@ pub(super) fn percolate_top_k_batch(
         return Err(status);
     }
     frames.push(Ok(summary));
+    // Every frame validated: commit the per-title counters (a batch of N
+    // titles records N rows/relations, exactly as N single top-K calls would)
+    // plus the summary frame's bytes, so shard result-byte accounting matches
+    // the coordinator's every-frame sum (codex review).
+    for (hits, bytes, exact) in pending_counts {
+        slot.ranked.record_top_k(hits, bytes, exact);
+    }
+    slot.ranked.record_result_bytes(encoded);
     slot.latency
         .observe(ShardRpc::PercolateTopKBatch, started.elapsed());
     slot.broad.record(&stats);
