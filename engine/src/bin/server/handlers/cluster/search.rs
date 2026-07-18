@@ -120,6 +120,10 @@ type ScoredIds = Vec<(u64, Option<i64>)>;
 /// of the single-node `order_and_page` (ADR-059/075). Ranked rows sort by
 /// `(score desc, _id asc)` (a total order, so pagination is byte-stable); unranked
 /// rows keep the merged ascending-id order. Then `from`/`size`.
+///
+/// The canonical statement of this order is `reverse_rusty::ranked_order`; this
+/// sort stays hand-written only because its rows carry `Option<i64>` scores (the
+/// ranked branch is all-`Some`, so the `Option` ordering never actually decides).
 fn order_and_page(rows: &ScoredIds, ranked: bool, from: usize, size: usize) -> ScoredIds {
     if ranked {
         let mut sorted = rows.clone();

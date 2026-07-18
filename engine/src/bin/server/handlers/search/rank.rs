@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-use reverse_rusty::{CompiledRankSpec, EngineSnapshot, RankSpec};
+use reverse_rusty::{ranked_order, CompiledRankSpec, EngineSnapshot, RankSpec};
 
 /// The optional `rank` block (ADR-059) on a percolate request. Maps to
 /// [`reverse_rusty::RankSpec`]: order matched queries by a numeric priority tag
@@ -65,7 +65,7 @@ pub(super) fn order_and_page(
     match rank {
         Some(spec) => {
             let mut scored = snap.rank(ids, spec);
-            scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            scored.sort_by(|a, b| ranked_order((a.1, a.0), (b.1, b.0)));
             scored
                 .into_iter()
                 .skip(from)
