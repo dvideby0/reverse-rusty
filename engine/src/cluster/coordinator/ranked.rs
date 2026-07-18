@@ -11,8 +11,8 @@ use std::time::Instant;
 use crate::cluster::shard::{FetchedMatch, ShardError, ShardRankedMatch};
 use crate::rank::{CompiledRankProgram, RankProgramError, RankProgramSpec, RankStats};
 use crate::result::{
-    QueryScope, TopKAdmissionError, TopKOptions, TotalHits, TotalHitsRelation,
-    DEFAULT_TRACK_TOTAL_HITS_UP_TO, MAX_TOP_K,
+    ranked_beats, ranked_order, QueryScope, TopKAdmissionError, TopKOptions, TotalHits,
+    TotalHitsRelation, DEFAULT_TRACK_TOTAL_HITS_UP_TO, MAX_TOP_K,
 };
 use crate::segment::MatchStats;
 use crate::util::FastSet;
@@ -209,9 +209,7 @@ impl ClusterEngine {
             TotalHits::lower_bound(threshold)
         };
         hits.sort_unstable_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then_with(|| a.logical_id.cmp(&b.logical_id))
+            ranked_order((a.score, a.logical_id), (b.score, b.logical_id))
         });
         hits.truncate(options.size);
         // The fan-out may complete just under the wire; the merge/sort above ran
@@ -474,8 +472,10 @@ fn validate_part(
     for pair in part.hits.windows(2) {
         let left = pair[0];
         let right = pair[1];
-        let ordered = left.score > right.score
-            || (left.score == right.score && left.logical_id < right.logical_id);
+        let ordered = ranked_beats(
+            (left.score, left.logical_id),
+            (right.score, right.logical_id),
+        );
         if !ordered {
             return Err(ClusterRankedError::InvalidShardReply {
                 position,

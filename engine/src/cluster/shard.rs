@@ -41,12 +41,14 @@ use std::sync::Arc;
 
 use super::clog::{ClusterMutation, LogPos};
 
+mod fetch;
 mod local;
 mod retention;
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) use fetch::fetch_source_step;
 pub(crate) use local::LocalShard;
 
 /// An error from cluster construction or a shard operation. In-process

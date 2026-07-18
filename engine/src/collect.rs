@@ -4,7 +4,7 @@
 //! member-level alive/tag checks. Collectors therefore cannot affect candidate
 //! retrieval or the lossless signature cover.
 
-use crate::result::{TotalHits, TotalHitsRelation};
+use crate::result::{ranked_beats, ranked_order, TotalHits, TotalHitsRelation};
 use crate::util::FastSet;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -244,14 +244,14 @@ struct HeapHit {
     score: i64,
 }
 
-// BinaryHeap keeps its greatest value at the root. Define "greater" as worse
-// under the public order so peek() is always the current worst winner.
+// BinaryHeap keeps its greatest value at the root. Under `ranked_order`,
+// "precedes" is Less, so the max-heap root is always the current worst winner.
 impl Ord for HeapHit {
     fn cmp(&self, other: &Self) -> Ordering {
-        other
-            .score
-            .cmp(&self.score)
-            .then_with(|| self.logical_id.cmp(&other.logical_id))
+        ranked_order(
+            (self.score, self.logical_id),
+            (other.score, other.logical_id),
+        )
     }
 }
 
@@ -364,7 +364,7 @@ where
             .extend(self.heap.drain().map(|hit| (hit.logical_id, hit.score)));
         self.heap_ids.clear();
         self.winners
-            .sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            .sort_unstable_by(|a, b| ranked_order((a.1, a.0), (b.1, b.0)));
         let total_hits = self.totals.total_hits();
         CollectionSummary {
             retained: self.winners.len(),
@@ -380,8 +380,10 @@ where
 }
 
 fn better(candidate: HeapHit, worst: HeapHit) -> bool {
-    candidate.score > worst.score
-        || (candidate.score == worst.score && candidate.logical_id < worst.logical_id)
+    ranked_beats(
+        (candidate.score, candidate.logical_id),
+        (worst.score, worst.logical_id),
+    )
 }
 
 fn exact_duplicates(emissions: u64, total_hits: TotalHits) -> Option<u64> {

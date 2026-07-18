@@ -410,22 +410,35 @@ impl ShardServer {
         Ok((slot, st))
     }
 
+    // Both failure messages are frozen (a pre-ADR-111 client retypes them by
+    // substring); the ADR-111 ownership code rides as metadata alongside.
     fn validate_placement_config(
         &self,
         generation: crate::ownership::PlacementGeneration,
         num_shards: u32,
     ) -> Result<(), Status> {
+        use crate::cluster::ranked_wire::{attach, RankedWireCode};
         let space = self.node_dict.load_full().ok_or_else(|| {
-            Status::failed_precondition("node has not adopted an ownership-aware feature space")
+            attach(
+                Status::failed_precondition(
+                    "node has not adopted an ownership-aware feature space",
+                ),
+                RankedWireCode::OwnershipMismatch,
+                None,
+            )
         })?;
         if space.placement_generation != generation || space.num_shards != num_shards {
-            return Err(Status::failed_precondition(format!(
-                "placement configuration mismatch: node generation {}/{} shards, request generation {}/{} shards",
-                space.placement_generation.0,
-                space.num_shards,
-                generation.0,
-                num_shards
-            )));
+            return Err(attach(
+                Status::failed_precondition(format!(
+                    "placement configuration mismatch: node generation {}/{} shards, request generation {}/{} shards",
+                    space.placement_generation.0,
+                    space.num_shards,
+                    generation.0,
+                    num_shards
+                )),
+                RankedWireCode::OwnershipMismatch,
+                None,
+            ));
         }
         Ok(())
     }

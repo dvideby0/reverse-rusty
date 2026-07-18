@@ -54,6 +54,27 @@ impl std::fmt::Display for TopKAdmissionError {
 
 impl std::error::Error for TopKAdmissionError {}
 
+/// The one ranked total order over `(score, logical_id)`: score descending,
+/// then logical id ascending (ADR-107/110). Every ranked surface — the bounded
+/// collector's heap and presentation sort, the coordinator merge and its
+/// shard-reply ordering guard, and the ADR-059 presentation sort — must express
+/// ordering through this function (or [`ranked_beats`]) so the tie rule cannot
+/// drift between them. `Less` means `a` precedes `b` in presentation order.
+#[inline]
+#[must_use]
+pub fn ranked_order(a: (i64, u64), b: (i64, u64)) -> std::cmp::Ordering {
+    b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1))
+}
+
+/// `a` strictly precedes `b` under [`ranked_order`]; an identical pair does not
+/// beat itself, which is what makes the strict shard-reply ordering guard and
+/// the heap-replacement predicate the same rule.
+#[inline]
+#[must_use]
+pub fn ranked_beats(a: (i64, u64), b: (i64, u64)) -> bool {
+    ranked_order(a, b) == std::cmp::Ordering::Less
+}
+
 /// Which accepted visibility classes a request asks the matcher to evaluate.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -144,5 +165,50 @@ mod tests {
         let total = TotalHits::lower_bound(DEFAULT_TRACK_TOTAL_HITS_UP_TO);
         let json = serde_json::to_string(&total).unwrap();
         assert_eq!(serde_json::from_str::<TotalHits>(&json).unwrap(), total);
+    }
+
+    #[test]
+    fn ranked_order_is_score_desc_then_id_asc() {
+        use std::cmp::Ordering;
+        // Higher score precedes lower, regardless of id.
+        assert_eq!(ranked_order((10, 9), (5, 1)), Ordering::Less);
+        assert_eq!(ranked_order((-1, 0), (0, 9)), Ordering::Greater);
+        // Score tie: lower id precedes.
+        assert_eq!(ranked_order((5, 1), (5, 2)), Ordering::Less);
+        assert_eq!(ranked_order((5, 2), (5, 1)), Ordering::Greater);
+        // Only an identical pair is Equal.
+        assert_eq!(ranked_order((5, 1), (5, 1)), Ordering::Equal);
+    }
+
+    #[test]
+    fn ranked_beats_is_the_strict_form() {
+        assert!(ranked_beats((6, 9), (5, 0)));
+        assert!(ranked_beats((5, 1), (5, 2)));
+        assert!(!ranked_beats((5, 2), (5, 1)));
+        assert!(!ranked_beats((5, 1), (5, 1)));
+    }
+
+    #[test]
+    fn ranked_order_is_a_total_order() {
+        use std::cmp::Ordering;
+        let mut pairs = Vec::new();
+        for score in -2i64..=2 {
+            for id in 0u64..4 {
+                pairs.push((score, id));
+            }
+        }
+        for &a in &pairs {
+            for &b in &pairs {
+                // Antisymmetry, and Equal exactly on identical pairs.
+                assert_eq!(ranked_order(a, b), ranked_order(b, a).reverse());
+                assert_eq!(ranked_order(a, b) == Ordering::Equal, a == b);
+                for &c in &pairs {
+                    // Transitivity of strict precedence.
+                    if ranked_beats(a, b) && ranked_beats(b, c) {
+                        assert!(ranked_beats(a, c));
+                    }
+                }
+            }
+        }
     }
 }

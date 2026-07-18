@@ -782,10 +782,16 @@ fn rpc_err(status: &tonic::Status) -> ShardError {
 
 /// ADR-110 ranked-seam inverse of the server's `read_status`: reconstruct the
 /// typed errors the coordinator's no-partial contract branches on (enrichment
-/// limit → 413, ownership/config mismatch → 503, per-id source loss). Every arm
-/// requires BOTH the status code and the server's message form; anything else
-/// stays a message-preserving `Remote` rather than a mistyped reconstruction.
+/// limit → 413, ownership/config mismatch → 503, per-id source loss).
+/// Metadata-first (the ADR-111 structured code an up-to-date peer attaches);
+/// the frozen-message substring ladder below stays as the version-skew
+/// fallback. Every fallback arm requires BOTH the status code and the server's
+/// message form; anything else stays a message-preserving `Remote` rather than
+/// a mistyped reconstruction.
 fn ranked_rpc_err(status: &tonic::Status) -> ShardError {
+    if let Some(error) = crate::cluster::ranked_wire::parse(status) {
+        return error;
+    }
     let message = status.message();
     match status.code() {
         tonic::Code::DeadlineExceeded => ShardError::DeadlineExceeded,
@@ -1240,13 +1246,21 @@ impl Shard for RemoteShard {
                         ));
                     }
                     if row.placement_generation != generation || row.num_shards != num_shards {
-                        return Err(tonic::Status::failed_precondition(
-                            "fetch_matches placement configuration mismatch",
+                        return Err(crate::cluster::ranked_wire::attach(
+                            tonic::Status::failed_precondition(
+                                "fetch_matches placement configuration mismatch",
+                            ),
+                            crate::cluster::ranked_wire::RankedWireCode::OwnershipMismatch,
+                            None,
                         ));
                     }
                     if row.source.len() > remaining_bytes {
-                        return Err(tonic::Status::resource_exhausted(
-                            "ranked enrichment byte credit exceeded by fetch stream",
+                        return Err(crate::cluster::ranked_wire::attach(
+                            tonic::Status::resource_exhausted(
+                                "ranked enrichment byte credit exceeded by fetch stream",
+                            ),
+                            crate::cluster::ranked_wire::RankedWireCode::EnrichmentLimit,
+                            Some(u64::try_from(max_source_bytes).unwrap_or(u64::MAX)),
                         ));
                     }
                     remaining_bytes -= row.source.len();
@@ -1858,6 +1872,52 @@ mod tests {
         assert!(matches!(
             ranked_rpc_err(&tonic::Status::internal("ownership sweep failed")),
             ShardError::Remote(_)
+        ));
+    }
+
+    /// ADR-111: with the structured metadata code present, reconstruction no
+    /// longer depends on the message at all — a deliberately scrambled message
+    /// still yields the typed error (and the true argument). The frozen-message
+    /// arms above remain the version-skew fallback.
+    #[test]
+    fn ranked_seam_prefers_metadata_over_message_substrings() {
+        use crate::cluster::ranked_wire::{attach, RankedWireCode};
+        assert!(matches!(
+            ranked_rpc_err(&attach(
+                tonic::Status::not_found("scrambled"),
+                RankedWireCode::SourceUnavailable,
+                Some(42),
+            )),
+            ShardError::SourceUnavailable(42)
+        ));
+        assert!(matches!(
+            ranked_rpc_err(&attach(
+                tonic::Status::resource_exhausted("scrambled"),
+                RankedWireCode::EnrichmentLimit,
+                Some(1024),
+            )),
+            ShardError::EnrichmentLimit { limit: 1024 }
+        ));
+        assert!(matches!(
+            ranked_rpc_err(&attach(
+                tonic::Status::failed_precondition("scrambled"),
+                RankedWireCode::OwnershipMismatch,
+                None,
+            )),
+            ShardError::OwnershipMismatch(_)
+        ));
+        // The codex-review case: a MARKED protocol failure whose message
+        // contains "ownership" must stay Protocol — the metadata short-circuits
+        // the substring ladder that would have retyped it.
+        assert!(matches!(
+            ranked_rpc_err(&attach(
+                tonic::Status::failed_precondition(
+                    "shard protocol error: missing bounded/ownership attestation"
+                ),
+                RankedWireCode::Protocol,
+                None,
+            )),
+            ShardError::Protocol(ref m) if m.contains("ownership attestation")
         ));
     }
 }

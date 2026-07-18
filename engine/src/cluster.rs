@@ -27,6 +27,7 @@ mod autoscale;
 mod clog;
 mod control;
 mod coordinator;
+mod http_status;
 mod replica;
 mod ring;
 mod shard;
@@ -49,6 +50,8 @@ mod health;
 mod node_metrics;
 #[cfg(feature = "distributed")]
 mod proto;
+#[cfg(feature = "distributed")]
+mod ranked_wire;
 #[cfg(feature = "distributed")]
 mod remote;
 #[cfg(feature = "distributed")]

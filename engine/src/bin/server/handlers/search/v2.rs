@@ -1,4 +1,6 @@
-//! Local bounded ranked percolation (`POST /v2/_search`, ADR-107/108).
+//! Bounded ranked percolation (`POST /v2/_search`, ADR-107/108/110): the
+//! request contract (DTOs + `prepare`) and the two thin mode handlers over the
+//! shared delivery pipeline in [`delivery`].
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -6,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
-use tracing::{info, instrument, warn};
+use tracing::instrument;
 
 use crate::dto::{ApiError, HitSource};
 use crate::metrics::PrometheusMetrics;
@@ -14,6 +16,8 @@ use crate::state::{AppState, ClusterAppState};
 
 use super::resolve::resolve_percolate;
 use super::DocBody;
+
+mod delivery;
 
 thread_local! {
     static RANKED_SCRATCH: RefCell<reverse_rusty::segment::MatchScratch> =
@@ -234,54 +238,22 @@ fn prepare(body: V2SearchBody) -> Result<PreparedSearch, PrepareFailure> {
     })
 }
 
-/// Fail-closed accounting for source text fetched during winner enrichment.
-/// A source used by both `_source` and explain is charged once.
-struct EnrichmentBudget {
-    used: usize,
-    limit: usize,
-}
-
-impl EnrichmentBudget {
-    fn new(limit: usize) -> Self {
-        Self { used: 0, limit }
+/// Shared prepare-failure accounting: an admission rejection counts its
+/// reason label, everything else records a validation outcome.
+fn prepare_failure(
+    prom: &PrometheusMetrics,
+    failure: PrepareFailure,
+    scope: reverse_rusty::QueryScope,
+) -> (StatusCode, Json<ApiError>) {
+    if let Some(reason) = failure.admission_reason() {
+        prom.rank_admission_rejections_total
+            .with_label_values(&[reason])
+            .inc();
+        record_outcome(prom, "admission", scope);
+    } else {
+        record_outcome(prom, "validation", scope);
     }
-
-    fn charge(&mut self, bytes: usize) -> Result<(), ()> {
-        let next = self.used.checked_add(bytes).ok_or(())?;
-        if next > self.limit {
-            return Err(());
-        }
-        self.used = next;
-        Ok(())
-    }
-
-    fn remaining(&self) -> usize {
-        self.limit.saturating_sub(self.used)
-    }
-}
-
-struct DeliveryResult {
-    hits: Vec<RankedHitBody>,
-    total_hits: reverse_rusty::TotalHits,
-    stats: reverse_rusty::segment::MatchStats,
-    rank_stats: reverse_rusty::RankStats,
-    routed_shards: usize,
-    shard_rows_received: usize,
-    shard_result_bytes: u64,
-    source_bytes: usize,
-}
-
-enum DeliveryError {
-    Local(reverse_rusty::RankedMatchError),
-    Cluster(reverse_rusty::cluster::ClusterRankedError),
-    SourceUnavailable(u64),
-    ExplanationUnavailable(u64),
-    EnrichmentLimit,
-    Deadline,
-}
-
-fn deadline_expired(deadline: Instant) -> bool {
-    Instant::now() >= deadline
+    failure.response()
 }
 
 /// One-document, local-only, exact bounded top-K search.
@@ -294,19 +266,7 @@ pub(crate) async fn v2_search(
     let requested_scope = body.query_scope.unwrap_or_default();
     let prepared = match prepare(body) {
         Ok(prepared) => prepared,
-        Err(failure) => {
-            if let Some(reason) = failure.admission_reason() {
-                state
-                    .prom
-                    .rank_admission_rejections_total
-                    .with_label_values(&[reason])
-                    .inc();
-                record_outcome(&state.prom, "admission", requested_scope);
-            } else {
-                record_outcome(&state.prom, "validation", requested_scope);
-            }
-            return Err(failure.response());
-        }
+        Err(failure) => return Err(prepare_failure(&state.prom, failure, requested_scope)),
     };
     let PreparedSearch {
         title,
@@ -336,267 +296,26 @@ pub(crate) async fn v2_search(
         record_outcome(&state.prom, "validation", options.query_scope);
         return Err(validation("timeout_ms is too large"));
     };
-    let permit_sem = Arc::clone(&state.ranked_search_permits);
-    let state_inner = Arc::clone(&state);
-    let title_for_match = title.clone();
     let enrichment_limit = state.max_ranked_enrichment_bytes;
-
-    let work = async move {
-        let permit = crate::state::acquire_search_permit(
-            Some(&permit_sem),
-            &state_inner.prom.ranked_search_permits_in_use,
-        )
-        .await;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            state_inner.pool.install(|| {
-                RANKED_SCRATCH.with(|cell| {
-                    let ranked = snap
-                        .try_match_title_top_k(
-                            &title_for_match,
-                            options,
-                            &program,
-                            &predicate,
-                            &mut cell.borrow_mut(),
-                            Some(deadline),
-                        )
-                        .map_err(DeliveryError::Local)?;
-                    let mut budget = EnrichmentBudget::new(enrichment_limit);
-                    let mut hits = Vec::with_capacity(ranked.hits.len());
-                    for hit in ranked.hits {
-                        if deadline_expired(deadline) {
-                            return Err(DeliveryError::Deadline);
-                        }
-                        let source = if include_source || include_explain {
-                            // Bounded lookup: the store checks its borrowed value
-                            // against the REMAINING credit before cloning, so an
-                            // over-limit winner 413s without ever allocating the
-                            // full source `String` (codex review — peak-memory
-                            // bound).
-                            let source = match snap
-                                .get_query_source_bounded(hit.logical_id, budget.remaining())
-                            {
-                                Ok(Some(source)) => source,
-                                Ok(None) => {
-                                    return Err(if include_explain && !include_source {
-                                        DeliveryError::ExplanationUnavailable(hit.logical_id)
-                                    } else {
-                                        DeliveryError::SourceUnavailable(hit.logical_id)
-                                    });
-                                }
-                                Err(_over_credit) => return Err(DeliveryError::EnrichmentLimit),
-                            };
-                            budget
-                                .charge(source.len())
-                                .map_err(|()| DeliveryError::EnrichmentLimit)?;
-                            Some(source)
-                        } else {
-                            None
-                        };
-                        let explanation = if include_explain {
-                            let source = source
-                                .as_deref()
-                                .ok_or(DeliveryError::ExplanationUnavailable(hit.logical_id))?;
-                            Some(
-                                snap.explain_source(hit.logical_id, source, &title_for_match)
-                                    .ok_or(DeliveryError::ExplanationUnavailable(hit.logical_id))?,
-                            )
-                        } else {
-                            None
-                        };
-                        hits.push(RankedHitBody {
-                            _id: hit.logical_id,
-                            _score: hit.score,
-                            _source: if include_source {
-                                source.map(|query| HitSource { query })
-                            } else {
-                                None
-                            },
-                            _explanation: explanation,
-                        });
-                    }
-                    if deadline_expired(deadline) {
-                        return Err(DeliveryError::Deadline);
-                    }
-                    Ok(DeliveryResult {
-                        hits,
-                        total_hits: ranked.total_hits,
-                        stats: ranked.stats,
-                        rank_stats: ranked.rank_stats,
-                        routed_shards: 1,
-                        shard_rows_received: 0,
-                        shard_result_bytes: 0,
-                        source_bytes: budget.used,
-                    })
-                })
-            })
+    let work = move || {
+        RANKED_SCRATCH.with(|cell| {
+            delivery::local_delivery(
+                &snap,
+                &program,
+                &predicate,
+                &mut cell.borrow_mut(),
+                &delivery::DeliverySpec {
+                    title: &title,
+                    options,
+                    include_source,
+                    include_explain,
+                    enrichment_limit,
+                    deadline,
+                },
+            )
         })
-        .await
     };
-
-    let delivered = match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work)
-        .await
-    {
-        Ok(Ok(Ok(result))) => result,
-        Ok(Ok(Err(
-            DeliveryError::Local(reverse_rusty::RankedMatchError::Cancelled(_))
-            | DeliveryError::Deadline,
-        )))
-        | Err(_) => {
-            state
-                .prom
-                .http_requests_total
-                .with_label_values(&["v2_search", "408"])
-                .inc();
-            record_outcome(&state.prom, "timeout", options.query_scope);
-            let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
-            if elapsed_ms >= state.slow_query_threshold_ms as f64 {
-                state.prom.slow_queries_total.inc();
-            }
-            warn!(
-                k = options.size,
-                scope = ?options.query_scope,
-                relation = "unknown",
-                candidates = "unknown",
-                rank_time_ms = elapsed_ms,
-                cancellation = "deadline",
-                "v2 ranked search timed out"
-            );
-            return Err(ApiError::response(
-                StatusCode::REQUEST_TIMEOUT,
-                "timeout",
-                format!("ranked search timed out after {}ms", timeout.as_millis()),
-            ));
-        }
-        Ok(Ok(Err(DeliveryError::Local(reverse_rusty::RankedMatchError::Admission(error))))) => {
-            state
-                .prom
-                .rank_admission_rejections_total
-                .with_label_values(&["core"])
-                .inc();
-            record_outcome(&state.prom, "admission", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::BAD_REQUEST,
-                "rank_admission_rejected",
-                error.to_string(),
-            ));
-        }
-        Ok(Ok(Err(DeliveryError::SourceUnavailable(logical_id)))) => {
-            record_outcome(&state.prom, "error", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "source_unavailable",
-                format!("source unavailable for ranked winner {logical_id}"),
-            ));
-        }
-        Ok(Ok(Err(DeliveryError::ExplanationUnavailable(logical_id)))) => {
-            record_outcome(&state.prom, "error", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "explanation_unavailable",
-                format!("explanation unavailable for ranked winner {logical_id}"),
-            ));
-        }
-        Ok(Ok(Err(DeliveryError::EnrichmentLimit))) => {
-            state.prom.rank_enrichment_rejections_total.inc();
-            record_outcome(&state.prom, "enrichment_limit", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "rank_enrichment_limit",
-                format!(
-                    "ranked winner enrichment exceeds {} bytes",
-                    state.max_ranked_enrichment_bytes
-                ),
-            ));
-        }
-        Ok(Ok(Err(DeliveryError::Cluster(_)))) => {
-            record_outcome(&state.prom, "error", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "search_error",
-                "unexpected local ranked delivery error",
-            ));
-        }
-        Ok(Err(error)) => {
-            record_outcome(&state.prom, "error", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "search_error",
-                format!("ranked search task failed: {error}"),
-            ));
-        }
-    };
-
-    let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
-    state
-        .prom
-        .http_requests_total
-        .with_label_values(&["v2_search", "200"])
-        .inc();
-    record_outcome(&state.prom, "success", options.query_scope);
-    state
-        .prom
-        .rank_evaluations_total
-        .inc_by(delivered.rank_stats.evaluations);
-    state
-        .prom
-        .rank_heap_replacements_total
-        .inc_by(delivered.rank_stats.heap_replacements);
-    state
-        .prom
-        .rank_total_relation_total
-        .with_label_values(&[match delivered.total_hits.relation {
-            reverse_rusty::TotalHitsRelation::Eq => "eq",
-            reverse_rusty::TotalHitsRelation::Gte => "gte",
-        }])
-        .inc();
-    state
-        .prom
-        .rank_true_match_lower_bound_total
-        .inc_by(delivered.total_hits.value);
-    state
-        .prom
-        .rank_source_bytes_total
-        .inc_by(u64::try_from(delivered.source_bytes).unwrap_or(u64::MAX));
-    state
-        .prom
-        .rank_shard_rows_received_total
-        .inc_by(u64::try_from(delivered.shard_rows_received).unwrap_or(u64::MAX));
-    state
-        .prom
-        .rank_shard_result_bytes_total
-        .inc_by(delivered.shard_result_bytes);
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["v2_search"])
-        .observe(started.elapsed().as_secs_f64());
-    if took_ms >= state.slow_query_threshold_ms as f64 {
-        state.prom.slow_queries_total.inc();
-        info!(
-            k = options.size,
-            scope = ?options.query_scope,
-            relation = ?delivered.total_hits.relation,
-            candidates = delivered.stats.unique_candidates,
-            rank_time_ms = took_ms,
-            cancellation = "none",
-            "slow v2 ranked search"
-        );
-    }
-    Ok(Json(V2SearchResponse {
-        took_ms,
-        complete: true,
-        query_scope: options.query_scope,
-        _shards: Shards {
-            total: delivered.routed_shards,
-            successful: delivered.routed_shards,
-            failed: 0,
-        },
-        hits: RankedHitsBody {
-            total: delivered.total_hits,
-            hits: delivered.hits,
-        },
-    }))
+    delivery::drive(state, started, options, timeout, deadline, work).await
 }
 
 /// Coordinator-mode exact bounded top-K plus current-view winner fetch. No
@@ -611,19 +330,7 @@ pub(crate) async fn cluster_v2_search(
     let requested_scope = body.query_scope.unwrap_or_default();
     let prepared = match prepare(body) {
         Ok(prepared) => prepared,
-        Err(failure) => {
-            if let Some(reason) = failure.admission_reason() {
-                state
-                    .prom
-                    .rank_admission_rejections_total
-                    .with_label_values(&[reason])
-                    .inc();
-                record_outcome(&state.prom, "admission", requested_scope);
-            } else {
-                record_outcome(&state.prom, "validation", requested_scope);
-            }
-            return Err(failure.response());
-        }
+        Err(failure) => return Err(prepare_failure(&state.prom, failure, requested_scope)),
     };
     let PreparedSearch {
         title,
@@ -649,323 +356,37 @@ pub(crate) async fn cluster_v2_search(
         record_outcome(&state.prom, "validation", options.query_scope);
         return Err(validation("timeout_ms is too large"));
     };
-    let permit_sem = Arc::clone(&state.ranked_search_permits);
-    let state_inner = Arc::clone(&state);
-    let title_for_work = title.clone();
     let enrichment_limit = state.max_ranked_enrichment_bytes;
-    let work = async move {
-        let permit = crate::state::acquire_search_permit(
-            Some(&permit_sem),
-            &state_inner.prom.ranked_search_permits_in_use,
+    let cluster_state = Arc::clone(&state);
+    let work = move || {
+        // The cluster read lock is taken INSIDE the blocking closure (never
+        // across an await) and held for match + fetch + assembly, exactly as
+        // before the unification.
+        let cluster = cluster_state.cluster.read();
+        delivery::cluster_delivery(
+            &cluster,
+            &program,
+            &filter,
+            &delivery::DeliverySpec {
+                title: &title,
+                options,
+                include_source,
+                include_explain,
+                enrichment_limit,
+                deadline,
+            },
         )
-        .await;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            state_inner.pool.install(|| {
-                let cluster = state_inner.cluster.read();
-                let ranked = cluster
-                    .try_percolate_filtered_top_k(
-                        &title_for_work,
-                        &filter,
-                        options,
-                        &program,
-                        Some(deadline),
-                    )
-                    .map_err(DeliveryError::Cluster)?;
-                let sources = if include_source || include_explain {
-                    cluster
-                        .fetch_ranked_sources_bounded(&ranked, enrichment_limit, Some(deadline))
-                        .map_err(|error| match error {
-                            reverse_rusty::cluster::ClusterRankedError::EnrichmentLimit {
-                                ..
-                            } => DeliveryError::EnrichmentLimit,
-                            other => DeliveryError::Cluster(other),
-                        })?
-                } else {
-                    Vec::new()
-                };
-                let source_bytes = sources.iter().map(String::len).sum();
-                let mut sources = sources.into_iter();
-                let mut hits = Vec::with_capacity(ranked.hits.len());
-                for hit in &ranked.hits {
-                    if deadline_expired(deadline) {
-                        return Err(DeliveryError::Deadline);
-                    }
-                    let source = if include_source || include_explain {
-                        let source = sources
-                            .next()
-                            .ok_or(DeliveryError::SourceUnavailable(hit.logical_id))?;
-                        Some(source)
-                    } else {
-                        None
-                    };
-                    let explanation = if include_explain {
-                        Some(
-                            cluster
-                                .explain_ranked_source(
-                                    hit.logical_id,
-                                    source.as_deref().ok_or(
-                                        DeliveryError::ExplanationUnavailable(hit.logical_id),
-                                    )?,
-                                    &title_for_work,
-                                )
-                                .ok_or(DeliveryError::ExplanationUnavailable(hit.logical_id))?,
-                        )
-                    } else {
-                        None
-                    };
-                    hits.push(RankedHitBody {
-                        _id: hit.logical_id,
-                        _score: hit.score,
-                        _source: if include_source {
-                            source.map(|query| HitSource { query })
-                        } else {
-                            None
-                        },
-                        _explanation: explanation,
-                    });
-                }
-                if deadline_expired(deadline) {
-                    return Err(DeliveryError::Deadline);
-                }
-                Ok(DeliveryResult {
-                    hits,
-                    total_hits: ranked.total_hits,
-                    stats: ranked.stats,
-                    rank_stats: ranked.rank_stats,
-                    routed_shards: ranked.routed_shards,
-                    shard_rows_received: ranked.shard_rows_received,
-                    shard_result_bytes: ranked.shard_result_bytes,
-                    source_bytes,
-                })
-            })
-        })
-        .await
     };
-
-    let delivered = match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work)
-        .await
-    {
-        Ok(Ok(Ok(result))) => result,
-        Ok(Ok(Err(
-            DeliveryError::Deadline
-            | DeliveryError::Cluster(reverse_rusty::cluster::ClusterRankedError::DeadlineExceeded),
-        )))
-        | Err(_) => {
-            state
-                .prom
-                .http_requests_total
-                .with_label_values(&["v2_search", "408"])
-                .inc();
-            record_outcome(&state.prom, "timeout", options.query_scope);
-            // Mirror the single-node timeout arm's slow-query accounting: a
-            // cluster timeout must not be invisible to the slow-query metric
-            // and structured log (review finding — the two handlers drifted).
-            let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
-            if elapsed_ms >= state.slow_query_threshold_ms as f64 {
-                state.prom.slow_queries_total.inc();
-            }
-            warn!(
-                k = options.size,
-                scope = ?options.query_scope,
-                relation = "unknown",
-                candidates = "unknown",
-                rank_time_ms = elapsed_ms,
-                cancellation = "deadline",
-                "distributed v2 ranked search timed out"
-            );
-            return Err(ApiError::response(
-                StatusCode::REQUEST_TIMEOUT,
-                "timeout",
-                format!("ranked search timed out after {}ms", timeout.as_millis()),
-            ));
-        }
-        Ok(Ok(Err(DeliveryError::Cluster(error)))) => {
-            let (status, kind, outcome) = cluster_error_status(&error);
-            if matches!(
-                error,
-                reverse_rusty::cluster::ClusterRankedError::Admission(_)
-            ) {
-                state
-                    .prom
-                    .rank_admission_rejections_total
-                    .with_label_values(&["core"])
-                    .inc();
-            }
-            record_outcome(&state.prom, outcome, options.query_scope);
-            return Err(ApiError::response(status, kind, error.to_string()));
-        }
-        Ok(Ok(Err(DeliveryError::ExplanationUnavailable(logical_id)))) => {
-            record_outcome(&state.prom, "error", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::BAD_GATEWAY,
-                "explanation_unavailable",
-                format!("explanation unavailable for ranked winner {logical_id}"),
-            ));
-        }
-        Ok(Ok(Err(DeliveryError::SourceUnavailable(logical_id)))) => {
-            record_outcome(&state.prom, "error", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::BAD_GATEWAY,
-                "source_unavailable",
-                format!("source unavailable for ranked winner {logical_id}"),
-            ));
-        }
-        Ok(Ok(Err(DeliveryError::EnrichmentLimit))) => {
-            state.prom.rank_enrichment_rejections_total.inc();
-            record_outcome(&state.prom, "enrichment_limit", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "rank_enrichment_limit",
-                format!(
-                    "ranked winner enrichment exceeds {} bytes",
-                    state.max_ranked_enrichment_bytes
-                ),
-            ));
-        }
-        Ok(Ok(Err(DeliveryError::Local(_)))) => {
-            record_outcome(&state.prom, "error", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "search_error",
-                "unexpected cluster ranked delivery error",
-            ));
-        }
-        Ok(Err(error)) => {
-            record_outcome(&state.prom, "error", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "search_error",
-                format!("ranked search task failed: {error}"),
-            ));
-        }
-    };
-
-    let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
-    state
-        .prom
-        .http_requests_total
-        .with_label_values(&["v2_search", "200"])
-        .inc();
-    record_outcome(&state.prom, "success", options.query_scope);
-    state
-        .prom
-        .rank_evaluations_total
-        .inc_by(delivered.rank_stats.evaluations);
-    state
-        .prom
-        .rank_heap_replacements_total
-        .inc_by(delivered.rank_stats.heap_replacements);
-    state
-        .prom
-        .rank_total_relation_total
-        .with_label_values(&[match delivered.total_hits.relation {
-            reverse_rusty::TotalHitsRelation::Eq => "eq",
-            reverse_rusty::TotalHitsRelation::Gte => "gte",
-        }])
-        .inc();
-    state
-        .prom
-        .rank_true_match_lower_bound_total
-        .inc_by(delivered.total_hits.value);
-    state
-        .prom
-        .rank_source_bytes_total
-        .inc_by(u64::try_from(delivered.source_bytes).unwrap_or(u64::MAX));
-    state
-        .prom
-        .rank_shard_rows_received_total
-        .inc_by(u64::try_from(delivered.shard_rows_received).unwrap_or(u64::MAX));
-    state
-        .prom
-        .rank_shard_result_bytes_total
-        .inc_by(delivered.shard_result_bytes);
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["v2_search"])
-        .observe(started.elapsed().as_secs_f64());
-    if took_ms >= state.slow_query_threshold_ms as f64 {
-        state.prom.slow_queries_total.inc();
-        info!(
-            k = options.size,
-            scope = ?options.query_scope,
-            relation = ?delivered.total_hits.relation,
-            candidates = delivered.stats.unique_candidates,
-            shard_rows = delivered.shard_rows_received,
-            rank_time_ms = took_ms,
-            cancellation = "none",
-            "slow distributed v2 ranked search"
-        );
-    }
-    Ok(Json(V2SearchResponse {
-        took_ms,
-        complete: true,
-        query_scope: options.query_scope,
-        _shards: Shards {
-            total: delivered.routed_shards,
-            successful: delivered.routed_shards,
-            failed: 0,
-        },
-        hits: RankedHitsBody {
-            total: delivered.total_hits,
-            hits: delivered.hits,
-        },
-    }))
-}
-
-fn cluster_error_status(
-    error: &reverse_rusty::cluster::ClusterRankedError,
-) -> (StatusCode, &'static str, &'static str) {
-    use reverse_rusty::cluster::{ClusterRankedError, ShardError};
-    match error {
-        ClusterRankedError::Admission(_) | ClusterRankedError::Shard(ShardError::Admission(_)) => (
-            StatusCode::BAD_REQUEST,
-            "rank_admission_rejected",
-            "admission",
-        ),
-        ClusterRankedError::DeadlineExceeded => (StatusCode::REQUEST_TIMEOUT, "timeout", "timeout"),
-        ClusterRankedError::EnrichmentLimit { .. }
-        | ClusterRankedError::Shard(ShardError::EnrichmentLimit { .. }) => (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "rank_enrichment_limit",
-            "enrichment_limit",
-        ),
-        ClusterRankedError::InvalidShardReply { .. }
-        | ClusterRankedError::DuplicateLogicalId(_)
-        | ClusterRankedError::Shard(ShardError::Remote(_) | ShardError::Protocol(_)) => {
-            (StatusCode::BAD_GATEWAY, "shard_delivery_failed", "error")
-        }
-        ClusterRankedError::Shard(ShardError::SourceUnavailable(_)) => {
-            (StatusCode::BAD_GATEWAY, "source_unavailable", "error")
-        }
-        ClusterRankedError::Shard(ShardError::OwnershipMismatch(_)) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "placement_generation_mismatch",
-            "error",
-        ),
-        ClusterRankedError::Shard(ShardError::DeadlineExceeded) => {
-            (StatusCode::REQUEST_TIMEOUT, "timeout", "timeout")
-        }
-        ClusterRankedError::Shard(
-            ShardError::Config(_)
-            | ShardError::DictMismatch { .. }
-            | ShardError::Log(_)
-            | ShardError::ControlPlane(_)
-            | ShardError::DuplicateLogicalId(_)
-            | ShardError::PartiallyApplied { .. },
-        ) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cluster_unavailable",
-            "error",
-        ),
-    }
+    delivery::drive(state, started, options, timeout, deadline, work).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // The full v2 classification table (including the deliberate write-409 vs
+    // read-503 ownership divergence) is owned + pinned by the library in
+    // `cluster/http_status.rs`; this pin holds the handler to that seam.
     #[test]
     fn stale_cluster_ownership_maps_to_no_partial_503() {
         let error = reverse_rusty::cluster::ClusterRankedError::Shard(
@@ -973,8 +394,8 @@ mod tests {
                 reverse_rusty::ownership::OwnershipError::PlacementDecisionMismatch,
             ),
         );
-        let (status, kind, outcome) = cluster_error_status(&error);
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let (status, kind, outcome) = error.v2_http_class();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
         assert_eq!(kind, "placement_generation_mismatch");
         assert_eq!(outcome, "error");
     }

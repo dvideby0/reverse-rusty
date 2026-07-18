@@ -48,32 +48,15 @@ pub(crate) use vocab::{
     cluster_validate_and_apply_feedback,
 };
 
-/// Map a [`ShardError`] onto the HTTP layer. `PartiallyApplied` is deliberately NOT
-/// here — it is not a failure of the request (the mutation is durably logged and
-/// queued for repair); the write handlers surface it as a 200 with a `partial`
-/// result so the caller is told without being told to retry (a re-PUT would
-/// double-log).
+/// Map a [`ShardError`] onto the HTTP layer via the classification the error
+/// type owns ([`ShardError::write_http_class`] — the write/admin column of the
+/// two-surface table in `cluster/http_status.rs`). `PartiallyApplied` classifies
+/// as a 200 there for totality only: the write handlers surface it as a 200
+/// `partial` result before reaching this generic response, so the caller is
+/// told without being told to retry (a re-PUT would double-log).
 fn shard_error_response(context: &str, e: &ShardError) -> Response {
-    let (status, kind) = match e {
-        ShardError::Config(_) | ShardError::Admission(_) => {
-            (StatusCode::BAD_REQUEST, "validation_error")
-        }
-        ShardError::Log(_) => (StatusCode::SERVICE_UNAVAILABLE, "durability_unavailable"),
-        ShardError::Remote(_) => (StatusCode::BAD_GATEWAY, "shard_unreachable"),
-        ShardError::DictMismatch { .. } => {
-            (StatusCode::INTERNAL_SERVER_ERROR, "feature_space_mismatch")
-        }
-        ShardError::OwnershipMismatch(_) => (StatusCode::CONFLICT, "placement_generation_mismatch"),
-        ShardError::ControlPlane(_) => (StatusCode::SERVICE_UNAVAILABLE, "control_plane_error"),
-        ShardError::DeadlineExceeded => (StatusCode::REQUEST_TIMEOUT, "deadline_exceeded"),
-        ShardError::Protocol(_) => (StatusCode::BAD_GATEWAY, "invalid_shard_response"),
-        ShardError::SourceUnavailable(_) => (StatusCode::BAD_GATEWAY, "source_unavailable"),
-        ShardError::DuplicateLogicalId(_) => (StatusCode::CONFLICT, "logical_id_conflict"),
-        ShardError::EnrichmentLimit { .. } => {
-            (StatusCode::PAYLOAD_TOO_LARGE, "rank_enrichment_limit")
-        }
-        ShardError::PartiallyApplied { .. } => (StatusCode::OK, "partially_applied"),
-    };
+    let (status, kind) = e.write_http_class();
+    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     ApiError::response(status, kind, format!("{context}: {e}")).into_response()
 }
 

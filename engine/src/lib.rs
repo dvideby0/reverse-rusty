@@ -74,8 +74,8 @@ pub use rank::{
     RankValues, RankedHit, RankedMatch, RankedMatchError,
 };
 pub use result::{
-    QueryScope, ResultMode, TopKAdmissionError, TopKOptions, TotalHits, TotalHitsRelation,
-    DEFAULT_TOP_K, DEFAULT_TRACK_TOTAL_HITS_UP_TO, MAX_TOP_K,
+    ranked_beats, ranked_order, QueryScope, ResultMode, TopKAdmissionError, TopKOptions, TotalHits,
+    TotalHitsRelation, DEFAULT_TOP_K, DEFAULT_TRACK_TOTAL_HITS_UP_TO, MAX_TOP_K,
 };
 pub use segment::{
     AliasApplyReport, CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport,
