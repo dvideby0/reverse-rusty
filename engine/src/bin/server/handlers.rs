@@ -9,6 +9,7 @@ pub(crate) mod alias;
 mod backup;
 mod cluster;
 mod doc;
+mod pit;
 mod search;
 mod vocab;
 
@@ -33,6 +34,7 @@ pub(crate) use cluster::{
     cluster_validate_and_apply_feedback,
 };
 pub(crate) use doc::{bulk_ingest, delete_doc, get_doc, put_doc};
+pub(crate) use pit::{close_pit, open_pit};
 pub(crate) use search::{
     cluster_v2_mpercolate, cluster_v2_search, mpercolate, search, v2_mpercolate, v2_search,
 };

@@ -69,6 +69,13 @@ pub(super) struct DeliveryResult {
     pub(super) shard_rows_received: usize,
     pub(super) shard_result_bytes: u64,
     pub(super) source_bytes: usize,
+    /// ADR-113: the continuation token a pit-bound full page mints (attached
+    /// by the mode closure, passed through the epilogue untouched).
+    pub(super) next_cursor: Option<String>,
+    /// The last winner's `(score, logical_id)` in ranked order — the boundary
+    /// a continuation cursor encodes (kept as data so minting need not read
+    /// back the serialized `_`-prefixed response fields).
+    pub(super) last_ranked: Option<(i64, u64)>,
 }
 
 /// Delivery failure, generic over the mode's backend error — a local handler
@@ -313,6 +320,8 @@ pub(super) fn local_delivery(
         shard_rows_received: 0,
         shard_result_bytes: 0,
         source_bytes: budget.used,
+        next_cursor: None,
+        last_ranked: ranked.hits.last().map(|hit| (hit.score, hit.logical_id)),
     })
 }
 
@@ -367,6 +376,8 @@ pub(super) fn cluster_delivery(
         shard_rows_received: ranked.shard_rows_received,
         shard_result_bytes: ranked.shard_result_bytes,
         source_bytes,
+        next_cursor: None,
+        last_ranked: ranked.hits.last().map(|hit| (hit.score, hit.logical_id)),
     })
 }
 
@@ -622,6 +633,7 @@ where
             total: delivered.total_hits,
             hits: delivered.hits,
         },
+        next_cursor: delivered.next_cursor,
     }))
 }
 

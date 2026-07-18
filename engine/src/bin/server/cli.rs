@@ -78,6 +78,24 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES)]
     pub(crate) max_ranked_enrichment_bytes: usize,
 
+    /// Default keep-alive (seconds) for a `POST /v2/_pit` point-in-time
+    /// snapshot when the request does not name one (ADR-113). Every use of the
+    /// PIT renews its deadline to now + keep-alive.
+    #[arg(long, default_value_t = 60)]
+    pub(crate) pit_default_keep_alive_secs: u64,
+
+    /// Hard ceiling (seconds) on a requested PIT keep-alive; larger requests
+    /// are rejected with 400.
+    #[arg(long, default_value_t = 600)]
+    pub(crate) pit_max_keep_alive_secs: u64,
+
+    /// Hard ceiling on concurrently open PITs. Each PIT pins one engine
+    /// snapshot (retaining its memtable copy and any since-compacted segments),
+    /// so the bound is memory/disk-retention admission; breaches are rejected
+    /// with 429, never evicted.
+    #[arg(long, default_value_t = 64)]
+    pub(crate) max_open_pits: usize,
+
     /// Graceful shutdown drain timeout in seconds.
     #[arg(long, default_value_t = 30)]
     pub(crate) drain_timeout: u64,

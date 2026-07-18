@@ -110,8 +110,16 @@ pub(crate) fn requires_auth(method: &Method, path: &str, protect_reads: bool) ->
     if method == Method::GET || method == Method::HEAD {
         return false;
     }
-    // Read-only percolation via POST — the service's primary read path.
-    !matches!(path, "/_search" | "/v2/_search" | "/_mpercolate")
+    // Read-only percolation via POST — the service's primary read path — plus
+    // the ADR-113 PIT lifecycle, which rides with `/v2/_search` because cursor
+    // pagination is unusable without it (a PIT only pins a read snapshot; the
+    // registry cap + TTL bound the resource). NOTE the pre-existing asymmetry:
+    // `/v2/_mpercolate` is NOT allowlisted, so it requires the token when one
+    // is configured — flagged as out-of-scope residue in ADR-113.
+    !matches!(
+        path,
+        "/_search" | "/v2/_search" | "/_mpercolate" | "/v2/_pit"
+    )
 }
 
 /// Constant-time byte equality. The fold has no data-dependent branch, so a
@@ -236,6 +244,9 @@ mod tests {
             (Method::POST, "/_search"),
             (Method::POST, "/v2/_search"),
             (Method::POST, "/_mpercolate"),
+            // ADR-113: the PIT lifecycle rides with /v2/_search (both verbs).
+            (Method::POST, "/v2/_pit"),
+            (Method::DELETE, "/v2/_pit"),
             (Method::GET, "/_stats"),
             (Method::GET, "/_cat/segments"),
             (Method::GET, "/_health"),
@@ -346,6 +357,9 @@ mod tests {
             slow_query_threshold_ms: 0,
             auth,
             feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
+            pit_tokens: crate::pit::PitTokens::generate(),
+            pits: parking_lot::Mutex::new(reverse_rusty::PitRegistry::new()),
+            pit_config: reverse_rusty::PitConfig::default(),
         })
     }
 

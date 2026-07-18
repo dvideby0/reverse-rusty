@@ -46,6 +46,7 @@ mod cluster_mode;
 mod dto;
 mod handlers;
 mod metrics;
+mod pit;
 mod state;
 
 use std::net::SocketAddr;
@@ -71,11 +72,12 @@ use reverse_rusty::segment::Engine;
 
 use cli::Cli;
 use handlers::{
-    api_root, backup, bulk_ingest, cat_segments, cat_stats, compact, delete_doc, discover_aliases,
-    discover_and_record_aliases, flush, get_alias_feedback, get_aliases, get_doc, get_settings,
-    get_vocab, health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
-    mpercolate, prometheus_metrics, put_doc, put_settings, put_vocab, reset_alias_feedback, search,
-    stats, v2_mpercolate, v2_search, validate_and_apply_feedback,
+    api_root, backup, bulk_ingest, cat_segments, cat_stats, close_pit, compact, delete_doc,
+    discover_aliases, discover_and_record_aliases, flush, get_alias_feedback, get_aliases, get_doc,
+    get_settings, get_vocab, health, import_aliases, learn_and_apply_aliases,
+    learn_and_apply_vocab, learn_vocab, mpercolate, open_pit, prometheus_metrics, put_doc,
+    put_settings, put_vocab, reset_alias_feedback, search, stats, v2_mpercolate, v2_search,
+    validate_and_apply_feedback,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -384,6 +386,13 @@ async fn main() {
         slow_query_threshold_ms: slow_threshold,
         auth: auth_config,
         feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),
+        pit_tokens: pit::PitTokens::generate(),
+        pits: parking_lot::Mutex::new(reverse_rusty::PitRegistry::new()),
+        pit_config: reverse_rusty::PitConfig {
+            default_keep_alive: std::time::Duration::from_secs(cli.pit_default_keep_alive_secs),
+            max_keep_alive: std::time::Duration::from_secs(cli.pit_max_keep_alive_secs),
+            max_open: cli.max_open_pits,
+        },
     });
 
     // Build router.
@@ -393,6 +402,7 @@ async fn main() {
         .route("/_search", post(search))
         .route("/v2/_search", post(v2_search))
         .route("/v2/_mpercolate", post(v2_mpercolate))
+        .route("/v2/_pit", post(open_pit).delete(close_pit))
         .route("/_mpercolate", post(mpercolate))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))

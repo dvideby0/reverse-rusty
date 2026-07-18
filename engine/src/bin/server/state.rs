@@ -54,6 +54,13 @@ pub(crate) struct AppState {
     /// (default off ⇒ never touched); re-synced against the registry on every snapshot
     /// publish. Not persisted — a rolling operational signal.
     pub(crate) feedback: Mutex<AliasFeedback>,
+    /// Per-process HMAC key for PIT/cursor tokens (ADR-113): a restart mints a
+    /// new key, so every outstanding token fails closed as stale.
+    pub(crate) pit_tokens: crate::pit::PitTokens,
+    /// Open point-in-time snapshots: each entry pins one `Arc<EngineSnapshot>`
+    /// for cursor pagination. In-memory only — dies with the process by design.
+    pub(crate) pits: Mutex<reverse_rusty::PitRegistry<Arc<EngineSnapshot>>>,
+    pub(crate) pit_config: reverse_rusty::PitConfig,
 }
 
 impl AppState {

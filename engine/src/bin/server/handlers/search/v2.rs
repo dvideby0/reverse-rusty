@@ -19,6 +19,7 @@ use super::DocBody;
 
 mod delivery;
 mod mpercolate;
+mod page;
 
 #[cfg(test)]
 pub(crate) use mpercolate::V2MPercolateBody;
@@ -59,6 +60,12 @@ impl RankProgramBody {
     }
 }
 
+/// A PIT reference on a page-one cursor request (ADR-113).
+#[derive(Deserialize)]
+struct PitRefBody {
+    id: String,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct V2SearchBody {
     document: Option<DocBody>,
@@ -72,10 +79,15 @@ pub(crate) struct V2SearchBody {
     explain: Option<bool>,
     allow_partial_results: Option<bool>,
     timeout_ms: Option<u64>,
+    /// ADR-113 page one: bind this search to an open PIT and return
+    /// `next_cursor`.
+    pit: Option<PitRefBody>,
+    /// ADR-113 page N: continue a cursor (the same document/rank/filter/scope
+    /// must be resent; the cursor names its PIT internally).
+    cursor: Option<serde_json::Value>,
     // Named unsupported shapes produce a stable 400 rather than being ignored.
     #[serde(rename = "from")]
     page_from: Option<serde_json::Value>,
-    cursor: Option<serde_json::Value>,
     documents: Option<serde_json::Value>,
     query: Option<serde_json::Value>,
 }
@@ -110,6 +122,10 @@ pub(crate) struct V2SearchResponse {
     query_scope: reverse_rusty::QueryScope,
     _shards: Shards,
     hits: RankedHitsBody,
+    /// ADR-113: present only on a full pit-bound page — the opaque token that
+    /// continues the ranked stream. `null`/absent means the stream is done.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
 }
 
 fn validation(reason: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -141,6 +157,9 @@ struct PreparedSearch {
     include_source: bool,
     include_explain: bool,
     timeout: Duration,
+    /// ADR-113 page shape (tokens still unverified — verification is
+    /// mode-side, where the registry lives).
+    page: page::PageRequest,
 }
 
 enum PrepareFailure {
@@ -167,15 +186,28 @@ impl PrepareFailure {
 /// serving. Keeping this lowering shared is what makes their defaults and 400s
 /// identical as the delivery implementations evolve independently.
 fn prepare(body: V2SearchBody) -> Result<PreparedSearch, PrepareFailure> {
-    if body.page_from.is_some()
-        || body.cursor.is_some()
-        || body.documents.is_some()
-        || body.query.is_some()
-    {
+    if body.page_from.is_some() || body.documents.is_some() || body.query.is_some() {
         return Err(PrepareFailure::Validation(validation(
-            "v2 ranked search accepts one `document`; from, cursor, documents and query are not supported",
+            "v2 ranked search accepts one `document`; from, documents and query are not supported",
         )));
     }
+    let page = match (body.pit, body.cursor) {
+        (None, None) => page::PageRequest::None,
+        (Some(_), Some(_)) => {
+            return Err(PrepareFailure::Validation(validation(
+                "`pit` and `cursor` are mutually exclusive; the cursor already names its PIT",
+            )));
+        }
+        (Some(pit), None) => page::PageRequest::Pit(pit.id),
+        (None, Some(cursor)) => match cursor.as_str() {
+            Some(token) => page::PageRequest::Cursor(token.to_string()),
+            None => {
+                return Err(PrepareFailure::Validation(validation(
+                    "`cursor` must be the opaque string returned as next_cursor",
+                )));
+            }
+        },
+    };
     if body.allow_partial_results == Some(true) {
         return Err(PrepareFailure::Validation(validation(
             "allow_partial_results=true is not supported for exact top_k",
@@ -241,6 +273,7 @@ fn prepare(body: V2SearchBody) -> Result<PreparedSearch, PrepareFailure> {
         include_source: body.include_source.unwrap_or(true),
         include_explain: body.explain.unwrap_or(false),
         timeout: Duration::from_millis(body.timeout_ms.unwrap_or(5_000)),
+        page,
     })
 }
 
@@ -282,9 +315,28 @@ pub(crate) async fn v2_search(
         include_source,
         include_explain,
         timeout,
+        page,
     } = prepared;
 
-    let snap = Arc::clone(&state.snapshot.load());
+    // Resolve the page BEFORE compiling: a pit/cursor page must compile its
+    // rank program and predicate against the PINNED snapshot, not the live one.
+    let plan = match page::resolve_local(
+        &state,
+        &page,
+        &title,
+        options.query_scope,
+        &raw_program,
+        &filter,
+    ) {
+        Ok(plan) => plan,
+        Err(response) => return Err(response),
+    };
+    let snap = plan.snapshot;
+    let options = reverse_rusty::TopKOptions {
+        search_after: plan.search_after,
+        ..options
+    };
+    let mint = plan.mint;
     let program = match snap.compile_rank_program(&raw_program) {
         Ok(program) => program,
         Err(error) => {
@@ -303,6 +355,7 @@ pub(crate) async fn v2_search(
         return Err(validation("timeout_ms is too large"));
     };
     let enrichment_limit = state.max_ranked_enrichment_bytes;
+    let mint_state = Arc::clone(&state);
     let work = move || {
         RANKED_SCRATCH.with(|cell| {
             delivery::local_delivery(
@@ -319,6 +372,12 @@ pub(crate) async fn v2_search(
                     deadline,
                 },
             )
+            .map(|mut result| {
+                if let Some(mint) = &mint {
+                    page::attach_next_cursor(&mint_state.pit_tokens, mint, options, &mut result);
+                }
+                result
+            })
         })
     };
     delivery::drive(state, started, options, timeout, deadline, work).await
@@ -346,7 +405,17 @@ pub(crate) async fn cluster_v2_search(
         include_source,
         include_explain,
         timeout,
+        page,
     } = prepared;
+    if !matches!(page, page::PageRequest::None) {
+        record_outcome(&state.prom, "validation", options.query_scope);
+        return Err(ApiError::response(
+            StatusCode::NOT_IMPLEMENTED,
+            "pit_unsupported",
+            "PIT/cursor pagination is not yet available in coordinator mode; \
+             page via a single-node server (ADR-113)",
+        ));
+    }
     let program = match state.cluster.read().compile_rank_program(&rank) {
         Ok(program) => program,
         Err(error) => {

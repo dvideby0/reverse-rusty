@@ -16,6 +16,8 @@ pub(crate) struct PrometheusMetrics {
 
     // Engine gauge metrics (scraped from EngineMetrics snapshot)
     pub(crate) total_queries: IntGauge,
+    /// ADR-113: PITs currently pinning a snapshot for cursor pagination.
+    pub(crate) open_pits: IntGauge,
     pub(crate) base_segments: IntGauge,
     pub(crate) memtable_entries: IntGauge,
     pub(crate) dict_features: IntGauge,
@@ -117,6 +119,12 @@ impl PrometheusMetrics {
         let total_queries = IntGauge::with_opts(Opts::new(
             "total_queries",
             "Total queries stored across all segments and memtable",
+        ))
+        .unwrap();
+
+        let open_pits = IntGauge::with_opts(Opts::new(
+            "open_pits",
+            "Point-in-time snapshots currently pinned for cursor pagination (ADR-113)",
         ))
         .unwrap();
 
@@ -490,6 +498,7 @@ impl PrometheusMetrics {
 
         // Register all
         registry.register(Box::new(total_queries.clone())).unwrap();
+        registry.register(Box::new(open_pits.clone())).unwrap();
         registry.register(Box::new(base_segments.clone())).unwrap();
         registry
             .register(Box::new(memtable_entries.clone()))
@@ -643,6 +652,7 @@ impl PrometheusMetrics {
         Self {
             registry,
             total_queries,
+            open_pits,
             base_segments,
             memtable_entries,
             dict_features,

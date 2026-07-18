@@ -55,6 +55,11 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"], optio
 # protobuf 2.x; 0.14 ships protobuf 3.7.2, so disabling it is now a lean-deps
 # choice, not a security workaround.)
 prometheus = { version = "0.14", default-features = false, optional = true }
+# HMAC-SHA256 signing for the ADR-113 PIT/cursor tokens (RustCrypto, pure Rust).
+# Serving-layer-only: the lean core never mints or verifies a client token, so
+# both stay behind `server` and the seven-crate lean build is untouched.
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 # ---- Distributed: gRPC ShardServer / RemoteShard (behind the `distributed` feature; ADR-029) ----
 # The generated proto crate is the workspace member `grpc/`; `tonic` is the runtime.
@@ -97,6 +102,8 @@ server = [
     "dep:tracing",
     "dep:tracing-subscriber",
     "dep:prometheus",
+    "dep:hmac",
+    "dep:sha2",
 ]
 # gRPC shard transport (ADR-029): the generated proto crate + tonic + tokio's `net`
 # stack. Off by default, so neither the lean core nor the standard server build sees
