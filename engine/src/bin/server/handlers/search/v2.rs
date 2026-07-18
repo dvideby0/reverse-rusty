@@ -781,7 +781,8 @@ pub(crate) async fn cluster_v2_search(
             ));
         }
         Ok(Ok(Err(DeliveryError::Cluster(error)))) => {
-            let (status, kind, outcome) = cluster_error_status(&error);
+            let (status, kind, outcome) = error.v2_http_class();
+            let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             if matches!(
                 error,
                 reverse_rusty::cluster::ClusterRankedError::Admission(_)
@@ -914,58 +915,13 @@ pub(crate) async fn cluster_v2_search(
     }))
 }
 
-fn cluster_error_status(
-    error: &reverse_rusty::cluster::ClusterRankedError,
-) -> (StatusCode, &'static str, &'static str) {
-    use reverse_rusty::cluster::{ClusterRankedError, ShardError};
-    match error {
-        ClusterRankedError::Admission(_) | ClusterRankedError::Shard(ShardError::Admission(_)) => (
-            StatusCode::BAD_REQUEST,
-            "rank_admission_rejected",
-            "admission",
-        ),
-        ClusterRankedError::DeadlineExceeded => (StatusCode::REQUEST_TIMEOUT, "timeout", "timeout"),
-        ClusterRankedError::EnrichmentLimit { .. }
-        | ClusterRankedError::Shard(ShardError::EnrichmentLimit { .. }) => (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "rank_enrichment_limit",
-            "enrichment_limit",
-        ),
-        ClusterRankedError::InvalidShardReply { .. }
-        | ClusterRankedError::DuplicateLogicalId(_)
-        | ClusterRankedError::Shard(ShardError::Remote(_) | ShardError::Protocol(_)) => {
-            (StatusCode::BAD_GATEWAY, "shard_delivery_failed", "error")
-        }
-        ClusterRankedError::Shard(ShardError::SourceUnavailable(_)) => {
-            (StatusCode::BAD_GATEWAY, "source_unavailable", "error")
-        }
-        ClusterRankedError::Shard(ShardError::OwnershipMismatch(_)) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "placement_generation_mismatch",
-            "error",
-        ),
-        ClusterRankedError::Shard(ShardError::DeadlineExceeded) => {
-            (StatusCode::REQUEST_TIMEOUT, "timeout", "timeout")
-        }
-        ClusterRankedError::Shard(
-            ShardError::Config(_)
-            | ShardError::DictMismatch { .. }
-            | ShardError::Log(_)
-            | ShardError::ControlPlane(_)
-            | ShardError::DuplicateLogicalId(_)
-            | ShardError::PartiallyApplied { .. },
-        ) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "cluster_unavailable",
-            "error",
-        ),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // The full v2 classification table (including the deliberate write-409 vs
+    // read-503 ownership divergence) is owned + pinned by the library in
+    // `cluster/http_status.rs`; this pin holds the handler to that seam.
     #[test]
     fn stale_cluster_ownership_maps_to_no_partial_503() {
         let error = reverse_rusty::cluster::ClusterRankedError::Shard(
@@ -973,8 +929,8 @@ mod tests {
                 reverse_rusty::ownership::OwnershipError::PlacementDecisionMismatch,
             ),
         );
-        let (status, kind, outcome) = cluster_error_status(&error);
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let (status, kind, outcome) = error.v2_http_class();
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE.as_u16());
         assert_eq!(kind, "placement_generation_mismatch");
         assert_eq!(outcome, "error");
     }

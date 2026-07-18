@@ -27,6 +27,7 @@ mod autoscale;
 mod clog;
 mod control;
 mod coordinator;
+mod http_status;
 mod replica;
 mod ring;
 mod shard;
