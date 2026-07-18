@@ -51,6 +51,9 @@ fn better(candidate: HeapHit, worst: HeapHit) -> bool {
 /// set, the thresholded unique-total tracker, and the collection counters.
 pub(crate) struct TopKState {
     k: usize,
+    /// ADR-113 exclusive pagination boundary: rows NOT strictly after it under
+    /// `ranked_order` are counted (totals/emissions) but never retained.
+    after: Option<(i64, u64)>,
     heap: BinaryHeap<HeapHit>,
     heap_ids: FastSet<u64>,
     winners: Vec<(u64, i64)>,
@@ -61,11 +64,12 @@ pub(crate) struct TopKState {
 }
 
 impl TopKState {
-    pub(crate) fn new(k: usize, total_threshold: usize) -> Self {
+    pub(crate) fn new(k: usize, total_threshold: usize, after: Option<(i64, u64)>) -> Self {
         let mut heap_ids = FastSet::default();
         heap_ids.reserve(k);
         Self {
             k,
+            after,
             heap: BinaryHeap::with_capacity(k),
             heap_ids,
             winners: Vec::with_capacity(k),
@@ -92,6 +96,15 @@ impl TopKState {
             logical_id,
             score: scorer(logical_id),
         };
+        // Strictly-after gate: the boundary row itself is excluded, so a page
+        // whose last row becomes the next boundary yields no dup and no gap.
+        // (`evaluations` legitimately counts boundary-skipped rows — the
+        // scorer ran; page oracles compare winners + totals only.)
+        if let Some(after) = self.after {
+            if !ranked_beats(after, (hit.score, hit.logical_id)) {
+                return;
+            }
+        }
         if self.heap.len() < self.k {
             self.heap.push(hit);
             self.heap_ids.insert(logical_id);
@@ -162,9 +175,14 @@ impl<F> TopKCollector<F>
 where
     F: FnMut(u64) -> i64,
 {
-    pub(crate) fn new(k: usize, total_threshold: usize, scorer: F) -> Self {
+    pub(crate) fn new(
+        k: usize,
+        total_threshold: usize,
+        after: Option<(i64, u64)>,
+        scorer: F,
+    ) -> Self {
         Self {
-            state: TopKState::new(k, total_threshold),
+            state: TopKState::new(k, total_threshold, after),
             scorer,
         }
     }
@@ -223,8 +241,11 @@ where
 {
     pub(crate) fn new(titles: usize, k: usize, total_threshold: usize, scorer: F) -> Self {
         Self {
+            // Batch slots never carry a pagination boundary: `search_after`
+            // is a single-title cursor primitive and batch admission rejects
+            // it loudly upstream (ADR-113).
             slots: (0..titles)
-                .map(|_| TopKState::new(k, total_threshold))
+                .map(|_| TopKState::new(k, total_threshold, None))
                 .collect(),
             scorer,
         }
@@ -319,7 +340,7 @@ mod tests {
             let stream: Vec<u64> = (0..2_000).map(|_| rng.next() % 317).collect();
             for &k in &[0usize, 1, 3, 10, 100, 1_000] {
                 for &threshold in &[0usize, 1, 10, 100, 10_000] {
-                    let mut collector = TopKCollector::new(k, threshold, score);
+                    let mut collector = TopKCollector::new(k, threshold, None, score);
                     collector.reset();
                     for &id in &stream {
                         collector.on_match(id);
@@ -390,7 +411,7 @@ mod tests {
                     let mut all_exact = true;
                     let mut emissions = 0u64;
                     for (ti, stream) in streams.iter().enumerate() {
-                        let mut single = TopKCollector::new(k, threshold, score);
+                        let mut single = TopKCollector::new(k, threshold, None, score);
                         for &id in stream {
                             single.on_match(id);
                         }
@@ -417,6 +438,60 @@ mod tests {
                         }
                     );
                     assert_eq!(aggregate.logical_emissions, emissions);
+                }
+            }
+        }
+    }
+
+    /// ADR-113: paging with successive `search_after` boundaries concatenates
+    /// to exactly the full ranked list — boundary-exclusive (no dup, no gap) —
+    /// and every page reports the same total as the boundary-free collection.
+    #[test]
+    fn paging_by_search_after_concatenates_to_the_full_ranked_list() {
+        for seed in 1..=32u64 {
+            let mut rng = Rng(seed);
+            let stream: Vec<u64> = (0..1_500).map(|_| rng.next() % 271).collect();
+
+            let mut expected_ids = stream.clone();
+            expected_ids.sort_unstable();
+            expected_ids.dedup();
+            let mut expected: Vec<(u64, i64)> =
+                expected_ids.iter().map(|&id| (id, score(id))).collect();
+            expected.sort_unstable_by(|a, b| ranked_order((a.1, a.0), (b.1, b.0)));
+
+            for &page in &[1usize, 3, 7, 50] {
+                for &threshold in &[3usize, 10_000] {
+                    let mut baseline = TopKCollector::new(page, threshold, None, score);
+                    for &id in &stream {
+                        baseline.on_match(id);
+                    }
+                    baseline.finish();
+                    let baseline_total = baseline.total_hits();
+
+                    let mut pages: Vec<(u64, i64)> = Vec::new();
+                    let mut after: Option<(i64, u64)> = None;
+                    loop {
+                        let mut collector = TopKCollector::new(page, threshold, after, score);
+                        for &id in &stream {
+                            collector.on_match(id);
+                        }
+                        collector.finish();
+                        assert_eq!(collector.total_hits(), baseline_total);
+                        let winners = collector.winners().to_vec();
+                        if let (Some(after), Some(first)) = (after, winners.first()) {
+                            assert!(ranked_beats(after, (first.1, first.0)));
+                        }
+                        if winners.is_empty() {
+                            break;
+                        }
+                        after = winners.last().map(|&(id, s)| (s, id));
+                        let full_page = winners.len() == page;
+                        pages.extend(winners);
+                        if !full_page {
+                            break;
+                        }
+                    }
+                    assert_eq!(pages, expected);
                 }
             }
         }

@@ -145,6 +145,7 @@ fn prepare_batch(body: V2MPercolateBody) -> Result<PreparedBatch, PrepareFailure
     let (titles, _, filter) = resolve_percolate(None, Some(documents), body.filter, None)
         .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
     let options = reverse_rusty::TopKOptions {
+        search_after: None,
         size: body.size.unwrap_or(reverse_rusty::DEFAULT_TOP_K),
         track_total_hits_up_to: body
             .track_total_hits_up_to

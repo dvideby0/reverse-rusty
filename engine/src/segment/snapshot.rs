@@ -806,8 +806,12 @@ impl EngineSnapshot {
         }
         let threshold =
             usize::try_from(options.track_total_hits_up_to).unwrap_or(crate::result::MAX_TOP_K);
-        let mut collector =
-            TopKCollector::new(options.size, threshold, self.program_scorer(program));
+        let mut collector = TopKCollector::new(
+            options.size,
+            threshold,
+            options.search_after,
+            self.program_scorer(program),
+        );
         let view = MatchView {
             norm: &self.norm,
             dict: &self.dict,

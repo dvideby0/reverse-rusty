@@ -71,6 +71,7 @@ fn distributed_batch_top_k_matches_per_title_and_single_node() {
             for &size in &[0usize, 1, 3, 16] {
                 for &threshold in &[1u64, 10_000] {
                     let options = TopKOptions {
+                        search_after: None,
                         size,
                         track_total_hits_up_to: threshold,
                         query_scope: scope,
@@ -176,6 +177,7 @@ fn batch_fetch_dedups_cross_title_winners_and_charges_delivered_bytes() {
         "topps chrome box".to_string(),
     ];
     let options = TopKOptions {
+        search_after: None,
         size: 5,
         track_total_hits_up_to: 10_000,
         query_scope: QueryScope::Standard,
@@ -242,6 +244,7 @@ fn batch_admission_rejects_before_fanning() {
             &titles,
             &[],
             TopKOptions {
+                search_after: None,
                 size: reverse_rusty::MAX_TOP_K,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::Standard,
@@ -264,6 +267,7 @@ fn batch_admission_rejects_before_fanning() {
         &two_anchor,
         &[],
         TopKOptions {
+            search_after: None,
             size: reverse_rusty::MAX_TOP_K,
             track_total_hits_up_to: 10_000,
             query_scope: QueryScope::Standard,

@@ -51,6 +51,7 @@ pub mod index;
 pub mod loader;
 pub mod normalize;
 pub mod ownership;
+pub mod pit;
 pub mod rank;
 pub mod result;
 pub mod segment;
@@ -69,6 +70,7 @@ pub use events::{
 };
 pub use explain::ExplainDetail;
 pub use normalize::{Normalizer, NormalizerBuilder, PunctClass};
+pub use pit::{PitConfig, PitError, PitId, PitRegistry};
 pub use rank::{
     BatchRankedMatch, BatchRankedTitle, CompiledRankProgram, CompiledRankSpec, RankProgramError,
     RankProgramSpec, RankSpec, RankStats, RankValues, RankedHit, RankedMatch, RankedMatchError,

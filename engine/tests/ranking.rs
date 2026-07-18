@@ -219,6 +219,7 @@ fn bounded_typed_top_k_matches_collect_all_full_sort() {
     };
     let program = snap.compile_rank_program(&raw).expect("compile typed rank");
     let options = TopKOptions {
+        search_after: None,
         size: 3,
         track_total_hits_up_to: 3,
         query_scope: QueryScope::Standard,
@@ -286,6 +287,7 @@ fn bounded_top_k_honors_filters_size_zero_and_field_errors() {
         .try_match_title_top_k(
             "topps chrome",
             TopKOptions {
+                search_after: None,
                 size: 0,
                 track_total_hits_up_to: 10,
                 query_scope: QueryScope::Standard,
@@ -394,6 +396,7 @@ fn bounded_differential_spans_every_cost_lane_scope_k_and_threshold() {
                     .try_match_title_top_k(
                         &title,
                         TopKOptions {
+                            search_after: None,
                             size,
                             track_total_hits_up_to: threshold,
                             query_scope: scope,
@@ -423,4 +426,135 @@ fn bounded_differential_spans_every_cost_lane_scope_k_and_threshold() {
             }
         }
     }
+}
+
+/// ADR-113 exit gate at the engine seam: a held `EngineSnapshot` is a true
+/// point-in-time. Paging via `search_after` concatenates to exactly the
+/// one-shot ranked list (no dups, no gaps), every page reports the identical
+/// total, and inserts/deletes/flushes/compactions on the engine between pages
+/// change nothing the pinned snapshot serves.
+#[test]
+fn pit_snapshot_pages_concatenate_and_survive_engine_mutation() {
+    let mut eng = Engine::new(norm());
+    for id in 1..=40u64 {
+        let priority = (id % 7) as i64 * 10;
+        eng.try_insert_live_ranked(
+            "topps chrome",
+            id,
+            1,
+            &[tag("priority", &priority.to_string())],
+            Some(RankValues { priority }),
+        )
+        .expect("insert");
+        // Interleave flushes so pages read memtable AND base segments.
+        if id % 13 == 0 {
+            eng.flush();
+        }
+    }
+    let snap = eng.snapshot();
+    let raw = RankProgramSpec {
+        priority_field: Some("priority".into()),
+        boosts: Vec::new(),
+    };
+    let program = snap
+        .compile_rank_program(&raw)
+        .expect("compile rank program");
+    let pred = reverse_rusty::exact::TagPredicate::empty();
+    let title = "2020 topps chrome update";
+
+    let one_shot = {
+        let mut scratch = MatchScratch::new();
+        snap.try_match_title_top_k(
+            title,
+            TopKOptions {
+                size: 1_000,
+                track_total_hits_up_to: 10_000,
+                query_scope: QueryScope::Standard,
+                search_after: None,
+            },
+            &program,
+            &pred,
+            &mut scratch,
+            None,
+        )
+        .expect("one-shot baseline")
+    };
+    assert_eq!(one_shot.hits.len(), 40);
+    assert_eq!(one_shot.total_hits, TotalHits::exact(40));
+
+    let mut pages: Vec<(u64, i64)> = Vec::new();
+    let mut after: Option<(i64, u64)> = None;
+    let mut fresh_id = 100u64;
+    loop {
+        let mut scratch = MatchScratch::new();
+        let page = snap
+            .try_match_title_top_k(
+                title,
+                TopKOptions {
+                    size: 7,
+                    track_total_hits_up_to: 10_000,
+                    query_scope: QueryScope::Standard,
+                    search_after: after,
+                },
+                &program,
+                &pred,
+                &mut scratch,
+                None,
+            )
+            .expect("page");
+        assert_eq!(
+            page.total_hits,
+            TotalHits::exact(40),
+            "pinned totals are page-invariant even while the engine mutates"
+        );
+        if page.hits.is_empty() {
+            break;
+        }
+        after = page.hits.last().map(|hit| (hit.score, hit.logical_id));
+        let full_page = page.hits.len() == 7;
+        pages.extend(page.hits.iter().map(|hit| (hit.logical_id, hit.score)));
+
+        // Mutate the ENGINE between pages: delete this page's best winner,
+        // insert a would-be-page-one query, flush, compact. The held snapshot
+        // must be structurally isolated from all of it.
+        let victim = page.hits[0].logical_id;
+        eng.delete_by_logical_id(victim).expect("delete winner");
+        eng.try_insert_live_ranked(
+            "topps chrome",
+            fresh_id,
+            1,
+            &[tag("priority", "990")],
+            Some(RankValues { priority: 990 }),
+        )
+        .expect("insert fresh");
+        fresh_id += 1;
+        eng.flush();
+        let _ = eng.compact_all();
+
+        if !full_page {
+            break;
+        }
+    }
+    assert_eq!(
+        pages,
+        one_shot
+            .hits
+            .iter()
+            .map(|hit| (hit.logical_id, hit.score))
+            .collect::<Vec<_>>(),
+        "concatenated pages equal the one-shot ranked snapshot"
+    );
+
+    // Sanity that the engine really moved: a FRESH snapshot sees the new
+    // inserts and is missing the deleted winners.
+    let fresh = eng.snapshot();
+    let fresh_ids = matched(&fresh, title);
+    assert!(
+        fresh_ids.iter().any(|&id| id >= 100),
+        "fresh inserts visible to a new snapshot"
+    );
+    assert!(
+        !fresh_ids.contains(&pages[0].0),
+        "the deleted first winner is gone from a new snapshot"
+    );
 }

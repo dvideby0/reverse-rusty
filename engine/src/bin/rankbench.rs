@@ -387,6 +387,7 @@ fn capture_batch(
     let slice_len = titles.len().min(batch_size);
     let batch_titles = &titles[..slice_len];
     let options = TopKOptions {
+        search_after: None,
         size: k,
         track_total_hits_up_to: THRESHOLD,
         query_scope: QueryScope::WithBroad,
@@ -509,6 +510,7 @@ fn capture_bounded(
             .try_match_title_top_k(
                 title,
                 TopKOptions {
+                    search_after: None,
                     size: k,
                     track_total_hits_up_to: THRESHOLD as u64,
                     query_scope: QueryScope::WithBroad,
@@ -541,6 +543,7 @@ fn capture_bounded(
                 title,
                 &[],
                 TopKOptions {
+                    search_after: None,
                     size: k,
                     track_total_hits_up_to: THRESHOLD as u64,
                     query_scope: QueryScope::WithBroad,

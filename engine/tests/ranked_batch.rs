@@ -166,6 +166,7 @@ fn batch_top_k_equals_per_title_scalar_across_lanes_and_options() {
                     for &size in &[0usize, 1, 47] {
                         for &threshold in &[3u64, 10_000] {
                             let options = TopKOptions {
+                                search_after: None,
                                 size,
                                 track_total_hits_up_to: threshold,
                                 query_scope: scope,
@@ -199,6 +200,7 @@ fn filtered_batch_top_k_equals_filtered_scalar() {
     let pred = snap.compile_tag_predicate(&[("tier".to_string(), vec!["gold".to_string()])]);
     for scope in [QueryScope::Standard, QueryScope::WithBroad] {
         let options = TopKOptions {
+            search_after: None,
             size: 25,
             track_total_hits_up_to: 10_000,
             query_scope: scope,
@@ -248,6 +250,7 @@ fn dedup_heavy_batch_top_k_equals_scalar() {
     ];
     for &size in &[0usize, 10, 500] {
         let options = TopKOptions {
+            search_after: None,
             size,
             track_total_hits_up_to: 10_000,
             query_scope: QueryScope::WithBroad,
@@ -278,6 +281,7 @@ fn multiword_alias_forced_inline_batch_equals_scalar() {
     let empty = TagPredicate::empty();
     for scope in [QueryScope::Standard, QueryScope::WithBroad] {
         let options = TopKOptions {
+            search_after: None,
             size: 20,
             track_total_hits_up_to: 10_000,
             query_scope: scope,
@@ -330,6 +334,7 @@ fn batch_admission_rejects_before_matching() {
             &titles,
             BatchMatchOptions::default(),
             TopKOptions {
+                search_after: None,
                 size: reverse_rusty::MAX_TOP_K,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::Standard,
@@ -350,6 +355,7 @@ fn batch_admission_rejects_before_matching() {
             &titles,
             BatchMatchOptions::default(),
             TopKOptions {
+                search_after: None,
                 size: reverse_rusty::MAX_TOP_K + 1,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::Standard,
@@ -362,6 +368,26 @@ fn batch_admission_rejects_before_matching() {
     assert!(matches!(
         err,
         RankedMatchError::Admission(TopKAdmissionError::SizeTooLarge { .. })
+    ));
+
+    // ADR-113: a pagination boundary is a single-title cursor primitive —
+    // batch requests must reject it loudly, never silently drop it.
+    let err = snap
+        .try_match_titles_batch_top_k(
+            &["one title"],
+            BatchMatchOptions::default(),
+            TopKOptions {
+                search_after: Some((0, 0)),
+                ..TopKOptions::default()
+            },
+            &program,
+            &empty,
+            None,
+        )
+        .expect_err("search_after must reject on the batch path");
+    assert!(matches!(
+        err,
+        RankedMatchError::Admission(TopKAdmissionError::BatchSearchAfterUnsupported)
     ));
 }
 
@@ -380,6 +406,7 @@ fn expired_deadline_fails_the_whole_batch() {
             &data.titles,
             BatchMatchOptions::default(),
             TopKOptions {
+                search_after: None,
                 size: 10,
                 track_total_hits_up_to: 10_000,
                 query_scope: QueryScope::WithBroad,

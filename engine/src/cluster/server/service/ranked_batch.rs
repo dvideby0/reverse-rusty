@@ -77,6 +77,9 @@ pub(super) fn percolate_top_k_batch(
         } else {
             QueryScope::Standard
         },
+        // The wire never carries a pagination boundary (ADR-113); batch
+        // admission additionally rejects any boundary downstream.
+        search_after: None,
     };
     let requests: Vec<BatchTitleRequest<'_>> = entries
         .iter()
