@@ -375,12 +375,13 @@ fn timeout_response<S: RankedSearchCtx>(
     started: Instant,
     options: TopKOptions,
     timeout: Duration,
+    label: &'static str,
     mode: &'static str,
 ) -> (StatusCode, Json<ApiError>) {
     state
         .prom()
         .http_requests_total
-        .with_label_values(&["v2_search", "408"])
+        .with_label_values(&[label, "408"])
         .inc();
     record_outcome(state.prom(), "timeout", options.query_scope);
     let elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0;
@@ -404,6 +405,120 @@ fn timeout_response<S: RankedSearchCtx>(
     )
 }
 
+/// A finished-but-unsuccessful bounded run, as classified by
+/// [`failure_response`] — shared by the single-document and batch drivers so
+/// their failure surfaces cannot drift.
+pub(super) enum DeliveryFailure<E> {
+    Error(DeliveryError<E>),
+    Join(String),
+    Elapsed,
+}
+
+/// The ADR-099 bounded execution front shared by every v2 handler: the permit
+/// is acquired INSIDE the deadline race (queue wait counts against the
+/// timeout) and moved into the blocking closure (released when the work
+/// actually ends, not when an abandoned join handle drops at timeout).
+pub(super) async fn run_bounded<S, T, F>(
+    state: &Arc<S>,
+    deadline: Instant,
+    work: F,
+) -> Result<Result<T, tokio::task::JoinError>, tokio::time::error::Elapsed>
+where
+    S: RankedSearchCtx + Send + Sync + 'static,
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let permit_sem = Arc::clone(state.ranked_search_permits());
+    let state_inner = Arc::clone(state);
+    let work = async move {
+        let permit = crate::state::acquire_search_permit(
+            Some(&permit_sem),
+            &state_inner.prom().ranked_search_permits_in_use,
+        )
+        .await;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            state_inner.pool().install(work)
+        })
+        .await
+    };
+    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work).await
+}
+
+/// Classify one unsuccessful bounded run into the HTTP error response +
+/// metrics — every arm the two handlers used to duplicate. Deadline-shaped
+/// failures (elapsed race, cooperative cancellation, backend deadline) join
+/// the one timeout arm.
+pub(super) fn failure_response<S, E>(
+    state: &S,
+    started: Instant,
+    options: TopKOptions,
+    timeout: Duration,
+    label: &'static str,
+    failure: DeliveryFailure<E>,
+) -> (StatusCode, Json<ApiError>)
+where
+    S: RankedSearchCtx,
+    E: RankedBackendError + std::fmt::Display,
+{
+    match failure {
+        DeliveryFailure::Elapsed | DeliveryFailure::Error(DeliveryError::Deadline) => {
+            timeout_response(state, started, options, timeout, label, E::MODE)
+        }
+        DeliveryFailure::Error(DeliveryError::Backend(error)) => {
+            if error.is_deadline() {
+                return timeout_response(state, started, options, timeout, label, E::MODE);
+            }
+            let (status, kind, outcome) = error.http_class();
+            if error.is_core_admission() {
+                state
+                    .prom()
+                    .rank_admission_rejections_total
+                    .with_label_values(&["core"])
+                    .inc();
+            }
+            record_outcome(state.prom(), outcome, options.query_scope);
+            ApiError::response(status, kind, error.to_string())
+        }
+        DeliveryFailure::Error(DeliveryError::SourceUnavailable(logical_id)) => {
+            record_outcome(state.prom(), "error", options.query_scope);
+            ApiError::response(
+                E::UNAVAILABLE_STATUS,
+                "source_unavailable",
+                format!("source unavailable for ranked winner {logical_id}"),
+            )
+        }
+        DeliveryFailure::Error(DeliveryError::ExplanationUnavailable(logical_id)) => {
+            record_outcome(state.prom(), "error", options.query_scope);
+            ApiError::response(
+                E::UNAVAILABLE_STATUS,
+                "explanation_unavailable",
+                format!("explanation unavailable for ranked winner {logical_id}"),
+            )
+        }
+        DeliveryFailure::Error(DeliveryError::EnrichmentLimit) => {
+            state.prom().rank_enrichment_rejections_total.inc();
+            record_outcome(state.prom(), "enrichment_limit", options.query_scope);
+            ApiError::response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "rank_enrichment_limit",
+                format!(
+                    "ranked winner enrichment exceeds {} bytes",
+                    state.max_ranked_enrichment_bytes()
+                ),
+            )
+        }
+        DeliveryFailure::Join(detail) => {
+            record_outcome(state.prom(), "error", options.query_scope);
+            ApiError::response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "search_error",
+                format!("ranked search task failed: {detail}"),
+            )
+        }
+    }
+}
+
 /// The shared async driver: permit race, blocking dispatch, failure
 /// classification, and the success epilogue.
 pub(super) async fn drive<S, E, F>(
@@ -419,95 +534,39 @@ where
     E: RankedBackendError + std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<DeliveryResult, DeliveryError<E>> + Send + 'static,
 {
-    let permit_sem = Arc::clone(state.ranked_search_permits());
-    let state_inner = Arc::clone(&state);
-    // ADR-099 semantics: the permit is acquired INSIDE the deadline race (queue
-    // wait counts against the timeout) and moved into the blocking closure
-    // (released when the work actually ends, not when an abandoned join handle
-    // drops at timeout).
-    let work = async move {
-        let permit = crate::state::acquire_search_permit(
-            Some(&permit_sem),
-            &state_inner.prom().ranked_search_permits_in_use,
-        )
-        .await;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            state_inner.pool().install(work)
-        })
-        .await
+    let delivered = match run_bounded(&state, deadline, work).await {
+        Ok(Ok(Ok(result))) => result,
+        Ok(Ok(Err(error))) => {
+            return Err(failure_response(
+                &*state,
+                started,
+                options,
+                timeout,
+                "v2_search",
+                DeliveryFailure::Error(error),
+            ));
+        }
+        Ok(Err(join)) => {
+            return Err(failure_response::<S, E>(
+                &*state,
+                started,
+                options,
+                timeout,
+                "v2_search",
+                DeliveryFailure::Join(join.to_string()),
+            ));
+        }
+        Err(_) => {
+            return Err(failure_response::<S, E>(
+                &*state,
+                started,
+                options,
+                timeout,
+                "v2_search",
+                DeliveryFailure::Elapsed,
+            ));
+        }
     };
-
-    let delivered =
-        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work).await {
-            Ok(Ok(Ok(result))) => result,
-            Ok(Ok(Err(DeliveryError::Deadline))) | Err(_) => {
-                return Err(timeout_response(
-                    &*state,
-                    started,
-                    options,
-                    timeout,
-                    E::MODE,
-                ));
-            }
-            Ok(Ok(Err(DeliveryError::Backend(error)))) => {
-                if error.is_deadline() {
-                    return Err(timeout_response(
-                        &*state,
-                        started,
-                        options,
-                        timeout,
-                        E::MODE,
-                    ));
-                }
-                let (status, kind, outcome) = error.http_class();
-                if error.is_core_admission() {
-                    state
-                        .prom()
-                        .rank_admission_rejections_total
-                        .with_label_values(&["core"])
-                        .inc();
-                }
-                record_outcome(state.prom(), outcome, options.query_scope);
-                return Err(ApiError::response(status, kind, error.to_string()));
-            }
-            Ok(Ok(Err(DeliveryError::SourceUnavailable(logical_id)))) => {
-                record_outcome(state.prom(), "error", options.query_scope);
-                return Err(ApiError::response(
-                    E::UNAVAILABLE_STATUS,
-                    "source_unavailable",
-                    format!("source unavailable for ranked winner {logical_id}"),
-                ));
-            }
-            Ok(Ok(Err(DeliveryError::ExplanationUnavailable(logical_id)))) => {
-                record_outcome(state.prom(), "error", options.query_scope);
-                return Err(ApiError::response(
-                    E::UNAVAILABLE_STATUS,
-                    "explanation_unavailable",
-                    format!("explanation unavailable for ranked winner {logical_id}"),
-                ));
-            }
-            Ok(Ok(Err(DeliveryError::EnrichmentLimit))) => {
-                state.prom().rank_enrichment_rejections_total.inc();
-                record_outcome(state.prom(), "enrichment_limit", options.query_scope);
-                return Err(ApiError::response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "rank_enrichment_limit",
-                    format!(
-                        "ranked winner enrichment exceeds {} bytes",
-                        state.max_ranked_enrichment_bytes()
-                    ),
-                ));
-            }
-            Ok(Err(error)) => {
-                record_outcome(state.prom(), "error", options.query_scope);
-                return Err(ApiError::response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "search_error",
-                    format!("ranked search task failed: {error}"),
-                ));
-            }
-        };
 
     let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
     let prom = state.prom();
