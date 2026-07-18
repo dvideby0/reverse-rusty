@@ -22,6 +22,7 @@ mod dynamic_vocab;
 mod filtered;
 mod hot;
 mod placement;
+mod ranked_batch;
 mod ranking;
 mod replication;
 mod resize;

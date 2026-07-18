@@ -478,16 +478,12 @@ impl BatchEmissionPolicy for EmitAll {
 /// chunk the kernel is evaluating. A mixed-up index would silently move a
 /// logical row's emission to the wrong title's owner, so the driver slices
 /// contexts and titles from the same chunk base.
-// Constructed by the cluster shard's batch read (the gRPC-wire commit); until
-// that lands only the snapshot `_owned` entry references it.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PerTitleUniqueOwner<'a> {
     contexts: &'a [OwnershipContext],
     current_position: u32,
 }
 
-#[allow(dead_code)]
 impl<'a> PerTitleUniqueOwner<'a> {
     pub(crate) fn new(contexts: &'a [OwnershipContext], current_position: u32) -> Self {
         Self {

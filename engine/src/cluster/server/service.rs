@@ -26,12 +26,15 @@ use crate::segment::PlacedQuery;
 use super::{compile_item, ShardServer};
 
 type ShardServiceStream = Pin<Box<dyn Stream<Item = Result<proto::FetchMatch, Status>> + Send>>;
+type BatchTopKStream =
+    Pin<Box<dyn Stream<Item = Result<proto::PercolateTopKBatchFrame, Status>> + Send>>;
 
 mod add_shard;
 mod dict_adopt;
 mod gc;
 mod leases;
 mod ranked;
+mod ranked_batch;
 mod recovery;
 
 #[tonic::async_trait]
@@ -131,6 +134,15 @@ impl ShardService for ShardServer {
         request: Request<proto::FetchMatchesRequest>,
     ) -> Result<Response<Self::FetchMatchesStream>, Status> {
         ranked::fetch_matches(self, request)
+    }
+
+    type PercolateTopKBatchStream = BatchTopKStream;
+
+    async fn percolate_top_k_batch(
+        &self,
+        request: Request<proto::PercolateTopKBatchRequest>,
+    ) -> Result<Response<Self::PercolateTopKBatchStream>, Status> {
+        ranked_batch::percolate_top_k_batch(self, request)
     }
 
     async fn num_queries(

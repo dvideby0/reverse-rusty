@@ -24,6 +24,12 @@ service ShardService {
   rpc PercolateTopK (PercolateTopKRequest) returns (PercolateTopKReply);
   // ADR-110 query-then-fetch: source text only for finalized global winners.
   rpc FetchMatches (FetchMatchesRequest) returns (stream FetchMatch);
+  // ADR-112: bounded ranked title batching over the columnar batch kernel.
+  // One bounded unary request (per-title ownership contexts, one shared rank
+  // program/K/threshold/deadline); the reply streams one bounded title frame
+  // per request title IN ORDER, then exactly one trailing summary frame — the
+  // client's completeness sentinel. Each frame obeys the per-message result cap.
+  rpc PercolateTopKBatch (PercolateTopKBatchRequest) returns (stream PercolateTopKBatchFrame);
   rpc NumQueries  (ShardRef)         returns (CountReply);
   rpc ClassCounts (ShardRef)         returns (ClassCountsReply);
   // ---- writes ----
@@ -239,6 +245,60 @@ message PercolateTopKReply {
   uint32 requested_size = 7;
   uint64 placement_generation = 8;
   uint32 num_shards = 9;
+}
+
+// One batch title + ITS routing context (routed sets differ per title, so the
+// ownership context is per entry; request-local index = position in the list).
+message BatchTitle {
+  string title = 1;
+  OwnershipContext ownership = 2;
+}
+
+message PercolateTopKBatchRequest {
+  repeated BatchTitle titles = 1;
+  // Batch-wide visibility scope; per-title broad EVALUATION is governed by each
+  // title's ownership.broad_evaluator_plus_one (a title whose broad evaluator
+  // is elsewhere contributes no broad emissions here — per-title ownership
+  // suppression keeps the emitted set identical to N single calls).
+  bool include_broad = 2;
+  repeated TagGroup filter = 3;
+  RankProgram rank = 4;
+  uint32 size = 5;
+  uint64 track_total_hits_up_to = 6;
+  // ONE deadline budget for the whole batch (all-or-nothing, ADR-099 style).
+  uint64 remaining_micros = 7;
+  uint32 shard_id = 8;
+}
+
+// One title's bounded result: the single-title reply shape + its request-local
+// index. Match statistics are batch-aggregate (the columnar kernel cannot
+// attribute them per title) and ride the summary frame.
+message PercolateTopKTitleResult {
+  uint32 title_index = 1;
+  repeated RankedHit hits = 2;
+  BoundedTotalHits total_hits = 3;
+  BoundedRankStats rank_stats = 4;
+  bool bounded = 5;
+  bool ownership_applied = 6;
+  uint32 requested_size = 7;
+  uint64 placement_generation = 8;
+  uint32 num_shards = 9;
+}
+
+// Exactly once, LAST — the completeness sentinel a client requires before
+// accepting the batch (a truncated stream must fail loud, never partial).
+message PercolateTopKBatchSummary {
+  uint32 titles_served = 1;
+  MatchStats stats = 2;
+  uint64 placement_generation = 3;
+  uint32 num_shards = 4;
+}
+
+message PercolateTopKBatchFrame {
+  oneof frame {
+    PercolateTopKTitleResult title = 1;
+    PercolateTopKBatchSummary summary = 2;
+  }
 }
 
 message FetchMatchesRequest {

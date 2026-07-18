@@ -205,6 +205,32 @@ pub(crate) struct FetchedMatch {
     pub(crate) source: String,
 }
 
+/// One batch title plus ITS routing context (ADR-112) — routed sets differ per
+/// title, so ownership is per entry; slice index = title index.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BatchTitleRequest<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) context: &'a crate::ownership::OwnershipContext,
+}
+
+/// One title's ownership-filtered bounded rows inside a batch reply.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ShardRankedTitle {
+    pub(crate) hits: Vec<crate::rank::RankedHit>,
+    pub(crate) total_hits: crate::result::TotalHits,
+    pub(crate) rank_stats: crate::rank::RankStats,
+}
+
+/// One shard's bounded batch reply: per-title rows in request order + the
+/// batch-aggregate match statistics. `result_bytes` sums the exact encoded
+/// frame sizes for remote replies and is zero for in-process shards.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ShardBatchRankedMatch {
+    pub(crate) titles: Vec<ShardRankedTitle>,
+    pub(crate) stats: MatchStats,
+    pub(crate) result_bytes: u64,
+}
+
 /// Sink for shard-level observability events (e.g. a [`ReplicatedShard`] replica
 /// dropping out of its in-sync set). The `Arc` analogue of the engine's event
 /// observer; the coordinator fans its observer in via `ClusterEngine::set_observer`.
@@ -331,6 +357,34 @@ pub(crate) trait Shard: Send + Sync {
         );
         Err(ShardError::Protocol(
             "bounded top-k is not implemented by this shard".into(),
+        ))
+    }
+    /// Ownership-aware bounded ranked title batching (ADR-112): one shared
+    /// program/K/threshold, per-title contexts, one deadline, per-title rows in
+    /// request order. The default is a loud refusal — a legacy/test shard
+    /// cannot silently masquerade as batch-capable.
+    #[allow(clippy::too_many_arguments)]
+    fn percolate_top_k_batch_owned(
+        &self,
+        titles: &[BatchTitleRequest<'_>],
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardBatchRankedMatch, ShardError> {
+        let _ = (
+            titles,
+            include_broad,
+            pred,
+            program,
+            options,
+            current_position,
+            deadline,
+        );
+        Err(ShardError::Protocol(
+            "bounded batch top-k is not implemented by this shard".into(),
         ))
     }
     /// Batch-fetch current source text for final winners. Implementations must

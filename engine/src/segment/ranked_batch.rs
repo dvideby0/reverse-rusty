@@ -54,8 +54,6 @@ impl EngineSnapshot {
     /// index-aligned with `titles`. Boolean verification is identical to the
     /// standalone entry; the per-title [`PerTitleUniqueOwner`] policy applies
     /// only at the final emission boundary.
-    // Called by the cluster shard's batch read (the gRPC-wire commit).
-    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_match_titles_batch_top_k_owned(
         &self,

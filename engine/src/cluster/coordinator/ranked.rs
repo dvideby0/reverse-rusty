@@ -159,28 +159,17 @@ impl ClusterEngine {
         };
         check_deadline(deadline)?;
 
-        let mut hits = Vec::with_capacity(options.size.saturating_mul(targets.len()));
-        let mut seen = FastSet::default();
-        seen.reserve(hits.capacity());
         let mut stats = MatchStats::default();
         let mut rank_stats = RankStats::default();
-        let mut exact_sum = 0u64;
-        let mut exact_overflow = false;
-        let mut all_exact = true;
         let mut result_bytes = 0u64;
-
-        for (position, part) in parts {
+        for (position, part) in &parts {
             validate_part(
-                position,
+                *position,
                 options.size,
                 options.track_total_hits_up_to,
-                &part,
+                &part.hits,
+                &part.total_hits,
             )?;
-            all_exact &= part.total_hits.relation == TotalHitsRelation::Eq;
-            match exact_sum.checked_add(part.total_hits.value) {
-                Some(sum) => exact_sum = sum,
-                None => exact_overflow = true,
-            }
             stats.merge(part.stats);
             rank_stats.evaluations = rank_stats
                 .evaluations
@@ -189,29 +178,17 @@ impl ClusterEngine {
                 .heap_replacements
                 .saturating_add(part.rank_stats.heap_replacements);
             result_bytes = result_bytes.saturating_add(part.result_bytes);
-            for hit in part.hits {
-                if !seen.insert(hit.logical_id) {
-                    return Err(ClusterRankedError::DuplicateLogicalId(hit.logical_id));
-                }
-                hits.push(ClusterRankedHit {
-                    logical_id: hit.logical_id,
-                    score: hit.score,
-                    owner_position: position as u32,
-                });
-            }
         }
-
-        let shard_rows_received = hits.len();
-        let threshold = options.track_total_hits_up_to;
-        let total_hits = if all_exact && !exact_overflow && exact_sum <= threshold {
-            TotalHits::exact(exact_sum)
-        } else {
-            TotalHits::lower_bound(threshold)
-        };
-        hits.sort_unstable_by(|a, b| {
-            ranked_order((a.score, a.logical_id), (b.score, b.logical_id))
-        });
-        hits.truncate(options.size);
+        let title_parts: Vec<TitlePart<'_>> = parts
+            .iter()
+            .map(|(position, part)| TitlePart {
+                position: *position,
+                hits: &part.hits,
+                total: part.total_hits,
+            })
+            .collect();
+        let (hits, total_hits, shard_rows_received) =
+            merge_title_rows(options.size, options.track_total_hits_up_to, &title_parts)?;
         // The fan-out may complete just under the wire; the merge/sort above ran
         // unchecked, so re-verify the absolute deadline before claiming success
         // (codex review).
@@ -401,7 +378,7 @@ impl ClusterEngine {
     }
 }
 
-fn validate_options(options: TopKOptions) -> Result<(), ClusterRankedError> {
+pub(super) fn validate_options(options: TopKOptions) -> Result<(), ClusterRankedError> {
     if options.size > MAX_TOP_K {
         return Err(ClusterRankedError::Admission(
             TopKAdmissionError::SizeTooLarge {
@@ -421,7 +398,7 @@ fn validate_options(options: TopKOptions) -> Result<(), ClusterRankedError> {
     Ok(())
 }
 
-fn check_deadline(deadline: Option<Instant>) -> Result<(), ClusterRankedError> {
+pub(super) fn check_deadline(deadline: Option<Instant>) -> Result<(), ClusterRankedError> {
     if deadline.is_some_and(|at| Instant::now() >= at) {
         Err(ClusterRankedError::DeadlineExceeded)
     } else {
@@ -429,19 +406,68 @@ fn check_deadline(deadline: Option<Instant>) -> Result<(), ClusterRankedError> {
     }
 }
 
-fn validate_part(
+/// One shard's already-validated rows for ONE title — the unit the shared
+/// exact merge consumes.
+pub(super) struct TitlePart<'a> {
+    pub(super) position: usize,
+    pub(super) hits: &'a [crate::rank::RankedHit],
+    pub(super) total: crate::result::TotalHits,
+}
+
+/// The ADR-110 exact merge core for one title: enforce ADR-109 cross-shard
+/// disjointness, fold the honest total (exact only while every part is exact
+/// and the sum stays under the threshold), order by the shared comparator,
+/// truncate to K. Returns `(winners, total, rows_received)`.
+pub(super) fn merge_title_rows(
+    size: usize,
+    track_total_hits_up_to: u64,
+    parts: &[TitlePart<'_>],
+) -> Result<(Vec<ClusterRankedHit>, TotalHits, usize), ClusterRankedError> {
+    let mut hits = Vec::with_capacity(parts.iter().map(|part| part.hits.len()).sum());
+    let mut seen = FastSet::default();
+    seen.reserve(hits.capacity());
+    let mut exact_sum = 0u64;
+    let mut exact_overflow = false;
+    let mut all_exact = true;
+    for part in parts {
+        all_exact &= part.total.relation == TotalHitsRelation::Eq;
+        match exact_sum.checked_add(part.total.value) {
+            Some(sum) => exact_sum = sum,
+            None => exact_overflow = true,
+        }
+        for hit in part.hits {
+            if !seen.insert(hit.logical_id) {
+                return Err(ClusterRankedError::DuplicateLogicalId(hit.logical_id));
+            }
+            hits.push(ClusterRankedHit {
+                logical_id: hit.logical_id,
+                score: hit.score,
+                owner_position: part.position as u32,
+            });
+        }
+    }
+    let rows_received = hits.len();
+    let total_hits = if all_exact && !exact_overflow && exact_sum <= track_total_hits_up_to {
+        TotalHits::exact(exact_sum)
+    } else {
+        TotalHits::lower_bound(track_total_hits_up_to)
+    };
+    hits.sort_unstable_by(|a, b| ranked_order((a.score, a.logical_id), (b.score, b.logical_id)));
+    hits.truncate(size);
+    Ok((hits, total_hits, rows_received))
+}
+
+pub(super) fn validate_part(
     position: usize,
     requested_k: usize,
     track_total_hits_up_to: u64,
-    part: &ShardRankedMatch,
+    hits: &[crate::rank::RankedHit],
+    total: &crate::result::TotalHits,
 ) -> Result<(), ClusterRankedError> {
-    if part.hits.len() > requested_k {
+    if hits.len() > requested_k {
         return Err(ClusterRankedError::InvalidShardReply {
             position,
-            detail: format!(
-                "returned {} rows for requested K={requested_k}",
-                part.hits.len()
-            ),
+            detail: format!("returned {} rows for requested K={requested_k}", hits.len()),
         });
     }
     // The total claim must be consistent with the bounded-collector contract
@@ -449,11 +475,10 @@ fn validate_part(
     // (v = its distinct matched count) or Gte(threshold) exactly. Anything else
     // would let one faulty peer publish an exact count smaller than its own hit
     // list or fabricate an unsupported lower bound through the merge.
-    let total = &part.total_hits;
     let consistent = match total.relation {
         crate::result::TotalHitsRelation::Eq => {
             total.value <= track_total_hits_up_to
-                && total.value >= u64::try_from(part.hits.len()).unwrap_or(u64::MAX)
+                && total.value >= u64::try_from(hits.len()).unwrap_or(u64::MAX)
         }
         crate::result::TotalHitsRelation::Gte => total.value == track_total_hits_up_to,
     };
@@ -464,12 +489,12 @@ fn validate_part(
                 "total claim {:?}({}) is inconsistent with {} rows under threshold {}",
                 total.relation,
                 total.value,
-                part.hits.len(),
+                hits.len(),
                 track_total_hits_up_to
             ),
         });
     }
-    for pair in part.hits.windows(2) {
+    for pair in hits.windows(2) {
         let left = pair[0];
         let right = pair[1];
         let ordered = ranked_beats(

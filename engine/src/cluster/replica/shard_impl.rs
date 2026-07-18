@@ -100,6 +100,29 @@ impl Shard for ReplicatedShard {
         })
     }
 
+    fn percolate_top_k_batch_owned(
+        &self,
+        titles: &[crate::cluster::shard::BatchTitleRequest<'_>],
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<crate::cluster::shard::ShardBatchRankedMatch, ShardError> {
+        self.read(|shard| {
+            shard.percolate_top_k_batch_owned(
+                titles,
+                include_broad,
+                pred,
+                program,
+                options,
+                current_position,
+                deadline,
+            )
+        })
+    }
+
     fn fetch_matches(
         &self,
         logical_ids: &[u64],

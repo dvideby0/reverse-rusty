@@ -639,6 +639,70 @@ impl Shard for LocalShard {
         })
     }
 
+    fn percolate_top_k_batch_owned(
+        &self,
+        titles: &[crate::cluster::shard::BatchTitleRequest<'_>],
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        mut options: crate::result::TopKOptions,
+        current_position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<crate::cluster::shard::ShardBatchRankedMatch, ShardError> {
+        // Fail closed up front: one invalid/unrouted context fails the whole
+        // batch before any matching work.
+        for request in titles {
+            request.context.validate()?;
+            request.context.require_routed(current_position)?;
+        }
+        options.query_scope = if include_broad {
+            crate::result::QueryScope::WithBroad
+        } else {
+            crate::result::QueryScope::Standard
+        };
+        let snap = self.snapshot();
+        let cfg = snap.config();
+        let batch_opts = crate::segment::BatchMatchOptions {
+            include_broad,
+            broad_batch_size: cfg.broad_batch_size,
+            broad_strategy: if cfg.broad_columnar {
+                crate::segment::BroadStrategy::Columnar
+            } else {
+                crate::segment::BroadStrategy::Inline
+            },
+            broad_materialize: cfg.broad_materialize,
+            broad_prefilter: cfg.broad_prefilter,
+        };
+        let title_strs: Vec<&str> = titles.iter().map(|request| request.title).collect();
+        let contexts: Vec<crate::ownership::OwnershipContext> = titles
+            .iter()
+            .map(|request| request.context.clone())
+            .collect();
+        let ranked = snap.try_match_titles_batch_top_k_owned(
+            &title_strs,
+            batch_opts,
+            options,
+            program,
+            pred,
+            &contexts,
+            current_position,
+            deadline,
+        )?;
+        Ok(crate::cluster::shard::ShardBatchRankedMatch {
+            titles: ranked
+                .titles
+                .into_iter()
+                .map(|title| crate::cluster::shard::ShardRankedTitle {
+                    hits: title.hits,
+                    total_hits: title.total_hits,
+                    rank_stats: title.rank_stats,
+                })
+                .collect(),
+            stats: ranked.stats,
+            result_bytes: 0,
+        })
+    }
+
     fn fetch_matches(
         &self,
         logical_ids: &[u64],
