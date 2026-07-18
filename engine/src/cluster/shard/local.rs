@@ -59,6 +59,12 @@ pub(crate) struct LocalShard {
     dict: Arc<Dict>,
     /// `Some` ⇒ durable (segments + translog + checkpoint sidecar live here); `None` ⇒ in-memory.
     data_dir: Option<PathBuf>,
+    /// Pinned point-in-time snapshots keyed by the coordinator-allocated pit id
+    /// (ADR-113). TTL/caps live at the coordinator (whose registry owns the
+    /// lifecycle and fans `close_pit`); this map only holds the pins. Dropped
+    /// with the shard — a resize/set_vocab rebuild releases every pin, and the
+    /// coordinator's generation gate 409s the cursor before it ever gets here.
+    pits: Mutex<crate::util::FastMap<u64, Arc<EngineSnapshot>>>,
 }
 
 impl LocalShard {
@@ -92,6 +98,7 @@ impl LocalShard {
             norm,
             dict,
             data_dir: None,
+            pits: Mutex::new(crate::util::fast_map()),
         }
     }
 
@@ -150,6 +157,7 @@ impl LocalShard {
             norm,
             dict,
             data_dir: Some(dir),
+            pits: Mutex::new(crate::util::fast_map()),
         })
     }
 
@@ -197,6 +205,7 @@ impl LocalShard {
             norm,
             dict,
             data_dir: dir,
+            pits: Mutex::new(crate::util::fast_map()),
         })
     }
 
@@ -245,6 +254,7 @@ impl LocalShard {
             norm,
             dict,
             data_dir: Some(dir),
+            pits: Mutex::new(crate::util::fast_map()),
         };
         // Replay the un-sealed tail (ops > P) into the engine ONLY — the ops are already on disk
         // in the translog, so re-appending would duplicate them. Position-filtered, so it never
@@ -513,6 +523,49 @@ impl LocalShard {
     }
 }
 
+impl LocalShard {
+    /// The one bounded-top-K body, parameterized by the snapshot it reads —
+    /// the current view (`percolate_top_k_owned`) and a pinned PIT
+    /// (`percolate_top_k_owned_pit`, ADR-113) cannot fork behavior.
+    #[allow(clippy::too_many_arguments)]
+    fn top_k_on(
+        snap: &EngineSnapshot,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        mut options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        context.validate()?;
+        context.require_routed(current_position)?;
+        options.query_scope = if include_broad {
+            crate::result::QueryScope::WithBroad
+        } else {
+            crate::result::QueryScope::Standard
+        };
+        let mut scratch = MatchScratch::new();
+        let ranked = snap.try_match_title_top_k_owned(
+            title,
+            options,
+            program,
+            pred,
+            &mut scratch,
+            deadline,
+            crate::ownership::UniqueOwner::new(context, current_position),
+        )?;
+        Ok(ShardRankedMatch {
+            hits: ranked.hits,
+            total_hits: ranked.total_hits,
+            stats: ranked.stats,
+            rank_stats: ranked.rank_stats,
+            result_bytes: 0,
+        })
+    }
+}
+
 impl Shard for LocalShard {
     /// Verbatim the body of the coordinator's old `query_shard`: allocate scratch,
     /// match one title against the lock-free snapshot, return ids + stats. Infallible
@@ -607,36 +660,71 @@ impl Shard for LocalShard {
         include_broad: bool,
         pred: &TagPredicate,
         program: &crate::rank::CompiledRankProgram,
-        mut options: crate::result::TopKOptions,
+        options: crate::result::TopKOptions,
         context: &crate::ownership::OwnershipContext,
         current_position: u32,
         deadline: Option<Instant>,
     ) -> Result<ShardRankedMatch, ShardError> {
-        context.validate()?;
-        context.require_routed(current_position)?;
-        options.query_scope = if include_broad {
-            crate::result::QueryScope::WithBroad
-        } else {
-            crate::result::QueryScope::Standard
-        };
-        let snap = self.snapshot();
-        let mut scratch = MatchScratch::new();
-        let ranked = snap.try_match_title_top_k_owned(
+        Self::top_k_on(
+            &self.snapshot(),
             title,
-            options,
-            program,
+            include_broad,
             pred,
-            &mut scratch,
+            program,
+            options,
+            context,
+            current_position,
             deadline,
-            crate::ownership::UniqueOwner::new(context, current_position),
-        )?;
-        Ok(ShardRankedMatch {
-            hits: ranked.hits,
-            total_hits: ranked.total_hits,
-            stats: ranked.stats,
-            rank_stats: ranked.rank_stats,
-            result_bytes: 0,
-        })
+        )
+    }
+
+    fn open_pit(&self, pit: u64) -> Result<(), ShardError> {
+        let snapshot = self.snapshot();
+        self.pits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pit, snapshot);
+        Ok(())
+    }
+
+    fn close_pit(&self, pit: u64) -> Result<(), ShardError> {
+        self.pits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&pit);
+        Ok(())
+    }
+
+    fn percolate_top_k_owned_pit(
+        &self,
+        pit: u64,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        let pinned = self
+            .pits
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&pit)
+            .map(Arc::clone)
+            .ok_or(ShardError::PitNotFound(pit))?;
+        Self::top_k_on(
+            &pinned,
+            title,
+            include_broad,
+            pred,
+            program,
+            options,
+            context,
+            current_position,
+            deadline,
+        )
     }
 
     fn percolate_top_k_batch_owned(

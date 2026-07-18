@@ -395,6 +395,11 @@ impl ClusterEngine {
         self.shards = shards;
         self.placement_generation
             .store(new_generation.0, std::sync::atomic::Ordering::Release);
+        // ADR-113: the old shards (and their PIT pins) are gone; every open
+        // registry entry can only ever fail its generation gate now. Drop them
+        // eagerly (frees cap slots) WITHOUT resetting the id counter — a
+        // reused id would let a stale cursor alias a post-rebuild PIT.
+        self.clear_pits();
         if let Some(vocab) = new_vocab {
             self.vocab = Some(Arc::new(vocab));
         }

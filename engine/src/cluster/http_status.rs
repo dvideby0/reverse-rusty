@@ -8,6 +8,8 @@
 //! | `Config` | 400 `validation_error` | 503 `cluster_unavailable` |
 //! | `DictMismatch` | 500 `feature_space_mismatch` | 503 `cluster_unavailable` |
 //! | `DuplicateLogicalId` | 409 `logical_id_conflict` | 503 `cluster_unavailable` |
+//! | `PitNotFound` / `StalePit` | 409 `stale_cursor` | **409** `stale_cursor` |
+//! | `PitUnsupported` | 400 `validation_error` | 501 `pit_unsupported` |
 //!
 //! The write/admin surface speaks REST conflict semantics: 409 tells the writer
 //! its mutation raced a placement change (or hit an existing id) — re-resolve
@@ -17,6 +19,13 @@
 //! read cannot be served right now" — retry *later*, which is 503. Aligning
 //! either direction would silently break a documented surface, so the two
 //! tables live side by side here where a new variant must be decided for both.
+//!
+//! **The one deliberate read-surface 409 (ADR-113):** a stale PIT/cursor. It is
+//! NOT a retry-later condition — the pinned generation is gone forever, no
+//! amount of waiting brings it back, and the client's correct move is to open a
+//! new PIT and restart pagination. 409 (against the ADR-110-era read-409-free
+//! rule, amended by ADR-113) tells the client precisely that; 503 would invite
+//! useless retries of an unservable cursor.
 //!
 //! Codes are `u16` so the lean core stays free of any HTTP crate; the server
 //! bin converts (every value emitted here is a valid status code).
@@ -33,7 +42,12 @@ impl ShardError {
     #[must_use]
     pub fn write_http_class(&self) -> (u16, &'static str) {
         match self {
-            ShardError::Config(_) | ShardError::Admission(_) => (400, "validation_error"),
+            // `PitUnsupported` joins the 400 row (ADR-113 totality — PIT ops
+            // never reach the write surface; an unsupported pin is a
+            // caller-shape error there).
+            ShardError::Config(_) | ShardError::Admission(_) | ShardError::PitUnsupported(_) => {
+                (400, "validation_error")
+            }
             ShardError::Log(_) => (503, "durability_unavailable"),
             ShardError::Remote(_) => (502, "shard_unreachable"),
             ShardError::DictMismatch { .. } => (500, "feature_space_mismatch"),
@@ -45,6 +59,9 @@ impl ShardError {
             ShardError::DuplicateLogicalId(_) => (409, "logical_id_conflict"),
             ShardError::EnrichmentLimit { .. } => (413, "rank_enrichment_limit"),
             ShardError::PartiallyApplied { .. } => (200, "partially_applied"),
+            // ADR-113 totality row: a missing pin is the same stale-cursor
+            // conflict the read surface reports.
+            ShardError::PitNotFound(_) => (409, "stale_cursor"),
         }
     }
 }
@@ -79,6 +96,19 @@ impl ClusterRankedError {
             }
             ClusterRankedError::Shard(ShardError::OwnershipMismatch(_)) => {
                 (503, "placement_generation_mismatch", "error")
+            }
+            // ADR-113: the one deliberate read-surface 409 (see module doc) —
+            // the pinned generation is gone forever; restart pagination.
+            // (`Shard(PitNotFound)` folds into `StalePit` at the From seam;
+            // kept in the match for totality if constructed directly.)
+            ClusterRankedError::StalePit
+            | ClusterRankedError::Shard(ShardError::PitNotFound(_)) => {
+                (409, "stale_cursor", "stale_cursor")
+            }
+            // A PIT op reached a shard that cannot pin (remote assembly):
+            // not stale, not retryable — the feature is absent here.
+            ClusterRankedError::Shard(ShardError::PitUnsupported(_)) => {
+                (501, "pit_unsupported", "validation")
             }
             ClusterRankedError::Shard(
                 ShardError::Config(_)
@@ -148,6 +178,37 @@ mod tests {
             (status, kind, outcome),
             (502, "shard_delivery_failed", "error")
         );
+    }
+
+    #[test]
+    fn stale_pit_is_the_one_deliberate_read_surface_409() {
+        // ADR-113 amends the read-409-free rule for exactly this condition:
+        // the pinned generation is unrecoverable, so retry-later (503) would
+        // be a lie — the client must open a new PIT and restart.
+        let (status, kind, outcome) = ClusterRankedError::StalePit.v2_http_class();
+        assert_eq!(
+            (status, kind, outcome),
+            (409, "stale_cursor", "stale_cursor")
+        );
+        let (status, kind, outcome) =
+            ClusterRankedError::Shard(ShardError::PitNotFound(3)).v2_http_class();
+        assert_eq!(
+            (status, kind, outcome),
+            (409, "stale_cursor", "stale_cursor")
+        );
+        // Both surfaces agree on this one (the divergence-free row).
+        assert_eq!(
+            ShardError::PitNotFound(3).write_http_class(),
+            (409, "stale_cursor")
+        );
+    }
+
+    #[test]
+    fn pit_unsupported_is_read_501_write_400() {
+        let error = ShardError::PitUnsupported("wire PIT is a later increment".into());
+        assert_eq!(error.write_http_class(), (400, "validation_error"));
+        let (status, kind, _) = ClusterRankedError::Shard(error).v2_http_class();
+        assert_eq!((status, kind), (501, "pit_unsupported"));
     }
 
     #[test]

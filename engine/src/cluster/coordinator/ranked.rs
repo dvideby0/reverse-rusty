@@ -55,9 +55,19 @@ pub enum ClusterRankedError {
     Admission(TopKAdmissionError),
     Shard(ShardError),
     DeadlineExceeded,
-    InvalidShardReply { position: usize, detail: String },
+    InvalidShardReply {
+        position: usize,
+        detail: String,
+    },
     DuplicateLogicalId(u64),
-    EnrichmentLimit { limit: usize },
+    EnrichmentLimit {
+        limit: usize,
+    },
+    /// ADR-113: the referenced point-in-time is unknown, expired, closed, or
+    /// was opened under a different placement (a vocab/resize rebuild). The
+    /// cursor stream cannot continue without mixing generations — fail closed;
+    /// the serving layer surfaces 409 stale-cursor.
+    StalePit,
 }
 
 impl std::fmt::Display for ClusterRankedError {
@@ -76,6 +86,10 @@ impl std::fmt::Display for ClusterRankedError {
             Self::EnrichmentLimit { limit } => {
                 write!(f, "ranked winner enrichment exceeds {limit} bytes")
             }
+            Self::StalePit => f.write_str(
+                "the referenced point-in-time is no longer available; open a new PIT and restart \
+                 pagination",
+            ),
         }
     }
 }
@@ -88,6 +102,9 @@ impl From<ShardError> for ClusterRankedError {
             ShardError::DeadlineExceeded => Self::DeadlineExceeded,
             ShardError::Admission(error) => Self::Admission(error),
             ShardError::EnrichmentLimit { limit } => Self::EnrichmentLimit { limit },
+            // A shard-side missing pin (handoff swap, replica failover, restart)
+            // is the same client condition as a coordinator-side stale entry.
+            ShardError::PitNotFound(_) => Self::StalePit,
             other => Self::Shard(other),
         }
     }
@@ -120,7 +137,31 @@ impl ClusterEngine {
         program: &CompiledRankProgram,
         deadline: Option<Instant>,
     ) -> Result<ClusterRankedMatch, ClusterRankedError> {
+        self.top_k_core(None, title, filter, options, program, deadline)
+    }
+
+    /// The ONE bounded distributed collection body, parameterized by the view:
+    /// `pit: None` reads each shard's current snapshot; `Some(pit)` reads its
+    /// ADR-113 pinned snapshot (callers gate placement identity first). One
+    /// body means the current-view and pit paths cannot fork semantics.
+    pub(super) fn top_k_core(
+        &self,
+        pit: Option<u64>,
+        title: &str,
+        filter: &[(String, Vec<String>)],
+        options: TopKOptions,
+        program: &CompiledRankProgram,
+        deadline: Option<Instant>,
+    ) -> Result<ClusterRankedMatch, ClusterRankedError> {
         validate_options(options)?;
+        if pit.is_none() && options.search_after.is_some() {
+            // A boundary without a pinned view would mix generations across
+            // pages (and a remote shard's wire cannot even carry it) — the
+            // cursor contract requires a PIT (ADR-113).
+            return Err(ClusterRankedError::Shard(ShardError::PitUnsupported(
+                "search_after requires an open point-in-time (ADR-113)".into(),
+            )));
+        }
         check_deadline(deadline)?;
 
         let include_broad = options.query_scope == QueryScope::WithBroad;
@@ -134,19 +175,33 @@ impl ClusterEngine {
         )?;
 
         let collect_one = |&position: &usize| {
-            self.shards[position]
-                .percolate_top_k_owned(
+            let shard = &self.shards[position];
+            let broad_here = include_broad && position == broad_eval_shard;
+            match pit {
+                None => shard.percolate_top_k_owned(
                     title,
-                    include_broad && position == broad_eval_shard,
+                    broad_here,
                     &pred,
                     program,
                     options,
                     &ownership,
                     position as u32,
                     deadline,
-                )
-                .map(|part| (position, part))
-                .map_err(ClusterRankedError::from)
+                ),
+                Some(pit) => shard.percolate_top_k_owned_pit(
+                    pit,
+                    title,
+                    broad_here,
+                    &pred,
+                    program,
+                    options,
+                    &ownership,
+                    position as u32,
+                    deadline,
+                ),
+            }
+            .map(|part| (position, part))
+            .map_err(ClusterRankedError::from)
         };
         let parts: Vec<(usize, ShardRankedMatch)> = if targets.len() <= 1 {
             targets.iter().map(collect_one).collect::<Result<_, _>>()?
@@ -167,6 +222,7 @@ impl ClusterEngine {
                 *position,
                 options.size,
                 options.track_total_hits_up_to,
+                options.search_after,
                 &part.hits,
                 &part.total_hits,
             )?;
@@ -461,6 +517,7 @@ pub(super) fn validate_part(
     position: usize,
     requested_k: usize,
     track_total_hits_up_to: u64,
+    search_after: Option<(i64, u64)>,
     hits: &[crate::rank::RankedHit],
     total: &crate::result::TotalHits,
 ) -> Result<(), ClusterRankedError> {
@@ -469,6 +526,18 @@ pub(super) fn validate_part(
             position,
             detail: format!("returned {} rows for requested K={requested_k}", hits.len()),
         });
+    }
+    // ADR-113 boundary attestation: under a cursor page every row must sit
+    // strictly AFTER the boundary — a dishonest/buggy shard smuggling a
+    // pre-boundary row through the merge would duplicate an earlier page.
+    // Rows are strictly-ordered (checked below), so the first suffices.
+    if let (Some(after), Some(first)) = (search_after, hits.first()) {
+        if !ranked_beats(after, (first.score, first.logical_id)) {
+            return Err(ClusterRankedError::InvalidShardReply {
+                position,
+                detail: "rows are not strictly after the search_after boundary".into(),
+            });
+        }
     }
     // The total claim must be consistent with the bounded-collector contract
     // (codex review): an honest shard reports Eq(v) with rows ≤ v ≤ threshold

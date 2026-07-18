@@ -1134,6 +1134,18 @@ impl Shard for RemoteShard {
         Ok((reply.ids.into_iter().zip(reply.scores).collect(), stats))
     }
 
+    /// ADR-113: wire PIT is a named later increment — the coordinator refuses
+    /// cursor requests on a remote assembly BEFORE fanning, and this explicit
+    /// override keeps the refusal loud with the operator-facing alternative
+    /// even if a future caller reaches the seam directly.
+    fn open_pit(&self, pit: u64) -> Result<(), ShardError> {
+        let _ = pit;
+        Err(ShardError::PitUnsupported(
+            "wire PIT is a later increment; page via an in-process cluster or single-node mode"
+                .into(),
+        ))
+    }
+
     fn percolate_top_k_owned(
         &self,
         title: &str,

@@ -94,6 +94,15 @@ pub enum ShardError {
     /// Winner source materialization exceeded the caller's cumulative byte
     /// credit. This is distinct from the per-message transport cap.
     EnrichmentLimit { limit: usize },
+    /// This shard cannot pin point-in-time snapshots (ADR-113) — today every
+    /// remote/wire-backed shard. Carries the alternative the caller should
+    /// surface (the deferral pattern: refuse loudly, name the way out).
+    PitUnsupported(String),
+    /// A pit-scoped read named a PIT this shard does not hold (expired,
+    /// closed, replaced backing, or a failed-over replica). Serving the
+    /// current view instead would silently mix generations — fail closed and
+    /// let the caller surface 409 stale-cursor semantics (ADR-113).
+    PitNotFound(u64),
     /// A cluster mutation could not be durably logged (the coordinator's externalized
     /// `ClusterLog`, ADR-031). The mutation is *rejected*, not applied — surfacing it
     /// rather than acknowledging an unlogged write is load-bearing for the
@@ -152,6 +161,15 @@ impl std::fmt::Display for ShardError {
             ),
             ShardError::EnrichmentLimit { limit } => {
                 write!(f, "ranked winner enrichment exceeds {limit} bytes")
+            }
+            ShardError::PitUnsupported(alternative) => {
+                write!(
+                    f,
+                    "point-in-time snapshots are unsupported here: {alternative}"
+                )
+            }
+            ShardError::PitNotFound(pit) => {
+                write!(f, "point-in-time {pit} is not held by this shard")
             }
             ShardError::Log(m) => write!(f, "cluster log durability error: {m}"),
             ShardError::ControlPlane(m) => write!(f, "cluster control-plane error: {m}"),
@@ -359,6 +377,57 @@ pub(crate) trait Shard: Send + Sync {
             "bounded top-k is not implemented by this shard".into(),
         ))
     }
+    /// Pin this shard's CURRENT snapshot under the coordinator-allocated pit
+    /// id (ADR-113). Default: loud typed refusal — only in-process shards can
+    /// pin (wire PIT is a named later increment).
+    fn open_pit(&self, pit: u64) -> Result<(), ShardError> {
+        let _ = pit;
+        Err(ShardError::PitUnsupported(
+            "this shard cannot pin snapshots; use an in-process cluster or single-node mode".into(),
+        ))
+    }
+
+    /// Release a pinned snapshot. Default `Ok`: close is best-effort cleanup —
+    /// a shard that never pinned has nothing to release, and failing a close
+    /// would block the coordinator from reaping its own registry entry.
+    fn close_pit(&self, pit: u64) -> Result<(), ShardError> {
+        let _ = pit;
+        Ok(())
+    }
+
+    /// [`Shard::percolate_top_k_owned`] served from the pinned `pit` snapshot
+    /// instead of the current view (ADR-113). The default refuses loudly so a
+    /// shard that cannot pin can never silently serve a current-view page into
+    /// a cursor stream (generation mixing).
+    #[allow(clippy::too_many_arguments)]
+    fn percolate_top_k_owned_pit(
+        &self,
+        pit: u64,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        let _ = (
+            title,
+            include_broad,
+            pred,
+            program,
+            options,
+            context,
+            current_position,
+            deadline,
+        );
+        let _ = pit;
+        Err(ShardError::PitUnsupported(
+            "pit-scoped bounded top-k is not implemented by this shard".into(),
+        ))
+    }
+
     /// Ownership-aware bounded ranked title batching (ADR-112): one shared
     /// program/K/threshold, per-title contexts, one deadline, per-title rows in
     /// request order. The default is a loud refusal — a legacy/test shard

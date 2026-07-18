@@ -110,6 +110,11 @@ pub(crate) struct ClusterAppState {
     pub(crate) slow_query_threshold_ms: u64,
     /// Bearer-token auth (ADR-062), identical to single-node mode.
     pub(crate) auth: Option<AuthConfig>,
+    /// Per-process HMAC key for PIT/cursor tokens (ADR-113); the coordinator
+    /// holds the registry itself (`ClusterEngine` pins per-shard snapshots).
+    pub(crate) pit_tokens: crate::pit::PitTokens,
+    /// Admission bounds handed to `ClusterEngine::open_pit` per call.
+    pub(crate) pit_config: reverse_rusty::PitConfig,
 }
 
 /// What the request-scoped middleware needs from either backend's state — the seam

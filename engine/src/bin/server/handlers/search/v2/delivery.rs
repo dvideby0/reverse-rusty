@@ -325,23 +325,37 @@ pub(super) fn local_delivery(
     })
 }
 
-/// Coordinator kernel: exact bounded distributed top-K, then the phase-two
-/// winner fetch under one global credit, then assembly.
+/// Coordinator kernel: exact bounded distributed top-K — from the current
+/// view, or from an ADR-113 PIT's pinned per-shard snapshots when `pit` is
+/// set — then the phase-two winner fetch under one global credit, then
+/// assembly. A stale PIT surfaces as `Backend(StalePit)` and rides the
+/// existing classification (409 via `v2_http_class`) with no new driver arms.
 pub(super) fn cluster_delivery(
     cluster: &ClusterEngine,
+    pit: Option<reverse_rusty::PitId>,
     program: &CompiledRankProgram,
     filter: &[(String, Vec<String>)],
     spec: &DeliverySpec<'_>,
 ) -> Result<DeliveryResult, DeliveryError<ClusterRankedError>> {
-    let ranked = cluster
-        .try_percolate_filtered_top_k(
+    let ranked = match pit {
+        None => cluster.try_percolate_filtered_top_k(
             spec.title,
             filter,
             spec.options,
             program,
             Some(spec.deadline),
-        )
-        .map_err(DeliveryError::Backend)?;
+        ),
+        Some(pit) => cluster.try_percolate_filtered_top_k_pit(
+            pit,
+            spec.title,
+            filter,
+            spec.options,
+            program,
+            Some(spec.deadline),
+            Instant::now(),
+        ),
+    }
+    .map_err(DeliveryError::Backend)?;
     let sources = if spec.include_source || spec.include_explain {
         cluster
             .fetch_ranked_sources_bounded(&ranked, spec.enrichment_limit, Some(spec.deadline))

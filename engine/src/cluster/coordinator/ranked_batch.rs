@@ -195,6 +195,9 @@ impl ClusterEngine {
                     *position,
                     options.size,
                     options.track_total_hits_up_to,
+                    // Batch requests never carry a boundary (rejected at
+                    // admission), so no per-title attestation applies.
+                    None,
                     &title_result.hits,
                     &title_result.total_hits,
                 )?;

@@ -407,25 +407,79 @@ pub(crate) async fn cluster_v2_search(
         timeout,
         page,
     } = prepared;
-    if !matches!(page, page::PageRequest::None) {
-        record_outcome(&state.prom, "validation", options.query_scope);
-        return Err(ApiError::response(
-            StatusCode::NOT_IMPLEMENTED,
-            "pit_unsupported",
-            "PIT/cursor pagination is not yet available in coordinator mode; \
-             page via a single-node server (ADR-113)",
-        ));
-    }
-    let program = match state.cluster.read().compile_rank_program(&rank) {
-        Ok(program) => program,
-        Err(error) => {
-            record_outcome(&state.prom, "validation", options.query_scope);
-            return Err(ApiError::response(
-                StatusCode::BAD_REQUEST,
-                "unsupported_rank_field",
-                error.to_string(),
-            ));
-        }
+    // Verify page tokens (pure — no lock). Garbled ⇒ 400; foreign key ⇒ 409.
+    let (pit, search_after, expected_fingerprint) = match &page {
+        page::PageRequest::None => (None, None, None),
+        page::PageRequest::Pit(token) => match state.pit_tokens.verify_pit(token) {
+            Ok(pit) => (Some(pit), None, None),
+            Err(error) => {
+                record_outcome(&state.prom, "validation", options.query_scope);
+                return Err(crate::pit::token_failure_response(error));
+            }
+        },
+        page::PageRequest::Cursor(token) => match state.pit_tokens.verify_cursor(token) {
+            Ok(payload) => (
+                Some(payload.pit),
+                Some(payload.after),
+                Some(payload.fingerprint),
+            ),
+            Err(error) => {
+                record_outcome(&state.prom, "validation", options.query_scope);
+                return Err(crate::pit::token_failure_response(error));
+            }
+        },
+    };
+    // One brief read-lock scope (the existing compile pattern — sync, never
+    // across an await): compile + PIT pre-check + fingerprint. The stale gate
+    // runs BEFORE the fingerprint so a rebuilt normalizer cannot mis-classify
+    // a dead cursor as a client mismatch; the kernel re-gates inside the
+    // blocking closure, so the gap between here and there stays fail-closed.
+    let (program, mint) = {
+        let cluster = state.cluster.read();
+        let program = match cluster.compile_rank_program(&rank) {
+            Ok(program) => program,
+            Err(error) => {
+                record_outcome(&state.prom, "validation", options.query_scope);
+                return Err(ApiError::response(
+                    StatusCode::BAD_REQUEST,
+                    "unsupported_rank_field",
+                    error.to_string(),
+                ));
+            }
+        };
+        let mint = match pit {
+            None => None,
+            Some(pit) => {
+                if let Err(error) = cluster.check_pit(pit, Instant::now()) {
+                    let (status, kind, outcome) = error.v2_http_class();
+                    record_outcome(&state.prom, outcome, options.query_scope);
+                    return Err(ApiError::response(
+                        StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                        kind,
+                        error.to_string(),
+                    ));
+                }
+                let fingerprint = crate::pit::request_fingerprint(
+                    cluster.normalizer(),
+                    &title,
+                    options.query_scope,
+                    &rank,
+                    &filter,
+                );
+                if let Some(expected) = expected_fingerprint {
+                    if fingerprint != expected {
+                        record_outcome(&state.prom, "cursor_mismatch", options.query_scope);
+                        return Err(crate::pit::cursor_mismatch_response());
+                    }
+                }
+                Some(page::MintCtx { pit, fingerprint })
+            }
+        };
+        (program, mint)
+    };
+    let options = reverse_rusty::TopKOptions {
+        search_after,
+        ..options
     };
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         record_outcome(&state.prom, "validation", options.query_scope);
@@ -440,6 +494,7 @@ pub(crate) async fn cluster_v2_search(
         let cluster = cluster_state.cluster.read();
         delivery::cluster_delivery(
             &cluster,
+            mint.as_ref().map(|mint| mint.pit),
             &program,
             &filter,
             &delivery::DeliverySpec {
@@ -451,6 +506,12 @@ pub(crate) async fn cluster_v2_search(
                 deadline,
             },
         )
+        .map(|mut result| {
+            if let Some(mint) = &mint {
+                page::attach_next_cursor(&cluster_state.pit_tokens, mint, options, &mut result);
+            }
+            result
+        })
     };
     delivery::drive(state, started, options, timeout, deadline, work).await
 }

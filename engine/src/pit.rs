@@ -142,6 +142,18 @@ impl<T> PitRegistry<T> {
         self.entries.remove(&id.0).map(|entry| entry.payload)
     }
 
+    /// Remove EVERY entry (returning the payloads) while preserving the id
+    /// counter. Used when the pinned world is wholesale replaced (a cluster
+    /// vocab/resize rebuild): the entries are dead, but reusing their numeric
+    /// ids would let a stale cursor alias a fresh PIT of the new generation —
+    /// ids must stay process-unique forever.
+    pub fn clear(&mut self) -> Vec<(PitId, T)> {
+        self.entries
+            .drain()
+            .map(|(id, entry)| (PitId(id), entry.payload))
+            .collect()
+    }
+
     /// Remove every expired entry, returning the payloads for cleanup.
     pub fn reap_expired(&mut self, now: Instant) -> Vec<(PitId, T)> {
         let expired: Vec<u64> = self

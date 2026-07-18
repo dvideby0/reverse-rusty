@@ -100,6 +100,44 @@ impl Shard for ReplicatedShard {
         })
     }
 
+    // ---- ADR-113 PIT: PRIMARY-ONLY, deliberately no read failover ----
+    // A PIT is a per-engine pin: the primary's pinned snapshot does not exist
+    // on a replica, so failing a pit read over would silently serve a
+    // different generation into a cursor stream. A failover mid-cursor
+    // surfaces as PitNotFound → the coordinator's 409 stale-cursor.
+    fn open_pit(&self, pit: u64) -> Result<(), ShardError> {
+        self.primary.open_pit(pit)
+    }
+
+    fn close_pit(&self, pit: u64) -> Result<(), ShardError> {
+        self.primary.close_pit(pit)
+    }
+
+    fn percolate_top_k_owned_pit(
+        &self,
+        pit: u64,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<ShardRankedMatch, ShardError> {
+        self.primary.percolate_top_k_owned_pit(
+            pit,
+            title,
+            include_broad,
+            pred,
+            program,
+            options,
+            context,
+            current_position,
+            deadline,
+        )
+    }
+
     fn percolate_top_k_batch_owned(
         &self,
         titles: &[crate::cluster::shard::BatchTitleRequest<'_>],

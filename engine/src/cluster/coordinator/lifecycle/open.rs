@@ -100,6 +100,9 @@ impl ClusterEngine {
             observer: Mutex::new(None),
             pending_events: Mutex::new(Vec::new()),
             pending_repair: Mutex::new(std::collections::BTreeMap::new()),
+            // ADR-113: coordinator PIT registry (in-memory by design — a reopened
+            // cluster serves no prior generation, so old cursors fail closed).
+            pits: Mutex::new(crate::pit::PitRegistry::new()),
             // No position is handoff-wrapped by default; the gRPC builders install handles via
             // `with_handoffs`. Empty here ⇒ the in-process/default path is byte-identical (ADR-043).
             #[cfg(feature = "distributed")]
