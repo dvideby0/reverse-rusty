@@ -199,7 +199,13 @@ fn read_status(error: &ShardError) -> Status {
             RankedWireCode::OwnershipMismatch,
             None,
         ),
-        ShardError::Protocol(_) => Status::failed_precondition(error.to_string()),
+        // Marked so an up-to-date client never substring-retypes a protocol
+        // detail containing "ownership" into OwnershipMismatch (codex review).
+        ShardError::Protocol(_) => attach(
+            Status::failed_precondition(error.to_string()),
+            RankedWireCode::Protocol,
+            None,
+        ),
         ShardError::SourceUnavailable(logical) => attach(
             Status::not_found(error.to_string()),
             RankedWireCode::SourceUnavailable,

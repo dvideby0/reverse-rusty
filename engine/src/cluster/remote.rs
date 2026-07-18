@@ -1906,5 +1906,18 @@ mod tests {
             )),
             ShardError::OwnershipMismatch(_)
         ));
+        // The codex-review case: a MARKED protocol failure whose message
+        // contains "ownership" must stay Protocol — the metadata short-circuits
+        // the substring ladder that would have retyped it.
+        assert!(matches!(
+            ranked_rpc_err(&attach(
+                tonic::Status::failed_precondition(
+                    "shard protocol error: missing bounded/ownership attestation"
+                ),
+                RankedWireCode::Protocol,
+                None,
+            )),
+            ShardError::Protocol(ref m) if m.contains("ownership attestation")
+        ));
     }
 }

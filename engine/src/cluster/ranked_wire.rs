@@ -28,12 +28,13 @@ pub(crate) const RANKED_ERROR_ARG_KEY: &str = "rr-ranked-error-arg";
 const CODE_SOURCE_UNAVAILABLE: &str = "source_unavailable";
 const CODE_ENRICHMENT_LIMIT: &str = "enrichment_limit";
 const CODE_OWNERSHIP_MISMATCH: &str = "ownership_mismatch";
+const CODE_PROTOCOL: &str = "protocol";
 
-/// The ranked-seam error classes that cross the wire as structured codes —
-/// exactly the set `ranked_rpc_err` reconstructs. Deadline stays typed by the
-/// gRPC status code alone, and admission deliberately stays untyped here (the
-/// coordinator surfaces a remote admission failure as a 502 delivery error,
-/// not a caller 400; typing it would change that contract).
+/// The ranked-seam error classes that cross the wire as structured codes.
+/// Deadline stays typed by the gRPC status code alone, and admission
+/// deliberately stays untyped here (the coordinator surfaces a remote
+/// admission failure as a 502 delivery error, not a caller 400; typing it
+/// would change that contract).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RankedWireCode {
     /// Argument: the logical id whose source is missing.
@@ -41,6 +42,11 @@ pub(crate) enum RankedWireCode {
     /// Argument: the group's full byte credit.
     EnrichmentLimit,
     OwnershipMismatch,
+    /// A malformed/dishonest-reply failure. Marked explicitly: an UNMARKED
+    /// `failed_precondition` is indistinguishable from a legacy peer's, so
+    /// without this code the substring fallback would retype a protocol
+    /// detail containing "ownership" as `OwnershipMismatch` (codex review).
+    Protocol,
 }
 
 impl RankedWireCode {
@@ -49,6 +55,7 @@ impl RankedWireCode {
             Self::SourceUnavailable => CODE_SOURCE_UNAVAILABLE,
             Self::EnrichmentLimit => CODE_ENRICHMENT_LIMIT,
             Self::OwnershipMismatch => CODE_OWNERSHIP_MISMATCH,
+            Self::Protocol => CODE_PROTOCOL,
         }
     }
 }
@@ -89,6 +96,9 @@ pub(crate) fn parse(status: &Status) -> Option<ShardError> {
         CODE_OWNERSHIP_MISMATCH => Some(ShardError::OwnershipMismatch(
             OwnershipError::PlacementDecisionMismatch,
         )),
+        // The class survives the wire; without this an up-to-date peer's
+        // protocol failure would re-enter the substring ladder below.
+        CODE_PROTOCOL => Some(ShardError::Protocol(status.message().to_string())),
         _ => None,
     }
 }

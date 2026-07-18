@@ -21,13 +21,17 @@ fallback.
 
 - **Module:** `src/cluster/ranked_wire.rs` (`distributed`-gated). ASCII metadata keys
   `rr-ranked-error` (a compact code: `source_unavailable` | `enrichment_limit` |
-  `ownership_mismatch`) and `rr-ranked-error-arg` (a decimal `u64` argument: the missing logical id,
-  or the group's full byte credit). Keys are deliberately not `grpc-*` (tonic sanitizes those).
+  `ownership_mismatch` | `protocol`) and `rr-ranked-error-arg` (a decimal `u64` argument: the
+  missing logical id, or the group's full byte credit). Keys are deliberately not `grpc-*` (tonic
+  sanitizes those).
 - **Producers** attach the code alongside the *unchanged* message: `read_status`'s
-  `OwnershipMismatch` / `SourceUnavailable` / `EnrichmentLimit` arms, both
+  `OwnershipMismatch` / `SourceUnavailable` / `EnrichmentLimit` / `Protocol` arms, both
   `validate_placement_config` refusals, and the two client-side fetch-drain constructions
-  (placement drift, over-stream credit). `Protocol` deliberately carries no code — its
-  `failed_precondition` must not be reconstructed as an ownership failure by an up-to-date peer.
+  (placement drift, over-stream credit). `Protocol` carries an explicit marker rather than none —
+  an *unmarked* `failed_precondition` is indistinguishable from a legacy peer's, so leaving it bare
+  would send it back through the substring fallback and retype any protocol detail containing
+  "ownership" into `OwnershipMismatch` (503 instead of the intended 502; codex review). The marked
+  reconstruction preserves the `Protocol` class and message.
 - **Consumer:** `ranked_rpc_err` parses metadata first and falls back to the pre-ADR-111
   code+substring ladder when the code is absent or unusable. A garbled/unknown code degrades to the
   old behavior, never to a failed reconstruction. `SourceUnavailable` without its id argument is
