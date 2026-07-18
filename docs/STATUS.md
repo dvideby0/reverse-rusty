@@ -79,6 +79,12 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   completeness summary); one-call-per-shard coordinator fan with the shared per-title exact merge
   and a one-credit union winner fetch; `POST /v2/_mpercolate` in both modes; `size × titles`
   heap-budget admission; no durable-format change (ADR-112).
+- **PIT + cursor pagination** — `POST/DELETE /v2/_pit` pins the immutable engine snapshot (local)
+  or every position's snapshot (in-process cluster, placement-identity-gated) under a renew-on-use
+  TTL; `search_after` boundary pages under the one ranked order with page-invariant totals and
+  HMAC-signed opaque cursors (fingerprint-checked resends); stale shapes are the one deliberate
+  read-surface 409; enrichment stays current-view fail-closed; wire PIT/batch cursors deferred;
+  no durable-format change (ADR-113).
 - **Explain** (`explain.rs`) — first-class; structured `ExplainDetail` over REST.
 
 ### Durability & storage

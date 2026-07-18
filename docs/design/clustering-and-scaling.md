@@ -354,11 +354,15 @@ ID. Replicas and handoffs keep their normal read failover. Placement drift, miss
 stream, timeout, or any shard failure invalidates the whole response; partial results are not supported.
 Explanations are compiled at the coordinator under the authoritative normalizer/dictionary.
 
-The phase-two contract is deliberately current-view rather than PIT-consistent. The phase-one
-placement generation/shard count is still fenced through fetch so a layout rebuild cannot enrich an
-old winner set through a new placement. PIT/cursors are the later snapshot-consistency increment.
-No durable format changes: the source store and ADR-109 placement columns/log frames already carry all
-required state.
+Match/score/order/total snapshot-consistency is available by opting into a PIT (ADR-113): the
+coordinator pins every position's snapshot at open, records the placement identity, and gates each
+pit-scoped page on it (a vocab/resize rebuild stales the PIT as the deliberate read-surface 409;
+pit reads are primary-only, never silently failed over; remote assemblies refuse — wire PIT is a
+later increment). Phase-two enrichment remains current-view even under a PIT (`SourceStore` is
+interior-mutable): the phase-one placement generation/shard count is still fenced through fetch so
+a layout rebuild cannot enrich an old winner set through a new placement, and a winner whose source
+vanished fails the page typed. No durable format changes: the source store and ADR-109 placement
+columns/log frames already carry all required state.
 
 ### 7.3 Ranked title batching (ADR-112)
 

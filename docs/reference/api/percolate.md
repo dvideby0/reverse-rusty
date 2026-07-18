@@ -5,9 +5,10 @@
 ## `POST /v2/_search` — Exact bounded ranked percolation (ADR-107/108/110)
 
 Single-node and cluster-coordinator modes serve exact bounded top-K ranking without first
-materializing every matching ID. The route accepts exactly one `document`; batching, cursors/PIT,
-`from`, exhaustive `all`, and approximate `terminated` delivery are later increments and reject
-loudly. Existing `/_search` and `/_mpercolate` behavior and response bytes are unchanged.
+materializing every matching ID. The route accepts exactly one `document`; batching, exhaustive
+`all`, and approximate `terminated` delivery are later increments and reject loudly, as does
+`from` (deep pagination is the PIT/cursor flow below, ADR-113). Existing `/_search` and
+`/_mpercolate` behavior and response bytes are unchanged.
 
 ```json
 {
@@ -68,7 +69,9 @@ shard totals are summed; `eq` is returned only when every shard is exact and the
 within the threshold. The coordinator then fetches **current** source only for final winners, grouped
 by owning position, and compiles explanations locally. A shard/fetch failure, missing source,
 placement-generation drift, timeout, or malformed reply fails the whole response—partial hits never
-escape. This current-view enrichment is not a PIT guarantee.
+escape. Enrichment is current-view even under a PIT (ADR-113): matching, scores, order, and totals
+are snapshot-stable, but `_source` text is read from the live store — a winner deleted after the
+PIT was opened fails its enriched page typed (`include_source: false` pages stay fully pinned).
 
 Winner source text is charged once against `--max-ranked-enrichment-bytes` (default 16 MiB), even when
 both `_source` and explanation use it. Exceeding the cap returns `413 rank_enrichment_limit` with no
@@ -77,7 +80,45 @@ cluster configuration returns 503. `allow_partial_results=true` remains a 400.
 
 The optional rank program supports only `priority_field="priority"` plus additive integer tag boosts.
 Unknown rank fields return `unsupported_rank_field`. `result_mode="all"` or `"terminated"`,
-`allow_partial_results=true`, `from`, `cursor`, `documents`, and `query` return explicit 400s.
+`allow_partial_results=true`, `from`, `documents`, and `query` return explicit 400s.
+
+## `POST /v2/_pit`, `DELETE /v2/_pit` — Point-in-time cursor pagination (ADR-113)
+
+Deep pagination over `/v2/_search` without deep `from`: open a PIT, page with `search_after`
+cursors over ONE frozen view, never mixing generations.
+
+```
+POST /v2/_pit {"keep_alive_s": 60}      -> {"pit_id": "<opaque token>"}
+POST /v2/_search {..., "pit": {"id": "<pit_id>"}}          -> page 1 + "next_cursor"
+POST /v2/_search {..., "cursor": "<next_cursor>"}          -> page N (resend the same request)
+DELETE /v2/_pit {"pit_id": "<pit_id>"}  -> {"closed": true|false}
+```
+
+A PIT pins the engine snapshot (single-node) or every shard position's snapshot (in-process
+cluster) for a renew-on-use keep-alive: default `--pit-default-keep-alive-secs` (60), ceiling
+`--pit-max-keep-alive-secs` (600, over-ask is a 400), at most `--max-open-pits` (64) concurrently
+open — a breach is **429 `pit_limit_exceeded`**, never an eviction. Every use (open, page,
+cursor) renews the deadline; abandoned PITs expire; `DELETE` frees immediately (`closed: false`
+when already gone — the goal state either way). Open PITs retain memory (the pinned memtable
+copy) and, after compaction, disk (unlinked-but-mapped segments) until released; the `open_pits`
+gauge tracks them.
+
+Cursor rules: a FULL page (`hits.length == size`, `size > 0`) returns `next_cursor`; a short page
+ends the stream (no cursor). The client resends the **same** `document`/`query_scope`/`rank`/
+`filter` with each cursor — they are fingerprinted into the token and a drifted resend is a 400
+`cursor_mismatch`; `size`, `timeout_ms`, and `track_total_hits_up_to` may vary per page. Totals
+are page-invariant (every page of one PIT reports the identical total). `pit` + `cursor` together
+is a 400. Concatenating pages yields exactly the one-shot ranked result over the same PIT — no
+duplicates, no gaps.
+
+Fail-closed staleness — **409 `stale_cursor`** (the one deliberate read-surface 409; the pinned
+generation is unrecoverable, so open a new PIT and restart rather than retrying): an expired or
+closed PIT, a server restart (tokens are HMAC-signed with a per-process key), and — in cluster
+mode — any placement change (`resize`, vocabulary rebuild) or a primary failover (PIT reads are
+primary-only, never silently failed over). Structurally garbled tokens are 400s. A remote/gRPC
+coordinator assembly refuses PIT entirely with **501 `pit_unsupported`** (wire PIT is a later
+increment; page via an in-process cluster or single-node mode). Both endpoints ride the open
+search auth allowlist.
 
 ## `POST /_search` — Percolate titles
 
@@ -314,6 +355,8 @@ Semantics and bounds:
   defaults to 30000 (the v1 batch default).
 - **`explain` is not supported here** (a named 400) — per-(document, winner) explanation
   compilation is antithetical to the throughput path; use `/v2/_search` for one document.
+- **`pit`/`cursor` are not supported here** (named 400s, ADR-113) — batch cursor pagination is a
+  deferred increment; page per title via `/v2/_search`.
 - **Admission**: batch length ≤ min(`max_percolate_batch`, 10 000) and `size × documents ≤ 2^20`
   (the aggregate collector heap budget), both rejected as `rank_admission_rejected` before any
   matching.
