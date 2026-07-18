@@ -35,7 +35,9 @@ fn spawn_pending(
     endpoints
 }
 
-fn corpus() -> (Vec<(u64, String)>, Vec<Vec<(String, String)>>) {
+type Corpus = (Vec<(u64, String)>, Vec<Vec<(String, String)>>);
+
+fn corpus() -> Corpus {
     let mut queries: Vec<(u64, String)> = (1..=60)
         .map(|id| (id, "topps chrome".to_string()))
         .collect();
