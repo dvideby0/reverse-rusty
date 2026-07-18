@@ -652,16 +652,13 @@ impl Shard for LocalShard {
         let mut out = Vec::with_capacity(logical_ids.len());
         let mut remaining = max_source_bytes;
         for &logical_id in logical_ids {
-            if deadline.is_some_and(|at| Instant::now() >= at) {
-                return Err(ShardError::DeadlineExceeded);
-            }
-            let source = snap
-                .get_query_source_bounded(logical_id, remaining)
-                .map_err(|_| ShardError::EnrichmentLimit {
-                    limit: max_source_bytes,
-                })?
-                .ok_or(ShardError::SourceUnavailable(logical_id))?;
-            remaining -= source.len();
+            let source = super::fetch_source_step(
+                &snap,
+                logical_id,
+                &mut remaining,
+                max_source_bytes,
+                deadline,
+            )?;
             out.push(FetchedMatch { logical_id, source });
         }
         Ok(out)

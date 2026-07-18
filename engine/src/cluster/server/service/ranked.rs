@@ -132,32 +132,25 @@ pub(super) fn fetch_matches(
         let mut remaining = max_source_bytes;
         let mut source_bytes = 0usize;
         for logical_id in logical_ids {
-            if Instant::now() >= deadline {
-                slot.ranked.record_cancellation();
-                drop(tx.blocking_send(Err(read_status(&ShardError::DeadlineExceeded))));
-                return;
-            }
-            let source = match snapshot.get_query_source_bounded(logical_id, remaining) {
-                Ok(Some(source)) => source,
-                Ok(None) => {
-                    drop(
-                        tx.blocking_send(Err(read_status(&ShardError::SourceUnavailable(
-                            logical_id,
-                        )))),
-                    );
-                    return;
-                }
-                Err(_) => {
-                    drop(
-                        tx.blocking_send(Err(read_status(&ShardError::EnrichmentLimit {
-                            limit: max_source_bytes,
-                        }))),
-                    );
+            // The shared credit step (deadline → bounded lookup → decrement) is
+            // the same kernel LocalShard::fetch_matches drains in-process.
+            let source = match crate::cluster::shard::fetch_source_step(
+                &snapshot,
+                logical_id,
+                &mut remaining,
+                max_source_bytes,
+                Some(deadline),
+            ) {
+                Ok(source) => source,
+                Err(error) => {
+                    if matches!(error, ShardError::DeadlineExceeded) {
+                        slot.ranked.record_cancellation();
+                    }
+                    drop(tx.blocking_send(Err(read_status(&error))));
                     return;
                 }
             };
             let bytes = source.len();
-            remaining -= bytes;
             source_bytes = source_bytes.saturating_add(bytes);
             let message = proto::FetchMatch {
                 logical_id,
