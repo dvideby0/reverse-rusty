@@ -104,6 +104,14 @@ impl ShardService for LegacyOwnershipServer {
     ) -> Result<Response<Self::FetchMatchesStream>, Status> {
         Err(Status::unimplemented("legacy mock"))
     }
+    type PercolateTopKBatchStream =
+        Pin<Box<dyn Stream<Item = Result<raw::PercolateTopKBatchFrame, Status>> + Send>>;
+    async fn percolate_top_k_batch(
+        &self,
+        _req: Request<raw::PercolateTopKBatchRequest>,
+    ) -> Result<Response<Self::PercolateTopKBatchStream>, Status> {
+        Err(Status::unimplemented("legacy mock"))
+    }
     async fn num_queries(
         &self,
         _req: Request<raw::ShardRef>,

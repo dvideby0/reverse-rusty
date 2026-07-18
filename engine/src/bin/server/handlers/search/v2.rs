@@ -18,6 +18,11 @@ use super::resolve::resolve_percolate;
 use super::DocBody;
 
 mod delivery;
+mod mpercolate;
+
+#[cfg(test)]
+pub(crate) use mpercolate::V2MPercolateBody;
+pub(crate) use mpercolate::{cluster_v2_mpercolate, v2_mpercolate};
 
 thread_local! {
     static RANKED_SCRATCH: RefCell<reverse_rusty::segment::MatchScratch> =

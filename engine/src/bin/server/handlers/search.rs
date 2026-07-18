@@ -25,7 +25,7 @@ mod tests;
 
 pub(crate) use mpercolate::mpercolate;
 pub(crate) use percolate::search;
-pub(crate) use v2::{cluster_v2_search, v2_search};
+pub(crate) use v2::{cluster_v2_mpercolate, cluster_v2_search, v2_mpercolate, v2_search};
 // The request-resolution helper is shared with the coordinator-mode handlers
 // (ADR-070), so both modes parse the identical native + ES envelopes.
 pub(crate) use resolve::resolve_percolate;

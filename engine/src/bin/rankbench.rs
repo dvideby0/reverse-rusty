@@ -255,6 +255,21 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
             )
         })
         .collect();
+    let batch: Vec<BatchCapture> = [16usize, 64, 256]
+        .into_iter()
+        .flat_map(|batch_size| [10usize, 100].into_iter().map(move |k| (batch_size, k)))
+        .map(|(batch_size, k)| {
+            capture_batch(
+                &snap,
+                &cluster,
+                &data.titles,
+                &bounded_program,
+                &cluster_program,
+                k,
+                batch_size,
+            )
+        })
+        .collect();
     let cluster_capture = capture_cluster(&cluster, &data.titles);
 
     let mut counts = capture.match_counts.clone();
@@ -320,10 +335,143 @@ fn run_workload(name: &str, data: &Dataset, shards: usize) {
             capture.fetch_time.as_secs_f64() * 1_000.0,
         );
     }
+    for capture in batch {
+        println!(
+            "batch bs={} K={}: titles={} local_batch_ms={:.3} cluster_batch_ms={:.3} shard_calls={} shard_rows={} shard_result_bytes={} fetch_bytes={} fetch_ms={:.3}",
+            capture.batch_size,
+            capture.k,
+            capture.titles,
+            capture.local_time.as_secs_f64() * 1_000.0,
+            capture.cluster_time.as_secs_f64() * 1_000.0,
+            capture.fanned_shard_calls,
+            capture.shard_rows_received,
+            capture.shard_result_bytes,
+            capture.fetch_bytes,
+            capture.fetch_time.as_secs_f64() * 1_000.0,
+        );
+    }
     println!(
         "semantic checksum: local={:016x} cluster={:016x}",
         capture.checksum, cluster_capture.checksum
     );
+}
+
+/// ADR-112 bounded ranked batch capture: the local columnar batch entry and
+/// the one-call-per-shard cluster batch, each asserted per-title identical to
+/// the scalar bounded path (equivalence is the hard gate; timings are
+/// informational).
+struct BatchCapture {
+    batch_size: usize,
+    k: usize,
+    titles: usize,
+    local_time: Duration,
+    cluster_time: Duration,
+    fanned_shard_calls: usize,
+    shard_rows_received: usize,
+    shard_result_bytes: u64,
+    fetch_bytes: usize,
+    fetch_time: Duration,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_batch(
+    snap: &reverse_rusty::EngineSnapshot,
+    cluster: &ClusterEngine,
+    titles: &[String],
+    program: &reverse_rusty::CompiledRankProgram,
+    cluster_program: &reverse_rusty::CompiledRankProgram,
+    k: usize,
+    batch_size: usize,
+) -> BatchCapture {
+    const THRESHOLD: u64 = 10_000;
+    let slice_len = titles.len().min(batch_size);
+    let batch_titles = &titles[..slice_len];
+    let options = TopKOptions {
+        size: k,
+        track_total_hits_up_to: THRESHOLD,
+        query_scope: QueryScope::WithBroad,
+    };
+    let pred = reverse_rusty::exact::TagPredicate::empty();
+    let mut scratch = MatchScratch::new();
+
+    let started = Instant::now();
+    let local = snap
+        .try_match_titles_batch_top_k(
+            batch_titles,
+            reverse_rusty::segment::BatchMatchOptions {
+                include_broad: true,
+                ..reverse_rusty::segment::BatchMatchOptions::default()
+            },
+            options,
+            program,
+            &pred,
+            None,
+        )
+        .expect("local batch top k");
+    let local_time = started.elapsed();
+
+    let started = Instant::now();
+    let distributed = cluster
+        .try_percolate_filtered_top_k_batch(batch_titles, &[], options, cluster_program, None)
+        .expect("cluster batch top k");
+    let cluster_time = started.elapsed();
+
+    for (i, title) in batch_titles.iter().enumerate() {
+        let scalar = snap
+            .try_match_title_top_k(title, options, program, &pred, &mut scratch, None)
+            .expect("scalar bounded reference");
+        let expected: Vec<(u64, i64)> = scalar
+            .hits
+            .iter()
+            .map(|hit| (hit.logical_id, hit.score))
+            .collect();
+        let local_rows: Vec<(u64, i64)> = local.titles[i]
+            .hits
+            .iter()
+            .map(|hit| (hit.logical_id, hit.score))
+            .collect();
+        assert_eq!(
+            local_rows, expected,
+            "local batch diverged at K={k} title={i}"
+        );
+        let cluster_rows: Vec<(u64, i64)> = distributed.titles[i]
+            .hits
+            .iter()
+            .map(|hit| (hit.logical_id, hit.score))
+            .collect();
+        assert_eq!(
+            cluster_rows, expected,
+            "cluster batch diverged at K={k} title={i}"
+        );
+        assert!(
+            distributed.titles[i].hits.len() <= k,
+            "per-title rows exceed K"
+        );
+    }
+
+    let fetch_started = Instant::now();
+    let sources = cluster
+        .fetch_ranked_sources_batch_bounded(&distributed, 16 * 1024 * 1024, None)
+        .expect("batch winner fetch");
+    let fetch_time = fetch_started.elapsed();
+    let fetch_bytes = sources
+        .iter()
+        .flatten()
+        .map(String::len)
+        .fold(0usize, usize::saturating_add);
+
+    BatchCapture {
+        batch_size,
+        k,
+        titles: slice_len,
+        local_time,
+        cluster_time,
+        fanned_shard_calls: distributed.fanned_shard_calls,
+        shard_rows_received: distributed.shard_rows_received,
+        shard_result_bytes: distributed.shard_result_bytes,
+        fetch_bytes,
+        fetch_time,
+    }
 }
 
 fn capture_bounded(

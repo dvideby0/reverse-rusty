@@ -70,12 +70,13 @@ pub use events::{
 pub use explain::ExplainDetail;
 pub use normalize::{Normalizer, NormalizerBuilder, PunctClass};
 pub use rank::{
-    CompiledRankProgram, CompiledRankSpec, RankProgramError, RankProgramSpec, RankSpec, RankStats,
-    RankValues, RankedHit, RankedMatch, RankedMatchError,
+    BatchRankedMatch, BatchRankedTitle, CompiledRankProgram, CompiledRankSpec, RankProgramError,
+    RankProgramSpec, RankSpec, RankStats, RankValues, RankedHit, RankedMatch, RankedMatchError,
 };
 pub use result::{
     ranked_beats, ranked_order, QueryScope, ResultMode, TopKAdmissionError, TopKOptions, TotalHits,
-    TotalHitsRelation, DEFAULT_TOP_K, DEFAULT_TRACK_TOTAL_HITS_UP_TO, MAX_TOP_K,
+    TotalHitsRelation, DEFAULT_TOP_K, DEFAULT_TRACK_TOTAL_HITS_UP_TO, MAX_RANKED_BATCH_HEAP_ROWS,
+    MAX_RANKED_BATCH_TITLES, MAX_TOP_K,
 };
 pub use segment::{
     AliasApplyReport, CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport,

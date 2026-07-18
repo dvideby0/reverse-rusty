@@ -1,11 +1,19 @@
-//! ADR-110 reads reuse existing segment/source durability without a format bump.
+//! ADR-110/112 reads reuse existing segment/source durability without a format
+//! bump. The batch view runs post-flush, so this is also the mmap-backed
+//! batch-kernel coverage (in-memory batch legs live in `cluster_oracle`).
 
 use crate::harness::*;
 use reverse_rusty::{QueryScope, RankProgramSpec, TopKOptions};
 
-fn ranked_view(
-    cluster: &ClusterEngine,
-) -> (Vec<(u64, i64)>, reverse_rusty::TotalHits, Vec<String>) {
+type RankedView = (
+    Vec<(u64, i64)>,
+    reverse_rusty::TotalHits,
+    Vec<String>,
+    Vec<Vec<(u64, i64)>>,
+    Vec<Vec<String>>,
+);
+
+fn ranked_view(cluster: &ClusterEngine) -> RankedView {
     let program = cluster
         .compile_rank_program(&RankProgramSpec {
             priority_field: None,
@@ -15,18 +23,13 @@ fn ranked_view(
             ],
         })
         .expect("rank program");
+    let options = TopKOptions {
+        size: 7,
+        track_total_hits_up_to: 10_000,
+        query_scope: QueryScope::WithBroad,
+    };
     let ranked = cluster
-        .try_percolate_filtered_top_k(
-            "2020 topps chrome update",
-            &[],
-            TopKOptions {
-                size: 7,
-                track_total_hits_up_to: 10_000,
-                query_scope: QueryScope::WithBroad,
-            },
-            &program,
-            None,
-        )
+        .try_percolate_filtered_top_k("2020 topps chrome update", &[], options, &program, None)
         .expect("top k");
     let rows = ranked
         .hits
@@ -36,7 +39,30 @@ fn ranked_view(
     let sources = cluster
         .fetch_ranked_sources(&ranked, None)
         .expect("winner fetch");
-    (rows, ranked.total_hits, sources)
+    // The ADR-112 batch over the same durable segments: per-title rows must be
+    // byte-stable across checkpoint/reopen/restore exactly like the scalar.
+    let batch_titles = [
+        "2020 topps chrome update".to_string(),
+        "1998 topps chrome refractor".to_string(),
+    ];
+    let batch = cluster
+        .try_percolate_filtered_top_k_batch(&batch_titles, &[], options, &program, None)
+        .expect("batch top k");
+    let batch_rows = batch
+        .titles
+        .iter()
+        .map(|title| {
+            title
+                .hits
+                .iter()
+                .map(|hit| (hit.logical_id, hit.score))
+                .collect()
+        })
+        .collect();
+    let batch_sources = cluster
+        .fetch_ranked_sources_batch_bounded(&batch, 16 * 1024 * 1024, None)
+        .expect("batch winner fetch");
+    (rows, ranked.total_hits, sources, batch_rows, batch_sources)
 }
 
 #[test]

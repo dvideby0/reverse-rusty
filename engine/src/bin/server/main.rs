@@ -75,7 +75,7 @@ use handlers::{
     discover_and_record_aliases, flush, get_alias_feedback, get_aliases, get_doc, get_settings,
     get_vocab, health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
     mpercolate, prometheus_metrics, put_doc, put_settings, put_vocab, reset_alias_feedback, search,
-    stats, v2_search, validate_and_apply_feedback,
+    stats, v2_mpercolate, v2_search, validate_and_apply_feedback,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -392,6 +392,7 @@ async fn main() {
         .route("/_doc/{id}", get(get_doc).put(put_doc).delete(delete_doc))
         .route("/_search", post(search))
         .route("/v2/_search", post(v2_search))
+        .route("/v2/_mpercolate", post(v2_mpercolate))
         .route("/_mpercolate", post(mpercolate))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))

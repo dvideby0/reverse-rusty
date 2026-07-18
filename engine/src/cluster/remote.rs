@@ -34,7 +34,10 @@ use super::clog::{ClusterMutation, LogPos};
 use super::proto;
 use super::proto::shard_service_client::ShardServiceClient;
 use super::security::{configure_endpoint, ClientSecurity, MeshAuthInject, MeshTransport};
-use super::shard::{FetchedMatch, Shard, ShardError, ShardRankedMatch};
+use super::shard::{
+    BatchTitleRequest, FetchedMatch, Shard, ShardBatchRankedMatch, ShardError, ShardRankedMatch,
+    ShardRankedTitle,
+};
 use super::transport_metrics::{RpcMethod, RpcOutcome, TransportMetrics};
 
 /// The mesh-aware client channel (ADR-071): every RPC flows through the
@@ -1203,6 +1206,194 @@ impl Shard for RemoteShard {
             stats: reply.stats.map(proto::stats_to_engine).unwrap_or_default(),
             rank_stats,
             result_bytes,
+        })
+    }
+
+    fn percolate_top_k_batch_owned(
+        &self,
+        titles: &[BatchTitleRequest<'_>],
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: &crate::rank::CompiledRankProgram,
+        options: crate::result::TopKOptions,
+        current_position: u32,
+        deadline: Option<Instant>,
+    ) -> Result<ShardBatchRankedMatch, ShardError> {
+        for request in titles {
+            self.validate_ownership(
+                current_position,
+                request.context.generation(),
+                request.context.num_shards(),
+            )?;
+        }
+        let absolute = self.bounded_deadline(deadline)?;
+        let base = proto::PercolateTopKBatchRequest {
+            titles: titles
+                .iter()
+                .map(|request| proto::BatchTitle {
+                    title: request.title.to_string(),
+                    ownership: Some(proto::ownership_to_proto(request.context)),
+                })
+                .collect(),
+            include_broad,
+            filter: proto::tag_predicate_to_proto(pred),
+            rank: Some(proto::rank_program_to_proto(program)),
+            size: options.size as u32,
+            track_total_hits_up_to: options.track_total_hits_up_to,
+            remaining_micros: 0,
+            shard_id: self.shard_id,
+        };
+        // Fail loud before flight rather than through a mid-stream transport
+        // error: the request must fit the same cap ceiling replies obey.
+        let encoded_request = reverse_rusty_shard_proto::encoded_len(&base);
+        if encoded_request > super::server::MAX_GRPC_RESULT_BYTES {
+            return Err(ShardError::Admission(
+                crate::result::TopKAdmissionError::BatchTitlesTooLarge {
+                    requested: titles.len(),
+                    max: crate::result::MAX_RANKED_BATCH_TITLES,
+                },
+            ));
+        }
+        let client = self.client.clone();
+        let generation = self.placement_generation.get();
+        let num_shards = self.num_shards;
+        let expected = titles.len();
+        let size = options.size as u32;
+        let size_bound = options.size;
+        self.call_until(RpcMethod::PercolateTopKBatch, absolute, move |remaining| {
+            let mut client = client.clone();
+            let mut body = base.clone();
+            body.remaining_micros = remaining_micros(remaining);
+            let mut request = tonic::Request::new(body);
+            request.set_timeout(remaining);
+            async move {
+                use crate::cluster::ranked_wire::{attach, RankedWireCode};
+                use proto::percolate_top_k_batch_frame::Frame;
+                let mut stream = client.percolate_top_k_batch(request).await?.into_inner();
+                // Strict in-order completeness: frame k must be title k for
+                // k in 0..n, then exactly one summary with titles_served == n,
+                // then end-of-stream. Anything else fails the whole batch.
+                let mut titles_out: Vec<ShardRankedTitle> = Vec::with_capacity(expected);
+                let mut summary_stats: Option<MatchStats> = None;
+                let mut result_bytes = 0u64;
+                while let Some(frame) = stream.message().await? {
+                    result_bytes = result_bytes.saturating_add(
+                        u64::try_from(reverse_rusty_shard_proto::encoded_len(&frame))
+                            .unwrap_or(u64::MAX),
+                    );
+                    match frame.frame {
+                        Some(Frame::Title(result)) => {
+                            if summary_stats.is_some() {
+                                return Err(tonic::Status::out_of_range(
+                                    "batch title frame after the summary frame",
+                                ));
+                            }
+                            if titles_out.len() >= expected {
+                                return Err(tonic::Status::out_of_range(
+                                    "batch stream returned more title frames than requested",
+                                ));
+                            }
+                            if result.title_index as usize != titles_out.len() {
+                                return Err(tonic::Status::out_of_range(
+                                    "batch title frames arrived out of order",
+                                ));
+                            }
+                            if !result.bounded
+                                || !result.ownership_applied
+                                || result.requested_size != size
+                                || result.hits.len() > size_bound
+                            {
+                                return Err(attach(
+                                    tonic::Status::failed_precondition(
+                                        "batch title frame failed bounded/ownership attestation",
+                                    ),
+                                    RankedWireCode::Protocol,
+                                    None,
+                                ));
+                            }
+                            if result.placement_generation != generation
+                                || result.num_shards != num_shards
+                            {
+                                return Err(attach(
+                                    tonic::Status::failed_precondition(
+                                        "batch title frame placement configuration mismatch",
+                                    ),
+                                    RankedWireCode::OwnershipMismatch,
+                                    None,
+                                ));
+                            }
+                            let total_hits = result
+                                .total_hits
+                                .map(proto::total_hits_from_proto)
+                                .ok_or_else(|| {
+                                    tonic::Status::out_of_range("title frame omitted total hits")
+                                })?;
+                            let rank_stats = result
+                                .rank_stats
+                                .map(proto::rank_stats_from_proto)
+                                .ok_or_else(|| {
+                                    tonic::Status::out_of_range("title frame omitted rank stats")
+                                })?;
+                            titles_out.push(ShardRankedTitle {
+                                hits: result
+                                    .hits
+                                    .into_iter()
+                                    .map(|hit| crate::rank::RankedHit {
+                                        logical_id: hit.logical_id,
+                                        score: hit.score,
+                                    })
+                                    .collect(),
+                                total_hits,
+                                rank_stats,
+                            });
+                        }
+                        Some(Frame::Summary(summary)) => {
+                            if summary_stats.is_some() {
+                                return Err(tonic::Status::out_of_range(
+                                    "batch stream returned a duplicate summary frame",
+                                ));
+                            }
+                            if summary.placement_generation != generation
+                                || summary.num_shards != num_shards
+                            {
+                                return Err(attach(
+                                    tonic::Status::failed_precondition(
+                                        "batch summary placement configuration mismatch",
+                                    ),
+                                    RankedWireCode::OwnershipMismatch,
+                                    None,
+                                ));
+                            }
+                            if summary.titles_served as usize != expected
+                                || titles_out.len() != expected
+                            {
+                                return Err(tonic::Status::out_of_range(
+                                    "batch summary disagrees with the delivered title frames",
+                                ));
+                            }
+                            summary_stats = Some(
+                                summary
+                                    .stats
+                                    .map(proto::stats_to_engine)
+                                    .unwrap_or_default(),
+                            );
+                        }
+                        None => {
+                            return Err(tonic::Status::out_of_range("empty batch frame"));
+                        }
+                    }
+                }
+                let Some(stats) = summary_stats else {
+                    return Err(tonic::Status::out_of_range(
+                        "batch stream ended without its completeness summary",
+                    ));
+                };
+                Ok(ShardBatchRankedMatch {
+                    titles: titles_out,
+                    stats,
+                    result_bytes,
+                })
+            }
         })
     }
 

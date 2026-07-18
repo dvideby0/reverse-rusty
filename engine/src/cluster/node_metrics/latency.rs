@@ -53,15 +53,17 @@ pub(crate) enum ShardRpc {
     PercolateTopK = 2,
     FetchMatches = 3,
     Ingest = 4,
+    PercolateTopKBatch = 5,
 }
 
 /// The `method` label value per [`ShardRpc`] discriminant.
-pub(crate) const SHARD_RPC_LABELS: [&str; 5] = [
+pub(crate) const SHARD_RPC_LABELS: [&str; 6] = [
     "percolate",
     "percolate_ranked",
     "percolate_top_k",
     "fetch_matches",
     "ingest",
+    "percolate_top_k_batch",
 ];
 
 /// A lean fixed-bucket latency histogram: lock-free `AtomicU64`s, `Relaxed` everywhere (each
@@ -153,13 +155,7 @@ pub(crate) struct SlotLatency {
 impl SlotLatency {
     pub(crate) fn new() -> Self {
         Self {
-            per_rpc: [
-                LatencyHistogram::new(),
-                LatencyHistogram::new(),
-                LatencyHistogram::new(),
-                LatencyHistogram::new(),
-                LatencyHistogram::new(),
-            ],
+            per_rpc: std::array::from_fn(|_| LatencyHistogram::new()),
         }
     }
 
@@ -221,11 +217,12 @@ mod tests {
         sl.observe(ShardRpc::Percolate, Duration::from_micros(3));
         sl.observe(ShardRpc::Percolate, Duration::from_micros(3));
         sl.observe(ShardRpc::Ingest, Duration::from_millis(2));
-        let [p, pr, top_k, fetch, i] = sl.snapshot();
+        let [p, pr, top_k, fetch, i, batch] = sl.snapshot();
         assert_eq!(p.count, 2);
         assert_eq!(pr.count, 0);
         assert_eq!(top_k.count, 0);
         assert_eq!(fetch.count, 0);
         assert_eq!(i.count, 1);
+        assert_eq!(batch.count, 0);
     }
 }

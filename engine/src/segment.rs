@@ -54,6 +54,7 @@ mod matching;
 mod merge;
 mod metrics;
 mod persistence;
+mod ranked_batch;
 mod seg;
 mod snapshot;
 

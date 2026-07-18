@@ -177,7 +177,7 @@ pub(super) fn fetch_matches(
     Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
 }
 
-fn deadline_from_remaining(micros: u64) -> Result<Instant, Status> {
+pub(super) fn deadline_from_remaining(micros: u64) -> Result<Instant, Status> {
     if micros == 0 {
         return Err(Status::deadline_exceeded("request deadline exhausted"));
     }
@@ -189,7 +189,7 @@ fn deadline_from_remaining(micros: u64) -> Result<Instant, Status> {
 // The message strings below are a frozen cross-version contract: a pre-ADR-111
 // client reconstructs typed errors from them (`ranked_rpc_err`'s substring
 // fallback). The ADR-111 metadata codes ride alongside, never instead.
-fn read_status(error: &ShardError) -> Status {
+pub(super) fn read_status(error: &ShardError) -> Status {
     use crate::cluster::ranked_wire::{attach, RankedWireCode};
     match error {
         ShardError::DeadlineExceeded => Status::deadline_exceeded(error.to_string()),

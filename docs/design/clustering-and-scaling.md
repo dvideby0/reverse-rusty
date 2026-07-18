@@ -360,6 +360,23 @@ old winner set through a new placement. PIT/cursors are the later snapshot-consi
 No durable format changes: the source store and ADR-109 placement columns/log frames already carry all
 required state.
 
+### 7.3 Ranked title batching (ADR-112)
+
+A batch of titles reaches the columnar broad/hot batch kernel remotely: the coordinator routes every
+title independently, groups titles by shard, and fans ONE `PercolateTopKBatch` per involved shard —
+each title carrying its own ownership context, all under one shared program/K/threshold and ONE
+absolute deadline. A shard broad-evaluates only when some sub-batch title selected it as the one
+broad evaluator (the ADR-080 bounded fan-out); its columnar broad pass sees every sub-batch title,
+but per-title ownership suppression at the emission boundary keeps the emitted set identical to N
+single calls — only `MatchStats` may differ. The reply is a stream of per-title bounded frames IN
+ORDER (each under the per-message result cap) plus exactly one trailing completeness summary; the
+client fails the whole batch on any gap, duplicate, reorder, count disagreement, or missing summary.
+Each title then merges through the same exact core as the single-title path. The batch winner fetch
+dedups cross-title winners (one id may win several titles, with possibly different owners — sources
+are version-identical), drains owner groups under ONE credit, and charges per delivered occurrence.
+Admission bounds titles, the encoded request, and the `size × titles` aggregate heap budget before
+any matching. `POST /v2/_mpercolate` is the serving surface in both modes.
+
 ---
 
 ## 8. What makes it *dead simple* (zero-config + self-tuning)

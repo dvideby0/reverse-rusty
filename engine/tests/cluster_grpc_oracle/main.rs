@@ -35,6 +35,7 @@ mod hot;
 mod legacy_layout;
 mod parallel;
 mod partial_apply;
+mod ranked_batch;
 mod reassign;
 mod rebalance;
 mod reconcile;

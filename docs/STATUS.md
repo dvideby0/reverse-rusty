@@ -74,6 +74,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   then fetches current source only for global winners and compiles explanations centrally. One
   deadline, no partial results, static HTTP/gRPC byte caps, cluster `POST /v2/_search`, and bounded
   delivery metrics; no durable-format change (ADR-110).
+- **Distributed ranked title batching** — per-title ownership + bounded collectors through the
+  columnar batch kernel; the streamed `PercolateTopKBatch` wire (capped per-title frames + a
+  completeness summary); one-call-per-shard coordinator fan with the shared per-title exact merge
+  and a one-credit union winner fetch; `POST /v2/_mpercolate` in both modes; `size × titles`
+  heap-budget admission; no durable-format change (ADR-112).
 - **Explain** (`explain.rs`) — first-class; structured `ExplainDetail` over REST.
 
 ### Durability & storage

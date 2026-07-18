@@ -10,6 +10,7 @@
 
 use crate::collect::BatchMatchSink;
 use crate::dict::FeatureId;
+use crate::ownership::BatchEmissionPolicy;
 use crate::segment::{MatchStats, Segment};
 use crate::storage::MmapSegment;
 use crate::util::{sig_key, FastMap};
@@ -77,6 +78,11 @@ pub(in crate::segment) trait BroadBackend {
     /// exists for).
     fn vacuous_accept(&self, lane: Lane, local: u32, anchor: FeatureId) -> bool;
     fn logical_id(&self, local: u32) -> u64;
+    /// ADR-109 placement identity for `local` — consulted (per candidate, not
+    /// per title bit) by the batch emission policy AFTER verification, exactly
+    /// like the scalar path's `should_emit(placement)`. Identity metadata only;
+    /// it never gates candidate retrieval.
+    fn placement(&self, local: u32) -> crate::ownership::QueryPlacementRef<'_>;
     /// Whether query `local` satisfies the request's tag filter (ADR-049). The
     /// vacuous-accept fast path bypasses `verify`/`eval_into`, so it must check tags
     /// here to avoid leaking a filtered-out query.
@@ -183,6 +189,10 @@ impl BroadBackend for &Segment {
         self.exact.logical(local)
     }
     #[inline]
+    fn placement(&self, local: u32) -> crate::ownership::QueryPlacementRef<'_> {
+        self.exact.placement(local)
+    }
+    #[inline]
     fn passes_tags(&self, local: u32, pred: &crate::exact::TagPredicate) -> bool {
         pred.matches(self.exact.tags_of(local))
     }
@@ -259,6 +269,10 @@ impl BroadBackend for &MmapSegment {
         self.logical(local)
     }
     #[inline]
+    fn placement(&self, local: u32) -> crate::ownership::QueryPlacementRef<'_> {
+        MmapSegment::placement(self, local)
+    }
+    #[inline]
     fn passes_tags(&self, local: u32, pred: &crate::exact::TagPredicate) -> bool {
         pred.matches(self.tags_of(local))
     }
@@ -296,27 +310,43 @@ impl BroadBackend for &MmapSegment {
 
 /// Emit one matched CANDIDATE's logical ids from a title bitmap — the leader
 /// itself plus, on a group-bearing segment, its body-group members (dedup
-/// Stage A), each gated on aliveness + the request's tag filter. `grouped=false`
+/// Stage A), each gated on aliveness + the request's tag filter, then the
+/// per-title emission policy (ADR-109/112 — identity metadata read once per
+/// row, checked per set title bit; under [`EmitAll`](crate::ownership::EmitAll)
+/// the check is constant `true` and the read folds away). `grouped=false`
 /// emits exactly the pre-dedup single-id path (the alive/tag gates then repeat
 /// checks the caller already made — same values, no behavior change).
 #[inline]
-fn emit_from_bits<B: BroadBackend, S: BatchMatchSink>(
+fn emit_from_bits<B: BroadBackend, S: BatchMatchSink, P: BatchEmissionPolicy>(
     backend: &B,
     grouped: bool,
     local: u32,
     pred: &crate::exact::TagPredicate,
     bits: &[u64],
     collector: &mut S,
+    policy: P,
 ) {
     if backend.alive(local) && backend.passes_tags(local, pred) {
         let logical = backend.logical_id(local);
-        for_each_set_bit(bits, |ti| collector.on_match(ti, logical));
+        let placement = backend.placement(local);
+        for_each_set_bit(bits, |ti| {
+            if policy.should_emit(ti, placement) {
+                collector.on_match(ti, logical);
+            }
+        });
     }
     if grouped {
         for &m in backend.members_of(local) {
             if backend.alive(m) && backend.passes_tags(m, pred) {
                 let logical = backend.logical_id(m);
-                for_each_set_bit(bits, |ti| collector.on_match(ti, logical));
+                // Per-member placement: ownership is per row, and a member's
+                // placement is its own identity even inside a shared body.
+                let placement = backend.placement(m);
+                for_each_set_bit(bits, |ti| {
+                    if policy.should_emit(ti, placement) {
+                        collector.on_match(ti, logical);
+                    }
+                });
             }
         }
     }
@@ -332,7 +362,11 @@ fn emit_from_bits<B: BroadBackend, S: BatchMatchSink>(
 /// condition argument; counted per lane). The knob is the provable kill-switch —
 /// `false` restores the exact pre-lever path.
 #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
-pub(in crate::segment) fn eval_one_segment<B: BroadBackend, S: BatchMatchSink>(
+pub(in crate::segment) fn eval_one_segment<
+    B: BroadBackend,
+    S: BatchMatchSink,
+    P: BatchEmissionPolicy,
+>(
     backend: B,
     lane: Lane,
     distinct: &[FeatureId],
@@ -352,6 +386,7 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend, S: BatchMatchSink>(
     prefilter: bool,
     pred: &crate::exact::TagPredicate,
     stats: &mut MatchStats,
+    policy: P,
 ) {
     cands.clear();
     non_pure.clear();
@@ -438,7 +473,7 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend, S: BatchMatchSink>(
             // body — the vacuous property holds for each — so emission fans out
             // per alive, tag-passing member.
             if materialize && backend.vacuous_accept(lane, local, f) {
-                emit_from_bits(&backend, grouped, local, pred, fbits, collector);
+                emit_from_bits(&backend, grouped, local, pred, fbits, collector, policy);
             } else {
                 // Count-gate pre-reject (lever 5a) before queueing full bitmap
                 // verification. A vacuous-accept candidate never reaches this check
@@ -477,7 +512,7 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend, S: BatchMatchSink>(
                 grp,
                 &crate::exact::TagPredicate::empty(),
             );
-            emit_from_bits(&backend, grouped, local, pred, acc, collector);
+            emit_from_bits(&backend, grouped, local, pred, acc, collector, policy);
         } else {
             backend.eval_into(
                 local,
@@ -490,7 +525,12 @@ pub(in crate::segment) fn eval_one_segment<B: BroadBackend, S: BatchMatchSink>(
                 pred,
             );
             let logical = backend.logical_id(local);
-            for_each_set_bit(acc, |ti| collector.on_match(ti, logical));
+            let placement = backend.placement(local);
+            for_each_set_bit(acc, |ti| {
+                if policy.should_emit(ti, placement) {
+                    collector.on_match(ti, logical);
+                }
+            });
         }
     }
 }

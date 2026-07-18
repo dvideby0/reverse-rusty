@@ -48,11 +48,13 @@ mod lifecycle;
 mod logical_ids;
 mod matching;
 mod ranked;
+mod ranked_batch;
 mod resize;
 mod topology;
 mod vocab;
 
 pub use ranked::{ClusterRankedError, ClusterRankedHit, ClusterRankedMatch};
+pub use ranked_batch::{ClusterBatchRankedMatch, ClusterRankedTitle};
 pub use resize::recommended_shard_count;
 pub use topology::{resolve_topology, route_topology, seed_position_preserving, ShardEndpoints};
 

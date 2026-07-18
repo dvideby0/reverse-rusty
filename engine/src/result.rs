@@ -12,6 +12,14 @@ pub const DEFAULT_TOP_K: usize = 100;
 pub const MAX_TOP_K: usize = 10_000;
 /// Default threshold above which total hits become a lower bound.
 pub const DEFAULT_TRACK_TOTAL_HITS_UP_TO: u64 = 10_000;
+/// Hard admission ceiling on titles in one ranked batch (ADR-112) — aligned
+/// with the HTTP layer's `max_percolate_batch` default.
+pub const MAX_RANKED_BATCH_TITLES: usize = 10_000;
+/// Aggregate eager-heap budget for one ranked batch: `size × titles` must stay
+/// under this bound (ADR-112). Each per-title collector eagerly reserves K heap
+/// slots + K id-set slots (~40 B/row ⇒ ~40 MiB at this ceiling); the lazy
+/// total tracker is additionally threshold-capped per title.
+pub const MAX_RANKED_BATCH_HEAP_ROWS: u64 = 1 << 20;
 
 /// Admission-bounded options for one local ranked percolation request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,8 +42,24 @@ impl Default for TopKOptions {
 /// Typed admission failures shared by the lean core and HTTP layer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TopKAdmissionError {
-    SizeTooLarge { requested: usize, max: usize },
-    TotalHitsThresholdTooLarge { requested: u64, max: u64 },
+    SizeTooLarge {
+        requested: usize,
+        max: usize,
+    },
+    TotalHitsThresholdTooLarge {
+        requested: u64,
+        max: u64,
+    },
+    /// ADR-112: too many titles in one ranked batch.
+    BatchTitlesTooLarge {
+        requested: usize,
+        max: usize,
+    },
+    /// ADR-112: `size × titles` exceeds the aggregate eager-heap budget.
+    BatchHeapBudgetExceeded {
+        requested_rows: u64,
+        max: u64,
+    },
 }
 
 impl std::fmt::Display for TopKAdmissionError {
@@ -47,6 +71,16 @@ impl std::fmt::Display for TopKAdmissionError {
             Self::TotalHitsThresholdTooLarge { requested, max } => write!(
                 f,
                 "track_total_hits_up_to {requested} exceeds maximum {max}"
+            ),
+            Self::BatchTitlesTooLarge { requested, max } => {
+                write!(f, "batch of {requested} titles exceeds maximum {max}")
+            }
+            Self::BatchHeapBudgetExceeded {
+                requested_rows,
+                max,
+            } => write!(
+                f,
+                "batch heap budget of {requested_rows} rows (size x titles) exceeds maximum {max}"
             ),
         }
     }

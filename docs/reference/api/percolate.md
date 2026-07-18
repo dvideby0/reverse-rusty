@@ -281,6 +281,49 @@ independently), composes with `filter`, and is **opt-in**: with no `rank` block 
 byte-identical to before — no `_score` field, engine order preserved. Compatibility cluster endpoints
 use ADR-075 rank-at-shard/full-union merge; `/v2/_search` uses ADR-110's bounded exact merge.
 
+## `POST /v2/_mpercolate` — Exact bounded ranked batch (ADR-112)
+
+The batch counterpart to `/v2/_search`: one shared parameter set + `documents[]`, one exact bounded
+top-K result per document (`responses[i]` corresponds to `documents[i]`), evaluated through the
+columnar batch kernel — in coordinator mode with ONE `PercolateTopKBatch` call per involved shard
+instead of a per-document fan.
+
+```bash
+curl -X POST localhost:9200/v2/_mpercolate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "documents": [{"title": "1996 skybox premium michael jordan psa 10"},
+                  {"title": "generic unmatched listing"}],
+    "query_scope": "standard",
+    "size": 10,
+    "rank": {"priority_field": "priority"},
+    "include_source": true,
+    "timeout_ms": 30000
+  }'
+```
+
+Response: `{took_ms, complete, query_scope, responses: [{_shards, hits: {total, hits: [{_id,
+_score, _source?}]}}]}` — per-slot `_shards.total` is that document's routed fan-out; totals carry
+the same `eq`/`gte` honesty as `/v2/_search`. Empty `documents` is a 200 with empty `responses`.
+
+Semantics and bounds:
+
+- **Shared options.** `query_scope`, `size`, `track_total_hits_up_to`, `rank`, `filter`,
+  `include_source`, and `timeout_ms` apply to every slot (per-document options are a named 400;
+  heterogeneous-K callers split batches). Defaults match `/v2/_search`, except `timeout_ms`
+  defaults to 30000 (the v1 batch default).
+- **`explain` is not supported here** (a named 400) — per-(document, winner) explanation
+  compilation is antithetical to the throughput path; use `/v2/_search` for one document.
+- **Admission**: batch length ≤ min(`max_percolate_batch`, 10 000) and `size × documents ≤ 2^20`
+  (the aggregate collector heap budget), both rejected as `rank_admission_rejected` before any
+  matching.
+- **Winner `_source`** is fetched once per distinct winner across the whole batch and charged per
+  DELIVERED occurrence against the same 16 MiB credit as `/v2/_search`
+  (`--max-ranked-enrichment-bytes`); overflow is a whole-request 413.
+- **No partial results**: one absolute deadline covers routing, matching, merge, and enrichment —
+  expiry is a whole-batch 408; any shard/enrichment failure fails the whole request (the same
+  status mapping as `/v2/_search`).
+
 ## `POST /_mpercolate` — Batch percolate (high throughput)
 
 The throughput counterpart to `/_search`. Percolates a **batch** of documents in one request and

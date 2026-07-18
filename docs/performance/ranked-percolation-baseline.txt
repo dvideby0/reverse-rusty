@@ -124,3 +124,14 @@ ordinary:            local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
 broad-heavy:         local=bb248a758615fda0 cluster=0b64b11f5259ff1c
 body-duplicate:      local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
 placement-duplicate: local=0ec5dda03607d01f cluster=77575a4edc1f29e7
+
+--- ADR-112 batch capture (2026-07-18, M4 Max dev box, canonical `rankbench 20000 500 8 275775489`) ---
+Single-title semantic checksums UNCHANGED by the batch refactor:
+  ordinary            local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
+  broad-heavy         local=bb248a758615fda0 cluster=0b64b11f5259ff1c
+Batch capture (per-title ≡ scalar asserted inside the bench; timings informational):
+  [ordinary]    batch bs=16  K=10 : local_batch_ms=0.061 cluster_batch_ms=0.144 shard_calls=8 shard_rows=16
+  [ordinary]    batch bs=256 K=100: local_batch_ms=0.355 cluster_batch_ms=0.785 shard_calls=8 shard_rows=256
+  [broad-heavy] batch bs=16  K=10 : local_batch_ms=0.090 cluster_batch_ms=0.182 shard_calls=8 shard_rows=35
+  [broad-heavy] batch bs=256 K=100: local_batch_ms=0.950 cluster_batch_ms=0.874 shard_calls=8 shard_rows=3997
+Structure: fanned_shard_calls ≤ shards (ONE batch call per involved shard); per-title rows ≤ K.

@@ -8,8 +8,11 @@
 //! eval itself lives in [`super::kernel`].
 
 use super::kernel::{eval_one_segment, Lane};
-use crate::collect::{AllBatchCollector, BatchMatchSink, CollectionSummary, VecSink};
+use crate::collect::{
+    AllBatchCollector, BatchMatchCollector, BatchMatchSink, CollectionSummary, MatchSink,
+};
 use crate::dict::FeatureId;
+use crate::ownership::{BatchEmissionPolicy, EmitAll};
 use crate::segment::snapshot::MatchView;
 use crate::segment::{
     infallible, BaseSegment, BatchMatchOptions, BroadStrategy, DeadlineAt, DeadlineCheck,
@@ -46,9 +49,6 @@ pub(in crate::segment) struct BroadBatchScratch {
     acc: Vec<u64>,
     /// Per-any-of-group OR accumulator (`words` u64 words).
     grp: Vec<u64>,
-    /// Logical emissions accumulated per title across inline and columnar
-    /// lanes. Parallel to the reusable `outs` vectors owned by the driver.
-    delivery_emissions: Vec<u64>,
 }
 
 impl BroadBatchScratch {
@@ -64,7 +64,6 @@ impl BroadBatchScratch {
             non_pure: Vec::new(),
             acc: Vec::new(),
             grp: Vec::new(),
-            delivery_emissions: Vec::new(),
         }
     }
 
@@ -99,36 +98,47 @@ impl BroadBatchScratch {
     }
 }
 
+/// One per-title [`MatchSink`] view over the chunk's indexed batch collector —
+/// what lets the Phase-0 scalar lanes and the columnar lanes feed ONE
+/// collection policy. For the compatibility `AllBatchCollector` monomorph this
+/// inlines to the same per-title vector push the old `VecSink` did.
+struct IndexedTitleSink<'a, C> {
+    collector: &'a mut C,
+    title_index: usize,
+}
+
+impl<C: BatchMatchSink> MatchSink for IndexedTitleSink<'_, C> {
+    #[inline]
+    fn on_match(&mut self, logical_id: u64) {
+        self.collector.on_match(self.title_index, logical_id);
+    }
+}
+
 /// Match one chunk of titles: selective lane per title (unchanged), broad lane
-/// once over the chunk (columnar), merged into per-title `outs`.
+/// once over the chunk (columnar), emitted into the chunk's indexed collector
+/// (the compatibility path's per-title `outs`, or the ADR-112 per-title
+/// bounded top-K slots) under the per-title emission `policy`.
 /// Errs only under an armed cooperative deadline ([`DeadlineAt`], ADR-099) — checked at
 /// each Phase-0 title boundary and each Phase-1/2 segment block, never per candidate.
-/// On Err the chunk's `outs` are cleared (no partial escape); the unarmed monomorph
+/// On Err the collector is aborted (no partial escape); the unarmed monomorph
 /// ([`NoDeadline`]) compiles the checks away.
 #[allow(clippy::too_many_arguments)] // mirrors the scratch-threading style of eval_one_segment
-fn match_batch_chunk<D: DeadlineCheck>(
+pub(super) fn match_batch_chunk<
+    D: DeadlineCheck,
+    C: BatchMatchCollector,
+    P: BatchEmissionPolicy,
+>(
     view: &MatchView,
     titles: &[impl AsRef<str>],
     opts: BatchMatchOptions,
     ms: &mut MatchScratch,
     bs: &mut BroadBatchScratch,
-    outs: &mut Vec<Vec<u64>>,
+    collector: &mut C,
     stats: &mut MatchStats,
     dl: D,
+    policy: P,
 ) -> Result<(), D::Cancelled> {
     let b = titles.len();
-    if outs.len() < b {
-        outs.resize_with(b, Vec::new);
-    }
-    for v in outs.iter_mut().take(b) {
-        v.clear();
-    }
-    if bs.delivery_emissions.len() < b {
-        bs.delivery_emissions.resize(b, 0);
-    }
-    for count in bs.delivery_emissions.iter_mut().take(b) {
-        *count = 0;
-    }
     if b == 0 {
         return Ok(());
     }
@@ -174,15 +184,10 @@ fn match_batch_chunk<D: DeadlineCheck>(
 
     // ---- Phase 0: per-title normalize + selective lane + build feat bitmaps ----
     for (ti, title) in titles.iter().enumerate() {
-        // Cooperative-deadline title boundary (ADR-099): clear the chunk's outputs
+        // Cooperative-deadline title boundary (ADR-099): abort the collector
         // before abandoning so nothing partial can be read.
         if let Err(c) = dl.check() {
-            for v in outs.iter_mut().take(b) {
-                v.clear();
-            }
-            for count in bs.delivery_emissions.iter_mut().take(b) {
-                *count = 0;
-            }
+            collector.abort();
             return Err(c);
         }
         // per-title epoch bump for the selective lane's cross-signature dedup
@@ -236,18 +241,21 @@ fn match_batch_chunk<D: DeadlineCheck>(
             include_hot: hot_inline,
         };
         {
-            let mut collector = VecSink::new(&mut outs[ti], &mut bs.delivery_emissions[ti]);
+            let mut sink = IndexedTitleSink {
+                collector: &mut *collector,
+                title_index: ti,
+            };
             for (i, base) in view.segments.iter().enumerate() {
                 base.match_collect(
                     &tview,
                     view.dict,
                     epoch,
                     &mut ms.seen[i],
-                    &mut collector,
+                    &mut sink,
                     lanes,
                     view.pred,
                     stats,
-                    crate::ownership::EmitAll,
+                    policy.title_policy(ti),
                 );
             }
             view.memtable.match_collect(
@@ -255,11 +263,11 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 view.dict,
                 epoch,
                 &mut ms.seen[n_base],
-                &mut collector,
+                &mut sink,
                 lanes,
                 view.pred,
                 stats,
-                crate::ownership::EmitAll,
+                policy.title_policy(ti),
             );
         }
 
@@ -291,7 +299,6 @@ fn match_batch_chunk<D: DeadlineCheck>(
     }
 
     if !any_columnar {
-        let mut collector = AllBatchCollector::new(&mut outs[..b], &mut bs.delivery_emissions[..b]);
         record_collection(stats, collector.finish());
         return Ok(());
     }
@@ -314,13 +321,11 @@ fn match_batch_chunk<D: DeadlineCheck>(
         non_pure,
         acc,
         grp,
-        delivery_emissions,
     } = bs;
     let acc: &mut [u64] = &mut acc[..words];
     let grp: &mut [u64] = &mut grp[..words];
     let materialize = opts.broad_materialize;
     let prefilter = opts.broad_prefilter;
-    let mut collector = AllBatchCollector::new(&mut outs[..b], &mut delivery_emissions[..b]);
 
     for (si, base) in view.segments.iter().enumerate() {
         // Cooperative-deadline segment boundary in the columnar pass (ADR-099).
@@ -345,11 +350,12 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 non_pure,
                 acc,
                 grp,
-                &mut collector,
+                collector,
                 materialize,
                 prefilter,
                 view.pred,
                 stats,
+                policy,
             );
         }
         if hot_columnar && base.has_hot_entries() {
@@ -369,11 +375,12 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 non_pure,
                 acc,
                 grp,
-                &mut collector,
+                collector,
                 materialize,
                 prefilter,
                 view.pred,
                 stats,
+                policy,
             );
         }
     }
@@ -400,11 +407,12 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 non_pure,
                 acc,
                 grp,
-                &mut collector,
+                collector,
                 materialize,
                 prefilter,
                 view.pred,
                 stats,
+                policy,
             );
         }
         if hot_columnar && view.memtable.has_hot_entries() {
@@ -424,11 +432,12 @@ fn match_batch_chunk<D: DeadlineCheck>(
                 non_pure,
                 acc,
                 grp,
-                &mut collector,
+                collector,
                 materialize,
                 prefilter,
                 view.pred,
                 stats,
+                policy,
             );
         }
     }
@@ -466,7 +475,7 @@ fn next_epoch(broad_epoch: &mut u32, broad_seen: &mut [Vec<u32>]) -> u32 {
 /// Dispatch one columnar-lane evaluation over a [`BaseSegment`]'s two backings —
 /// collapses the Memory/Mmap duplication at the two lane-call sites above.
 #[allow(clippy::too_many_arguments)]
-fn eval_base_lane<S: BatchMatchSink>(
+fn eval_base_lane<S: BatchMatchSink, P: BatchEmissionPolicy>(
     base: &BaseSegment,
     lane: Lane,
     distinct: &[FeatureId],
@@ -486,6 +495,7 @@ fn eval_base_lane<S: BatchMatchSink>(
     prefilter: bool,
     pred: &crate::exact::TagPredicate,
     stats: &mut MatchStats,
+    policy: P,
 ) {
     match base {
         BaseSegment::Memory(s) => eval_one_segment(
@@ -508,6 +518,7 @@ fn eval_base_lane<S: BatchMatchSink>(
             prefilter,
             pred,
             stats,
+            policy,
         ),
         BaseSegment::Mmap(m) => eval_one_segment(
             m,
@@ -529,7 +540,25 @@ fn eval_base_lane<S: BatchMatchSink>(
             prefilter,
             pred,
             stats,
+            policy,
         ),
+    }
+}
+
+/// Size + clear the per-chunk compatibility output buffers (per-title match
+/// vectors + delivery-emission counters) the `AllBatchCollector` borrows.
+fn prepare_outs(outs: &mut Vec<Vec<u64>>, emissions: &mut Vec<u64>, b: usize) {
+    if outs.len() < b {
+        outs.resize_with(b, Vec::new);
+    }
+    for v in outs.iter_mut().take(b) {
+        v.clear();
+    }
+    if emissions.len() < b {
+        emissions.resize(b, 0);
+    }
+    for count in emissions.iter_mut().take(b) {
+        *count = 0;
     }
 }
 
@@ -575,13 +604,27 @@ pub(in crate::segment) fn batch_results_with_stats(
                     MatchScratch::new(),
                     BroadBatchScratch::new(),
                     Vec::<Vec<u64>>::new(),
+                    Vec::<u64>::new(),
                 )
             },
-            |(ms, bs, outs), (ci, ct)| {
+            |(ms, bs, outs, emissions), (ci, ct)| {
                 let mut st = MatchStats::default();
-                infallible(match_batch_chunk(
-                    view, ct, opts, ms, bs, outs, &mut st, NoDeadline,
-                ));
+                let b = ct.len();
+                prepare_outs(outs, emissions, b);
+                {
+                    let mut collector = AllBatchCollector::new(&mut outs[..b], &mut emissions[..b]);
+                    infallible(match_batch_chunk(
+                        view,
+                        ct,
+                        opts,
+                        ms,
+                        bs,
+                        &mut collector,
+                        &mut st,
+                        NoDeadline,
+                        EmitAll,
+                    ));
+                }
                 let base = ci * chunk;
                 let results: Vec<(usize, Vec<u64>)> = (0..ct.len())
                     .map(|ti| (base + ti, std::mem::take(&mut outs[ti])))
@@ -627,11 +670,27 @@ pub(in crate::segment) fn try_batch_results_with_stats(
                     MatchScratch::new(),
                     BroadBatchScratch::new(),
                     Vec::<Vec<u64>>::new(),
+                    Vec::<u64>::new(),
                 )
             },
-            |(ms, bs, outs), (ci, ct)| {
+            |(ms, bs, outs, emissions), (ci, ct)| {
                 let mut st = MatchStats::default();
-                match_batch_chunk(view, ct, opts, ms, bs, outs, &mut st, DeadlineAt(d))?;
+                let b = ct.len();
+                prepare_outs(outs, emissions, b);
+                {
+                    let mut collector = AllBatchCollector::new(&mut outs[..b], &mut emissions[..b]);
+                    match_batch_chunk(
+                        view,
+                        ct,
+                        opts,
+                        ms,
+                        bs,
+                        &mut collector,
+                        &mut st,
+                        DeadlineAt(d),
+                        EmitAll,
+                    )?;
+                }
                 let base = ci * chunk;
                 let results: Vec<(usize, Vec<u64>)> = (0..ct.len())
                     .map(|ti| (base + ti, std::mem::take(&mut outs[ti])))
@@ -665,13 +724,27 @@ pub(in crate::segment) fn batch_stats(
                     MatchScratch::new(),
                     BroadBatchScratch::new(),
                     Vec::<Vec<u64>>::new(),
+                    Vec::<u64>::new(),
                 )
             },
-            |(ms, bs, outs), ct| {
+            |(ms, bs, outs, emissions), ct| {
                 let mut st = MatchStats::default();
-                infallible(match_batch_chunk(
-                    view, ct, opts, ms, bs, outs, &mut st, NoDeadline,
-                ));
+                let b = ct.len();
+                prepare_outs(outs, emissions, b);
+                {
+                    let mut collector = AllBatchCollector::new(&mut outs[..b], &mut emissions[..b]);
+                    infallible(match_batch_chunk(
+                        view,
+                        ct,
+                        opts,
+                        ms,
+                        bs,
+                        &mut collector,
+                        &mut st,
+                        NoDeadline,
+                        EmitAll,
+                    ));
+                }
                 st.matches += outs
                     .iter()
                     .take(ct.len())

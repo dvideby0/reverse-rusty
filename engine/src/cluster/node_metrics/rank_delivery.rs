@@ -47,6 +47,14 @@ impl SlotRankDelivery {
         }
     }
 
+    /// Result bytes not attributable to one title's rows (the ADR-112 batch
+    /// summary frame) — keeps the byte counter equal to the exact encoded
+    /// bytes returned, matching the coordinator's every-frame sum.
+    pub(crate) fn record_result_bytes(&self, bytes: usize) {
+        self.top_k_result_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
     pub(crate) fn record_fetch(&self, bytes: usize) {
         self.fetch_source_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
