@@ -199,17 +199,6 @@ validation (ADR-103 — the title→query stream as behavioral evidence, opt-in 
     `open` uses — keeping the fail-closed guard as the fallback when enumeration fails. Oracle
     leg: reconnect a fresh coordinator to populated durable servers; an existing id must 409, a
     new id must insert.
-  - **v2 search delivery unification + typed wire errors + one comparator.** `cluster_v2_search`
-    is a ~300-line near-clone of `v2_search` (drift already caught + patched once: the cluster
-    timeout arm's slow-query accounting) — extract one shared delivery pipeline with the
-    HTTP mapping owned by the error type, and resolve the deliberate-or-not v1-vs-v2 status
-    divergence (`shard_error_response` 409 vs `cluster_error_status` 503 for the same
-    `ShardError` variants). Replace the ranked seam's message-substring error reconstruction
-    (`ranked_rpc_err` ↔ `read_status`, a three-string coupling) with a structured code in tonic
-    `Status` metadata. Define ONE public `(score desc, logical_id asc)` comparator (the ADR-110
-    exactness order currently lives in four places: `collect.rs` ×2, the coordinator merge,
-    `order_and_page`), and consider unifying the bounded fetch-credit kernel duplicated between
-    `LocalShard::fetch_matches` and the gRPC stream body.
   - **Per-logical-id write lock table.** The 256 striped mutexes serializing same-id cluster
     writes are held across the WAL append (fsync) AND the full shard fan-out (sequential gRPC per
     shard), so two unrelated ids colliding on a stripe serialize whole distributed writes and one
@@ -377,8 +366,8 @@ Low-priority polish and micro-optimizations — none are production blockers.
   are `#[allow(dead_code)]` on the trait (the coordinator calls only the `_owned` variants),
   leaving four per-type forwarding impls maintaining an unreachable parallel read path; tests
   needing emit-all can pass an all-positions `OwnershipContext`.
-- **650-line splits from the ADR-110 branch** — `handlers/search/v2.rs` (~966, split AFTER the
-  Tier-3 handler unification above), `segment/seg.rs` (625→730), `cluster/handoff.rs` (577→672).
+- **650-line splits from the ADR-110 branch** — `segment/seg.rs` (625→730), `cluster/handoff.rs`
+  (577→672). (`handlers/search/v2.rs` was split by the delivery unification, ADR-111 era.)
 - **Reuse the storage LE-read primitives in `server/durable.rs`** — `read_adopted_space`
   hand-rolls the truncated-LE-read idiom three times; make `read_u32_at`/`read_u64_at`
   `pub(crate)` and delete the copies.
