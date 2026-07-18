@@ -186,16 +186,31 @@ fn deadline_from_remaining(micros: u64) -> Result<Instant, Status> {
         .ok_or_else(|| Status::invalid_argument("remaining deadline is out of range"))
 }
 
+// The message strings below are a frozen cross-version contract: a pre-ADR-111
+// client reconstructs typed errors from them (`ranked_rpc_err`'s substring
+// fallback). The ADR-111 metadata codes ride alongside, never instead.
 fn read_status(error: &ShardError) -> Status {
+    use crate::cluster::ranked_wire::{attach, RankedWireCode};
     match error {
         ShardError::DeadlineExceeded => Status::deadline_exceeded(error.to_string()),
         ShardError::Admission(_) => Status::invalid_argument(error.to_string()),
-        ShardError::OwnershipMismatch(_) | ShardError::Protocol(_) => {
-            Status::failed_precondition(error.to_string())
-        }
-        ShardError::SourceUnavailable(_) => Status::not_found(error.to_string()),
-        ShardError::EnrichmentLimit { .. } => Status::resource_exhausted(
-            "ranked enrichment byte credit exhausted before source materialization",
+        ShardError::OwnershipMismatch(_) => attach(
+            Status::failed_precondition(error.to_string()),
+            RankedWireCode::OwnershipMismatch,
+            None,
+        ),
+        ShardError::Protocol(_) => Status::failed_precondition(error.to_string()),
+        ShardError::SourceUnavailable(logical) => attach(
+            Status::not_found(error.to_string()),
+            RankedWireCode::SourceUnavailable,
+            Some(*logical),
+        ),
+        ShardError::EnrichmentLimit { limit } => attach(
+            Status::resource_exhausted(
+                "ranked enrichment byte credit exhausted before source materialization",
+            ),
+            RankedWireCode::EnrichmentLimit,
+            Some(u64::try_from(*limit).unwrap_or(u64::MAX)),
         ),
         _ => Status::internal(error.to_string()),
     }

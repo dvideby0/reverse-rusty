@@ -51,6 +51,8 @@ mod node_metrics;
 #[cfg(feature = "distributed")]
 mod proto;
 #[cfg(feature = "distributed")]
+mod ranked_wire;
+#[cfg(feature = "distributed")]
 mod remote;
 #[cfg(feature = "distributed")]
 mod remote_control;
