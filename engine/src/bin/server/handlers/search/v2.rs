@@ -461,6 +461,7 @@ pub(crate) async fn cluster_v2_search(
                 }
                 let fingerprint = crate::pit::request_fingerprint(
                     cluster.normalizer(),
+                    cluster.dict(),
                     &title,
                     options.query_scope,
                     &rank,

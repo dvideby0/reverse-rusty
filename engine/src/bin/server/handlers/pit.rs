@@ -77,7 +77,12 @@ pub(crate) async fn close_pit(
         .verify_pit(&body.pit_id)
         .map_err(token_failure_response)?;
     let closed = {
+        let now = Instant::now();
         let mut pits = state.pits.lock();
+        // Reap first: an expired target honestly reports `closed: false`, and
+        // a DELETE-first client still frees every expired cap slot (dropping
+        // the reaped Arcs IS the local release) — codex review.
+        drop(pits.reap_expired(now));
         let closed = pits.close(pit).is_some();
         state.prom.open_pits.set(pits.len() as i64);
         closed
@@ -142,7 +147,7 @@ pub(crate) async fn cluster_close_pit(
     let worker = Arc::clone(&state);
     let closed = tokio::task::spawn_blocking(move || {
         let cluster = worker.cluster.read();
-        let closed = cluster.close_pit(pit);
+        let closed = cluster.close_pit(pit, Instant::now());
         worker.prom.open_pits.set(cluster.open_pit_count() as i64);
         closed
     })

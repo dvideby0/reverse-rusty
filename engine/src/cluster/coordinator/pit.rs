@@ -57,6 +57,12 @@ impl ClusterEngine {
         &self.norm
     }
 
+    /// The shared frozen dict — the fingerprint's feature-id space (same
+    /// pinned-≡-current argument as [`Self::normalizer`]).
+    pub fn dict(&self) -> &crate::dict::Dict {
+        &self.dict
+    }
+
     /// Open an index-wide PIT: reap expired entries (releasing their shard
     /// pins), admit under `cfg`, then pin every position's current snapshot.
     /// Fails closed: any shard refusal releases the already-placed pins and
@@ -68,6 +74,17 @@ impl ClusterEngine {
         now: Instant,
     ) -> Result<PitId, ClusterPitError> {
         self.reap_pits(now);
+        // ADR-113 mutation barrier (WRITE side): every `apply_*` funnel arm
+        // holds the read side across its full shard fan-out, so the pin fan
+        // below observes either all of a mutation or none of it on every
+        // shard — a PIT is always a view that actually existed. Taken AFTER
+        // the reap (which fans shard closes) and held through registry
+        // admission + the pin fan; no shard engine lock is taken under it, so
+        // no cycle with the writers (codex review).
+        let _mutations_excluded = self
+            .pit_open_barrier
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let meta = ClusterPitMeta {
             generation: self.placement_generation(),
             num_shards: self.shards.len() as u32,
@@ -88,9 +105,13 @@ impl ClusterEngine {
         Ok(pit)
     }
 
-    /// Close a PIT, releasing every shard pin. `false` if it was already gone
-    /// (expired/closed/rebuilt) — the caller's goal state either way.
-    pub fn close_pit(&self, pit: PitId) -> bool {
+    /// Close a PIT, releasing every shard pin. Reaps expired entries first
+    /// (releasing THEIR pins too), so an expired target honestly reports
+    /// `false` and a DELETE-first client still frees the cap (codex review).
+    /// `false` = already gone (expired/closed/rebuilt) — the caller's goal
+    /// state either way.
+    pub fn close_pit(&self, pit: PitId, now: Instant) -> bool {
+        self.reap_pits(now);
         let existed = self.lock_pits().close(pit).is_some();
         if existed {
             for shard in &self.shards {

@@ -99,9 +99,17 @@ pub(in crate::handlers::search) fn resolve_local(
         return Err(stale_cursor_response());
     };
 
-    // The fingerprint is computed against the PINNED snapshot's normalizer, so
-    // a live vocab change cannot silently re-tokenize an in-flight cursor.
-    let fingerprint = request_fingerprint(snapshot.normalizer(), title, scope, rank, filter);
+    // The fingerprint is computed against the PINNED snapshot's normalizer +
+    // dict, so a live vocab change cannot silently re-tokenize an in-flight
+    // cursor.
+    let fingerprint = request_fingerprint(
+        snapshot.normalizer(),
+        snapshot.dict(),
+        title,
+        scope,
+        rank,
+        filter,
+    );
     if let Some(expected) = expected_fingerprint {
         if fingerprint != expected {
             record_outcome(&state.prom, "cursor_mismatch", scope);

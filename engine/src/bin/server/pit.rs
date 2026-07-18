@@ -89,6 +89,12 @@ impl PitTokens {
 
     /// Decode + authenticate a token of the expected kind, returning its body.
     fn open(&self, token: &str, kind: u8, body_len: usize) -> Result<Vec<u8>, TokenError> {
+        // Exact-length gate BEFORE decoding: tokens have a fixed encoded size,
+        // and an attacker-sized "token" must not reserve half its body-limit
+        // bytes in `hex_decode` just to be rejected (codex review).
+        if token.len() != (body_len + TAG_LEN) * 2 {
+            return Err(TokenError::Malformed);
+        }
         let raw = hex_decode(token).ok_or(TokenError::Malformed)?;
         if raw.len() != body_len + TAG_LEN {
             return Err(TokenError::Malformed);
@@ -150,13 +156,28 @@ impl PitTokens {
     }
 }
 
-/// SHA-256 fingerprint of one request's page-invariant semantics. Uses the
-/// PINNED snapshot's normalizer, so a vocab change on the live engine cannot
-/// silently re-tokenize an in-flight cursor's title. Every component is
-/// length-prefixed (no delimiter ambiguity); filter keys/values are sorted so
-/// JSON field order cannot flip the fingerprint.
+/// SHA-256 fingerprint of one request's page-invariant semantics — computed
+/// against the PINNED snapshot's normalizer + dict, so a live vocab change
+/// cannot silently re-tokenize an in-flight cursor's title.
+///
+/// The title component hashes the MATCHER's exact input — both ADR-061 feature
+/// views (`N(T)`/`P(T)`) from `match_features_dual` — not surface tokens: with
+/// a collapsing phrase configured, `upper deck` and `upper  deck` clean to the
+/// same tokens but emit different feature sets (whitespace runs are
+/// phrase-significant), and the fingerprint must distinguish exactly what the
+/// matcher distinguishes (codex review). Boosts are reduced to their EFFECTIVE
+/// compiled map first (`compile_rank_program` is last-write-wins per
+/// `(key, value)`), so duplicate-boost reorderings that change scoring change
+/// the fingerprint too. Every variable-length region is count-prefixed and
+/// every piece length-prefixed — no cross-section ambiguity. Filter groups
+/// keep their key→values structure (a flattened encoding would collide
+/// `{"a":["b","c"]}` with `{"a":["b"],"c":[]}`); values within a group are
+/// sorted (JSON order is not semantic), groups sorted by key.
+/// `size`/`timeout_ms`/`track_total_hits_up_to` are deliberately excluded —
+/// they may vary per page.
 pub(crate) fn request_fingerprint(
     norm: &Normalizer,
+    dict: &reverse_rusty::dict::Dict,
     title: &str,
     scope: QueryScope,
     rank: &RankProgramSpec,
@@ -167,28 +188,49 @@ pub(crate) fn request_fingerprint(
         hasher.update((bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
-    for token in norm.clean_tokens(title) {
-        piece(token.as_bytes());
+
+    let mut lc = String::new();
+    let mut sc = reverse_rusty::normalize::NormScratch::new();
+    let mut neg: Vec<reverse_rusty::FeatureId> = Vec::new();
+    let mut pos: Vec<reverse_rusty::FeatureId> = Vec::new();
+    norm.match_features_dual(title, dict, &mut lc, &mut sc, &mut neg, &mut pos);
+    for view in [&neg, &pos] {
+        piece(&(view.len() as u64).to_le_bytes());
+        for &id in view {
+            piece(&id.to_le_bytes());
+        }
     }
+
     piece(&[match scope {
         QueryScope::Standard => 0u8,
         QueryScope::WithBroad => 1u8,
     }]);
     piece(rank.priority_field.as_deref().unwrap_or("").as_bytes());
-    let mut boosts: Vec<&(String, String, i64)> = rank.boosts.iter().collect();
-    boosts.sort();
-    for (key, value, weight) in boosts {
+
+    // The effective boost program: last-write-wins per (key, value), exactly
+    // like compile_rank_program's FastMap collection; BTreeMap gives the
+    // canonical order.
+    let mut effective: std::collections::BTreeMap<(&str, &str), i64> =
+        std::collections::BTreeMap::new();
+    for (key, value, weight) in &rank.boosts {
+        effective.insert((key.as_str(), value.as_str()), *weight);
+    }
+    piece(&(effective.len() as u64).to_le_bytes());
+    for ((key, value), weight) in &effective {
         piece(key.as_bytes());
         piece(value.as_bytes());
         piece(&weight.to_le_bytes());
     }
+
     let mut filters: Vec<(String, Vec<String>)> = filter.to_vec();
     for (_, values) in &mut filters {
         values.sort();
     }
     filters.sort();
+    piece(&(filters.len() as u64).to_le_bytes());
     for (key, values) in &filters {
         piece(key.as_bytes());
+        piece(&(values.len() as u64).to_le_bytes());
         for value in values {
             piece(value.as_bytes());
         }
@@ -335,55 +377,72 @@ mod tests {
     }
 
     #[test]
+    fn oversized_tokens_are_rejected_without_decoding() {
+        let tokens = PitTokens::generate();
+        // Valid hex, wrong (huge) length: must be Malformed by the length
+        // gate, never an allocation proportional to the input (codex review).
+        let huge = "ab".repeat(1 << 20);
+        assert_eq!(tokens.verify_pit(&huge), Err(TokenError::Malformed));
+        assert_eq!(tokens.verify_cursor(&huge), Err(TokenError::Malformed));
+        // One char short / long of the exact encoded size is Malformed too.
+        let minted = tokens.mint_pit(PitId(1));
+        assert_eq!(
+            tokens.verify_pit(&minted[..minted.len() - 2]),
+            Err(TokenError::Malformed)
+        );
+        assert_eq!(
+            tokens.verify_pit(&format!("{minted}ab")),
+            Err(TokenError::Malformed)
+        );
+    }
+
+    #[test]
     fn fingerprint_covers_semantics_and_ignores_paging_knobs() {
         let norm = norm();
+        let dict = reverse_rusty::dict::Dict::new();
+        let fp = |title: &str,
+                  scope: QueryScope,
+                  rank: &RankProgramSpec,
+                  filter: &[(String, Vec<String>)]| {
+            request_fingerprint(&norm, &dict, title, scope, rank, filter)
+        };
         let rank = RankProgramSpec {
             priority_field: Some("priority".into()),
             boosts: vec![("tier".into(), "gold".into(), 100)],
         };
         let filter = vec![("tier".to_string(), vec!["gold".to_string()])];
-        let base = request_fingerprint(&norm, "topps chrome", QueryScope::Standard, &rank, &filter);
+        let base = fp("topps chrome", QueryScope::Standard, &rank, &filter);
 
         // Same request → same fingerprint; surface-noise title variants that
-        // normalize identically also match (the fingerprint is over N(T)).
+        // produce the same match features also match.
         assert_eq!(
             base,
-            request_fingerprint(&norm, "topps chrome", QueryScope::Standard, &rank, &filter)
+            fp("topps chrome", QueryScope::Standard, &rank, &filter)
         );
         assert_eq!(
             base,
-            request_fingerprint(
-                &norm,
-                "  Topps   CHROME ",
-                QueryScope::Standard,
-                &rank,
-                &filter
-            )
+            fp("  Topps   CHROME ", QueryScope::Standard, &rank, &filter)
         );
 
         // Every covered component moves it.
         assert_ne!(
             base,
-            request_fingerprint(&norm, "topps finest", QueryScope::Standard, &rank, &filter)
+            fp("topps finest", QueryScope::Standard, &rank, &filter)
         );
         assert_ne!(
             base,
-            request_fingerprint(&norm, "topps chrome", QueryScope::WithBroad, &rank, &filter)
+            fp("topps chrome", QueryScope::WithBroad, &rank, &filter)
         );
         assert_ne!(
             base,
-            request_fingerprint(
-                &norm,
+            fp(
                 "topps chrome",
                 QueryScope::Standard,
                 &RankProgramSpec::default(),
                 &filter
             )
         );
-        assert_ne!(
-            base,
-            request_fingerprint(&norm, "topps chrome", QueryScope::Standard, &rank, &[])
-        );
+        assert_ne!(base, fp("topps chrome", QueryScope::Standard, &rank, &[]));
 
         // Filter value order is canonicalized.
         let two = vec![(
@@ -395,8 +454,109 @@ mod tests {
             vec!["silver".to_string(), "gold".to_string()],
         )];
         assert_eq!(
-            request_fingerprint(&norm, "topps chrome", QueryScope::Standard, &rank, &two),
-            request_fingerprint(&norm, "topps chrome", QueryScope::Standard, &rank, &two_rev)
+            fp("topps chrome", QueryScope::Standard, &rank, &two),
+            fp("topps chrome", QueryScope::Standard, &rank, &two_rev)
+        );
+    }
+
+    /// Codex-review regressions: the three fingerprint collision windows.
+    #[test]
+    fn fingerprint_distinguishes_grouping_boost_order_and_phrase_titles() {
+        let norm = norm();
+        let dict = reverse_rusty::dict::Dict::new();
+        let plain = RankProgramSpec::default();
+
+        // (1) Filter GROUP boundaries: {"a":["b","c"]} must not collide with
+        // {"a":["b"],"c":[]} — one OR group vs an extra empty (match-nothing)
+        // group.
+        let grouped = vec![("a".to_string(), vec!["b".to_string(), "c".to_string()])];
+        let split = vec![
+            ("a".to_string(), vec!["b".to_string()]),
+            ("c".to_string(), vec![]),
+        ];
+        assert_ne!(
+            request_fingerprint(&norm, &dict, "t", QueryScope::Standard, &plain, &grouped),
+            request_fingerprint(&norm, &dict, "t", QueryScope::Standard, &plain, &split)
+        );
+
+        // (2) Duplicate boosts are last-write-wins in compile_rank_program:
+        // reversing duplicates with different weights changes the effective
+        // program, so it must change the fingerprint — while true duplicates
+        // in a different interleaving (same effective map) must not.
+        let last_wins_a = RankProgramSpec {
+            priority_field: None,
+            boosts: vec![("k".into(), "v".into(), 1), ("k".into(), "v".into(), 2)],
+        };
+        let last_wins_b = RankProgramSpec {
+            priority_field: None,
+            boosts: vec![("k".into(), "v".into(), 2), ("k".into(), "v".into(), 1)],
+        };
+        assert_ne!(
+            request_fingerprint(&norm, &dict, "t", QueryScope::Standard, &last_wins_a, &[]),
+            request_fingerprint(&norm, &dict, "t", QueryScope::Standard, &last_wins_b, &[])
+        );
+        let effective_same = RankProgramSpec {
+            priority_field: None,
+            boosts: vec![
+                ("k".into(), "v".into(), 1),
+                ("j".into(), "w".into(), 3),
+                ("k".into(), "v".into(), 2),
+            ],
+        };
+        let effective_same_reordered = RankProgramSpec {
+            priority_field: None,
+            boosts: vec![("j".into(), "w".into(), 3), ("k".into(), "v".into(), 2)],
+        };
+        assert_eq!(
+            request_fingerprint(
+                &norm,
+                &dict,
+                "t",
+                QueryScope::Standard,
+                &effective_same,
+                &[]
+            ),
+            request_fingerprint(
+                &norm,
+                &dict,
+                "t",
+                QueryScope::Standard,
+                &effective_same_reordered,
+                &[]
+            )
+        );
+
+        // (3) With a collapsing phrase active, whitespace runs are
+        // phrase-significant: `upper deck` (phrase feature) and `upper  deck`
+        // (component features) must fingerprint differently — the matcher
+        // sees different feature sets even though the cleaned tokens agree.
+        let mut vocab = reverse_rusty::vocab::Vocab::new();
+        vocab.aliases_mut().add_classified(
+            &["ud".into(), "upper deck".into()],
+            reverse_rusty::vocab::AliasProvenance::DeclaredFile,
+            1.0,
+            &norm,
+            &dict,
+        );
+        let phrased = vocab.to_normalizer().expect("phrase normalizer");
+        assert_ne!(
+            request_fingerprint(
+                &phrased,
+                &dict,
+                "upper deck",
+                QueryScope::Standard,
+                &plain,
+                &[]
+            ),
+            request_fingerprint(
+                &phrased,
+                &dict,
+                "upper  deck",
+                QueryScope::Standard,
+                &plain,
+                &[]
+            ),
+            "phrase vs component titles must not share a cursor"
         );
     }
 }

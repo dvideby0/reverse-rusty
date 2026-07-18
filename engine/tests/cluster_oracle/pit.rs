@@ -238,8 +238,11 @@ fn pit_pages_concatenate_pin_across_mutation_and_match_single_node() {
                 .collect::<Vec<_>>(),
             "shards={shards} rf={rf}: pit survives every mutation"
         );
-        assert!(cluster.close_pit(pit), "close releases");
-        assert!(!cluster.close_pit(pit), "second close is a no-op");
+        assert!(cluster.close_pit(pit, Instant::now()), "close releases");
+        assert!(
+            !cluster.close_pit(pit, Instant::now()),
+            "second close is a no-op"
+        );
         assert_eq!(cluster.open_pit_count(), 0);
     }
 }
@@ -334,6 +337,156 @@ fn boundary_and_lifecycle_failures_are_typed() {
         err,
         ClusterPitError::Admission(PitError::KeepAliveTooLarge { .. })
     ));
+}
+
+/// Codex-review regressions: the batch boundary is rejected AT THE
+/// COORDINATOR ENTRY (an empty batch must not short-circuit to success, and a
+/// remote wire could not carry a boundary), and close-after-expiry reaps
+/// honestly (`false` for the expired target, cap slots freed).
+#[test]
+fn batch_boundary_rejects_at_entry_and_close_reaps_expired() {
+    let (queries, _titles) = build_corpus();
+    let tags = ranked_tags_parallel(&queries);
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    let cluster =
+        ClusterEngine::build_with_tags(vocab(), &cfg, &queries, &tags).expect("cluster build");
+    let program = cluster
+        .compile_rank_program(&rank_program())
+        .expect("program");
+
+    // Batch + boundary: rejected before routing — even for an EMPTY batch.
+    let empty: [&str; 0] = [];
+    let err = cluster
+        .try_percolate_filtered_top_k_batch(
+            &empty,
+            &[],
+            options(5, QueryScope::Standard, Some((0, 0))),
+            &program,
+            None,
+        )
+        .expect_err("empty batch with a boundary must reject at entry");
+    assert!(matches!(
+        err,
+        ClusterRankedError::Admission(
+            reverse_rusty::TopKAdmissionError::BatchSearchAfterUnsupported
+        )
+    ));
+    let err = cluster
+        .try_percolate_filtered_top_k_batch(
+            &["michael jordan"],
+            &[],
+            options(5, QueryScope::Standard, Some((0, 0))),
+            &program,
+            None,
+        )
+        .expect_err("non-empty batch with a boundary must reject at entry");
+    assert!(matches!(
+        err,
+        ClusterRankedError::Admission(
+            reverse_rusty::TopKAdmissionError::BatchSearchAfterUnsupported
+        )
+    ));
+
+    // Close-after-expiry: the expired target reports false and every expired
+    // slot is reaped (the live one survives).
+    let now = Instant::now();
+    let expired = cluster
+        .open_pit(Some(Duration::from_secs(5)), &PitConfig::default(), now)
+        .expect("short pit");
+    let alive = cluster
+        .open_pit(Some(Duration::from_secs(500)), &PitConfig::default(), now)
+        .expect("long pit");
+    let later = now + Duration::from_secs(6);
+    assert!(
+        !cluster.close_pit(expired, later),
+        "an expired PIT closes as false"
+    );
+    assert_eq!(cluster.open_pit_count(), 1, "only the live PIT remains");
+    assert!(cluster.close_pit(alive, later));
+}
+
+/// Codex-review P1 regression: opening a PIT is ATOMIC against concurrent
+/// mutations — the pin fan and the upsert two-pass hold opposite sides of the
+/// coordinator's barrier, so a pinned view always contains exactly one row
+/// per logical id, even while that row's placement is being moved between
+/// shards by re-anchoring upserts.
+#[test]
+fn pit_open_is_atomic_against_concurrent_replacing_upserts() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        include_broad: true,
+        ..ClusterConfig::default()
+    };
+    // A tiny corpus: the flipping query + two stable anchors.
+    let queries: Vec<(u64, String)> = vec![
+        (999, "michael jordan".to_string()),
+        (1, "topps chrome".to_string()),
+        (2, "lebron james".to_string()),
+    ];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("build");
+    let program = cluster
+        .compile_rank_program(&RankProgramSpec::default())
+        .expect("program");
+    // Matches BOTH versions of query 999 plus the stable anchors.
+    let title = "michael jordan lebron james topps chrome rookie";
+
+    let stop = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(|| {
+            let mut flip = false;
+            while !stop.load(Ordering::Relaxed) {
+                let dsl = if flip {
+                    "lebron james"
+                } else {
+                    "michael jordan"
+                };
+                flip = !flip;
+                // Re-anchoring upsert: the tombstone/insert two-pass moves the
+                // row's placement between shards — the exact torn-pin shape.
+                cluster
+                    .upsert_query(999, dsl, 1)
+                    .expect("upsert under churn");
+                // Yield between mutations: a zero-gap loop of barrier READ
+                // holds starves the open's WRITE acquisition on
+                // reader-preferring platform rwlocks — a pathological writer
+                // shape real HTTP traffic doesn't produce (each request has
+                // network gaps). The test wants interleaving, not starvation.
+                std::thread::yield_now();
+            }
+        });
+
+        for _ in 0..50 {
+            let now = Instant::now();
+            let pit = cluster
+                .open_pit(None, &PitConfig::default(), now)
+                .expect("open under churn");
+            let page = cluster
+                .try_percolate_filtered_top_k_pit(
+                    pit,
+                    title,
+                    &[],
+                    options(10, QueryScope::WithBroad, None),
+                    &program,
+                    None,
+                    now,
+                )
+                .expect("a pinned view is always consistent (no duplicate-id 502)");
+            let hits_999 = page.hits.iter().filter(|hit| hit.logical_id == 999).count();
+            assert_eq!(
+                hits_999, 1,
+                "every pinned view holds exactly one row for the flipping id"
+            );
+            cluster.close_pit(pit, now);
+        }
+        stop.store(true, Ordering::Relaxed);
+        writer.join().expect("writer joins");
+    });
 }
 
 /// The three placement-invalidation shapes: `resize` and `set_vocab` (the two

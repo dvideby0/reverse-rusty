@@ -378,6 +378,14 @@ pub struct ClusterEngine {
     /// by design; entries are wholesale `clear()`ed (ids never reused) when a
     /// vocab/resize rebuild replaces the shard set.
     pits: Mutex<crate::pit::PitRegistry<pit::ClusterPitMeta>>,
+    /// ADR-113 PIT-open ↔ mutation barrier: every `apply_*` funnel arm holds
+    /// the READ side across its full shard fan-out, and `open_pit` holds the
+    /// WRITE side across its pin fan — so a PIT can never freeze a torn
+    /// cross-shard view (half of an upsert's tombstone/insert two-pass, a
+    /// re-placed row present on two shards' pins, or on none). Reads never
+    /// touch it; the uncontended read acquisition is noise next to the
+    /// funnel's log write (codex review).
+    pit_open_barrier: RwLock<()>,
     /// The cluster-state control plane: membership + the shard→node map + ring params +
     /// feature-model version + epoch (ADR-037). Read at assembly / introspection time only,
     /// never on the per-title hot path. [`InMemoryControlPlane`] today; openraft-backed later.
