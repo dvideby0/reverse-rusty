@@ -160,6 +160,60 @@ fn adopt_dict_state_machine() {
     assert_eq!(current_fp(&srv), d2.fingerprint());
 }
 
+#[tokio::test]
+async fn fingerprint_claim_attests_space_adopted_during_legacy_drain() {
+    let n = norm();
+    let d1 = frozen_dict(&["1994 upper deck"], &n);
+    let d2 = frozen_dict(&["1995 fleer ultra"], &n);
+    assert_ne!(
+        d1.fingerprint(),
+        d2.fingerprint(),
+        "test setup requires divergent feature spaces"
+    );
+
+    let srv = Arc::new(ShardServer::new(
+        Arc::clone(&n),
+        Arc::new(d1),
+        EngineConfig::default(),
+    ));
+    // Model an unstamped AdoptDict that the outer lease service admitted before
+    // the claim arrived. The handler may replace an empty node's feature space,
+    // and the claim must wait for its complete response body to drain.
+    let legacy_adopt = srv.coordinator_lease.hold_unstamped_for_test();
+    let mut request = Request::new(proto::Empty {});
+    request.metadata_mut().insert(
+        "x-reverse-rusty-coordinator-id",
+        "41".parse().expect("metadata"),
+    );
+    request.metadata_mut().insert(
+        "x-reverse-rusty-coordinator-claim",
+        "1".parse().expect("metadata"),
+    );
+
+    let claiming_server = Arc::clone(&srv);
+    let claiming = tokio::spawn(async move { claiming_server.dict_fingerprint(request).await });
+    while !srv.coordinator_lease.is_claiming() {
+        tokio::task::yield_now().await;
+    }
+
+    srv.adopt_dict(adopt_req(&d2))
+        .await
+        .expect("legacy adopt completes before its response drains");
+    drop(legacy_adopt);
+
+    let reply = claiming
+        .await
+        .expect("claim task")
+        .expect("claim succeeds after legacy drain")
+        .into_inner();
+    assert_eq!(
+        reply.fingerprint,
+        d2.fingerprint(),
+        "claim handshake must attest the post-drain adopted space"
+    );
+    assert_eq!(reply.coordinator_id, 41);
+}
+
 /// An `InsertRequest` targeting `shard_id` — the write-path builder shared by the fence tests.
 fn insert_req(shard_id: u32, id: u64, dsl: &str) -> Request<proto::InsertRequest> {
     Request::new(proto::InsertRequest {
@@ -905,6 +959,108 @@ fn grpc_result_cap_can_only_be_lowered_within_static_bounds() {
 
     let server = ShardServer::pending(n, EngineConfig::default());
     assert!(server.with_max_grpc_result_bytes(1).is_ok());
+}
+
+#[test]
+fn exhaustive_stream_workers_are_admitted_before_spawn() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let dict = Arc::new(frozen_dict(&["deliveryneedle"], &n));
+    let server = ShardServer::new(Arc::clone(&n), dict, EngineConfig::default())
+        .with_max_concurrent_exhaustive_streams(1)
+        .expect("one exhaustive worker");
+    let items: Vec<_> = (0..32)
+        .map(|id| (id, "deliveryneedle".to_string()))
+        .collect();
+    server.ingest_dsl(&items);
+    let ownership = crate::ownership::OwnershipContext::new(
+        crate::ownership::PlacementGeneration::INITIAL,
+        1,
+        vec![0],
+        None,
+    )
+    .expect("ownership context");
+    let request = || {
+        Request::new(proto::PercolateAllRequest {
+            title: "deliveryneedle".into(),
+            include_broad: false,
+            filter: Vec::new(),
+            rank: None,
+            chunk_size: 1,
+            remaining_micros: 5_000_000,
+            shard_id: 0,
+            ownership: Some(proto::ownership_to_proto(&ownership)),
+        })
+    };
+
+    // Retain but do not drain the first stream. Its bounded channel fills, so
+    // the worker and its admission permit remain live.
+    let first = rt
+        .block_on(server.percolate_all(request()))
+        .expect("first stream admitted");
+    let Err(error) = rt.block_on(server.percolate_all(request())) else {
+        panic!("second stream bypassed node-local admission");
+    };
+    assert_eq!(error.code(), Code::ResourceExhausted);
+    drop(first);
+    rt.block_on(async {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    });
+}
+
+#[test]
+fn exhaustive_stream_configuration_rejects_invalid_bounds_without_panicking() {
+    let server = ShardServer::pending(norm(), EngineConfig::default());
+    assert!(server.with_max_concurrent_exhaustive_streams(0).is_err());
+
+    let server = ShardServer::pending(norm(), EngineConfig::default());
+    assert!(server
+        .with_max_concurrent_exhaustive_streams(tokio::sync::Semaphore::MAX_PERMITS + 1)
+        .is_err());
+
+    let server = ShardServer::pending(norm(), EngineConfig::default());
+    assert!(server
+        .with_max_exhaustive_stream_duration(std::time::Duration::ZERO)
+        .is_err());
+}
+
+#[test]
+fn exhaustive_stream_rejects_a_caller_deadline_above_the_node_ceiling() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let dict = Arc::new(frozen_dict(&["deliveryneedle"], &n));
+    let server = ShardServer::new(n, dict, EngineConfig::default())
+        .with_max_concurrent_exhaustive_streams(1)
+        .expect("one exhaustive worker")
+        .with_max_exhaustive_stream_duration(std::time::Duration::from_secs(1))
+        .expect("one-second node ceiling");
+    let ownership = crate::ownership::OwnershipContext::new(
+        crate::ownership::PlacementGeneration::INITIAL,
+        1,
+        vec![0],
+        None,
+    )
+    .expect("ownership context");
+    let request = Request::new(proto::PercolateAllRequest {
+        title: "deliveryneedle".into(),
+        include_broad: false,
+        filter: Vec::new(),
+        rank: None,
+        chunk_size: 1,
+        remaining_micros: 2_000_000,
+        shard_id: 0,
+        ownership: Some(proto::ownership_to_proto(&ownership)),
+    });
+
+    let Err(error) = rt.block_on(server.percolate_all(request)) else {
+        panic!("caller-controlled overlong deadline must be refused");
+    };
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(
+        server.exhaustive_permits.available_permits(),
+        1,
+        "deadline validation must happen before node admission"
+    );
 }
 
 /// `ingest_dsl` preloads must be emitted under ownership-suppressed cluster reads:

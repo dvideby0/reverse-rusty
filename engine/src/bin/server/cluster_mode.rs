@@ -34,15 +34,16 @@ use reverse_rusty::normalize::Normalizer;
 use crate::auth::AuthConfig;
 use crate::cli::Cli;
 use crate::handlers::{
-    cluster_backup, cluster_bulk, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats,
-    cluster_checkpoint, cluster_compact, cluster_delete_doc, cluster_deregister_node,
-    cluster_discover_aliases, cluster_discover_and_record_aliases, cluster_flush, cluster_gc,
-    cluster_get_alias_feedback, cluster_get_aliases, cluster_get_doc, cluster_get_settings,
-    cluster_get_vocab, cluster_handoff, cluster_health, cluster_import_aliases,
-    cluster_learn_aliases, cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_metrics,
-    cluster_mpercolate, cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign,
-    cluster_rebalance, cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback,
-    cluster_resize, cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
+    cluster_backup, cluster_bulk, cluster_cancel_job, cluster_cat_segments, cluster_cat_shards,
+    cluster_cat_stats, cluster_checkpoint, cluster_compact, cluster_create_job, cluster_delete_doc,
+    cluster_deregister_node, cluster_discover_aliases, cluster_discover_and_record_aliases,
+    cluster_flush, cluster_gc, cluster_get_alias_feedback, cluster_get_aliases, cluster_get_doc,
+    cluster_get_job, cluster_get_job_stream, cluster_get_settings, cluster_get_vocab,
+    cluster_handoff, cluster_health, cluster_import_aliases, cluster_learn_aliases,
+    cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_metrics, cluster_mpercolate,
+    cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
+    cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
+    cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
     cluster_v2_mpercolate, cluster_v2_search, cluster_validate_and_apply_feedback,
 };
 use crate::metrics::PrometheusMetrics;
@@ -313,6 +314,21 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         .build()
         .expect("failed to build rayon thread pool");
     let ranked_workers = pool.current_num_threads().max(1);
+    let exhaustive_jobs = crate::jobs::ExhaustiveJobs::new(
+        crate::jobs::ExhaustiveJobConfig {
+            threads: cli.exhaustive_threads,
+            max_concurrent: cli.max_concurrent_exhaustive_jobs,
+            chunk_size: cli.exhaustive_chunk_size,
+            channel_depth: cli.exhaustive_channel_depth,
+            max_timeout: std::time::Duration::from_secs(cli.exhaustive_job_timeout_secs),
+            max_retained: cli.max_retained_exhaustive_jobs,
+        },
+        prom.clone(),
+    )
+    .unwrap_or_else(|reason| {
+        error!(%reason, "invalid exhaustive-job configuration");
+        std::process::exit(1);
+    });
 
     let state = Arc::new(ClusterAppState {
         cluster: RwLock::new(cluster),
@@ -321,6 +337,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         search_permits: (cli.max_concurrent_searches > 0)
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
         ranked_search_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(ranked_workers)),
+        exhaustive_jobs,
         max_ranked_enrichment_bytes: cli.max_ranked_enrichment_bytes,
         include_broad: cli.include_broad,
         prom,
@@ -349,6 +366,12 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             "/v2/_pit",
             post(crate::handlers::cluster_open_pit).delete(crate::handlers::cluster_close_pit),
         )
+        .route("/_percolate/jobs", post(cluster_create_job))
+        .route(
+            "/_percolate/jobs/{id}",
+            get(cluster_get_job).delete(cluster_cancel_job),
+        )
+        .route("/_percolate/jobs/{id}/stream", get(cluster_get_job_stream))
         .route("/_mpercolate", post(cluster_mpercolate))
         .route("/_bulk", post(cluster_bulk))
         .route("/_flush", post(cluster_flush))
@@ -462,6 +485,14 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             }
         }
         () = drain_deadline => {}
+    }
+
+    let cancelled_jobs = state.exhaustive_jobs.cancel_all();
+    if cancelled_jobs > 0 {
+        info!(
+            cancelled_jobs,
+            "cancelled exhaustive jobs before cluster shutdown cleanup"
+        );
     }
 
     // Stop the reconcile loop before the durability flush: a pass already on the blocking pool finishes

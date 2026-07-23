@@ -34,15 +34,17 @@ fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
         .num_threads(2)
         .build()
         .expect("pool");
+    let prom = PrometheusMetrics::new();
     Arc::new(ClusterAppState {
         cluster: RwLock::new(cluster),
         write_serial: Mutex::new(()),
         pool,
         search_permits: None,
         ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+        exhaustive_jobs: crate::jobs::ExhaustiveJobs::for_tests(prom.clone()),
         max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
         include_broad: true,
-        prom: PrometheusMetrics::new(),
+        prom,
         slow_query_threshold_ms: 0,
         auth: None,
         pit_tokens: crate::pit::PitTokens::generate(),

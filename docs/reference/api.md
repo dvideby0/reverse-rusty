@@ -32,6 +32,12 @@ Options:
 | `--pit-default-keep-alive-secs` | 60 | Keep-alive for a `POST /v2/_pit` point-in-time when the request names none; renewed on every use (ADR-113) |
 | `--pit-max-keep-alive-secs` | 600 | Ceiling on a requested PIT keep-alive; over-ask is a 400 (ADR-113) |
 | `--max-open-pits` | 64 | Concurrently open PITs; a breach is `429 pit_limit_exceeded`, never an eviction (ADR-113) |
+| `--exhaustive-threads` | 2 | Dedicated Rayon workers for exhaustive jobs; isolated from interactive search (ADR-114) |
+| `--max-concurrent-exhaustive-jobs` | 2 | Non-queuing exhaustive admission permits; must not exceed `--exhaustive-threads`; excess starts return 503 |
+| `--exhaustive-chunk-size` | 512 | Maximum members per provisional stream chunk (hard ceiling 16,384) |
+| `--exhaustive-channel-depth` | 8 | Bounded frames buffered between an exhaustive worker and its stream consumer |
+| `--exhaustive-job-timeout-secs` | 300 | Maximum exhaustive admission-to-terminal lifetime (including worker scheduling); a request may ask for less |
+| `--max-retained-exhaustive-jobs` | 1024 | In-memory job records; oldest terminal records are pruned, while an all-active full registry rejects with 429 |
 | `--include-broad` | false | Include broad-lane (class C) queries in results |
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |
@@ -134,7 +140,9 @@ curl localhost:9200/
 Endpoints are grouped by concern — open the one you need:
 
 - **[Documents](api/documents.md)** — register / retrieve / delete a stored query (`PUT`/`GET`/`DELETE /_doc/{id}`), incl. per-query metadata tags.
-- **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`, local/cluster bounded `POST /v2/_search`, `POST /_mpercolate`), incl. filtered percolation.
+- **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`,
+  local/cluster bounded `POST /v2/_search`, `POST /_mpercolate`), including filtered
+  percolation and exhaustive `result_mode=all` jobs with a terminally verified NDJSON stream.
 - **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`, `/_flush`, `/_compact`).
 - **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
 - **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias registry (`/_vocab/aliases*`, ADR-060).
@@ -154,6 +162,9 @@ The full method/path matrix is below.
 | `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
 | `/v2/_search` | POST | Single-node or cluster, single-document exact bounded top-K + winner-only enrichment (ADR-107/108/110); accepts `pit`/`cursor` pages (ADR-113) |
 | `/v2/_pit` | POST/DELETE | Open / close a point-in-time snapshot for cursor pagination (in-process modes; remote assemblies 501 — ADR-113) |
+| `/_percolate/jobs` | POST | Start one exact exhaustive background match; returns 202 with status and stream URLs (ADR-114) |
+| `/_percolate/jobs/{id}` | GET/DELETE | Inspect a retained exhaustive job / request cooperative cancellation |
+| `/_percolate/jobs/{id}/stream` | GET | Claim the job's one bounded `application/x-ndjson` stream consumer |
 | `/_mpercolate` | POST | Batch percolate (high throughput; columnar broad lane; `responses[]` envelope) |
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |
 | `/_flush` | POST | Flush memtable to immutable segment |
@@ -213,12 +224,19 @@ client half `--tls-ca`/`--tls-domain` — the controlserver for its peer Raft li
 shardserver for the `RecoverFrom` outbound pull from a peer source). `shardserver` also takes
 `--max-grpc-result-bytes` (default/hard ceiling 4 MiB; any positive lower byte bound is valid),
 enforced against exact protobuf size for compatibility replies, top-K replies, and every fetched
-source stream item (ADR-110). `--data-dir` makes
+source stream item (ADR-110). ADR-114 adds node-local exhaustive-stream limits:
+`--max-concurrent-exhaustive-streams` (default 2, non-queuing) and
+`--max-exhaustive-stream-secs` (default 300, a hard ceiling on the coordinator/direct caller's
+remaining budget). In remote mode, configure that duration at least as high as the coordinator's
+`--exhaustive-job-timeout-secs`; an over-ask fails loud before shard admission.
+`--data-dir` makes
 an **in-process** cluster durable (build once, reopen on restart — `--load-file` is skipped with a
 warning when the reopened cluster is already populated). A **remote** coordinator is stateless and
 refuses `--data-dir`: durability lives on the shard nodes (`shardserver --data-dir`, the per-shard
 translog — ADR-039); restarting the coordinator reconnects and re-mints the identical frozen dict
-from the same `--load-file`, so the fingerprint handshake holds.
+from the same `--load-file`, so the fingerprint handshake holds. Its new boot ID may need to retry
+until the 30-second renewable owner lease expires, then wait for any response bodies/streams
+admitted under the prior owner to drain before taking over a node.
 
 Behavior deltas from single-node mode (all deliberate, none silent):
 

@@ -118,10 +118,11 @@ deferral.
 - The default path is byte-identical (`search_after: None`, no PIT): rankbench canonical
   checksums unchanged; every suite green.
 - Deferred, in the ADR-110 §Consequences pattern: wire/gRPC PIT (`RemoteShard` refuses typed
-  with the alternative; the coordinator refuses before fanning), batch cursors,
-  `result_mode=all` exhaustive delivery (Increment 7), SourceStore versioning, and the
+  with the alternative; the coordinator refuses before fanning), batch cursors, SourceStore
+  versioning, and the
   pre-existing `/v2/_mpercolate` auth-allowlist asymmetry (`/v2/_pit` joins the open search
   allowlist; `/v2/_mpercolate` still requires a token when one is configured — flagged, not
-  changed here).
+  changed here). `result_mode=all` was also deferred at this decision and is now delivered by
+  ADR-114.
 - `evaluations` rank counters legitimately differ across pages (the scorer runs before the
   boundary check); oracles compare winners + totals only (the ADR-112 rule).

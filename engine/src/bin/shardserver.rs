@@ -25,10 +25,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use reverse_rusty::cluster::{
     resolve_mesh_token, serve_metrics, ClientSecurity, ServerSecurity, ShardServer,
-    TlsClientConfig, TlsServerIdentity, DEFAULT_MAX_GRPC_RESULT_BYTES,
+    TlsClientConfig, TlsServerIdentity, DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
+    DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION, DEFAULT_MAX_GRPC_RESULT_BYTES,
 };
 use reverse_rusty::compile::extract;
 use reverse_rusty::config::EngineConfig;
@@ -62,6 +64,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Exact protobuf bound for every result-bearing unary reply and each
     // FetchMatches stream item. The builder enforces the hard 4 MiB ceiling.
     let mut max_grpc_result_bytes = DEFAULT_MAX_GRPC_RESULT_BYTES;
+    // Node-local backpressure bounds for ADR-114 exhaustive streams. These are
+    // independent of the coordinator's HTTP admission because direct mesh
+    // callers and multiple coordinators share this process.
+    let mut max_concurrent_exhaustive_streams = DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS;
+    let mut max_exhaustive_stream_duration = DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -94,6 +101,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     max_grpc_result_bytes = v
                         .parse()
                         .map_err(|e| format!("--max-grpc-result-bytes {v}: {e}"))?;
+                }
+                i += 1;
+            }
+            "--max-concurrent-exhaustive-streams" => {
+                if let Some(v) = args.get(i + 1) {
+                    max_concurrent_exhaustive_streams = v
+                        .parse()
+                        .map_err(|e| format!("--max-concurrent-exhaustive-streams {v}: {e}"))?;
+                }
+                i += 1;
+            }
+            "--max-exhaustive-stream-secs" => {
+                if let Some(v) = args.get(i + 1) {
+                    let seconds = v
+                        .parse()
+                        .map_err(|e| format!("--max-exhaustive-stream-secs {v}: {e}"))?;
+                    max_exhaustive_stream_duration = Duration::from_secs(seconds);
                 }
                 i += 1;
             }
@@ -146,7 +170,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(dir) => ShardServer::open_durable(norm, engine_cfg.clone(), dir.clone())?,
             None => ShardServer::pending(norm, engine_cfg.clone()),
         };
-        let server = server.with_max_grpc_result_bytes(max_grpc_result_bytes)?;
+        let server = server
+            .with_max_grpc_result_bytes(max_grpc_result_bytes)?
+            .with_max_concurrent_exhaustive_streams(max_concurrent_exhaustive_streams)?
+            .with_max_exhaustive_stream_duration(max_exhaustive_stream_duration)?;
         let state = if server.is_serving() {
             "RESUMED from durable state".to_string()
         } else {
@@ -202,7 +229,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?,
         None => ShardServer::new(Arc::clone(&norm), Arc::new(dict), engine_cfg.clone()),
     };
-    let server = server.with_max_grpc_result_bytes(max_grpc_result_bytes)?;
+    let server = server
+        .with_max_grpc_result_bytes(max_grpc_result_bytes)?
+        .with_max_concurrent_exhaustive_streams(max_concurrent_exhaustive_streams)?
+        .with_max_exhaustive_stream_duration(max_exhaustive_stream_duration)?;
     server.ingest_dsl(&queries);
     if let Some(ha) = health_addr {
         println!("shardserver: health (grpc.health.v1) on {ha} (plaintext, k8s probes)");

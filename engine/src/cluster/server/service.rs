@@ -28,9 +28,12 @@ use super::{compile_item, ShardServer};
 type ShardServiceStream = Pin<Box<dyn Stream<Item = Result<proto::FetchMatch, Status>> + Send>>;
 type BatchTopKStream =
     Pin<Box<dyn Stream<Item = Result<proto::PercolateTopKBatchFrame, Status>> + Send>>;
+type ExhaustiveStream =
+    Pin<Box<dyn Stream<Item = Result<proto::PercolateAllFrame, Status>> + Send>>;
 
 mod add_shard;
 mod dict_adopt;
+mod exhaustive;
 mod gc;
 mod leases;
 mod ranked;
@@ -127,6 +130,15 @@ impl ShardService for ShardServer {
         ranked::percolate_top_k(self, request)
     }
 
+    type PercolateAllStream = ExhaustiveStream;
+
+    async fn percolate_all(
+        &self,
+        request: Request<proto::PercolateAllRequest>,
+    ) -> Result<Response<Self::PercolateAllStream>, Status> {
+        exhaustive::percolate_all(self, request)
+    }
+
     type FetchMatchesStream = ShardServiceStream;
 
     async fn fetch_matches(
@@ -179,15 +191,29 @@ impl ShardService for ShardServer {
 
     async fn dict_fingerprint(
         &self,
-        _request: Request<proto::Empty>,
+        request: Request<proto::Empty>,
     ) -> Result<Response<proto::DictFingerprintReply>, Status> {
+        let coordinator_id = crate::cluster::security::request_coordinator_id(&request)?;
+        let claim_requested = crate::cluster::security::coordinator_claim_requested(&request)?;
         // Node-level (ADR-093): the dict/tag-dict fingerprints are a node-wide content invariant, read
         // from the node-scope adopted space (not any slot). A truly pending node — no adopt yet — is
         // not-ready, matching the pre-ADR-093 `loaded()?` failing on a pending server.
-        let space = self
+        let mut space = self
             .node_dict
             .load_full()
             .ok_or_else(|| Status::failed_precondition("shard has not adopted a dict yet"))?;
+        if claim_requested {
+            crate::cluster::security::claim_coordinator(&self.coordinator_lease, coordinator_id)
+                .await?;
+            // Claiming drains every unstamped RPC that was admitted before the
+            // transition. One of those may have completed an AdoptDict after
+            // the snapshot above was taken, so attest the post-drain node
+            // space—not stale pre-claim fingerprints.
+            space = self
+                .node_dict
+                .load_full()
+                .ok_or_else(|| Status::failed_precondition("shard has not adopted a dict yet"))?;
+        }
         Ok(Response::new(proto::DictFingerprintReply {
             fingerprint: space.dict.fingerprint(),
             // ADR-077: the probe carries the tag-space identity too, so a bare
@@ -200,6 +226,7 @@ impl ShardService for ShardServer {
             broad_replicate_all: true,
             placement_generation: space.placement_generation.0,
             num_shards: space.num_shards,
+            coordinator_id: self.coordinator_lease.owner(),
         }))
     }
 
@@ -215,14 +242,14 @@ impl ShardService for ShardServer {
     ///   re-basing already-loaded data onto a different feature space would silently corrupt
     ///   matches. The coordinator surfaces this as `ShardError::DictMismatch`.
     ///
-    /// Single-coordinator / adopt-before-ingest is the intended use; concurrent adopts are
-    /// not synchronized beyond the atomic state swap (last writer wins, both with the same
-    /// dict in practice).
+    /// Node adoption is serialized after coordinator admission. A valid claim first drains
+    /// already-admitted legacy traffic; the install mutex then makes same-owner retries
+    /// revalidate and update the node/slot state one at a time.
     async fn adopt_dict(
         &self,
         request: Request<proto::AdoptDictRequest>,
     ) -> Result<Response<proto::AdoptDictReply>, Status> {
-        dict_adopt::adopt_dict(self, request)
+        dict_adopt::adopt_dict(self, request).await
     }
 
     /// Create a co-located slot on a node that has already adopted the dict (ADR-093 Stage 2) —
@@ -231,7 +258,7 @@ impl ShardService for ShardServer {
         &self,
         request: Request<proto::AddShardRequest>,
     ) -> Result<Response<proto::AddShardReply>, Status> {
-        add_shard::add_shard(self, request)
+        add_shard::add_shard(self, request).await
     }
 
     async fn ingest_extracted(

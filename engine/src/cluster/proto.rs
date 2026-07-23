@@ -173,10 +173,8 @@ pub(crate) fn stats_to_engine(p: MatchStats) -> EngineStats {
         main_candidates: p.main_candidates,
         broad_candidates: p.broad_candidates,
         matches: p.matches,
-        // ADR-107 telemetry is intentionally not added to the compatibility
-        // protobuf. Remote shards report zero until the bounded v2 wire lands.
-        logical_emissions: 0,
-        duplicate_emissions: 0,
+        logical_emissions: p.logical_emissions,
+        duplicate_emissions: p.duplicate_emissions,
         probes_attempted: p.probes_attempted,
         probes_skipped: p.probes_skipped,
         broad_queries_evaluated: p.broad_queries_evaluated,
@@ -213,6 +211,8 @@ pub(crate) fn stats_from_engine(s: EngineStats) -> MatchStats {
         hot_anchors_scanned: s.hot_anchors_scanned,
         hot_batches: s.hot_batches,
         hot_prefilter_skipped: s.hot_prefilter_skipped,
+        logical_emissions: s.logical_emissions,
+        duplicate_emissions: s.duplicate_emissions,
     }
 }
 
@@ -274,7 +274,7 @@ pub(crate) fn translog_entry_from_mutation(
 mod tests {
     use super::{stats_from_engine, stats_to_engine, EngineStats, MatchStats};
 
-    // 18 DISTINCT values, so any field swap in either mapper changes the result — a pure
+    // Distinct values, so any field swap in either mapper changes the result — a pure
     // round-trip alone would miss a *symmetric* transposition present in both directions,
     // which the per-field, by-name assertions below catch.
     const VALS: [u32; 18] = [
@@ -289,10 +289,8 @@ mod tests {
             main_candidates: VALS[3],
             broad_candidates: VALS[4],
             matches: VALS[5],
-            // ADR-107 delivery telemetry is deliberately absent from the frozen
-            // protobuf contract; transport mapping leaves both counters zero.
-            logical_emissions: 0,
-            duplicate_emissions: 0,
+            logical_emissions: 19,
+            duplicate_emissions: 20,
             probes_attempted: VALS[6],
             probes_skipped: VALS[7],
             broad_queries_evaluated: VALS[8],
@@ -329,6 +327,8 @@ mod tests {
         assert_eq!(p.hot_anchors_scanned, VALS[15]);
         assert_eq!(p.hot_batches, VALS[16]);
         assert_eq!(p.hot_prefilter_skipped, VALS[17]);
+        assert_eq!(p.logical_emissions, 19);
+        assert_eq!(p.duplicate_emissions, 20);
     }
 
     #[test]
@@ -352,6 +352,8 @@ mod tests {
             hot_anchors_scanned: VALS[15],
             hot_batches: VALS[16],
             hot_prefilter_skipped: VALS[17],
+            logical_emissions: 19,
+            duplicate_emissions: 20,
         };
         let e = stats_to_engine(p);
         assert_eq!(e.unique_candidates, VALS[0]);
@@ -372,6 +374,8 @@ mod tests {
         assert_eq!(e.hot_anchors_scanned, VALS[15]);
         assert_eq!(e.hot_batches, VALS[16]);
         assert_eq!(e.hot_prefilter_skipped, VALS[17]);
+        assert_eq!(e.logical_emissions, 19);
+        assert_eq!(e.duplicate_emissions, 20);
     }
 
     #[test]

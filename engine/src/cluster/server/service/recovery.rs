@@ -145,15 +145,23 @@ pub(super) async fn recover_from(
     // security (TLS + token) applies to the outbound pull exactly as it does to a
     // coordinator connection — a bare connect here would silently bypass the mesh
     // (and a secured source would reject the unauthenticated FetchSegments anyway).
-    let mut client =
-        crate::cluster::remote::connect_mesh(&req.source_endpoint, &server.client_security)
-            .await
-            .map_err(|e| {
-                Status::unavailable(format!(
-                    "connecting to recovery source {}: {e}",
-                    req.source_endpoint
-                ))
-            })?;
+    let coordinator_id = server.coordinator_lease.owner();
+    let connected = if coordinator_id == 0 {
+        crate::cluster::remote::connect_mesh(&req.source_endpoint, &server.client_security).await
+    } else {
+        crate::cluster::remote::connect_mesh_with_coordinator(
+            &req.source_endpoint,
+            &server.client_security,
+            Some(coordinator_id),
+        )
+        .await
+    };
+    let mut client = connected.map_err(|e| {
+        Status::unavailable(format!(
+            "connecting to recovery source {}: {e}",
+            req.source_endpoint
+        ))
+    })?;
     let mut stream = client
         .fetch_segments(proto::FetchSegmentsRequest {
             dict_fingerprint: dict_fp,

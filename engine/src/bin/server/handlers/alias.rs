@@ -278,15 +278,17 @@ mod tests {
             .num_threads(1)
             .build()
             .expect("pool");
+        let prom = PrometheusMetrics::new();
         Arc::new(AppState {
             engine: parking_lot::Mutex::new(eng),
             snapshot: arc_swap::ArcSwap::new(snap),
             pool,
             search_permits: None,
             ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+            exhaustive_jobs: crate::jobs::ExhaustiveJobs::for_tests(prom.clone()),
             max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
             include_broad: false,
-            prom: PrometheusMetrics::new(),
+            prom,
             slow_query_threshold_ms: 0,
             auth: None,
             feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),

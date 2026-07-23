@@ -215,6 +215,31 @@ impl Shard for Arc<HandoffShard> {
         )
     }
 
+    fn percolate_all_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: Option<&crate::rank::CompiledRankProgram>,
+        chunk_size: usize,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+        sink: &mut dyn crate::delivery::ChunkSink,
+    ) -> Result<crate::delivery::ExhaustiveMatchResult, ShardError> {
+        self.current.load().percolate_all_owned(
+            title,
+            include_broad,
+            pred,
+            program,
+            chunk_size,
+            context,
+            current_position,
+            deadline,
+            sink,
+        )
+    }
+
     // ---- ADR-113 PIT: forwarded to the CURRENT backing. A handoff swap
     // replaces the backing, so its pins vanish and a mid-cursor page fails
     // typed (PitNotFound → 409 stale) instead of serving the new generation.

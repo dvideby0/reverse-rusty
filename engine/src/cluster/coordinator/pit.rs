@@ -74,13 +74,14 @@ impl ClusterEngine {
         now: Instant,
     ) -> Result<PitId, ClusterPitError> {
         self.reap_pits(now);
-        // ADR-113 mutation barrier (WRITE side): every `apply_*` funnel arm
-        // holds the read side across its full shard fan-out, so the pin fan
-        // below observes either all of a mutation or none of it on every
-        // shard — a PIT is always a view that actually existed. Taken AFTER
-        // the reap (which fans shard closes) and held through registry
-        // admission + the pin fan; no shard engine lock is taken under it, so
-        // no cycle with the writers (codex review).
+        // ADR-113 mutation barrier (WRITE side): every live mutation entry
+        // point holds the read side from before its coordinator-log append
+        // through the complete shard fan-out, so the pin fan below observes
+        // either all of a mutation or none of it on every shard — a PIT is
+        // always a view that actually existed. Taken AFTER the reap (which
+        // fans shard closes) and held through registry admission + the pin
+        // fan; no shard engine lock is taken under it, so no cycle with the
+        // writers (codex review).
         let _mutations_excluded = self
             .pit_open_barrier
             .write()

@@ -22,6 +22,9 @@ service ShardService {
   rpc Percolate   (PercolateRequest) returns (PercolateReply);
   // ADR-110: exact bounded typed ranking after ADR-109 ownership suppression.
   rpc PercolateTopK (PercolateTopKRequest) returns (PercolateTopKReply);
+  // ADR-114: bounded exhaustive delivery. Chunks are provisional; exactly one
+  // terminal summary is the completeness sentinel.
+  rpc PercolateAll (PercolateAllRequest) returns (stream PercolateAllFrame);
   // ADR-110 query-then-fetch: source text only for finalized global winners.
   rpc FetchMatches (FetchMatchesRequest) returns (stream FetchMatch);
   // ADR-112: bounded ranked title batching over the columnar batch kernel.
@@ -247,6 +250,49 @@ message PercolateTopKReply {
   uint32 num_shards = 9;
 }
 
+message PercolateAllRequest {
+  string title = 1;
+  bool include_broad = 2;
+  repeated TagGroup filter = 3;
+  // Optional: absent emits ids only; present emits the same typed score used by
+  // bounded ranking without imposing a global order.
+  RankProgram rank = 4;
+  uint32 chunk_size = 5;
+  uint64 remaining_micros = 6;
+  uint32 shard_id = 7;
+  OwnershipContext ownership = 8;
+}
+
+message ExhaustiveHit {
+  uint64 logical_id = 1;
+  int64 score = 2;
+  // Scores may legitimately equal zero, so presence is explicit.
+  bool has_score = 3;
+}
+
+message ExhaustiveChunk {
+  uint64 sequence = 1;
+  repeated ExhaustiveHit matches = 2;
+}
+
+message ExhaustiveSummary {
+  uint64 exact_total = 1;
+  uint64 chunk_count = 2;
+  uint64 checksum_xor = 3;
+  uint64 checksum_sum = 4;
+  MatchStats stats = 5;
+  bool ownership_applied = 6;
+  uint64 placement_generation = 7;
+  uint32 num_shards = 8;
+}
+
+message PercolateAllFrame {
+  oneof frame {
+    ExhaustiveChunk chunk = 1;
+    ExhaustiveSummary summary = 2;
+  }
+}
+
 // One batch title + ITS routing context (routed sets differ per title, so the
 // ownership context is per entry; request-local index = position in the list).
 message BatchTitle {
@@ -344,6 +390,9 @@ message MatchStats {
   uint32 hot_anchors_scanned     = 16;
   uint32 hot_batches             = 17;
   uint32 hot_prefilter_skipped   = 18;
+  // ADR-107/114 result-delivery telemetry. Additive: absent from an older peer ⇒ 0.
+  uint64 logical_emissions       = 19;
+  uint64 duplicate_emissions     = 20;
 }
 
 // One query to (re)compile on the server, identified by logical id. `dsl` is the
@@ -420,6 +469,9 @@ message DictFingerprintReply {
   bool broad_replicate_all = 3;
   uint64 placement_generation = 4;
   uint32 num_shards = 5;
+  // Exclusive live remote-coordinator owner. A coordinator-stamped probe must
+  // echo its own non-zero id; zero is an unowned or pre-lease server.
+  uint64 coordinator_id = 6;
 }
 
 // The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
@@ -452,6 +504,8 @@ message AdoptDictReply {
   bool broad_replicate_all = 3;
   uint64 placement_generation = 4;
   uint32 num_shards = 5;
+  // Attests that this server enforced the caller's exclusive coordinator lease.
+  uint64 coordinator_id = 6;
 }
 
 // Create a co-located slot on a node that has ALREADY adopted the dict (ADR-093 Stage 2). No dict
@@ -472,6 +526,7 @@ message AddShardReply {
   bool broad_replicate_all = 3;
   uint64 placement_generation = 4;
   uint32 num_shards = 5;
+  uint64 coordinator_id = 6;
 }
 
 // ---- peer recovery (ADR-035/036) ----

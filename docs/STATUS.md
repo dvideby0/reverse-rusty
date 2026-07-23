@@ -85,6 +85,28 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   HMAC-signed opaque cursors (fingerprint-checked resends); stale shapes are the one deliberate
   read-surface 409; enrichment stays current-view fail-closed; wire PIT/batch cursors deferred;
   no durable-format change (ADR-113).
+- **Exhaustive job/stream delivery** — `POST /_percolate/jobs` runs exact `result_mode=all` on a
+  dedicated bounded pool and returns a single-consumer NDJSON stream of fixed-size provisional
+  chunks followed by one exact completion checksum. Per-member idempotency keys, fail-closed
+  deadline/cancellation/sink semantics, bounded-memory legacy logical-id dedup, ownership-disjoint
+  cluster fan-in with fail-closed partial-repair refusal plus a full-fan-out mutation barrier,
+  pre-setup/zero-chunk/candidate/dedup-member/legacy-duplicate and ranked-metadata scan cancellation,
+  deadline-bounded HTTP/gRPC backpressure,
+  barrier-first mutation/repair lock ordering, score-presence-safe checksum attestation,
+  post-final-send cancellation polling, non-runtime-worker-safe gRPC polling, tag-growth-stable raw
+  request idempotency with ambiguous synthetic-boost collision rejection, non-destructive HTTP
+  admission, completion-backpressure cancellation classification, pre-spawn shard-node admission,
+  a server-owned shard-stream deadline ceiling,
+  terminal-dequeue-gated completed status, populated-remote-reattach and partial-initial-bulk-load
+  convergence refusal,
+  boot-namespaced durable member keys, and the
+  server-streaming `PercolateAll` shard RPC with fail-closed broad-evaluator validation are built;
+  external broker durability remains an operator adapter over the reference at-least-once
+  publisher. No persistence-format change (ADR-114).
+- **Exact competitive pruning deliberately absent** — Increment 8's profiling gate did not show
+  exact verification dominating delivery/orchestration, so no score-bound storage or
+  high-score-first candidate visitation was added. Revisit only with phase-attributed workload
+  evidence and the full exhaustive differential proof (ADR-115).
 - **Explain** (`explain.rs`) — first-class; structured `ExplainDetail` over REST.
 
 ### Durability & storage
@@ -118,7 +140,10 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   **cooperative match cancellation + bounded search concurrency** — an explicit `timeout_ms`
   stops the work at coarse boundaries, `--max-concurrent-searches` bounds pool occupancy, both
   defaults byte-identical (ADR-099); local and cluster v2 winner enrichment share
-  `--max-ranked-enrichment-bytes` (16 MiB default, ADR-110).
+  `--max-ranked-enrichment-bytes` (16 MiB default, ADR-110); exhaustive jobs have their own
+  worker pool, non-queuing concurrency quota, bounded channel, timeout, and retained-record cap;
+  shard nodes separately bound direct `PercolateAll` workers before spawn and reject caller
+  deadlines above a node-owned ceiling (ADR-114).
 - **Gate & CI** — `check.sh` is the one gate, CI runs it (ADR-024); lean-core feature gate
   (ADR-028).
 - **Security review** (Phase 0 item 5, ADR-089) — a [threat model](operations/threat-model.md) (trust
@@ -178,7 +203,10 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   (ADR-030); dict + tag-dict shipping at connect (ADR-034, ADR-055); tag-dict fingerprint on all
   six recovery RPCs (ADR-077); placement generation/configuration on every data/recovery boundary
   plus ownership-applied read attestation (ADR-109); bounded `PercolateTopK` and streaming
-  `FetchMatches`, each under the request's absolute deadline and exact result cap (ADR-110).
+  `FetchMatches`, each under the request's absolute deadline and exact result cap (ADR-110);
+  server-streaming `PercolateAll` validates bounded contiguous chunks plus a terminal ownership,
+  total, and checksum attestation and has independent node-local worker admission plus a hard
+  server-owned stream-duration ceiling (ADR-114).
 - **gRPC transport resilience** — client connect-timeout + per-call deadlines + HTTP/2 keepalive
   (shared dial helper, so shard + control + Raft-peer links harden together), bounded fail-loud
   retry of idempotent reads on a transient error, and per-RPC transport metrics on cluster-mode

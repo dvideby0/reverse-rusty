@@ -43,6 +43,7 @@
 
 mod autoscale;
 mod control_plane;
+mod exhaustive;
 mod ingest;
 mod lifecycle;
 mod logical_ids;
@@ -54,6 +55,7 @@ mod resize;
 mod topology;
 mod vocab;
 
+pub use exhaustive::ClusterExhaustiveMatch;
 pub use pit::ClusterPitError;
 pub use ranked::{ClusterRankedError, ClusterRankedHit, ClusterRankedMatch};
 pub use ranked_batch::{ClusterBatchRankedMatch, ClusterRankedTitle};
@@ -378,13 +380,14 @@ pub struct ClusterEngine {
     /// by design; entries are wholesale `clear()`ed (ids never reused) when a
     /// vocab/resize rebuild replaces the shard set.
     pits: Mutex<crate::pit::PitRegistry<pit::ClusterPitMeta>>,
-    /// ADR-113 PIT-open ↔ mutation barrier: every `apply_*` funnel arm holds
-    /// the READ side across its full shard fan-out, and `open_pit` holds the
-    /// WRITE side across its pin fan — so a PIT can never freeze a torn
-    /// cross-shard view (half of an upsert's tombstone/insert two-pass, a
-    /// re-placed row present on two shards' pins, or on none). Reads never
-    /// touch it; the uncontended read acquisition is noise next to the
-    /// funnel's log write (codex review).
+    /// ADR-113 PIT-open ↔ mutation barrier: every live mutation entry point
+    /// holds the READ side across its durable append + full shard fan-out, and
+    /// `open_pit` / exhaustive delivery hold the WRITE side across their read
+    /// fan-out — so they can never freeze/certify a torn cross-shard view (half
+    /// of an upsert's tombstone/insert two-pass, a re-placed row present on two
+    /// shards, or on none). When a logical stripe is also needed, this barrier
+    /// is ALWAYS acquired first; `resync` has the same order, avoiding a
+    /// writer-preferring RwLock cycle. Ordinary reads never touch it.
     pit_open_barrier: RwLock<()>,
     /// The cluster-state control plane: membership + the shard→node map + ring params +
     /// feature-model version + epoch (ADR-037). Read at assembly / introspection time only,
@@ -423,6 +426,11 @@ pub struct ClusterEngine {
     /// in-process path ⇒ byte-identical.
     #[cfg(feature = "distributed")]
     client_security: super::security::ClientSecurity,
+    /// Exclusive identity stamped on every RPC made by an exact-delivery
+    /// remote coordinator. `None` preserves the historical compatibility
+    /// mode, which may share shard nodes but cannot attest an exhaustive view.
+    #[cfg(feature = "distributed")]
+    coordinator_id: Option<u64>,
     /// The busy-endpoint move ledger (ADR-095, replacing ADR-090's whole-coordinator
     /// `reassign_serial: Mutex<()>`): every DATA-MOVING op — an operator
     /// `reassign_and_move`/`reassign_group_and_move`/`rebalance_and_move`, a raw

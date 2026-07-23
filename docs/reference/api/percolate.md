@@ -5,9 +5,10 @@
 ## `POST /v2/_search` — Exact bounded ranked percolation (ADR-107/108/110)
 
 Single-node and cluster-coordinator modes serve exact bounded top-K ranking without first
-materializing every matching ID. The route accepts exactly one `document`; batching, exhaustive
-`all`, and approximate `terminated` delivery are later increments and reject loudly, as does
-`from` (deep pagination is the PIT/cursor flow below, ADR-113). Existing `/_search` and
+materializing every matching ID. The route accepts exactly one `document`; batching and
+approximate `terminated` delivery reject loudly, as does `from` (deep pagination is the
+PIT/cursor flow below, ADR-113). Exact exhaustive `all` is deliberately a separate background
+job/stream surface below (ADR-114), not a giant `/v2/_search` response. Existing `/_search` and
 `/_mpercolate` behavior and response bytes are unchanged.
 
 ```json
@@ -119,6 +120,162 @@ primary-only, never silently failed over). Structurally garbled tokens are 400s.
 coordinator assembly refuses PIT entirely with **501 `pit_unsupported`** (wire PIT is a later
 increment; page via an in-process cluster or single-node mode). Both endpoints ride the open
 search auth allowlist.
+
+## `POST /_percolate/jobs` — Exact exhaustive delivery (ADR-114)
+
+An exhaustive result can be arbitrarily large, so `result_mode="all"` is a background job with
+bounded provisional chunks and a required terminal completion record:
+
+```json
+{
+  "event_id": "listing-123/version-7",
+  "document": {"title": "1996 Skybox Premium Michael Jordan PSA 10"},
+  "query_scope": "with_broad",
+  "result_mode": "all",
+  "filter": {"tenant": ["acme"]},
+  "rank": {
+    "priority_field": "priority",
+    "boosts": [{"key": "tier", "value": "gold", "boost": 25000}]
+  },
+  "sink": {"type": "grpc_stream"},
+  "timeout_ms": 60000,
+  "allow_partial_results": false
+}
+```
+
+`result_mode="all"`, one `document`, and `sink.type="grpc_stream"` are explicit requirements.
+The HTTP reference consumer may instead name `"ndjson_stream"`. `query_scope` defaults to
+`"standard"`; `rank` and `filter` are optional; `allow_partial_results=true` is always rejected.
+The requested timeout must be positive and no greater than
+`--exhaustive-job-timeout-secs`. In remote mode, every shard independently rejects a remaining
+budget above its server-owned `--max-exhaustive-stream-secs` ceiling (default 300 seconds), before
+claiming a node worker permit. Set that shard ceiling at least as high as the coordinator job
+ceiling.
+
+A successful admission returns `202 Accepted`:
+
+```json
+{
+  "job_id": "7fcaa575-beb7-4c6f-a27c-9be901aa7d86",
+  "event_id": "listing-123/version-7",
+  "state": "running",
+  "snapshot_generation": 987654321012345678,
+  "status_url": "/_percolate/jobs/7fcaa575-beb7-4c6f-a27c-9be901aa7d86",
+  "stream_url": "/_percolate/jobs/7fcaa575-beb7-4c6f-a27c-9be901aa7d86/stream",
+  "reused": false
+}
+```
+
+`event_id` is the POST idempotency key while the record is retained. Repeating the same effective
+request returns the same job/generation with `reused=true`; defaults and unordered collections are
+canonicalized first. For example, omitted versus explicit `query_scope: "standard"`, default
+priority/default timeout, reordered filter values or effective boosts, and the accepted
+`grpc_stream`/`ndjson_stream` spellings are equivalent. Reusing that event id for different
+execution semantics returns `409 event_id_conflict`. Canonicalization uses stable raw tag
+key/value groups and a last-write-wins boost map, so interning a previously unknown tag after the
+first request does not change a retained event's identity. Distinct boost pairs that resolve to
+the same synthetic tag id are rejected as ambiguous with 400. Exhaustive execution uses a
+dedicated worker pool and non-queuing permit: no permit is `503 exhaustive_capacity`; a registry
+full of active jobs is `429 exhaustive_registry_full`.
+Rejected admission never evicts retained history: the server claims an execution permit before it
+prunes a terminal record to make room for the admitted replacement.
+`snapshot_generation` is an opaque boot-namespaced `u64`, not a counter clients should order or
+predict. A fresh process starts from a new random namespace so a retry after restart cannot reuse
+the prior process's member idempotency keys.
+
+### Status, stream, and cancellation
+
+`GET /_percolate/jobs/{id}` returns `running`, `completed`, `failed`, or `cancelled`, plus creation
+and completion timestamps. Only a completed job has `exact_total`, `chunk_count`, and `checksum`;
+failed/cancelled jobs instead carry `failure`.
+`completed` is published only after the stream dequeues its terminal completion frame, not when
+the worker merely places those bytes in the bounded queue. If a claimed response is dropped while
+that frame is still queued, the job becomes `failed` with no summary; the retained event may not
+misrepresent a truncated single-consumer stream as complete.
+Cancellation, deadline expiry, and terminal dequeue are arbitrated by one terminal transition:
+once cancellation or expiry wins, a concurrent dequeue cannot expose completion bytes; once
+delivery wins, a later cancellation is a no-op. Any other earlier invalidation is equally final:
+for example, DELETE cannot relabel an already-dropped completion frame from `not consumed` to
+`cancelled`.
+
+`GET /_percolate/jobs/{id}/stream` claims the job's one
+`application/x-ndjson` consumer. A second claim returns `409 stream_already_claimed`; `HEAD` is
+rejected with 405 and never consumes the claim. Frames are:
+
+```json
+{"type":"match_chunk","job_id":"...","sequence":0,"members":[
+  {"logical_id":42,"score":1050,"idempotency_key":"<sha256-hex>"},
+  {"logical_id":91,"idempotency_key":"<sha256-hex>"}
+]}
+{"type":"completion","job_id":"...","exact_total":2,"snapshot_generation":987654321012345678,"chunk_count":1,"checksum":{"xor":1190750903085048104,"sum":8313222029812487130}}
+```
+
+Sequences start at zero and are contiguous. A member has `score` only when the request supplied a
+rank program. Its idempotency key is derived from
+`(event_id, snapshot_generation, logical_id)`. Chunks are provisional and have no global ordering
+guarantee: a consumer deduplicates by key, verifies the exact total/checksum, and commits **only**
+after `completion`. A stream may end after provisional chunks because of cancellation, deadline,
+disconnect, shard/protocol failure, or server restart; none of those cases emits completion.
+The checksum includes score presence as a separate domain, so an absent score cannot attest as any
+valid signed score value.
+The optional best-effort `failure` frame is diagnostic only—the status endpoint is authoritative.
+
+`DELETE /_percolate/jobs/{id}` requests cooperative cancellation. Poll until the state becomes
+`cancelled` or another terminal state; a running status in the immediate DELETE response means the
+worker has not reached its next bounded poll yet. Cancellation is checked even when the match has
+not emitted a chunk, while waiting for the cluster write barrier, and inside large candidate
+postings or a long legacy duplicate-version scan. With bearer auth enabled,
+create/status/stream are read surfaces (unless
+`--auth-protect-reads` is set), while DELETE is protected.
+
+Jobs and stream buffers are in memory. Restart loses them; durable production delivery is an
+operator-selected Kafka/Pub/Sub/SQS/JetStream-style adapter implementing the server's keyed
+at-least-once publisher. The same key and payload are retried, so duplicates are safe. In cluster
+mode, ownership makes shard streams disjoint and every shard summary is validated before the
+terminal job completion. The coordinator mutation barrier serializes successful shard mutations
+and repair re-drives across that exact execution view (including direct library callers), so a long
+or backpressured exhaustive job can delay cluster writes; size the dedicated quota and timeout
+accordingly. Mutations and repair re-drives acquire that barrier before any logical-id stripe, so
+an exhaustive writer cannot form a lock-order cycle with `resync`. Full HTTP/gRPC channel waits are
+bounded by that job/request deadline. Shard nodes independently admit a bounded number of
+`PercolateAll` workers before spawning them; direct excess receives gRPC `RESOURCE_EXHAUSTED`
+rather than consuming the global blocking pool. While a blocking closure is still queued, its
+response sender is revocable on deadline/disconnect but its permit remains attached to the
+closure until Tokio schedules it. The configured concurrency bound therefore also bounds dormant
+closures in the global blocking pool instead of letting expired requests recycle permits and
+enqueue unbounded replacements. Once a closure starts, an explicit signal drops the watcher
+sender so a successful terminal summary is followed immediately by EOF.
+
+Remote exact delivery also requires an exclusive coordinator assembly:
+`connect_remote_exclusive` / `connect_replicated_exclusive` with one non-zero ID retained across
+retries. The server's HTTP cluster connector selects this mode automatically. The first validated
+exclusive `AdoptDict`/`AddShard` claims each node, all replies attest that identity, and every later
+RPC from another or unstamped coordinator fails with `FAILED_PRECONDITION`. A pre-lease shard
+binary attests zero and is refused. This cluster-wide fence is required because two fresh
+process-local barriers could otherwise both certify the same empty shard set. The historical
+library builders `connect_remote` / `connect_replicated` stay unleased for compatibility, but
+their exhaustive call fails before its first chunk; once an exclusive coordinator claims a node,
+those unleased clients are fenced there too.
+
+The owner lease is renewable and bounded (30 seconds): every admitted owner RPC renews it. A
+different ID is rejected while that lease is live; after it expires, an explicit claim handshake
+may replace it only after all already-admitted response bodies and streams drain. A stateless
+coordinator restart can therefore require retries through the bounded lease window plus the drain
+time of already-admitted work, instead of leaving nodes permanently pinned to the prior boot ID. A
+durable shard-process restart clears its
+process-local lease; an existing `RemoteShard` automatically performs a claim-stamped,
+read-only `DictFingerprint` handshake, verifies the restored node configuration, and retries the
+rejected RPC once. That recovery never creates an empty slot. These lifecycle repairs do not make
+a fresh in-memory coordinator's convergence history authoritative: rebuild fresh slots from the
+authoritative corpus before that restarted coordinator requests exact delivery.
+A cluster with
+queued partial-apply repairs is not ownership-disjoint: the job fails
+without completion (and, when the repair was already queued, without provisional chunks). Run
+`POST /_cluster/resync`, verify `pending_repairs=0`, and retry. A newly restarted in-memory
+coordinator attached to already-populated remote shards is also refused even when that fresh
+counter is zero: it cannot attest that an earlier coordinator left no partial apply. `resync`
+cannot reconstruct unknown history in that shape; rebuild fresh shard slots from the authoritative
+corpus before requesting exact exhaustive completion.
 
 ## `POST /_search` — Percolate titles
 

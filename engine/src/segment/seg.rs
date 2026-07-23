@@ -291,6 +291,19 @@ impl Segment {
         self.exact.version(local_id)
     }
 
+    pub(in crate::segment) fn class_of(&self, local_id: u32) -> Option<CostClass> {
+        self.class.get(local_id as usize).copied()
+    }
+
+    pub(in crate::segment) fn verify_local(
+        &self,
+        local_id: u32,
+        view: &crate::exact::TitleView<'_>,
+        pred: &crate::exact::TagPredicate,
+    ) -> bool {
+        self.exact.verify(local_id, view, pred)
+    }
+
     /// Whether a local id is alive (not tombstoned).
     #[inline]
     pub fn is_alive(&self, local_id: u32) -> bool {
@@ -365,9 +378,15 @@ impl Segment {
         // Signatures are generated from the POSITIVE (superset) view so an overlapping alias
         // entity retrieves its candidates (ADR-061); verify then applies both views.
         let feats = view.pos;
+        if collector.should_stop() {
+            return;
+        }
 
         // arity-1 signatures (one per feature)
         for &f in feats {
+            if collector.should_stop() {
+                return;
+            }
             let key = sig_key(&[f]);
             stats.probes_attempted += 1;
             if let Some(flt) = filter {
@@ -394,8 +413,14 @@ impl Segment {
         // title side of the class-B pair predicate, and extending it is lever 3's
         // fenced change, not the hot tier's (ADR-105).
         for &h in feats {
+            if collector.should_stop() {
+                return;
+            }
             if is_hot(dict, h) {
                 for &o in feats {
+                    if collector.should_stop() {
+                        return;
+                    }
                     if o != h {
                         let (a, b) = if h < o { (h, o) } else { (o, h) };
                         let key = sig_key(&[a, b]);
@@ -430,6 +455,9 @@ impl Segment {
         // title, the structural zero-overhead answer for hot-free corpora.
         if lanes.include_hot && self.has_hot_entries() {
             for &f in feats {
+                if collector.should_stop() {
+                    return;
+                }
                 let key = sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if let Some(flt) = filter {
@@ -455,6 +483,9 @@ impl Segment {
         // broad lane (arity-1 anchors), measured separately
         if lanes.include_broad {
             for &f in feats {
+                if collector.should_stop() {
+                    return;
+                }
                 let key = sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if let Some(flt) = filter {
@@ -480,6 +511,9 @@ impl Segment {
             // unconditionally — the accept knob gates ingest, never visibility, so a
             // stored entry stays reachable however the knob is later toggled. With no
             // class-D entries this is one filter (or hash) miss per segment.
+            if collector.should_stop() {
+                return;
+            }
             let key = crate::util::universal_sig();
             stats.probes_attempted += 1;
             let skip = filter.is_some_and(|flt| !flt.may_contain(key));
@@ -530,10 +564,13 @@ impl Segment {
                 ProbeLane::Hot => stats.hot_postings_scanned += posting.len() as u32,
                 ProbeLane::Main => {}
             }
-            posting.for_each(|local| {
+            posting.for_each_while(|local| {
+                if collector.should_stop() {
+                    return false;
+                }
                 // dedup across signatures with an epoch stamp (O(1), no alloc)
                 if seen[local as usize] == epoch {
-                    return;
+                    return true;
                 }
                 seen[local as usize] = epoch;
                 stats.unique_candidates += 1;
@@ -544,15 +581,15 @@ impl Segment {
                 }
                 if !has_dups {
                     if !self.alive[local as usize] {
-                        return; // tombstoned
+                        return true; // tombstoned
                     }
                     // Tag filter (ADR-049) — applied post-candidate inside verify.
                     if self.exact.verify(local, view, pred)
                         && emission.should_emit(self.exact.placement(local))
                     {
-                        collector.on_match(self.exact.logical(local));
+                        collector.on_match_at(self.exact.logical(local), local);
                     }
-                    return;
+                    return !collector.should_stop();
                 }
                 // Group-aware path. The leader may itself be tombstoned while a
                 // member lives, so aliveness gates EMISSION, never the body
@@ -560,28 +597,43 @@ impl Segment {
                 // likewise applied per member, after the shared body check.
                 let members = self.members_of(local);
                 if members.is_empty() && !self.alive[local as usize] {
-                    return; // tombstoned singleton — the cheap skip
+                    return true; // tombstoned singleton — the cheap skip
                 }
                 if !self
                     .exact
                     .verify(local, view, &crate::exact::TagPredicate::empty())
                 {
-                    return;
+                    return true;
                 }
                 if self.alive[local as usize]
                     && pred.matches(self.exact.tags_of(local))
                     && emission.should_emit(self.exact.placement(local))
                 {
-                    collector.on_match(self.exact.logical(local));
+                    collector.on_match_at(self.exact.logical(local), local);
+                    if collector.should_stop() {
+                        return false;
+                    }
                 }
                 for &m in members {
+                    // A canonical-body group can be arbitrarily large, and a
+                    // dead, tag-filtered, or ownership-suppressed member never
+                    // reaches the post-emission poll below. Poll before every
+                    // member's filters so those groups remain cooperatively
+                    // cancellable even when none of their members emits.
+                    if collector.should_stop() {
+                        return false;
+                    }
                     if self.alive[m as usize]
                         && pred.matches(self.exact.tags_of(m))
                         && emission.should_emit(self.exact.placement(m))
                     {
-                        collector.on_match(self.exact.logical(m));
+                        collector.on_match_at(self.exact.logical(m), m);
+                        if collector.should_stop() {
+                            return false;
+                        }
                     }
                 }
+                true
             });
         }
     }

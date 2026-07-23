@@ -92,6 +92,13 @@ pub(crate) struct PrometheusMetrics {
     pub(crate) rank_shard_rows_received_total: IntCounter,
     pub(crate) rank_shard_result_bytes_total: IntCounter,
     pub(crate) rank_enrichment_rejections_total: IntCounter,
+    // ADR-114 exhaustive background delivery.
+    pub(crate) exhaustive_chunks_total: IntCounter,
+    pub(crate) exhaustive_bytes_total: IntCounter,
+    pub(crate) exhaustive_backpressure_seconds_total: Counter,
+    pub(crate) exhaustive_jobs: IntGaugeVec,
+    pub(crate) exhaustive_jobs_total: IntCounterVec,
+    pub(crate) exhaustive_permits_in_use: IntGauge,
 
     // Cluster gRPC transport metrics (ADR-085), set on each /_metrics scrape from the
     // coordinator's TransportMetrics snapshot; labeled by RPC `method`. Cumulative values in
@@ -396,6 +403,42 @@ impl PrometheusMetrics {
             "Ranked responses rejected by the static winner-enrichment byte limit",
         ))
         .unwrap();
+        let exhaustive_chunks_total = IntCounter::with_opts(Opts::new(
+            "percolate_stream_chunks_total",
+            "Provisional exhaustive match chunks accepted by the job sink",
+        ))
+        .unwrap();
+        let exhaustive_bytes_total = IntCounter::with_opts(Opts::new(
+            "percolate_stream_bytes_total",
+            "NDJSON bytes accepted by exhaustive job streams, including terminal frames",
+        ))
+        .unwrap();
+        let exhaustive_backpressure_seconds_total = Counter::with_opts(Opts::new(
+            "percolate_stream_backpressure_seconds_total",
+            "Cumulative time exhaustive workers waited for bounded downstream capacity",
+        ))
+        .unwrap();
+        let exhaustive_jobs = IntGaugeVec::new(
+            Opts::new(
+                "percolate_jobs",
+                "Retained exhaustive jobs by current lifecycle state",
+            ),
+            &["state"],
+        )
+        .unwrap();
+        let exhaustive_jobs_total = IntCounterVec::new(
+            Opts::new(
+                "percolate_jobs_total",
+                "Exhaustive jobs reaching a terminal outcome",
+            ),
+            &["outcome"],
+        )
+        .unwrap();
+        let exhaustive_permits_in_use = IntGauge::with_opts(Opts::new(
+            "exhaustive_permits_in_use",
+            "Dedicated exhaustive-job concurrency permits currently held",
+        ))
+        .unwrap();
 
         // --- Broad-lane batch metrics (POST /_mpercolate) ---
 
@@ -606,6 +649,24 @@ impl PrometheusMetrics {
         registry
             .register(Box::new(rank_enrichment_rejections_total.clone()))
             .unwrap();
+        registry
+            .register(Box::new(exhaustive_chunks_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(exhaustive_bytes_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(exhaustive_backpressure_seconds_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(exhaustive_jobs.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(exhaustive_jobs_total.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(exhaustive_permits_in_use.clone()))
+            .unwrap();
         registry.register(Box::new(wal_size_bytes.clone())).unwrap();
         registry
             .register(Box::new(wal_pending_entries.clone()))
@@ -702,6 +763,12 @@ impl PrometheusMetrics {
             rank_shard_rows_received_total,
             rank_shard_result_bytes_total,
             rank_enrichment_rejections_total,
+            exhaustive_chunks_total,
+            exhaustive_bytes_total,
+            exhaustive_backpressure_seconds_total,
+            exhaustive_jobs,
+            exhaustive_jobs_total,
+            exhaustive_permits_in_use,
             transport_rpc_calls,
             transport_rpc_errors,
             transport_rpc_timeouts,

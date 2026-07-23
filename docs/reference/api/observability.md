@@ -160,16 +160,31 @@ ADR-108 adds low-cardinality local bounded-ranking telemetry:
 `rank_admission_rejections_total{reason}`, `rank_evaluations_total`,
 `rank_heap_replacements_total`, `rank_source_bytes_total`,
 `rank_true_match_lower_bound_total`, and the current `ranked_search_permits_in_use` gauge. Slow v2
-logs include K, scope, total relation, candidates, rank wall time, and cancellation outcome.
+logs include K, scope, total relation, the true-match lower bound, candidates, routed shards,
+shard rows/result bytes, rank wall time, and cancellation outcome.
 
 ADR-110 uses the same families for cluster `/v2/_search` and adds
 `rank_shard_rows_received_total`, `rank_shard_result_bytes_total`, and
 `rank_enrichment_rejections_total`. Coordinator transport families expose fixed method labels
 `percolate_top_k` and `fetch_matches` for calls/errors/timeouts/retries/latency.
 
+ADR-114 adds exhaustive-job/stream telemetry:
+
+- `percolate_stream_chunks_total`
+- `percolate_stream_bytes_total`
+- `percolate_stream_backpressure_seconds_total`
+- `percolate_jobs{state="running"|"completed"|"failed"|"cancelled"}`
+- `percolate_jobs_total{outcome="completed"|"failed"|"cancelled"}`
+- `exhaustive_permits_in_use`
+
+The job gauge counts retained records by current state, so terminal series fall when retention
+prunes them; the terminal counter never falls. Backpressure time includes a blocked send that
+ultimately ends in cancellation, deadline, or disconnect. Coordinator transport metrics and shard
+RPC latency use the additional fixed method label `percolate_all`.
+
 On each shard node, `reverse_rusty_shard_rpc_duration_seconds{shard,method,le}` includes
-`percolate_top_k` and `fetch_matches`. The following fixed-cardinality counters make bounded delivery
-and its fail-closed limits visible:
+`percolate_top_k`, `fetch_matches`, and `percolate_all`. The following fixed-cardinality counters
+make bounded delivery and its fail-closed limits visible:
 
 - `reverse_rusty_shard_top_k_hits_total{shard}`
 - `reverse_rusty_shard_top_k_result_bytes_total{shard}`

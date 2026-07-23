@@ -16,7 +16,9 @@ The **benchmark runbook** — how to run each harness, the machine-independent *
 verify, and the dated **capture log** — is in [`benchmark-results.txt`](benchmark-results.txt).
 The ADR-107 pre-collector baseline and ADR-108 bounded K=10/100/1,000/10,000 post-integration
 latency, structural-memory, result-byte, and checksum capture are in
-[`ranked-percolation-baseline.txt`](ranked-percolation-baseline.txt).
+[`ranked-percolation-baseline.txt`](ranked-percolation-baseline.txt). It also records the
+post-ADR-114 rerun and ADR-115's evidence-based decision not to add exact competitive pruning:
+the source plan's “verification dominates delivery” prerequisite was not established.
 
 ## Reproduce
 

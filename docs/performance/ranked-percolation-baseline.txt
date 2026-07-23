@@ -135,3 +135,24 @@ Batch capture (per-title ≡ scalar asserted inside the bench; timings informati
   [broad-heavy] batch bs=16  K=10 : local_batch_ms=0.090 cluster_batch_ms=0.182 shard_calls=8 shard_rows=35
   [broad-heavy] batch bs=256 K=100: local_batch_ms=0.950 cluster_batch_ms=0.874 shard_calls=8 shard_rows=3997
 Structure: fanned_shard_calls ≤ shards (ONE batch call per involved shard); per-title rows ≤ K.
+
+--- ADR-114/115 post-program capture (2026-07-22, M4 Max dev box) ---
+Command: cargo run --release --bin rankbench -- 20000 500 8 275775489
+
+All semantic checksum pairs remain unchanged:
+  ordinary:            local=b1afc6fc70a0a6e9 cluster=9190396adafa380f
+  broad-heavy:         local=bb248a758615fda0 cluster=0b64b11f5259ff1c
+  body-duplicate:      local=0e39cfc896f99281 cluster=4d3ea2d4e20345b0
+  placement-duplicate: local=0ec5dda03607d01f cluster=77575a4edc1f29e7
+
+Increment-8 profiling gate, broad-heavy K=10 (500 titles, 18,313 rank evaluations):
+  whole local Boolean match + bounded rank : 1.989 ms
+  collect-all compatibility rank only      : 0.793 ms
+  in-process cluster collect + merge       : 26.857 ms
+  winner source fetch                      : 0.239 ms
+  256-title K=10 batch local / cluster     : 0.735 / 0.745 ms
+
+The ~1.2 ms local remainder combines candidate retrieval, integer verification, logical-id
+handling, totals, and collector work; it does not establish exact verification as dominant.
+Cluster orchestration is >13x the complete local kernel in this capture. Per ADR-115, exact
+competitive pruning is declined until phase-attributed real-workload evidence fires its gate.

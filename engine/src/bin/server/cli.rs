@@ -63,6 +63,33 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) threads: Option<usize>,
 
+    /// Dedicated worker threads for exhaustive result jobs (ADR-114). These
+    /// never share the interactive search pool.
+    #[arg(long, default_value_t = 2)]
+    pub(crate) exhaustive_threads: usize,
+
+    /// Maximum exhaustive jobs executing concurrently. Admission is non-queuing:
+    /// excess starts return 503.
+    #[arg(long, default_value_t = 2)]
+    pub(crate) max_concurrent_exhaustive_jobs: usize,
+
+    /// Members per provisional exhaustive chunk.
+    #[arg(long, default_value_t = reverse_rusty::delivery::DEFAULT_MATCH_CHUNK_SIZE)]
+    pub(crate) exhaustive_chunk_size: usize,
+
+    /// Bounded job-stream frames buffered between a worker and its consumer.
+    #[arg(long, default_value_t = 8)]
+    pub(crate) exhaustive_channel_depth: usize,
+
+    /// Maximum lifetime of one exhaustive job. Requests may ask for less, never more.
+    #[arg(long, default_value_t = 300)]
+    pub(crate) exhaustive_job_timeout_secs: u64,
+
+    /// Maximum in-memory job records. Oldest terminal records are pruned first;
+    /// if every retained job is active, new starts return 429.
+    #[arg(long, default_value_t = 1024)]
+    pub(crate) max_retained_exhaustive_jobs: usize,
+
     /// Bound concurrent search work (ADR-099): at most this many `/_search` /
     /// `/_mpercolate` requests occupy the match pool at once; excess requests
     /// queue on a semaphore (bounded by their own `timeout_ms`, so a queued

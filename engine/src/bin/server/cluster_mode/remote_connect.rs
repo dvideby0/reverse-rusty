@@ -5,12 +5,13 @@
 //! within the module-size budget.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use tracing::{info, warn};
 
 use reverse_rusty::cluster::{
-    ClientSecurity, ClusterConfig, ClusterEngine, ControlPlane, RemoteControlPlane, ShardEndpoints,
-    ShardError, ShardGroup,
+    ClientSecurity, ClusterConfig, ClusterEngine, ControlPlane, RemoteControlPlane, RemoteShard,
+    ShardEndpoints, ShardError, ShardGroup,
 };
 use reverse_rusty::normalize::Normalizer;
 
@@ -34,6 +35,11 @@ fn parse_groups(remote_groups: &[String]) -> Result<Vec<ShardGroup>, ShardError>
         ));
     }
     Ok(groups)
+}
+
+fn process_coordinator_id() -> u64 {
+    static ID: OnceLock<u64> = OnceLock::new();
+    *ID.get_or_init(RemoteShard::new_coordinator_id)
 }
 
 /// Connect + validate the durable control-plane quorum (ADR-083) with multi-endpoint failover
@@ -160,14 +166,29 @@ pub(crate) fn connect_remote_cluster(
     let groups = build_groups(route_by_assignments, cli_groups, control.as_ref(), cfg)?;
 
     let plain = groups.iter().all(|g| g.replicas.is_empty());
+    let coordinator_id = process_coordinator_id();
     let cluster = if plain && cfg.replication_factor == 1 {
         let endpoints: Vec<String> = groups.into_iter().map(|g| g.primary).collect();
-        ClusterEngine::connect_remote_with_security(
-            norm, dict, tag_dict, cfg, &endpoints, handle, security,
+        ClusterEngine::connect_remote_exclusive_with_security(
+            norm,
+            dict,
+            tag_dict,
+            cfg,
+            &endpoints,
+            handle,
+            coordinator_id,
+            security,
         )?
     } else {
-        ClusterEngine::connect_replicated_with_security(
-            norm, dict, tag_dict, cfg, &groups, handle, security,
+        ClusterEngine::connect_replicated_exclusive_with_security(
+            norm,
+            dict,
+            tag_dict,
+            cfg,
+            &groups,
+            handle,
+            coordinator_id,
+            security,
         )?
     };
 

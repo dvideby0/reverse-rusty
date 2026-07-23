@@ -26,11 +26,13 @@ pub(super) struct LogicalIdDirectory {
     added: FastSet<u64>,
     removed: FastSet<u64>,
     /// True only when this directory was installed from an authoritative source
-    /// (build/bulk-ingest/durable-open enumeration, or a provably-empty fresh
-    /// assembly). A coordinator attached to an already-populated cluster it
+    /// (build/successful bulk-ingest/durable-open enumeration, or a provably-empty
+    /// fresh assembly) and the coordinator can attest that source was applied
+    /// coherently. A coordinator attached to an already-populated cluster it
     /// cannot enumerate (the gRPC connect shape — `RemoteShard` has no live-id
-    /// enumeration RPC yet) stays unauthoritative, and insert-only admission
-    /// fails closed instead of vacuously admitting duplicates.
+    /// enumeration RPC yet), or one whose initial bulk ingest failed after an
+    /// ambiguous subset of shard writes, stays unauthoritative. Insert-only and
+    /// exact-exhaustive admission then fail closed.
     authoritative: bool,
 }
 
@@ -176,6 +178,15 @@ impl ClusterEngine {
     pub(super) fn replace_logical_ids(&self, ids: Vec<u64>) -> Result<(), ShardError> {
         *write_directory(&self.logical_ids) = LogicalIdDirectory::from_ids(ids)?;
         Ok(())
+    }
+
+    /// Preserve every fail-closed id reservation while revoking the convergence
+    /// attestation. A remote bulk-write error is ambiguous: earlier shard calls
+    /// may have succeeded, and the failing call itself may have applied before
+    /// its transport failed. Without a bulk repair journal, only rebuilding fresh
+    /// shard slots can restore authority.
+    pub(super) fn mark_logical_ids_unconverged(&self) {
+        write_directory(&self.logical_ids).authoritative = false;
     }
 
     pub(super) fn compact_logical_ids(&self) {

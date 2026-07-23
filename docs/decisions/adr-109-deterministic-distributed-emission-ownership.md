@@ -142,6 +142,7 @@ most once. Every distributed row pays fixed SoA metadata plus selective placemen
 coordinated ADR-109 rebuild/upgrade.
 
 Bounded distributed top-K and query-then-fetch enrichment are delivered separately by
-[ADR-110](adr-110-distributed-top-k-query-then-fetch.md). Distributed title batching, PIT/cursors,
-exhaustive jobs/streams, and approximate termination remain later increments. This ADR provides the
-one-logical-emission foundation without itself introducing a new response contract.
+[ADR-110](adr-110-distributed-top-k-query-then-fetch.md). Distributed title batching,
+PIT/cursors, and exhaustive jobs/streams were subsequently delivered by ADR-112/113/114;
+approximate termination remains separate. This ADR provides the one-logical-emission foundation
+without itself introducing a new response contract.
