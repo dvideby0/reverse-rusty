@@ -118,7 +118,7 @@ on the *gRPC* shard/control transports, are the tracked Tier-3 items — see
 
 ---
 
-## `GET /` — API root
+## `GET /` / `HEAD /` — API root
 
 ```bash
 curl localhost:9200/
@@ -127,13 +127,27 @@ curl localhost:9200/
 ```json
 {
   "name": "reverse-rusty",
-  "version": "0.1.0",
+  "cluster_name": "reverse-rusty",
+  "cluster_uuid": "_na_",
+  "version": {
+    "distribution": "reverse-rusty",
+    "number": "0.1.0"
+  },
   "tagline": "you know, for matching"
 }
 ```
 
-> `version` is the crate's `CARGO_PKG_VERSION` (from `engine/Cargo.toml`), not a pinned literal —
-> the `"0.1.0"` above is illustrative and will track the package version as it bumps.
+The shape follows the familiar Elasticsearch/OpenSearch cluster-information response while staying
+honest about Reverse Rusty's own capabilities:
+
+- `version.number` is the crate's `CARGO_PKG_VERSION` (from `engine/Cargo.toml`), not a pinned
+  literal — the `"0.1.0"` above is illustrative and tracks the package version as it bumps.
+- `cluster_uuid` is `_na_` because Reverse Rusty does not currently persist an externally visible
+  cluster identity. The response omits Lucene, wire-compatibility, and index-compatibility fields
+  because they do not apply.
+- Coordinator mode adds `mode: "cluster"`, `shards`, `replication_factor`, and `durable`.
+- `HEAD /` is the lightweight connectivity form: it returns the same `200` and response headers as
+  `GET /`, with no body.
 
 ## Endpoint reference
 
@@ -155,7 +169,7 @@ The full method/path matrix is below.
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/` | GET | Version info |
+| `/` | GET/HEAD | Product, version, and cluster info |
 | `/_doc/{id}` | GET | Retrieve a stored query |
 | `/_doc/{id}` | PUT | Register **or atomically replace** a query (201 created / 200 updated, ADR-067) |
 | `/_doc/{id}` | DELETE | Remove a stored query |

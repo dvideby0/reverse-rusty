@@ -323,8 +323,23 @@ async fn root_reports_cluster_mode() {
     let state = test_state(&seed());
     let (status, body) = send(&state, req_empty("GET", "/")).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "reverse-rusty");
+    assert_eq!(body["cluster_name"], "reverse-rusty");
+    assert_eq!(body["cluster_uuid"], "_na_");
+    assert_eq!(body["version"]["distribution"], "reverse-rusty");
+    assert_eq!(body["version"]["number"], env!("CARGO_PKG_VERSION"));
     assert_eq!(body["mode"], "cluster");
     assert_eq!(body["shards"], 3);
+
+    let response = router(&state)
+        .oneshot(req_empty("HEAD", "/"))
+        .await
+        .expect("router response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("HEAD body")
+        .is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

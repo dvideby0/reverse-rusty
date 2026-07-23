@@ -29,6 +29,7 @@ use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
 use tracing::{error, info, instrument};
 
+use crate::dto::ApiVersion;
 use crate::state::ClusterAppState;
 
 use super::{not_in_cluster_mode, shard_error_response};
@@ -36,7 +37,9 @@ use super::{not_in_cluster_mode, shard_error_response};
 #[derive(Serialize)]
 struct ClusterRootResponse {
     name: &'static str,
-    version: &'static str,
+    cluster_name: &'static str,
+    cluster_uuid: &'static str,
+    version: ApiVersion,
     mode: &'static str,
     shards: usize,
     replication_factor: usize,
@@ -49,7 +52,9 @@ pub(crate) async fn cluster_root(State(state): State<Arc<ClusterAppState>>) -> i
     let cluster = state.cluster.read();
     Json(ClusterRootResponse {
         name: "reverse-rusty",
-        version: env!("CARGO_PKG_VERSION"),
+        cluster_name: "reverse-rusty",
+        cluster_uuid: "_na_",
+        version: ApiVersion::current(),
         mode: "cluster",
         shards: cluster.num_shards(),
         replication_factor: cluster.replication_factor(),
