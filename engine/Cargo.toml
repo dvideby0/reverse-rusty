@@ -69,6 +69,11 @@ reverse-rusty-shard-proto = { path = "grpc", optional = true }
 # `tls-ring` (ADR-071): rustls-backed TLS for the mesh transports — the ring crypto
 # provider (pure-library build; aws-lc would add a cmake/C toolchain for nothing here).
 tonic = { version = "0.14", optional = true, features = ["tls-ring"] }
+# Tower middleware around the generated shard service keeps a pre-claim lease
+# guard attached to the complete HTTP response body (including streaming RPCs).
+# Already present transitively through tonic; named explicitly only for the
+# distributed body wrapper's `Body` implementation.
+http-body = { version = "1", optional = true }
 # Server-streaming peer recovery (ADR-036) wraps an mpsc receiver as a `Stream`
 # (`ReceiverStream`); `sync` is the feature that gates that wrapper. Distributed-only.
 tokio-stream = { version = "0.1", features = ["sync"], optional = true }
@@ -104,12 +109,13 @@ server = [
     "dep:prometheus",
     "dep:hmac",
     "dep:sha2",
+    "dep:tokio-stream",
 ]
 # gRPC shard transport (ADR-029): the generated proto crate + tonic + tokio's `net`
 # stack. Off by default, so neither the lean core nor the standard server build sees
 # it. `dep:tokio` re-enables tokio (optional since the lean split) with its declared
 # features; `tokio/net` adds the socket support tonic's transport needs.
-distributed = ["dep:reverse-rusty-shard-proto", "dep:tonic", "dep:tokio", "tokio/net", "dep:tokio-stream", "dep:openraft"]
+distributed = ["dep:reverse-rusty-shard-proto", "dep:tonic", "dep:http-body", "dep:tokio", "tokio/net", "dep:tokio-stream", "dep:openraft"]
 
 [[bin]]
 name = "bench"

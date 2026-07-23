@@ -140,6 +140,8 @@ Network rows are now bounded by routed positions × K, and source/explanation wo
 enrichment race is intentionally resolved to current state and can fail the response; clients needing
 snapshot-consistent paging must wait for PIT/cursors.
 
-Title batching, PIT/cursors, exhaustive jobs/streams, partial results, and competitive pruning remain
-the later ranked-delivery increments. The compatibility all-ID gRPC method remains available but is
-now safely bounded by the static result cap.
+Title batching and PIT/cursors were later delivered by ADR-112/113; exhaustive jobs/streams by
+ADR-114. Partial results remain out of scope, and competitive pruning was declined by ADR-115 after
+its profiling gate did not fire. These outcomes close the originally sequenced later
+ranked-delivery increments. The compatibility all-ID gRPC method remains available but is now
+safely bounded by the static result cap.

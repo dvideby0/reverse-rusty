@@ -262,12 +262,13 @@ impl ClusterEngine {
 
         // Connect the SOURCE (the committed primary — write-authoritative, so it provably holds
         // every acked write) and pin its un-sealed tail for the whole move (ADR-040).
-        let source = RemoteShard::connect_with_security(
+        let source = RemoteShard::connect_for_coordinator_with_security(
             &cp_ep,
             handle.clone(),
             expected,
             expected_tag,
             pos,
+            self.coordinator_id,
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
@@ -302,7 +303,7 @@ impl ClusterEngine {
                 .iter()
                 .filter(|(nid, _)| !committed_ids.contains(&nid.0))
             {
-                let t = RemoteShard::connect_and_adopt_with_security(
+                let t = RemoteShard::connect_and_adopt_for_coordinator_with_security(
                     ep,
                     handle.clone(),
                     dict_bytes.clone(),
@@ -312,6 +313,7 @@ impl ClusterEngine {
                     pos,
                     self.placement_generation(),
                     self.num_shards() as u32,
+                    self.coordinator_id,
                     &self.client_security,
                 )?
                 .with_metrics(Arc::clone(&self.transport_metrics));
@@ -427,7 +429,7 @@ impl ClusterEngine {
                     .iter()
                     .filter(|(nid, _)| committed_ids.contains(&nid.0) && *nid != cp)
                 {
-                    let t = RemoteShard::connect_and_adopt_with_security(
+                    let t = RemoteShard::connect_and_adopt_for_coordinator_with_security(
                         ep,
                         handle.clone(),
                         dict_bytes.clone(),
@@ -437,6 +439,7 @@ impl ClusterEngine {
                         pos,
                         self.placement_generation(),
                         self.num_shards() as u32,
+                        self.coordinator_id,
                         &self.client_security,
                     )?
                     .with_metrics(Arc::clone(&self.transport_metrics));
@@ -477,12 +480,13 @@ impl ClusterEngine {
                         return Ok(Box::new(t));
                     }
                     debug_assert_eq!(nid, cp, "every non-cp member was established above");
-                    let t = RemoteShard::connect_with_security(
+                    let t = RemoteShard::connect_for_coordinator_with_security(
                         ep,
                         handle.clone(),
                         expected,
                         expected_tag,
                         pos,
+                        self.coordinator_id,
                         &self.client_security,
                     )?
                     .with_metrics(Arc::clone(&self.transport_metrics));

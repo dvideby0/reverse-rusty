@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, ShardError, ShardServer};
+use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, RemoteShard, ShardError, ShardServer};
 use reverse_rusty::compile::extract;
 use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::Dict;
@@ -189,6 +189,54 @@ fn grpc_connect_rejects_divergent_dict() {
         Err(ShardError::DictMismatch { .. }) => {} // the handshake fired — correct.
         Err(other) => panic!("expected DictMismatch, got a different error: {other:?}"),
         Ok(_) => panic!("connect SUCCEEDED against a divergent dict — the silent-FN guard failed"),
+    }
+
+    // The exclusive builder uses a one-shot claim header on AdoptDict. Its
+    // diagnostic DictFingerprint fallback must switch to the ordinary
+    // coordinator-stamped client because claim metadata is deliberately
+    // rejected on every non-handshake RPC.
+    match ClusterEngine::connect_remote_exclusive(
+        Arc::clone(&norm),
+        Arc::clone(&dict_coord),
+        empty_tag_dict(),
+        &cfg,
+        &[format!("http://{addr}")],
+        rt.handle(),
+        RemoteShard::new_coordinator_id(),
+    ) {
+        Err(ShardError::DictMismatch { .. }) => {}
+        Err(other) => panic!("exclusive mismatch probe returned the wrong error: {other:?}"),
+        Ok(_) => panic!("exclusive connect SUCCEEDED against a divergent dict"),
+    }
+
+    // AddShard has the same diagnostic path. First let one coordinator claim
+    // the populated node idempotently under its real dict, then attest the
+    // divergent coordinator dict for a co-located slot.
+    let coordinator_id = RemoteShard::new_coordinator_id();
+    let tag_dict = empty_tag_dict();
+    let endpoint = format!("http://{addr}");
+    RemoteShard::connect_and_adopt(
+        &endpoint,
+        rt.handle().clone(),
+        reverse_rusty::storage::serialize_dict(&dict_server),
+        dict_server.fingerprint(),
+        reverse_rusty::storage::serialize_tagdict(&tag_dict),
+        tag_dict.fingerprint(),
+        0,
+        coordinator_id,
+    )
+    .expect("the owner claims the populated node under its existing dict");
+    match RemoteShard::connect_and_add_shard(
+        &endpoint,
+        rt.handle().clone(),
+        dict_coord.fingerprint(),
+        tag_dict.fingerprint(),
+        1,
+        coordinator_id,
+    ) {
+        Err(ShardError::DictMismatch { .. }) => {}
+        Err(other) => panic!("exclusive AddShard mismatch probe returned {other:?}"),
+        Ok(_) => panic!("exclusive AddShard accepted a divergent dict"),
     }
 }
 

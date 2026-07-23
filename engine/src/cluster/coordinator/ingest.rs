@@ -139,7 +139,23 @@ impl ClusterEngine {
         self.replace_logical_ids(accepted_ids)?;
         for (s, bucket) in buckets.into_iter().enumerate() {
             if !bucket.is_empty() {
-                self.shards[s].ingest_extracted(&bucket)?;
+                if let Err(error) = self.shards[s].ingest_extracted(&bucket) {
+                    // Unlike incremental writes, this initial base-segment fan-out
+                    // has no per-logical repair record. Earlier shards may already
+                    // hold their buckets, and a transport failure cannot prove the
+                    // current shard applied nothing. Keep all id reservations but
+                    // revoke the convergence attestation so exact exhaustive
+                    // delivery cannot certify the ambiguous corpus (review finding).
+                    self.mark_logical_ids_unconverged();
+                    self.emit(EngineEvent::DurabilityFailure {
+                        op: DurabilityOp::ClusterPartialApply,
+                        detail: format!(
+                            "bulk ingest failed at shard {s}; cluster convergence is unattested"
+                        ),
+                        error: error.to_string(),
+                    });
+                    return Err(error);
+                }
             }
         }
         Ok(())
@@ -266,6 +282,14 @@ impl ClusterEngine {
             return Ok(AddOutcome::RejectedClassD);
         }
         let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        // Global lock order is PIT/mutation barrier -> logical stripe. Resync
+        // uses the same order; taking the stripe first can deadlock behind a
+        // queued exhaustive writer on writer-preferring RwLock implementations.
+        // Hold the barrier through the durable append and complete shard fan-out.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // ADR-110's bounded merge requires one live distributed row per logical id.
         // Content-derived placement cannot guarantee a common owner for two different
         // rows sharing an id, so cluster adds are insert-only; replacements use upsert.
@@ -371,6 +395,12 @@ impl ClusterEngine {
             return Ok((0, AddOutcome::RejectedClassD));
         }
         let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        // Keep the same barrier -> logical-stripe order as add/remove/resync.
+        // The barrier spans the log append and both delete/insert fan-out passes.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Serialize against an insert-only add/remove for the same id. An upsert
         // keeps the id present; a fresh upsert reserves it before the log append so
         // a concurrent add cannot create a second physical row.
@@ -415,13 +445,6 @@ impl ClusterEngine {
         tags: &[(String, String)],
         placement: &crate::ownership::QueryPlacement,
     ) -> Result<(usize, AddOutcome), ShardError> {
-        // ADR-113: exclude PIT opens for the duration of this mutation's full
-        // shard fan-out (see `pit_open_barrier` on the struct) — a pin fan
-        // interleaving mid-mutation would freeze a torn cross-shard view.
-        let _pit_barrier = self
-            .pit_open_barrier
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.note_tags(tags);
         let ast = match crate::dsl::parse(dsl) {
             Ok(a) => a,
@@ -520,6 +543,12 @@ impl ClusterEngine {
     /// or any-of query may live on several shards; a re-add may have moved it).
     /// WAL-first, like [`Self::add_query`].
     pub fn remove_query(&self, id: u64) -> Result<usize, ShardError> {
+        // Canonical barrier -> logical-stripe order; see add/upsert. Keeping
+        // this guard through append + fan-out excludes torn exhaustive/PIT views.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _logical_guard = self.logical_write_guard(id);
         let m = ClusterMutation::Remove { logical: id };
         if let Err(e) = self.log.append(&m) {
@@ -604,13 +633,6 @@ impl ClusterEngine {
         tags: &[(String, String)],
         placement: &crate::ownership::QueryPlacement,
     ) -> Result<AddOutcome, ShardError> {
-        // ADR-113: exclude PIT opens for the duration of this mutation's full
-        // shard fan-out (see `pit_open_barrier` on the struct) — a pin fan
-        // interleaving mid-mutation would freeze a torn cross-shard view.
-        let _pit_barrier = self
-            .pit_open_barrier
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Latch tags_present (ADR-055, `/_stats` introspection) — covers both the live add
         // (`add_query_with_tags`) and a tagged log-tail entry replayed on `open`.
         self.note_tags(tags);
@@ -679,13 +701,6 @@ impl ClusterEngine {
     /// memtable/segment liveness is the authority; there is no separate coordinator live
     /// set to keep in sync (the durable base is the per-shard segments — ADR-032).
     fn apply_remove(&self, id: u64) -> Result<usize, ShardError> {
-        // ADR-113: exclude PIT opens for the duration of this mutation's full
-        // shard fan-out (see `pit_open_barrier` on the struct) — a pin fan
-        // interleaving mid-mutation would freeze a torn cross-shard view.
-        let _pit_barrier = self
-            .pit_open_barrier
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Remove fans the idempotent delete out to EVERY shard. Try them all (don't bail on the
         // first error) and collect failures, so a partial remove is repairable rather than a
         // silent half-delete (ADR-047). In-process deletes are infallible ⇒ `failed` stays empty
@@ -776,6 +791,13 @@ impl ClusterEngine {
     /// anything. The durable cluster log stays authoritative — a reopen replays it in order, so
     /// `resync` is a liveness optimization, not the correctness backstop.
     pub fn resync(&self) -> ResyncReport {
+        // Exhaustive cross-shard reads take the exclusive side of the same
+        // barrier. A repair re-drive mutates shard visibility just like a live
+        // add/upsert/remove and must not slip between sequential shard reads.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Drain the queue, then re-drive OUTSIDE the lock (re-driving issues shard RPCs; holding
         // the lock across them would stall concurrent writes' note_partial/clear_pending).
         let pending: Vec<(u64, PendingRepair)> = {

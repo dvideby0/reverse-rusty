@@ -6,8 +6,12 @@ use super::{
     infallible, BaseSegment, BatchMatchOptions, DeadlineAt, DeadlineCheck, EngineSnapshot,
     MatchCancelled, MatchScratch, MatchStats, NoDeadline, Segment,
 };
-use crate::collect::{AllCollector, MatchCollector, TopKCollector};
+use crate::collect::{AllCollector, ChunkCollector, MatchCollector, TopKCollector};
+use crate::compile::CostClass;
 use crate::config::EngineConfig;
+use crate::delivery::{
+    ChunkSink, ExhaustiveMatchError, ExhaustiveMatchResult, ExhaustiveOptions, MAX_MATCH_CHUNK_SIZE,
+};
 use crate::dict::Dict;
 use crate::exact::TagPredicate;
 use crate::normalize::Normalizer;
@@ -73,6 +77,163 @@ pub(in crate::segment) struct MatchView<'a> {
     /// Request-scoped tag filter (ADR-049). `TagPredicate::empty()` ⇒ no filtering, so
     /// every existing (unfiltered) caller is byte-identical to before tags.
     pub(in crate::segment) pred: &'a crate::exact::TagPredicate,
+}
+
+/// Exhaustive-only logical-id dedup (ADR-114). It reuses the snapshot's reverse
+/// indexes to select the deterministic first physical copy that matches this
+/// already-normalized title, avoiding a result-sized `HashSet`.
+struct ExhaustiveDeduper<'a, P> {
+    snapshot: &'a EngineSnapshot,
+    pred: &'a TagPredicate,
+    include_broad: bool,
+    emission: P,
+    neg: Vec<crate::dict::FeatureId>,
+    pos: Vec<crate::dict::FeatureId>,
+    neg_mask: u64,
+    pos_mask: u64,
+    dual: bool,
+}
+
+impl<'a, P: crate::ownership::EmissionPolicy> ExhaustiveDeduper<'a, P> {
+    fn new(
+        snapshot: &'a EngineSnapshot,
+        title: &str,
+        pred: &'a TagPredicate,
+        include_broad: bool,
+        emission: P,
+    ) -> Self {
+        let mut lc = String::new();
+        let mut norm = crate::normalize::NormScratch::new();
+        let mut neg = Vec::new();
+        let mut pos = Vec::new();
+        let dual = snapshot.norm.has_multiword_aliases();
+        if dual {
+            snapshot.norm.match_features_dual(
+                title,
+                &snapshot.dict,
+                &mut lc,
+                &mut norm,
+                &mut neg,
+                &mut pos,
+            );
+        } else {
+            snapshot
+                .norm
+                .match_features(title, &snapshot.dict, &mut lc, &mut norm, &mut neg);
+        }
+        let neg_mask = title_mask(&snapshot.dict, &neg);
+        let pos_mask = if dual {
+            title_mask(&snapshot.dict, &pos)
+        } else {
+            neg_mask
+        };
+        Self {
+            snapshot,
+            pred,
+            include_broad,
+            emission,
+            neg,
+            pos,
+            neg_mask,
+            pos_mask,
+            dual,
+        }
+    }
+
+    fn view(&self) -> crate::exact::TitleView<'_> {
+        if self.dual {
+            crate::exact::TitleView::dual(self.pos_mask, &self.pos, self.neg_mask, &self.neg)
+        } else {
+            crate::exact::TitleView::single(self.neg_mask, &self.neg)
+        }
+    }
+
+    fn visible(&self, class: CostClass) -> bool {
+        self.include_broad || !matches!(class, CostClass::C | CostClass::D)
+    }
+
+    fn base_matches(&self, segment: &BaseSegment, local: u32) -> bool {
+        segment.is_alive(local)
+            && segment
+                .class_of(local)
+                .is_some_and(|class| self.visible(class))
+            && self.emission.should_emit(segment.placement(local))
+            && segment.verify_local(local, &self.view(), self.pred)
+    }
+
+    fn memtable_matches(&self, local: u32) -> bool {
+        self.snapshot.memtable.is_alive(local)
+            && self
+                .snapshot
+                .memtable
+                .class_of(local)
+                .is_some_and(|class| self.visible(class))
+            && self
+                .emission
+                .should_emit(self.snapshot.memtable.placement(local))
+            && self
+                .snapshot
+                .memtable
+                .verify_local(local, &self.view(), self.pred)
+    }
+
+    fn is_first_matching(
+        &mut self,
+        source: usize,
+        current: u32,
+        logical: u64,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) -> bool {
+        let base_count = self.snapshot.segments.len();
+        let preceding_bases = source.min(base_count);
+        for segment in self.snapshot.segments.iter().take(preceding_bases) {
+            for &local in segment.locals_for_logical(logical) {
+                if should_stop() {
+                    return false;
+                }
+                if self.base_matches(segment, local) {
+                    return false;
+                }
+            }
+        }
+        if source < base_count {
+            for &local in self.snapshot.segments[source].locals_for_logical(logical) {
+                if local >= current {
+                    break;
+                }
+                if should_stop() {
+                    return false;
+                }
+                if self.base_matches(&self.snapshot.segments[source], local) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        for &local in self.snapshot.memtable.locals_for_logical(logical) {
+            if local >= current {
+                break;
+            }
+            if should_stop() {
+                return false;
+            }
+            if self.memtable_matches(local) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn title_mask(dict: &Dict, feats: &[crate::dict::FeatureId]) -> u64 {
+    feats.iter().fold(0u64, |mask, &feature| {
+        let bit = dict.mask_bit(feature);
+        if bit == crate::dict::NO_MASK_BIT {
+            mask
+        } else {
+            mask | (1u64 << bit)
+        }
+    })
 }
 
 impl MatchView<'_> {
@@ -145,6 +306,13 @@ impl MatchView<'_> {
         let epoch = s.epoch;
         collector.reset();
 
+        // Exhaustive sinks can be cancelled before matching produces its first
+        // member (for example DELETE on a zero-result job). Poll before
+        // normalization so that cancellation does not depend on chunk emission.
+        if collector.should_stop() {
+            return Ok(MatchStats::default());
+        }
+
         // Cooperative-deadline entry check (ADR-099): a match that spent its whole
         // budget queued on the rayon pool dies here, before doing any work. The
         // unarmed monomorph compiles this away.
@@ -196,6 +364,7 @@ impl MatchView<'_> {
                 cancelled = Some(c);
                 break;
             }
+            collector.begin_source(i);
             base.match_collect(
                 &view,
                 self.dict,
@@ -212,11 +381,16 @@ impl MatchView<'_> {
                 &mut stats,
                 emission,
             );
+            if collector.should_stop() {
+                break;
+            }
         }
-        if cancelled.is_none() {
-            match dl.check() {
-                Err(c) => cancelled = Some(c),
-                Ok(()) => self.memtable.match_collect(
+        if cancelled.is_none() && !collector.should_stop() {
+            if let Err(c) = dl.check() {
+                cancelled = Some(c);
+            } else {
+                collector.begin_source(n_base);
+                self.memtable.match_collect(
                     &view,
                     self.dict,
                     epoch,
@@ -229,7 +403,7 @@ impl MatchView<'_> {
                     self.pred,
                     &mut stats,
                     emission,
-                ),
+                );
             }
         }
 
@@ -619,6 +793,125 @@ impl EngineSnapshot {
         }
     }
 
+    /// Exact exhaustive matching with `O(chunk_size)` result memory (ADR-114).
+    /// Chunks are provisional; the caller may commit them only after this
+    /// method returns a terminal summary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_match_title_chunks<S: ChunkSink + ?Sized>(
+        &self,
+        title: &str,
+        options: ExhaustiveOptions,
+        program: Option<&crate::rank::CompiledRankProgram>,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        deadline: Option<Instant>,
+        sink: &mut S,
+    ) -> Result<ExhaustiveMatchResult, ExhaustiveMatchError> {
+        self.try_match_title_chunks_with_policy(
+            title,
+            options,
+            program,
+            pred,
+            scratch,
+            deadline,
+            sink,
+            crate::ownership::EmitAll,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_match_title_chunks_owned<S: ChunkSink + ?Sized>(
+        &self,
+        title: &str,
+        options: ExhaustiveOptions,
+        program: Option<&crate::rank::CompiledRankProgram>,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        deadline: Option<Instant>,
+        sink: &mut S,
+        emission: crate::ownership::UniqueOwner<'_>,
+    ) -> Result<ExhaustiveMatchResult, ExhaustiveMatchError> {
+        self.try_match_title_chunks_with_policy(
+            title, options, program, pred, scratch, deadline, sink, emission,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_match_title_chunks_with_policy<
+        S: ChunkSink + ?Sized,
+        P: crate::ownership::EmissionPolicy,
+    >(
+        &self,
+        title: &str,
+        options: ExhaustiveOptions,
+        program: Option<&crate::rank::CompiledRankProgram>,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        deadline: Option<Instant>,
+        sink: &mut S,
+        emission: P,
+    ) -> Result<ExhaustiveMatchResult, ExhaustiveMatchError> {
+        if options.chunk_size == 0 || options.chunk_size > MAX_MATCH_CHUNK_SIZE {
+            return Err(ExhaustiveMatchError::InvalidChunkSize {
+                requested: options.chunk_size,
+                max: MAX_MATCH_CHUNK_SIZE,
+            });
+        }
+        // Fail before title normalization and exhaustive-deduper allocation.
+        // Jobs can already be cancelled (or expired while waiting for the
+        // cluster view barrier), and setup must honor that bound too.
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            return Err(ExhaustiveMatchError::Cancelled);
+        }
+        sink.check_cancelled().map_err(ExhaustiveMatchError::Sink)?;
+        let include_broad = options.query_scope == crate::result::QueryScope::WithBroad;
+        let mut deduper = ExhaustiveDeduper::new(self, title, pred, include_broad, emission);
+        let canonical = move |source, local, logical, should_stop: &mut dyn FnMut() -> bool| {
+            deduper.is_first_matching(source, local, logical, should_stop)
+        };
+        let scorer = |logical_id, should_stop: &mut dyn FnMut() -> bool| {
+            program.and_then(|rank| {
+                self.rank_metadata_for_logical_with_poll(logical_id, should_stop)
+                    .map(|(values, tags)| crate::rank::score_program(values, tags, rank))
+            })
+        };
+        let mut collector =
+            ChunkCollector::new(sink, options.chunk_size, canonical, scorer, deadline);
+        let view = MatchView {
+            norm: &self.norm,
+            dict: &self.dict,
+            segments: &self.segments,
+            memtable: &self.memtable,
+            pred,
+        };
+        let mut stats = match deadline {
+            Some(at) => view
+                .match_title_collect(
+                    title,
+                    scratch,
+                    &mut collector,
+                    include_broad,
+                    DeadlineAt(at),
+                    emission,
+                )
+                .map_err(|_| ExhaustiveMatchError::Cancelled)?,
+            None => infallible(view.match_title_collect(
+                title,
+                scratch,
+                &mut collector,
+                include_broad,
+                NoDeadline,
+                emission,
+            )),
+        };
+        if collector.deadline_expired() {
+            return Err(ExhaustiveMatchError::Cancelled);
+        }
+        let summary = collector.result().map_err(ExhaustiveMatchError::Sink)?;
+        stats.matches = u32::try_from(summary.exact_total).unwrap_or(u32::MAX);
+        Ok(ExhaustiveMatchResult { summary, stats })
+    }
+
     /// Compile a request filter — a conjunction of `(key, [values])` groups — into a
     /// [`TagPredicate`] against this snapshot's tag space (ADR-049). Each value resolves
     /// via [`get_or_synthetic`](crate::tagdict::TagDict::get_or_synthetic), so a value
@@ -695,7 +988,25 @@ impl EngineSnapshot {
         &self,
         logical_id: u64,
     ) -> Option<(crate::rank::RankValues, &[crate::tagdict::TagId])> {
+        self.rank_metadata_for_logical_with_poll(logical_id, &mut || false)
+    }
+
+    /// Cancellable exhaustive counterpart to [`Self::rank_metadata_for_logical`].
+    /// A legacy logical id may have arbitrarily many newer tombstoned physical
+    /// copies, so poll between reverse-index entries rather than turning score
+    /// resolution into one uninterruptible scan.
+    fn rank_metadata_for_logical_with_poll<C>(
+        &self,
+        logical_id: u64,
+        should_stop: &mut C,
+    ) -> Option<(crate::rank::RankValues, &[crate::tagdict::TagId])>
+    where
+        C: FnMut() -> bool + ?Sized,
+    {
         for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
+            if should_stop() {
+                return None;
+            }
             if self.memtable.is_alive(local) {
                 let tags = self.memtable.tags_of(local);
                 let mut rank = self.memtable.rank_values(local);
@@ -707,6 +1018,9 @@ impl EngineSnapshot {
         }
         for seg in self.segments.iter().rev() {
             for &local in seg.locals_for_logical(logical_id).iter().rev() {
+                if should_stop() {
+                    return None;
+                }
                 if seg.is_alive(local) {
                     let tags = seg.tags_of(local);
                     let mut rank = seg.rank_values(local);
@@ -1081,5 +1395,129 @@ impl EngineSnapshot {
             opts,
             deadline,
         )
+    }
+}
+
+#[cfg(test)]
+mod exhaustive_dedup_tests {
+    use super::*;
+
+    struct CancelImmediately {
+        polls: usize,
+    }
+
+    impl ChunkSink for CancelImmediately {
+        fn send_chunk(
+            &mut self,
+            _chunk: &crate::delivery::MatchChunk,
+        ) -> Result<(), crate::delivery::ChunkSinkError> {
+            Ok(())
+        }
+
+        fn check_cancelled(&mut self) -> Result<(), crate::delivery::ChunkSinkError> {
+            self.polls += 1;
+            Err(crate::delivery::ChunkSinkError::new(
+                "already cancelled before setup",
+            ))
+        }
+    }
+
+    #[test]
+    fn exhaustive_entry_polls_before_setup() {
+        let engine = crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        let snapshot = engine.snapshot();
+        let mut sink = CancelImmediately { polls: 0 };
+        let error = snapshot
+            .try_match_title_chunks(
+                "an alias-heavy or otherwise expensive title must not be normalized",
+                ExhaustiveOptions::default(),
+                None,
+                &TagPredicate::empty(),
+                &mut MatchScratch::new(),
+                None,
+                &mut sink,
+            )
+            .expect_err("pre-cancelled entry must fail before setup");
+        assert!(matches!(error, ExhaustiveMatchError::Sink(_)));
+        assert_eq!(sink.polls, 1);
+    }
+
+    #[test]
+    fn legacy_duplicate_scan_polls_cancellation_between_physical_copies() {
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        for version in 0..2_048 {
+            engine
+                .try_insert_live("zzlegacyhay", 7, version)
+                .expect("legacy duplicate");
+        }
+        engine.flush();
+        engine
+            .try_insert_live("zzmatchingneedle", 7, 2_048)
+            .expect("current matching copy");
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.segments[0].locals_for_logical(7).len(),
+            2_048,
+            "test must exercise a long reverse-index walk"
+        );
+        let current = snapshot.memtable.locals_for_logical(7)[0];
+        let pred = TagPredicate::empty();
+        let mut deduper = ExhaustiveDeduper::new(
+            &snapshot,
+            "zzmatchingneedle",
+            &pred,
+            true,
+            crate::ownership::EmitAll,
+        );
+        let mut polls = 0usize;
+        let accepted = deduper.is_first_matching(snapshot.segments.len(), current, 7, &mut || {
+            polls += 1;
+            polls >= 17
+        });
+
+        assert!(!accepted, "a cancelled walk must not emit its current copy");
+        assert_eq!(
+            polls, 17,
+            "the walk must stop at the cancellation poll, not scan all duplicates"
+        );
+    }
+
+    #[test]
+    fn ranked_metadata_scan_polls_cancellation_between_legacy_copies() {
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine
+            .try_insert_live("zzrankcancel", 7, 0)
+            .expect("oldest live copy");
+        for version in 1..=2_048 {
+            let crate::segment::InsertOutcome::Inserted(local) = engine
+                .try_insert_live("zzrankcancel", 7, version)
+                .expect("newer legacy copy")
+            else {
+                panic!("selective test query was unexpectedly rejected");
+            };
+            engine.tombstone(local).expect("tombstone newer copy");
+        }
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.memtable.locals_for_logical(7).len(),
+            2_049,
+            "test must exercise a long newest-first metadata walk"
+        );
+
+        let mut polls = 0usize;
+        let metadata = snapshot.rank_metadata_for_logical_with_poll(7, &mut || {
+            polls += 1;
+            polls >= 17
+        });
+        assert!(
+            metadata.is_none(),
+            "a cancelled metadata scan must not return an older score"
+        );
+        assert_eq!(
+            polls, 17,
+            "the walk must stop at the cancellation poll, not scan all copies"
+        );
     }
 }

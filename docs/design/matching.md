@@ -277,6 +277,22 @@ ranked paths use the identical context. The coordinator retains sort/dedup defen
 `duplicate_emissions` asserts the shard replies are already disjoint. See the placement/persistence
 contract in [`clustering-and-scaling.md`](clustering-and-scaling.md) §7 and ADR-109.
 
+Exhaustive delivery additionally requires `pending_repairs=0`. During an ADR-047 partial upsert, an
+old body can remain live under its old placement while the replacement is already live under a new
+placement; both positions can then be valid emitters for the same logical id. The bounded
+coordinator cannot deduplicate that state without result-sized memory, so it refuses exact
+completion until `resync` or a durable log replay restores one converged version. It also requires
+an authoritative coordinator logical-id directory: a fresh coordinator reattached to populated
+remote shards cannot prove that a prior process left no unrecorded partial apply, even though its
+new `pending_repairs` map is empty. The same authority is revoked when an initial multi-shard bulk
+ingest fails after an ambiguous subset of shard writes; that path predates the per-logical repair
+journal, so its empty repair map is not a convergence attestation either. Both shapes refuse before
+emitting and require fresh shard slots rebuilt from the authoritative corpus. The coordinator
+rechecks convergence at every shard boundary so a newly queued repair fails an in-flight stream
+closed. The full exhaustive fan-out also holds the exclusive mutation/PIT-open barrier (live writes
+and `resync` hold the shared side), preventing a healthy successful re-placement from interleaving
+between shard reads.
+
 ---
 
 ## 5. Per-query metadata, filtered percolation, and ranking
@@ -380,7 +396,47 @@ Explanations are compiled at the coordinator from fetched source under its autho
 dictionary; explanation objects never cross the shard wire. This is deliberately a current-view
 contract, not PIT consistency. ADR-075 compatibility cluster ranking remains available and unchanged.
 
-### 5.5 Alternatives (documented, deferred)
+### 5.5 Exhaustive bounded delivery (ADR-114)
+
+`result_mode=all` uses the same post-verification collector seam without materializing the full
+answer. `ChunkCollector` retains one fixed-capacity `Vec<ExhaustiveMatch>`; a synchronous
+`ChunkSink` accepts each provisional chunk, so bounded-channel or gRPC flow-control backpressure
+stops the matching worker. Its default-infallible `check_cancelled` hook lets job/gRPC sinks
+surface cancellation, deadline, disconnect, or a prior send failure even before a chunk exists;
+the exhaustive collector polls it before title-normalization/deduper setup and at
+probe/candidate boundaries, and threads the same hook through both legacy duplicate selection and
+newest-live ranked-metadata scans. A successful pass returns an exact unique total, chunk count,
+and order-independent checksum. The serving layer alone emits completion; any deadline, sink,
+shard, ownership, or protocol failure leaves already-sent chunks provisional.
+For the HTTP reference sink, enqueueing terminal bytes is not yet completion: the worker waits for
+the single-consumer body to dequeue that record. Only then does job status expose the exact
+summary; dropping the response while the completion is still queued invalidates it and fails the
+job. Shard nodes apply an independent server-owned maximum to the caller's remaining stream
+budget before acquiring admission, so a direct client cannot retain every blocking worker with an
+arbitrarily distant deadline.
+
+The compatibility collector historically sorts/deduplicates its complete `Vec<u64>`, because
+library callers can leave multiple live physical rows for one logical id. Exhaustive delivery
+cannot retain that result-sized set. Its collector therefore receives `(source ordinal, local id)`
+after exact verification and consults each segment's existing logical-id reverse index. It emits
+only the deterministic first physical row that itself passes aliveness, visibility, tag,
+ownership, and exact checks against the already-normalized title. The rule preserves the case
+where an older body matches but a newer duplicate body does not, while keeping result memory
+`O(chunk_size)`. This additional lookup/reverification is exhaustive-only; compatibility and
+top-K collectors keep their prior callback shape.
+
+Across shards, ADR-109 ownership makes output sets disjoint. `PercolateAll` streams bounded,
+contiguous shard-local chunks followed by one summary attesting placement identity, counts,
+checksum, and stats. The coordinator validates each part and rewrites sequences into one
+contiguous job stream using at most one additional chunk. It never repairs overlap by
+deduplicating: overlap means the ownership contract failed and the exact job fails closed. A
+shard asked to include the broad lane must itself be the context's named broad evaluator; missing
+or mismatched broad ownership is rejected before execution. A
+nonzero partial-repair queue is refused, and the full sequential shard read holds the exclusive
+coordinator mutation barrier so a successful concurrent re-placement cannot move between owners
+mid-stream. `resync` and live shard mutations hold the shared side.
+
+### 5.6 Alternatives (documented, deferred)
 
 - **Post-match external filter** (return everything, look up each id's metadata afterward) — effectively
   what callers do *today*, outside the engine. Rejected as the long-term design: it still verifies every

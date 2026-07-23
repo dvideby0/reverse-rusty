@@ -164,6 +164,72 @@ impl ReplicatedShard {
         Err(last_err)
     }
 
+    /// Streaming-read analogue of [`Self::read`]. A transport failure may fail
+    /// over only before the attempted copy has emitted its first provisional
+    /// chunk. Once a chunk has escaped, replaying the request against another
+    /// copy would splice two attempts into one sequence; fail closed and let the
+    /// job retry under its idempotency contract instead (ADR-114).
+    fn read_stream<T>(
+        &self,
+        sink: &mut dyn crate::delivery::ChunkSink,
+        mut op: impl FnMut(&dyn Shard, &mut dyn crate::delivery::ChunkSink) -> Result<T, ShardError>,
+    ) -> Result<T, ShardError> {
+        struct CountingSink<'a> {
+            inner: &'a mut dyn crate::delivery::ChunkSink,
+            emitted: bool,
+        }
+
+        impl crate::delivery::ChunkSink for CountingSink<'_> {
+            fn send_chunk(
+                &mut self,
+                chunk: &crate::delivery::MatchChunk,
+            ) -> Result<(), crate::delivery::ChunkSinkError> {
+                self.inner.send_chunk(chunk)?;
+                self.emitted = true;
+                Ok(())
+            }
+
+            fn check_cancelled(&mut self) -> Result<(), crate::delivery::ChunkSinkError> {
+                self.inner.check_cancelled()
+            }
+        }
+
+        fn attempt<T>(
+            shard: &dyn Shard,
+            sink: &mut dyn crate::delivery::ChunkSink,
+            op: &mut impl FnMut(
+                &dyn Shard,
+                &mut dyn crate::delivery::ChunkSink,
+            ) -> Result<T, ShardError>,
+        ) -> (Result<T, ShardError>, bool) {
+            let mut counting = CountingSink {
+                inner: sink,
+                emitted: false,
+            };
+            let result = op(shard, &mut counting);
+            (result, counting.emitted)
+        }
+
+        let (primary, emitted) = attempt(self.primary.as_ref(), sink, &mut op);
+        let mut last_err = match primary {
+            Ok(value) => return Ok(value),
+            Err(error @ ShardError::Remote(_)) if !emitted => error,
+            Err(error) => return Err(error),
+        };
+        for slot in self.replica_handles() {
+            if !slot.in_sync.load(Ordering::Acquire) {
+                continue;
+            }
+            let (result, emitted) = attempt(slot.shard.as_ref(), sink, &mut op);
+            match result {
+                Ok(value) => return Ok(value),
+                Err(error @ ShardError::Remote(_)) if !emitted => last_err = error,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_err)
+    }
+
     /// Fan a write (already applied to the primary) to the in-sync replicas. A replica that
     /// errors is dropped from the in-sync set and flagged; the op still succeeds (the
     /// authoritative primary holds the write). Caller holds [`Self::lock`].

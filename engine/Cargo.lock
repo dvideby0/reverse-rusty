@@ -1595,6 +1595,7 @@ dependencies = [
  "clap",
  "daachorse",
  "hmac",
+ "http-body",
  "memmap2",
  "openraft",
  "parking_lot",

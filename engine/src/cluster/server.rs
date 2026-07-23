@@ -12,6 +12,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use tonic::Status;
@@ -25,13 +26,24 @@ use crate::segment::PlacedQuery;
 use crate::tagdict::TagDict;
 
 use super::proto::shard_service_server::ShardServiceServer;
-use super::security::{ClientSecurity, MeshAuthVerify, ServerSecurity, TlsServerIdentity};
+use super::security::{
+    ClientSecurity, CoordinatorLease, CoordinatorLeaseService, MeshAuthVerify, ServerSecurity,
+    TlsServerIdentity,
+};
 use super::shard::{LocalShard, Shard, ShardError};
 
 /// Tonic's default receive-message ceiling. Operators may lower the application
 /// cap but ADR-110 deliberately does not permit raising this transport cliff.
 pub const DEFAULT_MAX_GRPC_RESULT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_GRPC_RESULT_BYTES: usize = DEFAULT_MAX_GRPC_RESULT_BYTES;
+/// Node-local admission for long-running exhaustive shard streams. This is
+/// deliberately independent of the coordinator HTTP job quota because a
+/// shard endpoint can be called by more than one coordinator or directly.
+pub const DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS: usize = 2;
+/// Server-owned ceiling for one exhaustive shard stream. The request carries
+/// its coordinator's remaining budget, but a direct caller must not be able to
+/// retain a blocking worker and admission permit indefinitely.
+pub const DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION: Duration = Duration::from_mins(5);
 
 mod durable;
 mod metrics_source;
@@ -172,6 +184,12 @@ pub struct ShardServer {
     /// `open_durable` reads it back). The node-level `DictFingerprint` handshake reads this — the
     /// dict/tag-dict fingerprints are a node-wide content invariant, independent of any slot.
     node_dict: Arc<ArcSwapOption<AdoptedSpace>>,
+    /// Exclusive renewable owner for remote coordination. Explicit handshakes
+    /// claim the node, owner RPCs renew the bounded lease, and takeover drains
+    /// admitted response bodies before publishing a replacement id. This
+    /// prevents two process-local mutation barriers from both certifying the
+    /// same remote shard set as an exact snapshot.
+    coordinator_lease: Arc<CoordinatorLease>,
     /// Mesh security (ADR-071): TLS identity + expected cluster token, applied by the
     /// `serve*` methods. Default (none) ⇒ the historical plaintext/open behavior.
     security: ServerSecurity,
@@ -186,6 +204,13 @@ pub struct ShardServer {
     /// Exact protobuf encoded-result cap for unary result messages and each
     /// `FetchMatches` stream item (ADR-110).
     max_grpc_result_bytes: usize,
+    /// Node-scope non-queuing admission for `PercolateAll` blocking workers.
+    /// An owned permit lives for the complete stream worker, including any
+    /// bounded-channel backpressure wait.
+    exhaustive_permits: Arc<tokio::sync::Semaphore>,
+    /// Hard node-local wall-clock ceiling for `PercolateAll`, independent of
+    /// the caller-supplied remaining budget.
+    max_exhaustive_stream_duration: Duration,
 }
 
 impl ShardServer {
@@ -215,10 +240,15 @@ impl ShardServer {
             data_dir: None,
             shards,
             node_dict,
+            coordinator_lease: Arc::new(CoordinatorLease::new()),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
+            )),
+            max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
         }
     }
 
@@ -233,10 +263,15 @@ impl ShardServer {
             data_dir: None,
             shards: Arc::new(RwLock::new(HashMap::new())),
             node_dict: Arc::new(ArcSwapOption::from(None)),
+            coordinator_lease: Arc::new(CoordinatorLease::new()),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
+            )),
+            max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
         }
     }
 
@@ -305,10 +340,15 @@ impl ShardServer {
             data_dir: Some(data_dir),
             shards: Arc::new(RwLock::new(slots)),
             node_dict,
+            coordinator_lease: Arc::new(CoordinatorLease::new()),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
+            )),
+            max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
         })
     }
 
@@ -323,10 +363,15 @@ impl ShardServer {
             data_dir: Some(data_dir),
             shards: Arc::new(RwLock::new(HashMap::new())),
             node_dict: Arc::new(ArcSwapOption::from(None)),
+            coordinator_lease: Arc::new(CoordinatorLease::new()),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
+            )),
+            max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
         }
     }
 
@@ -362,10 +407,15 @@ impl ShardServer {
             data_dir: Some(data_dir),
             shards,
             node_dict,
+            coordinator_lease: Arc::new(CoordinatorLease::new()),
             security: ServerSecurity::default(),
             client_security: ClientSecurity::default(),
             health_addr: None,
             max_grpc_result_bytes: DEFAULT_MAX_GRPC_RESULT_BYTES,
+            exhaustive_permits: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
+            )),
+            max_exhaustive_stream_duration: DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION,
         })
     }
 
@@ -606,6 +656,39 @@ impl ShardServer {
         Ok(self)
     }
 
+    /// Set the node-local maximum number of concurrently executing exhaustive
+    /// shard streams. Admission never queues: requests above this bound receive
+    /// gRPC `RESOURCE_EXHAUSTED` before a blocking worker is spawned.
+    pub fn with_max_concurrent_exhaustive_streams(
+        mut self,
+        max_concurrent: usize,
+    ) -> Result<Self, ShardError> {
+        if max_concurrent == 0 || max_concurrent > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(ShardError::Config(format!(
+                "max concurrent exhaustive shard streams must be within 1..={}, got \
+                 {max_concurrent}",
+                tokio::sync::Semaphore::MAX_PERMITS
+            )));
+        }
+        self.exhaustive_permits = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        Ok(self)
+    }
+
+    /// Set the node-local wall-clock ceiling for one exhaustive shard stream.
+    /// The request's remaining budget may be smaller, but never larger.
+    pub fn with_max_exhaustive_stream_duration(
+        mut self,
+        max_duration: Duration,
+    ) -> Result<Self, ShardError> {
+        if max_duration.is_zero() {
+            return Err(ShardError::Config(
+                "max exhaustive shard-stream duration must be non-zero".into(),
+            ));
+        }
+        self.max_exhaustive_stream_duration = max_duration;
+        Ok(self)
+    }
+
     pub(in crate::cluster::server) fn check_result_bytes(
         &self,
         encoded: usize,
@@ -636,8 +719,13 @@ impl ShardServer {
         }
         // The verifier wraps the WHOLE service (pass-through with no token), so every
         // RPC — including a future one — is covered before its handler runs.
-        let verify = MeshAuthVerify::new(security.token);
-        Ok(builder.add_service(ShardServiceServer::with_interceptor(self, verify)))
+        let verify = MeshAuthVerify::with_coordinator_lease(
+            security.token,
+            Arc::clone(&self.coordinator_lease),
+        );
+        let coordinator_lease = Arc::clone(&self.coordinator_lease);
+        let service = ShardServiceServer::with_interceptor(self, verify);
+        Ok(builder.add_service(CoordinatorLeaseService::new(service, coordinator_lease)))
     }
 
     /// Serve `ShardService` on `addr` until the returned future completes. When a

@@ -42,6 +42,7 @@ impl ShardService for LegacyOwnershipServer {
             broad_replicate_all: true,
             placement_generation: self.placement_generation,
             num_shards: self.num_shards,
+            coordinator_id: 0,
         }))
     }
 
@@ -50,6 +51,12 @@ impl ShardService for LegacyOwnershipServer {
         req: Request<raw::AdoptDictRequest>,
     ) -> Result<Response<raw::AdoptDictReply>, Status> {
         // Echo the shipped fingerprints so only the ownership attestation decides the result.
+        let coordinator_id = req
+            .metadata()
+            .get("x-reverse-rusty-coordinator-id")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_default();
         let r = req.into_inner();
         Ok(Response::new(raw::AdoptDictReply {
             fingerprint: r.fingerprint,
@@ -57,6 +64,7 @@ impl ShardService for LegacyOwnershipServer {
             broad_replicate_all: true,
             placement_generation: self.placement_generation,
             num_shards: self.num_shards,
+            coordinator_id,
         }))
     }
 
@@ -96,6 +104,14 @@ impl ShardService for LegacyOwnershipServer {
             placement_generation: self.placement_generation,
             num_shards: self.num_shards,
         }))
+    }
+    type PercolateAllStream =
+        Pin<Box<dyn Stream<Item = Result<raw::PercolateAllFrame, Status>> + Send>>;
+    async fn percolate_all(
+        &self,
+        _req: Request<raw::PercolateAllRequest>,
+    ) -> Result<Response<Self::PercolateAllStream>, Status> {
+        Err(Status::unimplemented("legacy mock"))
     }
     type FetchMatchesStream = Pin<Box<dyn Stream<Item = Result<raw::FetchMatch, Status>> + Send>>;
     async fn fetch_matches(
@@ -252,6 +268,7 @@ fn grpc_connect_refuses_missing_or_stale_ownership_attestation() {
     // 2. The adopt path refuses the same old peer.
     let dict_bytes = reverse_rusty::storage::serialize_dict(&dict);
     let tag_bytes = reverse_rusty::storage::serialize_tagdict(&empty_tag_dict());
+    let coordinator_id = RemoteShard::new_coordinator_id();
     match RemoteShard::connect_and_adopt(
         &legacy_ep,
         rt.handle().clone(),
@@ -260,6 +277,7 @@ fn grpc_connect_refuses_missing_or_stale_ownership_attestation() {
         tag_bytes.clone(),
         tag_fp,
         0,
+        coordinator_id,
     ) {
         Err(ShardError::OwnershipMismatch(_)) => {}
         Err(e) => panic!("expected typed ownership refusal, got {e}"),
@@ -268,6 +286,7 @@ fn grpc_connect_refuses_missing_or_stale_ownership_attestation() {
 
     // 3. A nonzero but stale peer is also refused; zero-only checking would miss this.
     let stale_ep = start_mock(2, 1);
+    let stale_coordinator_id = RemoteShard::new_coordinator_id();
     match RemoteShard::connect_and_adopt(
         &stale_ep,
         rt.handle().clone(),
@@ -276,6 +295,7 @@ fn grpc_connect_refuses_missing_or_stale_ownership_attestation() {
         tag_bytes,
         tag_fp,
         0,
+        stale_coordinator_id,
     ) {
         Err(ShardError::OwnershipMismatch(_)) => {}
         Err(e) => panic!("expected stale-generation ownership refusal, got {e}"),

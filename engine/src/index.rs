@@ -77,20 +77,37 @@ impl Posting {
     /// variants without allocating or materializing a temporary buffer.
     #[inline]
     pub fn for_each<F: FnMut(u32)>(&self, mut f: F) {
+        self.for_each_while(|id| {
+            f(id);
+            true
+        });
+    }
+
+    /// Iterate until `f` returns false. Exhaustive delivery uses this to stop a
+    /// large posting immediately after its bounded sink fails or is cancelled;
+    /// ordinary matchers still compile through [`Self::for_each`].
+    #[inline]
+    pub fn for_each_while<F: FnMut(u32) -> bool>(&self, mut f: F) {
         match self {
             Posting::Inline { ids, len } => {
                 for &id in &ids[..*len as usize] {
-                    f(id);
+                    if !f(id) {
+                        break;
+                    }
                 }
             }
             Posting::Heap(v) => {
                 for &id in v {
-                    f(id);
+                    if !f(id) {
+                        break;
+                    }
                 }
             }
             Posting::Roaring(bm) => {
                 for id in bm {
-                    f(id);
+                    if !f(id) {
+                        break;
+                    }
                 }
             }
         }

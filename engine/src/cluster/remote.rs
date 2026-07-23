@@ -55,18 +55,35 @@ pub(crate) async fn connect_mesh(
     endpoint: &str,
     security: &ClientSecurity,
 ) -> Result<ShardServiceClient<MeshChannel>, ShardError> {
+    connect_mesh_with_coordinator(endpoint, security, None).await
+}
+
+/// Mesh connect carrying an optional exclusive remote-coordinator identity.
+/// Ownership is claimed only by an explicitly claim-stamped
+/// `DictFingerprint`/`AdoptDict`/`AddShard`; ordinary clients use this helper
+/// after that handshake and can never claim a freshly restarted process
+/// accidentally.
+pub(crate) async fn connect_mesh_with_coordinator(
+    endpoint: &str,
+    security: &ClientSecurity,
+    coordinator_id: Option<u64>,
+) -> Result<ShardServiceClient<MeshChannel>, ShardError> {
     let ep = configure_endpoint(endpoint, security.tls.as_ref(), &security.transport)?;
     let channel = ep
         .connect()
         .await
         .map_err(|e| ShardError::Remote(format!("connect: {e}")))?;
-    let inject = MeshAuthInject::new(security.token.as_deref())?;
+    let inject = MeshAuthInject::with_coordinator(security.token.as_deref(), coordinator_id)?;
     Ok(ShardServiceClient::with_interceptor(channel, inject))
 }
 
 /// One shard living behind a gRPC `ShardService`.
 pub struct RemoteShard {
     client: ShardServiceClient<MeshChannel>,
+    /// One-shot claim-stamped client retained only for recovering this same
+    /// coordinator identity after a durable shard-process restart.
+    claim_client: Option<ShardServiceClient<MeshChannel>>,
+    coordinator_id: Option<u64>,
     handle: Handle,
     /// The endpoint string this client was connected with (ADR-096): the coordinator's GC sweep
     /// reads it back through [`Shard::live_endpoints`] so live routing's physical targets are a
@@ -101,11 +118,80 @@ fn connect_channel(
     endpoint: &str,
     handle: &Handle,
     security: &ClientSecurity,
+    coordinator_id: Option<u64>,
+    claim_coordinator: bool,
 ) -> Result<ShardServiceClient<MeshChannel>, ShardError> {
-    block_on_in_context(handle, connect_mesh(endpoint, security))
+    let connected = async {
+        let ep = configure_endpoint(endpoint, security.tls.as_ref(), &security.transport)?;
+        let channel = ep
+            .connect()
+            .await
+            .map_err(|error| ShardError::Remote(format!("connect: {error}")))?;
+        let inject = match (coordinator_id, claim_coordinator) {
+            (Some(id), true) => {
+                MeshAuthInject::with_coordinator_claim(security.token.as_deref(), id)?
+            }
+            (id, false) => MeshAuthInject::with_coordinator(security.token.as_deref(), id)?,
+            (None, true) => {
+                return Err(ShardError::Config(
+                    "a coordinator claim requires a non-zero coordinator id".into(),
+                ))
+            }
+        };
+        Ok(ShardServiceClient::with_interceptor(channel, inject))
+    };
+    block_on_in_context(handle, connected)
+}
+
+/// Read a node's actual dict fingerprint after a failed adoption handshake.
+///
+/// An exclusive handshake validates divergent input before it claims an
+/// unowned node. Prefer the ordinary coordinator-stamped client (the node may
+/// already be owned by this coordinator), then retry unstamped only when that
+/// probe is rejected because the failed handshake left the node unowned. This
+/// diagnostic probe intentionally stays non-claiming; the separate retained
+/// claim client uses `DictFingerprint` only for restart recovery.
+fn probe_actual_dict_fingerprint(
+    endpoint: &str,
+    handle: &Handle,
+    security: &ClientSecurity,
+    client: &ShardServiceClient<MeshChannel>,
+    coordinator_id: Option<u64>,
+) -> Option<u64> {
+    let mut probe = client.clone();
+    let first = block_on_in_context(handle, async move {
+        probe.dict_fingerprint(proto::Empty {}).await
+    });
+    match first {
+        Ok(reply) => Some(reply.into_inner().fingerprint),
+        Err(status)
+            if coordinator_id.is_some() && status.code() == tonic::Code::FailedPrecondition =>
+        {
+            // AdoptDict checks malformed/divergent input before publishing a
+            // lease, so a stamped probe can truthfully be "too early". An
+            // unstamped read is admitted only while the node is still unowned;
+            // it cannot bypass another coordinator's live lease.
+            let mut fallback = connect_channel(endpoint, handle, security, None, false).ok()?;
+            block_on_in_context(handle, async move {
+                fallback.dict_fingerprint(proto::Empty {}).await
+            })
+            .ok()
+            .map(|reply| reply.into_inner().fingerprint)
+        }
+        Err(_) => None,
+    }
 }
 
 impl RemoteShard {
+    /// Mint a non-zero process-boot-unique coordinator identity for the direct
+    /// adoption APIs. Generate this **once**, retain it, and reuse it for every
+    /// retry and every node/shard owned by the same coordinator. In particular,
+    /// do not mint a replacement after a lost `AdoptDict` response: the server
+    /// may already have committed the first identity.
+    pub fn new_coordinator_id() -> u64 {
+        super::security::fresh_coordinator_id()
+    }
+
     /// Connect to a `ShardService` at `endpoint` (e.g. `"http://127.0.0.1:50051"`),
     /// driving the async connect on `handle`, then verify the server's frozen-dict
     /// fingerprint equals `expected_fp` (the coordinator's
@@ -143,14 +229,76 @@ impl RemoteShard {
         shard_id: u32,
         security: &ClientSecurity,
     ) -> Result<Self, ShardError> {
-        let client = connect_channel(endpoint, &handle, security)?;
+        Self::connect_with_identity(
+            endpoint,
+            handle,
+            expected_fp,
+            expected_tag_fp,
+            shard_id,
+            None,
+            security,
+        )
+    }
+
+    /// Coordinator-owned variant used for every later recovery, handoff, and
+    /// GC connection made by a remote [`ClusterEngine`](super::ClusterEngine).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn connect_for_coordinator_with_security(
+        endpoint: &str,
+        handle: Handle,
+        expected_fp: u64,
+        expected_tag_fp: u64,
+        shard_id: u32,
+        coordinator_id: Option<u64>,
+        security: &ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        Self::connect_with_identity(
+            endpoint,
+            handle,
+            expected_fp,
+            expected_tag_fp,
+            shard_id,
+            coordinator_id,
+            security,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_with_identity(
+        endpoint: &str,
+        handle: Handle,
+        expected_fp: u64,
+        expected_tag_fp: u64,
+        shard_id: u32,
+        coordinator_id: Option<u64>,
+        security: &ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        let client = connect_channel(endpoint, &handle, security, coordinator_id, false)?;
+        let claim_client = coordinator_id
+            .map(|id| connect_channel(endpoint, &handle, security, Some(id), true))
+            .transpose()?;
         // Handshake before trusting the shard: clone the client for the probe RPC (a cheap
         // Channel bump, mirroring the per-call pattern below).
         let mut probe = client.clone();
-        let reply = block_on_in_context(&handle, async move {
+        let probed = block_on_in_context(&handle, async move {
             probe.dict_fingerprint(proto::Empty {}).await
-        })
-        .map_err(|status| rpc_err(&status))?
+        });
+        let reply = match probed {
+            Ok(reply) => reply,
+            Err(status) if no_live_coordinator_lease_status(&status) && claim_client.is_some() => {
+                let mut claimant = claim_client
+                    .as_ref()
+                    .ok_or_else(|| {
+                        ShardError::Remote("coordinator lease recovery client disappeared".into())
+                    })?
+                    .clone();
+                block_on_in_context(&handle, async move {
+                    claimant.dict_fingerprint(proto::Empty {}).await
+                })
+                .map_err(|status| rpc_err(&status))?
+            }
+            Err(status) => return Err(rpc_err(&status)),
+        }
         .into_inner();
         if reply.fingerprint != expected_fp {
             return Err(ShardError::DictMismatch {
@@ -173,8 +321,19 @@ impl RemoteShard {
                 crate::ownership::OwnershipError::MissingGeneration,
             ));
         }
+        if let Some(expected_coordinator) = coordinator_id {
+            if reply.coordinator_id != expected_coordinator {
+                return Err(coordinator_attestation_error(
+                    endpoint,
+                    expected_coordinator,
+                    reply.coordinator_id,
+                ));
+            }
+        }
         Ok(RemoteShard {
             client,
+            claim_client,
+            coordinator_id,
             handle,
             endpoint: endpoint.to_string(),
             dict_fp: expected_fp,
@@ -206,6 +365,7 @@ impl RemoteShard {
         tag_dict_bytes: Vec<u8>,
         expected_tag_fp: u64,
         shard_id: u32,
+        coordinator_id: u64,
     ) -> Result<Self, ShardError> {
         Self::connect_and_adopt_with_security(
             endpoint,
@@ -217,6 +377,7 @@ impl RemoteShard {
             shard_id,
             crate::ownership::PlacementGeneration::INITIAL,
             shard_id.saturating_add(1),
+            coordinator_id,
             &ClientSecurity::default(),
         )
     }
@@ -234,10 +395,114 @@ impl RemoteShard {
         shard_id: u32,
         placement_generation: crate::ownership::PlacementGeneration,
         num_shards: u32,
+        coordinator_id: u64,
         security: &ClientSecurity,
     ) -> Result<Self, ShardError> {
-        let client = connect_channel(endpoint, &handle, security)?;
-        let mut shipper = client.clone();
+        Self::connect_and_adopt_with_identity(
+            endpoint,
+            handle,
+            dict_bytes,
+            expected_fp,
+            tag_dict_bytes,
+            expected_tag_fp,
+            shard_id,
+            placement_generation,
+            num_shards,
+            Some(coordinator_id),
+            security,
+        )
+    }
+
+    /// Compatibility builder used by the historical distributed coordinator.
+    /// It deliberately leaves the shard process unleased, so multiple
+    /// compatibility coordinators keep their pre-ADR-114 behavior; such a
+    /// coordinator is refused by the exact exhaustive API.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn connect_and_adopt_compatible_with_security(
+        endpoint: &str,
+        handle: Handle,
+        dict_bytes: Vec<u8>,
+        expected_fp: u64,
+        tag_dict_bytes: Vec<u8>,
+        expected_tag_fp: u64,
+        shard_id: u32,
+        placement_generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+        security: &ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        Self::connect_and_adopt_with_identity(
+            endpoint,
+            handle,
+            dict_bytes,
+            expected_fp,
+            tag_dict_bytes,
+            expected_tag_fp,
+            shard_id,
+            placement_generation,
+            num_shards,
+            None,
+            security,
+        )
+    }
+
+    /// Internal coordinator path used by recovery/handoff. An exclusive
+    /// coordinator passes `Some(id)`; the compatibility path passes `None`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn connect_and_adopt_for_coordinator_with_security(
+        endpoint: &str,
+        handle: Handle,
+        dict_bytes: Vec<u8>,
+        expected_fp: u64,
+        tag_dict_bytes: Vec<u8>,
+        expected_tag_fp: u64,
+        shard_id: u32,
+        placement_generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+        coordinator_id: Option<u64>,
+        security: &ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        Self::connect_and_adopt_with_identity(
+            endpoint,
+            handle,
+            dict_bytes,
+            expected_fp,
+            tag_dict_bytes,
+            expected_tag_fp,
+            shard_id,
+            placement_generation,
+            num_shards,
+            coordinator_id,
+            security,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_and_adopt_with_identity(
+        endpoint: &str,
+        handle: Handle,
+        dict_bytes: Vec<u8>,
+        expected_fp: u64,
+        tag_dict_bytes: Vec<u8>,
+        expected_tag_fp: u64,
+        shard_id: u32,
+        placement_generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+        coordinator_id: Option<u64>,
+        security: &ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        // The claim bit is a one-handshake capability, never a property of the
+        // long-lived serving client. Retain a separate claim-only client so a
+        // durable shard-process restart can recover through a read-only
+        // fingerprint handshake; ordinary RPCs still cannot claim implicitly.
+        let client = connect_channel(endpoint, &handle, security, coordinator_id, false)?;
+        let claim_client = connect_channel(
+            endpoint,
+            &handle,
+            security,
+            coordinator_id,
+            coordinator_id.is_some(),
+        )?;
+        let mut shipper = claim_client.clone();
         // Ship the dict AND the frozen tag space (ADR-049/055) in one atomic adopt — never a window
         // where the server has the dict but not the tag space. `shard_id` names the slot to create
         // on the node (ADR-093); the node-scope dict is deserialized once and shared across slots.
@@ -250,33 +515,50 @@ impl RemoteShard {
             placement_generation: placement_generation.0,
             num_shards,
         };
-        let (adopted, adopted_tag, adopted_replicate_all, adopted_generation, adopted_num_shards) =
-            match block_on_in_context(&handle, async move { shipper.adopt_dict(req).await }) {
-                Ok(reply) => {
-                    let r = reply.into_inner();
-                    (
-                        r.fingerprint,
-                        r.tag_dict_fingerprint,
-                        r.broad_replicate_all,
-                        r.placement_generation,
-                        r.num_shards,
-                    )
+        let (
+            adopted,
+            adopted_tag,
+            adopted_replicate_all,
+            adopted_generation,
+            adopted_num_shards,
+            adopted_coordinator,
+        ) = match block_on_in_context(&handle, async move { shipper.adopt_dict(req).await }) {
+            Ok(reply) => {
+                let r = reply.into_inner();
+                (
+                    r.fingerprint,
+                    r.tag_dict_fingerprint,
+                    r.broad_replicate_all,
+                    r.placement_generation,
+                    r.num_shards,
+                    r.coordinator_id,
+                )
+            }
+            // The server holds data under a different dict and refused ours. Read its actual
+            // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
+            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+                // Keep this mismatch diagnostic non-claiming; the claim
+                // capability is reserved for explicit ownership handshakes.
+                // Probe through the ordinary owner-stamped client after the
+                // handshake has established (or confirmed) the lease.
+                if let Some(actual) = probe_actual_dict_fingerprint(
+                    endpoint,
+                    &handle,
+                    security,
+                    &client,
+                    coordinator_id,
+                ) {
+                    if actual != expected_fp {
+                        return Err(ShardError::DictMismatch {
+                            expected: expected_fp,
+                            actual,
+                        });
+                    }
                 }
-                // The server holds data under a different dict and refused ours. Read its actual
-                // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
-                Err(status) if status.code() == tonic::Code::FailedPrecondition => {
-                    let mut probe = client.clone();
-                    let actual = block_on_in_context(&handle, async move {
-                        probe.dict_fingerprint(proto::Empty {}).await
-                    })
-                    .map_or(0, |r| r.into_inner().fingerprint);
-                    return Err(ShardError::DictMismatch {
-                        expected: expected_fp,
-                        actual,
-                    });
-                }
-                Err(status) => return Err(ShardError::Remote(format!("adopt_dict: {status}"))),
-            };
+                return Err(ShardError::Remote(format!("adopt_dict: {status}")));
+            }
+            Err(status) => return Err(ShardError::Remote(format!("adopt_dict: {status}"))),
+        };
         // On success the server echoes the fingerprints it now serves — this equality IS the
         // dict-identity handshake, so no separate round-trip is needed. The tag-dict fingerprint is
         // checked the same way: a divergent tag space would mis-filter reads (ADR-055).
@@ -306,8 +588,26 @@ impl RemoteShard {
                 },
             ));
         }
+        match coordinator_id {
+            Some(expected) if adopted_coordinator != expected => {
+                return Err(coordinator_attestation_error(
+                    endpoint,
+                    expected,
+                    adopted_coordinator,
+                ))
+            }
+            None if adopted_coordinator != 0 => {
+                return Err(ShardError::Remote(format!(
+                    "shard {endpoint} unexpectedly attested coordinator {adopted_coordinator} \
+                     to an unleased compatibility handshake"
+                )))
+            }
+            _ => {}
+        }
         Ok(RemoteShard {
             client,
+            claim_client: coordinator_id.map(|_| claim_client),
+            coordinator_id,
             handle,
             endpoint: endpoint.to_string(),
             dict_fp: expected_fp,
@@ -332,6 +632,7 @@ impl RemoteShard {
         expected_fp: u64,
         expected_tag_fp: u64,
         shard_id: u32,
+        coordinator_id: u64,
     ) -> Result<Self, ShardError> {
         Self::connect_and_add_shard_with_security(
             endpoint,
@@ -341,6 +642,7 @@ impl RemoteShard {
             shard_id,
             crate::ownership::PlacementGeneration::INITIAL,
             shard_id.saturating_add(1),
+            coordinator_id,
             &ClientSecurity::default(),
         )
     }
@@ -356,10 +658,70 @@ impl RemoteShard {
         shard_id: u32,
         placement_generation: crate::ownership::PlacementGeneration,
         num_shards: u32,
+        coordinator_id: u64,
         security: &ClientSecurity,
     ) -> Result<Self, ShardError> {
-        let client = connect_channel(endpoint, &handle, security)?;
-        let mut shipper = client.clone();
+        Self::connect_and_add_shard_with_identity(
+            endpoint,
+            handle,
+            expected_fp,
+            expected_tag_fp,
+            shard_id,
+            placement_generation,
+            num_shards,
+            Some(coordinator_id),
+            security,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn connect_and_add_shard_compatible_with_security(
+        endpoint: &str,
+        handle: Handle,
+        expected_fp: u64,
+        expected_tag_fp: u64,
+        shard_id: u32,
+        placement_generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+        security: &ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        Self::connect_and_add_shard_with_identity(
+            endpoint,
+            handle,
+            expected_fp,
+            expected_tag_fp,
+            shard_id,
+            placement_generation,
+            num_shards,
+            None,
+            security,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_and_add_shard_with_identity(
+        endpoint: &str,
+        handle: Handle,
+        expected_fp: u64,
+        expected_tag_fp: u64,
+        shard_id: u32,
+        placement_generation: crate::ownership::PlacementGeneration,
+        num_shards: u32,
+        coordinator_id: Option<u64>,
+        security: &ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        // As in AdoptDict, retain the claim marker only on this handshake
+        // client. The returned serving client carries the owner id but cannot
+        // claim a freshly restarted process.
+        let client = connect_channel(endpoint, &handle, security, coordinator_id, false)?;
+        let claim_client = connect_channel(
+            endpoint,
+            &handle,
+            security,
+            coordinator_id,
+            coordinator_id.is_some(),
+        )?;
+        let mut shipper = claim_client.clone();
         // No dict bytes — just NAME the slot and attest the node's fingerprints (ADR-093 Stage 2).
         let req = proto::AddShardRequest {
             shard_id,
@@ -368,33 +730,46 @@ impl RemoteShard {
             placement_generation: placement_generation.0,
             num_shards,
         };
-        let (added, added_tag, added_replicate_all, added_generation, added_num_shards) =
-            match block_on_in_context(&handle, async move { shipper.add_shard(req).await }) {
-                Ok(reply) => {
-                    let r = reply.into_inner();
-                    (
-                        r.dict_fingerprint,
-                        r.tag_dict_fingerprint,
-                        r.broad_replicate_all,
-                        r.placement_generation,
-                        r.num_shards,
-                    )
+        let (
+            added,
+            added_tag,
+            added_replicate_all,
+            added_generation,
+            added_num_shards,
+            added_coordinator,
+        ) = match block_on_in_context(&handle, async move { shipper.add_shard(req).await }) {
+            Ok(reply) => {
+                let r = reply.into_inner();
+                (
+                    r.dict_fingerprint,
+                    r.tag_dict_fingerprint,
+                    r.broad_replicate_all,
+                    r.placement_generation,
+                    r.num_shards,
+                    r.coordinator_id,
+                )
+            }
+            // The node's adopted dict differs from ours (or it adopted none). Read its actual
+            // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
+            Err(status) if status.code() == tonic::Code::FailedPrecondition => {
+                if let Some(actual) = probe_actual_dict_fingerprint(
+                    endpoint,
+                    &handle,
+                    security,
+                    &client,
+                    coordinator_id,
+                ) {
+                    if actual != expected_fp {
+                        return Err(ShardError::DictMismatch {
+                            expected: expected_fp,
+                            actual,
+                        });
+                    }
                 }
-                // The node's adopted dict differs from ours (or it adopted none). Read its actual
-                // fingerprint so the mismatch is truthful, then fail loud (never a silent drop).
-                Err(status) if status.code() == tonic::Code::FailedPrecondition => {
-                    let mut probe = client.clone();
-                    let actual = block_on_in_context(&handle, async move {
-                        probe.dict_fingerprint(proto::Empty {}).await
-                    })
-                    .map_or(0, |r| r.into_inner().fingerprint);
-                    return Err(ShardError::DictMismatch {
-                        expected: expected_fp,
-                        actual,
-                    });
-                }
-                Err(status) => return Err(ShardError::Remote(format!("add_shard: {status}"))),
-            };
+                return Err(ShardError::Remote(format!("add_shard: {status}")));
+            }
+            Err(status) => return Err(ShardError::Remote(format!("add_shard: {status}"))),
+        };
         // The node echoes the fingerprints it serves — this equality IS the dict-identity handshake.
         if added != expected_fp {
             return Err(ShardError::DictMismatch {
@@ -421,8 +796,26 @@ impl RemoteShard {
                 },
             ));
         }
+        match coordinator_id {
+            Some(expected) if added_coordinator != expected => {
+                return Err(coordinator_attestation_error(
+                    endpoint,
+                    expected,
+                    added_coordinator,
+                ))
+            }
+            None if added_coordinator != 0 => {
+                return Err(ShardError::Remote(format!(
+                    "shard {endpoint} unexpectedly attested coordinator {added_coordinator} \
+                     to an unleased compatibility handshake"
+                )))
+            }
+            _ => {}
+        }
         Ok(RemoteShard {
             client,
+            claim_client: coordinator_id.map(|_| claim_client),
+            coordinator_id,
             handle,
             endpoint: endpoint.to_string(),
             dict_fp: expected_fp,
@@ -456,6 +849,67 @@ impl RemoteShard {
         self
     }
 
+    /// Reclaim this coordinator's lease after the shard process restarted.
+    /// `DictFingerprint` is a claim-capable, read-only handshake: it can only
+    /// succeed after the node restored/adopted its node space, and it never
+    /// creates an empty shard slot.
+    fn reclaim_coordinator_lease(&self, deadline: Option<Instant>) -> Result<(), ShardError> {
+        let (Some(expected_coordinator), Some(claim_client)) =
+            (self.coordinator_id, self.claim_client.as_ref())
+        else {
+            return Err(ShardError::Remote(
+                "remote shard has no coordinator claim capability".into(),
+            ));
+        };
+        let timeout = match deadline {
+            Some(deadline) => deadline
+                .checked_duration_since(Instant::now())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or(ShardError::DeadlineExceeded)?
+                .min(self.transport.write_timeout),
+            None => self.transport.write_timeout,
+        };
+        let mut claimant = claim_client.clone();
+        let mut request = tonic::Request::new(proto::Empty {});
+        request.set_timeout(timeout);
+        let reply = block_on_timeout_in_context(&self.handle, timeout, async move {
+            claimant.dict_fingerprint(request).await
+        })
+        .map_err(|_| {
+            if deadline.is_some() {
+                ShardError::DeadlineExceeded
+            } else {
+                ShardError::Remote("coordinator lease recovery timed out".into())
+            }
+        })?
+        .map_err(|status| ShardError::Remote(format!("coordinator lease recovery: {status}")))?
+        .into_inner();
+
+        if reply.fingerprint != self.dict_fp {
+            return Err(ShardError::DictMismatch {
+                expected: self.dict_fp,
+                actual: reply.fingerprint,
+            });
+        }
+        if reply.tag_dict_fingerprint != self.tag_dict_fp
+            || !reply.broad_replicate_all
+            || reply.placement_generation != self.placement_generation.get()
+            || reply.num_shards != self.num_shards
+        {
+            return Err(ShardError::Remote(
+                "coordinator lease recovery attested a divergent shard configuration".into(),
+            ));
+        }
+        if reply.coordinator_id != expected_coordinator {
+            return Err(coordinator_attestation_error(
+                &self.endpoint,
+                expected_coordinator,
+                reply.coordinator_id,
+            ));
+        }
+        Ok(())
+    }
+
     /// The single instrumented RPC seam (ADR-085): drive `mk`'s future with a per-call
     /// deadline (unary reads/writes) and bounded fail-loud retry of IDEMPOTENT reads on a
     /// transient error, recording the outcome + latency. `mk` is a FACTORY — a tonic call
@@ -469,7 +923,7 @@ impl RemoteShard {
         mk: MkFut,
     ) -> Result<R, ShardError>
     where
-        MkFut: Fn() -> Fut + Send,
+        MkFut: Fn() -> Fut + Send + Sync,
         Fut: Future<Output = Result<R, tonic::Status>> + Send,
         R: Send,
     {
@@ -487,8 +941,25 @@ impl RemoteShard {
             CallKind::Write | CallKind::Unbounded => 0,
         };
         let started = Instant::now();
-        let (result, attempts, timed_out) =
-            self.block_on(run_with_retry(mk, deadline, max_retries));
+        let (mut result, mut attempts, mut timed_out) =
+            self.block_on(run_with_retry(&mk, deadline, max_retries));
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(no_live_coordinator_lease_status)
+            && self.coordinator_id.is_some()
+        {
+            if let Err(error) = self.reclaim_coordinator_lease(None) {
+                self.metrics
+                    .record(method, RpcOutcome::Error, started.elapsed(), attempts);
+                return Err(error);
+            }
+            let (retried, retry_attempts, retry_timed_out) =
+                self.block_on(run_with_retry(&mk, deadline, max_retries));
+            result = retried;
+            attempts = attempts.saturating_add(retry_attempts).saturating_add(1);
+            timed_out = retry_timed_out;
+        }
         let latency = started.elapsed();
         let outcome = if result.is_ok() {
             RpcOutcome::Ok
@@ -522,16 +993,41 @@ impl RemoteShard {
         mk: MkFut,
     ) -> Result<R, ShardError>
     where
-        MkFut: Fn(Duration) -> Fut + Send,
+        MkFut: Fn(Duration) -> Fut + Send + Sync,
         Fut: Future<Output = Result<R, tonic::Status>> + Send,
         R: Send,
     {
         let started = Instant::now();
-        let (result, attempts, timed_out) = self.block_on(run_with_retry_until(
-            mk,
+        let (mut result, mut attempts, mut timed_out) = self.block_on(run_with_retry_until(
+            &mk,
             deadline,
             self.transport.read_retries,
         ));
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(no_live_coordinator_lease_status)
+            && self.coordinator_id.is_some()
+        {
+            if let Err(error) = self.reclaim_coordinator_lease(Some(deadline)) {
+                let outcome = if matches!(&error, ShardError::DeadlineExceeded) {
+                    RpcOutcome::Timeout
+                } else {
+                    RpcOutcome::Error
+                };
+                self.metrics
+                    .record(method, outcome, started.elapsed(), attempts);
+                return Err(error);
+            }
+            let (retried, retry_attempts, retry_timed_out) = self.block_on(run_with_retry_until(
+                &mk,
+                deadline,
+                self.transport.read_retries,
+            ));
+            result = retried;
+            attempts = attempts.saturating_add(retry_attempts).saturating_add(1);
+            timed_out = retry_timed_out;
+        }
         // tonic can surface a client-side `Request::set_timeout` expiry as
         // CANCELLED/"Timeout expired" rather than DEADLINE_EXCEEDED. It is still
         // the same request deadline and must retain the typed cancellation path.
@@ -736,6 +1232,13 @@ fn grpc_deadline_status(status: &tonic::Status) -> bool {
         || (status.code() == tonic::Code::Cancelled && status.message().contains("Timeout expired"))
 }
 
+fn no_live_coordinator_lease_status(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::FailedPrecondition
+        && status
+            .message()
+            .contains("shard node has no live coordinator lease")
+}
+
 /// Drive `fut` on `handle` from a SYNCHRONOUS caller, dispatching on the caller's tokio
 /// context so the bridge never panics with the nested-runtime error (ADR-047):
 /// - **off any runtime** (a rayon fan-out worker, the in-process build path, a plain thread):
@@ -766,6 +1269,26 @@ where
             }),
         },
     }
+}
+
+/// Construct AND drive a Tokio timeout inside `handle`'s runtime context.
+///
+/// `tokio::time::timeout` creates its timer eagerly, so constructing it before
+/// [`block_on_in_context`] enters the runtime panics on the plain/Rayon worker
+/// threads that normally call the synchronous [`Shard`] seam.
+fn block_on_timeout_in_context<F>(
+    handle: &Handle,
+    duration: Duration,
+    fut: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: Future + Send,
+    F::Output: Send,
+{
+    block_on_in_context(
+        handle,
+        async move { tokio::time::timeout(duration, fut).await },
+    )
 }
 
 /// Legacy transport error mapping (the pre-ADR-110 behavior): keep the typed
@@ -987,6 +1510,14 @@ fn backoff_delay(n: u32) -> Duration {
     Duration::from_millis((50u64 << shift).min(1000))
 }
 
+fn coordinator_attestation_error(endpoint: &str, expected: u64, actual: u64) -> ShardError {
+    ShardError::Remote(format!(
+        "shard at {endpoint} did not attest the exclusive remote-coordinator lease \
+         (expected {expected}, received {actual}; zero identifies a pre-lease server). \
+         Exact remote delivery requires every shard node to enforce one coordinator."
+    ))
+}
+
 /// The connect-time refusal when a shard server does not attest the ADR-080 replicate-to-all
 /// broad layout (`broad_replicate_all` false — a pre-ADR-080 server, where broad lived only on
 /// shard 0). This coordinator routes broad on a per-title broad-eval shard assuming EVERY shard
@@ -1132,6 +1663,244 @@ impl Shard for RemoteShard {
         }
         let stats = reply.stats.map(proto::stats_to_engine).unwrap_or_default();
         Ok((reply.ids.into_iter().zip(reply.scores).collect(), stats))
+    }
+
+    fn percolate_all_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: Option<&crate::rank::CompiledRankProgram>,
+        chunk_size: usize,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<Instant>,
+        sink: &mut dyn crate::delivery::ChunkSink,
+    ) -> Result<crate::delivery::ExhaustiveMatchResult, ShardError> {
+        self.validate_ownership(current_position, context.generation(), context.num_shards())?;
+        if chunk_size == 0 || chunk_size > crate::delivery::MAX_MATCH_CHUNK_SIZE {
+            return Err(ShardError::Config(format!(
+                "exhaustive chunk size {chunk_size} is outside 1..={}",
+                crate::delivery::MAX_MATCH_CHUNK_SIZE
+            )));
+        }
+        let absolute = self.bounded_deadline(deadline)?;
+        let base = proto::PercolateAllRequest {
+            title: title.to_string(),
+            include_broad,
+            filter: proto::tag_predicate_to_proto(pred),
+            rank: program.map(proto::rank_program_to_proto),
+            chunk_size: u32::try_from(chunk_size).unwrap_or(u32::MAX),
+            remaining_micros: 0,
+            shard_id: self.shard_id,
+            ownership: Some(proto::ownership_to_proto(context)),
+        };
+        let expected_scores = program.is_some();
+        let generation = context.generation().get();
+        let num_shards = context.num_shards();
+        let started = Instant::now();
+
+        // Drive one streaming attempt. A lease-rejected call is known not to
+        // have reached the handler, so it may be reclaimed and reissued before
+        // the first chunk. No transport/stream failure is retried here: that
+        // would splice attempts after provisional delivery.
+        let result = (|| {
+            const CANCEL_POLL: Duration = Duration::from_millis(10);
+            let mut reclaimed = false;
+            let response = loop {
+                sink.check_cancelled()
+                    .map_err(crate::delivery::ExhaustiveMatchError::Sink)
+                    .map_err(ShardError::from)?;
+                let remaining = absolute
+                    .checked_duration_since(Instant::now())
+                    .filter(|remaining| !remaining.is_zero())
+                    .ok_or(ShardError::DeadlineExceeded)?;
+                let mut body = base.clone();
+                body.remaining_micros = remaining_micros(remaining);
+                let mut request = tonic::Request::new(body);
+                request.set_timeout(remaining);
+                let mut client = self.client.clone();
+                let mut response_call = Box::pin(client.percolate_all(request));
+                let response = loop {
+                    sink.check_cancelled()
+                        .map_err(crate::delivery::ExhaustiveMatchError::Sink)
+                        .map_err(ShardError::from)?;
+                    let remaining = absolute
+                        .checked_duration_since(Instant::now())
+                        .filter(|remaining| !remaining.is_zero())
+                        .ok_or(ShardError::DeadlineExceeded)?;
+                    match block_on_timeout_in_context(
+                        &self.handle,
+                        remaining.min(CANCEL_POLL),
+                        response_call.as_mut(),
+                    ) {
+                        Err(_) if Instant::now() >= absolute => {
+                            return Err(ShardError::DeadlineExceeded);
+                        }
+                        Err(_) => {}
+                        Ok(response) => break response,
+                    }
+                };
+                if response
+                    .as_ref()
+                    .err()
+                    .is_some_and(no_live_coordinator_lease_status)
+                    && self.coordinator_id.is_some()
+                    && !reclaimed
+                {
+                    self.reclaim_coordinator_lease(Some(absolute))?;
+                    reclaimed = true;
+                    continue;
+                }
+                break response;
+            };
+            let mut stream = match response {
+                Err(status) if grpc_deadline_status(&status) => {
+                    return Err(ShardError::DeadlineExceeded);
+                }
+                Err(status) => return Err(ranked_rpc_err(&status)),
+                Ok(response) => response.into_inner(),
+            };
+
+            let mut next_sequence = 0u64;
+            let mut exact_total = 0u64;
+            let mut checksum = crate::delivery::DeliveryChecksum::default();
+            let mut terminal: Option<crate::delivery::ExhaustiveMatchResult> = None;
+            loop {
+                let mut next_call = Box::pin(stream.message());
+                let next = loop {
+                    sink.check_cancelled()
+                        .map_err(crate::delivery::ExhaustiveMatchError::Sink)
+                        .map_err(ShardError::from)?;
+                    let remaining = absolute
+                        .checked_duration_since(Instant::now())
+                        .filter(|remaining| !remaining.is_zero())
+                        .ok_or(ShardError::DeadlineExceeded)?;
+                    match block_on_timeout_in_context(
+                        &self.handle,
+                        remaining.min(CANCEL_POLL),
+                        next_call.as_mut(),
+                    ) {
+                        Err(_) if Instant::now() >= absolute => {
+                            return Err(ShardError::DeadlineExceeded);
+                        }
+                        Err(_) => {}
+                        Ok(next) => break next,
+                    }
+                };
+                let frame = match next {
+                    Err(status) if grpc_deadline_status(&status) => {
+                        return Err(ShardError::DeadlineExceeded);
+                    }
+                    Err(status) => return Err(ranked_rpc_err(&status)),
+                    Ok(frame) => frame,
+                };
+                let Some(frame) = frame else {
+                    break;
+                };
+                if terminal.is_some() {
+                    return Err(ShardError::Protocol(
+                        "exhaustive stream returned a frame after its summary".into(),
+                    ));
+                }
+                match frame.frame {
+                    Some(proto::percolate_all_frame::Frame::Chunk(chunk)) => {
+                        if chunk.sequence != next_sequence {
+                            return Err(ShardError::Protocol(format!(
+                                "exhaustive chunk sequence {} arrived where {} was required",
+                                chunk.sequence, next_sequence
+                            )));
+                        }
+                        if chunk.matches.is_empty() || chunk.matches.len() > chunk_size {
+                            return Err(ShardError::Protocol(format!(
+                                "exhaustive chunk contains {} members; required 1..={chunk_size}",
+                                chunk.matches.len()
+                            )));
+                        }
+                        let mut members = Vec::with_capacity(chunk.matches.len());
+                        for hit in chunk.matches {
+                            if hit.has_score != expected_scores
+                                || (!hit.has_score && hit.score != 0)
+                            {
+                                return Err(ShardError::Protocol(
+                                    "exhaustive member score presence disagrees with the request"
+                                        .into(),
+                                ));
+                            }
+                            members.push(crate::delivery::ExhaustiveMatch {
+                                logical_id: hit.logical_id,
+                                score: hit.has_score.then_some(hit.score),
+                            });
+                        }
+                        let forwarded = crate::delivery::MatchChunk {
+                            sequence: chunk.sequence,
+                            matches: members,
+                        };
+                        sink.send_chunk(&forwarded)
+                            .map_err(crate::delivery::ExhaustiveMatchError::Sink)
+                            .map_err(ShardError::from)?;
+                        next_sequence = next_sequence.saturating_add(1);
+                        exact_total = exact_total
+                            .checked_add(forwarded.matches.len() as u64)
+                            .ok_or_else(|| {
+                                ShardError::Protocol("exhaustive total overflowed u64".into())
+                            })?;
+                        for member in forwarded.matches {
+                            checksum.observe(member);
+                        }
+                    }
+                    Some(proto::percolate_all_frame::Frame::Summary(summary)) => {
+                        if !summary.ownership_applied
+                            || summary.placement_generation != generation
+                            || summary.num_shards != num_shards
+                        {
+                            return Err(ShardError::OwnershipMismatch(
+                                crate::ownership::OwnershipError::PlacementDecisionMismatch,
+                            ));
+                        }
+                        if summary.chunk_count != next_sequence
+                            || summary.exact_total != exact_total
+                            || summary.checksum_xor != checksum.xor
+                            || summary.checksum_sum != checksum.sum
+                        {
+                            return Err(ShardError::Protocol(
+                                "exhaustive summary disagrees with delivered chunks".into(),
+                            ));
+                        }
+                        terminal = Some(crate::delivery::ExhaustiveMatchResult {
+                            summary: crate::delivery::ExhaustiveSummary {
+                                exact_total,
+                                chunk_count: next_sequence,
+                                checksum,
+                            },
+                            stats: summary
+                                .stats
+                                .map(proto::stats_to_engine)
+                                .unwrap_or_default(),
+                        });
+                    }
+                    None => {
+                        return Err(ShardError::Protocol(
+                            "exhaustive stream returned an empty frame".into(),
+                        ));
+                    }
+                }
+            }
+            terminal.ok_or_else(|| {
+                ShardError::Protocol(
+                    "exhaustive stream ended without its completeness summary".into(),
+                )
+            })
+        })();
+
+        let outcome = match &result {
+            Ok(_) => RpcOutcome::Ok,
+            Err(ShardError::DeadlineExceeded) => RpcOutcome::Timeout,
+            Err(_) => RpcOutcome::Error,
+        };
+        self.metrics
+            .record(RpcMethod::PercolateAll, outcome, started.elapsed(), 0);
+        result
     }
 
     /// ADR-113: wire PIT is a named later increment — the coordinator refuses
@@ -1895,6 +2664,18 @@ mod tests {
 
     fn unavailable() -> tonic::Status {
         tonic::Status::unavailable("transient")
+    }
+
+    #[test]
+    fn timeout_bridge_constructs_its_timer_inside_the_runtime() {
+        // This test runs on a plain libtest worker, the same non-Tokio context
+        // as the exhaustive Rayon pool. Constructing `tokio::time::timeout`
+        // before entering `runtime.handle()` panics immediately.
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let result =
+            block_on_timeout_in_context(runtime.handle(), Duration::from_secs(1), async { 42u32 })
+                .expect("immediate future completes before timeout");
+        assert_eq!(result, 42);
     }
 
     #[tokio::test]

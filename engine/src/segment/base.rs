@@ -118,6 +118,26 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.placement(local_id),
         }
     }
+
+    pub(in crate::segment) fn class_of(&self, local_id: u32) -> Option<crate::compile::CostClass> {
+        match self {
+            BaseSegment::Memory(s) => s.class_of(local_id),
+            BaseSegment::Mmap(s) => s.class_of(local_id),
+        }
+    }
+
+    pub(in crate::segment) fn verify_local(
+        &self,
+        local_id: u32,
+        view: &crate::exact::TitleView<'_>,
+        pred: &crate::exact::TagPredicate,
+    ) -> bool {
+        match self {
+            BaseSegment::Memory(s) => s.verify_local(local_id, view, pred),
+            BaseSegment::Mmap(s) => s.verify(local_id, view, pred),
+        }
+    }
+
     // Compatibility dispatch wrapper — signature stays byte-for-byte stable.
     #[allow(clippy::too_many_arguments)]
     pub fn match_into(

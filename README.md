@@ -151,6 +151,10 @@ curl -X PUT localhost:9200/_doc/2 -H 'Content-Type: application/json' \
   -d '{"query":"dell laptop 16gb","rank_fields":{"priority":50}}'
 curl -X POST localhost:9200/v2/_search -H 'Content-Type: application/json' \
   -d '{"document":{"title":"Dell XPS 15 Laptop 16GB RAM"},"size":10}'
+
+# Exact exhaustive delivery is a bounded background stream, not one giant response:
+curl -X POST localhost:9200/_percolate/jobs -H 'Content-Type: application/json' \
+  -d '{"event_id":"listing-123/version-1","document":{"title":"Dell XPS 15 Laptop 16GB RAM"},"result_mode":"all","sink":{"type":"ndjson_stream"}}'
 ```
 
 Full endpoint and flag reference: [`docs/reference/api.md`](docs/reference/api.md). Query language:

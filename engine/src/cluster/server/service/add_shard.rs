@@ -26,10 +26,11 @@ use super::super::{ServerState, ShardServer, ShardSlot};
 ///   reconnect after a node restart self-restored the slot);
 /// - otherwise build the slot's shard (in-memory, or durable under `data_dir/shard_<id>/`) over the
 ///   node-shared space and install it. NO dict deserialize, NO bytes, NO node-space re-persist.
-pub(super) fn add_shard(
+pub(super) async fn add_shard(
     server: &ShardServer,
     request: Request<proto::AddShardRequest>,
 ) -> Result<Response<proto::AddShardReply>, Status> {
+    let coordinator_id = crate::cluster::security::request_coordinator_id(&request)?;
     let req = request.into_inner();
     let shard_id = req.shard_id;
 
@@ -58,6 +59,37 @@ pub(super) fn add_shard(
         )));
     }
 
+    // A co-located slot must belong to the coordinator that adopted the
+    // node. If two first handshakes raced while the lease was unowned, this
+    // atomic claim admits exactly one before any new slot is installed.
+    crate::cluster::security::claim_coordinator(&server.coordinator_lease, coordinator_id).await?;
+    let _install = server.coordinator_lease.lock_install().await;
+
+    // Re-read after ownership and install serialization. A same-id retry may
+    // have installed/replaced the node space while this request was waiting;
+    // validating only the earlier snapshot would let it build against stale
+    // `Arc`s and overwrite a live slot.
+    let node = server.node_dict.load_full().ok_or_else(|| {
+        Status::failed_precondition(
+            "AddShard requires a prior AdoptDict on this node (the node has adopted no dict)",
+        )
+    })?;
+    let fp = node.dict.fingerprint();
+    let tag_fp = node.tag_dict.fingerprint();
+    if fp != req.dict_fingerprint
+        || tag_fp != req.tag_dict_fingerprint
+        || node.placement_generation.0 != req.placement_generation
+        || node.num_shards != req.num_shards
+        || shard_id >= req.num_shards
+    {
+        return Err(Status::failed_precondition(format!(
+            "AddShard fingerprint mismatch: node adopted dict {fp:#018x}/tag {tag_fp:#018x} but the \
+             request attests {:#018x}/{:#018x} (the coordinator's frozen space diverges from this \
+             node's)",
+            req.dict_fingerprint, req.tag_dict_fingerprint
+        )));
+    }
+
     // Idempotent no-op: this slot already serves exactly this space (e.g. a restart self-restored it,
     // then the coordinator reconnected).
     if let Ok(slot) = server.slot(shard_id) {
@@ -68,6 +100,7 @@ pub(super) fn add_shard(
                     tag_fp,
                     node.placement_generation,
                     node.num_shards,
+                    server.coordinator_lease.owner(),
                 ));
             }
         }
@@ -90,6 +123,7 @@ pub(super) fn add_shard(
         tag_fp,
         node.placement_generation,
         node.num_shards,
+        server.coordinator_lease.owner(),
     ))
 }
 
@@ -100,6 +134,7 @@ fn add_shard_reply(
     tag_fp: u64,
     generation: crate::ownership::PlacementGeneration,
     num_shards: u32,
+    coordinator_id: u64,
 ) -> Response<proto::AddShardReply> {
     Response::new(proto::AddShardReply {
         dict_fingerprint: fp,
@@ -107,5 +142,6 @@ fn add_shard_reply(
         broad_replicate_all: true,
         placement_generation: generation.0,
         num_shards,
+        coordinator_id,
     })
 }

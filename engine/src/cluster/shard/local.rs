@@ -678,6 +678,42 @@ impl Shard for LocalShard {
         )
     }
 
+    fn percolate_all_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: Option<&crate::rank::CompiledRankProgram>,
+        chunk_size: usize,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<Instant>,
+        sink: &mut dyn crate::delivery::ChunkSink,
+    ) -> Result<crate::delivery::ExhaustiveMatchResult, ShardError> {
+        context.validate()?;
+        context.require_routed(current_position)?;
+        let query_scope = if include_broad {
+            crate::result::QueryScope::WithBroad
+        } else {
+            crate::result::QueryScope::Standard
+        };
+        self.snapshot()
+            .try_match_title_chunks_owned(
+                title,
+                crate::delivery::ExhaustiveOptions {
+                    query_scope,
+                    chunk_size,
+                },
+                program,
+                pred,
+                &mut MatchScratch::new(),
+                deadline,
+                sink,
+                crate::ownership::UniqueOwner::new(context, current_position),
+            )
+            .map_err(ShardError::from)
+    }
+
     fn open_pit(&self, pit: u64) -> Result<(), ShardError> {
         let snapshot = self.snapshot();
         self.pits

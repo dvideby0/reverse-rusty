@@ -54,6 +54,14 @@ impl ClusterEngine {
         self
     }
 
+    /// Retain the optional identity already installed in every serving
+    /// RemoteShard. Later recovery/handoff/GC connections preserve the same
+    /// leased (`Some`) or compatibility (`None`) mode.
+    fn with_coordinator_id(mut self, coordinator_id: Option<u64>) -> Self {
+        self.coordinator_id = coordinator_id;
+        self
+    }
+
     /// Install the SHARED transport-metrics collector (ADR-085) the gRPC builders also handed
     /// to each serving `RemoteShard`, so remote per-RPC stats aggregate on the engine (read via
     /// [`Self::transport_metrics`]). Replaces the empty one `from_parts` created. Only the gRPC
@@ -117,6 +125,77 @@ impl ClusterEngine {
         handle: &tokio::runtime::Handle,
         security: ClientSecurity,
     ) -> Result<Self, ShardError> {
+        Self::connect_remote_with_security_mode(
+            norm, dict, tag_dict, config, endpoints, handle, security, None,
+        )
+    }
+
+    /// Assemble a remote cluster with an exclusive renewable coordinator
+    /// lease, required before the exact exhaustive API can attest completion.
+    /// `coordinator_id` must be generated once and reused for all retries of
+    /// this logical coordinator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_remote_exclusive(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: &ClusterConfig,
+        endpoints: &[String],
+        handle: &tokio::runtime::Handle,
+        coordinator_id: u64,
+    ) -> Result<Self, ShardError> {
+        Self::connect_remote_exclusive_with_security(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            endpoints,
+            handle,
+            coordinator_id,
+            ClientSecurity::default(),
+        )
+    }
+
+    /// Secured-mesh variant of [`Self::connect_remote_exclusive`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_remote_exclusive_with_security(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: &ClusterConfig,
+        endpoints: &[String],
+        handle: &tokio::runtime::Handle,
+        coordinator_id: u64,
+        security: ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        if coordinator_id == 0 {
+            return Err(ShardError::Config(
+                "exclusive remote coordinator id must be non-zero".into(),
+            ));
+        }
+        Self::connect_remote_with_security_mode(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            endpoints,
+            handle,
+            security,
+            Some(coordinator_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_remote_with_security_mode(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: &ClusterConfig,
+        endpoints: &[String],
+        handle: &tokio::runtime::Handle,
+        security: ClientSecurity,
+        coordinator_id: Option<u64>,
+    ) -> Result<Self, ShardError> {
         if endpoints.len() != config.num_shards {
             return Err(ShardError::Config(format!(
                 "connect_remote needs exactly one endpoint per shard: got {} endpoints \
@@ -168,29 +247,63 @@ impl ClusterEngine {
         for (position, ep) in endpoints.iter().enumerate() {
             let shard_id = position as u32;
             let remote = if adopted.insert(ep.as_str()) {
-                crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
-                    ep,
-                    handle.clone(),
-                    dict_bytes.clone(),
-                    expected,
-                    tag_dict_bytes.clone(),
-                    expected_tag,
-                    shard_id,
-                    crate::ownership::PlacementGeneration::INITIAL,
-                    config.num_shards as u32,
-                    &security,
-                )?
+                match coordinator_id {
+                    Some(id) => {
+                        crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                            ep,
+                            handle.clone(),
+                            dict_bytes.clone(),
+                            expected,
+                            tag_dict_bytes.clone(),
+                            expected_tag,
+                            shard_id,
+                            crate::ownership::PlacementGeneration::INITIAL,
+                            config.num_shards as u32,
+                            id,
+                            &security,
+                        )
+                    }
+                    None => crate::cluster::remote::RemoteShard::
+                        connect_and_adopt_compatible_with_security(
+                            ep,
+                            handle.clone(),
+                            dict_bytes.clone(),
+                            expected,
+                            tag_dict_bytes.clone(),
+                            expected_tag,
+                            shard_id,
+                            crate::ownership::PlacementGeneration::INITIAL,
+                            config.num_shards as u32,
+                            &security,
+                        ),
+                }?
             } else {
-                crate::cluster::remote::RemoteShard::connect_and_add_shard_with_security(
-                    ep,
-                    handle.clone(),
-                    expected,
-                    expected_tag,
-                    shard_id,
-                    crate::ownership::PlacementGeneration::INITIAL,
-                    config.num_shards as u32,
-                    &security,
-                )?
+                match coordinator_id {
+                    Some(id) => {
+                        crate::cluster::remote::RemoteShard::connect_and_add_shard_with_security(
+                            ep,
+                            handle.clone(),
+                            expected,
+                            expected_tag,
+                            shard_id,
+                            crate::ownership::PlacementGeneration::INITIAL,
+                            config.num_shards as u32,
+                            id,
+                            &security,
+                        )
+                    }
+                    None => crate::cluster::remote::RemoteShard::
+                        connect_and_add_shard_compatible_with_security(
+                            ep,
+                            handle.clone(),
+                            expected,
+                            expected_tag,
+                            shard_id,
+                            crate::ownership::PlacementGeneration::INITIAL,
+                            config.num_shards as u32,
+                            &security,
+                        ),
+                }?
             }
             .with_metrics(Arc::clone(&metrics));
             let (boxed, h) = wrap_handoff(Box::new(remote), 0);
@@ -217,6 +330,7 @@ impl ClusterEngine {
         .with_handoff_caps(config.handoff_drain_passes, config.handoff_final_drain_cap)
         .with_handle(handle.clone())
         .with_client_security(security)
+        .with_coordinator_id(coordinator_id)
         .with_transport_metrics(metrics))
     }
 
@@ -260,6 +374,74 @@ impl ClusterEngine {
         handle: &tokio::runtime::Handle,
         security: ClientSecurity,
     ) -> Result<Self, ShardError> {
+        Self::connect_replicated_with_security_mode(
+            norm, dict, tag_dict, config, groups, handle, security, None,
+        )
+    }
+
+    /// Replicated analogue of [`Self::connect_remote_exclusive`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_replicated_exclusive(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: &ClusterConfig,
+        groups: &[ShardGroup],
+        handle: &tokio::runtime::Handle,
+        coordinator_id: u64,
+    ) -> Result<Self, ShardError> {
+        Self::connect_replicated_exclusive_with_security(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            groups,
+            handle,
+            coordinator_id,
+            ClientSecurity::default(),
+        )
+    }
+
+    /// Secured-mesh variant of [`Self::connect_replicated_exclusive`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_replicated_exclusive_with_security(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: &ClusterConfig,
+        groups: &[ShardGroup],
+        handle: &tokio::runtime::Handle,
+        coordinator_id: u64,
+        security: ClientSecurity,
+    ) -> Result<Self, ShardError> {
+        if coordinator_id == 0 {
+            return Err(ShardError::Config(
+                "exclusive remote coordinator id must be non-zero".into(),
+            ));
+        }
+        Self::connect_replicated_with_security_mode(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            groups,
+            handle,
+            security,
+            Some(coordinator_id),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_replicated_with_security_mode(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: &ClusterConfig,
+        groups: &[ShardGroup],
+        handle: &tokio::runtime::Handle,
+        security: ClientSecurity,
+        coordinator_id: Option<u64>,
+    ) -> Result<Self, ShardError> {
         if groups.len() != config.num_shards {
             return Err(ShardError::Config(format!(
                 "connect_replicated needs one ShardGroup per shard: got {} for {} shards",
@@ -290,57 +472,125 @@ impl ClusterEngine {
             // A replica hosts the SAME global position (shard-id) as its primary (ADR-093).
             let shard_id = position as u32;
             let primary = if adopted.insert(g.primary.as_str()) {
-                crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
-                    &g.primary,
-                    handle.clone(),
-                    dict_bytes.clone(),
-                    expected,
-                    tag_dict_bytes.clone(),
-                    expected_tag,
-                    shard_id,
-                    crate::ownership::PlacementGeneration::INITIAL,
-                    config.num_shards as u32,
-                    &security,
-                )?
+                match coordinator_id {
+                    Some(id) => {
+                        crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                            &g.primary,
+                            handle.clone(),
+                            dict_bytes.clone(),
+                            expected,
+                            tag_dict_bytes.clone(),
+                            expected_tag,
+                            shard_id,
+                            crate::ownership::PlacementGeneration::INITIAL,
+                            config.num_shards as u32,
+                            id,
+                            &security,
+                        )
+                    }
+                    None => crate::cluster::remote::RemoteShard::
+                        connect_and_adopt_compatible_with_security(
+                            &g.primary,
+                            handle.clone(),
+                            dict_bytes.clone(),
+                            expected,
+                            tag_dict_bytes.clone(),
+                            expected_tag,
+                            shard_id,
+                            crate::ownership::PlacementGeneration::INITIAL,
+                            config.num_shards as u32,
+                            &security,
+                        ),
+                }?
             } else {
-                crate::cluster::remote::RemoteShard::connect_and_add_shard_with_security(
-                    &g.primary,
-                    handle.clone(),
-                    expected,
-                    expected_tag,
-                    shard_id,
-                    crate::ownership::PlacementGeneration::INITIAL,
-                    config.num_shards as u32,
-                    &security,
-                )?
+                match coordinator_id {
+                    Some(id) => {
+                        crate::cluster::remote::RemoteShard::connect_and_add_shard_with_security(
+                            &g.primary,
+                            handle.clone(),
+                            expected,
+                            expected_tag,
+                            shard_id,
+                            crate::ownership::PlacementGeneration::INITIAL,
+                            config.num_shards as u32,
+                            id,
+                            &security,
+                        )
+                    }
+                    None => crate::cluster::remote::RemoteShard::
+                        connect_and_add_shard_compatible_with_security(
+                            &g.primary,
+                            handle.clone(),
+                            expected,
+                            expected_tag,
+                            shard_id,
+                            crate::ownership::PlacementGeneration::INITIAL,
+                            config.num_shards as u32,
+                            &security,
+                        ),
+                }?
             }
             .with_metrics(Arc::clone(&metrics));
             let mut replicas: Vec<Box<dyn Shard>> = Vec::with_capacity(g.replicas.len());
             for ep in &g.replicas {
                 let r = if adopted.insert(ep.as_str()) {
-                    crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
-                        ep,
-                        handle.clone(),
-                        dict_bytes.clone(),
-                        expected,
-                        tag_dict_bytes.clone(),
-                        expected_tag,
-                        shard_id,
-                        crate::ownership::PlacementGeneration::INITIAL,
-                        config.num_shards as u32,
-                        &security,
-                    )?
+                    match coordinator_id {
+                        Some(id) => {
+                            crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+                                ep,
+                                handle.clone(),
+                                dict_bytes.clone(),
+                                expected,
+                                tag_dict_bytes.clone(),
+                                expected_tag,
+                                shard_id,
+                                crate::ownership::PlacementGeneration::INITIAL,
+                                config.num_shards as u32,
+                                id,
+                                &security,
+                            )
+                        }
+                        None => crate::cluster::remote::RemoteShard::
+                            connect_and_adopt_compatible_with_security(
+                                ep,
+                                handle.clone(),
+                                dict_bytes.clone(),
+                                expected,
+                                tag_dict_bytes.clone(),
+                                expected_tag,
+                                shard_id,
+                                crate::ownership::PlacementGeneration::INITIAL,
+                                config.num_shards as u32,
+                                &security,
+                            ),
+                    }?
                 } else {
-                    crate::cluster::remote::RemoteShard::connect_and_add_shard_with_security(
-                        ep,
-                        handle.clone(),
-                        expected,
-                        expected_tag,
-                        shard_id,
-                        crate::ownership::PlacementGeneration::INITIAL,
-                        config.num_shards as u32,
-                        &security,
-                    )?
+                    match coordinator_id {
+                        Some(id) => {
+                            crate::cluster::remote::RemoteShard::connect_and_add_shard_with_security(
+                                ep,
+                                handle.clone(),
+                                expected,
+                                expected_tag,
+                                shard_id,
+                                crate::ownership::PlacementGeneration::INITIAL,
+                                config.num_shards as u32,
+                                id,
+                                &security,
+                            )
+                        }
+                        None => crate::cluster::remote::RemoteShard::
+                            connect_and_add_shard_compatible_with_security(
+                                ep,
+                                handle.clone(),
+                                expected,
+                                expected_tag,
+                                shard_id,
+                                crate::ownership::PlacementGeneration::INITIAL,
+                                config.num_shards as u32,
+                                &security,
+                            ),
+                    }?
                 }
                 .with_metrics(Arc::clone(&metrics));
                 replicas.push(Box::new(r) as Box<dyn Shard>);
@@ -374,6 +624,7 @@ impl ClusterEngine {
         .with_handoff_caps(config.handoff_drain_passes, config.handoff_final_drain_cap)
         .with_handle(handle.clone())
         .with_client_security(security)
+        .with_coordinator_id(coordinator_id)
         .with_transport_metrics(metrics))
     }
 
@@ -404,12 +655,13 @@ impl ClusterEngine {
         // whole recovery; released below whether it converges or errors.
         // Recover the source's slot `shard_id` into the target's slot `shard_id` (ADR-093): a
         // relocation/replication keeps the SAME global position (e.g. position 1's primary hosts slot 1).
-        let source = crate::cluster::remote::RemoteShard::connect_with_security(
+        let source = crate::cluster::remote::RemoteShard::connect_for_coordinator_with_security(
             source_endpoint,
             handle.clone(),
             expected,
             expected_tag,
             shard_id,
+            self.coordinator_id,
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
@@ -419,7 +671,8 @@ impl ClusterEngine {
             let dict_bytes = crate::storage::serialize_dict(&self.dict);
             // Ship the dict + frozen tag space so the fresh node attaches segments against the right
             // feature + tag space (ADR-055).
-            let target = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+            let target = crate::cluster::remote::RemoteShard::
+                connect_and_adopt_for_coordinator_with_security(
                 target_endpoint,
                 handle.clone(),
                 dict_bytes,
@@ -429,6 +682,7 @@ impl ClusterEngine {
                 shard_id,
                 self.placement_generation(),
                 self.num_shards() as u32,
+                self.coordinator_id,
                 &self.client_security,
             )?
             .with_metrics(Arc::clone(&self.transport_metrics));
@@ -483,21 +737,23 @@ impl ClusterEngine {
         let expected = self.dict.fingerprint();
         let expected_tag = self.tag_dict.fingerprint();
         // Catch up the target's slot `shard_id` from the source's same slot (ADR-093).
-        let source = crate::cluster::remote::RemoteShard::connect_with_security(
+        let source = crate::cluster::remote::RemoteShard::connect_for_coordinator_with_security(
             source_endpoint,
             handle.clone(),
             expected,
             expected_tag,
             shard_id,
+            self.coordinator_id,
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
-        let target = crate::cluster::remote::RemoteShard::connect_with_security(
+        let target = crate::cluster::remote::RemoteShard::connect_for_coordinator_with_security(
             target_endpoint,
             handle.clone(),
             expected,
             expected_tag,
             shard_id,
+            self.coordinator_id,
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
@@ -587,13 +843,14 @@ impl ClusterEngine {
 
         // Connect to the source and pin its un-sealed tail for the WHOLE move, so the segment-copy
         // seal — or any concurrent seal — cannot trim away the tail we still need (ADR-040).
-        let source = crate::cluster::remote::RemoteShard::connect_with_security(
+        let source = crate::cluster::remote::RemoteShard::connect_for_coordinator_with_security(
             source_endpoint,
             handle.clone(),
             expected,
             expected_tag,
             // Fence/recover/lease the RIGHT slot: this handoff moves shard `position` (ADR-093).
             position as u32,
+            self.coordinator_id,
             &self.client_security,
         )?
         .with_metrics(Arc::clone(&self.transport_metrics));
@@ -603,7 +860,8 @@ impl ClusterEngine {
             // Ship the dict + frozen tag space + drive the target to pull the source's segments at
             // snapshot `P` (the source keeps serving + writing — no quiesce).
             let dict_bytes = crate::storage::serialize_dict(&self.dict);
-            let target = crate::cluster::remote::RemoteShard::connect_and_adopt_with_security(
+            let target = crate::cluster::remote::RemoteShard::
+                connect_and_adopt_for_coordinator_with_security(
                 target_endpoint,
                 handle.clone(),
                 dict_bytes,
@@ -613,6 +871,7 @@ impl ClusterEngine {
                 position as u32,
                 self.placement_generation(),
                 self.num_shards() as u32,
+                self.coordinator_id,
                 &self.client_security,
             )?
             .with_metrics(Arc::clone(&self.transport_metrics));

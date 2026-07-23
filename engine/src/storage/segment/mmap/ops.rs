@@ -420,6 +420,23 @@ impl MmapSegment {
         )
     }
 
+    pub(crate) fn class_of(&self, id: u32) -> Option<CostClass> {
+        if id as usize >= self.num_queries as usize {
+            return None;
+        }
+        // SAFETY: the bounds check above proves `id < num_queries`; `class_arr`
+        // is the validated `num_queries`-long class column owned by this mmap.
+        let class = unsafe { *self.class_arr.add(id as usize) };
+        match class {
+            0 => Some(CostClass::A),
+            1 => Some(CostClass::B),
+            2 => Some(CostClass::C),
+            3 => Some(CostClass::D),
+            4 => Some(CostClass::H),
+            _ => None,
+        }
+    }
+
     // ---- broad-lane batch evaluation surface (mmap twin of the in-memory
     // `Segment` accessors used by `segment::broad_batch`). Lets the columnar
     // broad evaluator drive mmap and in-memory segments through one body. ----
@@ -639,9 +656,15 @@ impl MmapSegment {
         let has_filter = self.filter_num_blocks > 0;
         // Retrieval uses the positive (superset) view; verify applies both (ADR-061).
         let feats = view.pos;
+        if collector.should_stop() {
+            return;
+        }
 
         // arity-1 signatures
         for &f in feats {
+            if collector.should_stop() {
+                return;
+            }
             let key = crate::util::sig_key(&[f]);
             stats.probes_attempted += 1;
             if has_filter && !self.may_contain(key) {
@@ -662,8 +685,14 @@ impl MmapSegment {
         }
         // arity-2 signatures
         for &h in feats {
+            if collector.should_stop() {
+                return;
+            }
             if crate::compile::is_hot(dict, h) {
                 for &o in feats {
+                    if collector.should_stop() {
+                        return;
+                    }
                     if o != h {
                         let (a, b) = if h < o { (h, o) } else { (o, h) };
                         let key = crate::util::sig_key(&[a, b]);
@@ -692,6 +721,9 @@ impl MmapSegment {
         // the segment holds no hot entries.
         if lanes.include_hot && self.has_hot_entries() {
             for &f in feats {
+                if collector.should_stop() {
+                    return;
+                }
                 let key = crate::util::sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if has_filter && !self.may_contain(key) {
@@ -714,6 +746,9 @@ impl MmapSegment {
         // broad lane
         if lanes.include_broad {
             for &f in feats {
+                if collector.should_stop() {
+                    return;
+                }
                 let key = crate::util::sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if has_filter && !self.may_contain(key) {
@@ -736,6 +771,9 @@ impl MmapSegment {
             // unconditionally (the accept knob gates ingest, never visibility);
             // with no class-D entries this is one filter miss. Mirrors
             // `Segment::match_into` exactly.
+            if collector.should_stop() {
+                return;
+            }
             let key = crate::util::universal_sig();
             stats.probes_attempted += 1;
             if has_filter && !self.may_contain(key) {
@@ -788,6 +826,9 @@ impl MmapSegment {
                 Lane::Main => {}
             }
             for &local in posting {
+                if collector.should_stop() {
+                    break;
+                }
                 if seen[local as usize] == epoch {
                     continue;
                 }
@@ -803,7 +844,7 @@ impl MmapSegment {
                 }
                 // Tag filter (ADR-049) — applied post-candidate inside verify.
                 if self.verify(local, view, pred) && emission.should_emit(self.placement(local)) {
-                    collector.on_match(self.logical(local));
+                    collector.on_match_at(self.logical(local), local);
                 }
             }
         }

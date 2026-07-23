@@ -118,7 +118,7 @@ pub(crate) fn requires_auth(method: &Method, path: &str, protect_reads: bool) ->
     // is configured — flagged as out-of-scope residue in ADR-113.
     !matches!(
         path,
-        "/_search" | "/v2/_search" | "/_mpercolate" | "/v2/_pit"
+        "/_search" | "/v2/_search" | "/_mpercolate" | "/v2/_pit" | "/_percolate/jobs"
     )
 }
 
@@ -226,6 +226,7 @@ mod tests {
             (Method::POST, "/_vocab/aliases/import"),
             (Method::POST, "/_vocab/aliases/learn_and_apply"),
             (Method::PUT, "/_settings"),
+            (Method::DELETE, "/_percolate/jobs/job-id"),
             // Default-deny: an unknown future endpoint is protected too.
             (Method::POST, "/_new_admin_thing"),
         ] {
@@ -244,6 +245,9 @@ mod tests {
             (Method::POST, "/_search"),
             (Method::POST, "/v2/_search"),
             (Method::POST, "/_mpercolate"),
+            (Method::POST, "/_percolate/jobs"),
+            (Method::GET, "/_percolate/jobs/job-id"),
+            (Method::GET, "/_percolate/jobs/job-id/stream"),
             // ADR-113: the PIT lifecycle rides with /v2/_search (both verbs).
             (Method::POST, "/v2/_pit"),
             (Method::DELETE, "/v2/_pit"),
@@ -345,15 +349,17 @@ mod tests {
             .num_threads(1)
             .build()
             .expect("pool");
+        let prom = PrometheusMetrics::new();
         Arc::new(AppState {
             engine: parking_lot::Mutex::new(eng),
             snapshot: arc_swap::ArcSwap::new(snap),
             pool,
             search_permits: None,
             ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
+            exhaustive_jobs: crate::jobs::ExhaustiveJobs::for_tests(prom.clone()),
             max_ranked_enrichment_bytes: crate::state::DEFAULT_MAX_RANKED_ENRICHMENT_BYTES,
             include_broad: false,
-            prom: PrometheusMetrics::new(),
+            prom,
             slow_query_threshold_ms: 0,
             auth,
             feedback: parking_lot::Mutex::new(reverse_rusty::vocab::AliasFeedback::default()),

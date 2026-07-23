@@ -100,6 +100,33 @@ impl Shard for ReplicatedShard {
         })
     }
 
+    fn percolate_all_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: Option<&crate::rank::CompiledRankProgram>,
+        chunk_size: usize,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+        sink: &mut dyn crate::delivery::ChunkSink,
+    ) -> Result<crate::delivery::ExhaustiveMatchResult, ShardError> {
+        self.read_stream(sink, |shard, attempt_sink| {
+            shard.percolate_all_owned(
+                title,
+                include_broad,
+                pred,
+                program,
+                chunk_size,
+                context,
+                current_position,
+                deadline,
+                attempt_sink,
+            )
+        })
+    }
+
     // ---- ADR-113 PIT: PRIMARY-ONLY, deliberately no read failover ----
     // A PIT is a per-engine pin: the primary's pinned snapshot does not exist
     // on a replica, so failing a pit read over would silently serve a

@@ -205,6 +205,22 @@ impl From<crate::rank::RankedMatchError> for ShardError {
     }
 }
 
+impl From<crate::delivery::ExhaustiveMatchError> for ShardError {
+    fn from(value: crate::delivery::ExhaustiveMatchError) -> Self {
+        match value {
+            crate::delivery::ExhaustiveMatchError::InvalidChunkSize { requested, max } => {
+                Self::Config(format!(
+                    "exhaustive chunk size {requested} is outside 1..={max}"
+                ))
+            }
+            crate::delivery::ExhaustiveMatchError::Cancelled => Self::DeadlineExceeded,
+            crate::delivery::ExhaustiveMatchError::Sink(error) => {
+                Self::Protocol(format!("exhaustive sink failed: {error}"))
+            }
+        }
+    }
+}
+
 /// One ownership-filtered, bounded shard result. `result_bytes` is the exact
 /// protobuf encoded size for remote replies and zero for in-process shards.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -375,6 +391,38 @@ pub(crate) trait Shard: Send + Sync {
         );
         Err(ShardError::Protocol(
             "bounded top-k is not implemented by this shard".into(),
+        ))
+    }
+
+    /// Ownership-aware exhaustive collection (ADR-114). The sink is called
+    /// synchronously with fixed-capacity provisional chunks; success is valid
+    /// only with the returned terminal summary.
+    #[allow(clippy::too_many_arguments)]
+    fn percolate_all_owned(
+        &self,
+        title: &str,
+        include_broad: bool,
+        pred: &TagPredicate,
+        program: Option<&crate::rank::CompiledRankProgram>,
+        chunk_size: usize,
+        context: &crate::ownership::OwnershipContext,
+        current_position: u32,
+        deadline: Option<std::time::Instant>,
+        sink: &mut dyn crate::delivery::ChunkSink,
+    ) -> Result<crate::delivery::ExhaustiveMatchResult, ShardError> {
+        let _ = (
+            title,
+            include_broad,
+            pred,
+            program,
+            chunk_size,
+            context,
+            current_position,
+            deadline,
+            sink,
+        );
+        Err(ShardError::Protocol(
+            "exhaustive streaming is not implemented by this shard".into(),
         ))
     }
     /// Pin this shard's CURRENT snapshot under the coordinator-allocated pit

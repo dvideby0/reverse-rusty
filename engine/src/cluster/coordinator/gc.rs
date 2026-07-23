@@ -163,12 +163,13 @@ impl ClusterEngine {
             // A node-level client (slot binding irrelevant for the LISTING; drops connect their
             // own per-slot client below). Connect refuses a divergent dict — exactly the identity
             // check the sweep wants before classifying anything on the node.
-            let lister = match RemoteShard::connect_with_security(
+            let lister = match RemoteShard::connect_for_coordinator_with_security(
                 &addr,
                 handle.clone(),
                 expected,
                 expected_tag,
                 0,
+                self.coordinator_id,
                 &self.client_security,
             ) {
                 Ok(c) => c.with_metrics(std::sync::Arc::clone(&self.transport_metrics)),
@@ -228,12 +229,13 @@ impl ClusterEngine {
         listing: &crate::cluster::proto::ShardListing,
         handle: &Handle,
     ) -> Result<(), ShardError> {
-        let client = RemoteShard::connect_with_security(
+        let client = RemoteShard::connect_for_coordinator_with_security(
             addr,
             handle.clone(),
             self.dict.fingerprint(),
             self.tag_dict.fingerprint(),
             listing.shard_id,
+            self.coordinator_id,
             &self.client_security,
         )?
         .with_metrics(std::sync::Arc::clone(&self.transport_metrics));

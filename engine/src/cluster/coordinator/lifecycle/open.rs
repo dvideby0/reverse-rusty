@@ -122,6 +122,10 @@ impl ClusterEngine {
             // `with_client_security` (ADR-071).
             #[cfg(feature = "distributed")]
             client_security: crate::cluster::security::ClientSecurity::default(),
+            // An exclusive remote builder replaces this before returning and
+            // stamps the same id on every RemoteShard it assembled.
+            #[cfg(feature = "distributed")]
+            coordinator_id: None,
             // Empty; reserved only by the data-moving reassign path (ADR-090/095). Default-path
             // moves never happen (no `execute_handoff` in-process), so it is never contended.
             #[cfg(feature = "distributed")]

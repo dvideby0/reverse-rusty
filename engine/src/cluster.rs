@@ -68,9 +68,9 @@ pub use control::{
 };
 pub use coordinator::{
     recommended_shard_count, resolve_topology, route_topology, seed_position_preserving,
-    AddOutcome, ClusterBatchRankedMatch, ClusterConfig, ClusterEngine, ClusterPitError,
-    ClusterRankedError, ClusterRankedHit, ClusterRankedMatch, ClusterRankedTitle, ResyncReport,
-    ShardEndpoints,
+    AddOutcome, ClusterBatchRankedMatch, ClusterConfig, ClusterEngine, ClusterExhaustiveMatch,
+    ClusterPitError, ClusterRankedError, ClusterRankedHit, ClusterRankedMatch, ClusterRankedTitle,
+    ResyncReport, ShardEndpoints,
 };
 pub use ring::{HashRing, DEFAULT_VNODES};
 pub use shard::ShardError;
@@ -101,5 +101,6 @@ pub use security::{
 };
 #[cfg(feature = "distributed")]
 pub use server::{
-    ShardMetricsSource, ShardServer, DEFAULT_MAX_GRPC_RESULT_BYTES, MAX_GRPC_RESULT_BYTES,
+    ShardMetricsSource, ShardServer, DEFAULT_MAX_CONCURRENT_EXHAUSTIVE_STREAMS,
+    DEFAULT_MAX_EXHAUSTIVE_STREAM_DURATION, DEFAULT_MAX_GRPC_RESULT_BYTES, MAX_GRPC_RESULT_BYTES,
 };

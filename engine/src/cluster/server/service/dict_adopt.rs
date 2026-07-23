@@ -23,10 +23,11 @@ use super::super::{AdoptedSpace, ServerState, ShardServer, ShardSlot};
 ///   so re-basing loaded data onto a divergent feature space would silently corrupt matches);
 /// - otherwise build the slot's shard (in-memory, or durable under `data_dir/shard_<id>/`) and install
 ///   it, (re)placing the node-scope dict when it changed.
-pub(super) fn adopt_dict(
+pub(super) async fn adopt_dict(
     server: &ShardServer,
     request: Request<proto::AdoptDictRequest>,
 ) -> Result<Response<proto::AdoptDictReply>, Status> {
+    let coordinator_id = crate::cluster::security::request_coordinator_id(&request)?;
     let req = request.into_inner();
     let shard_id = req.shard_id;
     let placement_generation = crate::ownership::PlacementGeneration(req.placement_generation);
@@ -61,26 +62,6 @@ pub(super) fn adopt_dict(
         )));
     }
 
-    // Idempotent no-op: this slot already serves exactly this dict AND tag space.
-    if let Ok(slot) = server.slot(shard_id) {
-        if let Some(st) = slot.state.load_full() {
-            if st.dict.fingerprint() == fp && st.tag_dict.fingerprint() == tag_fp {
-                if let Some(node) = server.node_dict.load_full() {
-                    if node.placement_generation == placement_generation
-                        && node.num_shards == req.num_shards
-                    {
-                        return Ok(adopt_reply(
-                            fp,
-                            tag_fp,
-                            placement_generation,
-                            req.num_shards,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-
     // Node-scope adopt (deserialize ONCE per node): reuse the node's `Arc`s when the fingerprints
     // already match (so every slot shares one `Arc<Dict>`), else (re)place the node dict — but only
     // when no slot holds data, since the dict is node-shared.
@@ -91,15 +72,58 @@ pub(super) fn adopt_dict(
             && s.placement_generation == placement_generation
             && s.num_shards == req.num_shards
     });
+    if !node_matches && node.is_some() && server.any_slot_populated()? {
+        return Err(Status::failed_precondition(format!(
+            "node already hosts loaded shards under a different feature space; refusing to \
+             adopt a divergent dict {fp:#018x} (re-basing loaded data is unsafe)"
+        )));
+    }
+
+    // Only a fully validated adopt may claim the process. Two handshakes that
+    // raced through the unowned interceptor linearize here before either can
+    // build or install a slot.
+    crate::cluster::security::claim_coordinator(&server.coordinator_lease, coordinator_id).await?;
+    let _install = server.coordinator_lease.lock_install().await;
+
+    // The first validation deliberately preceded the claim so malformed or
+    // divergent input cannot seize an unowned node. Re-read under the install
+    // mutex because a same-id retry may have completed while this request was
+    // draining old traffic or waiting to install.
+    let node = server.node_dict.load_full();
+    let node_matches = node.as_deref().is_some_and(|s| {
+        s.dict.fingerprint() == fp
+            && s.tag_dict.fingerprint() == tag_fp
+            && s.placement_generation == placement_generation
+            && s.num_shards == req.num_shards
+    });
+    if !node_matches && node.is_some() && server.any_slot_populated()? {
+        return Err(Status::failed_precondition(format!(
+            "node already hosts loaded shards under a different feature space; refusing to \
+             adopt a divergent dict {fp:#018x} (re-basing loaded data is unsafe)"
+        )));
+    }
+
+    // Idempotent no-op: this slot already serves exactly this dict, tag space,
+    // and placement configuration.
+    if node_matches {
+        if let Ok(slot) = server.slot(shard_id) {
+            if let Some(st) = slot.state.load_full() {
+                if st.dict.fingerprint() == fp && st.tag_dict.fingerprint() == tag_fp {
+                    return Ok(adopt_reply(
+                        fp,
+                        tag_fp,
+                        placement_generation,
+                        req.num_shards,
+                        server.coordinator_lease.owner(),
+                    ));
+                }
+            }
+        }
+    }
+
     let (space_dict, space_tag) = if let (true, Some(s)) = (node_matches, node.as_deref()) {
         (Arc::clone(&s.dict), Arc::clone(&s.tag_dict))
     } else {
-        if node.is_some() && server.any_slot_populated()? {
-            return Err(Status::failed_precondition(format!(
-                "node already hosts loaded shards under a different feature space; refusing to \
-                 adopt a divergent dict {fp:#018x} (re-basing loaded data is unsafe)"
-            )));
-        }
         (Arc::new(dict), Arc::new(tag_dict))
     };
 
@@ -150,6 +174,7 @@ pub(super) fn adopt_dict(
         tag_fp,
         placement_generation,
         req.num_shards,
+        server.coordinator_lease.owner(),
     ))
 }
 
@@ -213,6 +238,7 @@ fn adopt_reply(
     tag_fp: u64,
     generation: crate::ownership::PlacementGeneration,
     num_shards: u32,
+    coordinator_id: u64,
 ) -> Response<proto::AdoptDictReply> {
     Response::new(proto::AdoptDictReply {
         fingerprint: fp,
@@ -220,5 +246,6 @@ fn adopt_reply(
         broad_replicate_all: true,
         placement_generation: generation.0,
         num_shards,
+        coordinator_id,
     })
 }

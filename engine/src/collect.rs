@@ -7,8 +7,10 @@
 use crate::result::{TotalHits, TotalHitsRelation};
 use crate::util::FastSet;
 
+mod chunk;
 mod top_k;
 
+pub(crate) use chunk::ChunkCollector;
 pub(crate) use top_k::{BatchTopKCollector, TopKCollector};
 
 /// Summary returned when a collector finalizes one exact matching pass.
@@ -24,6 +26,27 @@ pub(crate) struct CollectionSummary {
 /// The single hot-path emission operation. Generic callers monomorphize it.
 pub(crate) trait MatchSink {
     fn on_match(&mut self, logical_id: u64);
+
+    /// Whether collection has failed or been cancelled and matching should
+    /// return at the next candidate/probe boundary. Generic non-streaming
+    /// collectors retain the statically-false default.
+    #[inline]
+    fn should_stop(&mut self) -> bool {
+        false
+    }
+
+    /// Exhaustive delivery's physical-address callback (ADR-114). Existing
+    /// collectors ignore the address through this default and retain their
+    /// pre-ADR machine shape.
+    #[inline]
+    fn on_match_at(&mut self, logical_id: u64, _local_id: u32) {
+        self.on_match(logical_id);
+    }
+
+    /// Identify which base segment (oldest-first) or memtable is about to emit.
+    /// Used only by the bounded-memory exhaustive duplicate check.
+    #[inline]
+    fn begin_source(&mut self, _source: usize) {}
 }
 
 /// Lifecycle implemented by a complete single-title collector.

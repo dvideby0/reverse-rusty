@@ -34,11 +34,14 @@
 
 pub mod cluster;
 // Count stays internal; TopK is wired to the scalar local matcher by Increment 2.
+#[cfg(feature = "server")]
+pub mod broker;
 #[allow(dead_code)]
 mod collect;
 pub mod compile;
 pub mod config;
 pub mod corpus;
+pub mod delivery;
 pub mod dict;
 pub mod dsl;
 pub mod error;
@@ -63,6 +66,11 @@ pub mod wal;
 
 pub use compile::{CompiledQuery, CostClass};
 pub use config::EngineConfig;
+pub use delivery::{
+    ChunkSink, ChunkSinkError, DeliveryChecksum, ExhaustiveMatch, ExhaustiveMatchError,
+    ExhaustiveMatchResult, ExhaustiveOptions, ExhaustiveSummary, MatchChunk,
+    DEFAULT_MATCH_CHUNK_SIZE, MAX_MATCH_CHUNK_SIZE,
+};
 pub use dict::FeatureId;
 pub use error::{NormalizerError, ParseError, ParseErrorKind, WriteError};
 pub use events::{

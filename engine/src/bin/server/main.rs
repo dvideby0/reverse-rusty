@@ -45,6 +45,7 @@ mod cli;
 mod cluster_mode;
 mod dto;
 mod handlers;
+mod jobs;
 mod metrics;
 mod pit;
 mod state;
@@ -72,12 +73,12 @@ use reverse_rusty::segment::Engine;
 
 use cli::Cli;
 use handlers::{
-    api_root, backup, bulk_ingest, cat_segments, cat_stats, close_pit, compact, delete_doc,
-    discover_aliases, discover_and_record_aliases, flush, get_alias_feedback, get_aliases, get_doc,
-    get_settings, get_vocab, health, import_aliases, learn_and_apply_aliases,
-    learn_and_apply_vocab, learn_vocab, mpercolate, open_pit, prometheus_metrics, put_doc,
-    put_settings, put_vocab, reset_alias_feedback, search, stats, v2_mpercolate, v2_search,
-    validate_and_apply_feedback,
+    api_root, backup, bulk_ingest, cancel_job, cat_segments, cat_stats, close_pit, compact,
+    create_job, delete_doc, discover_aliases, discover_and_record_aliases, flush,
+    get_alias_feedback, get_aliases, get_doc, get_job, get_job_stream, get_settings, get_vocab,
+    health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
+    mpercolate, open_pit, prometheus_metrics, put_doc, put_settings, put_vocab,
+    reset_alias_feedback, search, stats, v2_mpercolate, v2_search, validate_and_apply_feedback,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -373,6 +374,21 @@ async fn main() {
     let slow_threshold = cli.slow_query_threshold_ms;
     let initial_snapshot = Arc::new(engine.snapshot());
     let ranked_workers = pool.current_num_threads().max(1);
+    let exhaustive_jobs = jobs::ExhaustiveJobs::new(
+        jobs::ExhaustiveJobConfig {
+            threads: cli.exhaustive_threads,
+            max_concurrent: cli.max_concurrent_exhaustive_jobs,
+            chunk_size: cli.exhaustive_chunk_size,
+            channel_depth: cli.exhaustive_channel_depth,
+            max_timeout: std::time::Duration::from_secs(cli.exhaustive_job_timeout_secs),
+            max_retained: cli.max_retained_exhaustive_jobs,
+        },
+        prom.clone(),
+    )
+    .unwrap_or_else(|reason| {
+        error!(%reason, "invalid exhaustive-job configuration");
+        std::process::exit(1);
+    });
     let state = Arc::new(AppState {
         engine: Mutex::new(engine),
         snapshot: ArcSwap::new(initial_snapshot),
@@ -380,6 +396,7 @@ async fn main() {
         search_permits: (cli.max_concurrent_searches > 0)
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
         ranked_search_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(ranked_workers)),
+        exhaustive_jobs,
         max_ranked_enrichment_bytes: cli.max_ranked_enrichment_bytes,
         include_broad: cli.include_broad,
         prom,
@@ -403,6 +420,9 @@ async fn main() {
         .route("/v2/_search", post(v2_search))
         .route("/v2/_mpercolate", post(v2_mpercolate))
         .route("/v2/_pit", post(open_pit).delete(close_pit))
+        .route("/_percolate/jobs", post(create_job))
+        .route("/_percolate/jobs/{id}", get(get_job).delete(cancel_job))
+        .route("/_percolate/jobs/{id}/stream", get(get_job_stream))
         .route("/_mpercolate", post(mpercolate))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))
@@ -491,6 +511,14 @@ async fn main() {
         () = drain_deadline => {
             // Drain took too long — fall through to cleanup.
         }
+    }
+
+    let cancelled_jobs = state.exhaustive_jobs.cancel_all();
+    if cancelled_jobs > 0 {
+        info!(
+            cancelled_jobs,
+            "cancelled exhaustive jobs before shutdown cleanup"
+        );
     }
 
     info!(

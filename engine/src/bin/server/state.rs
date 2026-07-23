@@ -43,6 +43,8 @@ pub(crate) struct AppState {
     /// Always-bounded v2 ranked-search admission. Its default is the Rayon
     /// worker count and is deliberately independent from compatibility routes.
     pub(crate) ranked_search_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Separate pool/admission/registry for ADR-114 exhaustive jobs.
+    pub(crate) exhaustive_jobs: Arc<crate::jobs::ExhaustiveJobs>,
     pub(crate) max_ranked_enrichment_bytes: usize,
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,
@@ -104,6 +106,7 @@ pub(crate) struct ClusterAppState {
     pub(crate) search_permits: Option<std::sync::Arc<tokio::sync::Semaphore>>,
     /// Always-bounded v2 ranked-search admission, symmetric with local mode.
     pub(crate) ranked_search_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) exhaustive_jobs: Arc<crate::jobs::ExhaustiveJobs>,
     pub(crate) max_ranked_enrichment_bytes: usize,
     pub(crate) include_broad: bool,
     pub(crate) prom: PrometheusMetrics,

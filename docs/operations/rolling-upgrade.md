@@ -66,6 +66,24 @@ pre-upgrade backup:
   `/v2/_search` against an old shard fails closed (`UNIMPLEMENTED` → 502) with no partial hits. Enable
   or route v2 traffic only after every shard is upgraded; keep each shard's
   `--max-grpc-result-bytes` at or below 4 MiB.
+- **ADR-114 exhaustive delivery:** no durable format changes. `PercolateAll` is an additive
+  server-streaming RPC, but an exact-capable remote coordinator must use the exclusive builder
+  selected by the HTTP cluster connector. Its attestation is semantically mandatory: an older
+  shard echoes protobuf zero and the coordinator refuses it. The historical unleased library
+  builders remain usable for compatibility reads/recovery but refuse exhaustive completion.
+  Enable the job surface only after every shard is upgraded, and never treat provisional chunks
+  from a mixed-version failure as complete—the terminal summary/completion is the commit marker.
+  Keep each shard's `--max-exhaustive-stream-secs` at least as high as the coordinator's
+  `--exhaustive-job-timeout-secs`; a larger caller budget is rejected before node admission.
+  The renewable owner lease has a 30-second bound. Introducing this fence therefore requires a
+  version-homogeneous shard restart followed by exclusive coordinator attach; a restarted
+  in-memory remote coordinator still needs freshly rebuilt shard slots before it can attest exact
+  exhaustive completion. A replacement coordinator may need to retry until the prior lease
+  expires. Takeover then drains pre-claim RPC response bodies/streams; the claim capability is
+  accepted only on `DictFingerprint`/`AdoptDict`/`AddShard`, and a cancelled attach rolls back its
+  pending transition when no same-coordinator retry remains. An existing exclusive client
+  reconnecting to a restarted durable shard uses the read-only fingerprint claim and does not
+  create a replacement slot.
 
 An ADR-109 upgrade is therefore **not a normal rolling mixed-version upgrade**. Back up, stop the
 cluster, rebuild clustered data under the new binary (or wipe/reseed remote shard volumes from the
