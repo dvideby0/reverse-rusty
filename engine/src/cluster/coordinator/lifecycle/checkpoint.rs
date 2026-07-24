@@ -74,6 +74,8 @@ impl ClusterEngine {
             placement_generation: self.placement_generation(),
             segment_registry: segment_registry.clone(),
             next_seg_ids,
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: self.source_files.clone(),
             dict_data: crate::storage::serialize_dict(&self.dict),
             vocab_data,
             // The frozen per-query tag space (ADR-049/055) — re-persisted so the filter resolves to

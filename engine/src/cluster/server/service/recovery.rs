@@ -75,11 +75,15 @@ pub(super) fn fetch_segments(
         .shard
         .next_seg_id()
         .map_err(|e| Status::internal(format!("next_seg_id: {e}")))?;
+    let source_file_name = st
+        .shard
+        .source_file_name()
+        .map_err(|e| Status::internal(format!("source_file_name: {e}")))?;
 
     let (tx, rx) = tokio::sync::mpsc::channel(8);
     tokio::spawn(async move {
         let seg_dir = dir.join("segments");
-        let sources = dir.join("sources.dat");
+        let sources = dir.join(&source_file_name);
         let has_sources = sources.exists();
         let manifest = proto::FetchSegmentsChunk {
             frame: Some(proto::fetch_segments_chunk::Frame::Manifest(
@@ -91,6 +95,7 @@ pub(super) fn fetch_segments(
                     up_to_seqno,
                     placement_generation: req.placement_generation,
                     num_shards: req.num_shards,
+                    compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
                 },
             )),
         };
@@ -398,6 +403,13 @@ async fn drain_recovery_stream(
             manifest.placement_generation, manifest.num_shards
         )));
     }
+    if manifest.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+        return Err(Status::failed_precondition(format!(
+            "recovery manifest compiler semantics mismatch: expected {}, got {}",
+            crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            manifest.compiler_semantics_version
+        )));
+    }
     validate_received(&manifest, &received)?;
     Ok((
         manifest.segment_files,
@@ -461,6 +473,7 @@ mod tests {
             up_to_seqno: 0,
             placement_generation: 1,
             num_shards: 1,
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
         }
     }
 

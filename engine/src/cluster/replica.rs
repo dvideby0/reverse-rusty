@@ -381,18 +381,23 @@ fn peer_recover_inner(
             .map_err(|e| ShardError::Log(format!("peer recovery: copying segment {name}: {e}")))?;
     }
 
-    // 3. `sources.dat` is display-only (never on the match path): copy it if present, but a
-    //    missing one must not fail recovery.
+    // 3. The source sidecar is display-only (never on the match path): copy the
+    //    generation selected by the source's commit document into the target's
+    //    canonical filename. A missing one must not fail recovery.
     let replica_sources = replica_dir.join("sources.dat");
     if replica_sources.exists() {
         std::fs::remove_file(&replica_sources).map_err(|e| {
             ShardError::Log(format!("peer recovery: clearing stale sources.dat: {e}"))
         })?;
     }
-    let primary_sources = primary_dir.join("sources.dat");
+    let primary_source_name = primary.source_file_name()?;
+    let primary_sources = primary_dir.join(&primary_source_name);
     if primary_sources.exists() {
-        std::fs::copy(&primary_sources, &replica_sources)
-            .map_err(|e| ShardError::Log(format!("peer recovery: copying sources.dat: {e}")))?;
+        std::fs::copy(&primary_sources, &replica_sources).map_err(|e| {
+            ShardError::Log(format!(
+                "peer recovery: copying {primary_source_name} as sources.dat: {e}"
+            ))
+        })?;
     }
 
     // 4. Attach the copied segments against the shared dict (fail-loud on any missing/corrupt).

@@ -333,6 +333,64 @@ fn durable_shard_self_restart_refuses_legacy_clause_boundary_semantics() {
 }
 
 #[test]
+fn durable_shard_self_restart_refuses_legacy_tail_with_empty_base() {
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[(1, "alpha bravo")]);
+    let tmp = scratch_dir("selfrestart_legacy_tail_only");
+    let cfg = EngineConfig {
+        data_dir: Some(tmp.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            cfg.clone(),
+        )
+        .expect("durable shard");
+        shard
+            .insert_extracted_with_tags(&corpus[0].1, 1, 1, &corpus[0].2, &[])
+            .expect("unsealed tail insert");
+        // Deliberately do not seal: the checkpoint base stays empty and the
+        // acknowledged row exists only in the translog tail.
+    }
+
+    // Downgrade the v2 checkpoint to the exact v1 body. With no segment
+    // filenames the legacy body is the first 28 bytes (three u64s + count).
+    let sidecar_path = tmp.join("shard.ckpt");
+    let current = std::fs::read(&sidecar_path).expect("read current sidecar");
+    let legacy_body = current[12..12 + 28].to_vec();
+    let mut legacy_bytes = Vec::new();
+    legacy_bytes.extend_from_slice(b"RSCK");
+    legacy_bytes.extend_from_slice(&1u32.to_le_bytes());
+    legacy_bytes.extend_from_slice(&crate::storage::crc32(&legacy_body).to_le_bytes());
+    legacy_bytes.extend_from_slice(&legacy_body);
+    std::fs::write(&sidecar_path, &legacy_bytes).expect("write v1 sidecar");
+    let translog_before =
+        std::fs::read(tmp.join(crate::cluster::translog::TRANSLOG_FILE)).expect("read tail");
+
+    let Err(error) = LocalShard::new_durable(norm, dict, tag_dict, cfg) else {
+        panic!("a current binary must not replay a legacy-only tail");
+    };
+    assert!(
+        error.to_string().contains("legacy compiler semantics")
+            && error.to_string().contains("re-placement"),
+        "unexpected refusal: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&sidecar_path).expect("sidecar remains"),
+        legacy_bytes,
+        "the refusal must not advance the empty-base checkpoint"
+    );
+    assert_eq!(
+        std::fs::read(tmp.join(crate::cluster::translog::TRANSLOG_FILE)).expect("translog remains"),
+        translog_before,
+        "the refusal must happen before the legacy tail can be reset or consumed"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn add_recovered_replica_promotes_an_in_sync_set_equal_replica() {
     // ADR-040 finalize: add a replica to a live position at runtime — peer-recover + converge +
     // promote under a brief quiesce. The promoted replica is in-sync (a later write fans out to

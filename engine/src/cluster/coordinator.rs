@@ -281,6 +281,9 @@ pub(crate) struct ClusterDurable {
     pub epoch: u64,
     /// ADR-109 placement generation restored from the durable cluster fence.
     pub placement_generation: crate::ownership::PlacementGeneration,
+    /// Per-shard source-sidecar basename selected by the same commit as the
+    /// segment registry.
+    pub source_files: Vec<String>,
     /// Ring vnode count, captured so the manifest can re-derive a byte-identical ring.
     pub vnodes: u32,
     /// The cluster-state control plane (membership + shard→node map + ring params + model
@@ -299,6 +302,7 @@ impl ClusterDurable {
             data_dir: None,
             epoch: 0,
             placement_generation: crate::ownership::PlacementGeneration::INITIAL,
+            source_files: vec!["sources.dat".to_string(); num_shards as usize],
             vnodes,
             control: Box::new(InMemoryControlPlane::single_node(
                 num_shards,
@@ -363,6 +367,9 @@ pub struct ClusterEngine {
     per_shard: EngineConfig,
     /// Durable-artifact directory (`Some` ⇔ durable).
     data_dir: Option<PathBuf>,
+    /// Per-shard source-sidecar basenames selected by the current coordinator
+    /// manifest. Index-aligned with `shards`.
+    source_files: Vec<String>,
     /// Optional observer for durability events (recovery torn-tail, append failures).
     /// Buffered until set, mirroring the engine's `set_observer` pattern.
     observer: Mutex<Option<ClusterObserver>>,

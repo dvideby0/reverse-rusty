@@ -23,6 +23,22 @@ fn scratch_dir(tag: &str) -> PathBuf {
     dir
 }
 
+fn downgrade_cluster_manifest_to_v6(path: &std::path::Path) {
+    let manifest = crate::storage::read_cluster_manifest(path).expect("read v7 manifest");
+    let mut bytes = std::fs::read(path).expect("read manifest bytes");
+    let suffix = 8 + manifest
+        .source_files
+        .iter()
+        .map(|name| 4 + name.len())
+        .sum::<usize>();
+    let content_len = bytes.len().checked_sub(4 + suffix).expect("v7 suffix fits");
+    bytes.truncate(content_len);
+    bytes[4..8].copy_from_slice(&6u32.to_le_bytes());
+    let crc = crate::storage::crc32(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    std::fs::write(path, bytes).expect("write v6 manifest");
+}
+
 #[derive(Default)]
 struct FirstAppendGate {
     calls: AtomicU64,
@@ -912,6 +928,87 @@ fn rebuild_preserves_stored_query_version() {
         "the re-placed query must still match after the rebuild"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_tail_is_folded_before_current_placement_validation() {
+    let dir = scratch_dir("legacy_tail_placement");
+    let cfg = ClusterConfig {
+        num_shards: 16,
+        data_dir: Some(dir.clone()),
+        ..Default::default()
+    };
+    let mut alias_vocab = crate::vocab::Vocab::new();
+    alias_vocab.import_solr_aliases("ny => new york", &vocab(), &Dict::new());
+    let cluster =
+        ClusterEngine::build_with_vocab(alias_vocab, &cfg, &[]).expect("empty durable cluster");
+
+    // Reconstruct the pre-ADR-118 lowering for `new -used york`: the old
+    // compiler joined both positive bare terms across the intervening negated
+    // clause, so `new york` collapsed as one query-side alias entity.
+    let mut lc = String::new();
+    let mut legacy = crate::compile::Extracted {
+        required: cluster
+            .norm
+            .compile_features_readonly("new york", &cluster.dict, &mut lc),
+        forbidden: cluster
+            .norm
+            .compile_features_readonly("used", &cluster.dict, &mut lc),
+        anyof: Vec::new(),
+    };
+    legacy.required.sort_unstable();
+    legacy.required.dedup();
+    legacy.forbidden.sort_unstable();
+    legacy.forbidden.dedup();
+    legacy.expand_equivalences(cluster.dict.equivalences());
+
+    let ast = crate::dsl::parse("new -used york").expect("current query");
+    let current = crate::compile::extract_readonly(&ast, &cluster.norm, &cluster.dict, &mut lc);
+    let generation = cluster.placement_generation();
+    let legacy_placement = placement_of(
+        &cluster.dict,
+        &cluster.ring,
+        &legacy,
+        true,
+        cluster.per_shard.hot_anchor_threshold,
+    )
+    .placement(generation, cfg.num_shards as u32)
+    .expect("legacy placement");
+    let current_placement = placement_of(
+        &cluster.dict,
+        &cluster.ring,
+        &current,
+        true,
+        cluster.per_shard.hot_anchor_threshold,
+    )
+    .placement(generation, cfg.num_shards as u32)
+    .expect("current placement");
+    assert_ne!(
+        legacy_placement, current_placement,
+        "precondition: this tail must exercise a real placement change"
+    );
+
+    cluster
+        .log
+        .append(&ClusterMutation::Add {
+            logical: 1,
+            version: 1,
+            dsl: "new -used york".into(),
+            tags: Vec::new(),
+            placement: legacy_placement,
+        })
+        .expect("append legacy-shaped tail");
+    drop(cluster);
+
+    let manifest_path = dir.join(CLUSTER_MANIFEST_FILE);
+    downgrade_cluster_manifest_to_v6(&manifest_path);
+    let reopened = ClusterEngine::open(&dir, vocab(), Some(&cfg))
+        .expect("legacy tail is folded before re-placement");
+    assert!(reopened
+        .percolate("new vintage collectible york")
+        .expect("match")
+        .contains(&1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

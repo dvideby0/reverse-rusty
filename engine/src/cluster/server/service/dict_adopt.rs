@@ -29,6 +29,13 @@ pub(super) async fn adopt_dict(
 ) -> Result<Response<proto::AdoptDictReply>, Status> {
     let coordinator_id = crate::cluster::security::request_coordinator_id(&request)?;
     let req = request.into_inner();
+    if req.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+        return Err(Status::failed_precondition(format!(
+            "AdoptDict compiler semantics mismatch: server {}, coordinator {}",
+            crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            req.compiler_semantics_version
+        )));
+    }
     let shard_id = req.shard_id;
     let placement_generation = crate::ownership::PlacementGeneration(req.placement_generation);
     if placement_generation == crate::ownership::PlacementGeneration::STANDALONE
@@ -247,5 +254,6 @@ fn adopt_reply(
         placement_generation: generation.0,
         num_shards,
         coordinator_id,
+        compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
     })
 }

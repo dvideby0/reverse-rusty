@@ -1108,7 +1108,10 @@ impl Engine {
             if rank.priority == 0 {
                 rank = self.cluster_rank_values(&item.tags, &tag_ids);
             }
-            let source_generation = self.allocate_source_generation();
+            let source_generation = match item.source_generation {
+                Some(source_generation) => self.replay_source_generation(Some(source_generation)),
+                None => self.allocate_source_generation(),
+            };
             if let Some(added) = seg.add_compiled_ranked_placed_with_source_generation(
                 &item.ex,
                 &tag_ids,
@@ -1318,6 +1321,7 @@ mod tests {
             ex,
             dsl: "1994 upper deck".into(),
             version: 1,
+            source_generation: None,
             tags: Vec::new(),
             // Nonempty carry-through bypasses the runtime max_tags check, but
             // the exact-store u16 count ceiling remains unconditional.

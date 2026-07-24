@@ -355,6 +355,7 @@ impl Engine {
             persistence_healthy: skipped_segments == 0,
             skipped_segments,
             query_store,
+            source_file_name: "sources.dat".to_string(),
             vocab_epoch: 0,
             owns_manifest: true,
         };
@@ -559,22 +560,64 @@ impl Engine {
         files: &[String],
         next_seg_id: u64,
     ) -> std::io::Result<Self> {
-        Self::open_shared_segments_inner(norm, dict, tag_dict, config, files, next_seg_id, false)
+        Self::open_shared_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            "sources.dat",
+            false,
+        )
     }
 
-    /// Coordinator-only attach seam used while an old durable cluster is being
-    /// opened and immediately blue/green rebuilt under an atomic cluster
-    /// manifest commit. Every other shared-segment attach refuses any live
-    /// legacy compiler materialization.
-    pub(crate) fn open_shared_segments_for_compiler_migration(
+    /// Coordinator-selected source-sidecar attach seam. The source filename is
+    /// validated by the cluster manifest reader before it reaches this method.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_shared_segments_with_source_file(
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
         tag_dict: Arc<TagDict>,
         config: EngineConfig,
         files: &[String],
         next_seg_id: u64,
+        source_file_name: &str,
     ) -> std::io::Result<Self> {
-        Self::open_shared_segments_inner(norm, dict, tag_dict, config, files, next_seg_id, true)
+        Self::open_shared_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            source_file_name,
+            false,
+        )
+    }
+
+    /// Coordinator-only legacy attach with an explicitly manifest-selected
+    /// source sidecar.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_shared_segments_for_compiler_migration_with_source_file(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+        source_file_name: &str,
+    ) -> std::io::Result<Self> {
+        Self::open_shared_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            source_file_name,
+            true,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -585,6 +628,7 @@ impl Engine {
         config: EngineConfig,
         files: &[String],
         next_seg_id: u64,
+        source_file_name: &str,
         allow_legacy_compiler_semantics: bool,
     ) -> std::io::Result<Self> {
         let dir = config.data_dir.as_ref().ok_or_else(|| {
@@ -602,7 +646,7 @@ impl Engine {
             segments.push(Arc::new(BaseSegment::Mmap(mmap_seg)));
         }
         let query_store = Arc::new(SourceStore::open(
-            &dir.join("sources.dat"),
+            &dir.join(source_file_name),
             config.retain_source,
         )?);
         let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
@@ -632,6 +676,7 @@ impl Engine {
             persistence_healthy: true,
             skipped_segments: 0,
             query_store,
+            source_file_name: source_file_name.to_string(),
             vocab_epoch: 0,
             owns_manifest: false,
         };

@@ -27,6 +27,32 @@ fn stamp_cluster_segments_as_legacy(
     }
 }
 
+/// Convert this binary's v7 cluster manifest to the exact v6 prefix: v6 ends
+/// immediately after `placement_generation`; v7 appends compiler semantics +
+/// the source-file column before the trailing CRC.
+fn downgrade_cluster_manifest_to_v6(
+    path: &std::path::Path,
+    manifest: &reverse_rusty::storage::ClusterManifest,
+) {
+    let mut bytes = std::fs::read(path).expect("read v7 manifest");
+    let v7_suffix = 4
+        + 4
+        + manifest
+            .source_files
+            .iter()
+            .map(|name| 4 + name.len())
+            .sum::<usize>();
+    let v6_content_len = bytes
+        .len()
+        .checked_sub(4 + v7_suffix)
+        .expect("v7 suffix fits");
+    bytes.truncate(v6_content_len);
+    bytes[4..8].copy_from_slice(&6u32.to_le_bytes());
+    let crc = reverse_rusty::storage::crc32(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    std::fs::write(path, bytes).expect("write v6 manifest");
+}
+
 #[test]
 fn build_with_vocab_persists_the_vocab_from_the_first_durable_commit() {
     // Review finding: the durable `build_with_vocab` path (vocab_data written by
@@ -274,5 +300,123 @@ fn durable_cluster_rebuilds_legacy_clause_boundary_semantics_before_serving() {
         .percolate("new vintage collectible york")
         .unwrap()
         .contains(&1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn durable_cluster_rebuilds_a_legacy_tail_even_when_the_base_is_empty() {
+    let dir = std::env::temp_dir().join(format!("rr-adr118-tail-only-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        data_dir: Some(dir.clone()),
+        ..ClusterConfig::default()
+    };
+    {
+        let cluster = ClusterEngine::build_with_vocab(vocab_with_multiword_alias(), &cfg, &[])
+            .expect("empty durable cluster");
+        cluster
+            .add_query(1, "new -used york")
+            .expect("uncheckpointed tail add");
+        // Drop without checkpoint: every committed segment registry is empty,
+        // and the query exists only in the coordinator log tail.
+    }
+    let manifest_path = dir.join("cluster_manifest.bin");
+    let before =
+        reverse_rusty::storage::read_cluster_manifest(&manifest_path).expect("current manifest");
+    assert!(before.segment_registry.iter().all(Vec::is_empty));
+    downgrade_cluster_manifest_to_v6(&manifest_path, &before);
+
+    let reopened = ClusterEngine::open(
+        &dir,
+        reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+        Some(&cfg),
+    )
+    .expect("tail-only compiler migration");
+    assert!(
+        reopened
+            .percolate("new vintage collectible york")
+            .unwrap()
+            .contains(&1),
+        "the raw legacy tail must be folded then placed under current semantics"
+    );
+    let current = reverse_rusty::storage::read_cluster_manifest(&manifest_path)
+        .expect("migrated v7 manifest");
+    assert_eq!(
+        current.compiler_semantics_version, 1,
+        "successful migration commits the current compiler marker"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn failed_cluster_compiler_migration_preserves_old_sources_for_retry() {
+    let dir = std::env::temp_dir().join(format!("rr-adr118-source-retry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        data_dir: Some(dir.clone()),
+        ..ClusterConfig::default()
+    };
+    {
+        ClusterEngine::build_with_vocab(
+            vocab_with_multiword_alias(),
+            &cfg,
+            &[(1, "new -used york".into())],
+        )
+        .expect("durable cluster");
+    }
+    let manifest_path = dir.join("cluster_manifest.bin");
+    let before =
+        reverse_rusty::storage::read_cluster_manifest(&manifest_path).expect("current manifest");
+    downgrade_cluster_manifest_to_v6(&manifest_path, &before);
+    let old_sources: Vec<Vec<u8>> = (0..cfg.num_shards)
+        .map(|shard| {
+            std::fs::read(dir.join(format!("shard_{shard:03}")).join("sources.dat"))
+                .expect("old source sidecar")
+        })
+        .collect();
+
+    // Poison the writer's atomic temp path. The migration may finish its green
+    // segments/source sidecars, but cannot commit the v7 coordinator manifest.
+    let manifest_tmp = dir.join("cluster_manifest.cmanifest.tmp");
+    std::fs::create_dir(&manifest_tmp).expect("poison manifest temp");
+    let first = ClusterEngine::open(
+        &dir,
+        reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+        Some(&cfg),
+    );
+    assert!(first.is_err(), "the injected manifest failure must surface");
+    for (shard, expected) in old_sources.iter().enumerate() {
+        assert_eq!(
+            std::fs::read(dir.join(format!("shard_{shard:03}")).join("sources.dat"))
+                .expect("old source survives"),
+            *expected,
+            "a pre-commit green rebuild must not overwrite shard {shard}'s old source generation"
+        );
+    }
+
+    std::fs::remove_dir(&manifest_tmp).expect("clear injected failure");
+    let reopened = ClusterEngine::open(
+        &dir,
+        reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+        Some(&cfg),
+    )
+    .expect("migration retry from the still-authoritative v6 manifest");
+    assert!(reopened
+        .percolate("new vintage collectible york")
+        .unwrap()
+        .contains(&1));
+    let current =
+        reverse_rusty::storage::read_cluster_manifest(&manifest_path).expect("retry committed v7");
+    assert!(
+        current
+            .source_files
+            .iter()
+            .all(|name| name.starts_with("sources_g")),
+        "the successful manifest must atomically select the green source generation"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

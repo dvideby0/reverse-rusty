@@ -362,6 +362,10 @@ impl Shard for ReplicatedShard {
         self.primary.next_seg_id()
     }
 
+    fn source_file_name(&self) -> Result<String, ShardError> {
+        self.primary.source_file_name()
+    }
+
     // The position-bearing tail is the PRIMARY's (the authoritative copy + the recovery
     // source); a recovering replica is brought up from the primary's segments + this tail.
     fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {

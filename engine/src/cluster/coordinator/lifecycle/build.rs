@@ -254,6 +254,7 @@ impl ClusterEngine {
                             ex: ex.clone(),
                             dsl: text.clone(),
                             version: 1,
+                            source_generation: None,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
                             rank: crate::rank::RankValues::default(),
@@ -268,6 +269,7 @@ impl ClusterEngine {
                             ex: ex.clone(),
                             dsl: text.clone(),
                             version: 1,
+                            source_generation: None,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
                             rank: crate::rank::RankValues::default(),
@@ -411,6 +413,8 @@ impl ClusterEngine {
             broad_replicate_all: true,
             segment_registry,
             next_seg_ids,
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: vec!["sources.dat".to_string(); ring.num_shards()],
             dict_data: crate::storage::serialize_dict(dict),
             // A `build_with_vocab` cluster persists its vocabulary from the FIRST
             // commit (ADR-076) — a crash before any later checkpoint must still
@@ -444,6 +448,7 @@ impl ClusterEngine {
             data_dir: Some(dir.to_path_buf()),
             epoch: 0,
             placement_generation: PlacementGeneration::INITIAL,
+            source_files: vec!["sources.dat".to_string(); ring.num_shards()],
             vnodes: config.vnodes,
             control: Box::new(InMemoryControlPlane::single_node(
                 ring.num_shards() as u32,

@@ -335,7 +335,7 @@ impl Engine {
         let Some(dir) = self.config.data_dir.clone() else {
             return;
         };
-        let path = dir.join("sources.dat");
+        let path = dir.join(&self.source_file_name);
         if let Err(e) = self.query_store.write_to(&path) {
             self.persistence_healthy = false;
             self.emit(crate::events::EngineEvent::DurabilityFailure {
@@ -361,6 +361,12 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Basename of the source sidecar this engine persists. Cluster durability
+    /// records it in the coordinator manifest / shard checkpoint.
+    pub(crate) fn source_file_name(&self) -> &str {
+        &self.source_file_name
     }
 
     /// Collect paths of mmap'd segments (for cleanup during compaction).

@@ -684,6 +684,11 @@ pub(crate) trait Shard: Send + Sync {
     /// This shard's next segment-id counter — committed per shard so a flush after reopen
     /// never reuses a committed segment filename.
     fn next_seg_id(&self) -> Result<u64, ShardError>;
+    /// Durable source-sidecar basename selected with the current segment
+    /// registry. Legacy/test shards use the canonical filename.
+    fn source_file_name(&self) -> Result<String, ShardError> {
+        Ok("sources.dat".to_string())
+    }
 
     // ---- per-shard query log / translog (ADR-039; clustering step 5c) ----
     /// The un-sealed tail of this shard's durable query log: every logged mutation with

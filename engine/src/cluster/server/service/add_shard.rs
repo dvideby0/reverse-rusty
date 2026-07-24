@@ -33,6 +33,13 @@ pub(super) async fn add_shard(
     let coordinator_id = crate::cluster::security::request_coordinator_id(&request)?;
     let req = request.into_inner();
     let shard_id = req.shard_id;
+    if req.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+        return Err(Status::failed_precondition(format!(
+            "AddShard compiler semantics mismatch: server {}, coordinator {}",
+            crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            req.compiler_semantics_version
+        )));
+    }
 
     // The node must have adopted a dict already (AddShard ships none).
     let node = server.node_dict.load_full().ok_or_else(|| {
@@ -143,5 +150,6 @@ fn add_shard_reply(
         placement_generation: generation.0,
         num_shards,
         coordinator_id,
+        compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
     })
 }

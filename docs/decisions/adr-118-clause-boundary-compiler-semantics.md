@@ -52,22 +52,43 @@
     would be unsafe across a stop between migration commit and adoption; `open_with_vocab` is the
     efficient normal path;
   - durable `ClusterEngine::open` temporarily attaches committed local segments inside the recovery
-    transaction, replays the coordinator-log tail, performs the existing blue/green source rebuild
-    under the same normalizer while re-minting the dict, re-places at one new generation, bumps the
-    control document, and
-    checkpoints the new registry atomically before returning;
-  - durable shard self-restart refuses a legacy base. A shard-local rewrite cannot safely preserve a
-    selectively placed row because splitting the fabricated feature can change its ring positions or
-    visibility mode; only the coordinator can rebuild and commit the whole placement generation;
+    transaction, folds the coordinator-log tail by logical ID without first interpreting its legacy
+    placement, performs the existing blue/green source rebuild under the same normalizer while
+    re-minting the dict, re-places the resulting corpus exactly once at one new generation, bumps the
+    control document, and checkpoints the new registry atomically before returning. Replaying the
+    tail through the current placement validator first would reject a valid legacy write whose
+    clause-boundary fix changes its target;
+  - cluster manifest v7 records the compiler-semantics stamp independently of its segment registry,
+    so an empty checkpoint base plus a non-empty legacy coordinator-log tail still rebuilds before
+    serving. The same manifest selects one generation-named source sidecar per shard. A blue/green
+    rebuild writes only those new files and atomically selects them with the new segment registry;
+    failure before that commit leaves the old manifest and old source corpus intact and retryable.
+    Backups copy exactly the selected sidecars. Superseded source files are benign orphans;
+  - durable shard checkpoint v2 records the same compiler-semantics stamp and its selected source
+    sidecar, covering an empty base plus a retained translog tail. Durable shard self-restart refuses
+    a legacy checkpoint before attaching segments or replaying the tail. A shard-local rewrite cannot
+    safely preserve a selectively placed row because splitting the fabricated feature can change its
+    ring positions or visibility mode; only the coordinator can rebuild and commit the whole
+    placement generation;
   - raw/shared segment attach and ordinary peer recovery from a still-legacy source likewise refuse.
     The coordinator's boot transaction has a private migration-only attach/copy seam, but it never
     publishes those rows and immediately replaces the complete cluster before returning. A compiler
     semantics value newer than this binary understands is an unsupported compatibility fence and is
     fatal to standalone open too—it is never treated as ordinary skippable corruption;
+  - the distributed dict-adoption, add-shard, fingerprint, and peer-recovery exchanges attest the
+    current compiler-semantics version. A missing protobuf field reads as legacy zero and fails
+    before state adoption, so a mixed compiler mesh cannot silently create incompatible placement;
   - source-driven rebuild and WAL replay parse acknowledged DSL with the durable format's structural
     ceilings (`u32` text length and `u16` clause/group counts), not today's runtime policy or default.
     Tightening settings—or having originally accepted a supported value above the default—therefore
     cannot make recovery discard or reject an acknowledged query.
+
+- **Decision — keep runtime and durable state coherent on failed source persistence.** A persistent
+  standalone vocabulary change refuses to start when durability is already degraded. If writing the
+  replacement source sidecar fails after successful recompilation, the engine still installs the
+  complete green segment in memory so the new normalizer and exact plans agree; it marks persistence
+  degraded and does not advance the manifest or reset the WAL. Restart therefore selects the old
+  durable state, while the still-running process never serves a new normalizer over stale exact plans.
 
 - **Why this is safe.** The change is compile/recovery-only: title normalization, signature probing,
   exact verification, and the allocation-free match hot path are untouched. Splitting a fabricated
@@ -75,8 +96,9 @@
   lossless signature cover. Migration always rebuilds from the complete raw source set; it never
   attempts to reverse-engineer source clauses from a compiled integer plan. Standalone and
   coordinator recovery retain their old commit point until the complete replacement is durable, so
-  every crash point selects either the old base plus its log tail or the new base—never a partial
-  mixture. Ownerless and shard-local paths fail closed instead of guessing at placement.
+  every crash point selects either the old base plus its log tail and source corpus or the new base
+  plus its generation-selected source corpus—never a partial mixture. Ownerless, shard-local, and
+  mixed-wire paths fail closed instead of guessing at placement.
 
 - **Proof.** The regression matrix covers boundaries formed by a negated term, negated phrase,
   negated any-of, positive phrase, and positive any-of through both mutable build and read-only
@@ -85,9 +107,13 @@
   alias (number-context case), dense-ID stabilization across a later live insert, equivalence-aware
   `open` + `adopt_vocab`, duplicate-row refusal, no subset commit after a corrupt-segment skip,
   WAL-tail source survival across a second reopen, recovery above the default clause limit, and
-  fail-loud raw attach/future semantics. Cluster coverage proves an RF=2 durable reopen rebuilds,
-  bumps placement generation exactly once, and reopens idempotently. A durable-shard test proves
-  self-restart refuses without consuming its unsealed translog tail or advancing `shard.ckpt`.
+  fail-loud raw attach/future semantics, plus coherent in-memory matching after a source write
+  failure. Cluster coverage proves an RF=2 durable reopen rebuilds, bumps placement generation
+  exactly once, and reopens idempotently; folds a legacy placement-divergent tail before validation;
+  migrates an empty base with a tail; and preserves the old source corpus across a failed manifest
+  commit so the next open can retry. Durable-shard tests prove self-restart refuses both a legacy
+  segment base and an empty legacy base with an unsealed translog tail without advancing
+  `shard.ckpt`. Distributed units pin fail-closed compiler-semantics handshakes.
 
 - **Oracle follow-up.** ADR-087 remains code-independent, but this finding proved code independence
   is not the same as semantic independence when both implementations translate the same ambiguous

@@ -220,7 +220,7 @@ fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
 
 /// Back up a cluster coordinator `data_dir` into `dest`.
 ///
-/// Copies each shard's manifest-referenced segments + `sources.dat`, then
+/// Copies each shard's manifest-referenced segments + selected source sidecar, then
 /// `cluster.log`, then `cluster_manifest.bin` last. Replica directories are NOT
 /// copied — `ClusterEngine::open` rebuilds them from the primaries via peer
 /// recovery. The caller MUST `checkpoint()` first (so the source dir is consistent
@@ -248,11 +248,12 @@ fn stage_cluster_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
         for name in files {
             copy_file_durable(&src_seg.join(name), &dst_seg.join(name))?;
         }
-        // Per-shard sources.dat (persisted on every shard at checkpoint via the
-        // ADR-074 seal seam, even when its memtable was empty).
-        let src_sources = src.join(&shard).join(SOURCES);
+        // Per-shard source sidecar selected by the same manifest as the segment
+        // registry (persisted even when the memtable was empty).
+        let source_name = &manifest.source_files[i];
+        let src_sources = src.join(&shard).join(source_name);
         if src_sources.exists() {
-            copy_file_durable(&src_sources, &staging.join(&shard).join(SOURCES))?;
+            copy_file_durable(&src_sources, &staging.join(&shard).join(source_name))?;
         }
         fsync_dir(&dst_seg)?;
         fsync_dir(&staging.join(&shard))?;
@@ -288,7 +289,7 @@ pub fn verify_backup(dir: &Path) -> Result<(), BackupError> {
 }
 
 /// Validate a cluster backup: the cluster manifest parses and, for every shard, each
-/// referenced segment opens + passes its CRC check and the shard's `sources.dat` loads
+/// referenced segment opens + passes its CRC check and the shard's selected source sidecar loads
 /// — everything `ClusterEngine::open` will read per shard.
 pub fn verify_cluster_backup(dir: &Path) -> Result<(), BackupError> {
     let manifest_path = dir.join(CLUSTER_MANIFEST);
@@ -299,7 +300,7 @@ pub fn verify_cluster_backup(dir: &Path) -> Result<(), BackupError> {
     for (i, files) in manifest.segment_registry.iter().enumerate() {
         let shard = dir.join(shard_dir_name(i));
         verify_segments(&shard.join(SEGMENTS_DIR), files)?;
-        verify_sources(&shard.join(SOURCES))?;
+        verify_sources(&shard.join(&manifest.source_files[i]))?;
     }
     Ok(())
 }
@@ -471,6 +472,8 @@ mod tests {
             placement_generation: crate::ownership::PlacementGeneration::INITIAL,
             segment_registry: vec![vec![], vec![]],
             next_seg_ids: vec![1, 1],
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: vec![SOURCES.into(), SOURCES.into()],
             dict_data: Vec::new(),
             vocab_data: Vec::new(),
             tag_dict_data: Vec::new(),
@@ -533,6 +536,8 @@ mod tests {
             placement_generation: crate::ownership::PlacementGeneration::INITIAL,
             segment_registry: vec![vec![], vec![]],
             next_seg_ids: vec![1, 1],
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: vec![SOURCES.into(), SOURCES.into()],
             dict_data: Vec::new(),
             vocab_data: Vec::new(),
             tag_dict_data: Vec::new(),

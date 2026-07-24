@@ -201,6 +201,17 @@ impl Engine {
         &mut self,
         mut vocab: crate::vocab::Vocab,
     ) -> Result<usize, crate::error::NormalizerError> {
+        // A prior durability failure means this process may already be serving
+        // state that cannot be made the next durable base. Do not install
+        // another title normalizer over it: callers publish the engine snapshot
+        // after this method returns, and stale exact plans under a new
+        // normalizer are a false-negative risk.
+        if self.config.data_dir.is_some() && !self.persistence_healthy {
+            return Err(crate::error::NormalizerError::new(
+                "cannot change vocabulary while persistence is unhealthy; repair or restart \
+                 from the last committed state first",
+            ));
+        }
         // A vocabulary change must rebuild from canonical source. Validate the
         // source/exact pairing BEFORE mutating the normalizer, dict, or epoch;
         // otherwise a stale sidecar could either be recompiled as truth or make
@@ -712,9 +723,7 @@ impl Engine {
         // old manifest + WAL are still authoritative, so a second restart never
         // finds a committed exact row without its canonical source document.
         self.save_query_sources();
-        if self.config.data_dir.is_some() && !self.persistence_healthy {
-            return 0;
-        }
+        let sources_persisted = self.config.data_dir.is_none() || self.persistence_healthy;
 
         // Atomic swap: drop every (stale) base segment + the memtable and install
         // the one freshly-compiled segment, so no live query is left at an old
@@ -743,7 +752,13 @@ impl Engine {
         // both intact lets a restart recover the pre-recompile state and re-apply
         // the vocab change. The recompiled segment is still served from memory
         // meanwhile; `persistence_healthy` is false to signal the degraded state.
-        let committed = persisted && self.save_manifest_if_persistent();
+        // If the source-sidecar write failed, still install the fully-built
+        // replacement in RAM: the caller may already have installed the new
+        // normalizer, so retaining old exact plans would create false
+        // negatives. The old manifest + WAL remain the restart authority
+        // because the manifest commit is deliberately skipped; the unhealthy
+        // flag tells operators that this coherent live state is not durable.
+        let committed = sources_persisted && persisted && self.save_manifest_if_persistent();
         if committed {
             self.checkpoint_wal();
             self.reset_wal_if_safe();

@@ -16,7 +16,7 @@
 
 use std::fs::File;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Component, Path};
 
 mod backup;
 mod dict;
@@ -37,6 +37,24 @@ pub(crate) use segment::CURRENT_COMPILER_SEMANTICS_VERSION;
 pub use segment::{write_segment, MmapSegment};
 pub use sources::{load_query_sources, LazyBase, SourceStore, StoredSource};
 pub use tagdict::{deserialize_tagdict, serialize_tagdict};
+
+/// Validate an untrusted durable sidecar basename before joining it beneath a
+/// data directory. Commit documents may select generations, but never paths.
+pub(crate) fn validate_sidecar_basename(name: &str) -> io::Result<()> {
+    let mut components = Path::new(name).components();
+    let safe = matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none()
+        && !name.as_bytes().contains(&0)
+        && name.len() <= 255;
+    if safe {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid sidecar filename {name:?}: expected one safe basename"),
+        ))
+    }
+}
 
 // ---- shared low-level binary primitives (used by the codec submodules) ----
 
