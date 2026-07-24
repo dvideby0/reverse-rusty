@@ -674,7 +674,14 @@ impl Engine {
         if persisted && self.save_manifest_if_persistent() {
             self.checkpoint_wal();
             self.reset_wal_if_safe();
-            self.cleanup_segment_files(&old_files);
+            // A standalone engine owns the manifest commit above, so it may now
+            // retire the old files. A cluster shard does NOT own its registry:
+            // its coordinator manifest or `shard.ckpt` sidecar must atomically
+            // point at the replacement first. Leave the old files as benign
+            // orphans for that owner to remove after its commit (ADR-118).
+            if self.owns_manifest {
+                self.cleanup_segment_files(&old_files);
+            }
         }
         recompiled
     }

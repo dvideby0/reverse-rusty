@@ -163,3 +163,52 @@ fn merge_overlapping_groups(groups: Vec<BTreeSet<Feature>>) -> Vec<BTreeSet<Feat
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vocab::PhraseMode;
+
+    #[test]
+    fn positive_bare_term_runs_stop_at_clause_boundaries() {
+        let vocab = RefVocab::default_vocab()
+            .phrase("new york", "term:new_york", PhraseMode::Alias)
+            .equivalence(&["new york", "ny"]);
+        let cases = [
+            (
+                "negated term",
+                "new -used york",
+                "new vintage collectible york",
+            ),
+            (
+                "negated phrase",
+                "new -\"used item\" york",
+                "new vintage collectible york",
+            ),
+            (
+                "negated any-of",
+                "new -(used,damaged) york",
+                "new vintage collectible york",
+            ),
+            (
+                "positive phrase",
+                "new \"vintage\" york",
+                "new vintage collectible york",
+            ),
+            (
+                "positive any-of",
+                "new (vintage,modern) york",
+                "new vintage collectible york",
+            ),
+        ];
+
+        for (boundary, query, title) in cases {
+            let matcher = RefMatcher::build(&[(1, query.to_string())], vocab.clone());
+            assert!(
+                matcher.matches(title).contains(&1),
+                "reference extraction crossed the {boundary} boundary: query `{query}`, \
+                 title `{title}`"
+            );
+        }
+    }
+}

@@ -30,6 +30,14 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.vocab_epoch = epoch,
         }
     }
+
+    /// AST→compiled-query lowering semantics carried by this segment.
+    pub fn compiler_semantics_version(&self) -> u32 {
+        match self {
+            BaseSegment::Memory(s) => s.compiler_semantics_version(),
+            BaseSegment::Mmap(s) => s.compiler_semantics_version(),
+        }
+    }
 }
 
 impl std::fmt::Debug for BaseSegment {

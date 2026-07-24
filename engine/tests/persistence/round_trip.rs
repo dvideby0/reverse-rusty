@@ -7,6 +7,15 @@ use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::Engine;
 use reverse_rusty::vocab::Vocab;
 
+fn stamp_legacy_compiler_semantics(path: &std::path::Path) {
+    let mut bytes = std::fs::read(path).expect("read segment");
+    bytes[12..16].copy_from_slice(&0u32.to_le_bytes());
+    let body = bytes.len() - 4;
+    let crc = reverse_rusty::storage::crc32(&bytes[..body]);
+    bytes[body..].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(path, bytes).expect("write legacy compiler stamp");
+}
+
 #[test]
 fn segment_round_trip() {
     // Build an engine in-memory, then write its segment, mmap it back, and
@@ -606,6 +615,93 @@ fn durable_reopen_preserves_multiword_alias() {
         "FN: post-reopen ny insert did not gain the multi-word alias"
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn durable_reopen_recompiles_legacy_clause_boundary_semantics() {
+    let dir = test_dir("legacy_clause_boundary_compiler");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let mut vocab = Vocab::new();
+    vocab.import_solr_aliases(
+        "ny => new york",
+        &Normalizer::default_vocab().expect("vocab"),
+        &reverse_rusty::dict::Dict::new(),
+    );
+
+    {
+        let mut engine = Engine::with_vocab(vocab.clone(), config.clone()).expect("with_vocab");
+        engine.build_from_queries(&[(1, "new -used york".into())]);
+        assert!(
+            match_ids(&engine, "new vintage collectible york").contains(&1),
+            "current compiler respects the negated-clause boundary"
+        );
+    }
+
+    let old_manifest =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    assert!(!old_manifest.segment_files.is_empty(), "persisted segment");
+    for name in &old_manifest.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+
+    // A standalone shard/shared-segment attach has no coordinator manifest that
+    // can atomically swap a re-placed corpus, so it must refuse the same legacy
+    // materialization rather than publish it.
+    let direct_attach = Engine::open_shared_segments(
+        std::sync::Arc::new(vocab.to_normalizer().expect("normalizer")),
+        std::sync::Arc::new(
+            reverse_rusty::storage::deserialize_dict(&old_manifest.dict_data).expect("dict"),
+        ),
+        std::sync::Arc::new(
+            reverse_rusty::storage::deserialize_tagdict(&old_manifest.tag_dict_data)
+                .expect("tag dict"),
+        ),
+        config.clone(),
+        &old_manifest.segment_files,
+        old_manifest.next_seg_id,
+    );
+    assert!(
+        direct_attach
+            .expect_err("direct legacy attach must fail loud")
+            .to_string()
+            .contains("legacy compiler semantics"),
+        "unexpected direct-attach error"
+    );
+
+    // Opening with an active multi-word alias detects the legacy lowering,
+    // recompiles every live source, and commits a current-stamped replacement
+    // before the engine is returned.
+    {
+        let reopened =
+            Engine::open_with_vocab(vocab.clone(), config.clone()).expect("migrating reopen");
+        assert!(
+            match_ids(&reopened, "new vintage collectible york").contains(&1),
+            "recompiled query must retain the clause-boundary match"
+        );
+        let current_manifest =
+            reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+        assert!(
+            current_manifest.segment_files.iter().all(|name| {
+                reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
+                    .expect("open migrated segment")
+                    .compiler_semantics_version()
+                    > 0
+            }),
+            "the committed replacement must carry current compiler semantics"
+        );
+    }
+
+    // The durable header stamp makes the migration one-shot and the next reopen
+    // serves the already-rebuilt materialization.
+    let reopened = Engine::open_with_vocab(vocab, config).expect("second reopen");
+    assert!(
+        match_ids(&reopened, "new vintage collectible york").contains(&1),
+        "second reopen keeps the migrated result"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

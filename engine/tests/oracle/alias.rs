@@ -7,6 +7,7 @@
 //! the live apply recompiles existing queries without a restart.
 
 use crate::harness::*;
+use reverse_rusty::config::EngineConfig;
 use reverse_rusty::dict::Dict;
 use reverse_rusty::gen::{generate, GenConfig};
 use reverse_rusty::normalize::Normalizer;
@@ -254,6 +255,70 @@ fn multiword_alias_activates_and_matches_bidirectionally() {
         matched(&mut eng, &mut s, "ny yankees").contains(&2),
         "new york query must match a ny title (alias reverse)"
     );
+}
+
+/// External review regression (#120): a non-bare clause ends the current run of
+/// consecutive positive bare terms. Joining `new` and `york` across any of these
+/// boundaries lets the active alias collapse them to `term:new_york`, which is
+/// absent from a title where the two required terms occur noncontiguously. That
+/// drops the query before exact verification — a real retrieval false negative.
+#[test]
+fn positive_bare_term_runs_stop_at_clause_boundaries() {
+    let cases = [
+        (
+            "negated term",
+            "new -used york",
+            "new vintage collectible york",
+        ),
+        (
+            "negated phrase",
+            "new -\"used item\" york",
+            "new vintage collectible york",
+        ),
+        (
+            "negated any-of",
+            "new -(used,damaged) york",
+            "new vintage collectible york",
+        ),
+        (
+            "positive phrase",
+            "new \"vintage\" york",
+            "new vintage collectible york",
+        ),
+        (
+            "positive any-of",
+            "new (vintage,modern) york",
+            "new vintage collectible york",
+        ),
+    ];
+
+    // Seed a vocabulary with the alias already active so a fresh corpus build
+    // exercises the mutable extractor. The ordinary import path below recompiles
+    // an existing corpus through the read-only extractor.
+    let mut seed = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    seed.import_alias_synonyms("ny => new york")
+        .expect("activate alias");
+    let active_vocab = seed.vocab().expect("installed vocab").clone();
+
+    for (boundary, query, title) in cases {
+        let queries = vec![(1u64, query.to_string())];
+
+        let mut mutable = Engine::with_vocab(active_vocab.clone(), EngineConfig::default())
+            .expect("active vocab");
+        mutable.build_from_queries(&queries);
+        let mut mutable_scratch = MatchScratch::new();
+        assert!(
+            matched(&mut mutable, &mut mutable_scratch, title).contains(&1),
+            "mutable extraction crossed the {boundary} boundary: query `{query}`, title `{title}`"
+        );
+
+        let (mut readonly, _vocab) = engine_with_aliases(&queries, "ny => new york");
+        let mut readonly_scratch = MatchScratch::new();
+        assert!(
+            matched(&mut readonly, &mut readonly_scratch, title).contains(&1),
+            "read-only extraction crossed the {boundary} boundary: query `{query}`, title `{title}`"
+        );
+    }
 }
 
 /// (6) THE WALL (the case the abandoned flat-set attempt broke): a forbidden multi-word phrase is

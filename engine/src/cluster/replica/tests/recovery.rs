@@ -259,6 +259,104 @@ fn durable_shard_self_restarts_from_translog() {
 }
 
 #[test]
+fn durable_shard_self_restart_migrates_legacy_clause_boundary_semantics() {
+    let mut vocab = crate::vocab::Vocab::new();
+    vocab.import_solr_aliases(
+        "ny => new york",
+        &Normalizer::default_vocab().expect("normalizer"),
+        &Dict::new(),
+    );
+    let norm = Arc::new(vocab.to_normalizer().expect("alias normalizer"));
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let ast = crate::dsl::parse("new -used york").expect("query");
+    let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+    let tail_ast = crate::dsl::parse("alpha bravo").expect("tail query");
+    let tail_ex = crate::compile::extract(&tail_ast, &norm, &mut dict, &mut lc);
+    dict.finalize_mask();
+    let dict = Arc::new(dict);
+    let mut tag_dict = TagDict::new();
+    tag_dict.mark_finalized();
+    let tag_dict = Arc::new(tag_dict);
+
+    let tmp = scratch_dir("selfrestart_clause_migration");
+    let cfg = EngineConfig {
+        data_dir: Some(tmp.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            cfg.clone(),
+        )
+        .expect("durable shard");
+        shard
+            .insert_extracted_with_tags(&ex, 1, 1, "new -used york", &[])
+            .expect("base insert");
+        shard.seal_for_checkpoint().expect("seal legacy base");
+        shard
+            .insert_extracted_with_tags(&tail_ex, 2, 1, "alpha bravo", &[])
+            .expect("unsealed tail insert");
+    }
+
+    let legacy = crate::cluster::translog::read_sidecar(&tmp)
+        .expect("read sidecar")
+        .expect("sidecar");
+    for name in &legacy.segment_files {
+        let path = tmp.join("segments").join(name);
+        let mut bytes = std::fs::read(&path).expect("read segment");
+        bytes[12..16].copy_from_slice(&0u32.to_le_bytes());
+        let body = bytes.len() - 4;
+        let crc = crate::storage::crc32(&bytes[..body]);
+        bytes[body..].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(path, bytes).expect("write legacy compiler stamp");
+    }
+
+    {
+        let reopened = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            cfg.clone(),
+        )
+        .expect("self-restart migrates");
+        let (ids, _) = reopened
+            .percolate_filtered("new vintage collectible york", true, &TagPredicate::empty())
+            .expect("read migrated shard");
+        assert!(ids.contains(&1), "clause-boundary query remains matchable");
+        assert_eq!(
+            reopened.num_queries().expect("query count"),
+            2,
+            "the replayed tail is folded into the migrated base exactly once"
+        );
+    }
+
+    let current = crate::cluster::translog::read_sidecar(&tmp)
+        .expect("read migrated sidecar")
+        .expect("migrated sidecar");
+    assert!(
+        current.local_checkpoint > legacy.local_checkpoint,
+        "the sidecar must advance past the tail folded into the green base"
+    );
+    assert!(current.segment_files.iter().all(|name| {
+        crate::storage::MmapSegment::open(&tmp.join("segments").join(name))
+            .expect("open migrated segment")
+            .compiler_semantics_version()
+            > 0
+    }));
+
+    let again = LocalShard::new_durable(norm, dict, tag_dict, cfg).expect("second self-restart");
+    assert_eq!(
+        again.num_queries().expect("query count"),
+        2,
+        "current-stamped base must not replay or migrate twice"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn add_recovered_replica_promotes_an_in_sync_set_equal_replica() {
     // ADR-040 finalize: add a replica to a live position at runtime — peer-recover + converge +
     // promote under a brief quiesce. The promoted replica is in-sync (a later write fans out to

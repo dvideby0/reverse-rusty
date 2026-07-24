@@ -7,6 +7,26 @@ use crate::harness::*;
 use crate::vocab_learning::vocab_with_multiword_alias;
 use reverse_rusty::cluster::{ClusterConfig, ClusterEngine};
 
+fn stamp_cluster_segments_as_legacy(
+    dir: &std::path::Path,
+    manifest: &reverse_rusty::storage::ClusterManifest,
+) {
+    for (shard, files) in manifest.segment_registry.iter().enumerate() {
+        for name in files {
+            let path = dir
+                .join(format!("shard_{shard:03}"))
+                .join("segments")
+                .join(name);
+            let mut bytes = std::fs::read(&path).expect("read cluster segment");
+            bytes[12..16].copy_from_slice(&0u32.to_le_bytes());
+            let body = bytes.len() - 4;
+            let crc = reverse_rusty::storage::crc32(&bytes[..body]);
+            bytes[body..].copy_from_slice(&crc.to_le_bytes());
+            std::fs::write(path, bytes).expect("write legacy compiler stamp");
+        }
+    }
+}
+
 #[test]
 fn build_with_vocab_persists_the_vocab_from_the_first_durable_commit() {
     // Review finding: the durable `build_with_vocab` path (vocab_data written by
@@ -162,5 +182,97 @@ fn vocab_file_activates_on_an_empty_durable_reopen() {
             "post-reopen: {title:?} must still match (the activation persisted the vocab)"
         );
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn durable_cluster_rebuilds_legacy_clause_boundary_semantics_before_serving() {
+    let dir =
+        std::env::temp_dir().join(format!("rr-adr118-clause-migration-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        replication_factor: 2,
+        include_broad: true,
+        data_dir: Some(dir.clone()),
+        ..ClusterConfig::default()
+    };
+    {
+        let cluster = ClusterEngine::build_with_vocab(
+            vocab_with_multiword_alias(),
+            &cfg,
+            &[(1, "new -used york".into())],
+        )
+        .expect("durable build_with_vocab");
+        assert!(
+            cluster
+                .percolate("new vintage collectible york")
+                .unwrap()
+                .contains(&1),
+            "current compiler respects the negated-clause boundary"
+        );
+    }
+
+    let before = reverse_rusty::storage::read_cluster_manifest(&dir.join("cluster_manifest.bin"))
+        .expect("cluster manifest");
+    stamp_cluster_segments_as_legacy(&dir, &before);
+
+    // `open` may attach the legacy primary/replicas only inside this boot-time
+    // transaction. It replays the coordinator log, rebuilds and re-places the
+    // complete source corpus, bumps one placement generation, and atomically
+    // commits the current-stamped green registry before returning.
+    {
+        let reopened = ClusterEngine::open(
+            &dir,
+            reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+            Some(&cfg),
+        )
+        .expect("migrating cluster reopen");
+        assert_eq!(
+            reopened.placement_generation().0,
+            before.placement_generation.0 + 1
+        );
+        assert!(
+            reopened
+                .percolate("new vintage collectible york")
+                .unwrap()
+                .contains(&1),
+            "cluster migration retains the clause-boundary match"
+        );
+        let current =
+            reverse_rusty::storage::read_cluster_manifest(&dir.join("cluster_manifest.bin"))
+                .expect("migrated manifest");
+        assert!(current
+            .segment_registry
+            .iter()
+            .enumerate()
+            .flat_map(|(shard, files)| files.iter().map(move |name| (shard, name)))
+            .all(|(shard, name)| {
+                reverse_rusty::storage::MmapSegment::open(
+                    &dir.join(format!("shard_{shard:03}"))
+                        .join("segments")
+                        .join(name),
+                )
+                .expect("open migrated cluster segment")
+                .compiler_semantics_version()
+                    > 0
+            }));
+    }
+
+    let again = ClusterEngine::open(
+        &dir,
+        reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+        Some(&cfg),
+    )
+    .expect("second cluster reopen");
+    assert_eq!(
+        again.placement_generation().0,
+        before.placement_generation.0 + 1,
+        "current-stamped segments must not rebuild again"
+    );
+    assert!(again
+        .percolate("new vintage collectible york")
+        .unwrap()
+        .contains(&1));
     let _ = std::fs::remove_dir_all(&dir);
 }

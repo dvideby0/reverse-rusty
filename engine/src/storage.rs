@@ -33,6 +33,7 @@ pub use manifest::{
     read_cluster_manifest, read_manifest, write_cluster_manifest, write_manifest, ClusterManifest,
     Manifest,
 };
+pub(crate) use segment::CURRENT_COMPILER_SEMANTICS_VERSION;
 pub use segment::{write_segment, MmapSegment};
 pub use sources::{load_query_sources, LazyBase, SourceStore, StoredSource};
 pub use tagdict::{deserialize_tagdict, serialize_tagdict};

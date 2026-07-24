@@ -300,10 +300,57 @@ pub(crate) fn peer_recover(
     norm: &Arc<Normalizer>,
     dict: &Arc<Dict>,
     tag_dict: &Arc<TagDict>,
+    config: EngineConfig,
+    primary: &dyn Shard,
+    primary_dir: &Path,
+    replica_dir: &Path,
+) -> Result<(LocalShard, LogPos), ShardError> {
+    peer_recover_inner(
+        norm,
+        dict,
+        tag_dict,
+        config,
+        primary,
+        primary_dir,
+        replica_dir,
+        false,
+    )
+}
+
+/// Boot-time replica copy used only while `ClusterEngine::open` is immediately
+/// replacing pre-ADR-118 materializations under one atomic coordinator commit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn peer_recover_for_compiler_migration(
+    norm: &Arc<Normalizer>,
+    dict: &Arc<Dict>,
+    tag_dict: &Arc<TagDict>,
+    config: EngineConfig,
+    primary: &dyn Shard,
+    primary_dir: &Path,
+    replica_dir: &Path,
+) -> Result<(LocalShard, LogPos), ShardError> {
+    peer_recover_inner(
+        norm,
+        dict,
+        tag_dict,
+        config,
+        primary,
+        primary_dir,
+        replica_dir,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn peer_recover_inner(
+    norm: &Arc<Normalizer>,
+    dict: &Arc<Dict>,
+    tag_dict: &Arc<TagDict>,
     mut config: EngineConfig,
     primary: &dyn Shard,
     primary_dir: &Path,
     replica_dir: &Path,
+    allow_legacy_compiler_semantics: bool,
 ) -> Result<(LocalShard, LogPos), ShardError> {
     // 1. Seal so the primary's on-disk segments are a consistent, tombstone-baked snapshot at
     //    position `P`; the translog's remaining tail is exactly the un-sealed ops > P.
@@ -350,14 +397,25 @@ pub(crate) fn peer_recover(
 
     // 4. Attach the copied segments against the shared dict (fail-loud on any missing/corrupt).
     config.data_dir = Some(replica_dir.to_path_buf());
-    let replica = LocalShard::open_segments(
-        Arc::clone(norm),
-        Arc::clone(dict),
-        Arc::clone(tag_dict),
-        config,
-        &files,
-        next_seg_id,
-    )?;
+    let replica = if allow_legacy_compiler_semantics {
+        LocalShard::open_segments_for_compiler_migration(
+            Arc::clone(norm),
+            Arc::clone(dict),
+            Arc::clone(tag_dict),
+            config,
+            &files,
+            next_seg_id,
+        )
+    } else {
+        LocalShard::open_segments(
+            Arc::clone(norm),
+            Arc::clone(dict),
+            Arc::clone(tag_dict),
+            config,
+            &files,
+            next_seg_id,
+        )
+    }?;
 
     // 5. Replay the primary's translog tail (ops > P) — the writes that landed during the
     //    copy. This is what lifts the quiesce: the segment copy ran concurrently with writes,

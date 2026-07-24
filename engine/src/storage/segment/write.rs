@@ -262,7 +262,7 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
         },
     )?;
     write_u32(&mut f, seg.len() as u32)?;
-    write_u32(&mut f, 0)?; // reserved
+    write_u32(&mut f, seg.compiler_semantics_version())?;
     write_u64(&mut f, exact_off)?;
     write_u64(&mut f, main_off)?;
     write_u64(&mut f, broad_off)?;

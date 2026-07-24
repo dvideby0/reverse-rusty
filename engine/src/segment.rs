@@ -275,7 +275,7 @@ pub(in crate::segment) fn infallible<T>(r: Result<T, std::convert::Infallible>) 
 /// skip probes that would definitely miss, cutting read amplification when
 /// multiple segments exist. The memtable (mutable) has no filter; it's built
 /// at seal time (flush / bulk_ingest / compaction).
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Segment {
     main: CandidateIndex,
     broad: CandidateIndex,
@@ -295,6 +295,10 @@ pub struct Segment {
     filter: Option<SegmentFilter>,
     /// Vocab epoch at which this segment's queries were compiled.
     pub vocab_epoch: u64,
+    /// AST→compiled-query lowering semantics baked into this segment. Mechanical
+    /// merges preserve the oldest source version; a source-driven recompile
+    /// creates a segment at the current version.
+    pub(crate) compiler_semantics_version: u32,
     /// Reverse index: logical_id → local_ids in this segment. Enables O(1)
     /// delete lookups instead of full segment scans.
     logical_index: crate::util::FastMap<u64, Vec<u32>>,
@@ -314,6 +318,12 @@ pub struct Segment {
     /// signature (collision candidates; equality is confirmed with
     /// `ExactStore::bodies_equal` before any sharing). Unused after sealing.
     body_index: crate::util::FastMap<u64, Vec<u32>>,
+}
+
+impl Default for Segment {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The compile-time knobs `Segment::add_compiled` consults, bundled (they grew

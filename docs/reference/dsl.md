@@ -24,6 +24,11 @@ negations. **All top-level clauses are implicitly ANDed together.**
 Every top-level element is required (AND logic). Use groups for OR within that structure, and prefix
 with `-` for exclusion.
 
+Consecutive positive bare terms are normalized together only within one uninterrupted run, so a
+configured multi-word entity can be recognized (`new york`). Every phrase, any-of group, or negated
+clause is a boundary. For example, `new -used york` means required `new` AND required `york` AND NOT
+`used`; it never manufactures a contiguous `new york` entity across the negation (ADR-118).
+
 ```
 # All of these terms are required (AND):
 vintage leather jacket

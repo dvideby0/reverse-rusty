@@ -372,7 +372,82 @@ impl Engine {
         // Replay WAL entries after last checkpoint
         replay_wal_tail(&mut engine, &wal_path, manifest.wal_seq_watermark)?;
 
+        // ADR-118 compiler-semantics migration: a pre-fix segment can contain a
+        // multi-word alias synthesized across an intervening clause. Rebuild the
+        // complete live materialization from retained `_source` before returning
+        // an engine that could serve it. The segment header stamp makes this
+        // idempotent; a missing/inconsistent source sidecar or failed durable
+        // commit refuses startup rather than retaining a silent false negative.
+        engine.migrate_legacy_clause_boundary_semantics()?;
+
         Ok(engine)
+    }
+
+    /// Whether any live row is materialized under the pre-ADR-118 AST lowering.
+    pub(crate) fn has_legacy_compiler_segments(&self) -> bool {
+        let current = crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION;
+        self.segments.iter().any(|segment| {
+            segment.alive_count() != 0 && segment.compiler_semantics_version() < current
+        }) || (!self.memtable.is_empty() && self.memtable.compiler_semantics_version() < current)
+    }
+
+    /// Whether serving this engine under its current normalizer requires the
+    /// ADR-118 source-driven compiler migration.
+    pub(crate) fn needs_clause_boundary_compiler_migration(&self) -> bool {
+        self.norm.has_multiword_aliases() && self.has_legacy_compiler_segments()
+    }
+
+    /// Standalone upgrade path for ADR-118. The normalizer and dict do not
+    /// change, but every live source must be re-lowered so clause boundaries are
+    /// reflected in exact predicates, signatures, and placement.
+    pub(crate) fn migrate_legacy_clause_boundary_semantics(&mut self) -> std::io::Result<()> {
+        if !self.needs_clause_boundary_compiler_migration() {
+            return Ok(());
+        }
+
+        let expected = self.live_source_documents_tagged().map_err(|logical| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "cannot migrate legacy compiler semantics: live query {logical} has no \
+                     matching retained source document"
+                ),
+            )
+        })?;
+        let previous_epoch = self.vocab_epoch;
+        self.vocab_epoch = self.vocab_epoch.checked_add(1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cannot migrate legacy compiler semantics: vocab epoch exhausted",
+            )
+        })?;
+        let rebuilt = self.recompile_stale_segments();
+
+        if rebuilt != expected.len()
+            || self.has_legacy_compiler_segments()
+            || !self.persistence_healthy
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "legacy compiler-semantics migration did not commit completely \
+                     (expected {} live queries, rebuilt {rebuilt}, persistence_healthy={})",
+                    expected.len(),
+                    self.persistence_healthy
+                ),
+            ));
+        }
+
+        // The epoch was only a process-local trigger for a same-normalizer
+        // compiler migration. Restore it so introspection does not report a
+        // vocabulary change; the durable idempotency marker is the segment's
+        // compiler-semantics header word.
+        self.vocab_epoch = previous_epoch;
+        Arc::make_mut(&mut self.memtable).vocab_epoch = previous_epoch;
+        for segment in &mut self.segments {
+            Arc::make_mut(segment).set_vocab_epoch(previous_epoch);
+        }
+        Ok(())
     }
 
     /// Reopen a **cluster-shard** engine (ADR-032) by attaching an EXPLICIT list of
@@ -394,6 +469,34 @@ impl Engine {
         files: &[String],
         next_seg_id: u64,
     ) -> std::io::Result<Self> {
+        Self::open_shared_segments_inner(norm, dict, tag_dict, config, files, next_seg_id, false)
+    }
+
+    /// Coordinator-only attach seam used while an old durable cluster is being
+    /// opened and immediately blue/green rebuilt under an atomic cluster
+    /// manifest commit. Every other shared-segment attach refuses legacy
+    /// compiler semantics when multi-word aliases are active.
+    pub(crate) fn open_shared_segments_for_compiler_migration(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+    ) -> std::io::Result<Self> {
+        Self::open_shared_segments_inner(norm, dict, tag_dict, config, files, next_seg_id, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_shared_segments_inner(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+        allow_legacy_compiler_semantics: bool,
+    ) -> std::io::Result<Self> {
         let dir = config.data_dir.as_ref().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -413,7 +516,7 @@ impl Engine {
             config.retain_source,
         )?);
         let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
-        Ok(Engine {
+        let engine = Engine {
             config: Arc::new(config),
             norm,
             vocab: None,
@@ -441,6 +544,15 @@ impl Engine {
             query_store,
             vocab_epoch: 0,
             owns_manifest: false,
-        })
+        };
+        if !allow_legacy_compiler_semantics && engine.needs_clause_boundary_compiler_migration() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "legacy compiler semantics with active multi-word aliases require an atomic \
+                 source-driven rebuild; reopen through ClusterEngine or recover this shard from \
+                 a current peer",
+            ));
+        }
+        Ok(engine)
     }
 }

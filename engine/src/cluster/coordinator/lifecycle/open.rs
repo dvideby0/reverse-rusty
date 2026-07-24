@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::cluster::clog::{FileClusterLog, LogPos};
-use crate::cluster::control::InMemoryControlPlane;
+use crate::cluster::control::{ClusterStateChange, InMemoryControlPlane};
 use crate::cluster::coordinator::{
     into_shard, replica_dir, shard_dir, ClusterConfig, ClusterDurable, ClusterEngine,
     CLUSTER_LOG_FILE, CLUSTER_MANIFEST_FILE,
@@ -276,11 +276,16 @@ impl ClusterEngine {
         // is a silent shard-sized false negative).
         let rf = config.map_or(1, |c| c.replication_factor.max(1));
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
+        let mut needs_clause_boundary_compiler_migration = false;
         for s in 0..num_shards {
             let primary_dir = shard_dir(&data_dir, s);
             let mut sc = per_shard.clone();
             sc.data_dir = Some(primary_dir.clone());
-            let primary = LocalShard::open_segments(
+            // Coordinator recovery is the one attach path allowed to load a
+            // pre-ADR-118 segment: after every shard and the log tail are
+            // present, `open` atomically blue/green rebuilds the whole cluster
+            // before returning it to a caller.
+            let primary = LocalShard::open_segments_for_compiler_migration(
                 Arc::clone(&norm),
                 Arc::clone(&dict),
                 Arc::clone(&tag_dict),
@@ -288,6 +293,9 @@ impl ClusterEngine {
                 &manifest.segment_registry[s],
                 manifest.next_seg_ids[s],
             )?;
+            let shard_needs_clause_boundary_migration =
+                primary.needs_clause_boundary_compiler_migration();
+            needs_clause_boundary_compiler_migration |= shard_needs_clause_boundary_migration;
             // Re-seed replicas (rf-1) by peer recovery from the just-attached primary — replicas
             // are not in the manifest, so they are rebuilt from the durable primary on every open.
             // The log-tail replay below then feeds primary AND replicas through the composite.
@@ -297,7 +305,12 @@ impl ClusterEngine {
                 // The high-water is irrelevant here: at open there are no concurrent writes,
                 // so the primary's translog tail is empty and this peer_recover is a pure
                 // segment copy; the coordinator-log replay below repopulates all copies.
-                let (replica, _hwm) = crate::cluster::replica::peer_recover(
+                let recover = if shard_needs_clause_boundary_migration {
+                    crate::cluster::replica::peer_recover_for_compiler_migration
+                } else {
+                    crate::cluster::replica::peer_recover
+                };
+                let (replica, _hwm) = recover(
                     &norm,
                     &dict,
                     &tag_dict,
@@ -403,6 +416,33 @@ impl ClusterEngine {
         }
         for (_pos, m) in replay.entries {
             engine.replay_apply(m)?;
+        }
+
+        // ADR-118: legacy segments compiled positive bare terms across clause
+        // boundaries. With active multi-word aliases that can bake a predicate
+        // no title satisfying the source query can reach. Rebuild from the
+        // complete, replayed live corpus under the unchanged normalizer/dict,
+        // re-place at one fresh generation, update the control document, and
+        // commit the green registry before exposing the cluster. Any incomplete
+        // source sidecar or failed checkpoint returns an error; the old manifest
+        // stays authoritative and a later restart can retry.
+        if needs_clause_boundary_compiler_migration {
+            let next_generation = engine
+                .placement_generation()
+                .next()
+                .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
+            engine.rebuild_from_live(
+                Arc::clone(&engine.norm),
+                engine.ring.clone(),
+                None,
+                next_generation,
+            )?;
+            engine
+                .control
+                .propose(ClusterStateChange::BumpModelVersion {
+                    dict_fingerprint: engine.dict.fingerprint(),
+                })?;
+            engine.checkpoint()?;
         }
         Ok(engine)
     }

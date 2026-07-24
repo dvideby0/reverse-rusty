@@ -63,6 +63,16 @@ const FORMAT_VERSION_OWNERSHIP: u32 = 7;
 /// whenever any row carries a non-zero generation; the version is also a
 /// rollback fence because an older reader cannot safely validate `_source`.
 const FORMAT_VERSION_SOURCE_GENERATION: u32 = 8;
+/// Semantic version of the AST→compiled-query lowering baked into a segment.
+///
+/// Version 0 is every segment written before ADR-118: positive bare terms were
+/// incorrectly gathered across intervening clauses before multi-word alias
+/// normalization. Version 1 compiles each maximal consecutive positive bare-term
+/// run independently. This lives in the format's old reserved header word rather
+/// than `FORMAT_VERSION`: an older reader can safely execute a v1-compiled exact
+/// plan, while a newer writer must be able to distinguish legacy materializations
+/// that need a source-driven rebuild when multi-word aliases are active.
+pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 1;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -70,7 +80,7 @@ const HEADER_SIZE: usize = 80;
 //   0..4    magic
 //   4..8    format_version (u32 LE)
 //   8..12   num_queries (u32 LE)
-//   12..16  reserved (u32)
+//   12..16  compiler_semantics_version (u32; 0 on legacy files, ADR-118)
 //   16..24  exact_section_off (u64 LE)
 //   24..32  main_index_off (u64 LE)
 //   32..40  broad_index_off (u64 LE)
@@ -284,6 +294,58 @@ mod tests {
             error
                 .to_string()
                 .contains("source-generation column length mismatch"),
+            "got: {error}"
+        );
+
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn compiler_semantics_header_distinguishes_legacy_and_rejects_future() {
+        let (path, current) = v7_segment_bytes();
+        assert_eq!(read_u32(&current, 12), CURRENT_COMPILER_SEMANTICS_VERSION);
+        assert_eq!(
+            MmapSegment::open(&path)
+                .expect("open current compiler semantics")
+                .compiler_semantics_version(),
+            CURRENT_COMPILER_SEMANTICS_VERSION
+        );
+
+        let mut legacy = current.clone();
+        legacy[12..16].copy_from_slice(&0u32.to_le_bytes());
+        reseal(&mut legacy);
+        std::fs::write(&path, &legacy).expect("write legacy compiler stamp");
+        let legacy_mmap =
+            MmapSegment::open(&path).expect("legacy compiler semantics remain readable");
+        assert_eq!(legacy_mmap.compiler_semantics_version(), 0);
+
+        // Mechanical mmap materialization + compaction must not accidentally
+        // bless a legacy exact plan as current. Only source re-extraction may
+        // advance this stamp.
+        let legacy_memory = legacy_mmap.to_memory_segment(&crate::tagdict::TagDict::new());
+        assert_eq!(legacy_memory.compiler_semantics_version(), 0);
+        let compacted = crate::segment::Segment::compact_from(&[&legacy_memory]);
+        assert_eq!(compacted.compiler_semantics_version(), 0);
+        let compacted_path = path.with_file_name("legacy-compacted.seg");
+        write_segment(&compacted, &compacted_path).expect("write compacted legacy segment");
+        assert_eq!(
+            MmapSegment::open(&compacted_path)
+                .expect("open compacted legacy segment")
+                .compiler_semantics_version(),
+            0
+        );
+
+        let mut future = current;
+        future[12..16].copy_from_slice(&(CURRENT_COMPILER_SEMANTICS_VERSION + 1).to_le_bytes());
+        reseal(&mut future);
+        std::fs::write(&path, future).expect("write future compiler stamp");
+        let error = MmapSegment::open(&path).expect_err("future semantics must fail loud");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported compiler semantics version"),
             "got: {error}"
         );
 

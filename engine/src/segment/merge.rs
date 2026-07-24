@@ -94,6 +94,11 @@ impl Segment {
         dest.build_filter();
         // Merged segment inherits the minimum epoch — still stale if any source was.
         dest.vocab_epoch = sources.iter().map(|s| s.vocab_epoch).min().unwrap_or(0);
+        dest.compiler_semantics_version = sources
+            .iter()
+            .map(|s| s.compiler_semantics_version)
+            .min()
+            .unwrap_or(crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION);
         dest
     }
 
@@ -177,6 +182,11 @@ impl Segment {
         }
         dest.build_filter();
         dest.vocab_epoch = sources.iter().map(|s| s.vocab_epoch).min().unwrap_or(0);
+        dest.compiler_semantics_version = sources
+            .iter()
+            .map(|s| s.compiler_semantics_version)
+            .min()
+            .unwrap_or(crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION);
         dest
     }
 
@@ -430,6 +440,11 @@ impl Segment {
         dest.build_filter();
         // Merged segment inherits the minimum epoch — still stale if any source was.
         dest.vocab_epoch = sources.iter().map(|s| s.vocab_epoch).min().unwrap_or(0);
+        dest.compiler_semantics_version = sources
+            .iter()
+            .map(|s| s.compiler_semantics_version)
+            .min()
+            .unwrap_or(crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION);
         (dest, stats)
     }
 }

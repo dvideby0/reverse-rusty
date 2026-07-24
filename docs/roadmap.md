@@ -39,8 +39,10 @@ active development** — the current top priority is the
    front end (parser/normalizer/extractor/predicate) from the spec, reusing none of the engine
    (independence enforced by a `check.sh` `cargo tree` lane); the engine is diffed against it
    (`tests/independent_oracle/`) over default/populated/alias corpora + a hand-written gotcha table +
-   the env-gated `RR_ORACLE_CORPUS` real-corpus hook. Closes the ADR-050/063 shared-front-end blind
-   spot for the covered paths — zero FN/FP, no engine front-end bug found.
+   the env-gated `RR_ORACLE_CORPUS` real-corpus hook. It closes the ADR-050/063 shared-**code**
+   front-end blind spot for the covered paths. ADR-118 later exposed and fixed a shared-**semantics**
+   lowering bug that both implementations had independently copied; issue #123 tracks strengthening
+   the reference around a semantic model.
 3. **Durability torture (crash injection) — ✅ shipped
    ([ADR-088](decisions/adr-088-crash-injection-harness.md)).** A `crashwriter` lean-core bin + the
    `tests/crash_injection/` suite spawn a real process, deliver a real external SIGKILL mid

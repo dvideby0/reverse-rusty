@@ -9,6 +9,12 @@
   `check.sh` lane (`ref-matcher independence`) mechanically enforces the independence via
   `cargo tree`. All run under the default `cargo test --release` + the gate.
 
+  **2026-07-24 amendment (ADR-118):** “independent” here means no shared code or dependencies, not
+  guaranteed semantic independence. Both implementations independently interpreted “joint positive
+  bare words” as spanning non-bare intervening clauses and therefore agreed on one false-negative
+  lowering. ADR-118 fixes it, adds a human-expectation pin, and records the residual oracle boundary;
+  issue #123 tracks a stronger semantic-model reference.
+
 - **Context:** This is **Phase 0, item 2** of the reality/adversarial audit — the
   highest-value net-new item, prioritized above every product-roadmap tier. Reverse Rusty's cardinal
   guarantee is **zero false negatives** ([`design/README.md`](../design/README.md) §2): a stage-one
@@ -35,9 +41,9 @@
      diacritic fold + the `PunctClass` table; the grader/grade/number/synonym/generic token pipeline
      with the single-pending grader/grade-context aging windows; the ADR-061 two title views
      `N(T)` / `P(T)` with the force-additive parse-union, the raw-`term:` union, and the overlap
-     scan), the extractor (joint normalization of positive bare words; the rarest-by-frequency any-of
-     proxy with singleton-collapse; ADR-054 equivalence expansion required→any-of; class-D drop), and
-     the match predicate.
+     scan), the extractor (normalization of each maximal consecutive positive bare-term run, corrected
+     by ADR-118; the rarest-by-frequency any-of proxy with singleton-collapse; ADR-054 equivalence
+     expansion required→any-of; class-D drop), and the match predicate.
   2. **It reuses none of the engine — provably.** No `reverse-rusty`, no `daachorse`, no `serde`. The
      reference compares matches by **canonical feature string** (`year:1994`, `term:psa`,
      `grade:10`, `grader_grade:psa10`), never the engine's interned `FeatureId` — which is what frees
@@ -80,10 +86,10 @@
     member's tokens — which real surface forms never produce (a title carries a member completely or
     not at all), so it does not arise in the generated / gotcha corpora (both pass). Noted for the
     real-corpus pass.
-  - **Result:** zero FN / zero FP everywhere — ~61k default-clean, ~69k default-messy, ~75k populated,
-    ~989k at-scale-alias matches, plus every gotcha. The independent reference found **no engine
-    front-end bug**: the parser/normalizer/extractor are now confirmed correct under a check the
-    in-tree oracle structurally cannot be, not merely assumed correct.
+  - **Result at adoption:** zero FN / zero FP over ~61k default-clean, ~69k default-messy, ~75k
+    populated, ~989k at-scale-alias matches, plus every then-current gotcha. ADR-118 later found the
+    first shared-semantics miss outside that expectation table: code independence did not prevent
+    both implementations from translating the same ambiguous prose incorrectly.
 
 - **Alternatives reconsidered (this revisits ADR-050's declined option):** ADR-050 explicitly
   *declined* "a fully independent reference extractor," on three grounds; each is addressed here:

@@ -41,6 +41,42 @@ pub fn is_hot_anchor(dict: &Dict, f: FeatureId, theta: u32) -> bool {
     is_hot(dict, f) || (theta != 0 && dict.freq(f) >= theta)
 }
 
+/// Normalize one maximal run of consecutive positive bare terms through the
+/// mutable query-side pipeline. Every other AST clause is a hard boundary:
+/// joining across it can manufacture a multi-word entity that the source query
+/// never contained contiguously, which can make candidate retrieval lossy.
+fn flush_positive_run(
+    words: &mut Vec<&str>,
+    norm: &Normalizer,
+    dict: &mut Dict,
+    lc: &mut String,
+    required: &mut Vec<FeatureId>,
+) {
+    if words.is_empty() {
+        return;
+    }
+    let joined = words.join(" ");
+    required.extend(norm.compile_features(&joined, dict, lc));
+    words.clear();
+}
+
+/// Read-only twin of [`flush_positive_run`]. Kept separate so this path cannot
+/// accidentally intern into the frozen dictionary shared by cluster shards.
+fn flush_positive_run_readonly(
+    words: &mut Vec<&str>,
+    norm: &Normalizer,
+    dict: &Dict,
+    lc: &mut String,
+    required: &mut Vec<FeatureId>,
+) {
+    if words.is_empty() {
+        return;
+    }
+    let joined = words.join(" ");
+    required.extend(norm.compile_features_readonly(&joined, dict, lc));
+    words.clear();
+}
+
 /// Extract required / forbidden / any-of from an AST, interning features and
 /// bumping their query-frequency. Run for every query in pass A.
 pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -> Extracted {
@@ -55,6 +91,9 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
     let mut pos_words: Vec<&str> = Vec::new();
 
     for clause in &ast.clauses {
+        if !matches!((&clause.atom, clause.negated), (Atom::Term(_), false)) {
+            flush_positive_run(&mut pos_words, norm, dict, lc, &mut required);
+        }
         match (&clause.atom, clause.negated) {
             (Atom::Term(w), false) => {
                 pos_words.push(w.as_str());
@@ -97,12 +136,7 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
         }
     }
 
-    // normalize the joined positive bare words as one stream
-    if !pos_words.is_empty() {
-        let joined = pos_words.join(" ");
-        let feats = norm.compile_features(&joined, dict, lc);
-        required.extend_from_slice(&feats);
-    }
+    flush_positive_run(&mut pos_words, norm, dict, lc, &mut required);
 
     required.sort_unstable();
     required.dedup();
@@ -147,6 +181,9 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
     let mut pos_words: Vec<&str> = Vec::new();
 
     for clause in &ast.clauses {
+        if !matches!((&clause.atom, clause.negated), (Atom::Term(_), false)) {
+            flush_positive_run_readonly(&mut pos_words, norm, dict, lc, &mut required);
+        }
         match (&clause.atom, clause.negated) {
             (Atom::Term(w), false) => {
                 pos_words.push(w.as_str());
@@ -185,11 +222,7 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
         }
     }
 
-    if !pos_words.is_empty() {
-        let joined = pos_words.join(" ");
-        let feats = norm.compile_features_readonly(&joined, dict, lc);
-        required.extend_from_slice(&feats);
-    }
+    flush_positive_run_readonly(&mut pos_words, norm, dict, lc, &mut required);
 
     required.sort_unstable();
     required.dedup();

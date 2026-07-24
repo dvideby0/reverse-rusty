@@ -48,6 +48,7 @@ impl Segment {
             alive_counter: 0,
             filter: None,
             vocab_epoch: 0,
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
             logical_index: crate::util::fast_map(),
             dup_of: Vec::new(),
             dup_members: crate::util::fast_map(),
@@ -103,6 +104,12 @@ impl Segment {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.exact.is_empty()
+    }
+
+    /// AST→compiled-query lowering semantics carried by this segment.
+    #[inline]
+    pub fn compiler_semantics_version(&self) -> u32 {
+        self.compiler_semantics_version
     }
 
     pub fn main_index(&self) -> &CandidateIndex {
@@ -763,6 +770,7 @@ impl Segment {
             alive_counter,
             filter: None,
             vocab_epoch: 0,
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
             logical_index,
             // Rebuilt-from-parts segments carry EXPANDED postings (the on-disk
             // form) — identity groups, no sharing (dedup is re-derived only by
