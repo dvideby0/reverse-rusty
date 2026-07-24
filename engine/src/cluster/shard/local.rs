@@ -947,6 +947,10 @@ impl Shard for LocalShard {
         }
     }
 
+    fn has_live_query(&self, logical: u64) -> Result<bool, ShardError> {
+        Ok(self.snapshot().has_live_query(logical))
+    }
+
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         Ok(self.ingest_local(items))
     }

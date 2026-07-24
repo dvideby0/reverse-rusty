@@ -110,7 +110,8 @@ async fn get_doc_is_es_shaped_filterable_and_head_aware() {
                 "tags": {
                     "tenant": "acme",
                     "colors": ["red", "blue"],
-                    "active": true
+                    "active": true,
+                    "é": "accent"
                 }
             })
             .to_string(),
@@ -132,6 +133,7 @@ async fn get_doc_is_es_shaped_filterable_and_head_aware() {
     assert_eq!(body["_source"]["query"], "topps chrome");
     assert_eq!(body["_source"]["tags"]["tenant"], "acme");
     assert_eq!(body["_source"]["tags"]["active"], "true");
+    assert_eq!(body["_source"]["tags"]["é"], "accent");
     assert_eq!(
         body["_source"]["tags"]["colors"],
         serde_json::json!(["blue", "red"])
@@ -148,6 +150,19 @@ async fn get_doc_is_es_shaped_filterable_and_head_aware() {
     assert_eq!(
         body["_source"]["tags"],
         serde_json::json!({"colors": ["blue", "red"]})
+    );
+
+    let unicode_question = Request::builder()
+        .uri("/_doc/7?_source_includes=tags.%3F")
+        .body(Body::empty())
+        .expect("Unicode wildcard GET");
+    let (status, bytes) = route_doc(&state, unicode_question).await;
+    assert_eq!(status, StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("Unicode wildcard json");
+    assert_eq!(
+        body["_source"],
+        serde_json::json!({"tags": {"é": "accent"}}),
+        "`?` must consume one Unicode character, not one UTF-8 byte"
     );
 
     let excluded = Request::builder()
@@ -243,6 +258,19 @@ async fn get_doc_does_not_report_a_live_row_as_missing_when_its_source_is_unavai
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("error json");
     assert_eq!(body["error"]["type"], "source_unavailable");
+
+    let head = Request::builder()
+        .method("HEAD")
+        .uri("/_doc/7")
+        .body(Body::empty())
+        .expect("HEAD request");
+    let (status, bytes) = route_doc(&state, head).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "HEAD existence comes from the live exact index, not sources.dat"
+    );
+    assert!(bytes.is_empty(), "HEAD response must be bodyless");
 
     let _ = std::fs::remove_dir_all(dir);
 }

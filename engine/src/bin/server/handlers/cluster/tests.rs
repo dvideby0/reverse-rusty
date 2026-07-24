@@ -295,6 +295,19 @@ async fn cluster_v2_missing_winner_source_is_a_no_partial_502() {
     )
     .expect("source-less cluster reopen");
     let state = state_from_cluster(cluster);
+
+    let (status, json) = send(&state, req_empty("HEAD", "/_doc/1")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "coordinator HEAD must use exact-index liveness even without sources.dat"
+    );
+    assert!(json.is_null(), "HEAD must be bodyless");
+
+    let (status, json) = send(&state, req_empty("GET", "/_doc/1")).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert_eq!(json["error"]["type"], "source_unavailable");
+
     let (status, json) = send(
         &state,
         req(

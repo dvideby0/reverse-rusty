@@ -97,8 +97,8 @@ pub(in crate::cluster::coordinator) fn rebalance_group_targets(
 /// (ADR-097): both content fingerprints — computed while BOTH sides are quiescent (the source
 /// post-freeze-probe; the member write-quiesced by the primary fence, since composite writes are
 /// primary-first) — and equal. Equality covers the match-relevant live multiset
-/// `(logical, version, dsl, TagId*)`; sources.dat / segment-layout divergence is deliberately
-/// out of scope (never on the match path). `None` source fingerprint (the RPC failed — e.g. a
+/// `(logical, version, dsl, TagId*, raw source tags when present)`; physical segment-layout
+/// divergence is deliberately out of scope. `None` source fingerprint (the RPC failed — e.g. a
 /// pre-ADR-097 peer) or a member-side error ⇒ NOT provable ⇒ the caller falls back to the
 /// proven heal-by-re-copy. False negatives here cost a redundant copy, never correctness.
 pub(super) fn retained_member_is_complete(

@@ -978,6 +978,16 @@ impl Engine {
                 tag_ids.sort_unstable();
                 tag_ids.dedup();
             }
+            // `tag_ids` is a public carry-through field, so its non-emptiness cannot by
+            // itself be trusted as proof that the final set fits the exact store. The
+            // runtime `max_tags` exception above preserves already-acknowledged rebuild
+            // rows, but the structural u16 ceiling is absolute: crossing it would wrap
+            // `tag_len` and let a valid filter miss the query.
+            if tag_ids.len() > usize::from(u16::MAX) {
+                self.rejected_parse += 1;
+                report.rejected_parse += 1;
+                continue;
+            }
             let (source_tags, source_tags_known) = if !item.tags.is_empty() || tag_ids.is_empty() {
                 (item.tags.clone(), true)
             } else {
@@ -1156,5 +1166,41 @@ impl Engine {
         } else if let Some(seg) = self.segments.get_mut(seg_idx as usize) {
             Arc::make_mut(seg).tombstone(local_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracted_ingest_rejects_a_merged_tag_column_over_u16() {
+        let mut engine =
+            Engine::new(crate::normalize::Normalizer::default_vocab().expect("normalizer"));
+        let seed = vec![(1, "1994 upper deck".to_string())];
+        assert_eq!(engine.build_from_queries(&seed).ingested, 1);
+
+        let ast = crate::dsl::parse("1994 upper deck").expect("parse");
+        let mut lc = String::new();
+        let ex = crate::compile::extract_readonly(&ast, &engine.norm, &engine.dict, &mut lc);
+        let item = PlacedQuery {
+            logical: 2,
+            ex,
+            dsl: "1994 upper deck".into(),
+            version: 1,
+            tags: Vec::new(),
+            // Nonempty carry-through bypasses the runtime max_tags check, but
+            // the exact-store u16 count ceiling remains unconditional.
+            tag_ids: (0..=u32::from(u16::MAX)).collect(),
+            rank: crate::rank::RankValues::default(),
+            placement: crate::ownership::QueryPlacement::standalone(),
+        };
+        let report = engine.ingest_extracted(&[item]);
+        assert_eq!(report.ingested, 0);
+        assert_eq!(report.rejected_parse, 1);
+        assert!(
+            !engine.snapshot().has_live_query(2),
+            "a wrapping tag column must never reach the exact store"
+        );
     }
 }

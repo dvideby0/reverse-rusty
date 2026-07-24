@@ -587,19 +587,30 @@ impl EngineSnapshot {
     pub fn get_query_document(&self, logical_id: u64) -> Option<crate::storage::StoredSource> {
         let mut source = self.query_store.get_document(logical_id)?;
         let (version, tag_ids) = self.source_metadata_for_logical(logical_id)?;
-        let recovered_tags = if source.tags_known() {
-            None
-        } else {
-            tag_ids
-                .iter()
-                .map(|&id| {
-                    self.tag_dict
-                        .key_value(id)
-                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
-                })
-                .collect::<Option<Vec<_>>>()
-        };
-        source.apply_live_metadata(version, recovered_tags);
+        if source.tags_known() {
+            // SourceStore is shared behind interior mutability so an already-published
+            // snapshot can briefly observe the next write's source before that write's
+            // exact-store snapshot is published. A failed best-effort sidecar write can
+            // produce the inverse mismatch after reopen. Never combine those generations:
+            // a footer-backed source has an authoritative write version, so mismatch is
+            // source unavailability and the HTTP layer fails loud.
+            if source.version() != version {
+                return None;
+            }
+            return Some(source);
+        }
+        // Footer-less v1/original-v2 sources carry neither trustworthy version nor raw
+        // tags. Preserve their compatibility path by inheriting the newest live exact
+        // row, reconstructing tags only when every dense id is reversible.
+        let recovered_tags = tag_ids
+            .iter()
+            .map(|&id| {
+                self.tag_dict
+                    .key_value(id)
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            })
+            .collect::<Option<Vec<_>>>();
+        source.recover_legacy_metadata(version, recovered_tags);
         Some(source)
     }
 
@@ -1441,6 +1452,45 @@ impl EngineSnapshot {
             opts,
             deadline,
         )
+    }
+}
+
+#[cfg(test)]
+mod source_document_tests {
+    use super::*;
+
+    #[test]
+    fn point_read_refuses_source_from_a_different_exact_generation() {
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine
+            .try_upsert_live_with_tags("1994 topps", 7, 1, &[("status".into(), "old".into())])
+            .expect("initial upsert");
+        let old_snapshot = engine.snapshot();
+
+        // SourceStore is intentionally shared by snapshots. Mutate the engine without
+        // publishing a replacement snapshot to reproduce the write/source ordering
+        // window: old exact row, new source document.
+        engine
+            .try_upsert_live_with_tags("1995 fleer", 7, 2, &[("status".into(), "new".into())])
+            .expect("replacement upsert");
+
+        assert!(
+            old_snapshot.get_query_document(7).is_none(),
+            "a point read must fail loud instead of combining source v2 with exact row v1"
+        );
+        assert!(
+            old_snapshot.has_live_query(7),
+            "the mismatch is source unavailability, not document absence"
+        );
+
+        let fresh = engine
+            .snapshot()
+            .get_query_document(7)
+            .expect("fresh generation is coherent");
+        assert_eq!(fresh.version(), 2);
+        assert_eq!(fresh.query(), "1995 fleer");
+        assert_eq!(fresh.tags(), [("status".into(), "new".into())]);
     }
 }
 

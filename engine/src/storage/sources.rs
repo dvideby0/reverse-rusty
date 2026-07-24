@@ -72,11 +72,15 @@ impl StoredSource {
         self.tags_known
     }
 
-    pub(crate) fn apply_live_metadata(
+    pub(crate) fn recover_legacy_metadata(
         &mut self,
         version: u32,
         tags: Option<Vec<(String, String)>>,
     ) {
+        debug_assert!(
+            !self.tags_known,
+            "only footer-less source records may inherit exact-store metadata"
+        );
         self.version = version;
         if let Some(tags) = tags {
             self.tags = tags;
@@ -157,7 +161,7 @@ impl LazyBase {
         read_u64_at(&self.mmap, self.index_off + i * SRC_IDX_REC).ok()
     }
 
-    fn record(&self, i: usize) -> Option<SourceRecord<'_>> {
+    fn query_record(&self, i: usize) -> Option<(u64, &str)> {
         let data: &[u8] = &self.mmap;
         let rec = self.index_off + i * SRC_IDX_REC;
         let logical = read_u64_at(data, rec).ok()?;
@@ -167,6 +171,12 @@ impl LazyBase {
         let query_start = self.blob_off.checked_add(query_off)?;
         let query_end = query_start.checked_add(query_len)?;
         let query = std::str::from_utf8(data.get(query_start..query_end)?).ok()?;
+        Some((logical, query))
+    }
+
+    fn record(&self, i: usize) -> Option<SourceRecord<'_>> {
+        let data: &[u8] = &self.mmap;
+        let (logical, query) = self.query_record(i)?;
         let (version, tags_known, encoded_tags) = match self.metadata {
             Some(metadata) => {
                 let metadata_rec = metadata.directory_off + i * META_IDX_REC;
@@ -193,7 +203,7 @@ impl LazyBase {
         })
     }
 
-    fn find(&self, logical: u64) -> Option<SourceRecord<'_>> {
+    fn index_of(&self, logical: u64) -> Option<usize> {
         let (mut lo, mut hi) = (0usize, self.count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
@@ -201,23 +211,32 @@ impl LazyBase {
             match found.cmp(&logical) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
-                std::cmp::Ordering::Equal => return self.record(mid),
+                std::cmp::Ordering::Equal => return Some(mid),
             }
         }
         None
     }
 
+    fn find(&self, logical: u64) -> Option<SourceRecord<'_>> {
+        self.record(self.index_of(logical)?)
+    }
+
     /// Read one source only when it fits the caller's remaining byte credit.
-    /// The mmap length is checked before `to_owned`, so an over-budget source is
-    /// rejected without allocating its text.
+    /// The query index/blob is deliberately read without touching the optional
+    /// metadata directory/blob; winner enrichment remains the pre-ADR-116
+    /// query-only mmap path. The query length is checked before `to_owned`, so an
+    /// over-budget source is rejected without allocating its text.
     fn get_bounded(&self, logical: u64, max_bytes: usize) -> Result<Option<String>, usize> {
-        let Some(record) = self.find(logical) else {
+        let Some(i) = self.index_of(logical) else {
             return Ok(None);
         };
-        if record.query.len() > max_bytes {
-            return Err(record.query.len());
+        let Some((_, query)) = self.query_record(i) else {
+            return Ok(None);
+        };
+        if query.len() > max_bytes {
+            return Err(query.len());
         }
-        Ok(Some(record.query.to_owned()))
+        Ok(Some(query.to_owned()))
     }
 
     fn get_document(&self, logical: u64) -> Option<StoredSource> {
@@ -432,6 +451,7 @@ impl SourceStore {
                     .values()
                     .map(|source| {
                         source.query.capacity()
+                            + source.tags.capacity() * size_of::<(String, String)>()
                             + source
                                 .tags
                                 .iter()
@@ -448,6 +468,7 @@ impl SourceStore {
                     .flatten()
                     .map(|source| {
                         source.query.capacity()
+                            + source.tags.capacity() * size_of::<(String, String)>()
                             + source
                                 .tags
                                 .iter()
@@ -643,7 +664,7 @@ fn encode_tags(tags: &[(String, String)], out: &mut Vec<u8>) -> io::Result<()> {
     Ok(())
 }
 
-fn decode_tags(data: &[u8]) -> io::Result<Vec<(String, String)>> {
+fn encoded_tag_count(data: &[u8]) -> io::Result<usize> {
     if data.len() < 4 {
         return Err(bad_sources());
     }
@@ -651,8 +672,15 @@ fn decode_tags(data: &[u8]) -> io::Result<Vec<(String, String)>> {
     if count > data.len().saturating_sub(4) / 8 {
         return Err(bad_sources());
     }
+    Ok(count)
+}
+
+/// Validate and visit the encoded tag slice without allocating owned strings.
+/// Lazy open uses the no-op visitor so corruption still fails loud without
+/// cloning an entire tagged corpus merely to discard it.
+fn visit_encoded_tags(data: &[u8], mut visit: impl FnMut(&str, &str)) -> io::Result<()> {
+    let count = encoded_tag_count(data)?;
     let mut cursor = 4usize;
-    let mut tags = Vec::with_capacity(count);
     for _ in 0..count {
         let key_len = read_u32_at(data, cursor)? as usize;
         cursor = cursor.checked_add(4).ok_or_else(bad_sources)?;
@@ -660,19 +688,29 @@ fn decode_tags(data: &[u8]) -> io::Result<Vec<(String, String)>> {
         cursor = cursor.checked_add(4).ok_or_else(bad_sources)?;
         let key_end = cursor.checked_add(key_len).ok_or_else(bad_sources)?;
         let key = std::str::from_utf8(data.get(cursor..key_end).ok_or_else(bad_sources)?)
-            .map_err(|_| bad_sources())?
-            .to_owned();
+            .map_err(|_| bad_sources())?;
         cursor = key_end;
         let value_end = cursor.checked_add(value_len).ok_or_else(bad_sources)?;
         let value = std::str::from_utf8(data.get(cursor..value_end).ok_or_else(bad_sources)?)
-            .map_err(|_| bad_sources())?
-            .to_owned();
+            .map_err(|_| bad_sources())?;
         cursor = value_end;
-        tags.push((key, value));
+        visit(key, value);
     }
     if cursor != data.len() {
         return Err(bad_sources());
     }
+    Ok(())
+}
+
+fn validate_encoded_tags(data: &[u8]) -> io::Result<()> {
+    visit_encoded_tags(data, |_, _| {})
+}
+
+fn decode_tags(data: &[u8]) -> io::Result<Vec<(String, String)>> {
+    let mut tags = Vec::with_capacity(encoded_tag_count(data)?);
+    visit_encoded_tags(data, |key, value| {
+        tags.push((key.to_owned(), value.to_owned()));
+    })?;
     Ok(tags)
 }
 
@@ -786,7 +824,7 @@ fn metadata_layout(
         if tags_end > footer_off {
             return Err(bad_sources());
         }
-        decode_tags(data.get(tags_start..tags_end).ok_or_else(bad_sources)?)?;
+        validate_encoded_tags(data.get(tags_start..tags_end).ok_or_else(bad_sources)?)?;
     }
     Ok(Some(MetadataLayout {
         directory_off,
@@ -983,7 +1021,7 @@ pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, S
 
 #[cfg(test)]
 mod tests {
-    use super::{SourceStore, SRC_HEADER, SRC_IDX_REC};
+    use super::{MetadataLayout, SourceStore, SRC_HEADER, SRC_IDX_REC};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
@@ -1019,6 +1057,66 @@ mod tests {
         );
 
         std::fs::remove_file(path).expect("remove test sources");
+    }
+
+    #[test]
+    fn bounded_lazy_lookup_does_not_touch_document_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "reverse-rusty-query-only-sources-{}-{}.dat",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        let resident = SourceStore::new_resident();
+        resident.insert_document(
+            7,
+            "0123456789".to_string(),
+            42,
+            &[("tenant".to_string(), "acme".to_string())],
+        );
+        resident.write_to(&path).expect("write v2 sources");
+
+        let mut lazy = SourceStore::open(&path, false).expect("mmap sources");
+        let SourceStore::Lazy {
+            base: Some(base), ..
+        } = &mut lazy
+        else {
+            panic!("expected lazy mmap base");
+        };
+        // Poison only the metadata layout after open. Query-only lookup must
+        // still succeed because it reads the original query index/blob alone.
+        base.metadata = Some(MetadataLayout {
+            directory_off: usize::MAX,
+            blob_off: usize::MAX,
+        });
+        assert_eq!(
+            lazy.get_bounded(7, 10).expect("query-only lookup"),
+            Some("0123456789".to_string())
+        );
+
+        std::fs::remove_file(path).expect("remove test sources");
+    }
+
+    #[test]
+    fn resident_bytes_counts_each_tag_vector_backing_allocation() {
+        let tuple_bytes = std::mem::size_of::<(String, String)>();
+
+        let resident_plain = SourceStore::new_resident();
+        resident_plain.insert_document(7, String::new(), 1, &[]);
+        let resident_tagged = SourceStore::new_resident();
+        resident_tagged.insert_document(7, String::new(), 1, &[(String::new(), String::new())]);
+        assert!(
+            resident_tagged.resident_bytes() >= resident_plain.resident_bytes() + tuple_bytes,
+            "resident accounting must include the tags Vec backing allocation"
+        );
+
+        let lazy_plain = SourceStore::empty(false);
+        lazy_plain.insert_document(7, String::new(), 1, &[]);
+        let lazy_tagged = SourceStore::empty(false);
+        lazy_tagged.insert_document(7, String::new(), 1, &[(String::new(), String::new())]);
+        assert!(
+            lazy_tagged.resident_bytes() >= lazy_plain.resident_bytes() + tuple_bytes,
+            "lazy-overlay accounting must include the tags Vec backing allocation"
+        );
     }
 
     #[test]

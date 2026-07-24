@@ -612,6 +612,16 @@ pub(crate) trait Shard: Send + Sync {
         ))
     }
 
+    /// Whether the shard's live exact index contains `logical`, independent of
+    /// source-sidecar availability. This is the shard seam behind
+    /// `HEAD /_doc/{id}`. The default is loud so a remote implementation that
+    /// cannot inspect liveness never turns "unknown" into a false 404.
+    fn has_live_query(&self, _logical: u64) -> Result<bool, ShardError> {
+        Err(ShardError::Config(
+            "has_live_query is only supported for in-process shards in v1".into(),
+        ))
+    }
+
     // ---- writes ----
     /// Bulk-ingest a pre-extracted bucket into a new immutable base segment — the
     /// distributed load path ([`crate::cluster::ClusterEngine::ingest`]). NOTE:

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -194,13 +194,17 @@ fn nested_field_selected(parent: &str, field: &str, includes: &[&str], excludes:
 /// Small ES-style source-filter glob (`*` and `?`), kept local to this
 /// off-hot-path point read so no regex dependency reaches the core.
 fn source_pattern_matches(pattern: &str, value: &str) -> bool {
-    let (pattern, value) = (pattern.as_bytes(), value.as_bytes());
+    // ES/OS wildcard `?` consumes one Unicode scalar value, not one UTF-8 byte.
+    // This is off the hot path, so small temporary char vectors keep the greedy
+    // matcher simple and make tag keys such as `é` behave as one character.
+    let pattern: Vec<char> = pattern.chars().collect();
+    let value: Vec<char> = value.chars().collect();
     let (mut p, mut v, mut star, mut retry_v) = (0usize, 0usize, None, 0usize);
     while v < value.len() {
-        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == value[v]) {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == value[v]) {
             p += 1;
             v += 1;
-        } else if p < pattern.len() && pattern[p] == b'*' {
+        } else if p < pattern.len() && pattern[p] == '*' {
             star = Some(p);
             p += 1;
             retry_v = v;
@@ -212,7 +216,7 @@ fn source_pattern_matches(pattern: &str, value: &str) -> bool {
             return false;
         }
     }
-    while p < pattern.len() && pattern[p] == b'*' {
+    while p < pattern.len() && pattern[p] == '*' {
         p += 1;
     }
     p == pattern.len()
@@ -581,34 +585,47 @@ pub(crate) async fn get_doc(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
     Query(params): Query<GetDocParams>,
+    method: Method,
 ) -> Response {
     let start = Instant::now();
     let snap = state.snapshot.load();
-    let (status, response) = match snap.get_query_document(id) {
-        Some(document) => (
-            StatusCode::OK,
-            (
+    let (status, response) = if method == Method::HEAD {
+        // HEAD is an existence probe over the live exact index. It must not
+        // materialize `_source` or turn a damaged display-only sidecar into a
+        // false "missing"/500 result.
+        let status = if snap.has_live_query(id) {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        (status, status.into_response())
+    } else {
+        match snap.get_query_document(id) {
+            Some(document) => (
                 StatusCode::OK,
-                Json(GetDocResponse::found(id, &document, &params)),
-            )
-                .into_response(),
-        ),
-        None if snap.has_live_query(id) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            ApiError::response(
+                (
+                    StatusCode::OK,
+                    Json(GetDocResponse::found(id, &document, &params)),
+                )
+                    .into_response(),
+            ),
+            None if snap.has_live_query(id) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "source_unavailable",
-                format!(
-                    "query {id} is live but its stored source is unavailable; repair or \
-                     restore sources.dat"
-                ),
-            )
-            .into_response(),
-        ),
-        None => (
-            StatusCode::NOT_FOUND,
-            (StatusCode::NOT_FOUND, Json(GetDocResponse::missing(id))).into_response(),
-        ),
+                ApiError::response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "source_unavailable",
+                    format!(
+                        "query {id} is live but its stored source is unavailable; repair or \
+                         restore sources.dat"
+                    ),
+                )
+                .into_response(),
+            ),
+            None => (
+                StatusCode::NOT_FOUND,
+                (StatusCode::NOT_FOUND, Json(GetDocResponse::missing(id))).into_response(),
+            ),
+        }
     };
     state
         .prom

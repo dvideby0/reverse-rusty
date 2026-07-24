@@ -397,6 +397,27 @@ impl ClusterEngine {
         }
     }
 
+    /// Whether any shard holds a live exact row for `logical`, without reading
+    /// source metadata. Used by document HEAD so a missing/damaged sidecar does
+    /// not change existence semantics. As with source lookup, an incapable shard
+    /// prevents a definitive negative and therefore fails loud.
+    pub fn document_exists(&self, logical: u64) -> Result<bool, ShardError> {
+        let mut first_err: Option<ShardError> = None;
+        for shard in &self.shards {
+            match shard.has_live_query(logical) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error) => {
+                    first_err.get_or_insert(error);
+                }
+            }
+        }
+        match first_err {
+            Some(error) => Err(error),
+            None => Ok(false),
+        }
+    }
+
     /// The cluster's default broad-lane toggle (what [`Self::percolate`] uses).
     pub fn include_broad(&self) -> bool {
         self.include_broad

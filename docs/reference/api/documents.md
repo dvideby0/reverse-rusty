@@ -137,8 +137,8 @@ wildcards):
 The singular aliases `_source_include` and `_source_exclude` are accepted too. Unsupported query
 parameters fail with **400** rather than being silently ignored.
 
-Use `HEAD /_doc/{id}` for a bodyless existence check. It returns **200** when the query exists and
-**404** otherwise.
+Use `HEAD /_doc/{id}` for a bodyless existence check. It reads liveness from the exact index—not
+the display-only source sidecar—and returns **200** when the query exists and **404** otherwise.
 
 If the query ID doesn't exist, `GET` returns **404** with:
 
@@ -152,7 +152,9 @@ misreports an unavailable lookup as `found: false`.
 
 If the match index has a live row but its source sidecar is missing, the request fails with
 `source_unavailable` (**500** in single-node mode, **502** through a local coordinator) rather than
-misreporting the live document as a 404.
+misreporting the live document as a 404. The same fail-loud rule applies when footer-backed source
+metadata carries a different version from the live exact row. `HEAD` still returns **200** in either
+case because existence does not require source materialization.
 
 `sources.dat` v2 now appends a backward-readable metadata footer while leaving the original query
 index/blob intact, so query-only hit enrichment remains lazy and old binaries still read query text.
