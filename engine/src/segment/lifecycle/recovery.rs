@@ -276,6 +276,12 @@ impl Engine {
                     }
                     segments.push(Arc::new(BaseSegment::Mmap(mmap_seg)));
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        format!("cannot open committed segment {}: {e}", seg_path.display()),
+                    ));
+                }
                 Err(e) => {
                     pending_events.push(crate::events::EngineEvent::DurabilityFailure {
                         op: crate::events::DurabilityOp::SegmentRecovery,
@@ -415,13 +421,33 @@ impl Engine {
                  placement must be rebuilt and committed by the coordinator",
             ));
         }
+        if !self.persistence_healthy || self.skipped_segments != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "cannot migrate legacy compiler semantics from a degraded recovery \
+                     (persistence_healthy={}, skipped_segments={}): repair the committed \
+                     segment set first",
+                    self.persistence_healthy, self.skipped_segments
+                ),
+            ));
+        }
+        if let Some(logical) = self.duplicate_live_logical_id() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "cannot migrate legacy compiler semantics: live query {logical} has multiple \
+                     physical predicates but only one canonical source document"
+                ),
+            ));
+        }
 
         let live = self.live_source_documents_tagged().map_err(|logical| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
-                    "cannot migrate legacy compiler semantics: live query {logical} has no \
-                     matching retained source document"
+                    "cannot migrate legacy compiler semantics: live query {logical} does not \
+                     have exactly one matching retained source document"
                 ),
             )
         })?;
@@ -445,7 +471,7 @@ impl Engine {
             .collect();
         let mut lc = String::new();
         for (logical, text, ..) in &live {
-            let ast = crate::dsl::parse(text).map_err(|error| {
+            let ast = crate::dsl::parse_for_recovery(text).map_err(|error| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(

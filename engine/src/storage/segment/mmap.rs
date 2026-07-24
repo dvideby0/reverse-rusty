@@ -421,16 +421,22 @@ impl MmapSegment {
             // back with an empty tag column; v4 is the class-D fence; v5 adds
             // the hot index; v6 priority, v7 ownership, and v8 source generation
             // append cumulative exact-row columns).
-            if !(1..=FORMAT_VERSION_SOURCE_GENERATION).contains(&version) {
+            if version == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
+                    "invalid format version 0",
+                ));
+            }
+            if version > FORMAT_VERSION_SOURCE_GENERATION {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
                     format!("unsupported format version {version}"),
                 ));
             }
             let compiler_semantics_version = read_u32_at(data, 12)?;
             if compiler_semantics_version > super::CURRENT_COMPILER_SEMANTICS_VERSION {
                 return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
+                    io::ErrorKind::Unsupported,
                     format!("unsupported compiler semantics version {compiler_semantics_version}"),
                 ));
             }

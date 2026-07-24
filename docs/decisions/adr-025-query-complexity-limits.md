@@ -22,21 +22,22 @@
     `parse_with_limits` with the live config's limits. The config defaults now *reference* the `dsl`
     constants (single source of truth), so default behavior is unchanged and the `10_000`/`10_240` drift
     is gone. CLI `default_value_t` and the `api.md` example were aligned to the constants too.
-  - **WAL replay keeps the compiled-in ceiling** (the non-obvious bit): `replay_insert` deliberately
-    calls `dsl::parse` (default limits), *not* the configured limits. A WAL entry was already accepted at
-    its front-door write; re-applying a since-tightened limit on recovery could silently drop an
-    already-acknowledged write and diverge recovered state from the durable log. Durability beats policy
-    on the replay path; the compiled-in ceiling still bounds replay resource use.
+  - **WAL replay and source rebuild use structural recovery ceilings** (the non-obvious bit):
+    `parse_for_recovery` deliberately uses the durable encodings' hard bounds (`u32` text length,
+    `u16` clause/group counts), *not* the configured limits or today's defaults. A WAL/source record
+    was already accepted at its front-door write; re-applying a since-tightened limit—or a default
+    lower than the originally configured accepted limit—could silently drop an acknowledged write
+    and diverge recovered state from durable truth. Durability beats policy on replay/rebuild; exact
+    column-overflow validation remains the structural backstop.
 - **Consequence:** The `--max-*` flags and `PUT /_settings` now actually govern parsing on every ingest
   path — a tightened limit takes effect on the next ingest and is usable as a real abuse/resource guard —
   making ADR-022's *dynamic* classification and the `config.rs` / `api.md` docs true rather than
   aspirational. No match semantics change, so the oracle is unchanged. Regression-tested by a `dsl` unit
   test (`parse_with_limits_enforces_custom_bounds`, both tighter and looser than the defaults) and an
   integration test (`configured_query_limits_are_enforced_at_ingest_and_are_dynamic`) that also exercises
-  the dynamic `set_config` path. The compiled-in constants are retained as the defaults and as the
-  replay ceiling.
+  the dynamic `set_config` path. The compiled-in constants remain the front-door defaults; durable
+  structural limits are the recovery ceiling.
 - **See also:** ADR-022 (the settings API that listed these as dynamic before they were enforced),
   ADR-013 (WAL — why replay must not re-litigate limit policy), ADR-002 (no work on the match hot path —
   why threading limits through compile-time parsing is fine), `dsl.rs` (`ParseLimits` /
   `parse_with_limits`), `config.rs` (`parse_limits`).
-

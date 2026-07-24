@@ -342,6 +342,7 @@ mod tests {
         reseal(&mut future);
         std::fs::write(&path, future).expect("write future compiler stamp");
         let error = MmapSegment::open(&path).expect_err("future semantics must fail loud");
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
         assert!(
             error
                 .to_string()

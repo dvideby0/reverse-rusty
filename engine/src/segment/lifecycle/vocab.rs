@@ -243,7 +243,7 @@ impl Engine {
         // conditions against the proposed state before committing any of it.
         let mut lc = String::new();
         for (logical, text, ..) in &live {
-            let ast = crate::dsl::parse(text).map_err(|error| {
+            let ast = crate::dsl::parse_for_recovery(text).map_err(|error| {
                 crate::error::NormalizerError::new(format!(
                     "stored query for logical id {logical} cannot be rebuilt: {error}"
                 ))
@@ -295,31 +295,46 @@ impl Engine {
         self.vocab_epoch
     }
 
-    /// Record a vocabulary on an engine that is ALREADY consistent with it,
-    /// WITHOUT recompiling or bumping the epoch. Used at startup after
-    /// [`open`](Self::open): the engine was opened with this vocab's normalizer,
-    /// so its segments already align with it and only the [`Vocab`](crate::vocab::Vocab)
-    /// object needs installing (so `GET /_vocab` can serve it). Unlike
-    /// [`set_vocab`](Self::set_vocab) — which signals a normalizer *change* by
-    /// bumping the epoch and marking segments stale — this is a pure metadata
-    /// record. Use [`set_vocab`] + [`recompile_stale_segments`](Self::recompile_stale_segments)
-    /// to actually *change* the vocabulary at runtime.
+    /// Record a vocabulary on an engine opened with its normalizer. For an empty
+    /// engine or a vocabulary without equivalence groups this is metadata-only.
+    /// For a non-empty recovered engine with equivalences it conservatively
+    /// recompiles: the equivalence map is transient, and a prior compiler
+    /// migration may have durably rebuilt the rows before the vocabulary was
+    /// adopted. Prefer [`open_with_vocab`](Self::open_with_vocab), which installs
+    /// equivalences before WAL replay/migration and avoids this extra rebuild.
     pub fn adopt_vocab(
         &mut self,
         mut vocab: crate::vocab::Vocab,
     ) -> Result<(), crate::error::NormalizerError> {
-        // WAL-tail hazard (codex R13): `Engine::open` replays the WAL tail BEFORE any vocab is
-        // installed, and the `EquivMap` is transient (never persisted in the dict) — so a
-        // recovered memtable was recompiled WITHOUT this vocab's equivalence expansion, and a
-        // pure metadata adopt would leave those queries unexpanded (a recovery false negative:
-        // a replayed `new york mets` query no longer reaches a `ny mets` title). When both the
-        // hazard ingredients are present, escalate to the genuine-change path — `set_vocab` +
-        // `recompile_stale_segments` re-extracts every live query under the installed
-        // equivalences. Prefer [`open_with_vocab`](Self::open_with_vocab), which installs the
-        // equivalences BEFORE replay and keeps this adopt a pure metadata record.
-        if !self.memtable.is_empty() && !vocab.effective_equivalence_groups().is_empty() {
+        // Recovery hazard (codex R13 + ADR-118): `Engine::open` replays the WAL and may migrate
+        // legacy segments BEFORE any vocab is installed. The `EquivMap` is transient, so either
+        // materialization can omit required-to-any-of expansion. There is deliberately no
+        // process-local shortcut here: the process may stop after committing the migration but
+        // before adoption. Conservatively rebuild every non-empty recovered corpus when the
+        // adopted vocabulary has equivalences. `open_with_vocab` avoids the extra pass.
+        let equivalences_present = !vocab.effective_equivalence_groups().is_empty();
+        if equivalences_present && self.num_live_queries() != 0 {
+            let expected = self
+                .live_source_documents_tagged()
+                .map_err(|logical| {
+                    crate::error::NormalizerError::new(format!(
+                        "source metadata for logical id {logical} does not match its live exact row"
+                    ))
+                })?
+                .len();
             self.set_vocab(vocab)?;
-            self.recompile_stale_segments();
+            let rebuilt = self.recompile_stale_segments();
+            if rebuilt != expected
+                || self.has_stale_segments()
+                || (self.config.data_dir.is_some() && !self.persistence_healthy)
+            {
+                return Err(crate::error::NormalizerError::new(format!(
+                    "equivalence-aware vocabulary adoption did not commit completely \
+                     (expected {expected} live queries, rebuilt {rebuilt}, \
+                     persistence_healthy={})",
+                    self.persistence_healthy
+                )));
+            }
             return Ok(());
         }
         let mut norm = Arc::new(vocab.to_normalizer()?);
@@ -427,6 +442,38 @@ impl Engine {
             }
         }
         logicals
+    }
+
+    /// Lowest logical id represented by more than one live physical exact row.
+    /// Ordinary vocabulary rebuilds intentionally canonicalize such additive
+    /// histories to the newest source generation. A compiler compatibility
+    /// migration has a stricter contract: it may not change the pre-upgrade
+    /// matched set, so it uses this check to refuse when the one-document source
+    /// store cannot reconstruct every physical predicate.
+    pub(in crate::segment) fn duplicate_live_logical_id(&self) -> Option<u64> {
+        let mut logicals = crate::util::FastSet::default();
+        let mut duplicate = None;
+        for local in 0..self.memtable.len() {
+            let local = local as u32;
+            if self.memtable.is_alive(local) {
+                let logical = self.memtable.exact_store().logical(local);
+                if !logicals.insert(logical) {
+                    duplicate = Some(duplicate.map_or(logical, |seen: u64| seen.min(logical)));
+                }
+            }
+        }
+        for segment in &self.segments {
+            for local in 0..segment.len() {
+                let local = local as u32;
+                if segment.is_alive(local) {
+                    let logical = segment.logical(local);
+                    if !logicals.insert(logical) {
+                        duplicate = Some(duplicate.map_or(logical, |seen: u64| seen.min(logical)));
+                    }
+                }
+            }
+        }
+        duplicate
     }
 
     /// Internal document-complete variant of [`Self::live_sources_tagged`].
@@ -607,6 +654,12 @@ impl Engine {
         if !self.has_stale_segments() {
             return 0;
         }
+        // Never replace a degraded/partial recovery with a freshly committed
+        // strict subset. The old manifest must remain authoritative so the
+        // unreadable segment can be repaired.
+        if self.config.data_dir.is_some() && !self.persistence_healthy {
+            return 0;
+        }
         // Recompile the live source set read-only against the frozen dict under
         // the current normalizer into one fresh segment.
         let Ok(live) = self.live_source_documents_tagged() else {
@@ -620,10 +673,13 @@ impl Engine {
         let mut lc = String::new();
         let mut recompiled = 0usize;
         for (logical, text, version, source_generation, _, tags, rank, placement) in &live {
-            let Ok(ast) = crate::dsl::parse(text) else {
+            let Ok(ast) = crate::dsl::parse_for_recovery(text) else {
                 return 0;
             };
             let ex = crate::compile::extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+            if ex.column_overflow().is_some() {
+                return 0;
+            }
             // Carry tags, caller version, internal source generation, rank, and
             // placement unchanged: they are all orthogonal to normalization.
             // `accept_class_d = true` unconditionally (ADR-068): a STORED query
@@ -651,6 +707,15 @@ impl Engine {
         }
         seg.build_filter();
 
+        // A recompile captures the WAL tail in the replacement segment and then
+        // advances/resets that WAL. Persist its source overlay first, while the
+        // old manifest + WAL are still authoritative, so a second restart never
+        // finds a committed exact row without its canonical source document.
+        self.save_query_sources();
+        if self.config.data_dir.is_some() && !self.persistence_healthy {
+            return 0;
+        }
+
         // Atomic swap: drop every (stale) base segment + the memtable and install
         // the one freshly-compiled segment, so no live query is left at an old
         // epoch. Old segment files are GC'd after the manifest commit.
@@ -660,6 +725,13 @@ impl Engine {
         fresh_mem.vocab_epoch = self.vocab_epoch;
         self.memtable = Arc::new(fresh_mem);
         let persisted = self.seal_and_push(seg);
+        // `vocab_epoch` is process-local (not part of the durable segment
+        // format), so an mmap opened immediately after the write starts at zero.
+        // Stamp the just-installed view with the live epoch before any caller
+        // evaluates `has_stale_segments`.
+        if let Some(segment) = self.segments.last_mut() {
+            Arc::make_mut(segment).set_vocab_epoch(self.vocab_epoch);
+        }
 
         // Persist like a flush, but FAIL CLOSED (ADR-051): only retire the old
         // segment files and advance the WAL (checkpoint marks the live queries
@@ -671,7 +743,8 @@ impl Engine {
         // both intact lets a restart recover the pre-recompile state and re-apply
         // the vocab change. The recompiled segment is still served from memory
         // meanwhile; `persistence_healthy` is false to signal the degraded state.
-        if persisted && self.save_manifest_if_persistent() {
+        let committed = persisted && self.save_manifest_if_persistent();
+        if committed {
             self.checkpoint_wal();
             self.reset_wal_if_safe();
             // A standalone engine owns the manifest commit above, so it may now

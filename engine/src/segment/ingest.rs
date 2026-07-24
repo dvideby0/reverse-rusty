@@ -719,7 +719,7 @@ impl Engine {
     }
 
     /// Replay an upsert from WAL recovery (does NOT write back to WAL). Same
-    /// default-parse-ceiling rule as [`replay_insert`](Self::replay_insert).
+    /// recovery-parse-ceiling rule as [`replay_insert`](Self::replay_insert).
     /// `tombstone_in_segments` is `seq > wal_seq_watermark` at the dispatch site —
     /// see [`apply_upsert`](Self::apply_upsert) for the two state domains.
     #[allow(clippy::too_many_arguments)]
@@ -734,7 +734,7 @@ impl Engine {
         tombstone_in_segments: bool,
         class_d_accepted: bool,
     ) {
-        if let Ok(ast) = crate::dsl::parse(text) {
+        if let Ok(ast) = crate::dsl::parse_for_recovery(text) {
             let mut lc = String::new();
             let ex = {
                 let dict = Arc::make_mut(&mut self.dict);
@@ -1228,11 +1228,11 @@ impl Engine {
 
     /// Replay an insert from WAL recovery (does NOT write back to WAL).
     ///
-    /// Replay uses the default (compiled-in) parse ceiling, NOT the configured
-    /// `parse_limits()`: a WAL entry was already accepted at its front-door write,
-    /// so re-applying a (possibly since-tightened) limit here could silently drop
-    /// an already-acknowledged write and diverge the recovered state from the log.
-    /// The compiled-in ceiling still bounds resource use during replay.
+    /// Replay uses the durable format's structural parse ceiling, NOT the
+    /// configured `parse_limits()` or today's defaults: a WAL entry was already
+    /// accepted at its front-door write, so re-applying a possibly tightened (or
+    /// originally looser) policy here could silently drop an acknowledged write
+    /// and diverge recovered state from the log.
     ///
     /// `class_d_accepted` is the frame's own marker (WAL v5, ADR-068), NOT the
     /// engine's knob: an op-5 frame was accepted at its write (the live path gates
@@ -1252,7 +1252,7 @@ impl Engine {
         source_generation: Option<u64>,
         class_d_accepted: bool,
     ) {
-        if let Ok(ast) = crate::dsl::parse(text) {
+        if let Ok(ast) = crate::dsl::parse_for_recovery(text) {
             let tag_ids = self.intern_tags(tags);
             let rank = rank.unwrap_or_else(|| self.legacy_rank_values(&tag_ids));
             let mut lc = String::new();

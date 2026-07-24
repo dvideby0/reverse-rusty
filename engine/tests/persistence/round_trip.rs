@@ -7,13 +7,17 @@ use reverse_rusty::normalize::Normalizer;
 use reverse_rusty::segment::Engine;
 use reverse_rusty::vocab::Vocab;
 
-fn stamp_legacy_compiler_semantics(path: &std::path::Path) {
+fn stamp_compiler_semantics(path: &std::path::Path, version: u32) {
     let mut bytes = std::fs::read(path).expect("read segment");
-    bytes[12..16].copy_from_slice(&0u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&version.to_le_bytes());
     let body = bytes.len() - 4;
     let crc = reverse_rusty::storage::crc32(&bytes[..body]);
     bytes[body..].copy_from_slice(&crc.to_le_bytes());
-    std::fs::write(path, bytes).expect("write legacy compiler stamp");
+    std::fs::write(path, bytes).expect("write compiler-semantics stamp");
+}
+
+fn stamp_legacy_compiler_semantics(path: &std::path::Path) {
+    stamp_compiler_semantics(path, 0);
 }
 
 #[test]
@@ -745,6 +749,216 @@ fn durable_reopen_migrates_legacy_context_without_aliases() {
             > 0
     }));
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_migration_then_vocab_adoption_recompiles_equivalences() {
+    let dir = test_dir("legacy_clause_boundary_adopt_vocab");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let mut vocab = Vocab::new();
+    vocab.import_solr_aliases(
+        "ny => new york",
+        &Normalizer::default_vocab().expect("vocab"),
+        &reverse_rusty::dict::Dict::new(),
+    );
+
+    {
+        let mut engine = Engine::with_vocab(vocab.clone(), config.clone()).expect("with_vocab");
+        engine.build_from_queries(&[(1, "new york yankees".into())]);
+        assert!(match_ids(&engine, "ny yankees").contains(&1));
+    }
+    let manifest =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &manifest.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+
+    // The compatibility open path receives only the normalizer, so its mandatory
+    // compiler migration cannot reconstruct transient equivalence groups. A later
+    // adoption must detect that fact and perform one equivalence-aware rebuild.
+    let reopened =
+        Engine::open(vocab.to_normalizer().expect("normalizer"), config.clone()).expect("open");
+    drop(reopened); // migration commit and adoption may occur in different processes
+    let mut reopened = Engine::open(vocab.to_normalizer().expect("normalizer"), config.clone())
+        .expect("post-migration open");
+    reopened
+        .adopt_vocab(vocab.clone())
+        .expect("equivalence-aware adoption");
+    assert!(
+        match_ids(&reopened, "ny yankees").contains(&1),
+        "FN: adoption left the migrated predicate without alias expansion"
+    );
+    drop(reopened);
+
+    let reopened = Engine::open_with_vocab(vocab, config).expect("second reopen");
+    assert!(match_ids(&reopened, "ny yankees").contains(&1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_migration_refuses_duplicate_live_logical_rows() {
+    let dir = test_dir("legacy_clause_boundary_duplicate_rows");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.build_from_queries(&[(1, "alpha unique".into()), (1, "beta distinct".into())]);
+        assert!(match_ids(&engine, "alpha unique").contains(&1));
+        assert!(match_ids(&engine, "beta distinct").contains(&1));
+    }
+    let before =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &before.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+
+    let error = Engine::open(make_norm(), config).expect_err("ambiguous source must fail loud");
+    assert!(
+        error.to_string().contains("multiple physical predicates"),
+        "got: {error}"
+    );
+    let after = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    assert_eq!(
+        after.segment_files, before.segment_files,
+        "a refused migration must leave the old manifest authoritative"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn degraded_legacy_recovery_never_commits_an_attached_subset() {
+    let dir = test_dir("legacy_clause_boundary_degraded");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.build_from_queries(&[(1, "alpha bravo".into())]);
+        engine
+            .try_bulk_ingest(&[(2, "charlie delta".into())])
+            .expect("second segment");
+    }
+    let before =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    assert_eq!(before.segment_files.len(), 2);
+    for name in &before.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+    let corrupt = dir.join("segments").join(&before.segment_files[1]);
+    let mut bytes = std::fs::read(&corrupt).expect("read segment");
+    bytes[20] ^= 1; // leave the trailing CRC stale
+    std::fs::write(&corrupt, bytes).expect("corrupt segment");
+
+    let error = Engine::open(make_norm(), config).expect_err("degraded migration must fail");
+    assert!(
+        error.to_string().contains("degraded recovery"),
+        "got: {error}"
+    );
+    let after = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    assert_eq!(
+        after.segment_files, before.segment_files,
+        "migration must not replace the manifest with only readable segments"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_migration_persists_replayed_source_before_wal_reset() {
+    let dir = test_dir("legacy_clause_boundary_wal_source");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        memtable_flush_threshold: usize::MAX,
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.build_from_queries(&[(1, "seed query".into())]);
+        engine
+            .try_insert_live("charlie delta", 2, 1)
+            .expect("WAL-tail insert");
+    }
+    let legacy =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &legacy.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+
+    {
+        let migrated = Engine::open(make_norm(), config.clone()).expect("migrating reopen");
+        assert!(match_ids(&migrated, "charlie delta").contains(&2));
+        assert!(migrated.snapshot().get_query_document(2).is_some());
+    }
+    let reopened = Engine::open(make_norm(), config).expect("second reopen");
+    assert!(match_ids(&reopened, "charlie delta").contains(&2));
+    assert!(
+        reopened.snapshot().get_query_document(2).is_some(),
+        "the committed WAL-tail row must retain its canonical source"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn standalone_open_refuses_future_compiler_semantics() {
+    let dir = test_dir("future_compiler_semantics");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.build_from_queries(&[(1, "alpha bravo".into())]);
+    }
+    let manifest =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &manifest.segment_files {
+        stamp_compiler_semantics(&dir.join("segments").join(name), u32::MAX);
+    }
+
+    let error = Engine::open(make_norm(), config).expect_err("future semantics must fail loud");
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported compiler semantics version"),
+        "got: {error}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_migration_uses_structural_recovery_parse_limits() {
+    let dir = test_dir("legacy_clause_boundary_loose_limits");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        max_query_clauses: 300,
+        ..EngineConfig::default()
+    };
+    let query = (0..257)
+        .map(|i| format!("term{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        let report = engine
+            .try_build_from_queries(&[(1, query.clone())])
+            .expect("build");
+        assert_eq!(report.ingested, 1);
+    }
+    let legacy =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &legacy.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+
+    let reopened = Engine::open(make_norm(), config).expect("recovery-safe parse");
+    assert!(match_ids(&reopened, &query).contains(&1));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

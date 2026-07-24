@@ -54,6 +54,9 @@ pre-upgrade backup:
   standalone or local-cluster materialization source-rebuilds before serving, even without aliases
   (grader and number context are also clause-sensitive). A durable shard cannot safely re-place
   itself: shard-local restart, raw attach, and ordinary recovery from a still-legacy peer fail loud.
+  Standalone migration also refuses a degraded segment set, ambiguous duplicate live rows, or an
+  incomplete source sidecar without replacing the old manifest; WAL-tail sources are persisted
+  before its reset. Unknown future compiler semantics are an unsupported fence and abort open.
   Rebuild/re-place through the coordinator, or reseed/recover the shard from a current-semantics
   peer. Rolling back to a pre-ADR-118 writer is unsafe for **all new query writes** (it can create
   semantics-0 segments again); restore the pre-upgrade backup or keep writes quiesced until rolling

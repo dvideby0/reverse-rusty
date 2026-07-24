@@ -48,6 +48,20 @@ impl Default for ParseLimits {
     }
 }
 
+/// Structural parse limits for replaying or rebuilding an already-acknowledged
+/// query.
+///
+/// Runtime policy may be tightened after a write, and may also have been looser
+/// than today's defaults when the write was accepted. Recovery must therefore
+/// not re-litigate the write against either set of policy limits. These bounds
+/// are the durable encodings' hard ceilings instead: query text lengths are
+/// stored as `u32`, while exact-store clause/group counts are stored as `u16`.
+pub(crate) const RECOVERY_PARSE_LIMITS: ParseLimits = ParseLimits {
+    max_query_length: u32::MAX as usize,
+    max_clauses: u16::MAX as usize,
+    max_any_of_size: u16::MAX as usize,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Atom {
     Term(String),
@@ -73,6 +87,12 @@ pub struct Ast {
 /// the ingest paths call [`parse_with_limits`] so the configured limits govern.
 pub fn parse(input: &str) -> Result<Ast, ParseError> {
     parse_with_limits(input, &ParseLimits::default())
+}
+
+/// Parse an already-acknowledged query during WAL replay or a source-driven
+/// rebuild, using only the durable format's structural ceilings.
+pub(crate) fn parse_for_recovery(input: &str) -> Result<Ast, ParseError> {
+    parse_with_limits(input, &RECOVERY_PARSE_LIMITS)
 }
 
 /// Parse a query DSL string into an [`Ast`], enforcing `limits`.

@@ -40,8 +40,17 @@
     interns every feature newly exposed by splitting the legacy stream, re-resolves equivalences,
     recompiles every live query, commits the expanded dict + current-stamped segment + manifest, and
     only then returns. The interning step prevents a migrated synthetic ID from diverging when a later
-    standalone insert assigns the same name a dense ID. Missing/stale source or a failed durable
+    standalone insert assigns the same name a dense ID. The migration refuses a degraded/partially
+    attached recovery before writing anything, and refuses multiple live physical predicates sharing
+    one logical ID because the canonical one-document source sidecar cannot losslessly reconstruct
+    those distinct rows. WAL-replayed source overlays are durably written before the replacement
+    manifest captures them and resets the WAL. Missing/stale/ambiguous source or a failed durable
     commit refuses startup;
+  - `open_with_vocab` installs transient equivalence groups before replay and migration. The
+    compatibility `open(normalizer)` + later `adopt_vocab` path conservatively forces one
+    equivalence-aware rebuild for every non-empty recovered corpus. A process-local migration flag
+    would be unsafe across a stop between migration commit and adoption; `open_with_vocab` is the
+    efficient normal path;
   - durable `ClusterEngine::open` temporarily attaches committed local segments inside the recovery
     transaction, replays the coordinator-log tail, performs the existing blue/green source rebuild
     under the same normalizer while re-minting the dict, re-places at one new generation, bumps the
@@ -52,7 +61,13 @@
     visibility mode; only the coordinator can rebuild and commit the whole placement generation;
   - raw/shared segment attach and ordinary peer recovery from a still-legacy source likewise refuse.
     The coordinator's boot transaction has a private migration-only attach/copy seam, but it never
-    publishes those rows and immediately replaces the complete cluster before returning.
+    publishes those rows and immediately replaces the complete cluster before returning. A compiler
+    semantics value newer than this binary understands is an unsupported compatibility fence and is
+    fatal to standalone open too—it is never treated as ordinary skippable corruption;
+  - source-driven rebuild and WAL replay parse acknowledged DSL with the durable format's structural
+    ceilings (`u32` text length and `u16` clause/group counts), not today's runtime policy or default.
+    Tightening settings—or having originally accepted a supported value above the default—therefore
+    cannot make recovery discard or reject an acknowledged query.
 
 - **Why this is safe.** The change is compile/recovery-only: title normalization, signature probing,
   exact verification, and the allocation-free match hot path are untouched. Splitting a fabricated
@@ -67,11 +82,12 @@
   negated any-of, positive phrase, and positive any-of through both mutable build and read-only
   recompile paths. The reference matcher has a direct unit matrix over the same cases. Persistence
   tests downgrade the header stamp and prove one-shot standalone migration, migration without any
-  alias (number-context case), dense-ID stabilization across a later live insert, and fail-loud raw
-  attach. Cluster coverage proves an RF=2 durable reopen rebuilds, bumps placement generation exactly
-  once, and reopens idempotently. A durable-shard test proves self-restart refuses without consuming
-  its unsealed translog tail or advancing `shard.ckpt`. The segment codec pins
-  current/legacy/future stamp behavior.
+  alias (number-context case), dense-ID stabilization across a later live insert, equivalence-aware
+  `open` + `adopt_vocab`, duplicate-row refusal, no subset commit after a corrupt-segment skip,
+  WAL-tail source survival across a second reopen, recovery above the default clause limit, and
+  fail-loud raw attach/future semantics. Cluster coverage proves an RF=2 durable reopen rebuilds,
+  bumps placement generation exactly once, and reopens idempotently. A durable-shard test proves
+  self-restart refuses without consuming its unsealed translog tail or advancing `shard.ckpt`.
 
 - **Oracle follow-up.** ADR-087 remains code-independent, but this finding proved code independence
   is not the same as semantic independence when both implementations translate the same ambiguous
