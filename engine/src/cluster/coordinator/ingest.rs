@@ -252,6 +252,45 @@ impl ClusterEngine {
         dsl: &str,
         tags: &[(String, String)],
     ) -> Result<AddOutcome, ShardError> {
+        self.create_query_with_tags(id, dsl, 1, tags)
+    }
+
+    /// Atomically create one query only when `id` is absent. This is the
+    /// cluster-core operation behind REST `op_type=create`: the logical-id
+    /// stripe makes the absence check + reservation indivisible from every
+    /// add/upsert/remove of the same id, and a conflict writes no log frame.
+    ///
+    /// Unlike [`add_query_with_tags`](Self::add_query_with_tags), the caller's
+    /// display `version` is preserved in the coordinator log and every shard,
+    /// matching the versioned REST upsert path.
+    pub fn create_query_with_tags(
+        &self,
+        id: u64,
+        dsl: &str,
+        version: u32,
+        tags: &[(String, String)],
+    ) -> Result<AddOutcome, ShardError> {
+        // Check conflicts before compilation, matching the single-node REST
+        // boundary: an already-live id is the decisive create-only error even
+        // when the replacement body would fail DSL compilation. The stripe is
+        // load-bearing here. The directory also contains provisional reservations
+        // while their coordinator-log append is in flight; an unlocked read could
+        // report a false conflict if that append subsequently failed and rolled the
+        // reservation back. Waiting on the stripe observes the committed/rolled-back
+        // result. This is still only an early conflict return, never an absence
+        // proof — the second check below closes a create arriving during compilation.
+        if self.logical_ids_authoritative() {
+            // Preserve the global mutation lock order: PIT barrier, then logical
+            // stripe. Resync/exhaustive mutation code relies on this order.
+            let _pit_barrier = self
+                .pit_open_barrier
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _logical_guard = self.logical_write_guard(id);
+            if self.contains_logical_id(id) {
+                return Err(ShardError::DuplicateLogicalId(id));
+            }
+        }
         // Reject malformed DSL up front: it carries no replayable mutation, so it must
         // never reach the log (a logged record must parse on replay).
         let ast = match crate::dsl::parse(dsl) {
@@ -317,7 +356,7 @@ impl ClusterEngine {
         debug_assert!(inserted);
         let m = ClusterMutation::Add {
             logical: id,
-            version: 1,
+            version,
             dsl: dsl.to_string(),
             tags: tags.to_vec(),
             placement: placement.clone(),
@@ -331,7 +370,7 @@ impl ClusterEngine {
             });
             return Err(e);
         }
-        self.apply_add(id, 1, dsl, tags, &placement)
+        self.apply_add(id, version, dsl, tags, &placement)
     }
 
     /// Atomically replace a query by logical id — ES `index` semantics at the cluster

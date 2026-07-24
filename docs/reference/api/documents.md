@@ -4,6 +4,9 @@
 
 ## `PUT /_doc/{id}` — Register or replace a query
 
+Reference shapes: [Elasticsearch index document](https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-index)
+and [OpenSearch index document](https://docs.opensearch.org/latest/api-reference/document-apis/index-document/).
+
 ```bash
 curl -X PUT localhost:9200/_doc/1 \
   -H 'Content-Type: application/json' \
@@ -11,7 +14,7 @@ curl -X PUT localhost:9200/_doc/1 \
 ```
 
 ```json
-{"_id": 1, "result": "created", "error": null}
+{"_index": "queries", "_id": 1, "_version": 1, "result": "created"}
 ```
 
 **Replace-by-id (ES `index` semantics, ADR-067).** A re-PUT of an existing id is an **atomic
@@ -22,14 +25,44 @@ id answers **201** with `"result": "created"`; a replacement answers **200** wit
 `"result": "updated"`:
 
 ```json
-{"_id": 1, "result": "updated", "error": null}
+{"_index": "queries", "_id": 1, "_version": 1, "result": "updated"}
 ```
+
+Successful responses carry the applicable ES/OpenSearch fields: the implicit index is always
+`"queries"`, `_id` remains Reverse Rusty's numeric `u64`, and `_version` is the display version
+stored with this write. Reverse Rusty cannot honestly report Elasticsearch/OpenSearch replication
+counts, sequence numbers, or primary terms, so it omits `_shards`, `_seq_no`, and `_primary_term`
+instead of inventing values.
+
+### Index-operation parameters
+
+The two compatible operation controls are strict and identical in single-node and coordinator
+modes:
+
+| Query parameter | Behavior |
+|---|---|
+| `op_type=index` | Default. Atomically create or replace the id. |
+| `op_type=create` | Atomically create only when the id is absent; an existing id returns **409** `version_conflict_engine_exception` and remains unchanged. |
+| `refresh=false`, `true`, or `wait_for` | Accepted. Reverse Rusty publishes every fully applied write before replying, so all three receive the stronger immediate-search-visibility guarantee. |
+
+Any other query parameter—or any other value for these parameters—returns a structured **400**
+`illegal_argument_exception` before mutation. This is deliberate: silently ignoring `routing`,
+`pipeline`, `if_seq_no`, `if_primary_term`, `version`, or `version_type` could make an ES/OpenSearch
+client believe a write constraint was honored when it was not. A remote coordinator whose
+pre-existing shards cannot be enumerated also fails `op_type=create` closed rather than guessing
+that an id is absent; ordinary `op_type=index` remains available.
+
+The JSON-body `version` field is Reverse Rusty application metadata (an unsigned 32-bit value,
+default `1`) and is preserved verbatim in the successful response, `GET /_doc/{id}`, persistence,
+and recovery. It is **not** Elasticsearch/OpenSearch internal versioning or optimistic concurrency:
+it does not auto-increment, and repeated or lower values are legal. The ES/OS query-parameter
+version and sequence-number controls are therefore rejected, not partially emulated.
 
 If the query fails to parse or has no anchorable features (cost class D), the response includes the
 error — and the **prior version stays live and matchable** (a failed replace never deletes):
 
 ```json
-{"_id": 1, "result": "rejected", "error": "query has no anchorable feature (cost class D); negation-only queries are stored as always-candidates when the accept_class_d setting is enabled"}
+{"_index": "queries", "_id": 1, "result": "rejected", "error": "query has no anchorable feature (cost class D); negation-only queries are stored as always-candidates when the accept_class_d setting is enabled"}
 ```
 
 With the [`accept_class_d` setting](settings.md) on (ADR-068), a **negation-only** query (only `-...`

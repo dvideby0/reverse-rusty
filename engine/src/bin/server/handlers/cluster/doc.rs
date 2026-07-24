@@ -1,14 +1,15 @@
 //! Cluster-mode `_doc` CRUD + `_bulk` (ADR-070). `PUT /_doc/{id}` is the
-//! cluster-atomic upsert — ONE `ClusterMutation::Upsert` log frame replaces every
-//! prior live copy and inserts the new version (ES `index` semantics, the ADR-067
-//! contract at the coordinator). `_bulk` maps each index action onto the same upsert,
+//! cluster-atomic index operation: the default uses ONE `ClusterMutation::Upsert`
+//! log frame to replace every prior live copy and insert the new version (ES `index`
+//! semantics, the ADR-067 contract at the coordinator), while `op_type=create` uses
+//! the insert-only `Add` funnel. `_bulk` maps each index action onto the upsert path,
 //! one per-item status each.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{rejection::QueryRejection, Path, Query, State},
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -20,20 +21,12 @@ use reverse_rusty::cluster::{AddOutcome, ShardError};
 
 use crate::dto::ApiError;
 use crate::handlers::doc::{
-    extract_bulk_id, extract_ranked_ingest, GetDocParams, GetDocResponse, PutDocBody,
-    CLASS_D_REJECT_MSG,
+    extract_bulk_id, extract_ranked_ingest, GetDocParams, GetDocResponse, PutDocBody, PutDocParams,
+    PutDocResponse, CLASS_D_REJECT_MSG, QUERY_INDEX,
 };
 use crate::state::ClusterAppState;
 
-use super::shard_error_response;
-
-#[derive(Serialize)]
-struct ClusterPutDocResponse {
-    _id: u64,
-    result: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
+use super::{shard_error_response, shard_error_status};
 
 #[derive(Serialize)]
 struct ClusterDeleteDocResponse {
@@ -95,19 +88,43 @@ fn upsert_status(
     }
 }
 
-/// PUT /_doc/{id} — cluster-atomic upsert (ADR-070): replace-by-id under ONE
-/// coordinator log frame. 201 `created` for a fresh id, 200 `updated` for a
-/// replacement; a rejected new version (parse / class D) leaves the prior version
-/// live. A partial multi-shard apply (remote clusters only) answers 200 `partial`:
-/// the mutation IS durably logged and queued for repair — re-PUTting would
-/// double-log (`POST /_cluster/resync` converges it).
-#[instrument(skip(state, body), fields(query_id = id))]
+/// PUT /_doc/{id} — cluster-atomic index/create operation (ADR-117). The default
+/// upsert replaces by id under ONE coordinator log frame; `op_type=create` uses
+/// the insert-only `Add` funnel and conflicts without logging when the id is live.
+/// A partial multi-shard apply (remote clusters only) answers 200 `partial`: the
+/// mutation IS durably logged and queued for repair — re-PUTting would double-log
+/// (`POST /_cluster/resync` converges it).
+#[instrument(skip(state, params, body), fields(query_id = id))]
 pub(crate) async fn cluster_put_doc(
     State(state): State<Arc<ClusterAppState>>,
     Path(id): Path<u64>,
+    params: Result<Query<PutDocParams>, QueryRejection>,
     Json(body): Json<PutDocBody>,
 ) -> Response {
     let start = Instant::now();
+    let params = match params {
+        Ok(Query(params)) => params,
+        Err(e) => {
+            warn!(query_id = id, error = %e, "invalid index-document query parameters");
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["put_doc", "400"])
+                .inc();
+            state
+                .prom
+                .http_request_duration
+                .with_label_values(&["put_doc"])
+                .observe(start.elapsed().as_secs_f64());
+            return ApiError::response(
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                format!("invalid index-document query parameters: {e}"),
+            )
+            .into_response();
+        }
+    };
+    params.acknowledge_refresh_policy();
     // A malformed tag value is a caller error: 400 before any coordinator work
     // (ADR-073 — never silently drop a tag the caller asked for).
     let tags = match extract_ranked_ingest(&body.rest) {
@@ -129,8 +146,10 @@ pub(crate) async fn cluster_put_doc(
             if error_type == "invalid_tag_value" {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(ClusterPutDocResponse {
+                    Json(PutDocResponse {
+                        _index: QUERY_INDEX,
                         _id: id,
+                        _version: None,
                         result: "error",
                         error: Some(msg),
                     }),
@@ -143,7 +162,13 @@ pub(crate) async fn cluster_put_doc(
     let result = {
         let _w = state.write_serial.lock();
         let cluster = state.cluster.read();
-        cluster.upsert_query_with_tags(id, &body.query, body.version, &tags)
+        if params.create_only() {
+            cluster
+                .create_query_with_tags(id, &body.query, body.version, &tags)
+                .map(|outcome| (0, outcome))
+        } else {
+            cluster.upsert_query_with_tags(id, &body.query, body.version, &tags)
+        }
     };
     let response = match result {
         Ok((removed, outcome)) => {
@@ -160,8 +185,10 @@ pub(crate) async fn cluster_put_doc(
                 .inc();
             (
                 status,
-                Json(ClusterPutDocResponse {
+                Json(PutDocResponse {
+                    _index: QUERY_INDEX,
                     _id: id,
+                    _version: status.is_success().then_some(body.version),
                     result,
                     error,
                 }),
@@ -188,8 +215,10 @@ pub(crate) async fn cluster_put_doc(
                 .inc();
             (
                 StatusCode::OK,
-                Json(ClusterPutDocResponse {
+                Json(PutDocResponse {
+                    _index: QUERY_INDEX,
                     _id: id,
+                    _version: Some(body.version),
                     result: "partial",
                     error: Some(format!(
                         "applied on shards {applied:?}, pending on {failed:?}; durably \
@@ -199,14 +228,32 @@ pub(crate) async fn cluster_put_doc(
             )
                 .into_response()
         }
-        Err(e) => {
-            error!(query_id = id, error = %e, "cluster upsert failed");
+        Err(ShardError::DuplicateLogicalId(_)) if params.create_only() => {
+            warn!(
+                query_id = id,
+                "create-only write conflicts with a live document"
+            );
             state
                 .prom
                 .http_requests_total
-                .with_label_values(&["put_doc", "503"])
+                .with_label_values(&["put_doc", "409"])
                 .inc();
-            shard_error_response("upsert rejected", &e)
+            ApiError::response(
+                StatusCode::CONFLICT,
+                "version_conflict_engine_exception",
+                format!("document {id} already exists; op_type=create requires a missing id"),
+            )
+            .into_response()
+        }
+        Err(e) => {
+            error!(query_id = id, error = %e, "cluster document write failed");
+            let status = shard_error_status(&e);
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["put_doc", status.as_str()])
+                .inc();
+            shard_error_response("document write rejected", &e)
         }
     };
     state
