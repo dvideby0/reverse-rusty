@@ -273,6 +273,17 @@ impl Shard for ReplicatedShard {
         self.read(|s| s.source_of(logical))
     }
 
+    fn document_of(
+        &self,
+        logical: u64,
+    ) -> Result<Option<crate::storage::StoredSource>, ShardError> {
+        self.read(|s| s.document_of(logical))
+    }
+
+    fn has_live_query(&self, logical: u64) -> Result<bool, ShardError> {
+        self.read(|s| s.has_live_query(logical))
+    }
+
     // ---- writes (primary-authoritative, fan out to replicas) ----
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         let _g = self.lock();

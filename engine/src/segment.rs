@@ -476,6 +476,82 @@ pub struct PlacedQuery {
     pub placement: crate::ownership::QueryPlacement,
 }
 
+/// One accepted query whose source document is published after its match data
+/// reaches the durable commit point. Internal to the segment controller.
+pub(in crate::segment) struct AcceptedSource {
+    logical: u64,
+    text: String,
+    version: u32,
+    source_generation: u64,
+    tags: Vec<(String, String)>,
+    tags_known: bool,
+}
+
+impl AcceptedSource {
+    pub(in crate::segment) fn known(
+        logical: u64,
+        text: String,
+        version: u32,
+        source_generation: u64,
+        tags: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            logical,
+            text,
+            version,
+            source_generation,
+            tags,
+            tags_known: true,
+        }
+    }
+
+    pub(in crate::segment) fn with_tag_status(
+        logical: u64,
+        text: String,
+        version: u32,
+        source_generation: u64,
+        tags: Vec<(String, String)>,
+        tags_known: bool,
+    ) -> Self {
+        Self {
+            logical,
+            text,
+            version,
+            source_generation,
+            tags,
+            tags_known,
+        }
+    }
+}
+
+/// One live source row returned by [`Engine::live_sources_tagged`]:
+/// `(logical, dsl, version, tag_ids, rank, placement)`.
+///
+/// Naming the tuple preserves the established public representation while
+/// keeping internal signatures readable.
+pub type LiveTaggedSource = (
+    u64,
+    String,
+    u32,
+    Vec<crate::tagdict::TagId>,
+    crate::rank::RankValues,
+    crate::ownership::QueryPlacement,
+);
+
+/// Internal source-document gather used by cluster rebuilds and content
+/// fingerprints. It extends [`LiveTaggedSource`] with the internal source
+/// generation and canonical raw tags.
+pub(crate) type LiveSourceDocument = (
+    u64,
+    String,
+    u32,
+    u64,
+    Vec<(String, String)>,
+    Vec<crate::tagdict::TagId>,
+    crate::rank::RankValues,
+    crate::ownership::QueryPlacement,
+);
+
 /// Outcome of ingesting a batch of stored queries. Lets callers see how many
 /// queries actually entered the index versus why the rest were dropped, instead
 /// of silently losing them.
@@ -663,6 +739,9 @@ pub struct Engine {
     wal: Option<Wal>,
     /// Next segment file sequence number (for naming: seg_000001.seg, etc.)
     next_seg_id: u64,
+    /// Next non-zero internal generation used to couple an exact row to its
+    /// canonical source document. Independent of caller-visible `_version`.
+    next_source_generation: u64,
     /// Health flag: false if a WAL write has failed (durability degraded).
     pub wal_healthy: bool,
     /// Health flag: false if a manifest or segment file write has failed.

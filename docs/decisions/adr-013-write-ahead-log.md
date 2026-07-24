@@ -8,9 +8,12 @@
   tombstones are lost. The design doc specifies a durable mutation log as the source of truth
   (§3 of ingestion-and-updates.md).
 - **Decision:** Simple append-only WAL (`wal.log`) with framed entries. Each entry:
-  `[body_len: u32, crc32: u32, seq: u64, op: u8, payload...]`. Three operations: Insert
-  (stores logical_id + version + query text), Tombstone (seg_idx + local_id),
-  FlushCheckpoint (segment filename). CRC-32 per entry detects torn writes from crashes.
+  `[body_len: u32, crc32: u32, seq: u64, op: u8, payload...]`. Operations cover Insert,
+  atomic Upsert, positional legacy Tombstone, address-free DeleteByLogical, and
+  FlushCheckpoint; accepted class-D inserts/upserts have distinct op markers so replay preserves
+  the writer's admission decision. Insert-shaped payloads carry logical id, version, query text,
+  raw tags, optional typed priority, and—on engine-owned WAL v7 writes—the ADR-116 internal source
+  generation. CRC-32 per entry detects torn writes from crashes.
   Recovery: scan forward, skip entries with bad CRC, replay only entries after the last
   FlushCheckpoint (earlier entries are already materialized in sealed segments).
   WAL is written before memtable mutation (WAL-first = durability before visibility), and
@@ -24,6 +27,11 @@
   SQLite `NORMAL`); `true` fsyncs every append before acknowledging, so an acknowledged write
   survives power loss (SQLite `FULL`), at a large per-write latency cost. Checkpoints are always
   fsync'd.
+
+  The v7 source generation is reserved before append and installed unchanged in the exact row and
+  `sources.dat`. Recovery never allocates a new generation for that frame; generation-less legacy
+  frames remain generation zero. Source-store updates accept only an equal-or-newer generation, so
+  replaying an old frame covered by a later same-id bulk manifest cannot replace the newer source.
 - **Consequence:** Crash recovery is correct: replaying the WAL after the last checkpoint
   reproduces the exact memtable state. CRC-32 detects partial writes. The WAL is reset after
   compaction + manifest write (all data is in segments). No new dependencies (CRC-32 is
@@ -33,4 +41,3 @@
   failed WAL append rejects the write rather than degrading durability silently, so callers can
   retry (the server maps `WriteError::Wal` to HTTP 503).
 - **See also:** [ingestion-and-updates.md](../design/ingestion-and-updates.md) §3
-

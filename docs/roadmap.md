@@ -336,8 +336,6 @@ Low-priority polish and micro-optimizations — none are production blockers.
 - **No pre-warming** for mmap'd segments on cold start.
 - **No measured restart/reopen time** at ≥1M queries (ADR-064 item 7) — the design implies
   sub-second-to-seconds; capture a number.
-- **Tags are write-only over REST** — no endpoint returns a stored query's tags; small read-back
-  addition for metadata audits (ADR-064 item 7).
 - **Class-C ingest warnings / rewrite suggestions** — surface "this query landed in the broad
   lane" at ingest with a rewrite hint (the ADR-026 follow-up).
 

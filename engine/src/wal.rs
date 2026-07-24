@@ -34,9 +34,12 @@
 //!   then insert this version", so a crash can never recover the delete half without
 //!   the insert half (the no-match window the DELETE-then-PUT recipe had).
 //! WAL v6 (ADR-108): Insert/Upsert payloads may append one signed `priority: i64`
-//!   after tags. The header version remains informational: old readers stop after
-//!   the tag section and retain the mirrored canonical priority tag; new readers
-//!   derive an absent extension from that precompiled tag value.
+//!   after tags. WAL v7 (ADR-116) adds a marked source-generation extension:
+//!   `SGEN, source_generation: u64, priority_present: u8, [priority: i64]`.
+//!   New engine writes always carry the non-zero generation assigned before the
+//!   append so recovery can preserve mutation order across WAL and bulk segments.
+//!   The header version remains informational: old readers stop after the tag
+//!   section (and ignore an extension they do not recognize).
 //!
 //! On recovery, we scan forward from the beginning, skipping entries with bad CRC
 //! (torn writes from a crash). Entries before the last FlushCheckpoint are skipped
@@ -75,8 +78,12 @@ const WAL_MAGIC: [u8; 4] = *b"PWAL";
 // Same rollback story as v3/v4: an old binary stops at the first op-5/6 frame and
 // reports skipped bytes. v6 (ADR-108) adds no opcode: an optional trailing i64
 // extends insert-shaped payloads, so old readers safely ignore it after tags.
-const WAL_VERSION: u32 = 6;
+// v7 (ADR-116) replaces that unmarked tail on new writes with a marked source
+// generation + optional priority extension. The marker and exact tail length
+// distinguish v7 from v6 while older readers continue to ignore the extra bytes.
+const WAL_VERSION: u32 = 7;
 const WAL_HEADER_SIZE: usize = 8; // magic + version
+const SOURCE_GENERATION_MAGIC: [u8; 4] = *b"SGEN";
 
 const OP_INSERT: u8 = 0;
 const OP_TOMBSTONE: u8 = 1;
@@ -100,6 +107,10 @@ pub enum WalEntry {
         /// Optional fixed typed priority appended by WAL v6. Legacy frames leave
         /// this absent and replay derives the compatibility value from tags.
         priority: Option<i64>,
+        /// Engine-owned source generation appended by WAL v7. `None` denotes a
+        /// legacy frame; replay gives those rows generation zero so pre-v8
+        /// storage keeps its historical newest-first tie behavior.
+        source_generation: Option<u64>,
         /// `true` ⇔ the frame's op is `OP_INSERT_CLASS_D` (WAL v5, ADR-068): the write
         /// was accepted under the class-D lane, so replay stores it unconditionally.
         /// A legacy op-0 frame (`false`) replays under the old reject gate — binaries
@@ -137,6 +148,9 @@ pub enum WalEntry {
         tags: Vec<(String, String)>,
         /// Optional fixed typed priority appended by WAL v6.
         priority: Option<i64>,
+        /// Engine-owned source generation appended by WAL v7. `None` denotes a
+        /// legacy generation-zero frame.
+        source_generation: Option<u64>,
         /// `true` ⇔ op `OP_UPSERT_CLASS_D` (WAL v5, ADR-068) — see
         /// [`Insert::class_d_accepted`](WalEntry::Insert). Doubly load-bearing here:
         /// replaying a legacy logged-but-rejected upsert as accepted would not just
@@ -253,7 +267,7 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_INSERT, logical, version, text, tags, None)
+        self.append_insert_like(OP_INSERT, logical, version, text, tags, None, None)
     }
 
     pub fn append_insert_ranked(
@@ -264,7 +278,15 @@ impl Wal {
         tags: &[(String, String)],
         priority: i64,
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_INSERT, logical, version, text, tags, Some(priority))
+        self.append_insert_like(
+            OP_INSERT,
+            logical,
+            version,
+            text,
+            tags,
+            Some(priority),
+            None,
+        )
     }
 
     /// Append an Insert accepted under the class-D lane (WAL v5, ADR-068). Same
@@ -279,7 +301,7 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_INSERT_CLASS_D, logical, version, text, tags, None)
+        self.append_insert_like(OP_INSERT_CLASS_D, logical, version, text, tags, None, None)
     }
 
     pub fn append_insert_class_d_ranked(
@@ -297,6 +319,7 @@ impl Wal {
             text,
             tags,
             Some(priority),
+            None,
         )
     }
 
@@ -310,7 +333,7 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_UPSERT, logical, version, text, tags, None)
+        self.append_insert_like(OP_UPSERT, logical, version, text, tags, None, None)
     }
 
     pub fn append_upsert_ranked(
@@ -321,7 +344,15 @@ impl Wal {
         tags: &[(String, String)],
         priority: i64,
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_UPSERT, logical, version, text, tags, Some(priority))
+        self.append_insert_like(
+            OP_UPSERT,
+            logical,
+            version,
+            text,
+            tags,
+            Some(priority),
+            None,
+        )
     }
 
     /// Append an Upsert accepted under the class-D lane (WAL v5, ADR-068) — see
@@ -333,7 +364,7 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
     ) -> io::Result<u64> {
-        self.append_insert_like(OP_UPSERT_CLASS_D, logical, version, text, tags, None)
+        self.append_insert_like(OP_UPSERT_CLASS_D, logical, version, text, tags, None, None)
     }
 
     pub fn append_upsert_class_d_ranked(
@@ -351,11 +382,74 @@ impl Wal {
             text,
             tags,
             Some(priority),
+            None,
         )
     }
 
-    /// Shared encoder for the two insert-shaped ops (Insert / Upsert): identical
-    /// payload layout, different op byte.
+    /// Append an engine-owned Insert carrying its source generation (WAL v7).
+    /// This is the live Engine path; the compatibility helpers above deliberately
+    /// retain their historical generation-less wire shape for direct callers.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn append_insert_with_source_generation(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        priority: Option<i64>,
+        source_generation: u64,
+        class_d_accepted: bool,
+    ) -> io::Result<u64> {
+        let op = if class_d_accepted {
+            OP_INSERT_CLASS_D
+        } else {
+            OP_INSERT
+        };
+        self.append_insert_like(
+            op,
+            logical,
+            version,
+            text,
+            tags,
+            priority,
+            Some(source_generation),
+        )
+    }
+
+    /// Append an engine-owned Upsert carrying its source generation (WAL v7).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn append_upsert_with_source_generation(
+        &mut self,
+        logical: u64,
+        version: u32,
+        text: &str,
+        tags: &[(String, String)],
+        priority: Option<i64>,
+        source_generation: u64,
+        class_d_accepted: bool,
+    ) -> io::Result<u64> {
+        let op = if class_d_accepted {
+            OP_UPSERT_CLASS_D
+        } else {
+            OP_UPSERT
+        };
+        self.append_insert_like(
+            op,
+            logical,
+            version,
+            text,
+            tags,
+            priority,
+            Some(source_generation),
+        )
+    }
+
+    /// Shared encoder for the insert-shaped ops. Generation-less compatibility
+    /// calls retain the v6 optional-priority tail; engine-owned writes use the
+    /// marked v7 generation tail.
+    // Keep the payload fields explicit here so every compatibility helper chooses
+    // its priority/source-generation wire shape at the call site.
+    #[allow(clippy::too_many_arguments)]
     fn append_insert_like(
         &mut self,
         op: u8,
@@ -364,6 +458,7 @@ impl Wal {
         text: &str,
         tags: &[(String, String)],
         priority: Option<i64>,
+        source_generation: Option<u64>,
     ) -> io::Result<u64> {
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -381,8 +476,11 @@ impl Wal {
             tag_bytes.extend_from_slice(vb);
         }
         // payload: logical(8) + version(4) + text_len(4) + text + tag section
-        let payload_len =
-            8 + 4 + 4 + text_bytes.len() + tag_bytes.len() + priority.map_or(0, |_| 8);
+        let extension_len = match source_generation {
+            Some(_) => 4 + 8 + 1 + priority.map_or(0, |_| 8),
+            None => priority.map_or(0, |_| 8),
+        };
+        let payload_len = 8 + 4 + 4 + text_bytes.len() + tag_bytes.len() + extension_len;
         // entry body: seq(8) + op(1) + payload
         let body_len = 8 + 1 + payload_len;
 
@@ -394,7 +492,18 @@ impl Wal {
         body.extend_from_slice(&(text_bytes.len() as u32).to_le_bytes());
         body.extend_from_slice(text_bytes);
         body.extend_from_slice(&tag_bytes);
-        if let Some(value) = priority {
+        if let Some(source_generation) = source_generation {
+            debug_assert_ne!(
+                source_generation, 0,
+                "engine-owned WAL generations are non-zero"
+            );
+            body.extend_from_slice(&SOURCE_GENERATION_MAGIC);
+            body.extend_from_slice(&source_generation.to_le_bytes());
+            body.push(u8::from(priority.is_some()));
+            if let Some(value) = priority {
+                body.extend_from_slice(&value.to_le_bytes());
+            }
+        } else if let Some(value) = priority {
             body.extend_from_slice(&value.to_le_bytes());
         }
 
@@ -643,11 +752,36 @@ impl Wal {
                             tags.push((key, value));
                         }
                     }
-                    // WAL v6 appends one optional i64 after the complete tag
-                    // section. Old readers stop after tags and safely ignore it.
-                    let priority = (payload.len().saturating_sub(p) == 8)
-                        .then(|| get_i64(payload, p))
-                        .flatten();
+                    // WAL v6 appends one optional i64. WAL v7 engine writes use
+                    // the marked generation tail and carry an explicit
+                    // priority-present byte. Unknown tails remain ignored for
+                    // the same forward-compatible discipline as v6.
+                    let remaining = payload.get(p..).unwrap_or_default();
+                    let (source_generation, priority) = if remaining.len() == 8 {
+                        (None, get_i64(remaining, 0))
+                    } else if remaining.len() >= 13
+                        && remaining.get(..4) == Some(SOURCE_GENERATION_MAGIC.as_slice())
+                    {
+                        let generation = get_u64(remaining, 4);
+                        let priority_present = remaining.get(12).copied();
+                        let priority = match (priority_present, remaining.len()) {
+                            (Some(1), 21) => get_i64(remaining, 13),
+                            _ => None,
+                        };
+                        let valid_shape = matches!(
+                            (priority_present, remaining.len()),
+                            (Some(0), 13) | (Some(1), 21)
+                        );
+                        (
+                            valid_shape
+                                .then_some(generation)
+                                .flatten()
+                                .filter(|&g| g != 0),
+                            valid_shape.then_some(priority).flatten(),
+                        )
+                    } else {
+                        (None, None)
+                    };
                     entries.push(if op == OP_INSERT || op == OP_INSERT_CLASS_D {
                         WalEntry::Insert {
                             seq,
@@ -656,6 +790,7 @@ impl Wal {
                             text,
                             tags,
                             priority,
+                            source_generation,
                             class_d_accepted: op == OP_INSERT_CLASS_D,
                         }
                     } else {
@@ -666,6 +801,7 @@ impl Wal {
                             text,
                             tags,
                             priority,
+                            source_generation,
                             class_d_accepted: op == OP_UPSERT_CLASS_D,
                         }
                     });
@@ -892,6 +1028,55 @@ mod tests {
         }
         match &recovered.entries[1] {
             WalEntry::Upsert { priority, .. } => assert_eq!(*priority, Some(99)),
+            other => panic!("expected Upsert, got {other:?}"),
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn source_generation_extension_round_trips_with_optional_priority() {
+        let path = scratch_path("source_generation_roundtrip");
+        {
+            let mut wal = Wal::open(&path, true).unwrap();
+            wal.append_insert_with_source_generation(7, 3, "topps chrome", &[], None, 41, false)
+                .unwrap();
+            wal.append_upsert_with_source_generation(
+                7,
+                4,
+                "topps chrome refractor",
+                &[("priority".to_string(), "-55".to_string())],
+                Some(-55),
+                42,
+                true,
+            )
+            .unwrap();
+        }
+
+        let recovered = Wal::recover(&path).unwrap();
+        match &recovered.entries[0] {
+            WalEntry::Insert {
+                source_generation,
+                priority,
+                class_d_accepted,
+                ..
+            } => {
+                assert_eq!(*source_generation, Some(41));
+                assert_eq!(*priority, None);
+                assert!(!class_d_accepted);
+            }
+            other => panic!("expected Insert, got {other:?}"),
+        }
+        match &recovered.entries[1] {
+            WalEntry::Upsert {
+                source_generation,
+                priority,
+                class_d_accepted,
+                ..
+            } => {
+                assert_eq!(*source_generation, Some(42));
+                assert_eq!(*priority, Some(-55));
+                assert!(class_d_accepted);
+            }
             other => panic!("expected Upsert, got {other:?}"),
         }
         let _ = std::fs::remove_file(path);

@@ -14,8 +14,8 @@ use super::read::{
     parse_frozen_index, read_u16_slice, read_u32_slice, read_u64_slice, read_u8_slice,
 };
 use super::{
-    FrozenSlot, FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK, HEADER_SIZE,
-    MAGIC,
+    FrozenSlot, FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK,
+    FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE, MAGIC,
 };
 
 mod ops;
@@ -58,7 +58,7 @@ enum MmapLogicalIndex {
 pub struct MmapSegment {
     mmap: Arc<memmap2::Mmap>,
     num_queries: u32,
-    /// The file's header format version (1..=7). v4 ⇔ the segment holds class-D
+    /// The file's header format version (1..=8). v4 ⇔ the segment holds class-D
     /// always-candidates (the ADR-068 rollback fence); v5 ⇔ it holds class-H
     /// hot-tier entries (the ADR-105 fence + the hot-index section) — surfaced so
     /// the manifest commit can propagate the fence to its own version word.
@@ -102,6 +102,10 @@ pub struct MmapSegment {
     placement_blob: *const u32,
     placement_blob_len: usize,
     placement_count: usize,
+    // Optional v8 source/exact coupling column. `source_generation_count == 0`
+    // pre-v8; accessors expose legacy generation zero in that case.
+    source_generation: *const u64,
+    source_generation_count: usize,
     // Main index
     main_slots: *const FrozenSlot,
     main_cap: usize,
@@ -299,6 +303,8 @@ impl Clone for MmapSegment {
             placement_blob: self.placement_blob,
             placement_blob_len: self.placement_blob_len,
             placement_count: self.placement_count,
+            source_generation: self.source_generation,
+            source_generation_count: self.source_generation_count,
             main_slots: self.main_slots,
             main_cap: self.main_cap,
             main_mask: self.main_mask,
@@ -355,6 +361,13 @@ impl MmapSegment {
         self.hot_cap != 0
     }
 
+    /// Whether this file carries v8 source/exact generations. Propagated to the
+    /// standalone manifest so older recovery code refuses the corpus loudly
+    /// instead of skipping the unreadable segment.
+    pub fn carries_source_generation_fence(&self) -> bool {
+        self.format_version >= FORMAT_VERSION_SOURCE_GENERATION
+    }
+
     /// Load a segment from a file, memory-mapping it.
     pub fn open(path: &Path) -> io::Result<Self> {
         let file = std::fs::File::open(path)?;
@@ -393,11 +406,11 @@ impl MmapSegment {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
             }
             let version = read_u32_at(data, 4)?;
-            // v1–v5 are all supported (v1 reconstructs the reverse index; v1/v2 read
-            // back with an empty tag column; v4 is layout-identical to v3 — the bump
-            // is the class-D rollback fence, ADR-068; v5 adds the hot-index section,
-            // ADR-105).
-            if !(1..=FORMAT_VERSION_OWNERSHIP).contains(&version) {
+            // v1–v8 are supported (v1 reconstructs the reverse index; v1/v2 read
+            // back with an empty tag column; v4 is the class-D fence; v5 adds
+            // the hot index; v6 priority, v7 ownership, and v8 source generation
+            // append cumulative exact-row columns).
+            if !(1..=FORMAT_VERSION_SOURCE_GENERATION).contains(&version) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("unsupported format version {version}"),
@@ -486,13 +499,14 @@ impl MmapSegment {
             placement_off_s,
             placement_len_s,
             placement_blob_s,
+            after_placement,
         ) = if format_version >= FORMAT_VERSION_OWNERSHIP {
             let (generation, next) = read_u64_slice(data_for_parse, after_priority)?;
             let (num_shards, next) = read_u32_slice(data_for_parse, next)?;
             let (mode, next) = read_u8_slice(data_for_parse, next)?;
             let (off, next) = read_u32_slice(data_for_parse, next)?;
             let (len, next) = read_u32_slice(data_for_parse, next)?;
-            let (blob, _) = read_u32_slice(data_for_parse, next)?;
+            let (blob, next) = read_u32_slice(data_for_parse, next)?;
             let n = num_queries as usize;
             if generation.len() != n
                 || num_shards.len() != n
@@ -522,11 +536,32 @@ impl MmapSegment {
                 )
                 .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
             }
-            (generation, num_shards, mode, off, len, blob)
+            (generation, num_shards, mode, off, len, blob, next)
         } else {
-            (&[][..], &[][..], &[][..], &[][..], &[][..], &[][..])
+            (
+                &[][..],
+                &[][..],
+                &[][..],
+                &[][..],
+                &[][..],
+                &[][..],
+                after_priority,
+            )
         };
         let placement_count = placement_generation_s.len();
+        let source_generation_s = if format_version >= FORMAT_VERSION_SOURCE_GENERATION {
+            let (generation, _) = read_u64_slice(data_for_parse, after_placement)?;
+            if generation.len() != num_queries as usize {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "segment source-generation column length mismatch",
+                ));
+            }
+            generation
+        } else {
+            &[][..]
+        };
+        let source_generation_count = source_generation_s.len();
 
         // ---- Parse main index ----
         let (main_slots_s, main_blob_s, main_cap) = parse_frozen_index(data_for_parse, main_off)?;
@@ -745,6 +780,8 @@ impl MmapSegment {
             placement_blob: slice_ptr(placement_blob_s),
             placement_blob_len: placement_blob_s.len(),
             placement_count,
+            source_generation: slice_ptr(source_generation_s),
+            source_generation_count,
             main_slots: main_slots_s.as_ptr(),
             main_cap,
             main_mask: if main_cap > 0 {

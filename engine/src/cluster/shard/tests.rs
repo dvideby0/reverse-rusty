@@ -289,6 +289,13 @@ mod content_fingerprint_guard_tests {
             "a partial source store must REFUSE the fingerprint (fail-toward-copy), got \
              {refused:?}"
         );
+        assert!(
+            matches!(
+                reopened.document_of(1),
+                Err(crate::cluster::shard::ShardError::SourceUnavailable(1))
+            ),
+            "a live query with no source must fail loud instead of looking absent"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -2,7 +2,7 @@
 //! to disk (mmap'd back), the all-or-nothing commit point (ADR-017), WAL
 //! checkpoint/reset, and manifest + query-source persistence.
 
-use super::{BaseSegment, Engine, IngestReport, Segment};
+use super::{AcceptedSource, BaseSegment, Engine, IngestReport, Segment};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -112,16 +112,17 @@ impl Engine {
     /// segment is dropped and the orphan file deleted, so nothing is committed
     /// (mirrors RocksDB's `IngestExternalFile`).
     ///
-    /// `accepted` carries the `(logical_id, source_text)` of queries that
-    /// compiled. It is applied to the query store (display-only, never on the
-    /// match path) *after* the commit point and then persisted to `sources.dat`.
+    /// `accepted` carries the source documents of queries that compiled. It is
+    /// applied to the query store (display-only,
+    /// never on the match path) *after* the commit point and then persisted to
+    /// `sources.dat`.
     /// Bulk ingest has no WAL backstop, so this is the sole point at which bulk
     /// source text becomes durable; a `sources.dat` write failure is surfaced via
     /// `persistence_healthy` but does not un-commit the already-durable match data.
     pub(in crate::segment) fn commit_base_segment(
         &mut self,
         seg: Segment,
-        accepted: Vec<(u64, String)>,
+        accepted: Vec<AcceptedSource>,
         report: IngestReport,
     ) -> std::io::Result<IngestReport> {
         let (base, seg_path) = self.build_durable_base(seg)?;
@@ -140,8 +141,15 @@ impl Engine {
         }
 
         // Past the commit point — the match data is durable. Publish source text.
-        for (logical, text) in accepted {
-            self.query_store.insert(logical, text);
+        for source in accepted {
+            self.query_store.insert_document_with_generation_and_status(
+                source.logical,
+                source.text,
+                source.version,
+                source.source_generation,
+                &source.tags,
+                source.tags_known,
+            );
         }
         self.save_query_sources();
 
@@ -265,10 +273,19 @@ impl Engine {
                 BaseSegment::Mmap(m) => m.carries_hot_fence(),
                 BaseSegment::Memory(seg) => seg.has_hot_entries(),
             });
+            // Segment v8 carries the source/exact generation used by point reads.
+            // Standalone recovery skips an unsupported segment, so propagate the
+            // capability to manifest v6 and force an older binary to refuse the
+            // corpus before it can silently serve a partial index.
+            let source_generation_fence = self.segments.iter().any(|s| match s.as_ref() {
+                BaseSegment::Mmap(m) => m.carries_source_generation_fence(),
+                BaseSegment::Memory(seg) => seg.max_source_generation() != 0,
+            });
             let manifest = crate::storage::Manifest {
                 segment_files,
                 class_d_fence,
                 hot_fence,
+                source_generation_fence,
                 hot_anchor_theta: self.config.hot_anchor_threshold,
                 next_seg_id: self.next_seg_id,
                 dict_data: crate::storage::serialize_dict(&self.dict),

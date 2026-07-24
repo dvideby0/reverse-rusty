@@ -23,4 +23,8 @@
 - **Alternatives rejected:** (A) Adding to `.seg` format would bloat mmap'd memory with data
   never accessed during matching, violating the hot-path budget. (B) Per-segment sidecars add
   complexity for compaction merging and are premature at current scale.
-
+- **Amended by [ADR-116](adr-116-get-document-source-readback.md):** a backward-readable v2
+  metadata footer adds the write version, internal source generation, and canonical raw tags while
+  keeping the original query index/blob independently addressable for the same lazy, bounded
+  enrichment path. The generation is paired with the `.seg` v8 exact column so stale sidecars fail
+  loud even when caller versions repeat.

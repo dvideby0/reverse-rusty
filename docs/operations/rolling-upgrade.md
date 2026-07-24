@@ -34,7 +34,7 @@ Durable formats are **versioned and fail loud, never corrupt silently** — an i
 a refused open with a versioned error, and a refusal is always recoverable by restoring the
 pre-upgrade backup:
 
-- **Segments** (`.seg` v3–v7) and **manifests** (engine v3–v5, cluster v4–v6): newer minor
+- **Segments** (`.seg` v3–v8) and **manifests** (engine v3–v6, cluster v4–v6): newer minor
   formats read older files back; an *older* binary refuses a *newer* file it cannot honor. The
   "fence" versions exist precisely to make a semantic change loud — e.g. a
   class-D-bearing segment is written v4 so a pre-ADR-068 binary refuses it rather than silently
@@ -45,17 +45,19 @@ pre-upgrade backup:
   The *cluster* manifest deliberately does NOT bump for the hot tier: cluster shards attach
   their registered segments fail-loud, so the per-shard `.seg` v5 word alone fences an old
   binary (ADR-105). ADR-108 adds `.seg` v6 priority columns. ADR-109 adds `.seg` v7 ownership
-  columns and cluster-manifest v6; standalone `.seg` v1–v6 remains readable by the new binary,
-  but clustered manifests v1–v5 are intentionally rebuild-only because they cannot identify a
-  unique emission owner.
+  columns and cluster-manifest v6. ADR-116 adds `.seg` v8 source-generation columns and the
+  standalone engine-manifest v6 fence; older binaries must not skip those rows and serve a partial
+  corpus. Standalone `.seg` v1–v7 remains readable by the new binary, but clustered manifests v1–v5
+  are intentionally rebuild-only because they cannot identify a unique emission owner.
 - **Same-θ contract (ADR-105):** in remote cluster mode, run every `shardserver` (and the
   coordinator) with the same `--hot-anchor-threshold`. Divergence can never drop a match —
   class A and class H are both always-visible and place identically — it only decides which
   node re-inherits the un-quarantined fat-posting scans; the coordinator warns at startup when
   θ is set in remote mode.
-- **Logs:** the standalone WAL is v6 (ADR-108). ADR-109 advances the coordinator log and per-shard
-  translog to v4; clustered v1–v3 logs are rebuild-only because their writes lack placement
-  identity.
+- **Logs:** the standalone WAL is v7 (ADR-116): new engine insert/upsert frames append a marked
+  source generation around ADR-108's optional priority. Legacy v1–v6 frames remain readable as
+  generation-zero data. ADR-109 advances the coordinator log and per-shard translog to v4;
+  clustered v1–v3 logs are rebuild-only because their writes lack placement identity.
 - **Adopted shard state:** ADR-109 adopted feature-space v2 records placement generation and shard
   count. Legacy adopted data-node state must be wiped and reseeded.
 - **The mesh wire:** ADR-109 fields are protobuf-additive syntactically, but semantically mandatory.

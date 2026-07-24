@@ -47,6 +47,11 @@ pub struct ExactStore {
     placement_off: Vec<u32>,
     placement_len: Vec<u32>,
     placement_blob: Vec<u32>,
+    // Source/exact coupling (ADR-116 hardening). This internal generation is
+    // independent of the caller-visible version and changes on every accepted
+    // write, so two writes that both use `_version = 1` cannot be mistaken for
+    // the same stored document. Zero means a pre-generation legacy row.
+    source_generation: Vec<u64>,
     // identity, resolved only on a confirmed match
     version: Vec<u32>,
     logical: Vec<u64>,
@@ -123,6 +128,27 @@ impl ExactStore {
         rank: RankValues,
         placement: &QueryPlacement,
     ) -> u32 {
+        self.push_ranked_with_placement_and_source_generation(
+            ex, tags, dict, version, logical, rank, placement, 0,
+        )
+    }
+
+    /// Append a compiled query with distributed placement and the engine's
+    /// internal source generation. Public compatibility callers use
+    /// [`Self::push_ranked_with_placement`], whose generation `0` denotes a
+    /// legacy/unknown row; engine-owned writes always pass a non-zero value.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_ranked_with_placement_and_source_generation(
+        &mut self,
+        ex: &Extracted,
+        tags: &[TagId],
+        dict: &Dict,
+        version: u32,
+        logical: u64,
+        rank: RankValues,
+        placement: &QueryPlacement,
+        source_generation: u64,
+    ) -> u32 {
         let id = self.req_mask.len() as u32;
 
         let mut rmask = 0u64;
@@ -180,6 +206,7 @@ impl ExactStore {
         self.logical.push(logical);
         self.priority.push(rank.priority);
         self.push_placement(placement);
+        self.source_generation.push(source_generation);
         id
     }
 
@@ -200,6 +227,10 @@ impl ExactStore {
     #[inline]
     pub fn version(&self, id: u32) -> u32 {
         self.version[id as usize]
+    }
+    #[inline]
+    pub fn source_generation(&self, id: u32) -> u64 {
+        self.source_generation[id as usize]
     }
     #[inline]
     pub fn rank_values(&self, id: u32) -> RankValues {
@@ -559,6 +590,7 @@ impl ExactStore {
         dest.logical.push(self.logical[i]);
         dest.priority.push(self.priority[i]);
         dest.push_placement(&self.placement(id).to_owned());
+        dest.source_generation.push(self.source_generation[i]);
         new_id
     }
 
@@ -662,6 +694,12 @@ impl ExactStore {
     pub fn priorities(&self) -> &[i64] {
         &self.priority
     }
+    pub fn source_generations(&self) -> &[u64] {
+        &self.source_generation
+    }
+    pub fn max_source_generation(&self) -> u64 {
+        self.source_generation.iter().copied().max().unwrap_or(0)
+    }
     pub fn placement_generations(&self) -> &[u64] {
         &self.placement_generation
     }
@@ -736,6 +774,29 @@ impl ExactStore {
         priority: i64,
         placement: &QueryPlacement,
     ) -> u32 {
+        self.push_raw_placed_with_source_generation(
+            rmask, fmask, req_tail, forb_tail, groups, tags, version, logical, priority, placement,
+            0,
+        )
+    }
+
+    /// Raw-row reconstruction including validated ownership and source-generation
+    /// metadata. A generation of zero is the compatibility value for pre-v8 rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_raw_placed_with_source_generation(
+        &mut self,
+        rmask: u64,
+        fmask: u64,
+        req_tail: &[u32],
+        forb_tail: &[u32],
+        groups: (usize, usize, &[u32], &[u16], &[u32]),
+        tags: &[TagId],
+        version: u32,
+        logical: u64,
+        priority: i64,
+        placement: &QueryPlacement,
+        source_generation: u64,
+    ) -> u32 {
         let id = self.req_mask.len() as u32;
         self.req_mask.push(rmask);
         self.forb_mask.push(fmask);
@@ -772,6 +833,7 @@ impl ExactStore {
         self.logical.push(logical);
         self.priority.push(priority);
         self.push_placement(placement);
+        self.source_generation.push(source_generation);
         id
     }
 
@@ -796,6 +858,7 @@ impl ExactStore {
             + self.version.capacity() * size_of::<u32>()
             + self.logical.capacity() * size_of::<u64>()
             + self.priority.capacity() * size_of::<i64>()
+            + self.source_generation.capacity() * size_of::<u64>()
             + self.placement_generation.capacity() * size_of::<u64>()
             + self.placement_num_shards.capacity() * size_of::<u32>()
             + self.placement_mode.capacity() * size_of::<u8>()

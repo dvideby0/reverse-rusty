@@ -2,12 +2,13 @@
 //! stored queries, plus the per-query metadata-tag extraction shared by the single
 //! and bulk write paths (ADR-049).
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{Path, Query, State},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -16,7 +17,7 @@ use tracing::{error, info, instrument, warn};
 
 use reverse_rusty::segment::IngestItemStatus;
 
-use crate::dto::{ApiError, HitSource};
+use crate::dto::ApiError;
 use crate::state::AppState;
 
 /// The class-D rejection body, shared by the single-doc and bulk paths. Names the
@@ -49,12 +50,176 @@ struct PutDocResponse {
 }
 
 // -- GET /_doc/{id}
+pub(crate) const QUERY_INDEX: &str = "queries";
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetDocParams {
+    #[serde(rename = "_source")]
+    source: Option<bool>,
+    #[serde(rename = "_source_includes", alias = "_source_include", default)]
+    source_includes: Option<String>,
+    #[serde(rename = "_source_excludes", alias = "_source_exclude", default)]
+    source_excludes: Option<String>,
+}
+
 #[derive(Serialize)]
-struct GetDocResponse {
+pub(crate) struct GetDocResponse {
+    _index: &'static str,
     _id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    _version: Option<u32>,
     found: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    _source: Option<HitSource>,
+    _source: Option<GetDocSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    _source_metadata: Option<GetDocSourceMetadata>,
+}
+
+#[derive(Serialize)]
+struct GetDocSource {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tags: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+#[derive(Serialize)]
+struct GetDocSourceMetadata {
+    complete: bool,
+    reason: &'static str,
+}
+
+impl GetDocResponse {
+    pub(crate) fn found(
+        id: u64,
+        document: &reverse_rusty::storage::StoredSource,
+        params: &GetDocParams,
+    ) -> Self {
+        let metadata = (!document.tags_known()).then_some(GetDocSourceMetadata {
+            complete: false,
+            reason: "tag metadata predates the source metadata footer; re-PUT this document to \
+                     materialize it",
+        });
+        Self {
+            _index: QUERY_INDEX,
+            _id: id,
+            _version: Some(document.version()),
+            found: true,
+            _source: project_source(document, params),
+            _source_metadata: metadata,
+        }
+    }
+
+    pub(crate) const fn missing(id: u64) -> Self {
+        Self {
+            _index: QUERY_INDEX,
+            _id: id,
+            _version: None,
+            found: false,
+            _source: None,
+            _source_metadata: None,
+        }
+    }
+}
+
+fn project_source(
+    document: &reverse_rusty::storage::StoredSource,
+    params: &GetDocParams,
+) -> Option<GetDocSource> {
+    if params.source == Some(false) {
+        return None;
+    }
+    let includes = source_patterns(params.source_includes.as_deref());
+    let excludes = source_patterns(params.source_excludes.as_deref());
+    let include_query = field_selected("query", &includes, &excludes);
+    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (key, value) in document.tags() {
+        let field = format!("tags.{key}");
+        if nested_field_selected("tags", &field, &includes, &excludes) {
+            grouped.entry(key.clone()).or_default().push(value.clone());
+        }
+    }
+    let tags = (!grouped.is_empty()).then(|| {
+        grouped
+            .into_iter()
+            .map(|(key, mut values)| {
+                values.sort_unstable();
+                values.dedup();
+                let value = if values.len() == 1 {
+                    serde_json::Value::String(values.pop().unwrap_or_default())
+                } else {
+                    serde_json::Value::Array(
+                        values.into_iter().map(serde_json::Value::String).collect(),
+                    )
+                };
+                (key, value)
+            })
+            .collect()
+    });
+    Some(GetDocSource {
+        query: include_query.then(|| document.query().to_owned()),
+        tags,
+    })
+}
+
+fn source_patterns(raw: Option<&str>) -> Vec<&str> {
+    raw.into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn field_selected(field: &str, includes: &[&str], excludes: &[&str]) -> bool {
+    let included = includes.is_empty()
+        || includes
+            .iter()
+            .any(|pattern| source_pattern_matches(pattern, field));
+    included
+        && !excludes
+            .iter()
+            .any(|pattern| source_pattern_matches(pattern, field))
+}
+
+fn nested_field_selected(parent: &str, field: &str, includes: &[&str], excludes: &[&str]) -> bool {
+    let matches = |patterns: &[&str]| {
+        patterns.iter().any(|pattern| {
+            source_pattern_matches(pattern, parent) || source_pattern_matches(pattern, field)
+        })
+    };
+    (includes.is_empty() || matches(includes)) && !matches(excludes)
+}
+
+/// Small ES-style source-filter glob (`*` and `?`), kept local to this
+/// off-hot-path point read so no regex dependency reaches the core.
+fn source_pattern_matches(pattern: &str, value: &str) -> bool {
+    // ES/OS wildcard `?` consumes one Unicode scalar value, not one UTF-8 byte.
+    // This is off the hot path, so small temporary char vectors keep the greedy
+    // matcher simple and make tag keys such as `é` behave as one character.
+    let pattern: Vec<char> = pattern.chars().collect();
+    let value: Vec<char> = value.chars().collect();
+    let (mut p, mut v, mut star, mut retry_v) = (0usize, 0usize, None, 0usize);
+    while v < value.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some(p);
+            p += 1;
+            retry_v = v;
+        } else if let Some(star_at) = star {
+            p = star_at + 1;
+            retry_v += 1;
+            v = retry_v;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == '*' {
+        p += 1;
+    }
+    p == pattern.len()
 }
 
 // -- DELETE /_doc/{id}
@@ -415,48 +580,64 @@ pub(crate) async fn put_doc(
 }
 
 /// GET /_doc/{id} — retrieve a stored query by logical ID.
-#[instrument(skip(state), fields(query_id = id))]
+#[instrument(skip(state, params), fields(query_id = id))]
 pub(crate) async fn get_doc(
     State(state): State<Arc<AppState>>,
     Path(id): Path<u64>,
-) -> impl IntoResponse {
+    Query(params): Query<GetDocParams>,
+    method: Method,
+) -> Response {
     let start = Instant::now();
     let snap = state.snapshot.load();
-    let result = if let Some(query_text) = snap.get_query_source(id) {
-        state
-            .prom
-            .http_requests_total
-            .with_label_values(&["get_doc", "200"])
-            .inc();
-        (
-            StatusCode::OK,
-            Json(GetDocResponse {
-                _id: id,
-                found: true,
-                _source: Some(HitSource { query: query_text }),
-            }),
-        )
+    let (status, response) = if method == Method::HEAD {
+        // HEAD is an existence probe over the live exact index. It must not
+        // materialize `_source` or turn a damaged display-only sidecar into a
+        // false "missing"/500 result.
+        let status = if snap.has_live_query(id) {
+            StatusCode::OK
+        } else {
+            StatusCode::NOT_FOUND
+        };
+        (status, status.into_response())
     } else {
-        state
-            .prom
-            .http_requests_total
-            .with_label_values(&["get_doc", "404"])
-            .inc();
-        (
-            StatusCode::NOT_FOUND,
-            Json(GetDocResponse {
-                _id: id,
-                found: false,
-                _source: None,
-            }),
-        )
+        match snap.get_query_document(id) {
+            Some(document) => (
+                StatusCode::OK,
+                (
+                    StatusCode::OK,
+                    Json(GetDocResponse::found(id, &document, &params)),
+                )
+                    .into_response(),
+            ),
+            None if snap.has_live_query(id) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiError::response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "source_unavailable",
+                    format!(
+                        "query {id} is live but its stored source is unavailable; repair or \
+                         restore sources.dat"
+                    ),
+                )
+                .into_response(),
+            ),
+            None => (
+                StatusCode::NOT_FOUND,
+                (StatusCode::NOT_FOUND, Json(GetDocResponse::missing(id))).into_response(),
+            ),
+        }
     };
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["get_doc", status.as_str()])
+        .inc();
     state
         .prom
         .http_request_duration
         .with_label_values(&["get_doc"])
         .observe(start.elapsed().as_secs_f64());
-    result
+    response
 }
 
 /// DELETE /_doc/{id} — remove a stored query by logical ID.

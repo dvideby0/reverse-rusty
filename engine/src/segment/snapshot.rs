@@ -578,6 +578,67 @@ impl EngineSnapshot {
         self.query_store.get(logical_id)
     }
 
+    /// Canonical stored document for `GET /_doc/{id}`: original DSL text, the
+    /// newest live write version, and scalar-coerced metadata tags. Source files
+    /// without the ADR-116 metadata footer predate tag read-back; for those, dense tag ids are losslessly
+    /// reconstructed through the persisted tag dictionary. A legacy synthetic
+    /// tag cannot be reversed and leaves `tags_known = false` so the HTTP layer
+    /// can fail loud rather than return incomplete metadata.
+    pub fn get_query_document(&self, logical_id: u64) -> Option<crate::storage::StoredSource> {
+        let mut source = self.query_store.get_document(logical_id)?;
+        let (version, source_generation, tag_ids) = self.source_metadata_for_logical(logical_id)?;
+        if source.metadata_known() {
+            // SourceStore is shared behind interior mutability, so an older
+            // published snapshot can observe a later source mutation. The
+            // caller-visible version may repeat; the internal generation cannot.
+            // A durable sidecar failure creates the inverse mismatch after reopen.
+            // Never combine either pair of generations.
+            if source.version() != version || source.source_generation() != source_generation {
+                return None;
+            }
+            if !source.tags_known() {
+                let recovered_tags = tag_ids
+                    .iter()
+                    .map(|&id| {
+                        self.tag_dict
+                            .key_value(id)
+                            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    })
+                    .collect::<Option<Vec<_>>>();
+                source.recover_missing_tags(recovered_tags);
+            }
+            return Some(source);
+        }
+        // Footer-less v1/original-v2 sources carry neither trustworthy version nor raw
+        // tags. They may pair only with a pre-v8 exact row: a non-zero exact
+        // generation proves this is a stale sidecar and must fail loud.
+        if source_generation != 0 || source.source_generation() != 0 {
+            return None;
+        }
+        // Preserve the true legacy compatibility path by inheriting the newest
+        // live exact row, reconstructing tags only when every id is reversible.
+        let recovered_tags = tag_ids
+            .iter()
+            .map(|&id| {
+                self.tag_dict
+                    .key_value(id)
+                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            })
+            .collect::<Option<Vec<_>>>();
+        source.recover_legacy_metadata(version, source_generation, recovered_tags);
+        Some(source)
+    }
+
+    /// Whether the current snapshot has a live exact-store row for `logical_id`,
+    /// independent of source-store availability.
+    ///
+    /// Point-read adapters use this after a failed source lookup to distinguish
+    /// a legitimate missing document from a damaged/missing `sources.dat`.
+    #[must_use]
+    pub fn has_live_query(&self, logical_id: u64) -> bool {
+        self.source_metadata_for_logical(logical_id).is_some()
+    }
+
     /// Winner-fetch lookup with pre-allocation byte credit. `Err(actual_len)`
     /// means the current source exists but does not fit; the source store checks
     /// its borrowed resident/mmap value before cloning. Public so the v2
@@ -955,30 +1016,52 @@ impl EngineSnapshot {
         crate::rank::compile_rank_program(&self.tag_dict, spec)
     }
 
-    /// The live `TagId` slice for a matched logical id, picking the NEWEST live
-    /// copy. Ordering is newest-first at both levels: the memtable before the base
-    /// segments (all writes land in the memtable), base segments newest→oldest
-    /// (`segments` is oldest-first, so walk it reversed), AND **within** each
-    /// container the locals slice reversed — `locals_for_logical` lists a logical
-    /// id's physical copies in ascending (insertion) order, so the LAST live local
-    /// is the newest version. This matters when a logical id has two live copies in
-    /// one container (e.g. a re-`PUT`/`insert_live` that has not yet tombstoned the
-    /// old copy, or a flush of such a memtable). Returns `None` if no live copy
-    /// exists — not expected for a just-matched id, but total for safety.
-    fn tags_for_logical(&self, logical_id: u64) -> Option<&[crate::tagdict::TagId]> {
+    /// Metadata for the newest live mutation of a logical id. The internal source
+    /// generation is the ordering authority across storage tiers: an additive bulk
+    /// write may create a newer base-segment row while an older live insert remains
+    /// in the memtable. Reverse storage order is retained only as the tie-break for
+    /// legacy generation-zero rows. Returns `None` if no live copy exists.
+    fn source_metadata_for_logical(
+        &self,
+        logical_id: u64,
+    ) -> Option<(u32, u64, &[crate::tagdict::TagId])> {
+        let mut best: Option<(u32, u64, &[crate::tagdict::TagId])> = None;
         for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
             if self.memtable.is_alive(local) {
-                return Some(self.memtable.tags_of(local));
+                let source_generation = self.memtable.source_generation_of(local);
+                let replace = match best {
+                    Some((_, best_generation, _)) => source_generation > best_generation,
+                    None => true,
+                };
+                if replace {
+                    best = Some((
+                        self.memtable.version_of(local),
+                        source_generation,
+                        self.memtable.tags_of(local),
+                    ));
+                }
             }
         }
         for seg in self.segments.iter().rev() {
             for &local in seg.locals_for_logical(logical_id).iter().rev() {
                 if seg.is_alive(local) {
-                    return Some(seg.tags_of(local));
+                    let source_generation = seg.source_generation_of(local);
+                    let replace = match best {
+                        Some((_, best_generation, _)) => source_generation > best_generation,
+                        None => true,
+                    };
+                    if replace {
+                        best = Some((seg.version_of(local), source_generation, seg.tags_of(local)));
+                    }
                 }
             }
         }
-        None
+        best
+    }
+
+    fn tags_for_logical(&self, logical_id: u64) -> Option<&[crate::tagdict::TagId]> {
+        self.source_metadata_for_logical(logical_id)
+            .map(|(_, _, tags)| tags)
     }
 
     /// Newest-live typed rank values and tags for a logical id. The same reverse
@@ -1003,17 +1086,26 @@ impl EngineSnapshot {
     where
         C: FnMut() -> bool + ?Sized,
     {
+        let mut best: Option<(u64, crate::rank::RankValues, &[crate::tagdict::TagId])> = None;
         for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
             if should_stop() {
                 return None;
             }
             if self.memtable.is_alive(local) {
+                let source_generation = self.memtable.source_generation_of(local);
+                let replace = match best {
+                    Some((best_generation, _, _)) => source_generation > best_generation,
+                    None => true,
+                };
+                if !replace {
+                    continue;
+                }
                 let tags = self.memtable.tags_of(local);
                 let mut rank = self.memtable.rank_values(local);
                 if rank.priority == 0 {
                     rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
                 }
-                return Some((rank, tags));
+                best = Some((source_generation, rank, tags));
             }
         }
         for seg in self.segments.iter().rev() {
@@ -1022,16 +1114,24 @@ impl EngineSnapshot {
                     return None;
                 }
                 if seg.is_alive(local) {
+                    let source_generation = seg.source_generation_of(local);
+                    let replace = match best {
+                        Some((best_generation, _, _)) => source_generation > best_generation,
+                        None => true,
+                    };
+                    if !replace {
+                        continue;
+                    }
                     let tags = seg.tags_of(local);
                     let mut rank = seg.rank_values(local);
                     if rank.priority == 0 {
                         rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
                     }
-                    return Some((rank, tags));
+                    best = Some((source_generation, rank, tags));
                 }
             }
         }
-        None
+        best.map(|(_, rank, tags)| (rank, tags))
     }
 
     /// Build the newest-live integer scorer for one compiled rank program —
@@ -1395,6 +1495,62 @@ impl EngineSnapshot {
             opts,
             deadline,
         )
+    }
+}
+
+#[cfg(test)]
+mod source_document_tests {
+    use super::*;
+
+    #[test]
+    fn point_read_refuses_source_from_a_different_exact_generation() {
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine
+            .try_upsert_live_with_tags("1994 topps", 7, 1, &[("status".into(), "old".into())])
+            .expect("initial upsert");
+        let old_snapshot = engine.snapshot();
+
+        // SourceStore is intentionally shared by snapshots. Mutate the engine without
+        // publishing a replacement snapshot to reproduce the write/source ordering
+        // window: old exact row, new source document.
+        engine
+            .try_upsert_live_with_tags("1995 fleer", 7, 1, &[("status".into(), "new".into())])
+            .expect("replacement upsert");
+
+        assert!(
+            old_snapshot.get_query_document(7).is_none(),
+            "the internal generation must reject a newer source even when both client versions are 1"
+        );
+        assert!(
+            old_snapshot.has_live_query(7),
+            "the mismatch is source unavailability, not document absence"
+        );
+
+        let fresh = engine
+            .snapshot()
+            .get_query_document(7)
+            .expect("fresh generation is coherent");
+        assert_eq!(fresh.version(), 1);
+        assert_eq!(fresh.query(), "1995 fleer");
+        assert_eq!(fresh.tags(), [("status".into(), "new".into())]);
+    }
+
+    #[test]
+    fn point_read_finds_a_newer_bulk_generation_below_an_older_memtable_row() {
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine
+            .try_insert_live("1994 topps", 7, 1)
+            .expect("live insert");
+        let report = engine.bulk_ingest(&[(7, "1995 fleer".to_string())]);
+        assert_eq!(report.ingested, 1);
+
+        let source = engine
+            .snapshot()
+            .get_query_document(7)
+            .expect("bulk generation has a matching live exact row");
+        assert_eq!(source.query(), "1995 fleer");
     }
 }
 

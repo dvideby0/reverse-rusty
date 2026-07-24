@@ -432,6 +432,15 @@ fn synthetic_only_tags_survive_set_vocab_after_reopen() {
     reopened
         .set_vocab(alias_vocab("zzabbr", "term:zzcanon"))
         .expect("set_vocab on a reopened synthetic-only-tagged cluster");
+    let source = reopened
+        .get_document(100)
+        .expect("source lookup")
+        .expect("synthetic-tagged source");
+    assert_eq!(
+        source.tags(),
+        [("category".to_string(), "cards".to_string())],
+        "raw read-back metadata must survive the same reopen + rebuild"
+    );
 
     let cards = vec![("category".to_string(), vec!["cards".to_string()])];
     let coins = vec![("category".to_string(), vec!["coins".to_string()])];

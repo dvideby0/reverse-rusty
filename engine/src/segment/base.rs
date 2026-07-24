@@ -84,6 +84,21 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.version(local_id),
         }
     }
+    /// Internal source generation paired with this exact row. Zero denotes a
+    /// pre-v8 legacy row.
+    pub(in crate::segment) fn source_generation_of(&self, local_id: u32) -> u64 {
+        match self {
+            BaseSegment::Memory(s) => s.source_generation_of(local_id),
+            BaseSegment::Mmap(s) => s.source_generation(local_id),
+        }
+    }
+
+    pub(in crate::segment) fn max_source_generation(&self) -> u64 {
+        match self {
+            BaseSegment::Memory(s) => s.max_source_generation(),
+            BaseSegment::Mmap(s) => s.max_source_generation(),
+        }
+    }
     pub fn tombstone(&mut self, local_id: u32) {
         match self {
             BaseSegment::Memory(s) => s.tombstone(local_id),

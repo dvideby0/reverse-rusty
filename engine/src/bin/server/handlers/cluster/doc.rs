@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    extract::{Path, Query, State},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -18,9 +18,10 @@ use tracing::{error, info, instrument, warn};
 
 use reverse_rusty::cluster::{AddOutcome, ShardError};
 
-use crate::dto::{ApiError, HitSource};
+use crate::dto::ApiError;
 use crate::handlers::doc::{
-    extract_bulk_id, extract_ranked_ingest, PutDocBody, CLASS_D_REJECT_MSG,
+    extract_bulk_id, extract_ranked_ingest, GetDocParams, GetDocResponse, PutDocBody,
+    CLASS_D_REJECT_MSG,
 };
 use crate::state::ClusterAppState;
 
@@ -32,14 +33,6 @@ struct ClusterPutDocResponse {
     result: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-}
-
-#[derive(Serialize)]
-struct ClusterGetDocResponse {
-    _id: u64,
-    found: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    _source: Option<HitSource>,
 }
 
 #[derive(Serialize)]
@@ -227,62 +220,112 @@ pub(crate) async fn cluster_put_doc(
 /// GET /_doc/{id} — retrieve a stored query's source, probing each shard's source
 /// store (local clusters). On a remote cluster the lookup fails loud with 501
 /// rather than reporting a false `found: false`.
-#[instrument(skip(state), fields(query_id = id))]
+#[instrument(skip(state, params), fields(query_id = id))]
 pub(crate) async fn cluster_get_doc(
     State(state): State<Arc<ClusterAppState>>,
     Path(id): Path<u64>,
+    Query(params): Query<GetDocParams>,
+    method: Method,
 ) -> Response {
-    let result = {
-        let cluster = state.cluster.read();
-        cluster.get_source(id)
+    let start = Instant::now();
+    let response = if method == Method::HEAD {
+        let result = {
+            let cluster = state.cluster.read();
+            cluster.document_exists(id)
+        };
+        match result {
+            Ok(exists) => {
+                let status = if exists {
+                    StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                };
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["get_doc", status.as_str()])
+                    .inc();
+                status.into_response()
+            }
+            Err(ShardError::Config(e)) => {
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["get_doc", "501"])
+                    .inc();
+                ApiError::response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "not_supported_in_cluster_mode",
+                    format!("index liveness lookup is not available on this cluster: {e}"),
+                )
+                .into_response()
+            }
+            Err(e) => {
+                let (status, _) = e.write_http_class();
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["get_doc", &status.to_string()])
+                    .inc();
+                shard_error_response("index liveness lookup failed", &e)
+            }
+        }
+    } else {
+        let result = {
+            let cluster = state.cluster.read();
+            cluster.get_document(id)
+        };
+        match result {
+            Ok(Some(document)) => {
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["get_doc", "200"])
+                    .inc();
+                (
+                    StatusCode::OK,
+                    Json(GetDocResponse::found(id, &document, &params)),
+                )
+                    .into_response()
+            }
+            Ok(None) => {
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["get_doc", "404"])
+                    .inc();
+                (StatusCode::NOT_FOUND, Json(GetDocResponse::missing(id))).into_response()
+            }
+            Err(ShardError::Config(e)) => {
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["get_doc", "501"])
+                    .inc();
+                ApiError::response(
+                    StatusCode::NOT_IMPLEMENTED,
+                    "not_supported_in_cluster_mode",
+                    format!("source lookup is not available on this cluster: {e}"),
+                )
+                .into_response()
+            }
+            Err(e) => {
+                let (status, _) = e.write_http_class();
+                state
+                    .prom
+                    .http_requests_total
+                    .with_label_values(&["get_doc", &status.to_string()])
+                    .inc();
+                shard_error_response("source lookup failed", &e)
+            }
+        }
     };
-    match result {
-        Ok(Some(query)) => {
-            state
-                .prom
-                .http_requests_total
-                .with_label_values(&["get_doc", "200"])
-                .inc();
-            (
-                StatusCode::OK,
-                Json(ClusterGetDocResponse {
-                    _id: id,
-                    found: true,
-                    _source: Some(HitSource { query }),
-                }),
-            )
-                .into_response()
-        }
-        Ok(None) => {
-            state
-                .prom
-                .http_requests_total
-                .with_label_values(&["get_doc", "404"])
-                .inc();
-            (
-                StatusCode::NOT_FOUND,
-                Json(ClusterGetDocResponse {
-                    _id: id,
-                    found: false,
-                    _source: None,
-                }),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            state
-                .prom
-                .http_requests_total
-                .with_label_values(&["get_doc", "501"])
-                .inc();
-            ApiError::response(
-                StatusCode::NOT_IMPLEMENTED,
-                "not_supported_in_cluster_mode",
-                format!("source lookup is not available on this cluster: {e}"),
-            )
-            .into_response()
-        }
-    }
+    state
+        .prom
+        .http_request_duration
+        .with_label_values(&["get_doc"])
+        .observe(start.elapsed().as_secs_f64());
+    response
 }
 
 /// DELETE /_doc/{id} — remove a stored query everywhere (idempotent fan-out).

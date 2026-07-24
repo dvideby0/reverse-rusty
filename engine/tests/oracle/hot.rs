@@ -751,11 +751,11 @@ fn tiny_hot_corpus() -> Vec<(u64, String)> {
 }
 
 /// The ROLLBACK fence (the ADR-068 idiom, extended by ADR-105): a segment holding
-/// class-H entries writes format v5 (the hot-index section) and its commit writes
-/// manifest v5 (+ the recorded θ), so a pre-ADR-105 reader — which never probes
-/// the hot index — fails loudly instead of silently serving without those
-/// queries. Hot-free output stays v3 (or v4 under class D) byte-identically, and
-/// a forged/corrupt class byte fails loud at open.
+/// class-H entries carries at least format v5 (the hot-index section), and its
+/// commit carries at least manifest v5 (+ the recorded θ), so a pre-ADR-105
+/// reader — which never probes the hot index — fails loudly instead of silently
+/// serving without those queries. Later cumulative formats may outrank v5; a
+/// forged/corrupt class byte still fails loud at open.
 #[test]
 fn hot_segments_write_the_v5_rollback_fence() {
     use reverse_rusty::storage::MmapSegment;
@@ -782,7 +782,7 @@ fn hot_segments_write_the_v5_rollback_fence() {
     };
     let queries = tiny_hot_corpus();
 
-    // ---- hot-bearing: .seg v5 + manifest v5 + the recorded θ ----
+    // ---- hot-bearing: at least .seg/manifest v5 + the recorded θ ----
     let dir_hot = tempdir("fence-hot");
     {
         let mut cfg = cfg_theta(2);
@@ -792,14 +792,29 @@ fn hot_segments_write_the_v5_rollback_fence() {
         assert!(eng.class_counts()[4] > 0, "degenerate: no class H");
         eng.flush();
     }
-    assert_eq!(seg_version(&dir_hot), 5, "hot segment must carry the fence");
-    assert_eq!(manifest_version(&dir_hot), 5, "hot commit ⇒ manifest v5");
+    assert!(
+        seg_version(&dir_hot) >= 5,
+        "hot segment must carry at least the v5 fence"
+    );
+    assert!(
+        manifest_version(&dir_hot) >= 5,
+        "hot commit must carry at least manifest v5"
+    );
+    assert!(
+        MmapSegment::open(&seg_path(&dir_hot))
+            .expect("open hot segment")
+            .carries_hot_fence(),
+        "the segment content must carry the hot fence"
+    );
     let m = reverse_rusty::storage::read_manifest(&dir_hot.join("manifest.bin"))
         .expect("read manifest");
-    assert!(m.hot_fence, "v5 reads back with the hot fence set");
+    assert!(
+        m.hot_fence,
+        "the manifest reads back with the hot fence set"
+    );
     assert_eq!(m.hot_anchor_theta, 2, "the recorded θ round-trips");
 
-    // ---- hot-free under the SAME θ knob: byte-identical v3 output ----
+    // ---- hot-free under the SAME θ knob: no content-derived hot fence ----
     let dir_plain = tempdir("fence-plain");
     {
         let mut cfg = cfg_theta(1_000_000); // nothing reaches θ
@@ -809,11 +824,11 @@ fn hot_segments_write_the_v5_rollback_fence() {
         assert_eq!(eng.class_counts()[4], 0);
         eng.flush();
     }
-    assert_eq!(seg_version(&dir_plain), 3, "hot-free segments stay v3");
-    assert_eq!(
-        manifest_version(&dir_plain),
-        3,
-        "hot-free manifest stays v3"
+    assert!(
+        !MmapSegment::open(&seg_path(&dir_plain))
+            .expect("open hot-free segment")
+            .carries_hot_fence(),
+        "hot-free segment must not report the content-derived fence"
     );
 
     // ---- the version ladder: hot outranks class D ----
@@ -836,8 +851,11 @@ fn hot_segments_write_the_v5_rollback_fence() {
             "degenerate: the ladder segment must hold BOTH class D and class H"
         );
     }
-    assert_eq!(seg_version(&dir_both), 5, "hot + class D ⇒ v5 (the ladder)");
-    assert_eq!(manifest_version(&dir_both), 5);
+    assert!(
+        seg_version(&dir_both) >= 5,
+        "hot + class D must carry at least the v5 ladder fence"
+    );
+    assert!(manifest_version(&dir_both) >= 5);
 
     // ---- forged class bytes fail loud at open (never mis-bucketed) ----
     // A class byte above the version's ceiling: 5 in a v5 file…
@@ -871,9 +889,12 @@ fn hot_segments_write_the_v5_rollback_fence() {
     });
     let err = MmapSegment::open(&forged5).expect_err("class byte 5 must fail loud");
     assert!(err.to_string().contains("cost-class byte"), "got: {err}");
-    // …and a class byte 4 smuggled into a v3 file (whose ceiling is 3).
+    // …and a class byte 4 smuggled into a file declared as v3 (whose ceiling is
+    // 3). The source file is a modern cumulative format, so forge the declared
+    // version down as part of the corruption.
     let plain_seg = seg_path(&dir_plain);
     let forged4 = forge(&plain_seg, "forged4.seg", &|bytes: &mut Vec<u8>| {
+        bytes[4..8].copy_from_slice(&3u32.to_le_bytes());
         forge_class(bytes, 0, 4);
     });
     let err = MmapSegment::open(&forged4).expect_err("class byte 4 in v3 must fail loud");

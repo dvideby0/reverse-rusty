@@ -335,6 +335,17 @@ impl Shard for Arc<HandoffShard> {
         self.current.load().source_of(logical)
     }
 
+    fn document_of(
+        &self,
+        logical: u64,
+    ) -> Result<Option<crate::storage::StoredSource>, ShardError> {
+        self.current.load().document_of(logical)
+    }
+
+    fn has_live_query(&self, logical: u64) -> Result<bool, ShardError> {
+        self.current.load().has_live_query(logical)
+    }
+
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {
         self.current.load().ingest_extracted(items)
     }

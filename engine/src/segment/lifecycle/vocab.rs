@@ -201,6 +201,15 @@ impl Engine {
         &mut self,
         mut vocab: crate::vocab::Vocab,
     ) -> Result<usize, crate::error::NormalizerError> {
+        // A vocabulary change must rebuild from canonical source. Validate the
+        // source/exact pairing BEFORE mutating the normalizer, dict, or epoch;
+        // otherwise a stale sidecar could either be recompiled as truth or make
+        // the later gather abort after the live normalizer had already changed.
+        let live = self.live_source_documents_tagged().map_err(|logical| {
+            crate::error::NormalizerError::new(format!(
+                "source metadata for logical id {logical} does not match its live exact row"
+            ))
+        })?;
         let mut norm = Arc::new(vocab.to_normalizer()?);
         // Resolve any declared/learned equivalence groups against the dict under the new
         // normalizer and install them, so the subsequent recompile (and future inserts)
@@ -208,20 +217,58 @@ impl Engine {
         // into the (mutable) dict so a later insert can't mint a different dense id for a form
         // that would otherwise resolve to a synthetic id — the alias-ID-stability fix
         // (ADR-060). No groups ⇒ both are no-ops (the dict clone is dwarfed by the recompile
-        // this set_vocab triggers).
-        let dict = Arc::make_mut(&mut self.dict);
+        // this set_vocab triggers). Build the candidate dict off to the side so a rejected
+        // vocabulary cannot partially mutate the live feature space.
+        let mut proposed_dict = self.dict.as_ref().clone();
         // Self-heal first (codex R13): a vocabulary mutation (punct refold, new grader, …) can
         // make an Active alias form unexpressible under the NEW normalizer; demote those back
         // to review candidates rather than leaving an alias that reports active and silently
         // never matches. Demotion can shrink the registered phrase set, so rebuild on change.
-        if vocab.aliases_mut().demote_unexpressible(&norm, dict) > 0 {
+        if vocab
+            .aliases_mut()
+            .demote_unexpressible(&norm, &proposed_dict)
+            > 0
+        {
             norm = Arc::new(vocab.to_normalizer()?);
         }
-        vocab.intern_equivalence_forms(&norm, dict);
-        let equiv = vocab.resolve_equivalences(&norm, dict);
-        dict.set_equivalences(equiv);
+        vocab.intern_equivalence_forms(&norm, &mut proposed_dict);
+        let equiv = vocab.resolve_equivalences(&norm, &proposed_dict);
+        proposed_dict.set_equivalences(equiv);
+
+        // `set_vocab` and `recompile_stale_segments` are intentionally separate public
+        // operations, but installing a normalizer that cannot represent every acknowledged
+        // source would make that split unsafe: the later recompile would abort with the old
+        // segments still installed, while callers such as PUT /_vocab would publish the new
+        // title normalizer and create false negatives. Preflight the exact rejection
+        // conditions against the proposed state before committing any of it.
+        let mut lc = String::new();
+        for (logical, text, ..) in &live {
+            let ast = crate::dsl::parse(text).map_err(|error| {
+                crate::error::NormalizerError::new(format!(
+                    "stored query for logical id {logical} cannot be rebuilt: {error}"
+                ))
+            })?;
+            let ex = crate::compile::extract_readonly(&ast, &norm, &proposed_dict, &mut lc);
+            if let Some(width) = ex.column_overflow() {
+                return Err(crate::error::NormalizerError::new(format!(
+                    "vocabulary change expands stored query for logical id {logical} \
+                     beyond the exact-store column limit ({width} features)"
+                )));
+            }
+            let class =
+                crate::compile::anchor_plan(&ex, &proposed_dict, self.config.hot_anchor_threshold)
+                    .class;
+            if super::super::seg::rejects_class_d(class, &ex, true) {
+                return Err(crate::error::NormalizerError::new(format!(
+                    "vocabulary change makes stored query for logical id {logical} \
+                     effectively empty"
+                )));
+            }
+        }
+
         self.norm = norm;
         self.vocab = Some(Arc::new(vocab));
+        self.dict = Arc::new(proposed_dict);
         self.vocab_epoch += 1;
         Ok(self.stale_segment_count())
     }
@@ -348,28 +395,117 @@ impl Engine {
     /// dense or post-freeze synthetic — are carried verbatim: the tag space is preserved
     /// across a vocabulary change, so they stay valid (the same ADR-049 carry-through
     /// [`recompile_stale_segments`](Self::recompile_stale_segments) uses in-place).
-    pub fn live_sources_tagged(
-        &self,
-    ) -> Vec<(
-        u64,
-        String,
-        u32,
-        Vec<crate::tagdict::TagId>,
-        crate::rank::RankValues,
-        crate::ownership::QueryPlacement,
-    )> {
+    pub fn live_sources_tagged(&self) -> Vec<crate::segment::LiveTaggedSource> {
         let mut out = Vec::with_capacity(self.query_store.len());
-        // One liveness scan per entry: `None` = no live copy in this engine (stale store
-        // residue — skipped, see `live_sources`), `Some((version, tags))` = live, possibly
-        // untagged. The version is the live copy's stored version, carried through the rebuild
-        // so a `set_vocab`/resize re-places at version N rather than resetting to 1 (ADR-074).
         self.query_store.for_each_live(|logical, text| {
-            if let Some((version, tags, rank, placement)) = self.live_metadata_for(logical) {
+            if let Some((version, _, tags, rank, placement)) = self.live_metadata_for(logical) {
                 out.push((logical, text.to_string(), version, tags, rank, placement));
             }
         });
         out.sort_unstable_by_key(|&(l, ..)| l);
         out
+    }
+
+    /// Distinct logical ids represented by at least one live exact row. This is
+    /// the index-side half of rebuild-source completeness; counting physical
+    /// rows is insufficient because supported additive histories may leave
+    /// multiple live copies of one logical id.
+    fn live_exact_logical_ids(&self) -> crate::util::FastSet<u64> {
+        let mut logicals = crate::util::FastSet::default();
+        for local in 0..self.memtable.len() {
+            let local = local as u32;
+            if self.memtable.is_alive(local) {
+                logicals.insert(self.memtable.exact_store().logical(local));
+            }
+        }
+        for segment in &self.segments {
+            for local in 0..segment.len() {
+                let local = local as u32;
+                if segment.is_alive(local) {
+                    logicals.insert(segment.logical(local));
+                }
+            }
+        }
+        logicals
+    }
+
+    /// Internal document-complete variant of [`Self::live_sources_tagged`].
+    /// Carries canonical raw tags for cluster source read-back across rebuilds
+    /// and fails if either durable domain lacks a matching logical id.
+    pub(crate) fn live_source_documents_tagged(
+        &self,
+    ) -> Result<Vec<crate::segment::LiveSourceDocument>, u64> {
+        let mut out = Vec::with_capacity(self.query_store.len());
+        let mut mismatch = None;
+        let mut uncovered = self.live_exact_logical_ids();
+        // One liveness scan per entry: `None` = no live copy in this engine (stale store
+        // residue — skipped, see `live_sources`), `Some((version, tags))` = live, possibly
+        // untagged. The version is the live copy's stored version, carried through the rebuild
+        // so a `set_vocab`/resize re-places at version N rather than resetting to 1 (ADR-074).
+        self.query_store.for_each_live_document(
+            |logical,
+             text,
+             source_version,
+             stored_generation,
+             raw_tags,
+             tags_known,
+             metadata_known| {
+                if mismatch.is_some() {
+                    return;
+                }
+                if let Some((version, exact_generation, tags, rank, placement)) =
+                    self.live_metadata_for(logical)
+                {
+                    if (metadata_known
+                        && (source_version != version || stored_generation != exact_generation))
+                        || (!metadata_known && (stored_generation != 0 || exact_generation != 0))
+                    {
+                        mismatch = Some(logical);
+                        return;
+                    }
+                    let raw_tags = if tags_known {
+                        raw_tags.to_vec()
+                    } else {
+                        let Some(recovered) = tags
+                            .iter()
+                            .map(|&id| {
+                                self.tag_dict
+                                    .key_value(id)
+                                    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                            })
+                            .collect::<Option<Vec<_>>>()
+                        else {
+                            mismatch = Some(logical);
+                            return;
+                        };
+                        recovered
+                    };
+                    out.push((
+                        logical,
+                        text.to_string(),
+                        version,
+                        exact_generation,
+                        raw_tags,
+                        tags,
+                        rank,
+                        placement,
+                    ));
+                    uncovered.remove(&logical);
+                }
+            },
+        );
+        if mismatch.is_none() {
+            // A missing/partial sources.dat has no entry for the callback above
+            // to reject. Check from exact → source as well so a vocabulary
+            // change cannot rebuild an acknowledged live corpus from a strict
+            // subset and silently drop the uncovered rows.
+            mismatch = uncovered.into_iter().min();
+        }
+        if let Some(logical) = mismatch {
+            return Err(logical);
+        }
+        out.sort_unstable_by_key(|&(l, ..)| l);
+        Ok(out)
     }
 
     /// The current `TagId`s of the live entry for `logical` (ADR-049), read from the
@@ -384,19 +520,34 @@ impl Engine {
         logical: u64,
     ) -> Option<(
         u32,
+        u64,
         Vec<crate::tagdict::TagId>,
         crate::rank::RankValues,
         crate::ownership::QueryPlacement,
     )> {
+        // Source generations, not storage tiers, define mutation order. A supported
+        // additive history can write to the memtable and then append a newer bulk base
+        // segment for the same logical id. Scan newest-looking locations first only as
+        // the generation-zero legacy tie-break; any larger generation wins globally.
+        let mut best = None;
         for &local in self.memtable.locals_for_logical(logical).iter().rev() {
             if self.memtable.is_alive(local) {
+                let source_generation = self.memtable.source_generation_of(local);
+                let replace = match &best {
+                    Some((_, best_generation, _, _, _)) => source_generation > *best_generation,
+                    None => true,
+                };
+                if !replace {
+                    continue;
+                }
                 let tags = self.memtable.tags_of(local);
                 let mut rank = self.memtable.rank_values(local);
                 if rank.priority == 0 {
                     rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
                 }
-                return Some((
+                best = Some((
                     self.memtable.version_of(local),
+                    source_generation,
                     tags.to_vec(),
                     rank,
                     self.memtable.placement(local).to_owned(),
@@ -406,13 +557,22 @@ impl Engine {
         for seg in self.segments.iter().rev() {
             for &local in seg.locals_for_logical(logical).iter().rev() {
                 if seg.is_alive(local) {
+                    let source_generation = seg.source_generation_of(local);
+                    let replace = match &best {
+                        Some((_, best_generation, _, _, _)) => source_generation > *best_generation,
+                        None => true,
+                    };
+                    if !replace {
+                        continue;
+                    }
                     let tags = seg.tags_of(local);
                     let mut rank = seg.rank_values(local);
                     if rank.priority == 0 {
                         rank.priority = self.tag_dict.legacy_priority_for_tags(tags);
                     }
-                    return Some((
+                    best = Some((
                         seg.version_of(local),
+                        source_generation,
                         tags.to_vec(),
                         rank,
                         seg.placement(local).to_owned(),
@@ -420,7 +580,7 @@ impl Engine {
                 }
             }
         }
-        None
+        best
     }
 
     /// Recompile every live query under the CURRENT normalizer, replacing all
@@ -449,43 +609,45 @@ impl Engine {
         }
         // Recompile the live source set read-only against the frozen dict under
         // the current normalizer into one fresh segment.
-        let live = self.live_sources();
+        let Ok(live) = self.live_source_documents_tagged() else {
+            // A source/exact mismatch means rebuilding from the sidecar could
+            // replace acknowledged match data with a stale document. Keep the
+            // old segments intact and fail closed.
+            return 0;
+        };
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
         let mut lc = String::new();
         let mut recompiled = 0usize;
-        for (logical, text) in &live {
-            if let Ok(ast) = crate::dsl::parse(text) {
-                let ex = crate::compile::extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                // Carry the query's existing tags AND stored version forward unchanged —
-                // both are orthogonal to the normalizer, so a vocabulary change must not
-                // drop the tags (ADR-049) nor reset the version to 1 (the version-preserving
-                // rebuild, ADR-074). `live_sources` only returns entries with a live copy, so
-                // the lookup cannot be `None` here; the default is unreachable belt-and-braces.
-                let (version, tags, rank, placement) =
-                    self.live_metadata_for(*logical).unwrap_or((
-                        1,
-                        Vec::new(),
-                        crate::rank::RankValues::default(),
-                        crate::ownership::QueryPlacement::standalone(),
-                    ));
-                // `accept_class_d = true` unconditionally (ADR-068): a STORED query
-                // must survive a vocabulary change. A query whose positives vanish
-                // under the new vocab (re-classifying to D) is kept as an
-                // always-candidate when it still has forbidden features — zero FN,
-                // bounded FP — instead of being silently dropped from the rebuilt
-                // index (the pre-existing hazard); only the all-empty case drops.
-                let knobs = crate::segment::CompileKnobs {
-                    accept_class_d: true,
-                    ..self.config.compile_knobs()
-                };
-                if let Some(added) = seg.add_compiled_ranked_placed(
-                    &ex, &tags, &self.dict, *logical, version, rank, &placement, knobs,
-                ) {
-                    self.record_compiled(&added);
-                    recompiled += 1;
-                }
-            }
+        for (logical, text, version, source_generation, _, tags, rank, placement) in &live {
+            let Ok(ast) = crate::dsl::parse(text) else {
+                return 0;
+            };
+            let ex = crate::compile::extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+            // Carry tags, caller version, internal source generation, rank, and
+            // placement unchanged: they are all orthogonal to normalization.
+            // `accept_class_d = true` unconditionally (ADR-068): a STORED query
+            // must survive a vocabulary change. A query whose positives vanish
+            // under the new vocab is retained in the always-candidate lane.
+            let knobs = crate::segment::CompileKnobs {
+                accept_class_d: true,
+                ..self.config.compile_knobs()
+            };
+            let Some(added) = seg.add_compiled_ranked_placed_with_source_generation(
+                &ex,
+                tags,
+                &self.dict,
+                *logical,
+                *version,
+                *rank,
+                placement,
+                *source_generation,
+                knobs,
+            ) else {
+                return 0;
+            };
+            self.record_compiled(&added);
+            recompiled += 1;
         }
         seg.build_filter();
 
@@ -556,6 +718,105 @@ impl Engine {
         merged.merge(&learned);
         self.set_vocab(merged)?; // bumps the epoch / marks segments stale
         Ok(self.recompile_stale_segments())
+    }
+}
+
+#[cfg(test)]
+mod source_generation_tests {
+    use crate::normalize::Normalizer;
+    use crate::segment::Engine;
+
+    #[test]
+    fn live_document_gather_rejects_same_version_stale_source() {
+        let mut engine = Engine::new(Normalizer::default_vocab().expect("default normalizer"));
+        engine
+            .try_upsert_live_with_tags("1994 topps", 7, 1, &[("status".into(), "old".into())])
+            .expect("first write");
+        let stale = engine
+            .query_store
+            .get_document(7)
+            .expect("first source document");
+
+        engine
+            .try_upsert_live_with_tags("1995 fleer", 7, 1, &[("status".into(), "new".into())])
+            .expect("same-version replacement");
+        // The source store intentionally refuses generation rollback. Model a
+        // divergent sidecar by publishing the stale payload under a distinct,
+        // later generation instead; either direction must fail the exact/source
+        // equality check.
+        let divergent_generation = engine.allocate_source_generation();
+        engine.query_store.insert_document_with_generation(
+            7,
+            stale.query().to_owned(),
+            stale.version(),
+            divergent_generation,
+            stale.tags(),
+        );
+
+        assert_eq!(
+            engine.live_source_documents_tagged(),
+            Err(7),
+            "a rebuild/fingerprint gather must fail closed on stale source evidence"
+        );
+        let epoch = engine.vocab_epoch();
+        assert!(
+            engine.set_vocab(crate::vocab::Vocab::default()).is_err(),
+            "vocabulary mutation must reject before changing the live normalizer"
+        );
+        assert_eq!(engine.vocab_epoch(), epoch);
+    }
+
+    #[test]
+    fn additive_live_then_bulk_uses_the_newest_source_generation() {
+        let mut engine = Engine::new(Normalizer::default_vocab().expect("default normalizer"));
+        engine
+            .try_insert_live("1994 topps", 7, 1)
+            .expect("live insert");
+        let report = engine.bulk_ingest(&[(7, "1995 fleer".to_string())]);
+        assert_eq!(report.ingested, 1);
+
+        let document = engine
+            .snapshot()
+            .get_query_document(7)
+            .expect("newer bulk source must pair with its base-segment exact row");
+        assert_eq!(document.query(), "1995 fleer");
+        engine
+            .set_vocab(crate::vocab::Vocab::default())
+            .expect("a coherent additive history must remain rebuildable");
+        assert_eq!(engine.recompile_stale_segments(), 1);
+    }
+
+    #[test]
+    fn set_vocab_rejects_an_unrebuildable_corpus_without_mutating_live_state() {
+        let mut engine = Engine::new(Normalizer::default_vocab().expect("default normalizer"));
+        engine.try_insert_live("...", 1, 1).expect("dot query");
+        engine.try_insert_live("a.b", 2, 1).expect("term query");
+
+        let mut scratch = crate::segment::MatchScratch::new();
+        let mut before = Vec::new();
+        engine.match_title("a.b", &mut scratch, &mut before, true);
+        assert!(before.contains(&2));
+        let epoch = engine.vocab_epoch();
+
+        let mut vocab = crate::vocab::Vocab::new();
+        vocab.set_punct_class('.', crate::normalize::PunctClass::Split);
+        let error = engine
+            .set_vocab(vocab)
+            .expect_err("the dot-only stored query becomes effectively empty");
+        assert!(
+            error.to_string().contains("logical id 1")
+                && error.to_string().contains("effectively empty"),
+            "got: {error}"
+        );
+        assert_eq!(engine.vocab_epoch(), epoch);
+        assert!(!engine.has_stale_segments());
+
+        let mut after = Vec::new();
+        engine.match_title("a.b", &mut scratch, &mut after, true);
+        assert!(
+            after.contains(&2),
+            "a rejected vocabulary must leave the old query/title feature space live"
+        );
     }
 }
 

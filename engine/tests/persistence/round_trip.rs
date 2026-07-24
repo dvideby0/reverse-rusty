@@ -105,6 +105,14 @@ fn tagged_queries_survive_reopen_and_filter_on_mmap() {
     let engine2 = Engine::open(make_norm(), config).unwrap();
     let snap = engine2.snapshot();
     let title = "2020 topps chrome update";
+    let source = snap.get_query_document(1).expect("stored source metadata");
+    assert_eq!(source.query(), "topps chrome");
+    assert_eq!(source.version(), 1);
+    assert!(source.tags_known());
+    assert_eq!(
+        source.tags(),
+        [("category".to_string(), "cards".to_string())]
+    );
 
     let mut s = reverse_rusty::segment::MatchScratch::new();
     let mut out = Vec::new();

@@ -32,6 +32,13 @@ fn tagged_cluster_survives_checkpoint_and_reopen() {
     }
 
     let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen from disk");
+    let source = reopened
+        .get_document(live_id)
+        .expect("source lookup")
+        .expect("live source");
+    assert_eq!(source.query(), live_dsl);
+    assert_eq!(source.tags(), live_tag());
+    assert!(source.tags_known());
 
     // Brute oracle over the corpus + the live add; tag-of resolves the live add's tag.
     let mut all = queries.clone();

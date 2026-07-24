@@ -34,7 +34,7 @@ pub use manifest::{
     Manifest,
 };
 pub use segment::{write_segment, MmapSegment};
-pub use sources::{load_query_sources, LazyBase, SourceStore};
+pub use sources::{load_query_sources, LazyBase, SourceStore, StoredSource};
 pub use tagdict::{deserialize_tagdict, serialize_tagdict};
 
 // ---- shared low-level binary primitives (used by the codec submodules) ----

@@ -36,7 +36,8 @@ binaries, role chosen by command.
 Every mode serves, and `local-smoke.sh` asserts end-to-end on every PR:
 
 ```
-PUT/GET/DELETE /_doc/{id}      (ids are numeric u64 — a non-numeric id is a 400)
+PUT/DELETE /_doc/{id}          (ids are numeric u64 — a non-numeric id is a 400)
+GET/HEAD /_doc/{id}            (source read/existence check in local modes; remote coordinator 501)
 POST /_bulk                    (NDJSON, ES-shaped)
 POST /_search                  (single-document percolation; `include_broad` per request)
 POST /_mpercolate              (batch percolation, ES _msearch-shaped responses[])
