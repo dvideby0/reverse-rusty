@@ -55,9 +55,16 @@ pub(crate) use vocab::{
 /// `partial` result before reaching this generic response, so the caller is
 /// told without being told to retry (a re-PUT would double-log).
 fn shard_error_response(context: &str, e: &ShardError) -> Response {
-    let (status, kind) = e.write_http_class();
-    let status = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let (_, kind) = e.write_http_class();
+    let status = shard_error_status(e);
     ApiError::response(status, kind, format!("{context}: {e}")).into_response()
+}
+
+/// Resolve the write/admin HTTP status once so response rendering and endpoint
+/// metrics cannot classify the same [`ShardError`] differently.
+fn shard_error_status(e: &ShardError) -> StatusCode {
+    let (status, _) = e.write_http_class();
+    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// The shared 501 for a single-node-only surface: names the reason AND the

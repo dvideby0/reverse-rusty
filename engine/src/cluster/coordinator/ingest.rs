@@ -270,15 +270,26 @@ impl ClusterEngine {
         version: u32,
         tags: &[(String, String)],
     ) -> Result<AddOutcome, ShardError> {
-        // Fast conflict read before compilation, matching the single-node REST
+        // Check conflicts before compilation, matching the single-node REST
         // boundary: an already-live id is the decisive create-only error even
-        // when the replacement body would fail DSL compilation. This is only an
-        // early return, never an absence proof — a second check under the
-        // logical stripe below closes the concurrent-create race. A concurrent
-        // remove may linearize after this read, in which case the conflict is a
-        // valid ordering of the two operations.
-        if self.logical_ids_authoritative() && self.contains_logical_id(id) {
-            return Err(ShardError::DuplicateLogicalId(id));
+        // when the replacement body would fail DSL compilation. The stripe is
+        // load-bearing here. The directory also contains provisional reservations
+        // while their coordinator-log append is in flight; an unlocked read could
+        // report a false conflict if that append subsequently failed and rolled the
+        // reservation back. Waiting on the stripe observes the committed/rolled-back
+        // result. This is still only an early conflict return, never an absence
+        // proof — the second check below closes a create arriving during compilation.
+        if self.logical_ids_authoritative() {
+            // Preserve the global mutation lock order: PIT barrier, then logical
+            // stripe. Resync/exhaustive mutation code relies on this order.
+            let _pit_barrier = self
+                .pit_open_barrier
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _logical_guard = self.logical_write_guard(id);
+            if self.contains_logical_id(id) {
+                return Err(ShardError::DuplicateLogicalId(id));
+            }
         }
         // Reject malformed DSL up front: it carries no replayable mutation, so it must
         // never reach the log (a logged record must parse on replay).

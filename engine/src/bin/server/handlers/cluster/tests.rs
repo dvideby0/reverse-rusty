@@ -10,7 +10,7 @@ use axum::Router;
 use parking_lot::{Mutex, RwLock};
 use tower::ServiceExt;
 
-use reverse_rusty::cluster::{ClusterConfig, ClusterEngine};
+use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, ShardError};
 use reverse_rusty::Normalizer;
 
 use crate::metrics::PrometheusMetrics;
@@ -127,6 +127,27 @@ async fn send(state: &Arc<ClusterAppState>, r: Request<Body>) -> (StatusCode, se
         serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
     };
     (status, json)
+}
+
+#[test]
+fn write_error_metrics_and_responses_share_the_same_status_classification() {
+    for (error, expected) in [
+        (
+            ShardError::Config("unseeded directory".into()),
+            StatusCode::BAD_REQUEST,
+        ),
+        (ShardError::Remote("down".into()), StatusCode::BAD_GATEWAY),
+        (
+            ShardError::Log("unavailable".into()),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+    ] {
+        assert_eq!(shard_error_status(&error), expected);
+        assert_eq!(
+            shard_error_response("document write rejected", &error).status(),
+            expected
+        );
+    }
 }
 
 #[tokio::test]

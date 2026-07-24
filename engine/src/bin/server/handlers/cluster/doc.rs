@@ -26,7 +26,7 @@ use crate::handlers::doc::{
 };
 use crate::state::ClusterAppState;
 
-use super::shard_error_response;
+use super::{shard_error_response, shard_error_status};
 
 #[derive(Serialize)]
 struct ClusterDeleteDocResponse {
@@ -247,10 +247,11 @@ pub(crate) async fn cluster_put_doc(
         }
         Err(e) => {
             error!(query_id = id, error = %e, "cluster document write failed");
+            let status = shard_error_status(&e);
             state
                 .prom
                 .http_requests_total
-                .with_label_values(&["put_doc", "503"])
+                .with_label_values(&["put_doc", status.as_str()])
                 .inc();
             shard_error_response("document write rejected", &e)
         }

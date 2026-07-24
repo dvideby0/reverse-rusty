@@ -3,11 +3,11 @@
 
 use super::*;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use crate::cluster::clog::{ClusterMutation, LogPos};
+use crate::cluster::clog::{ClusterLog, ClusterMutation, ClusterReplay, LogPos};
 use crate::delivery::{ChunkSink, ChunkSinkError, MatchChunk};
 use crate::events::DurabilityOp;
 use crate::exact::TagPredicate;
@@ -21,6 +21,81 @@ fn scratch_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rr_clog_coord_{}_{}", tag, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
+}
+
+#[derive(Default)]
+struct FirstAppendGate {
+    calls: AtomicU64,
+    entered: (std::sync::Mutex<bool>, std::sync::Condvar),
+    release: (std::sync::Mutex<bool>, std::sync::Condvar),
+}
+
+impl FirstAppendGate {
+    fn wait_until_entered(&self) {
+        let (lock, ready) = &self.entered;
+        let entered = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (entered, _) = ready
+            .wait_timeout_while(entered, Duration::from_secs(5), |entered| !*entered)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(*entered, "first coordinator-log append never started");
+    }
+
+    fn release_first(&self) {
+        let (lock, release) = &self.release;
+        *lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        release.notify_all();
+    }
+}
+
+struct FailFirstAppendLog {
+    gate: Arc<FirstAppendGate>,
+}
+
+impl ClusterLog for FailFirstAppendLog {
+    fn append(&self, _mutation: &ClusterMutation) -> Result<LogPos, ShardError> {
+        let call = self.gate.calls.fetch_add(1, Ordering::SeqCst);
+        if call != 0 {
+            return Ok(LogPos(call));
+        }
+
+        let (entered_lock, entered) = &self.gate.entered;
+        *entered_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+        entered.notify_all();
+
+        let (release_lock, release) = &self.gate.release;
+        let released = release_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(
+            release
+                .wait_while(released, |released| !*released)
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        Err(ShardError::Log("injected first-append failure".into()))
+    }
+
+    fn replay(&self, _from: LogPos) -> Result<ClusterReplay, ShardError> {
+        Ok(ClusterReplay {
+            entries: Vec::new(),
+            skipped_bytes: 0,
+        })
+    }
+
+    fn last_pos(&self) -> Result<LogPos, ShardError> {
+        Ok(LogPos(
+            self.gate.calls.load(Ordering::SeqCst).saturating_sub(1),
+        ))
+    }
+
+    fn checkpoint(&self, _up_to: LogPos) -> Result<(), ShardError> {
+        Ok(())
+    }
 }
 
 /// WAL-first fail-closed: when the durable log append fails, the add is rejected with
@@ -56,6 +131,102 @@ fn add_query_is_fail_closed_when_log_append_fails() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A create racing a provisional same-id reservation must wait for the
+/// coordinator-log decision. If that append fails and rolls the reservation
+/// back, the waiter creates successfully instead of returning a false 409.
+#[test]
+fn create_waits_for_a_provisional_reservation_to_commit_or_roll_back() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![(100u64, "1994 topps baseball".to_string())];
+    let real = ClusterEngine::build(vocab(), &cfg, &seed).expect("throwaway build");
+    let norm = Arc::clone(&real.norm);
+    let dict = Arc::clone(&real.dict);
+    let tag_dict = Arc::clone(&real.tag_dict);
+    let shards: Vec<Box<dyn Shard>> = (0..cfg.num_shards)
+        .map(|_| {
+            Box::new(LocalShard::new(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                Arc::clone(&tag_dict),
+                cfg.per_shard.clone(),
+            )) as Box<dyn Shard>
+        })
+        .collect();
+    let ring = HashRing::new(cfg.num_shards, cfg.vnodes).expect("ring");
+    let gate = Arc::new(FirstAppendGate::default());
+    let mut durable =
+        ClusterDurable::in_memory(cfg.num_shards as u32, cfg.vnodes, dict.fingerprint());
+    durable.log = Box::new(FailFirstAppendLog {
+        gate: Arc::clone(&gate),
+    });
+    let cluster = Arc::new(
+        ClusterEngine::from_parts(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            ring,
+            shards,
+            cfg.include_broad,
+            1,
+            cfg.per_shard.clone(),
+            durable,
+        )
+        .expect("from_parts cluster"),
+    );
+
+    let first_cluster = Arc::clone(&cluster);
+    let first =
+        std::thread::spawn(move || first_cluster.create_query_with_tags(91, "1994 topps", 7, &[]));
+    gate.wait_until_entered();
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let second_cluster = Arc::clone(&cluster);
+    let second = std::thread::spawn(move || {
+        started_tx.send(()).expect("signal second start");
+        let result = second_cluster.create_query_with_tags(91, "1995 fleer", 8, &[]);
+        result_tx.send(result).expect("send second result");
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("second create started");
+    let early_result = result_rx.recv_timeout(Duration::from_millis(100));
+    gate.release_first();
+    assert!(
+        matches!(early_result, Err(mpsc::RecvTimeoutError::Timeout)),
+        "the second create must wait for the provisional reservation's log decision"
+    );
+
+    assert!(
+        matches!(
+            first.join().expect("first create thread"),
+            Err(ShardError::Log(_))
+        ),
+        "the first provisional write must fail durability"
+    );
+    let second_result = result_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("second create completes after rollback");
+    assert!(
+        matches!(
+            second_result,
+            Ok(AddOutcome::Placed { .. } | AddOutcome::Replicated)
+        ),
+        "the waiter must create after rollback, got {second_result:?}"
+    );
+    second.join().expect("second create thread");
+
+    let source = cluster
+        .get_document(91)
+        .expect("source lookup")
+        .expect("second create is live");
+    assert_eq!(source.query(), "1995 fleer");
+    assert_eq!(source.version(), 8);
 }
 
 /// On-disk fingerprint guard: a manifest whose stored `dict_fingerprint` disagrees with

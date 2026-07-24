@@ -52,9 +52,12 @@
 - **Proof.** Handler tests pin the applicable success envelope, all three refresh values,
   `op_type=index`, strict invalid/unsupported parameters, and concurrent same-id create races in
   both server modes: exactly one 201, exactly one 409, exactly one body live, and a later conflict
-  cannot replace it. A cluster-core test pins version/tag preservation plus insert-only behavior.
-  Existing upsert, failed-replace, flush-threshold, typed-rank, WAL/reopen, cluster replay, and
-  independent matching suites remain the regression proof.
+  cannot replace it. Cluster-core tests pin version/tag preservation plus insert-only behavior and
+  hold a provisional reservation across a fault-injected failing log append: a concurrent create
+  waits for rollback, then succeeds rather than reporting a false conflict. The cluster handler
+  also pins one shared status classifier for error responses and their Prometheus labels. Existing
+  upsert, failed-replace, flush-threshold, typed-rank, WAL/reopen, cluster replay, and independent
+  matching suites remain the regression proof.
 
 - **Deferred / deliberately unsupported.** Automatic IDs (`POST .../_doc`), the index-scoped
   `queries/_doc/{id}` alias, `_create/{id}`, internal/external version conflict rules, sequence
