@@ -710,7 +710,7 @@ fn rebuild_preserves_stored_query_version() {
     let pre = before
         .iter()
         .find(|(l, ..)| *l == 5)
-        .map(|(_, _, v, _, _, _)| *v);
+        .map(|(_, _, v, _, _, _, _)| *v);
     assert_eq!(
         pre,
         Some(42),
@@ -727,7 +727,7 @@ fn rebuild_preserves_stored_query_version() {
     let post = after
         .iter()
         .find(|(l, ..)| *l == 5)
-        .map(|(_, _, v, _, _, _)| *v);
+        .map(|(_, _, v, _, _, _, _)| *v);
     assert_eq!(
         post,
         Some(42),

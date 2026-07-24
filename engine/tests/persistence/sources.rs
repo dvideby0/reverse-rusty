@@ -128,6 +128,29 @@ fn write_v1_sources(path: &std::path::Path, entries: &[(u64, &str)]) {
     std::fs::write(path, buf).unwrap();
 }
 
+/// Hand-write the original query-only v2 format (no metadata footer).
+fn write_v2_sources(path: &std::path::Path, entries: &[(u64, &str)]) {
+    let mut entries = entries.to_vec();
+    entries.sort_unstable_by_key(|(id, _)| *id);
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"SRCS");
+    buf.extend_from_slice(&2u32.to_le_bytes());
+    buf.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    let mut blob = Vec::new();
+    for (id, text) in entries {
+        buf.extend_from_slice(&id.to_le_bytes());
+        buf.extend_from_slice(&(blob.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        buf.extend_from_slice(&0u32.to_le_bytes());
+        blob.extend_from_slice(text.as_bytes());
+    }
+    buf.extend_from_slice(&blob);
+    let crc = reverse_rusty::storage::crc32(&buf);
+    buf.extend_from_slice(&crc.to_le_bytes());
+    std::fs::write(path, buf).unwrap();
+}
+
 #[test]
 fn lazy_sources_round_trip_and_reopen() {
     // retain_source = false: source text lives on disk (mmap'd v2), not resident.
@@ -210,15 +233,79 @@ fn sources_v1_backcompat_and_migration() {
     assert_eq!(r.get(5).as_deref(), Some("echo"));
     assert!(r.get(3).is_none());
 
-    // Lazy migrates v1 → v2 on open, then reads from the mmap.
+    // Lazy migrates v1 → extended v2 on open, then reads from the mmap.
     let l = SourceStore::open(&path, false).unwrap();
     assert_eq!(l.get(2).as_deref(), Some("bravo"));
     assert_eq!(l.get(5).as_deref(), Some("echo"));
     assert!(l.get(99).is_none());
 
-    // The file is now v2 — re-opening lazily still works.
+    // The file is now extended v2 — re-opening lazily still works.
     let l2 = SourceStore::open(&path, false).unwrap();
     assert_eq!(l2.get(1).as_deref(), Some("alpha"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn original_v2_without_metadata_footer_stays_readable() {
+    use reverse_rusty::storage::SourceStore;
+    let dir = test_dir("sources_v2");
+    let path = dir.join("sources.dat");
+    write_v2_sources(&path, &[(5, "echo"), (1, "alpha"), (2, "bravo")]);
+
+    let resident = SourceStore::open(&path, true).unwrap();
+    assert_eq!(resident.get(1).as_deref(), Some("alpha"));
+    let legacy = resident.get_document(2).expect("legacy document");
+    assert_eq!(legacy.version(), 1);
+    assert!(!legacy.tags_known());
+
+    let lazy = SourceStore::open(&path, false).unwrap();
+    assert_eq!(lazy.get(5).as_deref(), Some("echo"));
+    assert!(!lazy
+        .get_document(5)
+        .expect("migrated document")
+        .tags_known());
+    let bytes = std::fs::read(&path).unwrap();
+    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_source_recovers_live_version_and_dense_tags() {
+    let dir = test_dir("sources_v2_live_metadata");
+    let cfg = || EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), cfg());
+        engine
+            .try_insert_live_with_tags(
+                "topps chrome",
+                7,
+                42,
+                &[("category".to_string(), "cards".to_string())],
+            )
+            .expect("tagged insert");
+        engine.flush();
+    }
+
+    // Simulate upgrading a real v2 source-text file while retaining the newer
+    // exact segment + tag dictionary. The point read must source version/tags
+    // from the newest live row instead of lying with v2's implicit version 1.
+    write_v2_sources(&dir.join("sources.dat"), &[(7, "topps chrome")]);
+    let engine = Engine::open(make_norm(), cfg()).expect("open legacy sources");
+    let source = engine
+        .snapshot()
+        .get_query_document(7)
+        .expect("reconstructed document");
+    assert_eq!(source.version(), 42);
+    assert!(source.tags_known());
+    assert_eq!(
+        source.tags(),
+        [("category".to_string(), "cards".to_string())]
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

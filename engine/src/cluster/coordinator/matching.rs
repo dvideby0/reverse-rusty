@@ -374,6 +374,29 @@ impl ClusterEngine {
         }
     }
 
+    /// The canonical stored document for `logical`, including write version and
+    /// read-back tags. Like [`Self::get_source`], every shard must be capable of
+    /// answering before absence is reported; remote v1 shards fail loud.
+    pub fn get_document(
+        &self,
+        logical: u64,
+    ) -> Result<Option<crate::storage::StoredSource>, ShardError> {
+        let mut first_err: Option<ShardError> = None;
+        for shard in &self.shards {
+            match shard.document_of(logical) {
+                Ok(Some(document)) => return Ok(Some(document)),
+                Ok(None) => {}
+                Err(error) => {
+                    first_err.get_or_insert(error);
+                }
+            }
+        }
+        match first_err {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
+
     /// The cluster's default broad-lane toggle (what [`Self::percolate`] uses).
     pub fn include_broad(&self) -> bool {
         self.include_broad

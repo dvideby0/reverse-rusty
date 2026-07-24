@@ -34,6 +34,15 @@ use super::ClusterEngine;
 use crate::cluster::control::ClusterStateChange;
 use crate::cluster::shard::ShardError;
 
+type LiveTaggedMetadata = (
+    String,
+    u32,
+    Vec<(String, String)>,
+    Vec<crate::tagdict::TagId>,
+    crate::rank::RankValues,
+    crate::ownership::QueryPlacement,
+);
+
 impl ClusterEngine {
     /// Change the cluster's vocabulary (ADR-046 mechanism 2) — e.g. declare an
     /// alias so two surface forms match. Rebuilds the cluster from its live source
@@ -167,27 +176,22 @@ impl ClusterEngine {
     pub(super) fn live_corpus_tagged(
         &self,
     ) -> Result<Vec<crate::cluster::shard::LiveTaggedQuery>, ShardError> {
-        let mut live: BTreeMap<
-            u64,
-            (
-                String,
-                u32,
-                Vec<crate::tagdict::TagId>,
-                crate::rank::RankValues,
-                crate::ownership::QueryPlacement,
-            ),
-        > = BTreeMap::new();
+        let mut live: BTreeMap<u64, LiveTaggedMetadata> = BTreeMap::new();
         for s in &self.shards {
-            for (logical, dsl, version, tag_ids, rank, placement) in s.live_sources_tagged()? {
+            for (logical, dsl, version, raw_tags, tag_ids, rank, placement) in
+                s.live_sources_tagged()?
+            {
                 live.entry(logical)
-                    .or_insert((dsl, version, tag_ids, rank, placement));
+                    .or_insert((dsl, version, raw_tags, tag_ids, rank, placement));
             }
         }
         Ok(live
             .into_iter()
-            .map(|(logical, (dsl, version, tag_ids, rank, placement))| {
-                (logical, dsl, version, tag_ids, rank, placement)
-            })
+            .map(
+                |(logical, (dsl, version, raw_tags, tag_ids, rank, placement))| {
+                    (logical, dsl, version, raw_tags, tag_ids, rank, placement)
+                },
+            )
             .collect())
     }
 

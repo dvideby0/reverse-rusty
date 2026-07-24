@@ -348,26 +348,40 @@ impl Engine {
     /// dense or post-freeze synthetic — are carried verbatim: the tag space is preserved
     /// across a vocabulary change, so they stay valid (the same ADR-049 carry-through
     /// [`recompile_stale_segments`](Self::recompile_stale_segments) uses in-place).
-    pub fn live_sources_tagged(
-        &self,
-    ) -> Vec<(
-        u64,
-        String,
-        u32,
-        Vec<crate::tagdict::TagId>,
-        crate::rank::RankValues,
-        crate::ownership::QueryPlacement,
-    )> {
+    pub fn live_sources_tagged(&self) -> Vec<crate::segment::LiveTaggedSource> {
         let mut out = Vec::with_capacity(self.query_store.len());
-        // One liveness scan per entry: `None` = no live copy in this engine (stale store
-        // residue — skipped, see `live_sources`), `Some((version, tags))` = live, possibly
-        // untagged. The version is the live copy's stored version, carried through the rebuild
-        // so a `set_vocab`/resize re-places at version N rather than resetting to 1 (ADR-074).
         self.query_store.for_each_live(|logical, text| {
             if let Some((version, tags, rank, placement)) = self.live_metadata_for(logical) {
                 out.push((logical, text.to_string(), version, tags, rank, placement));
             }
         });
+        out.sort_unstable_by_key(|&(l, ..)| l);
+        out
+    }
+
+    /// Internal document-complete variant of [`Self::live_sources_tagged`].
+    /// Carries canonical raw tags for cluster source read-back across rebuilds.
+    pub(crate) fn live_source_documents_tagged(&self) -> Vec<crate::segment::LiveSourceDocument> {
+        let mut out = Vec::with_capacity(self.query_store.len());
+        // One liveness scan per entry: `None` = no live copy in this engine (stale store
+        // residue — skipped, see `live_sources`), `Some((version, tags))` = live, possibly
+        // untagged. The version is the live copy's stored version, carried through the rebuild
+        // so a `set_vocab`/resize re-places at version N rather than resetting to 1 (ADR-074).
+        self.query_store.for_each_live_document(
+            |logical, text, _source_version, raw_tags, _tags_known| {
+                if let Some((version, tags, rank, placement)) = self.live_metadata_for(logical) {
+                    out.push((
+                        logical,
+                        text.to_string(),
+                        version,
+                        raw_tags.to_vec(),
+                        tags,
+                        rank,
+                        placement,
+                    ));
+                }
+            },
+        );
         out.sort_unstable_by_key(|&(l, ..)| l);
         out
     }

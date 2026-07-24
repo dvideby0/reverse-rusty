@@ -1,7 +1,9 @@
 //! `impl Engine` — the write path: initial build, live insert, tombstone/delete,
 //! bulk ingest, and the WAL-replay helpers used by recovery (`open`).
 
-use super::{Engine, IngestItemStatus, IngestReport, InsertOutcome, PlacedQuery, Segment};
+use super::{
+    AcceptedSource, Engine, IngestItemStatus, IngestReport, InsertOutcome, PlacedQuery, Segment,
+};
 use std::sync::Arc;
 
 use crate::compile::{extract, Extracted};
@@ -216,9 +218,9 @@ impl Engine {
         // (see commit_base_segment), so a failed batch leaves no partial sources.
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
-        let mut accepted: Vec<(u64, String)> = Vec::new();
+        let mut accepted: Vec<AcceptedSource> = Vec::new();
         let knobs = self.config.compile_knobs();
-        for (i, (_, logical, ex, text)) in extracted.iter().enumerate() {
+        for (i, (idx, logical, ex, text)) in extracted.iter().enumerate() {
             let Some(qtag_ids) = &tag_ids[i] else {
                 // Over-large tag set: rejected, never stored truncated.
                 self.rejected_parse += 1;
@@ -240,7 +242,12 @@ impl Engine {
                 }
                 Some(added) => {
                     self.record_compiled(&added);
-                    accepted.push((*logical, (*text).to_string()));
+                    accepted.push(AcceptedSource::known(
+                        *logical,
+                        (*text).to_string(),
+                        1,
+                        tags.get(*idx).cloned().unwrap_or_default(),
+                    ));
                     report.ingested += 1;
                 }
             }
@@ -406,7 +413,8 @@ impl Engine {
             .add_compiled_ranked(&ex, &tag_ids, &self.dict, logical, version, rank, knobs);
         if let Some(added) = outcome {
             self.record_compiled(&added);
-            self.query_store.insert(logical, text.to_string());
+            self.query_store
+                .insert_document(logical, text.to_string(), version, tags);
             self.maybe_flush();
             Ok(InsertOutcome::Inserted(added.local))
         } else {
@@ -612,7 +620,8 @@ impl Engine {
                 Arc::make_mut(seg).tombstone(local);
             }
         }
-        self.query_store.insert(logical, text.to_string());
+        self.query_store
+            .insert_document(logical, text.to_string(), version, tags);
         if replaced == 0 {
             UpsertOutcome::Created(new_local)
         } else {
@@ -870,7 +879,7 @@ impl Engine {
         }
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
-        let mut accepted: Vec<(u64, String)> = Vec::new();
+        let mut accepted: Vec<AcceptedSource> = Vec::new();
         let knobs = self.config.compile_knobs();
         for (i, (idx, logical, ex, text)) in extracted.iter().enumerate() {
             let Some(qtag_ids) = &tag_ids[i] else {
@@ -907,7 +916,12 @@ impl Engine {
                 }
                 Some(added) => {
                     self.record_compiled(&added);
-                    accepted.push((*logical, (*text).to_string()));
+                    accepted.push(AcceptedSource::known(
+                        *logical,
+                        (*text).to_string(),
+                        1,
+                        tags.get(*idx).cloned().unwrap_or_default(),
+                    ));
                     report.ingested += 1;
                 }
             }
@@ -936,7 +950,7 @@ impl Engine {
         let mut report = IngestReport::default();
         let mut seg = Segment::new();
         seg.vocab_epoch = self.vocab_epoch;
-        let mut accepted: Vec<(u64, String)> = Vec::new();
+        let mut accepted: Vec<AcceptedSource> = Vec::new();
         for item in items {
             // Resolve the query's FRESH raw tags read-only against the shared frozen tag
             // space (ADR-055) — never the CoW `intern_tags`, which would fork the shared
@@ -951,7 +965,7 @@ impl Engine {
             // contrast, must be rejected rather than truncated into the u16 column. (The
             // cluster front door already caps fresh tags via `check_tag_limit`; this is the
             // defense for the build/bulk path that reaches here with raw tags directly.)
-            if resolved.len() > self.config.max_tags {
+            if item.tag_ids.is_empty() && resolved.len() > self.config.max_tags {
                 self.rejected_parse += 1;
                 report.rejected_parse += 1;
                 continue;
@@ -964,6 +978,22 @@ impl Engine {
                 tag_ids.sort_unstable();
                 tag_ids.dedup();
             }
+            let (source_tags, source_tags_known) = if !item.tags.is_empty() || tag_ids.is_empty() {
+                (item.tags.clone(), true)
+            } else {
+                match tag_ids
+                    .iter()
+                    .map(|&id| {
+                        self.tag_dict
+                            .key_value(id)
+                            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                {
+                    Some(tags) => (tags, true),
+                    None => (Vec::new(), false),
+                }
+            };
             let mut rank = item.rank;
             if rank.priority == 0 {
                 rank = self.cluster_rank_values(&item.tags, &tag_ids);
@@ -979,7 +1009,13 @@ impl Engine {
                 self.config.compile_knobs(),
             ) {
                 self.record_compiled(&added);
-                accepted.push((item.logical, item.dsl.clone()));
+                accepted.push(AcceptedSource::with_tag_status(
+                    item.logical,
+                    item.dsl.clone(),
+                    item.version,
+                    source_tags,
+                    source_tags_known,
+                ));
                 report.ingested += 1;
             } else {
                 self.rejected_class_d += 1;
@@ -989,8 +1025,14 @@ impl Engine {
         seg.build_filter();
         self.seal_and_push(seg);
         let accepted_any = !accepted.is_empty();
-        for (logical, text) in accepted {
-            self.query_store.insert(logical, text);
+        for source in accepted {
+            self.query_store.insert_document_with_status(
+                source.logical,
+                source.text,
+                source.version,
+                &source.tags,
+                source.tags_known,
+            );
         }
         // Bulk ingest has no WAL/translog backstop (mirroring `commit_base_segment`):
         // this is the sole point at which the bulk's source text becomes durable. A
@@ -1053,7 +1095,8 @@ impl Engine {
         );
         if let Some(added) = outcome {
             self.record_compiled(&added);
-            self.query_store.insert(logical, text.to_string());
+            self.query_store
+                .insert_document(logical, text.to_string(), version, tags);
             Some(added.local)
         } else {
             self.rejected_class_d += 1;
@@ -1100,7 +1143,8 @@ impl Engine {
                 .add_compiled_ranked(&ex, &tag_ids, &self.dict, logical, version, rank, knobs)
             {
                 self.record_compiled(&added);
-                self.query_store.insert(logical, text.to_string());
+                self.query_store
+                    .insert_document(logical, text.to_string(), version, tags);
             }
         }
     }

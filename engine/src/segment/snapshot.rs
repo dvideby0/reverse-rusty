@@ -578,6 +578,41 @@ impl EngineSnapshot {
         self.query_store.get(logical_id)
     }
 
+    /// Canonical stored document for `GET /_doc/{id}`: original DSL text, the
+    /// newest live write version, and scalar-coerced metadata tags. Source files
+    /// without the ADR-116 metadata footer predate tag read-back; for those, dense tag ids are losslessly
+    /// reconstructed through the persisted tag dictionary. A legacy synthetic
+    /// tag cannot be reversed and leaves `tags_known = false` so the HTTP layer
+    /// can fail loud rather than return incomplete metadata.
+    pub fn get_query_document(&self, logical_id: u64) -> Option<crate::storage::StoredSource> {
+        let mut source = self.query_store.get_document(logical_id)?;
+        let (version, tag_ids) = self.source_metadata_for_logical(logical_id)?;
+        let recovered_tags = if source.tags_known() {
+            None
+        } else {
+            tag_ids
+                .iter()
+                .map(|&id| {
+                    self.tag_dict
+                        .key_value(id)
+                        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                })
+                .collect::<Option<Vec<_>>>()
+        };
+        source.apply_live_metadata(version, recovered_tags);
+        Some(source)
+    }
+
+    /// Whether the current snapshot has a live exact-store row for `logical_id`,
+    /// independent of source-store availability.
+    ///
+    /// Point-read adapters use this after a failed source lookup to distinguish
+    /// a legitimate missing document from a damaged/missing `sources.dat`.
+    #[must_use]
+    pub fn has_live_query(&self, logical_id: u64) -> bool {
+        self.source_metadata_for_logical(logical_id).is_some()
+    }
+
     /// Winner-fetch lookup with pre-allocation byte credit. `Err(actual_len)`
     /// means the current source exists but does not fit; the source store checks
     /// its borrowed resident/mmap value before cloning. Public so the v2
@@ -965,20 +1000,31 @@ impl EngineSnapshot {
     /// one container (e.g. a re-`PUT`/`insert_live` that has not yet tombstoned the
     /// old copy, or a flush of such a memtable). Returns `None` if no live copy
     /// exists — not expected for a just-matched id, but total for safety.
-    fn tags_for_logical(&self, logical_id: u64) -> Option<&[crate::tagdict::TagId]> {
+    fn source_metadata_for_logical(
+        &self,
+        logical_id: u64,
+    ) -> Option<(u32, &[crate::tagdict::TagId])> {
         for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
             if self.memtable.is_alive(local) {
-                return Some(self.memtable.tags_of(local));
+                return Some((
+                    self.memtable.version_of(local),
+                    self.memtable.tags_of(local),
+                ));
             }
         }
         for seg in self.segments.iter().rev() {
             for &local in seg.locals_for_logical(logical_id).iter().rev() {
                 if seg.is_alive(local) {
-                    return Some(seg.tags_of(local));
+                    return Some((seg.version_of(local), seg.tags_of(local)));
                 }
             }
         }
         None
+    }
+
+    fn tags_for_logical(&self, logical_id: u64) -> Option<&[crate::tagdict::TagId]> {
+        self.source_metadata_for_logical(logical_id)
+            .map(|(_, tags)| tags)
     }
 
     /// Newest-live typed rank values and tags for a logical id. The same reverse

@@ -417,8 +417,8 @@ impl LocalShard {
     }
 
     /// An order-independent 128-bit fingerprint over this shard's LIVE query multiset —
-    /// `(logical_id, version, dsl, TagId*, typed priority, placement)`, the
-    /// `live_sources_tagged` basis
+    /// `(logical_id, version, dsl, TagId*, typed priority, placement, raw source tags)`, the
+    /// document-complete `live_sources_tagged` basis
     /// (memtable +
     /// segments, live copies only) — plus the live count (ADR-097). Two logically-equal copies
     /// fingerprint equal regardless of insertion order, flush boundaries, segment layout, or
@@ -454,7 +454,7 @@ impl LocalShard {
             // `num_live_queries` (index-side, tombstone-aware) — NOT `num_queries`, which counts
             // physical entries including dead copies and would spuriously refuse after any
             // in-memtable delete.
-            (eng.live_sources_tagged(), eng.num_live_queries())
+            (eng.live_source_documents_tagged(), eng.num_live_queries())
         };
         if entries.len() != live {
             return Err(ShardError::Config(format!(
@@ -466,32 +466,58 @@ impl LocalShard {
         }
         let mut encoded: Vec<Vec<u8>> = entries
             .iter()
-            .map(|(logical, dsl, version, tags, rank, placement)| {
-                let mut e = Vec::with_capacity(8 + 4 + 8 + dsl.len() + 8 + 4 * tags.len() + 8);
-                e.extend_from_slice(&logical.to_le_bytes());
-                e.extend_from_slice(&version.to_le_bytes());
-                e.extend_from_slice(&(dsl.len() as u64).to_le_bytes());
-                e.extend_from_slice(dsl.as_bytes());
-                e.extend_from_slice(&(tags.len() as u64).to_le_bytes());
-                for t in tags {
-                    e.extend_from_slice(&t.to_le_bytes());
-                }
-                // Preserve the pre-ADR-108 fingerprint for the overwhelmingly-common all-zero
-                // corpus while still making a typed-priority divergence force peer recovery.
-                if rank.priority != 0 {
-                    e.extend_from_slice(&rank.priority.to_le_bytes());
-                }
-                if placement.mode() != crate::ownership::PlacementMode::Standalone {
-                    e.extend_from_slice(&placement.generation().get().to_le_bytes());
-                    e.extend_from_slice(&placement.num_shards().to_le_bytes());
-                    e.push(placement.mode() as u8);
-                    e.extend_from_slice(&(placement.positions().len() as u32).to_le_bytes());
-                    for position in placement.positions() {
-                        e.extend_from_slice(&position.to_le_bytes());
+            .map(
+                |(logical, dsl, version, raw_tags, tag_ids, rank, placement)| {
+                    let raw_tag_bytes: usize = raw_tags
+                        .iter()
+                        .map(|(key, value)| 8 + key.len() + value.len())
+                        .sum();
+                    let source_suffix_bytes = if raw_tags.is_empty() {
+                        0
+                    } else {
+                        8 + 8 + raw_tag_bytes
+                    };
+                    let mut e = Vec::with_capacity(
+                        8 + 4 + 8 + dsl.len() + 8 + 4 * tag_ids.len() + 8 + source_suffix_bytes,
+                    );
+                    e.extend_from_slice(&logical.to_le_bytes());
+                    e.extend_from_slice(&version.to_le_bytes());
+                    e.extend_from_slice(&(dsl.len() as u64).to_le_bytes());
+                    e.extend_from_slice(dsl.as_bytes());
+                    e.extend_from_slice(&(tag_ids.len() as u64).to_le_bytes());
+                    for t in tag_ids {
+                        e.extend_from_slice(&t.to_le_bytes());
                     }
-                }
-                e
-            })
+                    // Preserve the pre-ADR-108 fingerprint for the overwhelmingly-common all-zero
+                    // corpus while still making a typed-priority divergence force peer recovery.
+                    if rank.priority != 0 {
+                        e.extend_from_slice(&rank.priority.to_le_bytes());
+                    }
+                    if placement.mode() != crate::ownership::PlacementMode::Standalone {
+                        e.extend_from_slice(&placement.generation().get().to_le_bytes());
+                        e.extend_from_slice(&placement.num_shards().to_le_bytes());
+                        e.push(placement.mode() as u8);
+                        e.extend_from_slice(&(placement.positions().len() as u32).to_le_bytes());
+                        for position in placement.positions() {
+                            e.extend_from_slice(&position.to_le_bytes());
+                        }
+                    }
+                    // Extend the old fingerprint encoding only for source-tagged documents.
+                    // Untagged corpora keep their historical fingerprints across this upgrade,
+                    // while a source-divergent tagged replica can no longer skip recovery.
+                    if !raw_tags.is_empty() {
+                        e.extend_from_slice(b"SRCTAGS\0");
+                        e.extend_from_slice(&(raw_tags.len() as u64).to_le_bytes());
+                        for (key, value) in raw_tags {
+                            e.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                            e.extend_from_slice(key.as_bytes());
+                            e.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                            e.extend_from_slice(value.as_bytes());
+                        }
+                    }
+                    e
+                },
+            )
             .collect();
         // The multiset canon: sort the ENCODINGS (not the tuples), so equal live sets hash
         // equal without any Ord requirement on the entry fields.
@@ -896,7 +922,7 @@ impl Shard for LocalShard {
     }
 
     fn live_sources_tagged(&self) -> Result<Vec<super::LiveTaggedQuery>, ShardError> {
-        Ok(self.lock().live_sources_tagged())
+        Ok(self.lock().live_source_documents_tagged())
     }
 
     fn is_local(&self) -> bool {
@@ -906,6 +932,19 @@ impl Shard for LocalShard {
     fn source_of(&self, logical: u64) -> Result<Option<String>, ShardError> {
         // Lock-free: the snapshot's query store carries the live source set (ADR-014).
         Ok(self.snapshot().get_query_source(logical))
+    }
+
+    fn document_of(
+        &self,
+        logical: u64,
+    ) -> Result<Option<crate::storage::StoredSource>, ShardError> {
+        // Lock-free, like `source_of`; metadata is decoded only for this point read.
+        let snapshot = self.snapshot();
+        match snapshot.get_query_document(logical) {
+            Some(document) => Ok(Some(document)),
+            None if snapshot.has_live_query(logical) => Err(ShardError::SourceUnavailable(logical)),
+            None => Ok(None),
+        }
     }
 
     fn ingest_extracted(&self, items: &[PlacedQuery]) -> Result<IngestReport, ShardError> {

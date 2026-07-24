@@ -420,6 +420,59 @@ async fn put_search_delete_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_doc_reads_back_post_freeze_tags_filters_and_head_status() {
+    // The seed freezes an empty tag dictionary. These tags therefore use the
+    // synthetic-id path internally; GET must read the canonical raw metadata
+    // retained with the source, not attempt an impossible TagId reverse lookup.
+    let state = test_state(&seed());
+    let (status, _) = send(
+        &state,
+        req(
+            "PUT",
+            "/_doc/71",
+            &serde_json::json!({
+                "query": "topps chrome",
+                "version": 9,
+                "tags": {"tenant": "acme", "colors": ["red", "blue"]}
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = send(&state, req_empty("GET", "/_doc/71")).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["_index"], "queries");
+    assert_eq!(body["_version"], 9);
+    assert_eq!(body["_source"]["query"], "topps chrome");
+    assert_eq!(body["_source"]["tags"]["tenant"], "acme");
+    assert_eq!(
+        body["_source"]["tags"]["colors"],
+        serde_json::json!(["blue", "red"])
+    );
+
+    let (status, body) = send(
+        &state,
+        req_empty("GET", "/_doc/71?_source_includes=tags.tenant"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["_source"],
+        serde_json::json!({"tags": {"tenant": "acme"}})
+    );
+
+    for (path, expected) in [
+        ("/_doc/71", StatusCode::OK),
+        ("/_doc/72", StatusCode::NOT_FOUND),
+    ] {
+        let (status, body) = send(&state, req_empty("HEAD", path)).await;
+        assert_eq!(status, expected);
+        assert!(body.is_null(), "HEAD must be bodyless");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejections_are_loud_not_silent() {
     let state = test_state(&seed());
 

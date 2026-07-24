@@ -153,7 +153,9 @@ honest about Reverse Rusty's own capabilities:
 
 Endpoints are grouped by concern — open the one you need:
 
-- **[Documents](api/documents.md)** — register / retrieve / delete a stored query (`PUT`/`GET`/`DELETE /_doc/{id}`), incl. per-query metadata tags.
+- **[Documents](api/documents.md)** — register / retrieve / existence-check / delete a stored query
+  (`PUT`/`GET`/`HEAD`/`DELETE /_doc/{id}`), including durable metadata-tag read-back and ES/OS
+  `_source` filtering.
 - **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`,
   local/cluster bounded `POST /v2/_search`, `POST /_mpercolate`), including filtered
   percolation and exhaustive `result_mode=all` jobs with a terminally verified NDJSON stream.
@@ -170,7 +172,7 @@ The full method/path matrix is below.
 | Endpoint | Method | Description |
 |---|---|---|
 | `/` | GET/HEAD | Product, version, and cluster info |
-| `/_doc/{id}` | GET | Retrieve a stored query |
+| `/_doc/{id}` | GET/HEAD | Retrieve a stored query / bodyless existence check |
 | `/_doc/{id}` | PUT | Register **or atomically replace** a query (201 created / 200 updated, ADR-067) |
 | `/_doc/{id}` | DELETE | Remove a stored query |
 | `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |

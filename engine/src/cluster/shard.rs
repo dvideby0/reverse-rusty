@@ -273,18 +273,12 @@ pub(crate) struct ShardBatchRankedMatch {
 pub(crate) type EventSink = Arc<dyn Fn(&crate::events::EngineEvent) + Send + Sync>;
 
 /// One live query as gathered for a blue/green rebuild (`set_vocab` / resize, ADR-074/109):
-/// `(logical, dsl, version, tag_ids, rank, placement)`. The metadata rides the gather so the rebuild
-/// re-places each query at the version it was durably stored with (not reset to 1) and
-/// carries tags/rank to its new shard; the old placement is available for fingerprints but a
-/// rebuild deliberately derives a fresh placement under its one new generation.
-pub(crate) type LiveTaggedQuery = (
-    u64,
-    String,
-    u32,
-    Vec<crate::tagdict::TagId>,
-    crate::rank::RankValues,
-    crate::ownership::QueryPlacement,
-);
+/// `(logical, dsl, version, raw_tags, tag_ids, rank, placement)`. The metadata rides the gather
+/// so the rebuild re-places each query at the version it was durably stored with (not reset to 1)
+/// and carries both read-back source tags and integer match metadata to its new shard; the old
+/// placement is available for fingerprints but a rebuild deliberately derives a fresh placement
+/// under its one new generation.
+pub(crate) type LiveTaggedQuery = crate::segment::LiveSourceDocument;
 
 /// One shard, local or remote — the seam that lets a coordinator hold a mix of
 /// in-process and (eventually) networked shards behind one type.
@@ -602,6 +596,19 @@ pub(crate) trait Shard: Send + Sync {
     fn source_of(&self, _logical: u64) -> Result<Option<String>, ShardError> {
         Err(ShardError::Config(
             "source_of is only supported for in-process shards in v1".into(),
+        ))
+    }
+
+    /// Canonical source document for `GET /_doc/{id}`. Kept separate from
+    /// [`Self::source_of`] so search-hit enrichment remains a query-text-only
+    /// lookup and never decodes tag metadata. The default is loud for remote
+    /// shards until the richer source shape is added to the transport.
+    fn document_of(
+        &self,
+        _logical: u64,
+    ) -> Result<Option<crate::storage::StoredSource>, ShardError> {
+        Err(ShardError::Config(
+            "document_of is only supported for in-process shards in v1".into(),
         ))
     }
 
