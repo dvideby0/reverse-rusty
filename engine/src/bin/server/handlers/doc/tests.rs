@@ -7,7 +7,7 @@ use super::{delete_doc, get_doc, put_doc};
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -55,9 +55,14 @@ fn put_body(query: &str) -> super::PutDocBody {
 
 /// Run `put_doc` and return (status, parsed JSON body).
 async fn do_put(state: &Arc<AppState>, id: u64, query: &str) -> (StatusCode, serde_json::Value) {
-    let resp = put_doc(State(Arc::clone(state)), Path(id), Json(put_body(query)))
-        .await
-        .into_response();
+    let resp = put_doc(
+        State(Arc::clone(state)),
+        Path(id),
+        Ok(Query(super::PutDocParams::default())),
+        Json(put_body(query)),
+    )
+    .await
+    .into_response();
     let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
@@ -94,6 +99,25 @@ async fn route_doc(
         .await
         .expect("response body");
     (status, body)
+}
+
+fn put_request(path: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(path)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("PUT request")
+}
+
+async fn route_put_json(
+    state: &Arc<AppState>,
+    path: &str,
+    body: &serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let (status, bytes) = route_doc(state, put_request(path, body)).await;
+    let json = serde_json::from_slice(&bytes).expect("JSON response");
+    (status, json)
 }
 
 #[tokio::test]
@@ -282,7 +306,11 @@ async fn put_doc_is_created_then_updated_with_replace_semantics() {
     // First PUT: 201 created.
     let (status, body) = do_put(&state, 7, "michael jordan").await;
     assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["_index"], "queries");
+    assert_eq!(body["_id"], 7);
+    assert_eq!(body["_version"], 1);
     assert_eq!(body["result"], "created");
+    assert!(body.get("error").is_none());
     assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&7));
 
     // Re-PUT with different semantics: 200 updated, and the snapshot flips
@@ -290,12 +318,109 @@ async fn put_doc_is_created_then_updated_with_replace_semantics() {
     // (one lock, one publish; no matches-under-either-version window).
     let (status, body) = do_put(&state, 7, "lebron james").await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["_index"], "queries");
+    assert_eq!(body["_version"], 1);
     assert_eq!(body["result"], "updated");
     assert!(
         !matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&7),
         "old semantics must stop matching after the re-PUT"
     );
     assert!(matches_in_snapshot(&state, "2003 topps lebron james rookie").contains(&7));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_doc_create_only_is_atomic_and_never_overwrites() {
+    let state = state();
+    let first_body = serde_json::json!({"query":"michael jordan","version":7});
+    let second_body = serde_json::json!({"query":"lebron james","version":8});
+    let first = route_put_json(&state, "/_doc/7?op_type=create", &first_body);
+    let second = route_put_json(&state, "/_doc/7?op_type=create", &second_body);
+    let (a, b) = tokio::join!(first, second);
+    let mut statuses = [a.0, b.0];
+    statuses.sort_by_key(StatusCode::as_u16);
+    assert_eq!(statuses, [StatusCode::CREATED, StatusCode::CONFLICT]);
+
+    let (created, conflict) = if a.0 == StatusCode::CREATED {
+        (a.1, b.1)
+    } else {
+        (b.1, a.1)
+    };
+    assert_eq!(created["_index"], "queries");
+    assert!(
+        created["_version"] == 7 || created["_version"] == 8,
+        "the winning caller's display version is returned"
+    );
+    assert_eq!(
+        conflict["error"]["type"],
+        "version_conflict_engine_exception"
+    );
+
+    let jordan = matches_in_snapshot(&state, "1986 fleer michael jordan rookie");
+    let lebron = matches_in_snapshot(&state, "2003 topps lebron james rookie");
+    assert_ne!(
+        jordan.contains(&7),
+        lebron.contains(&7),
+        "exactly one create-only body must become live"
+    );
+
+    let (status, after) = route_put_json(
+        &state,
+        "/_doc/7?op_type=create",
+        &serde_json::json!({"query":"wayne gretzky","version":9}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(after["error"]["type"], "version_conflict_engine_exception");
+    assert!(
+        !matches_in_snapshot(&state, "1979 opc wayne gretzky rookie").contains(&7),
+        "a conflict must not replace the winning document"
+    );
+    let (status, malformed_conflict) = route_put_json(
+        &state,
+        "/_doc/7?op_type=create",
+        &serde_json::json!({"query":"("}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        malformed_conflict["error"]["type"], "version_conflict_engine_exception",
+        "an existing id is the decisive create-only error in both server modes"
+    );
+}
+
+#[tokio::test]
+async fn put_doc_validates_query_parameters_and_accepts_refresh_policies() {
+    let state = state();
+    for (id, refresh) in [(11, "false"), (12, "true"), (13, "wait_for")] {
+        let (status, body) = route_put_json(
+            &state,
+            &format!("/_doc/{id}?refresh={refresh}&op_type=index"),
+            &serde_json::json!({"query":format!("topps chrome {id}")}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert!(
+            matches_in_snapshot(&state, &format!("topps chrome {id}")).contains(&id),
+            "every accepted refresh policy has immediate visibility"
+        );
+    }
+
+    for path in [
+        "/_doc/20?refresh=immediate",
+        "/_doc/21?op_type=overwrite",
+        "/_doc/22?routing=custom",
+    ] {
+        let (status, body) =
+            route_put_json(&state, path, &serde_json::json!({"query":"michael jordan"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+        assert_eq!(body["error"]["type"], "illegal_argument_exception");
+    }
+    for id in [20, 21, 22] {
+        assert!(
+            !matches_in_snapshot(&state, "1986 fleer michael jordan rookie").contains(&id),
+            "invalid query parameters must reject before mutation"
+        );
+    }
 }
 
 #[tokio::test]
@@ -480,9 +605,14 @@ async fn put_doc_typed_priority_reaches_bounded_ranker_and_errors_are_structured
         "rank_fields": {"priority": 50}
     }))
     .expect("typed body");
-    let response = put_doc(State(Arc::clone(&state)), Path(77), Json(body))
-        .await
-        .into_response();
+    let response = put_doc(
+        State(Arc::clone(&state)),
+        Path(77),
+        Ok(Query(super::PutDocParams::default())),
+        Json(body),
+    )
+    .await
+    .into_response();
     assert_eq!(response.status(), StatusCode::CREATED);
 
     let snap = state.snapshot.load();
@@ -512,9 +642,14 @@ async fn put_doc_typed_priority_reaches_bounded_ranker_and_errors_are_structured
         "rank_fields": {"priority": 1.5}
     }))
     .expect("invalid rank still decodes at DTO layer");
-    let response = put_doc(State(Arc::clone(&state)), Path(78), Json(invalid))
-        .await
-        .into_response();
+    let response = put_doc(
+        State(Arc::clone(&state)),
+        Path(78),
+        Ok(Query(super::PutDocParams::default())),
+        Json(invalid),
+    )
+    .await
+    .into_response();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -549,9 +684,14 @@ async fn put_doc_rejects_structured_tag_value_with_400() {
         "tags": {"meta": {"x": 1}},
     }))
     .expect("body deserializes");
-    let resp = put_doc(State(Arc::clone(&state)), Path(7), Json(body))
-        .await
-        .into_response();
+    let resp = put_doc(
+        State(Arc::clone(&state)),
+        Path(7),
+        Ok(Query(super::PutDocParams::default())),
+        Json(body),
+    )
+    .await
+    .into_response();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     // Nothing was ingested: the engine never saw the doc.
     assert!(matches_in_snapshot(&state, "1986 fleer michael jordan rookie").is_empty());

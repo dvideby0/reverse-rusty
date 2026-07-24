@@ -370,7 +370,11 @@ async fn put_search_delete_round_trip() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["_index"], "queries");
+    assert_eq!(body["_id"], 10);
+    assert_eq!(body["_version"], 1);
     assert_eq!(body["result"], "created");
+    assert!(body.get("error").is_none());
 
     // Search finds it (with per-request include_broad).
     let (status, body) = send(
@@ -402,6 +406,8 @@ async fn put_search_delete_round_trip() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["_index"], "queries");
+    assert_eq!(body["_version"], 1);
     assert_eq!(body["result"], "updated");
     let (_, body) = send(
         &state,
@@ -430,6 +436,87 @@ async fn put_search_delete_round_trip() {
     assert_eq!(status, StatusCode::OK);
     let (status, _) = send(&state, req_empty("GET", "/_doc/10")).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_doc_create_only_and_query_parameter_contract_match_single_node() {
+    let state = test_state(&seed());
+    let first = send(
+        &state,
+        req(
+            "PUT",
+            "/_doc/70?op_type=create&refresh=wait_for",
+            &serde_json::json!({"query":"michael jordan","version":7}),
+        ),
+    );
+    let second = send(
+        &state,
+        req(
+            "PUT",
+            "/_doc/70?op_type=create&refresh=true",
+            &serde_json::json!({"query":"lebron james","version":8}),
+        ),
+    );
+    let (a, b) = tokio::join!(first, second);
+    let mut statuses = [a.0, b.0];
+    statuses.sort_by_key(StatusCode::as_u16);
+    assert_eq!(statuses, [StatusCode::CREATED, StatusCode::CONFLICT]);
+    let (created, conflict) = if a.0 == StatusCode::CREATED {
+        (a.1, b.1)
+    } else {
+        (b.1, a.1)
+    };
+    assert_eq!(created["_index"], "queries");
+    assert!(
+        created["_version"] == 7 || created["_version"] == 8,
+        "the winning caller's display version is returned"
+    );
+    assert_eq!(
+        conflict["error"]["type"],
+        "version_conflict_engine_exception"
+    );
+
+    let (status, current) = send(&state, req_empty("GET", "/_doc/70")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        current["_source"]["query"] == "michael jordan"
+            || current["_source"]["query"] == "lebron james",
+        "one complete create body wins"
+    );
+    assert_eq!(current["_version"], created["_version"]);
+
+    let (status, malformed_conflict) = send(
+        &state,
+        req(
+            "PUT",
+            "/_doc/70?op_type=create",
+            &serde_json::json!({"query":"("}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        malformed_conflict["error"]["type"],
+        "version_conflict_engine_exception"
+    );
+
+    let (status, invalid) = send(
+        &state,
+        req(
+            "PUT",
+            "/_doc/71?routing=custom",
+            &serde_json::json!({"query":"wayne gretzky"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{invalid}");
+    assert_eq!(invalid["error"]["type"], "illegal_argument_exception");
+    let (status, _) = send(&state, req_empty("HEAD", "/_doc/71")).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "unsupported parameters reject before mutation"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

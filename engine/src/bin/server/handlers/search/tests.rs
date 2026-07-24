@@ -452,6 +452,9 @@ async fn numeric_tag_ingest_meets_numeric_filter() {
     let resp = crate::handlers::doc::put_doc(
         axum::extract::State(Arc::clone(&state)),
         axum::extract::Path(1u64),
+        Ok(axum::extract::Query(
+            crate::handlers::doc::PutDocParams::default(),
+        )),
         Json(body),
     )
     .await

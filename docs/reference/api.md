@@ -173,7 +173,7 @@ The full method/path matrix is below.
 |---|---|---|
 | `/` | GET/HEAD | Product, version, and cluster info |
 | `/_doc/{id}` | GET/HEAD | Retrieve a stored query / bodyless existence check |
-| `/_doc/{id}` | PUT | Register **or atomically replace** a query (201 created / 200 updated, ADR-067) |
+| `/_doc/{id}` | PUT | Register or atomically replace/create-only a query (`op_type=index|create`; strict `refresh`; ES/OS response metadata, ADR-117) |
 | `/_doc/{id}` | DELETE | Remove a stored query |
 | `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
 | `/v2/_search` | POST | Single-node or cluster, single-document exact bounded top-K + winner-only enrichment (ADR-107/108/110); accepts `pit`/`cursor` pages (ADR-113) |
@@ -260,6 +260,11 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   live copy (ES `index` semantics, the ADR-067 contract at the cluster). A partial multi-shard apply
   (remote clusters only) answers 200 with `"result": "partial"`: the write **is** durably logged and
   queued for repair — do **not** re-PUT (it would double-log); `POST /_cluster/resync` converges it.
+  `op_type=create` uses the coordinator's atomic logical-id reservation and returns 409 without a
+  log frame when the id exists; a remote assembly that cannot authoritatively enumerate its
+  pre-existing ids refuses create-only writes rather than guessing absence. `refresh=false|true|wait_for`
+  are accepted under the stronger publish-before-response model; unsupported write parameters fail
+  with 400 instead of being ignored.
 - **Per-request `include_broad`** is honored on both `/_search` and `/_mpercolate`.
 - **`rank` works (ADR-075)** — the same block as single-node, scored at the shards against the shared
   tag space and merged `(score desc, _id asc)` with `from`/`size` + `_score`. One cluster-specific

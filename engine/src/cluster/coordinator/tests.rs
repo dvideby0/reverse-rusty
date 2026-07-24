@@ -939,6 +939,40 @@ fn incremental_add_is_insert_only_and_remove_allows_reuse() {
 }
 
 #[test]
+fn versioned_create_is_insert_only_and_preserves_source_metadata() {
+    let cfg = ClusterConfig {
+        num_shards: 4,
+        ..Default::default()
+    };
+    let cluster = ClusterEngine::build(vocab(), &cfg, &[]).expect("cluster");
+    let tags = vec![("tenant".to_string(), "acme".to_string())];
+    cluster
+        .create_query_with_tags(43, "1994 topps rareplayer0", 9, &tags)
+        .expect("fresh create");
+
+    let source = cluster
+        .get_document(43)
+        .expect("source lookup")
+        .expect("created source");
+    assert_eq!(source.version(), 9);
+    assert_eq!(source.tags(), tags.as_slice());
+    assert!(matches!(
+        cluster.create_query_with_tags(43, "1995 fleer rareplayer1000", 10, &[]),
+        Err(ShardError::DuplicateLogicalId(43))
+    ));
+    assert_eq!(
+        cluster
+            .percolate("1994 topps rareplayer0")
+            .expect("original remains"),
+        vec![43]
+    );
+    assert!(cluster
+        .percolate("1995 fleer rareplayer1000")
+        .expect("conflict body absent")
+        .is_empty());
+}
+
+#[test]
 fn concurrent_same_id_adds_admit_exactly_one_row() {
     use std::sync::{Arc, Barrier};
 

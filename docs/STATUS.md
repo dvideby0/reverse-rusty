@@ -135,7 +135,9 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   logs + Prometheus (ADR-021); per-segment introspection `/_cat/segments` (ADR-023).
 - **HTTP server** (`bin/server/`) — ES-style REST ([`reference/api.md`](reference/api.md));
   production hardening (ADR-052); tag-value coercion + `maybe_flush` on PUT + per-request
-  `include_broad` (ADR-073); opt-in bearer auth, default-deny on mutations (ADR-062); **cluster
+  `include_broad` (ADR-073); get-document source read-back/filtering (ADR-116); strict
+  index/create-only PUT controls + honest write metadata (ADR-117); opt-in bearer auth,
+  default-deny on mutations (ADR-062); **cluster
   coordinator mode** `--cluster`, in-process or remote, cluster-atomic upsert (ADR-070);
   **cooperative match cancellation + bounded search concurrency** — an explicit `timeout_ms`
   stops the work at coarse boundaries, `--max-concurrent-searches` bounds pool occupancy, both
