@@ -24,9 +24,11 @@
   pre-v8 files use generation zero. Reopen seeds the counter above both the exact and source maxima;
   compaction and in-place vocabulary recompilation preserve it. Content-fingerprint and blue/green
   rebuild gathers first require source version/generation agreement and complete raw tags, so peer
-  copy elision or re-placement cannot bless stale sidecar data. Lazy open validates tag encoding and
-  UTF-8 without allocating owned tag strings, and query-only winner enrichment reads only the original
-  query index/blob.
+  copy elision or re-placement cannot bless stale sidecar data. Exact metadata resolution chooses the
+  greatest live generation across the memtable and every base segment—not storage-tier order—because
+  supported additive live-then-bulk histories can put the newer row in a base segment. Lazy open
+  validates tag encoding and UTF-8 without allocating owned tag strings, and query-only winner
+  enrichment reads only the original query index/blob.
 - **REST contract.** Found documents return `_index: "queries"`, numeric `_id`, the stored
   `_version`, `found: true`, and canonical `_source` (`query` plus a `tags` object when tagged).
   Missing documents return 404 with `_index`, `_id`, and `found: false`. `_source=false`,
@@ -40,8 +42,9 @@
   query text remains available only with a pre-v8 exact row (both sides carry legacy generation
   zero); their unknown write version is recovered from that live row, and dense legacy tags are
   reconstructed through the persisted `TagDict`. A footer-backed source whose stored version **or
-  internal generation** disagrees with the live exact row fails with `source_unavailable` rather
-  than combining writes—even when both client versions are `1`. A pre-footer synthetic tag has no
+  internal generation** disagrees with the greatest live exact generation fails with
+  `source_unavailable` rather than combining writes—even when both client versions are `1`. A
+  pre-footer synthetic tag has no
   reversible string; that rare response is explicitly marked
   `_source_metadata.complete: false` until re-PUT, never silently presented as complete. A live
   exact row whose source sidecar is missing fails with `source_unavailable` rather than masquerading
@@ -57,5 +60,6 @@
   Persistence tests pin v1 migration, original-v2 and metadata-footer-v1 compatibility, old-reader
   query visibility, resident/lazy metadata-footer round-trips, `.seg` v8 and manifest-v6 fencing, and
   a same-client-version stale-sidecar reopen refusal. Snapshot and gather units pin same-version
-  cross-generation refusal. Cluster durability tests pin metadata across checkpoint/reopen and
-  across a synthetic-tag reopen plus vocabulary rebuild.
+  cross-generation refusal, additive live-then-bulk generation selection, and atomic rejection of
+  vocabulary changes that make an acknowledged query unrebuildable. Cluster durability tests pin
+  metadata across checkpoint/reopen and across a synthetic-tag reopen plus vocabulary rebuild.

@@ -154,9 +154,11 @@ misreports an unavailable lookup as `found: false`.
 If the match index has a live row but its source sidecar is missing, the request fails with
 `source_unavailable` (**500** in single-node mode, **502** through a local coordinator) rather than
 misreporting the live document as a 404. The same fail-loud rule applies when footer-backed source
-metadata carries a different client version or internal source generation from the live exact row.
-That catches a stale sidecar even when both writes used the default version `1`. `HEAD` still returns
-**200** in either case because existence does not require source materialization.
+metadata disagrees with the greatest live exact generation. Resolution uses that greatest generation
+across the memtable and base segments, so a supported additive bulk write after a live insert still
+reads the newer source even though it resides in a base segment. The generation check catches a stale
+sidecar even when both writes used the default version `1`. `HEAD` still returns **200** in either case
+because existence does not require source materialization.
 
 `sources.dat` v2 now appends a backward-readable metadata footer while leaving the original query
 index/blob intact, so query-only hit enrichment remains lazy and old binaries still read query text.
