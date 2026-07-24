@@ -406,13 +406,38 @@ impl Engine {
         out
     }
 
+    /// Distinct logical ids represented by at least one live exact row. This is
+    /// the index-side half of rebuild-source completeness; counting physical
+    /// rows is insufficient because supported additive histories may leave
+    /// multiple live copies of one logical id.
+    fn live_exact_logical_ids(&self) -> crate::util::FastSet<u64> {
+        let mut logicals = crate::util::FastSet::default();
+        for local in 0..self.memtable.len() {
+            let local = local as u32;
+            if self.memtable.is_alive(local) {
+                logicals.insert(self.memtable.exact_store().logical(local));
+            }
+        }
+        for segment in &self.segments {
+            for local in 0..segment.len() {
+                let local = local as u32;
+                if segment.is_alive(local) {
+                    logicals.insert(segment.logical(local));
+                }
+            }
+        }
+        logicals
+    }
+
     /// Internal document-complete variant of [`Self::live_sources_tagged`].
-    /// Carries canonical raw tags for cluster source read-back across rebuilds.
+    /// Carries canonical raw tags for cluster source read-back across rebuilds
+    /// and fails if either durable domain lacks a matching logical id.
     pub(crate) fn live_source_documents_tagged(
         &self,
     ) -> Result<Vec<crate::segment::LiveSourceDocument>, u64> {
         let mut out = Vec::with_capacity(self.query_store.len());
         let mut mismatch = None;
+        let mut uncovered = self.live_exact_logical_ids();
         // One liveness scan per entry: `None` = no live copy in this engine (stale store
         // residue — skipped, see `live_sources`), `Some((version, tags))` = live, possibly
         // untagged. The version is the live copy's stored version, carried through the rebuild
@@ -465,9 +490,17 @@ impl Engine {
                         rank,
                         placement,
                     ));
+                    uncovered.remove(&logical);
                 }
             },
         );
+        if mismatch.is_none() {
+            // A missing/partial sources.dat has no entry for the callback above
+            // to reject. Check from exact → source as well so a vocabulary
+            // change cannot rebuild an acknowledged live corpus from a strict
+            // subset and silently drop the uncovered rows.
+            mismatch = uncovered.into_iter().min();
+        }
         if let Some(logical) = mismatch {
             return Err(logical);
         }
@@ -707,11 +740,16 @@ mod source_generation_tests {
         engine
             .try_upsert_live_with_tags("1995 fleer", 7, 1, &[("status".into(), "new".into())])
             .expect("same-version replacement");
+        // The source store intentionally refuses generation rollback. Model a
+        // divergent sidecar by publishing the stale payload under a distinct,
+        // later generation instead; either direction must fail the exact/source
+        // equality check.
+        let divergent_generation = engine.allocate_source_generation();
         engine.query_store.insert_document_with_generation(
             7,
             stale.query().to_owned(),
             stale.version(),
-            stale.source_generation(),
+            divergent_generation,
             stale.tags(),
         );
 

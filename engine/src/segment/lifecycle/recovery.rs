@@ -69,6 +69,7 @@ fn replay_wal_tail(
                 text,
                 tags,
                 priority,
+                source_generation,
                 class_d_accepted,
                 ..
             } => {
@@ -85,6 +86,7 @@ fn replay_wal_tail(
                     version,
                     &tags,
                     priority.map(|priority| crate::rank::RankValues { priority }),
+                    source_generation,
                     class_d_accepted,
                 );
             }
@@ -127,6 +129,7 @@ fn replay_wal_tail(
                 text,
                 tags,
                 priority,
+                source_generation,
                 class_d_accepted,
             } => {
                 // ADR-067: the insert half ALWAYS replays — the new memtable copy
@@ -145,6 +148,7 @@ fn replay_wal_tail(
                     version,
                     &tags,
                     priority.map(|priority| crate::rank::RankValues { priority }),
+                    source_generation,
                     seq > watermark,
                     class_d_accepted,
                 );

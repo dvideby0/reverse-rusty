@@ -490,10 +490,35 @@ impl SourceStore {
         );
         match self {
             SourceStore::Resident(m) => {
-                rw_write(m).insert(logical, source);
+                let mut store = rw_write(m);
+                // Recovery replays WAL frames in log order, but a manifest
+                // commit may have installed a later same-id bulk segment and
+                // source document after an older frame. Never let that older
+                // generation roll the canonical sidecar backward. Equal
+                // generations still replace so legacy generation-zero frames
+                // retain their chronological last-write behavior.
+                if store
+                    .get(&logical)
+                    .is_none_or(|current| current.source_generation() <= source_generation)
+                {
+                    store.insert(logical, source);
+                }
             }
-            SourceStore::Lazy { overlay, .. } => {
-                rw_write(overlay).insert(logical, Some(source));
+            SourceStore::Lazy { base, overlay } => {
+                let should_replace = {
+                    let current = rw_read(overlay);
+                    match current.get(&logical) {
+                        Some(Some(current)) => current.source_generation() <= source_generation,
+                        Some(None) => true,
+                        None => base
+                            .as_ref()
+                            .and_then(|base| base.find(logical))
+                            .is_none_or(|current| current.source_generation <= source_generation),
+                    }
+                };
+                if should_replace {
+                    rw_write(overlay).insert(logical, Some(source));
+                }
             }
         }
     }
@@ -1399,6 +1424,35 @@ mod tests {
                 ("color".to_string(), "red".to_string()),
             ]
         );
+
+        std::fs::remove_file(path).expect("remove test sources");
+    }
+
+    #[test]
+    fn source_generation_prevents_replay_from_rolling_document_backward() {
+        let resident = SourceStore::new_resident();
+        resident.insert_document_with_generation(7, "new".to_string(), 2, 20, &[]);
+        resident.insert_document_with_generation(7, "old".to_string(), 1, 10, &[]);
+        let document = resident.get_document(7).expect("resident document");
+        assert_eq!(document.query(), "new");
+        assert_eq!(document.source_generation(), 20);
+
+        let path = std::env::temp_dir().join(format!(
+            "reverse-rusty-monotonic-sources-{}-{}.dat",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        resident.write_to(&path).expect("write lazy base");
+        let lazy = SourceStore::open(&path, false).expect("open lazy base");
+        lazy.insert_document_with_generation(7, "old".to_string(), 1, 10, &[]);
+        assert_eq!(
+            lazy.get_document(7).expect("base still wins").query(),
+            "new"
+        );
+        lazy.insert_document_with_generation(7, "newest".to_string(), 3, 21, &[]);
+        let document = lazy.get_document(7).expect("overlay document");
+        assert_eq!(document.query(), "newest");
+        assert_eq!(document.source_generation(), 21);
 
         std::fs::remove_file(path).expect("remove test sources");
     }

@@ -20,15 +20,22 @@
   Every engine-owned accepted write reserves a generation independent of the caller-visible
   `_version` and stores it in both durable domains. `.seg` **v8** appends the exact-row generation
   column; standalone engine manifest **v6** is the loud rollback fence (otherwise legacy recovery
-  could skip an unreadable segment and serve a partial corpus). Public low-level segment builders and
-  pre-v8 files use generation zero. Reopen seeds the counter above both the exact and source maxima;
-  compaction and in-place vocabulary recompilation preserve it. Content-fingerprint and blue/green
-  rebuild gathers first require source version/generation agreement and complete raw tags, so peer
-  copy elision or re-placement cannot bless stale sidecar data. Exact metadata resolution chooses the
-  greatest live generation across the memtable and every base segment—not storage-tier order—because
-  supported additive live-then-bulk histories can put the newer row in a base segment. Lazy open
-  validates tag encoding and UTF-8 without allocating owned tag strings, and query-only winner
-  enrichment reads only the original query index/blob.
+  could skip an unreadable segment and serve a partial corpus). WAL **v7** appends a marked
+  generation plus optional priority to every engine-owned insert/upsert frame. The reservation
+  happens before WAL append, and replay reinstalls that exact generation instead of minting a newer
+  one after restart. Source-store publication is generation-monotonic, so an older covered WAL frame
+  cannot roll back a same-id source written by a later bulk commit. Public low-level segment/WAL
+  builders and pre-v8/pre-v7 files use generation zero. Reopen seeds the counter above both the exact
+  and source maxima; compaction and in-place vocabulary recompilation preserve it.
+
+  Content-fingerprint and blue/green rebuild gathers require source version/generation agreement,
+  complete raw tags, **and bidirectional logical-id coverage**. The exact-to-source half is
+  load-bearing: iterating only `sources.dat` cannot notice a live exact row whose sidecar entry is
+  missing, and rebuilding that subset would silently drop the row. Exact metadata resolution chooses
+  the greatest live generation across the memtable and every base segment—not storage-tier
+  order—because supported additive live-then-bulk histories can put the newer row in a base segment.
+  Lazy open validates tag encoding and UTF-8 without allocating owned tag strings, and query-only
+  winner enrichment reads only the original query index/blob.
 - **REST contract.** Found documents return `_index: "queries"`, numeric `_id`, the stored
   `_version`, `found: true`, and canonical `_source` (`query` plus a `tags` object when tagged).
   Missing documents return 404 with `_index`, `_id`, and `found: false`. `_source=false`,
@@ -59,7 +66,10 @@
   projections, source suppression, unknown-parameter rejection, and HEAD in both local modes.
   Persistence tests pin v1 migration, original-v2 and metadata-footer-v1 compatibility, old-reader
   query visibility, resident/lazy metadata-footer round-trips, `.seg` v8 and manifest-v6 fencing, and
-  a same-client-version stale-sidecar reopen refusal. Snapshot and gather units pin same-version
-  cross-generation refusal, additive live-then-bulk generation selection, and atomic rejection of
-  vocabulary changes that make an acknowledged query unrebuildable. Cluster durability tests pin
-  metadata across checkpoint/reopen and across a synthetic-tag reopen plus vocabulary rebuild.
+  a same-client-version stale-sidecar reopen refusal. WAL tests pin the v7 generation extension;
+  crash/reopen coverage pins an older live frame followed by a newer same-id bulk source through a
+  subsequent vocabulary rebuild. Snapshot and gather units pin same-version cross-generation
+  refusal, additive live-then-bulk generation selection, and atomic rejection of vocabulary changes
+  that make an acknowledged query unrebuildable or whose source store omits a live exact id. Cluster
+  durability tests pin metadata across checkpoint/reopen and across a synthetic-tag reopen plus
+  vocabulary rebuild.

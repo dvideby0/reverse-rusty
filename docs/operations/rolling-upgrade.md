@@ -54,9 +54,10 @@ pre-upgrade backup:
   class A and class H are both always-visible and place identically — it only decides which
   node re-inherits the un-quarantined fat-posting scans; the coordinator warns at startup when
   θ is set in remote mode.
-- **Logs:** the standalone WAL is v6 (ADR-108). ADR-109 advances the coordinator log and per-shard
-  translog to v4; clustered v1–v3 logs are rebuild-only because their writes lack placement
-  identity.
+- **Logs:** the standalone WAL is v7 (ADR-116): new engine insert/upsert frames append a marked
+  source generation around ADR-108's optional priority. Legacy v1–v6 frames remain readable as
+  generation-zero data. ADR-109 advances the coordinator log and per-shard translog to v4;
+  clustered v1–v3 logs are rebuild-only because their writes lack placement identity.
 - **Adopted shard state:** ADR-109 adopted feature-space v2 records placement generation and shard
   count. Legacy adopted data-node state must be wiped and reseeded.
 - **The mesh wire:** ADR-109 fields are protobuf-additive syntactically, but semantically mandatory.

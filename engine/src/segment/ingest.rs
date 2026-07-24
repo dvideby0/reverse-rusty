@@ -21,6 +21,24 @@ impl Engine {
         generation
     }
 
+    /// Recover a WAL v7 generation verbatim and advance the live allocator past
+    /// it. Generation-less legacy frames stay at zero: pre-v8 exact/source rows
+    /// use storage order as their tie-break, and inventing a fresh post-reopen
+    /// generation would let an older WAL row outrank a later bulk segment.
+    pub(in crate::segment) fn replay_source_generation(
+        &mut self,
+        source_generation: Option<u64>,
+    ) -> u64 {
+        let Some(source_generation) = source_generation.filter(|&generation| generation != 0)
+        else {
+            return 0;
+        };
+        if source_generation >= self.next_source_generation {
+            self.next_source_generation = source_generation.wrapping_add(1).max(1);
+        }
+        source_generation
+    }
+
     /// Reject a query whose tag set exceeds `config.max_tags` (ADR-049) BEFORE any
     /// durable write, so an over-large set never reaches the SoA tag column (whose
     /// per-query count is a `u16` — truncation there would silently drop a real tag
@@ -401,6 +419,11 @@ impl Engine {
             self.rejected_class_d += 1;
             return Ok(InsertOutcome::RejectedClassD);
         }
+        // Reserve the source generation before the WAL so that same value is
+        // durable in the frame and installed in both the exact row and source
+        // store. A failed append may leave a harmless gap; no visible state is
+        // published.
+        let source_generation = self.allocate_source_generation();
         // WAL (durability before visibility). If the append fails the mutation
         // is not durable, so reject it and leave in-memory state untouched
         // rather than acknowledge a write a crash would lose. Tags are logged
@@ -409,16 +432,15 @@ impl Engine {
         // marker that lets replay store it unconditionally while legacy frames
         // (logged before classification by pre-v5 binaries) keep the old gate.
         if let Some(ref mut wal) = self.wal {
-            let appended = match (class == crate::compile::CostClass::D, rank) {
-                (true, Some(values)) => {
-                    wal.append_insert_class_d_ranked(logical, version, text, tags, values.priority)
-                }
-                (false, Some(values)) => {
-                    wal.append_insert_ranked(logical, version, text, tags, values.priority)
-                }
-                (true, None) => wal.append_insert_class_d(logical, version, text, tags),
-                (false, None) => wal.append_insert(logical, version, text, tags),
-            };
+            let appended = wal.append_insert_with_source_generation(
+                logical,
+                version,
+                text,
+                tags,
+                rank.map(|values| values.priority),
+                source_generation,
+                class == crate::compile::CostClass::D,
+            );
             if let Err(e) = appended {
                 self.wal_healthy = false;
                 return Err(crate::error::WriteError::Wal(e));
@@ -430,7 +452,6 @@ impl Engine {
             accept_class_d: true, // gated pre-WAL above (ADR-068)
             ..self.config.compile_knobs()
         };
-        let source_generation = self.allocate_source_generation();
         let outcome = Arc::make_mut(&mut self.memtable).add_compiled_ranked_with_source_generation(
             &ex,
             &tag_ids,
@@ -537,28 +558,40 @@ impl Engine {
             self.rejected_class_d += 1;
             return Ok(UpsertOutcome::RejectedClassD);
         }
+        // Reserve before the WAL so replay can reinstall this exact mutation
+        // generation rather than minting a newer one after restart.
+        let source_generation = self.allocate_source_generation();
         // WAL (durability before visibility) — one frame for both halves. An
         // accepted class-D upsert uses its own op code (WAL v5, ADR-068): replaying
         // a legacy logged-but-rejected op-4 frame as accepted would not just
         // resurrect the new version, it would tombstone the acknowledged-live prior
         // one — a false negative.
         if let Some(ref mut wal) = self.wal {
-            let appended = match (class == crate::compile::CostClass::D, rank) {
-                (true, Some(values)) => {
-                    wal.append_upsert_class_d_ranked(logical, version, text, tags, values.priority)
-                }
-                (false, Some(values)) => {
-                    wal.append_upsert_ranked(logical, version, text, tags, values.priority)
-                }
-                (true, None) => wal.append_upsert_class_d(logical, version, text, tags),
-                (false, None) => wal.append_upsert(logical, version, text, tags),
-            };
+            let appended = wal.append_upsert_with_source_generation(
+                logical,
+                version,
+                text,
+                tags,
+                rank.map(|values| values.priority),
+                source_generation,
+                class == crate::compile::CostClass::D,
+            );
             if let Err(e) = appended {
                 self.wal_healthy = false;
                 return Err(crate::error::WriteError::Wal(e));
             }
         }
-        let outcome = self.apply_upsert(&ex, text, logical, version, tags, rank, true, true);
+        let outcome = self.apply_upsert(
+            &ex,
+            text,
+            logical,
+            version,
+            tags,
+            rank,
+            source_generation,
+            true,
+            true,
+        );
         if matches!(
             outcome,
             UpsertOutcome::Created(_) | UpsertOutcome::Updated { .. }
@@ -583,6 +616,9 @@ impl Engine {
     /// false negative. A rejected new version leaves the old copies live. No WAL
     /// involvement (the caller logged or is replaying).
     ///
+    /// `source_generation` is reserved before the live WAL append and decoded
+    /// verbatim on replay, coupling this exact row to the same source mutation.
+    ///
     /// `tombstone_in_segments` separates the two state domains at replay
     /// (ADR-067): the MEMTABLE is WAL-truth — its prior copies are recreated by
     /// earlier replayed frames, so this funnel must always re-tombstone them —
@@ -601,6 +637,7 @@ impl Engine {
         version: u32,
         tags: &[(String, String)],
         rank: Option<crate::rank::RankValues>,
+        source_generation: u64,
         tombstone_in_segments: bool,
         accept_class_d: bool,
     ) -> UpsertOutcome {
@@ -634,7 +671,6 @@ impl Engine {
             accept_class_d,
             ..self.config.compile_knobs()
         };
-        let source_generation = self.allocate_source_generation();
         let Some(added) = Arc::make_mut(&mut self.memtable)
             .add_compiled_ranked_with_source_generation(
                 ex,
@@ -694,6 +730,7 @@ impl Engine {
         version: u32,
         tags: &[(String, String)],
         rank: Option<crate::rank::RankValues>,
+        source_generation: Option<u64>,
         tombstone_in_segments: bool,
         class_d_accepted: bool,
     ) {
@@ -703,6 +740,7 @@ impl Engine {
                 let dict = Arc::make_mut(&mut self.dict);
                 extract(&ast, &self.norm, dict, &mut lc)
             };
+            let source_generation = self.replay_source_generation(source_generation);
             self.apply_upsert(
                 &ex,
                 text,
@@ -710,6 +748,7 @@ impl Engine {
                 version,
                 tags,
                 rank,
+                source_generation,
                 tombstone_in_segments,
                 class_d_accepted,
             );
@@ -1201,6 +1240,8 @@ impl Engine {
     /// a legacy op-0 frame replays under the old reject gate, because a pre-v5
     /// binary logged BEFORE classifying and may have acknowledged the write as
     /// `RejectedClassD`.
+    // These arguments intentionally mirror the decoded insert-shaped WAL frame.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::segment) fn replay_insert(
         &mut self,
         text: &str,
@@ -1208,6 +1249,7 @@ impl Engine {
         version: u32,
         tags: &[(String, String)],
         rank: Option<crate::rank::RankValues>,
+        source_generation: Option<u64>,
         class_d_accepted: bool,
     ) {
         if let Ok(ast) = crate::dsl::parse(text) {
@@ -1222,7 +1264,7 @@ impl Engine {
                 accept_class_d: class_d_accepted,
                 ..self.config.compile_knobs()
             };
-            let source_generation = self.allocate_source_generation();
+            let source_generation = self.replay_source_generation(source_generation);
             if let Some(added) = Arc::make_mut(&mut self.memtable)
                 .add_compiled_ranked_with_source_generation(
                     &ex,

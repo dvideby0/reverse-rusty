@@ -157,8 +157,12 @@ misreporting the live document as a 404. The same fail-loud rule applies when fo
 metadata disagrees with the greatest live exact generation. Resolution uses that greatest generation
 across the memtable and base segments, so a supported additive bulk write after a live insert still
 reads the newer source even though it resides in a base segment. The generation check catches a stale
-sidecar even when both writes used the default version `1`. `HEAD` still returns **200** in either case
-because existence does not require source materialization.
+sidecar even when both writes used the default version `1`. WAL v7 preserves that ordering across
+restart: replay reinstalls the frame's original generation and cannot overwrite a later same-id bulk
+source. A vocabulary update also refuses before changing the live normalizer when the source store
+does not cover every distinct live exact id, so a partial sidecar cannot turn a rebuild into data
+loss. `HEAD` still returns **200** in either source-error case because existence does not require
+source materialization.
 
 `sources.dat` v2 now appends a backward-readable metadata footer while leaving the original query
 index/blob intact, so query-only hit enrichment remains lazy and old binaries still read query text.

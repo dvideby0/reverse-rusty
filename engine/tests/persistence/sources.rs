@@ -388,6 +388,97 @@ fn same_version_stale_source_sidecar_fails_loud_after_reopen() {
 }
 
 #[test]
+fn live_then_bulk_same_id_keeps_newer_source_across_reopen_and_rebuild() {
+    let dir = test_dir("sources_live_bulk_reopen");
+    let cfg = || EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), cfg());
+        engine
+            .try_insert_live_with_tags(
+                "1994 topps",
+                7,
+                1,
+                &[("status".to_string(), "old".to_string())],
+            )
+            .expect("live insert");
+        let rows = [(7, "1995 fleer".to_string())];
+        let tags = [vec![("status".to_string(), "new".to_string())]];
+        let (report, _) = engine
+            .try_bulk_ingest_detailed_with_tags(&rows, &tags)
+            .expect("later bulk commit");
+        assert_eq!(report.ingested, 1);
+        assert_eq!(
+            engine
+                .snapshot()
+                .get_query_document(7)
+                .expect("newest live document")
+                .query(),
+            "1995 fleer"
+        );
+        // Crash/drop without flushing the older WAL-backed memtable row.
+    }
+
+    let mut reopened = Engine::open(make_norm(), cfg()).expect("reopen");
+    let document = reopened
+        .snapshot()
+        .get_query_document(7)
+        .expect("bulk source must still pair with the newer base exact row");
+    assert_eq!(document.query(), "1995 fleer");
+    assert_eq!(document.tags(), [("status".to_string(), "new".to_string())]);
+
+    reopened
+        .set_vocab(reverse_rusty::vocab::Vocab::default())
+        .expect("coherent reopened corpus remains rebuildable");
+    assert_eq!(reopened.recompile_stale_segments(), 1);
+    assert!(match_ids(&reopened, "1995 fleer").contains(&7));
+    assert!(
+        !match_ids(&reopened, "1994 topps").contains(&7),
+        "the older replayed source must not replace the bulk document during rebuild"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn missing_source_store_blocks_vocab_change_without_dropping_live_rows() {
+    let dir = test_dir("sources_missing_vocab_guard");
+    let cfg = || EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), cfg());
+        engine
+            .try_insert_live("1995 fleer", 7, 1)
+            .expect("live insert");
+        engine.flush();
+    }
+    std::fs::remove_file(dir.join("sources.dat")).expect("remove source store");
+
+    let mut reopened = Engine::open(make_norm(), cfg()).expect("reopen");
+    assert!(match_ids(&reopened, "1995 fleer").contains(&7));
+    let epoch = reopened.vocab_epoch();
+    let error = reopened
+        .set_vocab(reverse_rusty::vocab::Vocab::default())
+        .expect_err("a partial rebuild corpus must fail before changing the normalizer");
+    assert!(
+        error.to_string().contains("logical id 7"),
+        "error must identify the uncovered live row: {error}"
+    );
+    assert_eq!(reopened.vocab_epoch(), epoch);
+    assert!(!reopened.has_stale_segments());
+    assert!(
+        match_ids(&reopened, "1995 fleer").contains(&7),
+        "a rejected vocabulary change must leave acknowledged matching state intact"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn lazy_overlay_insert_and_tombstone() {
     use reverse_rusty::storage::SourceStore;
     let dir = test_dir("lazy_overlay");
