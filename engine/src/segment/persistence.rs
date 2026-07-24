@@ -142,10 +142,11 @@ impl Engine {
 
         // Past the commit point — the match data is durable. Publish source text.
         for source in accepted {
-            self.query_store.insert_document_with_status(
+            self.query_store.insert_document_with_generation_and_status(
                 source.logical,
                 source.text,
                 source.version,
+                source.source_generation,
                 &source.tags,
                 source.tags_known,
             );
@@ -272,10 +273,19 @@ impl Engine {
                 BaseSegment::Mmap(m) => m.carries_hot_fence(),
                 BaseSegment::Memory(seg) => seg.has_hot_entries(),
             });
+            // Segment v8 carries the source/exact generation used by point reads.
+            // Standalone recovery skips an unsupported segment, so propagate the
+            // capability to manifest v6 and force an older binary to refuse the
+            // corpus before it can silently serve a partial index.
+            let source_generation_fence = self.segments.iter().any(|s| match s.as_ref() {
+                BaseSegment::Mmap(m) => m.carries_source_generation_fence(),
+                BaseSegment::Memory(seg) => seg.max_source_generation() != 0,
+            });
             let manifest = crate::storage::Manifest {
                 segment_files,
                 class_d_fence,
                 hot_fence,
+                source_generation_fence,
                 hot_anchor_theta: self.config.hot_anchor_threshold,
                 next_seg_id: self.next_seg_id,
                 dict_data: crate::storage::serialize_dict(&self.dict),

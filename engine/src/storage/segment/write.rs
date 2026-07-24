@@ -16,7 +16,8 @@ use crate::segment::Segment;
 use super::super::{crc32, durable_rename, write_u32, write_u64};
 use super::{
     align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_HOT,
-    FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK, HEADER_SIZE, MAGIC,
+    FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK, FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE,
+    MAGIC,
 };
 
 /// Build a frozen hash table + posting blob from an in-memory CandidateIndex.
@@ -145,13 +146,28 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     // ---- Exact section ----
     pad_to_8(&mut f)?;
     let exact_off = f.stream_position()?;
-    let has_ownership = seg
+    let has_source_generation = seg
         .exact_store()
-        .placement_modes()
+        .source_generations()
         .iter()
-        .any(|&mode| mode != 0);
+        .any(|&generation| generation != 0);
+    // v8 is cumulative: its reader expects both the v6 priority and v7
+    // ownership columns before the appended source-generation column. Emit
+    // standalone/zero values when source fencing is the only new capability.
+    let has_ownership = has_source_generation
+        || seg
+            .exact_store()
+            .placement_modes()
+            .iter()
+            .any(|&mode| mode != 0);
     let has_priority = has_ownership || seg.exact_store().priorities().iter().any(|&v| v != 0);
-    write_exact_section(&mut f, seg, has_priority, has_ownership)?;
+    write_exact_section(
+        &mut f,
+        seg,
+        has_priority,
+        has_ownership,
+        has_source_generation,
+    )?;
 
     // ---- Main index ----
     pad_to_8(&mut f)?;
@@ -231,7 +247,9 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
         .any(|c| matches!(c, crate::compile::CostClass::D));
     write_u32(
         &mut f,
-        if has_ownership {
+        if has_source_generation {
+            FORMAT_VERSION_SOURCE_GENERATION
+        } else if has_ownership {
             FORMAT_VERSION_OWNERSHIP
         } else if has_priority {
             FORMAT_VERSION_RANK
@@ -274,6 +292,7 @@ fn write_exact_section(
     seg: &Segment,
     write_priority: bool,
     write_ownership: bool,
+    write_source_generation: bool,
 ) -> io::Result<()> {
     let exact = seg.exact_store();
     write_u64_array(w, exact.req_masks())?;
@@ -301,6 +320,9 @@ fn write_exact_section(
         write_u32_array(w, exact.placement_offs())?;
         write_u32_array(w, exact.placement_lens())?;
         write_u32_array(w, exact.placement_blobs())?;
+    }
+    if write_source_generation {
+        write_u64_array(w, exact.source_generations())?;
     }
     Ok(())
 }

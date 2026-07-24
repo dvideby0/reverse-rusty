@@ -20,6 +20,27 @@ fn invalid_input(e: &crate::error::NormalizerError) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
 }
 
+fn seed_next_source_generation(
+    segments: &[Arc<BaseSegment>],
+    query_store: &SourceStore,
+) -> std::io::Result<u64> {
+    let exact_max = segments
+        .iter()
+        .map(|segment| segment.max_source_generation())
+        .max()
+        .unwrap_or(0);
+    exact_max
+        .max(query_store.max_source_generation())
+        .checked_add(1)
+        .filter(|&generation| generation != 0)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "source generation space exhausted",
+            )
+        })
+}
+
 /// Replay the WAL tail (entries after the last flush checkpoint) into a constructed
 /// engine — the ONE recovery loop, shared by the manifest path and the fresh
 /// (no-manifest-yet) path so ADR-013's contract ("every acknowledged mutation
@@ -297,6 +318,7 @@ impl Engine {
                     Arc::new(crate::storage::SourceStore::empty(config.retain_source))
                 }
             };
+        let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
 
         let mut engine = Engine {
             config: Arc::new(config),
@@ -318,6 +340,7 @@ impl Engine {
             pending_events,
             wal,
             next_seg_id: manifest.next_seg_id,
+            next_source_generation,
             wal_healthy: true,
             persistence_healthy: skipped_segments == 0,
             skipped_segments,
@@ -385,6 +408,7 @@ impl Engine {
             &dir.join("sources.dat"),
             config.retain_source,
         )?);
+        let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
         Ok(Engine {
             config: Arc::new(config),
             norm,
@@ -406,6 +430,7 @@ impl Engine {
             pending_events: Vec::new(),
             wal: None,
             next_seg_id,
+            next_source_generation,
             wal_healthy: true,
             persistence_healthy: true,
             skipped_segments: 0,

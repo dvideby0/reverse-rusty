@@ -37,6 +37,7 @@ use crate::cluster::shard::ShardError;
 type LiveTaggedMetadata = (
     String,
     u32,
+    u64,
     Vec<(String, String)>,
     Vec<crate::tagdict::TagId>,
     crate::rank::RankValues,
@@ -178,18 +179,37 @@ impl ClusterEngine {
     ) -> Result<Vec<crate::cluster::shard::LiveTaggedQuery>, ShardError> {
         let mut live: BTreeMap<u64, LiveTaggedMetadata> = BTreeMap::new();
         for s in &self.shards {
-            for (logical, dsl, version, raw_tags, tag_ids, rank, placement) in
+            for (logical, dsl, version, source_generation, raw_tags, tag_ids, rank, placement) in
                 s.live_sources_tagged()?
             {
-                live.entry(logical)
-                    .or_insert((dsl, version, raw_tags, tag_ids, rank, placement));
+                live.entry(logical).or_insert((
+                    dsl,
+                    version,
+                    source_generation,
+                    raw_tags,
+                    tag_ids,
+                    rank,
+                    placement,
+                ));
             }
         }
         Ok(live
             .into_iter()
             .map(
-                |(logical, (dsl, version, raw_tags, tag_ids, rank, placement))| {
-                    (logical, dsl, version, raw_tags, tag_ids, rank, placement)
+                |(
+                    logical,
+                    (dsl, version, source_generation, raw_tags, tag_ids, rank, placement),
+                )| {
+                    (
+                        logical,
+                        dsl,
+                        version,
+                        source_generation,
+                        raw_tags,
+                        tag_ids,
+                        rank,
+                        placement,
+                    )
                 },
             )
             .collect())

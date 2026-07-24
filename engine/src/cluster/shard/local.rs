@@ -454,7 +454,10 @@ impl LocalShard {
             // `num_live_queries` (index-side, tombstone-aware) — NOT `num_queries`, which counts
             // physical entries including dead copies and would spuriously refuse after any
             // in-memtable delete.
-            (eng.live_source_documents_tagged(), eng.num_live_queries())
+            let entries = eng
+                .live_source_documents_tagged()
+                .map_err(ShardError::SourceUnavailable)?;
+            (entries, eng.num_live_queries())
         };
         if entries.len() != live {
             return Err(ShardError::Config(format!(
@@ -467,7 +470,16 @@ impl LocalShard {
         let mut encoded: Vec<Vec<u8>> = entries
             .iter()
             .map(
-                |(logical, dsl, version, raw_tags, tag_ids, rank, placement)| {
+                |(
+                    logical,
+                    dsl,
+                    version,
+                    _source_generation,
+                    raw_tags,
+                    tag_ids,
+                    rank,
+                    placement,
+                )| {
                     let raw_tag_bytes: usize = raw_tags
                         .iter()
                         .map(|(key, value)| 8 + key.len() + value.len())
@@ -922,7 +934,9 @@ impl Shard for LocalShard {
     }
 
     fn live_sources_tagged(&self) -> Result<Vec<super::LiveTaggedQuery>, ShardError> {
-        Ok(self.lock().live_source_documents_tagged())
+        self.lock()
+            .live_source_documents_tagged()
+            .map_err(ShardError::SourceUnavailable)
     }
 
     fn is_local(&self) -> bool {

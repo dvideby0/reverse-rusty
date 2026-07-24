@@ -11,6 +11,16 @@ use crate::segment::UpsertOutcome;
 use crate::tagdict::TagId;
 
 impl Engine {
+    /// Reserve one non-zero internal source generation. Gaps are intentional:
+    /// compilation or durable-commit failure may consume a reservation, but a
+    /// generation is never reused during the engine's lifetime. Reopen seeds the
+    /// counter above every generation found in either durable domain.
+    pub(in crate::segment) fn allocate_source_generation(&mut self) -> u64 {
+        let generation = self.next_source_generation.max(1);
+        self.next_source_generation = generation.wrapping_add(1).max(1);
+        generation
+    }
+
     /// Reject a query whose tag set exceeds `config.max_tags` (ADR-049) BEFORE any
     /// durable write, so an over-large set never reaches the SoA tag column (whose
     /// per-query count is a `u16` — truncation there would silently drop a real tag
@@ -235,7 +245,17 @@ impl Engine {
                 continue;
             }
             let rank = self.legacy_rank_values(qtag_ids);
-            match seg.add_compiled_ranked(ex, qtag_ids, &self.dict, *logical, 1, rank, knobs) {
+            let source_generation = self.allocate_source_generation();
+            match seg.add_compiled_ranked_with_source_generation(
+                ex,
+                qtag_ids,
+                &self.dict,
+                *logical,
+                1,
+                rank,
+                source_generation,
+                knobs,
+            ) {
                 None => {
                     self.rejected_class_d += 1;
                     report.rejected_class_d += 1;
@@ -246,6 +266,7 @@ impl Engine {
                         *logical,
                         (*text).to_string(),
                         1,
+                        source_generation,
                         tags.get(*idx).cloned().unwrap_or_default(),
                     ));
                     report.ingested += 1;
@@ -409,12 +430,26 @@ impl Engine {
             accept_class_d: true, // gated pre-WAL above (ADR-068)
             ..self.config.compile_knobs()
         };
-        let outcome = Arc::make_mut(&mut self.memtable)
-            .add_compiled_ranked(&ex, &tag_ids, &self.dict, logical, version, rank, knobs);
+        let source_generation = self.allocate_source_generation();
+        let outcome = Arc::make_mut(&mut self.memtable).add_compiled_ranked_with_source_generation(
+            &ex,
+            &tag_ids,
+            &self.dict,
+            logical,
+            version,
+            rank,
+            source_generation,
+            knobs,
+        );
         if let Some(added) = outcome {
             self.record_compiled(&added);
-            self.query_store
-                .insert_document(logical, text.to_string(), version, tags);
+            self.query_store.insert_document_with_generation(
+                logical,
+                text.to_string(),
+                version,
+                source_generation,
+                tags,
+            );
             self.maybe_flush();
             Ok(InsertOutcome::Inserted(added.local))
         } else {
@@ -599,8 +634,18 @@ impl Engine {
             accept_class_d,
             ..self.config.compile_knobs()
         };
+        let source_generation = self.allocate_source_generation();
         let Some(added) = Arc::make_mut(&mut self.memtable)
-            .add_compiled_ranked(ex, &tag_ids, &self.dict, logical, version, rank, knobs)
+            .add_compiled_ranked_with_source_generation(
+                ex,
+                &tag_ids,
+                &self.dict,
+                logical,
+                version,
+                rank,
+                source_generation,
+                knobs,
+            )
         else {
             // The new version is class D and not marked accepted (a legacy op-4
             // frame on replay, or an effectively empty query): leave the prior
@@ -620,8 +665,13 @@ impl Engine {
                 Arc::make_mut(seg).tombstone(local);
             }
         }
-        self.query_store
-            .insert_document(logical, text.to_string(), version, tags);
+        self.query_store.insert_document_with_generation(
+            logical,
+            text.to_string(),
+            version,
+            source_generation,
+            tags,
+        );
         if replaced == 0 {
             UpsertOutcome::Created(new_local)
         } else {
@@ -908,7 +958,17 @@ impl Engine {
                 .copied()
                 .flatten()
                 .unwrap_or_else(|| self.legacy_rank_values(qtag_ids));
-            match seg.add_compiled_ranked(ex, qtag_ids, &self.dict, *logical, 1, rank, knobs) {
+            let source_generation = self.allocate_source_generation();
+            match seg.add_compiled_ranked_with_source_generation(
+                ex,
+                qtag_ids,
+                &self.dict,
+                *logical,
+                1,
+                rank,
+                source_generation,
+                knobs,
+            ) {
                 None => {
                     self.rejected_class_d += 1;
                     report.rejected_class_d += 1;
@@ -920,6 +980,7 @@ impl Engine {
                         *logical,
                         (*text).to_string(),
                         1,
+                        source_generation,
                         tags.get(*idx).cloned().unwrap_or_default(),
                     ));
                     report.ingested += 1;
@@ -1008,7 +1069,8 @@ impl Engine {
             if rank.priority == 0 {
                 rank = self.cluster_rank_values(&item.tags, &tag_ids);
             }
-            if let Some(added) = seg.add_compiled_ranked_placed(
+            let source_generation = self.allocate_source_generation();
+            if let Some(added) = seg.add_compiled_ranked_placed_with_source_generation(
                 &item.ex,
                 &tag_ids,
                 &self.dict,
@@ -1016,6 +1078,7 @@ impl Engine {
                 item.version,
                 rank,
                 &item.placement,
+                source_generation,
                 self.config.compile_knobs(),
             ) {
                 self.record_compiled(&added);
@@ -1023,6 +1086,7 @@ impl Engine {
                     item.logical,
                     item.dsl.clone(),
                     item.version,
+                    source_generation,
                     source_tags,
                     source_tags_known,
                 ));
@@ -1036,10 +1100,11 @@ impl Engine {
         self.seal_and_push(seg);
         let accepted_any = !accepted.is_empty();
         for source in accepted {
-            self.query_store.insert_document_with_status(
+            self.query_store.insert_document_with_generation_and_status(
                 source.logical,
                 source.text,
                 source.version,
+                source.source_generation,
                 &source.tags,
                 source.tags_known,
             );
@@ -1093,20 +1158,28 @@ impl Engine {
         // `intern_tags`. Empty ⇒ empty slice ⇒ byte-identical to the pre-tag `&[]` path.
         let tag_ids = self.resolve_tags_readonly(tags);
         let rank = self.cluster_rank_values(tags, &tag_ids);
-        let outcome = Arc::make_mut(&mut self.memtable).add_compiled_ranked_placed(
-            ex,
-            &tag_ids,
-            &self.dict,
-            logical,
-            version,
-            rank,
-            placement,
-            self.config.compile_knobs(),
-        );
+        let source_generation = self.allocate_source_generation();
+        let outcome = Arc::make_mut(&mut self.memtable)
+            .add_compiled_ranked_placed_with_source_generation(
+                ex,
+                &tag_ids,
+                &self.dict,
+                logical,
+                version,
+                rank,
+                placement,
+                source_generation,
+                self.config.compile_knobs(),
+            );
         if let Some(added) = outcome {
             self.record_compiled(&added);
-            self.query_store
-                .insert_document(logical, text.to_string(), version, tags);
+            self.query_store.insert_document_with_generation(
+                logical,
+                text.to_string(),
+                version,
+                source_generation,
+                tags,
+            );
             Some(added.local)
         } else {
             self.rejected_class_d += 1;
@@ -1149,12 +1222,27 @@ impl Engine {
                 accept_class_d: class_d_accepted,
                 ..self.config.compile_knobs()
             };
+            let source_generation = self.allocate_source_generation();
             if let Some(added) = Arc::make_mut(&mut self.memtable)
-                .add_compiled_ranked(&ex, &tag_ids, &self.dict, logical, version, rank, knobs)
+                .add_compiled_ranked_with_source_generation(
+                    &ex,
+                    &tag_ids,
+                    &self.dict,
+                    logical,
+                    version,
+                    rank,
+                    source_generation,
+                    knobs,
+                )
             {
                 self.record_compiled(&added);
-                self.query_store
-                    .insert_document(logical, text.to_string(), version, tags);
+                self.query_store.insert_document_with_generation(
+                    logical,
+                    text.to_string(),
+                    version,
+                    source_generation,
+                    tags,
+                );
             }
         }
     }

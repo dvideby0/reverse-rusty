@@ -350,6 +350,7 @@ mod tests {
             segment_files: files,
             class_d_fence: false,
             hot_fence: false,
+            source_generation_fence: false,
             hot_anchor_theta: 0,
             next_seg_id: 1,
             dict_data: Vec::new(),

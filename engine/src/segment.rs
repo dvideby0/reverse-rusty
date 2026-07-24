@@ -482,6 +482,7 @@ pub(in crate::segment) struct AcceptedSource {
     logical: u64,
     text: String,
     version: u32,
+    source_generation: u64,
     tags: Vec<(String, String)>,
     tags_known: bool,
 }
@@ -491,12 +492,14 @@ impl AcceptedSource {
         logical: u64,
         text: String,
         version: u32,
+        source_generation: u64,
         tags: Vec<(String, String)>,
     ) -> Self {
         Self {
             logical,
             text,
             version,
+            source_generation,
             tags,
             tags_known: true,
         }
@@ -506,6 +509,7 @@ impl AcceptedSource {
         logical: u64,
         text: String,
         version: u32,
+        source_generation: u64,
         tags: Vec<(String, String)>,
         tags_known: bool,
     ) -> Self {
@@ -513,6 +517,7 @@ impl AcceptedSource {
             logical,
             text,
             version,
+            source_generation,
             tags,
             tags_known,
         }
@@ -534,11 +539,13 @@ pub type LiveTaggedSource = (
 );
 
 /// Internal source-document gather used by cluster rebuilds and content
-/// fingerprints. It extends [`LiveTaggedSource`] with canonical raw tags.
+/// fingerprints. It extends [`LiveTaggedSource`] with the internal source
+/// generation and canonical raw tags.
 pub(crate) type LiveSourceDocument = (
     u64,
     String,
     u32,
+    u64,
     Vec<(String, String)>,
     Vec<crate::tagdict::TagId>,
     crate::rank::RankValues,
@@ -732,6 +739,9 @@ pub struct Engine {
     wal: Option<Wal>,
     /// Next segment file sequence number (for naming: seg_000001.seg, etc.)
     next_seg_id: u64,
+    /// Next non-zero internal generation used to couple an exact row to its
+    /// canonical source document. Independent of caller-visible `_version`.
+    next_source_generation: u64,
     /// Health flag: false if a WAL write has failed (durability degraded).
     pub wal_healthy: bool,
     /// Health flag: false if a manifest or segment file write has failed.

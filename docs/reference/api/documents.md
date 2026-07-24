@@ -123,7 +123,8 @@ whether a tag arrived under `tags` or as an ES-style sibling field.
 
 Reads are real-time: every acknowledged write publishes a new snapshot before returning. Reverse
 Rusty has no REST-visible equivalent of Elasticsearch's `_seq_no` or `_primary_term`, so it omits
-those fields instead of inventing concurrency tokens.
+those fields instead of inventing concurrency tokens. Internally, a separate persisted source
+generation changes on every accepted write; it is not a concurrency API and is never returned.
 
 The common ES/OS source projection parameters are supported (comma-separated values and `*`/`?`
 wildcards):
@@ -153,14 +154,16 @@ misreports an unavailable lookup as `found: false`.
 If the match index has a live row but its source sidecar is missing, the request fails with
 `source_unavailable` (**500** in single-node mode, **502** through a local coordinator) rather than
 misreporting the live document as a 404. The same fail-loud rule applies when footer-backed source
-metadata carries a different version from the live exact row. `HEAD` still returns **200** in either
-case because existence does not require source materialization.
+metadata carries a different client version or internal source generation from the live exact row.
+That catches a stale sidecar even when both writes used the default version `1`. `HEAD` still returns
+**200** in either case because existence does not require source materialization.
 
 `sources.dat` v2 now appends a backward-readable metadata footer while leaving the original query
 index/blob intact, so query-only hit enrichment remains lazy and old binaries still read query text.
-v1 and original-v2 files open automatically. Dense legacy tags are reconstructed from the persisted
-tag dictionary; the rare pre-footer document carrying only post-freeze synthetic tags cannot be
-reversed, so its response includes
+Metadata-footer v2 stores the internal generation; footer v1, source-file v1, and original-v2 files
+open automatically as generation-zero legacy data and can pair only with a generation-zero pre-v8
+segment. Dense legacy tags are reconstructed from the persisted tag dictionary; the rare pre-footer
+document carrying only post-freeze synthetic tags cannot be reversed, so its response includes
 `"_source_metadata":{"complete":false,...}` until the document is re-PUT. This is explicit rather
 than silently presenting incomplete metadata as the original source.
 

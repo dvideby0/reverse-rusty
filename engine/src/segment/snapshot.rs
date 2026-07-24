@@ -586,22 +586,37 @@ impl EngineSnapshot {
     /// can fail loud rather than return incomplete metadata.
     pub fn get_query_document(&self, logical_id: u64) -> Option<crate::storage::StoredSource> {
         let mut source = self.query_store.get_document(logical_id)?;
-        let (version, tag_ids) = self.source_metadata_for_logical(logical_id)?;
-        if source.tags_known() {
-            // SourceStore is shared behind interior mutability so an already-published
-            // snapshot can briefly observe the next write's source before that write's
-            // exact-store snapshot is published. A failed best-effort sidecar write can
-            // produce the inverse mismatch after reopen. Never combine those generations:
-            // a footer-backed source has an authoritative write version, so mismatch is
-            // source unavailability and the HTTP layer fails loud.
-            if source.version() != version {
+        let (version, source_generation, tag_ids) = self.source_metadata_for_logical(logical_id)?;
+        if source.metadata_known() {
+            // SourceStore is shared behind interior mutability, so an older
+            // published snapshot can observe a later source mutation. The
+            // caller-visible version may repeat; the internal generation cannot.
+            // A durable sidecar failure creates the inverse mismatch after reopen.
+            // Never combine either pair of generations.
+            if source.version() != version || source.source_generation() != source_generation {
                 return None;
+            }
+            if !source.tags_known() {
+                let recovered_tags = tag_ids
+                    .iter()
+                    .map(|&id| {
+                        self.tag_dict
+                            .key_value(id)
+                            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                    })
+                    .collect::<Option<Vec<_>>>();
+                source.recover_missing_tags(recovered_tags);
             }
             return Some(source);
         }
         // Footer-less v1/original-v2 sources carry neither trustworthy version nor raw
-        // tags. Preserve their compatibility path by inheriting the newest live exact
-        // row, reconstructing tags only when every dense id is reversible.
+        // tags. They may pair only with a pre-v8 exact row: a non-zero exact
+        // generation proves this is a stale sidecar and must fail loud.
+        if source_generation != 0 || source.source_generation() != 0 {
+            return None;
+        }
+        // Preserve the true legacy compatibility path by inheriting the newest
+        // live exact row, reconstructing tags only when every id is reversible.
         let recovered_tags = tag_ids
             .iter()
             .map(|&id| {
@@ -610,7 +625,7 @@ impl EngineSnapshot {
                     .map(|(key, value)| (key.to_owned(), value.to_owned()))
             })
             .collect::<Option<Vec<_>>>();
-        source.recover_legacy_metadata(version, recovered_tags);
+        source.recover_legacy_metadata(version, source_generation, recovered_tags);
         Some(source)
     }
 
@@ -1014,11 +1029,12 @@ impl EngineSnapshot {
     fn source_metadata_for_logical(
         &self,
         logical_id: u64,
-    ) -> Option<(u32, &[crate::tagdict::TagId])> {
+    ) -> Option<(u32, u64, &[crate::tagdict::TagId])> {
         for &local in self.memtable.locals_for_logical(logical_id).iter().rev() {
             if self.memtable.is_alive(local) {
                 return Some((
                     self.memtable.version_of(local),
+                    self.memtable.source_generation_of(local),
                     self.memtable.tags_of(local),
                 ));
             }
@@ -1026,7 +1042,11 @@ impl EngineSnapshot {
         for seg in self.segments.iter().rev() {
             for &local in seg.locals_for_logical(logical_id).iter().rev() {
                 if seg.is_alive(local) {
-                    return Some((seg.version_of(local), seg.tags_of(local)));
+                    return Some((
+                        seg.version_of(local),
+                        seg.source_generation_of(local),
+                        seg.tags_of(local),
+                    ));
                 }
             }
         }
@@ -1035,7 +1055,7 @@ impl EngineSnapshot {
 
     fn tags_for_logical(&self, logical_id: u64) -> Option<&[crate::tagdict::TagId]> {
         self.source_metadata_for_logical(logical_id)
-            .map(|(_, tags)| tags)
+            .map(|(_, _, tags)| tags)
     }
 
     /// Newest-live typed rank values and tags for a logical id. The same reverse
@@ -1472,12 +1492,12 @@ mod source_document_tests {
         // publishing a replacement snapshot to reproduce the write/source ordering
         // window: old exact row, new source document.
         engine
-            .try_upsert_live_with_tags("1995 fleer", 7, 2, &[("status".into(), "new".into())])
+            .try_upsert_live_with_tags("1995 fleer", 7, 1, &[("status".into(), "new".into())])
             .expect("replacement upsert");
 
         assert!(
             old_snapshot.get_query_document(7).is_none(),
-            "a point read must fail loud instead of combining source v2 with exact row v1"
+            "the internal generation must reject a newer source even when both client versions are 1"
         );
         assert!(
             old_snapshot.has_live_query(7),
@@ -1488,7 +1508,7 @@ mod source_document_tests {
             .snapshot()
             .get_query_document(7)
             .expect("fresh generation is coherent");
-        assert_eq!(fresh.version(), 2);
+        assert_eq!(fresh.version(), 1);
         assert_eq!(fresh.query(), "1995 fleer");
         assert_eq!(fresh.tags(), [("status".into(), "new".into())]);
     }

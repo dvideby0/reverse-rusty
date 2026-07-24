@@ -476,10 +476,11 @@ fn legacy_rejected_class_d_frames_replay_under_the_old_gate() {
 }
 
 /// The ROLLBACK fence (codex P1 on the first cut of ADR-068): a segment holding a
-/// class-D always-candidate is written as format v4 (layout-identical to v3), so a
-/// pre-ADR-068 reader — which never probes the universal signature — fails loudly
-/// ("unsupported format version") instead of serving the file with those queries
-/// silently unmatchable. Class-D-free segments keep writing v3 byte-identically.
+/// class-D always-candidate carries at least format v4, so a pre-ADR-068 reader —
+/// which never probes the universal signature — fails loudly ("unsupported format
+/// version") instead of serving the file with those queries silently unmatchable.
+/// Later cumulative formats may outrank v4; the content-derived fence still
+/// distinguishes class-D-bearing and class-D-free segments.
 #[test]
 fn class_d_segments_write_the_v4_rollback_fence() {
     use reverse_rusty::storage::MmapSegment;
@@ -494,7 +495,8 @@ fn class_d_segments_write_the_v4_rollback_fence() {
         u32::from_le_bytes(bytes[4..8].try_into().expect("version word"))
     };
 
-    // A class-D-bearing segment → v4.
+    // A class-D-bearing segment carries at least the v4 fence. Modern
+    // engine-owned writes use v8 because they also carry source generations.
     let dir_d = tempdir();
     {
         let mut cfg = lane_on();
@@ -504,21 +506,37 @@ fn class_d_segments_write_the_v4_rollback_fence() {
         eng.insert_live("-auto", 2, 1);
         eng.flush();
     }
-    assert_eq!(
-        seg_version(&dir_d),
-        4,
-        "class-D segment must carry the fence"
+    assert!(
+        seg_version(&dir_d) >= 4,
+        "class-D segment must carry at least the v4 fence"
+    );
+    let class_d_seg = std::fs::read_dir(dir_d.join("segments"))
+        .expect("read segments dir")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "seg"))
+        .expect("segment file");
+    assert!(
+        MmapSegment::open(&class_d_seg)
+            .expect("open class-D segment")
+            .carries_class_d_fence(),
+        "the segment content must carry a class-D fence"
     );
     // The MANIFEST is the loud half of the fence (a pre-ADR-068 binary skips an
     // unreadable segment as corrupt + continues, but an unsupported manifest
-    // version fails Engine::open outright): a class-D-bearing commit writes v4.
+    // version fails Engine::open outright): a class-D-bearing commit writes v4
+    // or a later cumulative fence.
     let manifest_version = |dir: &std::path::Path| -> u32 {
         let bytes = std::fs::read(dir.join("manifest.bin")).expect("manifest");
         u32::from_le_bytes(bytes[4..8].try_into().expect("version word"))
     };
-    assert_eq!(manifest_version(&dir_d), 4, "class-D commit ⇒ manifest v4");
+    assert!(
+        manifest_version(&dir_d) >= 4,
+        "class-D commit must carry at least manifest v4"
+    );
 
-    // A class-D-free segment → v3, byte-for-byte today's format.
+    // A class-D-free segment does not carry the content-derived fence. Its
+    // version may still be newer for unrelated cumulative capabilities.
     let dir_plain = tempdir();
     {
         let cfg = EngineConfig {
@@ -529,11 +547,17 @@ fn class_d_segments_write_the_v4_rollback_fence() {
         eng.insert_live("1990 brand", 1, 1);
         eng.flush();
     }
-    assert_eq!(seg_version(&dir_plain), 3, "class-D-free segments stay v3");
-    assert_eq!(
-        manifest_version(&dir_plain),
-        3,
-        "class-D-free commit keeps manifest v3 byte-identically"
+    let plain_seg = std::fs::read_dir(dir_plain.join("segments"))
+        .expect("read segments dir")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "seg"))
+        .expect("segment file");
+    assert!(
+        !MmapSegment::open(&plain_seg)
+            .expect("open class-D-free segment")
+            .carries_class_d_fence(),
+        "class-D-free segment must not report the content-derived fence"
     );
 
     // Our own reader applies the same fence to future versions it doesn't know.
@@ -544,7 +568,7 @@ fn class_d_segments_write_the_v4_rollback_fence() {
         .find(|p| p.extension().is_some_and(|x| x == "seg"))
         .expect("segment file");
     let mut bytes = std::fs::read(&seg_path).expect("read");
-    bytes[4..8].copy_from_slice(&8u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&9u32.to_le_bytes());
     // Re-seal the trailing whole-file CRC so the version check (which runs after
     // it) is what fires.
     let body = bytes.len() - 4;

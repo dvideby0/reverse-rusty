@@ -44,6 +44,11 @@ const MAGIC: [u8; 4] = *b"PERC";
 // keep writing v3/v4 byte-identically. v6 (ADR-108) appends one signed i64
 // priority per exact row, but is written only when at least one value is non-zero;
 // old v1-v5 rows lower their cached legacy priority tag at open/compaction time.
+// v7 appends distributed ownership columns. v8 (ADR-116 hardening) appends one
+// internal `u64` source generation per exact row. New engine-owned writes use a
+// non-zero generation to prove that `_source` and the exact row came from the
+// same accepted mutation even when the caller-visible version repeats; legacy
+// rows use zero.
 const FORMAT_VERSION: u32 = 3;
 const FORMAT_VERSION_CLASS_D: u32 = 4;
 const FORMAT_VERSION_HOT: u32 = 5;
@@ -54,6 +59,10 @@ const FORMAT_VERSION_RANK: u32 = 6;
 /// v7 (ADR-109): exact section appends allocation-free distributed placement
 /// columns. Standalone segments without placement continue to write v1-v6.
 const FORMAT_VERSION_OWNERSHIP: u32 = 7;
+/// v8: exact section appends the internal source-generation column. Written
+/// whenever any row carries a non-zero generation; the version is also a
+/// rollback fence because an older reader cannot safely validate `_source`.
+const FORMAT_VERSION_SOURCE_GENERATION: u32 = 8;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -167,6 +176,43 @@ mod tests {
         (path, bytes)
     }
 
+    fn v8_segment_bytes() -> (std::path::PathBuf, Vec<u8>) {
+        let norm = crate::normalize::Normalizer::default_vocab().expect("normalizer");
+        let mut dict = crate::dict::Dict::new();
+        let mut lc = String::new();
+        let ast = crate::dsl::parse("1994 topps").expect("query");
+        let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+        dict.finalize_mask();
+        let mut segment = crate::segment::Segment::new();
+        segment
+            .add_compiled_ranked_with_source_generation(
+                &ex,
+                &[],
+                &dict,
+                99,
+                7,
+                crate::rank::RankValues::default(),
+                41,
+                crate::segment::CompileKnobs {
+                    accept_class_d: true,
+                    hot_anchor_threshold: 0,
+                    dedup_bodies: true,
+                },
+            )
+            .expect("accepted query");
+        let dir = std::env::temp_dir().join(format!(
+            "rr_segment_v8_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("source-generation.seg");
+        write_segment(&segment, &path).expect("write v8 segment");
+        let bytes = std::fs::read(&path).expect("read segment");
+        (path, bytes)
+    }
+
     #[test]
     fn v7_ownership_columns_round_trip_and_malformed_columns_fail_loud() {
         let (path, original) = v7_segment_bytes();
@@ -200,6 +246,44 @@ mod tests {
             error
                 .to_string()
                 .contains("ownership column length mismatch"),
+            "got: {error}"
+        );
+
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn v8_source_generation_round_trips_and_bad_length_fails_loud() {
+        let (path, original) = v8_segment_bytes();
+        assert_eq!(read_u32(&original, 4), FORMAT_VERSION_SOURCE_GENERATION);
+        {
+            let mmap = MmapSegment::open(&path).expect("open v8");
+            assert_eq!(mmap.source_generation(0), 41);
+            assert_eq!(mmap.max_source_generation(), 41);
+        }
+
+        let mut cursor =
+            u64::from_le_bytes(original[16..24].try_into().expect("exact offset")) as usize;
+        for width in [8usize, 8, 4, 2, 4, 4, 2, 4, 4, 2, 4, 2, 4, 4, 8] {
+            cursor = skip_array(&original, cursor, width);
+        }
+        cursor = skip_array(&original, cursor, 8); // priority
+        for width in [8usize, 4, 1, 4, 4, 4] {
+            cursor = skip_array(&original, cursor, width);
+        }
+        let source_generation_count = cursor;
+        let mut bad = original;
+        bad[source_generation_count..source_generation_count + 4]
+            .copy_from_slice(&0u32.to_le_bytes());
+        reseal(&mut bad);
+        std::fs::write(&path, bad).expect("write bad source-generation length");
+        let error = MmapSegment::open(&path).expect_err("column mismatch must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("source-generation column length mismatch"),
             "got: {error}"
         );
 

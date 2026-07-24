@@ -372,6 +372,24 @@ impl MmapSegment {
         unsafe { *self.version_arr.add(id as usize) }
     }
 
+    /// Internal source generation paired with this exact row. Pre-v8 segments
+    /// expose the reserved legacy value zero without touching an absent column.
+    #[inline]
+    pub(crate) fn source_generation(&self, id: u32) -> u64 {
+        self.mmap_slice(self.source_generation, self.source_generation_count)
+            .get(id as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn max_source_generation(&self) -> u64 {
+        self.mmap_slice(self.source_generation, self.source_generation_count)
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    }
+
     /// The sorted `TagId` slice for a local id (ADR-049) — read back for the
     /// `set_vocab` recompile. Empty for a pre-tag (v1/v2) segment.
     #[inline]
@@ -891,7 +909,7 @@ impl MmapSegment {
                 stored
             };
             let placement = self.placement(i as u32).to_owned();
-            exact.push_raw_placed(
+            exact.push_raw_placed_with_source_generation(
                 rm,
                 fm,
                 &self.req_blob()[ro..ro + rl],
@@ -908,6 +926,7 @@ impl MmapSegment {
                 log,
                 priority,
                 &placement,
+                self.source_generation(i as u32),
             );
 
             // SAFETY: `i < n == num_queries`, and `class_arr` is the

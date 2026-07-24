@@ -273,7 +273,7 @@ pub(crate) struct ShardBatchRankedMatch {
 pub(crate) type EventSink = Arc<dyn Fn(&crate::events::EngineEvent) + Send + Sync>;
 
 /// One live query as gathered for a blue/green rebuild (`set_vocab` / resize, ADR-074/109):
-/// `(logical, dsl, version, raw_tags, tag_ids, rank, placement)`. The metadata rides the gather
+/// `(logical, dsl, version, source_generation, raw_tags, tag_ids, rank, placement)`. The metadata rides the gather
 /// so the rebuild re-places each query at the version it was durably stored with (not reset to 1)
 /// and carries both read-back source tags and integer match metadata to its new shard; the old
 /// placement is available for fingerprints but a rebuild deliberately derives a fresh placement

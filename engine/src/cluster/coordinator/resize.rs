@@ -212,7 +212,9 @@ impl ClusterEngine {
         let mut extracted: Vec<RebuildExtractedQuery> = Vec::with_capacity(live.len());
         let new_dict = if Arc::ptr_eq(&new_norm, &self.norm) {
             let dict = Arc::clone(&self.dict);
-            for (logical, text, version, raw_tags, tag_ids, rank, _placement) in live {
+            for (logical, text, version, _source_generation, raw_tags, tag_ids, rank, _placement) in
+                live
+            {
                 if let Ok(ast) = crate::dsl::parse(&text) {
                     let ex = extract_readonly(&ast, &new_norm, &dict, &mut lc);
                     extracted.push((logical, ex, text, version, raw_tags, tag_ids, rank));
@@ -221,7 +223,9 @@ impl ClusterEngine {
             dict
         } else {
             let mut dict = Dict::new();
-            for (logical, text, version, raw_tags, tag_ids, rank, _placement) in live {
+            for (logical, text, version, _source_generation, raw_tags, tag_ids, rank, _placement) in
+                live
+            {
                 if let Ok(ast) = crate::dsl::parse(&text) {
                     let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
                     extracted.push((logical, ex, text, version, raw_tags, tag_ids, rank));

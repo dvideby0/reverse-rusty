@@ -290,9 +290,40 @@ fn legacy_source_recovers_live_version_and_dense_tags() {
         engine.flush();
     }
 
-    // Simulate upgrading a real v2 source-text file while retaining the newer
-    // exact segment + tag dictionary. The point read must source version/tags
-    // from the newest live row instead of lying with v2's implicit version 1.
+    // Replace the current v8 segment with the equivalent pre-generation shape:
+    // public Segment builders intentionally write generation zero, while the
+    // initial durable engine above supplied the matching dict + tag dictionary
+    // in the manifest. This models a real legacy segment paired with an original
+    // query-only v2 source file; merely replacing v8's sidecar would correctly
+    // be rejected as stale.
+    let norm = make_norm();
+    let mut dict = reverse_rusty::dict::Dict::new();
+    let ast = reverse_rusty::dsl::parse("topps chrome").expect("legacy query");
+    let mut lc = String::new();
+    let ex = reverse_rusty::compile::extract(&ast, &norm, &mut dict, &mut lc);
+    let mut legacy_segment = reverse_rusty::segment::Segment::new();
+    legacy_segment
+        .add_compiled(
+            &ex,
+            &[0],
+            &dict,
+            7,
+            42,
+            reverse_rusty::segment::CompileKnobs {
+                accept_class_d: true,
+                hot_anchor_threshold: 0,
+                dedup_bodies: true,
+            },
+        )
+        .expect("legacy segment row");
+    reverse_rusty::storage::write_segment(
+        &legacy_segment,
+        &dir.join("segments").join("seg_000001.seg"),
+    )
+    .expect("write generation-zero segment");
+
+    // The point read inherits version/tags only because BOTH durable domains
+    // explicitly carry the legacy generation zero.
     write_v2_sources(&dir.join("sources.dat"), &[(7, "topps chrome")]);
     let engine = Engine::open(make_norm(), cfg()).expect("open legacy sources");
     let source = engine
@@ -304,6 +335,53 @@ fn legacy_source_recovers_live_version_and_dense_tags() {
     assert_eq!(
         source.tags(),
         [("category".to_string(), "cards".to_string())]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn same_version_stale_source_sidecar_fails_loud_after_reopen() {
+    let dir = test_dir("sources_same_version_generation");
+    let cfg = || EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let stale_sources = {
+        let mut engine = Engine::with_config(make_norm(), cfg());
+        engine
+            .try_upsert_live_with_tags(
+                "1994 topps",
+                7,
+                1,
+                &[("status".to_string(), "old".to_string())],
+            )
+            .expect("first write");
+        engine.flush();
+        let stale = std::fs::read(dir.join("sources.dat")).expect("first source sidecar");
+
+        engine
+            .try_upsert_live_with_tags(
+                "1995 fleer",
+                7,
+                1,
+                &[("status".to_string(), "new".to_string())],
+            )
+            .expect("same-version replacement");
+        engine.flush();
+        stale
+    };
+
+    // Model a failed/torn best-effort sidecar publication: the manifest and v8
+    // exact row name the second accepted write, while sources.dat is still the
+    // first write and carries the same caller-visible version.
+    std::fs::write(dir.join("sources.dat"), stale_sources).expect("restore stale sidecar");
+    let engine = Engine::open(make_norm(), cfg()).expect("reopen with stale source");
+    let snapshot = engine.snapshot();
+    assert!(snapshot.has_live_query(7), "the exact row remains live");
+    assert!(
+        snapshot.get_query_document(7).is_none(),
+        "internal generation mismatch must be source unavailability, never stale _source"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

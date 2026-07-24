@@ -113,7 +113,7 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 
 - **LSM write path** (`segment/`) — memtable + immutable segments + tombstones + score-based
   compaction with auto-triggers (ADR-004, ADR-009).
-- **mmap'd `.seg` format** (v3–v7) + frozen hash tables (ADR-012/105/108/109); flat mmap'd logical-index
+- **mmap'd `.seg` format** (v3–v8) + frozen hash tables (ADR-012/105/108/109/116); flat mmap'd logical-index
   columns + lazy on-disk source store → resident ~4.5 B/query (ADR-020, ADR-014).
 - **WAL** (v6) — CRC-framed, crash recovery, configurable fsync (ADR-013/108); address-free logical
   deletes + per-segment dead-locals bitmaps make tombstones durable at the commit point (ADR-066);

@@ -181,6 +181,34 @@ impl Segment {
         )
     }
 
+    /// Engine-owned standalone write path carrying the internal source
+    /// generation. Kept crate-private so external segment builders retain the
+    /// generation-zero compatibility contract.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_compiled_ranked_with_source_generation(
+        &mut self,
+        ex: &Extracted,
+        tags: &[crate::tagdict::TagId],
+        dict: &Dict,
+        logical: u64,
+        version: u32,
+        rank: crate::rank::RankValues,
+        source_generation: u64,
+        knobs: CompileKnobs,
+    ) -> Option<AddedCompiled> {
+        self.add_compiled_ranked_placed_with_source_generation(
+            ex,
+            tags,
+            dict,
+            logical,
+            version,
+            rank,
+            &crate::ownership::QueryPlacement::standalone(),
+            source_generation,
+            knobs,
+        )
+    }
+
     /// [`add_compiled_ranked`](Self::add_compiled_ranked) carrying identity-only
     /// distributed emission placement through dedup and compaction (ADR-109).
     #[allow(clippy::too_many_arguments)]
@@ -195,13 +223,41 @@ impl Segment {
         placement: &crate::ownership::QueryPlacement,
         knobs: CompileKnobs,
     ) -> Option<AddedCompiled> {
+        self.add_compiled_ranked_placed_with_source_generation(
+            ex, tags, dict, logical, version, rank, placement, 0, knobs,
+        )
+    }
+
+    /// Engine-owned write path carrying the internal source generation that
+    /// fences exact rows from stale `_source` records. A generation of zero is
+    /// reserved for legacy/public compatibility builders.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn add_compiled_ranked_placed_with_source_generation(
+        &mut self,
+        ex: &Extracted,
+        tags: &[crate::tagdict::TagId],
+        dict: &Dict,
+        logical: u64,
+        version: u32,
+        rank: crate::rank::RankValues,
+        placement: &crate::ownership::QueryPlacement,
+        source_generation: u64,
+        knobs: CompileKnobs,
+    ) -> Option<AddedCompiled> {
         let plan = build_signatures(ex, dict, knobs.hot_anchor_threshold);
         if rejects_class_d(plan.class, ex, knobs.accept_class_d) {
             return None;
         }
-        let local = self
-            .exact
-            .push_ranked_with_placement(ex, tags, dict, version, logical, rank, placement);
+        let local = self.exact.push_ranked_with_placement_and_source_generation(
+            ex,
+            tags,
+            dict,
+            version,
+            logical,
+            rank,
+            placement,
+            source_generation,
+        );
 
         // Canonical-body dedup (Stage A): an entry whose SEMANTIC body equals an
         // existing leader's joins that group instead of inserting postings — it
@@ -289,6 +345,16 @@ impl Segment {
     /// version rather than resetting it to 1.
     pub fn version_of(&self, local_id: u32) -> u32 {
         self.exact.version(local_id)
+    }
+
+    /// Internal source generation paired with this exact row. Zero denotes a
+    /// pre-v8 legacy row.
+    pub(in crate::segment) fn source_generation_of(&self, local_id: u32) -> u64 {
+        self.exact.source_generation(local_id)
+    }
+
+    pub(in crate::segment) fn max_source_generation(&self) -> u64 {
+        self.exact.max_source_generation()
     }
 
     pub(in crate::segment) fn class_of(&self, local_id: u32) -> Option<CostClass> {

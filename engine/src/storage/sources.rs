@@ -18,11 +18,14 @@ const SOURCES_VERSION: u32 = 2; // sorted query-text index + optional metadata f
 const SRC_HEADER: usize = 16; // magic(4) + version(4) + count(4) + reserved(4)
 const SRC_IDX_REC: usize = 24; // logical(8) + blob_off(8) + text_len(4) + pad(4)
 const META_MAGIC: [u8; 4] = *b"SMET";
-const META_VERSION: u32 = 1;
-const META_IDX_REC: usize = 24; // flags(4) + version(4) + blob_off(8) + len(4) + pad(4)
+const META_VERSION_V1: u32 = 1;
+const META_VERSION: u32 = 2;
+const META_IDX_REC_V1: usize = 24; // flags(4) + version(4) + blob_off(8) + len(4) + pad(4)
+const META_IDX_REC: usize = 32; // flags(4) + version(4) + generation(8) + blob_off(8) + len(4) + pad(4)
 const META_FOOTER: usize = 16; // magic(4) + metadata-version(4) + directory-off(8)
 const META_HEADER_MARKER: u32 = u32::from_le_bytes(META_MAGIC);
 const TAGS_KNOWN: u32 = 1;
+const METADATA_KNOWN: u32 = 2;
 
 /// Canonical source material retained for one stored query.
 ///
@@ -33,8 +36,10 @@ const TAGS_KNOWN: u32 = 1;
 pub struct StoredSource {
     query: String,
     version: u32,
+    source_generation: u64,
     tags: Vec<(String, String)>,
     tags_known: bool,
+    metadata_known: bool,
 }
 
 impl StoredSource {
@@ -42,8 +47,27 @@ impl StoredSource {
         Self {
             query,
             version,
+            source_generation: 0,
             tags,
             tags_known: true,
+            metadata_known: true,
+        }
+    }
+
+    pub(crate) fn with_generation(
+        query: String,
+        version: u32,
+        source_generation: u64,
+        tags: Vec<(String, String)>,
+        tags_known: bool,
+    ) -> Self {
+        Self {
+            query,
+            version,
+            source_generation,
+            tags,
+            tags_known,
+            metadata_known: true,
         }
     }
 
@@ -51,8 +75,10 @@ impl StoredSource {
         Self {
             query,
             version: 1,
+            source_generation: 0,
             tags: Vec::new(),
             tags_known: false,
+            metadata_known: false,
         }
     }
 
@@ -64,6 +90,10 @@ impl StoredSource {
         self.version
     }
 
+    pub(crate) fn source_generation(&self) -> u64 {
+        self.source_generation
+    }
+
     pub fn tags(&self) -> &[(String, String)] {
         &self.tags
     }
@@ -72,16 +102,34 @@ impl StoredSource {
         self.tags_known
     }
 
+    pub(crate) fn metadata_known(&self) -> bool {
+        self.metadata_known
+    }
+
     pub(crate) fn recover_legacy_metadata(
         &mut self,
         version: u32,
+        source_generation: u64,
         tags: Option<Vec<(String, String)>>,
     ) {
         debug_assert!(
-            !self.tags_known,
+            !self.metadata_known,
             "only footer-less source records may inherit exact-store metadata"
         );
         self.version = version;
+        self.source_generation = source_generation;
+        self.metadata_known = true;
+        if let Some(tags) = tags {
+            self.tags = tags;
+            self.tags_known = true;
+        }
+    }
+
+    pub(crate) fn recover_missing_tags(&mut self, tags: Option<Vec<(String, String)>>) {
+        debug_assert!(
+            !self.tags_known,
+            "only incomplete tag metadata is recovered"
+        );
         if let Some(tags) = tags {
             self.tags = tags;
             self.tags_known = true;
@@ -132,12 +180,16 @@ struct SourceRecord<'a> {
     logical: u64,
     query: &'a str,
     version: u32,
+    source_generation: u64,
     tags_known: bool,
+    metadata_known: bool,
     encoded_tags: Option<&'a [u8]>,
 }
 
 #[derive(Clone, Copy)]
 struct MetadataLayout {
+    version: u32,
+    record_size: usize,
     directory_off: usize,
     blob_off: usize,
 }
@@ -151,7 +203,9 @@ struct SourceEntryRef<'a> {
     logical: u64,
     query: &'a str,
     version: u32,
+    source_generation: u64,
     tags_known: bool,
+    metadata_known: bool,
     tags: TagsRef<'a>,
 }
 
@@ -177,28 +231,47 @@ impl LazyBase {
     fn record(&self, i: usize) -> Option<SourceRecord<'_>> {
         let data: &[u8] = &self.mmap;
         let (logical, query) = self.query_record(i)?;
-        let (version, tags_known, encoded_tags) = match self.metadata {
-            Some(metadata) => {
-                let metadata_rec = metadata.directory_off + i * META_IDX_REC;
-                let flags = read_u32_at(data, metadata_rec).ok()?;
-                let version = read_u32_at(data, metadata_rec + 4).ok()?;
-                let tags_off = read_u64_at(data, metadata_rec + 8).ok()? as usize;
-                let tags_len = read_u32_at(data, metadata_rec + 16).ok()? as usize;
-                let tags_start = metadata.blob_off.checked_add(tags_off)?;
-                let tags_end = tags_start.checked_add(tags_len)?;
-                (
-                    version,
-                    flags & TAGS_KNOWN != 0,
-                    Some(data.get(tags_start..tags_end)?),
-                )
-            }
-            None => (1, false, None),
-        };
+        let (version, source_generation, tags_known, metadata_known, encoded_tags) =
+            match self.metadata {
+                Some(metadata) => {
+                    let metadata_rec = metadata.directory_off + i * metadata.record_size;
+                    let flags = read_u32_at(data, metadata_rec).ok()?;
+                    let version = read_u32_at(data, metadata_rec + 4).ok()?;
+                    let (source_generation, tags_off, tags_len, metadata_known) =
+                        if metadata.version == META_VERSION_V1 {
+                            (
+                                0,
+                                read_u64_at(data, metadata_rec + 8).ok()? as usize,
+                                read_u32_at(data, metadata_rec + 16).ok()? as usize,
+                                true,
+                            )
+                        } else {
+                            (
+                                read_u64_at(data, metadata_rec + 8).ok()?,
+                                read_u64_at(data, metadata_rec + 16).ok()? as usize,
+                                read_u32_at(data, metadata_rec + 24).ok()? as usize,
+                                flags & METADATA_KNOWN != 0,
+                            )
+                        };
+                    let tags_start = metadata.blob_off.checked_add(tags_off)?;
+                    let tags_end = tags_start.checked_add(tags_len)?;
+                    (
+                        version,
+                        source_generation,
+                        flags & TAGS_KNOWN != 0,
+                        metadata_known,
+                        Some(data.get(tags_start..tags_end)?),
+                    )
+                }
+                None => (1, 0, false, false, None),
+            };
         Some(SourceRecord {
             logical,
             query,
             version,
+            source_generation,
             tags_known,
+            metadata_known,
             encoded_tags,
         })
     }
@@ -248,8 +321,10 @@ impl LazyBase {
         Some(StoredSource {
             query: record.query.to_owned(),
             version: record.version,
+            source_generation: record.source_generation,
             tags,
             tags_known: record.tags_known,
+            metadata_known: record.metadata_known,
         })
     }
 }
@@ -296,7 +371,9 @@ impl SourceStore {
                     logical: *logical,
                     query: source.query(),
                     version: source.version(),
+                    source_generation: source.source_generation(),
                     tags_known: source.tags_known(),
+                    metadata_known: source.metadata_known(),
                     tags: TagsRef::Decoded(source.tags()),
                 })
                 .collect();
@@ -374,23 +451,43 @@ impl SourceStore {
         version: u32,
         tags: &[(String, String)],
     ) {
-        self.insert_document_with_status(logical, text, version, tags, true);
+        self.insert_document_with_generation_and_status(logical, text, version, 0, tags, true);
     }
 
-    pub(crate) fn insert_document_with_status(
+    pub(crate) fn insert_document_with_generation(
         &self,
         logical: u64,
         text: String,
         version: u32,
+        source_generation: u64,
+        tags: &[(String, String)],
+    ) {
+        self.insert_document_with_generation_and_status(
+            logical,
+            text,
+            version,
+            source_generation,
+            tags,
+            true,
+        );
+    }
+
+    pub(crate) fn insert_document_with_generation_and_status(
+        &self,
+        logical: u64,
+        text: String,
+        version: u32,
+        source_generation: u64,
         tags: &[(String, String)],
         tags_known: bool,
     ) {
-        let source = StoredSource {
-            query: text,
+        let source = StoredSource::with_generation(
+            text,
             version,
-            tags: tags.to_vec(),
+            source_generation,
+            tags.to_vec(),
             tags_known,
-        };
+        );
         match self {
             SourceStore::Resident(m) => {
                 rw_write(m).insert(logical, source);
@@ -438,6 +535,35 @@ impl SourceStore {
 
     pub fn is_lazy(&self) -> bool {
         matches!(self, SourceStore::Lazy { .. })
+    }
+
+    /// Largest persisted internal source generation. Used only to seed the
+    /// engine's next generation after reopen; including shadowed/tombstoned lazy
+    /// base rows is conservative (it may leave a gap, never reuse a generation).
+    pub(crate) fn max_source_generation(&self) -> u64 {
+        match self {
+            SourceStore::Resident(m) => rw_read(m)
+                .values()
+                .map(StoredSource::source_generation)
+                .max()
+                .unwrap_or(0),
+            SourceStore::Lazy { base, overlay } => {
+                let base_max = base.as_ref().map_or(0, |base| {
+                    (0..base.count)
+                        .filter_map(|i| base.record(i))
+                        .map(|record| record.source_generation)
+                        .max()
+                        .unwrap_or(0)
+                });
+                let overlay_max = rw_read(overlay)
+                    .values()
+                    .flatten()
+                    .map(StoredSource::source_generation)
+                    .max()
+                    .unwrap_or(0);
+                base_max.max(overlay_max)
+            }
+        }
     }
 
     /// Resident heap bytes. For `Lazy` this is just the overlay; the mmap'd base
@@ -495,7 +621,9 @@ impl SourceStore {
                         logical: *logical,
                         query: source.query(),
                         version: source.version(),
+                        source_generation: source.source_generation(),
                         tags_known: source.tags_known(),
+                        metadata_known: source.metadata_known(),
                         tags: TagsRef::Decoded(source.tags()),
                     })
                     .collect();
@@ -514,7 +642,9 @@ impl SourceStore {
                                     logical: record.logical,
                                     query: record.query,
                                     version: record.version,
+                                    source_generation: record.source_generation,
                                     tags_known: record.tags_known,
+                                    metadata_known: record.metadata_known,
                                     tags: match record.encoded_tags {
                                         Some(encoded) => TagsRef::Encoded(encoded),
                                         None => TagsRef::Decoded(&[]),
@@ -530,7 +660,9 @@ impl SourceStore {
                             logical: *logical,
                             query: source.query(),
                             version: source.version(),
+                            source_generation: source.source_generation(),
                             tags_known: source.tags_known(),
+                            metadata_known: source.metadata_known(),
                             tags: TagsRef::Decoded(source.tags()),
                         });
                     }
@@ -581,7 +713,7 @@ impl SourceStore {
     /// keep using [`Self::for_each_live`].
     pub fn for_each_live_document(
         &self,
-        mut f: impl FnMut(u64, &str, u32, &[(String, String)], bool),
+        mut f: impl FnMut(u64, &str, u32, u64, &[(String, String)], bool, bool),
     ) {
         match self {
             SourceStore::Resident(m) => {
@@ -590,8 +722,10 @@ impl SourceStore {
                         *logical,
                         source.query(),
                         source.version(),
+                        source.source_generation(),
                         source.tags(),
                         source.tags_known(),
+                        source.metadata_known(),
                     );
                 }
             }
@@ -610,8 +744,10 @@ impl SourceStore {
                                         record.logical,
                                         record.query,
                                         record.version,
+                                        record.source_generation,
                                         &tags,
                                         record.tags_known,
+                                        record.metadata_known,
                                     );
                                 }
                             }
@@ -624,8 +760,10 @@ impl SourceStore {
                             *logical,
                             source.query(),
                             source.version(),
+                            source.source_generation(),
                             source.tags(),
                             source.tags_known(),
+                            source.metadata_known(),
                         );
                     }
                 }
@@ -731,7 +869,7 @@ fn write_sources_v2(entries: &[SourceEntryRef<'_>], path: &Path) -> io::Result<(
     let mut query_blob: Vec<u8> = Vec::new();
     let mut metadata_blob: Vec<u8> = Vec::new();
     let mut query_records: Vec<(u64, u64, u32)> = Vec::with_capacity(entries.len());
-    let mut metadata_records: Vec<(u32, u32, u64, u32)> = Vec::with_capacity(entries.len());
+    let mut metadata_records: Vec<(u32, u32, u64, u64, u32)> = Vec::with_capacity(entries.len());
     let mut prev: Option<u64> = None;
     for entry in entries {
         debug_assert!(
@@ -753,8 +891,10 @@ fn write_sources_v2(entries: &[SourceEntryRef<'_>], path: &Path) -> io::Result<(
         let metadata_len = u32::try_from(metadata_blob.len() as u64 - metadata_off)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source metadata too long"))?;
         metadata_records.push((
-            u32::from(entry.tags_known) * TAGS_KNOWN,
+            (u32::from(entry.tags_known) * TAGS_KNOWN)
+                | (u32::from(entry.metadata_known) * METADATA_KNOWN),
             entry.version,
+            entry.source_generation,
             metadata_off,
             metadata_len,
         ));
@@ -768,9 +908,10 @@ fn write_sources_v2(entries: &[SourceEntryRef<'_>], path: &Path) -> io::Result<(
     buf.extend_from_slice(&query_blob);
 
     let metadata_directory_off = buf.len() as u64;
-    for (flags, version, metadata_off, metadata_len) in metadata_records {
+    for (flags, version, source_generation, metadata_off, metadata_len) in metadata_records {
         buf.extend_from_slice(&flags.to_le_bytes());
         buf.extend_from_slice(&version.to_le_bytes());
+        buf.extend_from_slice(&source_generation.to_le_bytes());
         buf.extend_from_slice(&metadata_off.to_le_bytes());
         buf.extend_from_slice(&metadata_len.to_le_bytes());
         buf.extend_from_slice(&0u32.to_le_bytes());
@@ -803,22 +944,35 @@ fn metadata_layout(
         .len()
         .checked_sub(4 + META_FOOTER)
         .ok_or_else(bad_sources)?;
-    if data.get(footer_off..footer_off + 4) != Some(META_MAGIC.as_slice())
-        || read_u32_at(data, footer_off + 4)? != META_VERSION
-    {
+    if data.get(footer_off..footer_off + 4) != Some(META_MAGIC.as_slice()) {
         return Err(bad_sources());
     }
+    let version = read_u32_at(data, footer_off + 4)?;
+    let record_size = match version {
+        META_VERSION_V1 => META_IDX_REC_V1,
+        META_VERSION => META_IDX_REC,
+        _ => return Err(bad_sources()),
+    };
     let directory_off = read_u64_at(data, footer_off + 8)? as usize;
     let blob_off = directory_off
-        .checked_add(count.checked_mul(META_IDX_REC).ok_or_else(bad_sources)?)
+        .checked_add(count.checked_mul(record_size).ok_or_else(bad_sources)?)
         .ok_or_else(bad_sources)?;
     if directory_off < query_blob_off || blob_off > footer_off {
         return Err(bad_sources());
     }
     for i in 0..count {
-        let record = directory_off + i * META_IDX_REC;
-        let tags_off = read_u64_at(data, record + 8)? as usize;
-        let tags_len = read_u32_at(data, record + 16)? as usize;
+        let record = directory_off + i * record_size;
+        let (tags_off, tags_len) = if version == META_VERSION_V1 {
+            (
+                read_u64_at(data, record + 8)? as usize,
+                read_u32_at(data, record + 16)? as usize,
+            )
+        } else {
+            (
+                read_u64_at(data, record + 16)? as usize,
+                read_u32_at(data, record + 24)? as usize,
+            )
+        };
         let tags_start = blob_off.checked_add(tags_off).ok_or_else(bad_sources)?;
         let tags_end = tags_start.checked_add(tags_len).ok_or_else(bad_sources)?;
         if tags_end > footer_off {
@@ -827,6 +981,8 @@ fn metadata_layout(
         validate_encoded_tags(data.get(tags_start..tags_end).ok_or_else(bad_sources)?)?;
     }
     Ok(Some(MetadataLayout {
+        version,
+        record_size,
         directory_off,
         blob_off,
     }))
@@ -974,11 +1130,25 @@ fn load_stored_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, Stor
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                     .to_string();
                 let source = if let Some(metadata) = metadata {
-                    let metadata_rec = metadata.directory_off + i * META_IDX_REC;
+                    let metadata_rec = metadata.directory_off + i * metadata.record_size;
                     let flags = read_u32_at(&data, metadata_rec)?;
                     let stored_version = read_u32_at(&data, metadata_rec + 4)?;
-                    let tags_off = read_u64_at(&data, metadata_rec + 8)? as usize;
-                    let tags_len = read_u32_at(&data, metadata_rec + 16)? as usize;
+                    let (source_generation, tags_off, tags_len, metadata_known) =
+                        if metadata.version == META_VERSION_V1 {
+                            (
+                                0,
+                                read_u64_at(&data, metadata_rec + 8)? as usize,
+                                read_u32_at(&data, metadata_rec + 16)? as usize,
+                                true,
+                            )
+                        } else {
+                            (
+                                read_u64_at(&data, metadata_rec + 8)?,
+                                read_u64_at(&data, metadata_rec + 16)? as usize,
+                                read_u32_at(&data, metadata_rec + 24)? as usize,
+                                flags & METADATA_KNOWN != 0,
+                            )
+                        };
                     let tags_start = metadata
                         .blob_off
                         .checked_add(tags_off)
@@ -989,8 +1159,10 @@ fn load_stored_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, Stor
                     StoredSource {
                         query,
                         version: stored_version,
+                        source_generation,
                         tags,
                         tags_known: flags & TAGS_KNOWN != 0,
+                        metadata_known,
                     }
                 } else {
                     StoredSource::legacy(query)
@@ -1021,7 +1193,7 @@ pub fn load_query_sources(path: &Path) -> io::Result<crate::util::FastMap<u64, S
 
 #[cfg(test)]
 mod tests {
-    use super::{MetadataLayout, SourceStore, SRC_HEADER, SRC_IDX_REC};
+    use super::{MetadataLayout, SourceStore, META_IDX_REC, META_VERSION, SRC_HEADER, SRC_IDX_REC};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_PATH: AtomicU64 = AtomicU64::new(0);
@@ -1085,6 +1257,8 @@ mod tests {
         // Poison only the metadata layout after open. Query-only lookup must
         // still succeed because it reads the original query index/blob alone.
         base.metadata = Some(MetadataLayout {
+            version: META_VERSION,
+            record_size: META_IDX_REC,
             directory_off: usize::MAX,
             blob_off: usize::MAX,
         });
@@ -1120,6 +1294,55 @@ mod tests {
     }
 
     #[test]
+    fn metadata_v1_footer_remains_readable_as_generation_zero() {
+        let path = std::env::temp_dir().join(format!(
+            "reverse-rusty-metadata-v1-{}-{}.dat",
+            std::process::id(),
+            NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+        ));
+        let query = "topps chrome";
+        let tags = vec![("tenant".to_string(), "acme".to_string())];
+        let mut encoded_tags = Vec::new();
+        super::encode_tags(&tags, &mut encoded_tags).expect("encode tags");
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"SRCS");
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&super::META_HEADER_MARKER.to_le_bytes());
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(query.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(query.as_bytes());
+        let directory_off = bytes.len() as u64;
+        bytes.extend_from_slice(&super::TAGS_KNOWN.to_le_bytes());
+        bytes.extend_from_slice(&42u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&(encoded_tags.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&encoded_tags);
+        bytes.extend_from_slice(b"SMET");
+        bytes.extend_from_slice(&super::META_VERSION_V1.to_le_bytes());
+        bytes.extend_from_slice(&directory_off.to_le_bytes());
+        let crc = super::crc32(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, bytes).expect("write metadata v1 fixture");
+
+        for retain in [true, false] {
+            let store = SourceStore::open(&path, retain).expect("open metadata v1");
+            let document = store.get_document(7).expect("document");
+            assert_eq!(document.query(), query);
+            assert_eq!(document.version(), 42);
+            assert_eq!(document.source_generation(), 0);
+            assert!(document.metadata_known());
+            assert!(document.tags_known());
+            assert_eq!(document.tags(), tags);
+        }
+        std::fs::remove_file(path).expect("remove metadata v1 fixture");
+    }
+
+    #[test]
     fn metadata_footer_round_trip_preserves_version_and_canonical_tags() {
         let path = std::env::temp_dir().join(format!(
             "reverse-rusty-metadata-sources-{}-{}.dat",
@@ -1127,10 +1350,11 @@ mod tests {
             NEXT_PATH.fetch_add(1, Ordering::Relaxed)
         ));
         let resident = SourceStore::new_resident();
-        resident.insert_document(
+        resident.insert_document_with_generation(
             7,
             "topps chrome".to_string(),
             42,
+            99,
             &[
                 ("tenant".to_string(), "acme".to_string()),
                 ("color".to_string(), "blue".to_string()),
@@ -1165,6 +1389,7 @@ mod tests {
         let document = lazy.get_document(7).expect("stored document");
         assert_eq!(document.query(), "topps chrome");
         assert_eq!(document.version(), 42);
+        assert_eq!(document.source_generation(), 99);
         assert!(document.tags_known());
         assert_eq!(
             document.tags(),
