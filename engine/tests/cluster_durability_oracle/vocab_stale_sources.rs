@@ -4,13 +4,14 @@
 //! next rebuild's store-driven gather then preferred the stale (untagged / deleted)
 //! copy whenever the abandoned shard preceded the live copies in iteration order.
 //! Fixed at the GATHER: it now cross-checks index liveness, so stale residue is
-//! never gathered (and dirs polluted pre-fix self-heal). The green stores keep
-//! LOADING the old `sources.dat` deliberately — the green ingest persists sources
-//! EAGERLY, before the manifest commit, so the on-disk store must stay a SUPERSET
-//! of every generation a crash-reopen could make authoritative (codex round 2: a
-//! bucket-only green store lost moved-away queries if the crash landed before the
-//! commit). Plus the build-commit guard: a durable build whose `sources.dat` write
-//! failed must refuse to commit its manifest rather than ack an incomplete corpus.
+//! never gathered (and dirs polluted pre-fix self-heal). ADR-118 also makes a
+//! rebuild write generation-named green source sidecars and selects them in the
+//! same manifest commit as the green segment registry. The old `sources.dat`
+//! remains untouched while authoritative, so a crash chooses the complete blue
+//! pair or the complete green pair rather than requiring either file to contain
+//! both generations. Plus the build-commit guard: a durable build whose
+//! `sources.dat` write failed must refuse to commit its manifest rather than ack
+//! an incomplete corpus.
 //!
 //! Placement mechanics these constructions rely on (probed empirically while
 //! building this suite): a declared EQUIVALENCE (ADR-054) widens the query's anchor
@@ -181,24 +182,30 @@ fn durable_build_refuses_when_a_sources_write_fails() {
 }
 
 #[test]
-fn green_sources_remain_a_superset_across_the_rebuild() {
-    // The crash-window invariant (codex round 2 on this branch): the green ingest
-    // persists `sources.dat` EAGERLY — before the rebuild's manifest commit — so the
-    // file must remain a SUPERSET of every generation a crash-reopen could make
-    // authoritative. A bucket-only green store would lose moved-away queries when a
-    // crash lands before the commit: the old manifest + old segments stay
-    // authoritative, but the abandoned shard's store no longer lists the query, and
-    // the next rebuild's gather (store ∩ live) silently drops it. Keeping stale
-    // residue is safe (the liveness-checked gather skips it); dropping live history
-    // is not. Pinned at the file level: after a committed rebuild that moves a query
-    // onto the replicated lane, its source must still be present in MORE THAN ONE
-    // shard store — the new home AND the abandoned original — not just the new home.
+fn source_generations_coexist_across_the_rebuild_commit() {
+    // The crash-window invariant is now an atomic pointer swap: blue sources.dat
+    // remains intact while green generation-named sidecars are built, then manifest
+    // v7 selects the green sidecars together with the green segment registry.
     let (mut queries, _titles) = build_corpus();
     let q = 9_500_003u64;
     queries.push((q, "1994 fleer zzmovea".into()));
     let dir = unique_dir("superset_sources");
     let mut cluster = ClusterEngine::build(vocab(), &durable_cfg(8, dir.clone(), false), &queries)
         .expect("durable build");
+    let blue_holders: Vec<usize> = (0..8)
+        .filter(|s| {
+            let path = dir.join(format!("shard_{s:03}")).join("sources.dat");
+            path.exists()
+                && reverse_rusty::storage::SourceStore::open(&path, true)
+                    .expect("open blue source store")
+                    .get(q)
+                    .is_some()
+        })
+        .collect();
+    assert!(
+        !blue_holders.is_empty(),
+        "the build generation must retain the query source"
+    );
     cluster
         .set_vocab(equiv_vocab("zzmovea", "zzcanona"))
         .expect("bind: the widened query moves onto the replicated lane");
@@ -210,21 +217,52 @@ fn green_sources_remain_a_superset_across_the_rebuild() {
         "precondition — the equivalence must widen the query onto zzcanona"
     );
     drop(cluster); // committed by set_vocab's own checkpoint
-    let mut holders = 0usize;
-    for s in 0..8 {
+    for s in blue_holders {
         let path = dir.join(format!("shard_{s:03}")).join("sources.dat");
-        if path.exists() {
-            let store = reverse_rusty::storage::SourceStore::open(&path, true)
-                .expect("open a shard's committed source store");
-            if store.get(q).is_some() {
-                holders += 1;
-            }
-        }
+        assert!(
+            reverse_rusty::storage::SourceStore::open(&path, true)
+                .expect("reopen untouched blue source store")
+                .get(q)
+                .is_some(),
+            "green construction must not overwrite the blue sidecar on shard {s}"
+        );
     }
+
+    let manifest =
+        read_cluster_manifest(&dir.join("cluster_manifest.bin")).expect("read v7 manifest");
+    assert_eq!(manifest.compiler_semantics_version, 1);
     assert!(
-        holders >= 2,
-        "the moved query's source must survive on its abandoned shard too (the \
-         crash-window superset), not only on its new home — found it in {holders} store(s)"
+        manifest
+            .source_files
+            .iter()
+            .all(|name| name != "sources.dat"),
+        "the green registry must atomically select generation-named sidecars"
+    );
+    let holders = manifest
+        .source_files
+        .iter()
+        .enumerate()
+        .filter(|(s, name)| {
+            let path = dir.join(format!("shard_{s:03}")).join(name);
+            path.exists()
+                && reverse_rusty::storage::SourceStore::open(&path, true)
+                    .expect("open manifest-selected green source store")
+                    .get(q)
+                    .is_some()
+        })
+        .count();
+    assert!(
+        holders >= 1,
+        "the manifest-selected green source generation must retain the moved query"
+    );
+
+    let reopened = ClusterEngine::open(dir.clone(), vocab(), None).expect("reopen green commit");
+    assert!(
+        reopened
+            .percolate("1994 fleer zzcanona psa 10")
+            .expect("percolate after reopen")
+            .contains(&q),
+        "the green segment/source commit must reopen as one complete generation"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

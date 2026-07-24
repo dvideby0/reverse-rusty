@@ -57,7 +57,10 @@
     re-minting the dict, re-places the resulting corpus exactly once at one new generation, bumps the
     control document, and checkpoints the new registry atomically before returning. Replaying the
     tail through the current placement validator first would reject a valid legacy write whose
-    clause-boundary fix changes its target;
+    clause-boundary fix changes its target. Raw tags in that already-acknowledged tail are resolved
+    against the persisted frozen tag dictionary before the rebuild, marking them as stored
+    carry-through rather than fresh ingestion. Tightening `max_tags` therefore cannot make migration
+    omit a previously accepted tagged row;
   - cluster manifest v7 records the compiler-semantics stamp independently of its segment registry,
     so an empty checkpoint base plus a non-empty legacy coordinator-log tail still rebuilds before
     serving. The same manifest selects one generation-named source sidecar per shard. A blue/green
@@ -77,11 +80,15 @@
     fatal to standalone open too—it is never treated as ordinary skippable corruption;
   - the distributed dict-adoption, add-shard, fingerprint, and peer-recovery exchanges attest the
     current compiler-semantics version. A missing protobuf field reads as legacy zero and fails
-    before state adoption, so a mixed compiler mesh cannot silently create incompatible placement;
+    before state adoption, so a mixed compiler mesh cannot silently create incompatible placement.
+    The recovery receiver validates the mandatory first manifest frame before opening or renaming
+    any target file, so refusing an old peer cannot damage the target's existing durable commit;
   - source-driven rebuild and WAL replay parse acknowledged DSL with the durable format's structural
     ceilings (`u32` text length and `u16` clause/group counts), not today's runtime policy or default.
-    Tightening settings—or having originally accepted a supported value above the default—therefore
-    cannot make recovery discard or reject an acknowledged query.
+    Coordinator-log and shard-translog apply paths use the same rule and fail loud on structural
+    corruption rather than silently skipping a row. Tightening settings—or having originally
+    accepted a supported value above the default—therefore cannot make recovery discard or reject an
+    acknowledged query.
 
 - **Decision — keep runtime and durable state coherent on failed source persistence.** A persistent
   standalone vocabulary change refuses to start when durability is already degraded. If writing the
@@ -110,10 +117,12 @@
   fail-loud raw attach/future semantics, plus coherent in-memory matching after a source write
   failure. Cluster coverage proves an RF=2 durable reopen rebuilds, bumps placement generation
   exactly once, and reopens idempotently; folds a legacy placement-divergent tail before validation;
-  migrates an empty base with a tail; and preserves the old source corpus across a failed manifest
-  commit so the next open can retry. Durable-shard tests prove self-restart refuses both a legacy
-  segment base and an empty legacy base with an unsealed translog tail without advancing
-  `shard.ckpt`. Distributed units pin fail-closed compiler-semantics handshakes.
+  migrates an empty base with a tail; preserves a tagged tail accepted above the reopened
+  `max_tags`; and preserves the old source corpus across a failed manifest commit so the next open
+  can retry. Durable-shard tests prove self-restart refuses both a legacy segment base and an empty
+  legacy base with an unsealed translog tail without advancing `shard.ckpt`, and replays an
+  acknowledged query above today's default clause limit. Distributed units pin fail-closed
+  compiler-semantics handshakes and manifest refusal before target-file processing.
 
 - **Oracle follow-up.** ADR-087 remains code-independent, but this finding proved code independence
   is not the same as semantic independence when both implementations translate the same ambiguous

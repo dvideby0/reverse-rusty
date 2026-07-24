@@ -784,15 +784,17 @@ pub(crate) fn apply_mutation(
             tags,
             placement,
         } => {
-            // Only parseable DSL is ever logged, but stay defensive: an unparseable record
-            // carries no applicable mutation, so skip it rather than fail the whole replay.
-            if let Ok(ast) = crate::dsl::parse(dsl) {
-                let mut lc = String::new();
-                let ex = extract_readonly(&ast, norm, dict, &mut lc);
-                shard.insert_extracted_with_placement(
-                    &ex, *logical, *version, dsl, tags, placement,
-                )?;
-            }
+            // The source already acknowledged this logged mutation. Fail loud
+            // on structural corruption, but never re-apply today's policy
+            // limits and silently skip it.
+            let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+                ShardError::Log(format!(
+                    "parsing acknowledged shard add during recovery: {error}"
+                ))
+            })?;
+            let mut lc = String::new();
+            let ex = extract_readonly(&ast, norm, dict, &mut lc);
+            shard.insert_extracted_with_placement(&ex, *logical, *version, dsl, tags, placement)?;
         }
         ClusterMutation::Remove { logical } => {
             shard.delete_by_logical_id(*logical)?;
@@ -804,6 +806,11 @@ pub(crate) fn apply_mutation(
             tags,
             placement,
         } => {
+            let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+                ShardError::Log(format!(
+                    "parsing acknowledged shard upsert during recovery: {error}"
+                ))
+            })?;
             // Replace-by-id ON THIS SHARD: tombstone any prior copy, then insert the new
             // version — but only where the placement actually STORES the row. An upsert's
             // delete half fans to every shard, so a repair can legitimately target a
@@ -817,13 +824,11 @@ pub(crate) fn apply_mutation(
                     || placement.positions().binary_search(&p).is_ok()
             });
             if covered {
-                if let Ok(ast) = crate::dsl::parse(dsl) {
-                    let mut lc = String::new();
-                    let ex = extract_readonly(&ast, norm, dict, &mut lc);
-                    shard.insert_extracted_with_placement(
-                        &ex, *logical, *version, dsl, tags, placement,
-                    )?;
-                }
+                let mut lc = String::new();
+                let ex = extract_readonly(&ast, norm, dict, &mut lc);
+                shard.insert_extracted_with_placement(
+                    &ex, *logical, *version, dsl, tags, placement,
+                )?;
             }
         }
     }

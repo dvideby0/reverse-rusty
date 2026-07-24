@@ -259,6 +259,58 @@ fn durable_shard_self_restarts_from_translog() {
 }
 
 #[test]
+fn durable_shard_replays_an_acknowledged_query_above_default_parse_limits() {
+    let norm = Arc::new(Normalizer::default_vocab().expect("normalizer"));
+    let query = (0..=crate::dsl::MAX_CLAUSES)
+        .map(|i| format!("recoveryterm{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let limits = crate::dsl::ParseLimits {
+        max_clauses: crate::dsl::MAX_CLAUSES + 1,
+        ..Default::default()
+    };
+    let ast = crate::dsl::parse_with_limits(&query, &limits).expect("loose front-door parse");
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+    dict.finalize_mask();
+    let dict = Arc::new(dict);
+    let mut tag_dict = TagDict::new();
+    tag_dict.mark_finalized();
+    let tag_dict = Arc::new(tag_dict);
+
+    let tmp = scratch_dir("selfrestart_structural_parse_limit");
+    let cfg = EngineConfig {
+        data_dir: Some(tmp.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            cfg.clone(),
+        )
+        .expect("durable shard");
+        shard
+            .insert_extracted_with_tags(&ex, 1, 1, &query, &[])
+            .expect("already-validated query is acknowledged");
+        // Leave the query only in the translog tail.
+    }
+
+    let reopened = LocalShard::new_durable(norm, dict, tag_dict, cfg)
+        .expect("self-restart uses durable structural parse limits");
+    let (ids, _) = reopened
+        .percolate_filtered(&query, true, &TagPredicate::empty())
+        .expect("recovered query matches");
+    assert!(
+        ids.contains(&1),
+        "self-restart must not silently skip an acknowledged query above today's defaults"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn durable_shard_self_restart_refuses_legacy_clause_boundary_semantics() {
     let mut vocab = crate::vocab::Vocab::new();
     vocab.import_solr_aliases(

@@ -352,9 +352,21 @@ fn peer_recover_inner(
     replica_dir: &Path,
     allow_legacy_compiler_semantics: bool,
 ) -> Result<(LocalShard, LogPos), ShardError> {
-    // 1. Seal so the primary's on-disk segments are a consistent, tombstone-baked snapshot at
-    //    position `P`; the translog's remaining tail is exactly the un-sealed ops > P.
-    let snapshot_pos = primary.seal_for_checkpoint()?;
+    // 1. Seal ordinary live sources so their on-disk segments are a
+    //    consistent, tombstone-baked snapshot at position P. The private
+    //    compiler-migration source was just attached from the coordinator's
+    //    immutable commit and has a fresh empty translog; sealing it would write
+    //    a CURRENT shard checkpoint that falsely points at LEGACY segments.
+    let snapshot_pos = if allow_legacy_compiler_semantics {
+        if !primary.translog_tail(LogPos(0))?.is_empty() {
+            return Err(ShardError::Log(
+                "compiler-migration replica source unexpectedly has a translog tail".into(),
+            ));
+        }
+        LogPos(0)
+    } else {
+        primary.seal_for_checkpoint()?
+    };
     let files = primary.segment_filenames()?;
     let next_seg_id = primary.next_seg_id()?;
 

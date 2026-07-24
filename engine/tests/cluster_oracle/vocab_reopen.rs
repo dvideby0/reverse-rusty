@@ -351,6 +351,61 @@ fn durable_cluster_rebuilds_a_legacy_tail_even_when_the_base_is_empty() {
 }
 
 #[test]
+fn legacy_tail_preserves_acknowledged_tags_after_limit_tightening() {
+    let dir = std::env::temp_dir().join(format!(
+        "rr-adr118-tagged-tail-limit-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let wide = ClusterConfig {
+        num_shards: 3,
+        include_broad: true,
+        data_dir: Some(dir.clone()),
+        per_shard: reverse_rusty::config::EngineConfig {
+            max_tags: 4,
+            ..Default::default()
+        },
+        ..ClusterConfig::default()
+    };
+    let tags = vec![
+        ("tier".to_string(), "gold".to_string()),
+        ("region".to_string(), "us".to_string()),
+        ("channel".to_string(), "web".to_string()),
+    ];
+    {
+        let cluster = ClusterEngine::build_with_vocab(vocab_with_multiword_alias(), &wide, &[])
+            .expect("empty durable cluster");
+        cluster
+            .add_query_with_tags(1, "new -used york", &tags)
+            .expect("tagged tail add accepted under the wider limit");
+        // No checkpoint: the tagged query exists only in the coordinator tail.
+    }
+
+    let manifest_path = dir.join("cluster_manifest.bin");
+    let before =
+        reverse_rusty::storage::read_cluster_manifest(&manifest_path).expect("current manifest");
+    downgrade_cluster_manifest_to_v6(&manifest_path, &before);
+
+    let mut tight = wide.clone();
+    tight.per_shard.max_tags = 2;
+    let reopened = ClusterEngine::open(
+        &dir,
+        reverse_rusty::normalize::Normalizer::default_vocab().unwrap(),
+        Some(&tight),
+    )
+    .expect("legacy tagged tail migrates despite the tighter current policy");
+    let filter = vec![("tier".to_string(), vec!["gold".to_string()])];
+    assert!(
+        reopened
+            .percolate_filtered("new vintage collectible york", &filter)
+            .expect("filtered percolate")
+            .contains(&1),
+        "an acknowledged over-current-limit tag column must survive migration intact"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn failed_cluster_compiler_migration_preserves_old_sources_for_retry() {
     let dir = std::env::temp_dir().join(format!("rr-adr118-source-retry-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

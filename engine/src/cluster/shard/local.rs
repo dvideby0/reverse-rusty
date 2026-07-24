@@ -392,7 +392,7 @@ impl LocalShard {
         // double-applies an op already baked into the attached segments.
         let tail = shard.translog.replay(floor)?.entries;
         for (_pos, m) in &tail {
-            shard.apply_to_engine(m);
+            shard.apply_to_engine(m)?;
         }
         Ok(shard)
     }
@@ -400,8 +400,9 @@ impl LocalShard {
     /// Apply one logged mutation to the engine WITHOUT re-appending it to the translog — used by
     /// self-restart replay (ADR-039 §6), where the op is already durable in the translog. The
     /// translog-appending counterpart is the seam's `insert_extracted`/`delete_by_logical_id`.
-    /// Infallible: a segments-only engine has no WAL, so neither apply can error.
-    fn apply_to_engine(&self, m: &ClusterMutation) {
+    /// A malformed acknowledged frame fails restart loudly; silently skipping it
+    /// would shrink the recovered shard.
+    fn apply_to_engine(&self, m: &ClusterMutation) -> Result<(), ShardError> {
         let mut eng = self.lock();
         match m {
             ClusterMutation::Add {
@@ -411,12 +412,20 @@ impl LocalShard {
                 tags,
                 placement,
             } => {
-                if let Ok(ast) = crate::dsl::parse(dsl) {
-                    let mut lc = String::new();
-                    let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                    eng.insert_extracted_with_placement(
-                        &ex, *logical, *version, dsl, tags, placement,
-                    );
+                let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+                    ShardError::Log(format!(
+                        "parsing acknowledged shard add during self-restart: {error}"
+                    ))
+                })?;
+                let mut lc = String::new();
+                let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+                if eng
+                    .insert_extracted_with_placement(&ex, *logical, *version, dsl, tags, placement)
+                    .is_none()
+                {
+                    return Err(ShardError::Log(format!(
+                        "acknowledged shard add {logical} was rejected during self-restart"
+                    )));
                 }
             }
             ClusterMutation::Remove { logical } => {
@@ -434,17 +443,26 @@ impl LocalShard {
                 tags,
                 placement,
             } => {
+                let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+                    ShardError::Log(format!(
+                        "parsing acknowledged shard upsert during self-restart: {error}"
+                    ))
+                })?;
                 eng.delete_by_logical_id(*logical).unwrap_or(0);
-                if let Ok(ast) = crate::dsl::parse(dsl) {
-                    let mut lc = String::new();
-                    let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                    eng.insert_extracted_with_placement(
-                        &ex, *logical, *version, dsl, tags, placement,
-                    );
+                let mut lc = String::new();
+                let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+                if eng
+                    .insert_extracted_with_placement(&ex, *logical, *version, dsl, tags, placement)
+                    .is_none()
+                {
+                    return Err(ShardError::Log(format!(
+                        "acknowledged shard upsert {logical} was rejected during self-restart"
+                    )));
                 }
             }
         }
         Self::publish(&eng, &self.snapshot);
+        Ok(())
     }
 
     /// Bulk-ingest, infallibly — the build path uses this directly on a concrete

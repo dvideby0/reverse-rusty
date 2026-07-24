@@ -19,7 +19,29 @@ use crate::cluster::shard::{LocalShard, Shard, ShardError};
 use crate::dict::Dict;
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
-use crate::tagdict::TagDict;
+use crate::tagdict::{TagDict, TagId};
+
+/// Resolve an already-acknowledged coordinator-log row against the persisted,
+/// frozen tag space. Recovery must carry the resolved ids into the rebuild so a
+/// runtime `max_tags` tightening cannot reclassify the row as fresh ingestion.
+fn resolve_replayed_tag_ids(
+    tag_dict: &TagDict,
+    tags: &[(String, String)],
+) -> Result<Vec<TagId>, ShardError> {
+    let mut ids: Vec<TagId> = tags
+        .iter()
+        .map(|(key, value)| tag_dict.get_or_synthetic(key, value))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.len() > usize::from(u16::MAX) {
+        return Err(ShardError::Log(format!(
+            "replayed tag column exceeds the durable u16 ceiling ({} resolved tags)",
+            ids.len()
+        )));
+    }
+    Ok(ids)
+}
 
 impl ClusterEngine {
     /// Current logical placement generation (ADR-109). Physical checkpoints,
@@ -454,6 +476,7 @@ impl ClusterEngine {
                         if live.contains_key(&logical) {
                             return Err(ShardError::DuplicateLogicalId(logical));
                         }
+                        let tag_ids = resolve_replayed_tag_ids(&engine.tag_dict, &tags)?;
                         if !tags.is_empty() {
                             engine.tags_present.store(true, Ordering::Relaxed);
                         }
@@ -465,7 +488,7 @@ impl ClusterEngine {
                                 version,
                                 0,
                                 tags,
-                                Vec::new(),
+                                tag_ids,
                                 crate::rank::RankValues::default(),
                                 placement,
                             ),
@@ -481,6 +504,7 @@ impl ClusterEngine {
                         tags,
                         placement,
                     } => {
+                        let tag_ids = resolve_replayed_tag_ids(&engine.tag_dict, &tags)?;
                         if !tags.is_empty() {
                             engine.tags_present.store(true, Ordering::Relaxed);
                         }
@@ -492,7 +516,7 @@ impl ClusterEngine {
                                 version,
                                 0,
                                 tags,
-                                Vec::new(),
+                                tag_ids,
                                 crate::rank::RankValues::default(),
                                 placement,
                             ),
