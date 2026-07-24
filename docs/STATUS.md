@@ -177,8 +177,9 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 - **Multi-word aliases** — two title-side views P(T)/N(T) (ADR-061); on a cluster via P(T)-aware
   routing + `build_with_vocab` (live cross-process vocab shipping decided-refused: deploy-time
   config) (ADR-076). Query lowering respects every clause boundary: only maximal consecutive
-  positive bare-term runs are jointly normalized; legacy durable materializations auto-rebuild
-  before serving under an active multi-word alias (ADR-118).
+  positive bare-term runs are jointly normalized; every legacy standalone/local-cluster durable
+  materialization rebuilds before serving, while a legacy shard-local restart fails closed until
+  coordinator re-placement or current-peer recovery (ADR-118).
 - **Dynamic vocabulary** — feature-hashing for post-freeze terms + blue/green vocab rebuild
   (ADR-046); works on a tagged cluster via TagId carry-through (ADR-074).
 

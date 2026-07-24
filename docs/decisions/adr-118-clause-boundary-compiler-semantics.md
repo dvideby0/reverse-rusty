@@ -10,7 +10,10 @@
   query `new -used york` was therefore compiled as required `term:new_york` plus forbidden `used`.
   A title such as `new vintage collectible york` satisfies the DSL but does not contain the
   contiguous alias entity, so its signatures cannot retrieve that query. This is a real violation of
-  the lossless-cover contract, not merely an exact-matcher discrepancy. Both production extraction
+  the lossless-cover contract, not merely an exact-matcher discrepancy. The hazard is broader than
+  aliases: the fabricated stream can carry grader or number context across a clause too. Legacy
+  `pop -used 1994`, for example, normalized the fabricated `pop 1994` stream and could type `1994`
+  differently from a satisfying title where another token separates them. Both production extraction
   paths and the code-independent reference matcher had copied the same interpretation of the prose,
   so the existing differential stayed green.
 
@@ -30,39 +33,45 @@
   compaction and re-anchoring preserve the minimum source semantics version; only re-extraction from
   raw DSL produces the current stamp. Unknown future semantics fail loud.
 
-- **Decision — upgrade before serving.** A legacy stamp is match-equivalent when no multi-word alias
-  is active, so it needs no eager rewrite; a later vocabulary activation already rebuilds the corpus.
-  With active multi-word aliases:
+- **Decision — upgrade before serving.** Every live semantics-zero materialization is rebuilt;
+  absence of aliases is not proof of equivalence because phrase consumption, grader state, and number
+  context are also stream-sensitive.
   - standalone `Engine::open[_with_vocab]` replays the WAL, verifies a complete exact↔source corpus,
-    recompiles every live query, commits the current-stamped segment + manifest, and only then
-    returns. Missing/stale source or a failed durable commit refuses startup;
+    interns every feature newly exposed by splitting the legacy stream, re-resolves equivalences,
+    recompiles every live query, commits the expanded dict + current-stamped segment + manifest, and
+    only then returns. The interning step prevents a migrated synthetic ID from diverging when a later
+    standalone insert assigns the same name a dense ID. Missing/stale source or a failed durable
+    commit refuses startup;
   - durable `ClusterEngine::open` temporarily attaches committed local segments inside the recovery
     transaction, replays the coordinator-log tail, performs the existing blue/green source rebuild
-    under the same normalizer/dict, re-places at one new generation, bumps the control document, and
+    under the same normalizer while re-minting the dict, re-places at one new generation, bumps the
+    control document, and
     checkpoints the new registry atomically before returning;
-  - durable shard self-restart does the same under `shard.ckpt`: old base + translog tail remain
-    authoritative until a replacement registry that advances past the folded tail commits. Old files
-    are removed only after that commit;
-  - a raw/shared segment attach and peer recovery from a still-legacy source refuse loudly. They have
-    no owner capable of atomically committing a replacement registry.
+  - durable shard self-restart refuses a legacy base. A shard-local rewrite cannot safely preserve a
+    selectively placed row because splitting the fabricated feature can change its ring positions or
+    visibility mode; only the coordinator can rebuild and commit the whole placement generation;
+  - raw/shared segment attach and ordinary peer recovery from a still-legacy source likewise refuse.
+    The coordinator's boot transaction has a private migration-only attach/copy seam, but it never
+    publishes those rows and immediately replaces the complete cluster before returning.
 
 - **Why this is safe.** The change is compile/recovery-only: title normalization, signature probing,
   exact verification, and the allocation-free match hot path are untouched. Splitting a fabricated
   entity back into the source query's actual positive runs restores the DSL predicate and its
   lossless signature cover. Migration always rebuilds from the complete raw source set; it never
-  attempts to reverse-engineer source clauses from a compiled integer plan. Standalone and each
-  cluster/shard recovery path retain its old commit point until the complete replacement is durable,
-  so every crash point selects either the old base plus its log tail or the new base—never a partial
-  mixture.
+  attempts to reverse-engineer source clauses from a compiled integer plan. Standalone and
+  coordinator recovery retain their old commit point until the complete replacement is durable, so
+  every crash point selects either the old base plus its log tail or the new base—never a partial
+  mixture. Ownerless and shard-local paths fail closed instead of guessing at placement.
 
 - **Proof.** The regression matrix covers boundaries formed by a negated term, negated phrase,
   negated any-of, positive phrase, and positive any-of through both mutable build and read-only
   recompile paths. The reference matcher has a direct unit matrix over the same cases. Persistence
-  tests downgrade the header stamp and prove one-shot standalone migration plus fail-loud raw attach.
-  Cluster coverage proves an RF=2 durable reopen rebuilds, bumps placement generation exactly once,
-  and reopens idempotently. A durable-shard test folds an unsealed translog tail into the migrated
-  base, advances `shard.ckpt`, and proves a second restart has neither duplication nor another
-  migration. The segment codec pins current/legacy/future stamp behavior.
+  tests downgrade the header stamp and prove one-shot standalone migration, migration without any
+  alias (number-context case), dense-ID stabilization across a later live insert, and fail-loud raw
+  attach. Cluster coverage proves an RF=2 durable reopen rebuilds, bumps placement generation exactly
+  once, and reopens idempotently. A durable-shard test proves self-restart refuses without consuming
+  its unsealed translog tail or advancing `shard.ckpt`. The segment codec pins
+  current/legacy/future stamp behavior.
 
 - **Oracle follow-up.** ADR-087 remains code-independent, but this finding proved code independence
   is not the same as semantic independence when both implementations translate the same ambiguous

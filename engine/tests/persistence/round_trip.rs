@@ -705,6 +705,49 @@ fn durable_reopen_recompiles_legacy_clause_boundary_semantics() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn durable_reopen_migrates_legacy_context_without_aliases() {
+    let dir = test_dir("legacy_clause_boundary_number_context");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+
+    {
+        let mut engine = Engine::with_config(
+            Normalizer::default_vocab().expect("normalizer"),
+            config.clone(),
+        );
+        engine.build_from_queries(&[(1, "pop -used 1994".into())]);
+        assert!(
+            match_ids(&engine, "pop vintage 1994").contains(&1),
+            "current compiler isolates number context at the negated clause"
+        );
+    }
+
+    let legacy =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &legacy.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+
+    // The old joint stream could also leak grader/number context across a
+    // clause, so semantics-v0 is rebuilt even without any alias vocabulary.
+    let reopened = Engine::open(Normalizer::default_vocab().expect("normalizer"), config)
+        .expect("context-sensitive migration");
+    assert!(match_ids(&reopened, "pop vintage 1994").contains(&1));
+    let current =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    assert!(current.segment_files.iter().all(|name| {
+        reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
+            .expect("open migrated segment")
+            .compiler_semantics_version()
+            > 0
+    }));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Codex R13 (P1): a query in the WAL TAIL (inserted after the last flush) must recover with its
 /// alias expansion. `Engine::open` replays the tail BEFORE any vocab is installed, and the
 /// equivalence map is transient (never persisted in the dict) — so the pre-fix open + adopt order

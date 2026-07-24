@@ -259,7 +259,7 @@ fn durable_shard_self_restarts_from_translog() {
 }
 
 #[test]
-fn durable_shard_self_restart_migrates_legacy_clause_boundary_semantics() {
+fn durable_shard_self_restart_refuses_legacy_clause_boundary_semantics() {
     let mut vocab = crate::vocab::Vocab::new();
     vocab.import_solr_aliases(
         "ny => new york",
@@ -314,44 +314,20 @@ fn durable_shard_self_restart_migrates_legacy_clause_boundary_semantics() {
         std::fs::write(path, bytes).expect("write legacy compiler stamp");
     }
 
-    {
-        let reopened = LocalShard::new_durable(
-            Arc::clone(&norm),
-            Arc::clone(&dict),
-            Arc::clone(&tag_dict),
-            cfg.clone(),
-        )
-        .expect("self-restart migrates");
-        let (ids, _) = reopened
-            .percolate_filtered("new vintage collectible york", true, &TagPredicate::empty())
-            .expect("read migrated shard");
-        assert!(ids.contains(&1), "clause-boundary query remains matchable");
-        assert_eq!(
-            reopened.num_queries().expect("query count"),
-            2,
-            "the replayed tail is folded into the migrated base exactly once"
-        );
-    }
-
-    let current = crate::cluster::translog::read_sidecar(&tmp)
-        .expect("read migrated sidecar")
-        .expect("migrated sidecar");
+    let Err(error) = LocalShard::new_durable(norm, dict, tag_dict, cfg) else {
+        panic!("one shard cannot safely rewrite and preserve cluster placement");
+    };
     assert!(
-        current.local_checkpoint > legacy.local_checkpoint,
-        "the sidecar must advance past the tail folded into the green base"
+        error.to_string().contains("legacy compiler semantics")
+            && error.to_string().contains("re-placement"),
+        "unexpected refusal: {error}"
     );
-    assert!(current.segment_files.iter().all(|name| {
-        crate::storage::MmapSegment::open(&tmp.join("segments").join(name))
-            .expect("open migrated segment")
-            .compiler_semantics_version()
-            > 0
-    }));
-
-    let again = LocalShard::new_durable(norm, dict, tag_dict, cfg).expect("second self-restart");
     assert_eq!(
-        again.num_queries().expect("query count"),
-        2,
-        "current-stamped base must not replay or migrate twice"
+        crate::cluster::translog::read_sidecar(&tmp)
+            .expect("read unchanged sidecar")
+            .expect("sidecar"),
+        legacy,
+        "a refused shard-local restart must not advance its commit point or consume the tail"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }

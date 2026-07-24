@@ -419,13 +419,13 @@ impl ClusterEngine {
         }
 
         // ADR-118: legacy segments compiled positive bare terms across clause
-        // boundaries. With active multi-word aliases that can bake a predicate
-        // no title satisfying the source query can reach. Rebuild from the
-        // complete, replayed live corpus under the unchanged normalizer/dict,
-        // re-place at one fresh generation, update the control document, and
-        // commit the green registry before exposing the cluster. Any incomplete
-        // source sidecar or failed checkpoint returns an error; the old manifest
-        // stays authoritative and a later restart can retry.
+        // boundaries. The fabricated stream can change phrase, grader, number,
+        // or alias normalization and bake a predicate no satisfying title can
+        // reach. Rebuild from the complete, replayed live corpus, re-mint the
+        // dict, re-place at one fresh generation, update the control document,
+        // and commit the green registry before exposing the cluster. Any
+        // incomplete source sidecar or failed checkpoint returns an error; the
+        // old manifest stays authoritative and a later restart can retry.
         if needs_clause_boundary_compiler_migration {
             let next_generation = engine
                 .placement_generation()

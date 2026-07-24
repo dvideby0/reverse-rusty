@@ -53,7 +53,9 @@ pub(crate) struct LocalShard {
     /// dropped — byte-identical default path; a reap only fires at checkpoint time, long after
     /// an observer would have attached at cluster build/open).
     event_sink: Mutex<Option<EventSink>>,
-    /// Retained to stamp the per-shard checkpoint sidecar's dict fingerprint.
+    /// Retained for translog replay (re-derive features from raw DSL) on self-restart, and to
+    /// stamp the per-shard checkpoint sidecar's dict fingerprint.
+    norm: Arc<Normalizer>,
     dict: Arc<Dict>,
     /// `Some` ⇒ durable (segments + translog + checkpoint sidecar live here); `None` ⇒ in-memory.
     data_dir: Option<PathBuf>,
@@ -84,7 +86,7 @@ impl LocalShard {
         let retention_lease_ttl = resolve_lease_ttl(&config);
         // `tag_dict` is moved into the engine (the shard keeps no separate copy — the engine holds
         // the shared frozen tag space and does all read-only resolution against it).
-        let engine = Engine::with_shared(norm, Arc::clone(&dict), tag_dict, config);
+        let engine = Engine::with_shared(Arc::clone(&norm), Arc::clone(&dict), tag_dict, config);
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         LocalShard {
             engine: Mutex::new(engine),
@@ -93,6 +95,7 @@ impl LocalShard {
             retention: Mutex::new(RetentionLeases::default()),
             retention_lease_ttl,
             event_sink: Mutex::new(None),
+            norm,
             dict,
             data_dir: None,
             pits: Mutex::new(crate::util::fast_map()),
@@ -151,6 +154,7 @@ impl LocalShard {
             retention: Mutex::new(RetentionLeases::default()),
             retention_lease_ttl,
             event_sink: Mutex::new(None),
+            norm,
             dict,
             data_dir: Some(dir),
             pits: Mutex::new(crate::util::fast_map()),
@@ -211,7 +215,7 @@ impl LocalShard {
         };
         let engine = if allow_legacy_compiler_semantics {
             Engine::open_shared_segments_for_compiler_migration(
-                norm,
+                Arc::clone(&norm),
                 Arc::clone(&dict),
                 tag_dict,
                 config,
@@ -220,7 +224,7 @@ impl LocalShard {
             )
         } else {
             Engine::open_shared_segments(
-                norm,
+                Arc::clone(&norm),
                 Arc::clone(&dict),
                 tag_dict,
                 config,
@@ -237,6 +241,7 @@ impl LocalShard {
             retention: Mutex::new(RetentionLeases::default()),
             retention_lease_ttl,
             event_sink: Mutex::new(None),
+            norm,
             dict,
             data_dir: dir,
             pits: Mutex::new(crate::util::fast_map()),
@@ -244,7 +249,7 @@ impl LocalShard {
     }
 
     /// True when this local shard contains a live pre-ADR-118 materialization
-    /// that must be rebuilt before serving with active multi-word aliases.
+    /// that must be rebuilt and re-placed before serving.
     pub(crate) fn needs_clause_boundary_compiler_migration(&self) -> bool {
         self.lock().needs_clause_boundary_compiler_migration()
     }
@@ -274,12 +279,13 @@ impl LocalShard {
         let floor = LogPos(ckpt.local_checkpoint);
         let retention_lease_ttl = resolve_lease_ttl(&config);
         let translog = translog::open_existing(&dir, config.wal_sync_on_write, floor)?;
-        let replay_norm = Arc::clone(&norm);
-        // Self-restart owns `shard.ckpt`, so it may temporarily attach a legacy
-        // compiler materialization and replace it under that sidecar's atomic
-        // commit below. The public/direct attach path remains fail-loud.
-        let mut engine = Engine::open_shared_segments_for_compiler_migration(
-            norm,
+        // A shard-local restart cannot safely rewrite a legacy compiler plan:
+        // splitting a fabricated cross-clause feature can change both placement
+        // and visibility mode. The strict attach therefore refuses semantics-v0
+        // and requires coordinator-wide rebuild/re-placement (or recovery from
+        // a current peer) before this shard can serve.
+        let engine = Engine::open_shared_segments(
+            Arc::clone(&norm),
             Arc::clone(&dict),
             tag_dict,
             config,
@@ -287,78 +293,35 @@ impl LocalShard {
             ckpt.next_seg_id,
         )
         .map_err(|e| ShardError::Log(format!("attaching shard segments on self-restart: {e}")))?;
-
-        // Replay the un-sealed tail (ops > P) into the engine ONLY — the ops are already on disk
-        // in the translog, so re-appending would duplicate them. Position-filtered, so it never
-        // double-applies an op already baked into the attached segments.
-        let tail = translog.replay(floor)?.entries;
-        for (_pos, m) in &tail {
-            Self::apply_mutation_to_engine(&mut engine, &replay_norm, &dict, m);
-        }
-
-        // ADR-118 remote-shard upgrade. A shard sidecar is a real atomic
-        // registry, so this path can safely self-heal: write current green
-        // segments while the old files + sidecar remain authoritative, commit a
-        // sidecar that also advances past the replayed tail, then trim the log
-        // and remove old orphans. Every crash point reopens either the complete
-        // old base + tail or the complete new base.
-        if engine.needs_clause_boundary_compiler_migration() {
-            let old_files = ckpt.segment_files.clone();
-            let high_water = translog.last_pos()?;
-            engine
-                .migrate_legacy_clause_boundary_semantics()
-                .map_err(|e| {
-                    ShardError::Log(format!(
-                        "migrating legacy compiler semantics on shard self-restart: {e}"
-                    ))
-                })?;
-            let segment_files = engine.segment_filenames().map_err(|e| {
-                ShardError::Log(format!("collecting migrated shard segment filenames: {e}"))
-            })?;
-            translog::write_sidecar(
-                &dir,
-                &translog::ShardCheckpoint {
-                    next_seg_id: engine.next_seg_id(),
-                    local_checkpoint: high_water.0,
-                    dict_fingerprint: dict.fingerprint(),
-                    segment_files: segment_files.clone(),
-                },
-            )?;
-            translog.checkpoint(high_water)?;
-
-            // Post-commit GC only. A failure leaves an unreferenced file and is
-            // correctness-benign; the committed sidecar names the exact keep set.
-            for old in old_files {
-                if !segment_files.iter().any(|current| current == &old) {
-                    // Best-effort: a leftover orphan is ignored by the exact
-                    // sidecar registry on every subsequent open.
-                    drop(std::fs::remove_file(dir.join("segments").join(old)));
-                }
-            }
-        }
-
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
-        Ok(LocalShard {
+        let shard = LocalShard {
             engine: Mutex::new(engine),
             snapshot,
             translog,
             retention: Mutex::new(RetentionLeases::default()),
             retention_lease_ttl,
             event_sink: Mutex::new(None),
+            norm,
             dict,
             data_dir: Some(dir),
             pits: Mutex::new(crate::util::fast_map()),
-        })
+        };
+        // Replay the un-sealed tail (ops > P) into the engine ONLY — the ops are already on disk
+        // in the translog, so re-appending would duplicate them. Position-filtered, so it never
+        // double-applies an op already baked into the attached segments.
+        let tail = shard.translog.replay(floor)?.entries;
+        for (_pos, m) in &tail {
+            shard.apply_to_engine(m);
+        }
+        Ok(shard)
     }
 
-    /// Apply a logged mutation to one engine without re-appending it. Shared by
-    /// constructor-time translog replay and the live shard wrapper below.
-    fn apply_mutation_to_engine(
-        eng: &mut Engine,
-        norm: &Normalizer,
-        dict: &Dict,
-        m: &ClusterMutation,
-    ) {
+    /// Apply one logged mutation to the engine WITHOUT re-appending it to the translog — used by
+    /// self-restart replay (ADR-039 §6), where the op is already durable in the translog. The
+    /// translog-appending counterpart is the seam's `insert_extracted`/`delete_by_logical_id`.
+    /// Infallible: a segments-only engine has no WAL, so neither apply can error.
+    fn apply_to_engine(&self, m: &ClusterMutation) {
+        let mut eng = self.lock();
         match m {
             ClusterMutation::Add {
                 logical,
@@ -369,7 +332,7 @@ impl LocalShard {
             } => {
                 if let Ok(ast) = crate::dsl::parse(dsl) {
                     let mut lc = String::new();
-                    let ex = extract_readonly(&ast, norm, dict, &mut lc);
+                    let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
                     eng.insert_extracted_with_placement(
                         &ex, *logical, *version, dsl, tags, placement,
                     );
@@ -378,6 +341,11 @@ impl LocalShard {
             ClusterMutation::Remove { logical } => {
                 eng.delete_by_logical_id(*logical).unwrap_or(0);
             }
+            // Defensive: a per-shard translog never holds an Upsert frame today — the
+            // coordinator decomposes a cluster upsert into per-shard delete + insert seam
+            // calls, each re-logged as its own Remove/Add record (ADR-070). Replay one
+            // anyway (same delete-then-insert semantics) rather than panic on a future
+            // writer that logs it whole.
             ClusterMutation::Upsert {
                 logical,
                 version,
@@ -388,13 +356,14 @@ impl LocalShard {
                 eng.delete_by_logical_id(*logical).unwrap_or(0);
                 if let Ok(ast) = crate::dsl::parse(dsl) {
                     let mut lc = String::new();
-                    let ex = extract_readonly(&ast, norm, dict, &mut lc);
+                    let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
                     eng.insert_extracted_with_placement(
                         &ex, *logical, *version, dsl, tags, placement,
                     );
                 }
             }
         }
+        Self::publish(&eng, &self.snapshot);
     }
 
     /// Bulk-ingest, infallibly — the build path uses this directly on a concrete

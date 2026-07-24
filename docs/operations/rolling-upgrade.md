@@ -50,12 +50,14 @@ pre-upgrade backup:
   corpus. Standalone `.seg` v1–v7 remains readable by the new binary, but clustered manifests v1–v5
   are intentionally rebuild-only because they cannot identify a unique emission owner.
 - **Compiler-semantics stamp (ADR-118):** segment header bytes `12..16` are semantics 0 (legacy) or
-  1 (maximal positive bare-term runs); this is not a layout-version bump. With active multi-word
-  aliases, standalone, local-cluster, and durable shard self-restart source-recompile semantics-0
-  data before serving. A raw attach or recovery from a still-legacy peer fails loud. Upgrade a
-  durable shard on its own volume before using it as a recovery source. Rolling back to a pre-ADR-118
-  writer is unsafe for **new writes** under active multi-word aliases (it can create semantics-0
-  segments again); restore the pre-upgrade backup or keep writes quiesced until rolling forward.
+  1 (maximal positive bare-term runs); this is not a layout-version bump. Every live semantics-0
+  standalone or local-cluster materialization source-rebuilds before serving, even without aliases
+  (grader and number context are also clause-sensitive). A durable shard cannot safely re-place
+  itself: shard-local restart, raw attach, and ordinary recovery from a still-legacy peer fail loud.
+  Rebuild/re-place through the coordinator, or reseed/recover the shard from a current-semantics
+  peer. Rolling back to a pre-ADR-118 writer is unsafe for **all new query writes** (it can create
+  semantics-0 segments again); restore the pre-upgrade backup or keep writes quiesced until rolling
+  forward.
 - **Same-θ contract (ADR-105):** in remote cluster mode, run every `shardserver` (and the
   coordinator) with the same `--hot-anchor-threshold`. Divergence can never drop a match —
   class A and class H are both always-visible and place identically — it only decides which

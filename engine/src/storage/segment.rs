@@ -66,12 +66,12 @@ const FORMAT_VERSION_SOURCE_GENERATION: u32 = 8;
 /// Semantic version of the AST→compiled-query lowering baked into a segment.
 ///
 /// Version 0 is every segment written before ADR-118: positive bare terms were
-/// incorrectly gathered across intervening clauses before multi-word alias
-/// normalization. Version 1 compiles each maximal consecutive positive bare-term
-/// run independently. This lives in the format's old reserved header word rather
-/// than `FORMAT_VERSION`: an older reader can safely execute a v1-compiled exact
-/// plan, while a newer writer must be able to distinguish legacy materializations
-/// that need a source-driven rebuild when multi-word aliases are active.
+/// incorrectly gathered across intervening clauses before context-sensitive
+/// query normalization. Version 1 compiles each maximal consecutive positive
+/// bare-term run independently. This lives in the format's old reserved header
+/// word rather than `FORMAT_VERSION`: an older reader can safely execute a
+/// v1-compiled exact plan, while a newer reader must identify every legacy
+/// materialization for source-driven rebuild/re-placement.
 pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 1;
 const HEADER_SIZE: usize = 80;
 
