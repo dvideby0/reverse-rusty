@@ -243,6 +243,38 @@ fn deleting_the_last_phrase_row_restores_columnar_batch_mode() {
 }
 
 #[test]
+fn fully_deleted_deduplicated_phrase_group_is_skipped_before_columnar_eval() {
+    let mut engine = Engine::with_config(
+        Normalizer::default_vocab().expect("normalizer"),
+        EngineConfig {
+            accept_class_d: true,
+            ..EngineConfig::default()
+        },
+    );
+    engine.build_from_queries(&[
+        (1, "-\"for parts\"".to_string()),
+        (2, "-\"for parts\"".to_string()),
+        (3, "item".to_string()),
+    ]);
+    assert_eq!(engine.delete_by_logical_id(1).expect("delete leader"), 1);
+    assert_eq!(engine.delete_by_logical_id(2).expect("delete member"), 1);
+
+    let (results, stats) = engine.match_titles_batch_with_stats(
+        &["item".to_string()],
+        BatchMatchOptions {
+            include_broad: true,
+            broad_strategy: BroadStrategy::Columnar,
+            ..BatchMatchOptions::default()
+        },
+    );
+    assert!(
+        stats.broad_batches > 0,
+        "deleting every phrase row must restore the columnar path"
+    );
+    assert_eq!(results, vec![(0, vec![3])]);
+}
+
+#[test]
 fn in_memory_compaction_preserves_phrase_matching_for_every_merge_variant() {
     for (name, config) in [
         (

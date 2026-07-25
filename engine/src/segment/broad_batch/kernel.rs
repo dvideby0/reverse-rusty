@@ -362,6 +362,25 @@ fn emit_from_bits<B: BroadBackend, S: BatchMatchSink, P: BatchEmissionPolicy>(
     }
 }
 
+/// Whether a posting's canonical body still has at least one live identity.
+///
+/// A deduplicated posting names only its leader. The leader may be dead while a
+/// member remains live, so liveness is a group predicate; conversely, a
+/// non-empty member list is not enough because every row in that list may also
+/// be tombstoned. Fully-dead groups must be skipped before exact evaluation:
+/// their historical predicate can require a positioned title view even after
+/// the engine's live-phrase capability has correctly returned to the columnar
+/// path.
+#[inline]
+fn body_group_has_live_row<B: BroadBackend>(backend: &B, grouped: bool, local: u32) -> bool {
+    backend.alive(local)
+        || (grouped
+            && backend
+                .members_of(local)
+                .iter()
+                .any(|&member| backend.alive(member)))
+}
+
 /// Evaluate one columnar lane (broad or hot) of one segment against the whole
 /// batch, emitting matched logical IDs to the indexed batch collector.
 ///
@@ -439,8 +458,8 @@ pub(in crate::segment) fn eval_one_segment<
         for &local in &cands[before..] {
             stats.unique_candidates += 1;
             stats.broad_candidates += 1;
-            if !backend.alive(local) && (!grouped || backend.members_of(local).is_empty()) {
-                continue; // tombstoned singleton — no member can emit
+            if !body_group_has_live_row(&backend, grouped, local) {
+                continue; // fully tombstoned body group — no identity can emit
             }
             if prefilter && !backend.can_match_batch(local, batch_mask_union, feat_row) {
                 stats.broad_prefilter_skipped += 1;
@@ -471,8 +490,8 @@ pub(in crate::segment) fn eval_one_segment<
                 Lane::Broad => stats.broad_candidates += 1,
                 Lane::Hot => stats.hot_candidates += 1,
             }
-            if !backend.alive(local) && (!grouped || backend.members_of(local).is_empty()) {
-                continue; // tombstoned singleton — no member can emit
+            if !body_group_has_live_row(&backend, grouped, local) {
+                continue; // fully tombstoned body group — no identity can emit
             }
             // Vacuous-accept fast path: emit straight from the anchor bitmap. When
             // materialization is off, fall through to full verification — eval_into
