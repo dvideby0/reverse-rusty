@@ -620,12 +620,19 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         } else {
             (0, vec!["sources.dat".to_string(); num_shards as usize])
         };
-    if source_files.len() != num_shards as usize {
+    let expected_shards = num_shards as usize;
+    if segment_registry.len() != expected_shards
+        || next_seg_ids.len() != expected_shards
+        || source_files.len() != expected_shards
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "cluster manifest has {} source file(s) for {num_shards} shards",
-                source_files.len()
+                "cluster manifest per-shard columns do not match {num_shards} shards \
+                 (registry={}, next_ids={}, sources={})",
+                segment_registry.len(),
+                next_seg_ids.len(),
+                source_files.len(),
             ),
         ));
     }
@@ -868,6 +875,66 @@ mod tests {
             "corrupt manifest must error"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cluster_manifest_rejects_mismatched_per_shard_columns() {
+        const REGISTRY_COUNT_OFFSET: usize = 4 + 4 + 8 + 8 + 8 + 4 + 4 + 1;
+
+        let dir = std::env::temp_dir().join(format!("rr_cmanifest_columns_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cluster_manifest.bin");
+        let manifest = ClusterManifest {
+            epoch: 1,
+            snapshot_pos: 0,
+            dict_fingerprint: 7,
+            num_shards: 1,
+            vnodes: 64,
+            include_broad: true,
+            broad_replicate_all: true,
+            placement_generation: crate::ownership::PlacementGeneration::INITIAL,
+            segment_registry: vec![vec!["seg_000001.seg".into()]],
+            next_seg_ids: vec![2],
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: vec!["sources.dat".into()],
+            dict_data: Vec::new(),
+            vocab_data: Vec::new(),
+            tag_dict_data: Vec::new(),
+        };
+        write_cluster_manifest(&manifest, &path).expect("write valid manifest");
+
+        // Insert a second, empty registry row while leaving num_shards and the
+        // other two per-shard columns at one. Re-seal the CRC so structural
+        // validation—not corruption detection—is responsible for the error.
+        let mut bytes = std::fs::read(&path).expect("read manifest");
+        let body_len = bytes.len() - 4;
+        bytes.truncate(body_len);
+        let original_registry_count =
+            read_u32_at(&bytes, REGISTRY_COUNT_OFFSET).expect("registry count");
+        assert_eq!(original_registry_count, 1);
+        let mut cursor = REGISTRY_COUNT_OFFSET + 4;
+        let file_count = read_u32_at(&bytes, cursor).expect("file count") as usize;
+        cursor += 4;
+        for _ in 0..file_count {
+            let len = read_u32_at(&bytes, cursor).expect("filename length") as usize;
+            cursor += 4 + len;
+        }
+        bytes.splice(cursor..cursor, 0u32.to_le_bytes());
+        bytes[REGISTRY_COUNT_OFFSET..REGISTRY_COUNT_OFFSET + 4]
+            .copy_from_slice(&2u32.to_le_bytes());
+        let crc = crc32(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, bytes).expect("write malformed manifest");
+
+        let Err(error) = read_cluster_manifest(&path) else {
+            panic!("mismatched per-shard columns must fail in the reader");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("per-shard columns"),
+            "unexpected error: {error}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

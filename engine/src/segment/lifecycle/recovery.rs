@@ -64,6 +64,7 @@ fn replay_wal_tail(
     for entry in recovery.entries {
         match entry {
             WalEntry::Insert {
+                seq,
                 logical,
                 version,
                 text,
@@ -71,7 +72,6 @@ fn replay_wal_tail(
                 priority,
                 source_generation,
                 class_d_accepted,
-                ..
             } => {
                 // Replay without re-writing to WAL — tags included so a recovered
                 // insert keeps its metadata (ADR-049). The class-D accept decision
@@ -80,15 +80,29 @@ fn replay_wal_tail(
                 // flip; a legacy op-0 frame may have been acknowledged as rejected
                 // (pre-v5 binaries logged before classifying) and must not
                 // resurrect.
-                engine.replay_insert(
-                    &text,
-                    logical,
-                    version,
-                    &tags,
-                    priority.map(|priority| crate::rank::RankValues { priority }),
-                    source_generation,
-                    class_d_accepted,
-                );
+                //
+                // A crash after the manifest rename but before the subsequent WAL
+                // checkpoint/reset leaves the same mutation in BOTH the committed
+                // segment and the recoverable WAL prefix. Do not materialize that
+                // source generation twice: a compiler-semantics migration rejects
+                // genuinely additive same-id predicates because one source document
+                // cannot reconstruct them. The generation test is deliberately
+                // selective rather than `seq <= watermark` alone. Compaction can
+                // advance the manifest watermark while an unrelated insert remains
+                // memtable-only, and that frame still must replay.
+                let captured = seq <= watermark
+                    && engine.has_materialized_source_generation(logical, source_generation);
+                if !captured {
+                    engine.replay_insert(
+                        &text,
+                        logical,
+                        version,
+                        &tags,
+                        priority.map(|priority| crate::rank::RankValues { priority }),
+                        source_generation,
+                        class_d_accepted,
+                    );
+                }
             }
             WalEntry::Tombstone {
                 seq,
@@ -142,16 +156,20 @@ fn replay_wal_tail(
                 // frame's marker (op 6, ADR-068): a legacy op-4 frame replays
                 // under the old reject gate, so a logged-but-rejected class-D
                 // upsert can never tombstone the acknowledged-live prior version.
-                engine.replay_upsert(
-                    &text,
-                    logical,
-                    version,
-                    &tags,
-                    priority.map(|priority| crate::rank::RankValues { priority }),
-                    source_generation,
-                    seq > watermark,
-                    class_d_accepted,
-                );
+                let captured = seq <= watermark
+                    && engine.has_materialized_source_generation(logical, source_generation);
+                if !captured {
+                    engine.replay_upsert(
+                        &text,
+                        logical,
+                        version,
+                        &tags,
+                        priority.map(|priority| crate::rank::RankValues { priority }),
+                        source_generation,
+                        seq > watermark,
+                        class_d_accepted,
+                    );
+                }
             }
             WalEntry::FlushCheckpoint { .. } => {
                 // Skip — already handled by manifest
@@ -162,6 +180,36 @@ fn replay_wal_tail(
 }
 
 impl Engine {
+    /// Whether this exact WAL mutation generation is already represented by a
+    /// physical row. Source generations are allocated once before the WAL append
+    /// and stored unchanged in the exact row, so `(logical, generation)` is the
+    /// durable mutation identity. Liveness is intentionally irrelevant: a later
+    /// mutation may have tombstoned the captured row, but replaying the older
+    /// insert would still resurrect or duplicate it.
+    ///
+    /// Legacy frames without a generation cannot be distinguished safely from
+    /// intentionally additive same-id inserts, so they never take this shortcut.
+    fn has_materialized_source_generation(
+        &self,
+        logical: u64,
+        source_generation: Option<u64>,
+    ) -> bool {
+        let Some(source_generation) = source_generation.filter(|&generation| generation != 0)
+        else {
+            return false;
+        };
+        self.memtable
+            .locals_for_logical(logical)
+            .iter()
+            .any(|&local| self.memtable.source_generation_of(local) == source_generation)
+            || self.segments.iter().any(|segment| {
+                segment
+                    .locals_for_logical(logical)
+                    .iter()
+                    .any(|&local| segment.source_generation_of(local) == source_generation)
+            })
+    }
+
     /// Open an engine from an existing data directory, recovering state from
     /// the manifest and WAL. The normalizer must be the same one used when the
     /// engine was originally built (feature spaces must align).

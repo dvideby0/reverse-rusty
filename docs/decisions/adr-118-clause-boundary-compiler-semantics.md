@@ -43,9 +43,13 @@
     standalone insert assigns the same name a dense ID. The migration refuses a degraded/partially
     attached recovery before writing anything, and refuses multiple live physical predicates sharing
     one logical ID because the canonical one-document source sidecar cannot losslessly reconstruct
-    those distinct rows. WAL-replayed source overlays are durably written before the replacement
-    manifest captures them and resets the WAL. Missing/stale/ambiguous source or a failed durable
-    commit refuses startup;
+    those distinct rows. A crash after the old manifest rename but before its WAL checkpoint can
+    expose the same insert/upsert in both a committed segment and the recoverable WAL prefix; replay
+    recognizes that exact `(logical id, source generation)` mutation and materializes it only once.
+    It does not skip all frames below the manifest watermark, because a compaction can watermark an
+    unrelated insert that remains memtable/WAL-only. WAL-replayed source overlays are durably written
+    before the replacement manifest captures them and resets the WAL. Missing/stale/ambiguous source
+    or a failed durable commit refuses startup;
   - `open_with_vocab` installs transient equivalence groups before replay and migration. The
     compatibility `open(normalizer)` + later `adopt_vocab` path conservatively forces one
     equivalence-aware rebuild for every non-empty recovered corpus. A process-local migration flag
@@ -69,7 +73,9 @@
     serving. The same manifest selects one generation-named source sidecar per shard. A blue/green
     rebuild writes only those new files and atomically selects them with the new segment registry;
     failure before that commit leaves the old manifest and old source corpus intact and retryable.
-    Backups copy exactly the selected sidecars. Superseded source files are benign orphans;
+    The manifest reader validates the registry, next-segment-id, and source-file columns against
+    `num_shards` before any backup/open caller indexes them. Backups copy exactly the selected
+    sidecars. Superseded source files are benign orphans;
   - durable shard checkpoint v2 records the same compiler-semantics stamp and its selected source
     sidecar, covering an empty base plus a retained translog tail. Durable shard self-restart refuses
     a legacy checkpoint before attaching segments or replaying the tail. A shard-local rewrite cannot
@@ -116,10 +122,12 @@
   recompile paths. The reference matcher has a direct unit matrix over the same cases. Persistence
   tests downgrade the header stamp and prove one-shot standalone migration, migration without any
   alias (number-context case), dense-ID stabilization across a later live insert, equivalence-aware
-  `open` + `adopt_vocab`, duplicate-row refusal, no subset commit after a corrupt-segment skip,
-  WAL-tail source survival across a second reopen, recovery above the default clause limit, and
-  fail-loud raw attach/future semantics, plus coherent in-memory matching after a source write
-  failure. Cluster coverage proves an RF=2 durable reopen rebuilds, bumps placement generation
+  `open` + `adopt_vocab`, genuine duplicate-row refusal, manifest-captured insert/upsert WAL
+  de-duplication while a watermarked memtable-only insert still replays, no subset commit after a
+  corrupt-segment skip, WAL-tail source survival across a second reopen, recovery above the default
+  clause limit, and fail-loud raw attach/future semantics, plus coherent in-memory matching after a
+  source write failure. Manifest units reject mismatched per-shard columns before backup code can
+  index them. Cluster coverage proves an RF=2 durable reopen rebuilds, bumps placement generation
   exactly once, and reopens idempotently; folds a legacy placement-divergent tail before validation;
   migrates an empty base with a tail; preserves a tagged tail accepted above the reopened
   `max_tags`; preserves a rank-65 query's default visibility after deletes by retaining the frozen

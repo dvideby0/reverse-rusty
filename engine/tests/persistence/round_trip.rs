@@ -753,6 +753,126 @@ fn durable_reopen_migrates_legacy_context_without_aliases() {
 }
 
 #[test]
+fn legacy_migration_collapses_a_manifest_captured_wal_insert() {
+    let dir = test_dir("legacy_clause_boundary_manifest_wal_window");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        memtable_flush_threshold: usize::MAX,
+        ..EngineConfig::default()
+    };
+
+    // Preserve the pre-checkpoint WAL bytes, then let flush commit the same
+    // mutation into a segment + manifest. Restoring those bytes models SIGKILL
+    // after the manifest's atomic rename but before its WAL checkpoint/reset.
+    let wal_before_checkpoint = {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine
+            .try_insert_live("new -used york", 1, 1)
+            .expect("insert");
+        let wal = std::fs::read(dir.join("wal.log")).expect("pre-flush WAL");
+        engine.flush();
+        wal
+    };
+    std::fs::write(dir.join("wal.log"), wal_before_checkpoint).expect("restore captured WAL");
+    let manifest =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &manifest.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+
+    let reopened = Engine::open(make_norm(), config).expect("crash-window migration");
+    assert_eq!(
+        reopened.num_live_queries(),
+        1,
+        "the segment row and its captured WAL frame are one mutation"
+    );
+    assert!(
+        match_ids(&reopened, "new vintage york").contains(&1),
+        "the migrated query remains matchable"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_migration_collapses_a_manifest_captured_wal_upsert() {
+    let dir = test_dir("legacy_clause_boundary_manifest_wal_upsert");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        memtable_flush_threshold: usize::MAX,
+        ..EngineConfig::default()
+    };
+
+    let wal_before_checkpoint = {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.build_from_queries(&[(1, "alpha old".into())]);
+        engine
+            .try_upsert_live("new -used york", 1, 2)
+            .expect("upsert");
+        let wal = std::fs::read(dir.join("wal.log")).expect("pre-flush WAL");
+        engine.flush();
+        wal
+    };
+    std::fs::write(dir.join("wal.log"), wal_before_checkpoint).expect("restore captured WAL");
+    let manifest =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &manifest.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+
+    let reopened = Engine::open(make_norm(), config).expect("crash-window upsert migration");
+    assert_eq!(
+        reopened.num_live_queries(),
+        1,
+        "the committed upsert and its captured WAL frame are one mutation"
+    );
+    assert!(!match_ids(&reopened, "alpha old").contains(&1));
+    assert!(match_ids(&reopened, "new vintage york").contains(&1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_migration_replays_a_watermarked_memtable_only_insert() {
+    let dir = test_dir("legacy_clause_boundary_watermarked_tail");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        memtable_flush_threshold: usize::MAX,
+        ..EngineConfig::default()
+    };
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine
+            .try_insert_live("alpha base", 1, 1)
+            .expect("first base insert");
+        engine.flush();
+        engine
+            .try_insert_live("bravo base", 2, 1)
+            .expect("second base insert");
+        engine.flush();
+        engine
+            .try_insert_live("charlie tail", 3, 1)
+            .expect("memtable-only insert");
+        engine
+            .compact_all()
+            .expect("compaction advances the manifest watermark");
+        // Crash without flushing: query 3 is covered by the watermark but exists
+        // only in the WAL/memtable, not in the committed segment registry.
+    }
+    let manifest =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &manifest.segment_files {
+        stamp_legacy_compiler_semantics(&dir.join("segments").join(name));
+    }
+
+    let reopened = Engine::open(make_norm(), config).expect("tail-preserving migration");
+    assert!(
+        match_ids(&reopened, "charlie tail").contains(&3),
+        "watermark alone must not suppress an unmaterialized WAL insert"
+    );
+    assert_eq!(reopened.num_live_queries(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn legacy_migration_then_vocab_adoption_recompiles_equivalences() {
     let dir = test_dir("legacy_clause_boundary_adopt_vocab");
     let config = EngineConfig {
