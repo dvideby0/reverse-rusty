@@ -43,6 +43,7 @@ impl ShardService for LegacyOwnershipServer {
             placement_generation: self.placement_generation,
             num_shards: self.num_shards,
             coordinator_id: 0,
+            compiler_semantics_version: 1,
         }))
     }
 
@@ -65,6 +66,7 @@ impl ShardService for LegacyOwnershipServer {
             placement_generation: self.placement_generation,
             num_shards: self.num_shards,
             coordinator_id,
+            compiler_semantics_version: 1,
         }))
     }
 

@@ -78,8 +78,9 @@ curl -X PUT localhost:9200/_settings \
 
 The query-complexity limits (`max_query_length`, `max_query_clauses`, `max_anyof_group_size`) are
 enforced by the parser on every ingest path; a change applies to **subsequent** ingests, not
-retroactively, and WAL replay on recovery uses the compiled-in ceiling rather than the live limit so a
-tightened limit never drops an already-acknowledged write (ADR-025).
+retroactively. WAL replay and source-driven rebuild use only the durable format's structural ceilings,
+rather than either the live limit or today's defaults, so a tightened setting—or an originally looser
+supported setting—never drops an already-acknowledged write (ADR-025/118).
 
 Attempting to set a static or unknown key returns `400`:
 
@@ -88,4 +89,3 @@ Attempting to set a static or unknown key returns `400`:
 ```
 
 ---
-

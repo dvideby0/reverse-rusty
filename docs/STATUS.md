@@ -176,7 +176,10 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   `GET /_vocab/aliases/feedback` + `validate_and_apply` (explicit `activate=true`) (ADR-103).
 - **Multi-word aliases** — two title-side views P(T)/N(T) (ADR-061); on a cluster via P(T)-aware
   routing + `build_with_vocab` (live cross-process vocab shipping decided-refused: deploy-time
-  config) (ADR-076).
+  config) (ADR-076). Query lowering respects every clause boundary: only maximal consecutive
+  positive bare-term runs are jointly normalized; every legacy standalone/local-cluster durable
+  materialization rebuilds before serving, while a legacy shard-local restart fails closed until
+  coordinator re-placement or current-peer recovery (ADR-118).
 - **Dynamic vocabulary** — feature-hashing for post-freeze terms + blue/green vocab rebuild
   (ADR-046); works on a tagged cluster via TagId carry-through (ADR-074).
 
@@ -274,8 +277,10 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   matcher (`reverse-rusty-ref-matcher`) reimplements the parser/normalizer/extractor/predicate from
   the SPEC, reusing none of the engine (independence enforced by a `check.sh` `cargo tree` lane); the
   engine is diffed against it (`tests/independent_oracle/`) over default/populated/alias corpora + a
-  gotcha table + an env-gated real corpus. Closes the ADR-050 shared-front-end blind spot for the
-  covered paths; zero FN/FP, no engine front-end bug found.
+  gotcha table + an env-gated real corpus. It closes the **shared-code** ADR-050 blind spot for the
+  covered paths. ADR-118 later found the first shared-**semantics** blind spot: both independent
+  implementations read an ambiguous lowering rule the same wrong way. The clause-boundary FN is
+  fixed and pinned against a human expectation; issue #123 tracks a stronger semantic-model oracle.
 - **Real-process SIGKILL crash injection** (Phase 0 item 3, ADR-088) — a `crashwriter` lean-core bin +
   `tests/crash_injection/` spawn a real process and deliver a real external SIGKILL mid
   durable-operation (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**),

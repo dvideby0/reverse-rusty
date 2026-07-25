@@ -64,6 +64,7 @@ fn replay_wal_tail(
     for entry in recovery.entries {
         match entry {
             WalEntry::Insert {
+                seq,
                 logical,
                 version,
                 text,
@@ -71,7 +72,6 @@ fn replay_wal_tail(
                 priority,
                 source_generation,
                 class_d_accepted,
-                ..
             } => {
                 // Replay without re-writing to WAL — tags included so a recovered
                 // insert keeps its metadata (ADR-049). The class-D accept decision
@@ -80,15 +80,29 @@ fn replay_wal_tail(
                 // flip; a legacy op-0 frame may have been acknowledged as rejected
                 // (pre-v5 binaries logged before classifying) and must not
                 // resurrect.
-                engine.replay_insert(
-                    &text,
-                    logical,
-                    version,
-                    &tags,
-                    priority.map(|priority| crate::rank::RankValues { priority }),
-                    source_generation,
-                    class_d_accepted,
-                );
+                //
+                // A crash after the manifest rename but before the subsequent WAL
+                // checkpoint/reset leaves the same mutation in BOTH the committed
+                // segment and the recoverable WAL prefix. Do not materialize that
+                // source generation twice: a compiler-semantics migration rejects
+                // genuinely additive same-id predicates because one source document
+                // cannot reconstruct them. The generation test is deliberately
+                // selective rather than `seq <= watermark` alone. Compaction can
+                // advance the manifest watermark while an unrelated insert remains
+                // memtable-only, and that frame still must replay.
+                let captured = seq <= watermark
+                    && engine.has_materialized_source_generation(logical, source_generation);
+                if !captured {
+                    engine.replay_insert(
+                        &text,
+                        logical,
+                        version,
+                        &tags,
+                        priority.map(|priority| crate::rank::RankValues { priority }),
+                        source_generation,
+                        class_d_accepted,
+                    );
+                }
             }
             WalEntry::Tombstone {
                 seq,
@@ -142,16 +156,20 @@ fn replay_wal_tail(
                 // frame's marker (op 6, ADR-068): a legacy op-4 frame replays
                 // under the old reject gate, so a logged-but-rejected class-D
                 // upsert can never tombstone the acknowledged-live prior version.
-                engine.replay_upsert(
-                    &text,
-                    logical,
-                    version,
-                    &tags,
-                    priority.map(|priority| crate::rank::RankValues { priority }),
-                    source_generation,
-                    seq > watermark,
-                    class_d_accepted,
-                );
+                let captured = seq <= watermark
+                    && engine.has_materialized_source_generation(logical, source_generation);
+                if !captured {
+                    engine.replay_upsert(
+                        &text,
+                        logical,
+                        version,
+                        &tags,
+                        priority.map(|priority| crate::rank::RankValues { priority }),
+                        source_generation,
+                        seq > watermark,
+                        class_d_accepted,
+                    );
+                }
             }
             WalEntry::FlushCheckpoint { .. } => {
                 // Skip — already handled by manifest
@@ -162,6 +180,36 @@ fn replay_wal_tail(
 }
 
 impl Engine {
+    /// Whether this exact WAL mutation generation is already represented by a
+    /// physical row. Source generations are allocated once before the WAL append
+    /// and stored unchanged in the exact row, so `(logical, generation)` is the
+    /// durable mutation identity. Liveness is intentionally irrelevant: a later
+    /// mutation may have tombstoned the captured row, but replaying the older
+    /// insert would still resurrect or duplicate it.
+    ///
+    /// Legacy frames without a generation cannot be distinguished safely from
+    /// intentionally additive same-id inserts, so they never take this shortcut.
+    fn has_materialized_source_generation(
+        &self,
+        logical: u64,
+        source_generation: Option<u64>,
+    ) -> bool {
+        let Some(source_generation) = source_generation.filter(|&generation| generation != 0)
+        else {
+            return false;
+        };
+        self.memtable
+            .locals_for_logical(logical)
+            .iter()
+            .any(|&local| self.memtable.source_generation_of(local) == source_generation)
+            || self.segments.iter().any(|segment| {
+                segment
+                    .locals_for_logical(logical)
+                    .iter()
+                    .any(|&local| segment.source_generation_of(local) == source_generation)
+            })
+    }
+
     /// Open an engine from an existing data directory, recovering state from
     /// the manifest and WAL. The normalizer must be the same one used when the
     /// engine was originally built (feature spaces must align).
@@ -276,6 +324,12 @@ impl Engine {
                     }
                     segments.push(Arc::new(BaseSegment::Mmap(mmap_seg)));
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        format!("cannot open committed segment {}: {e}", seg_path.display()),
+                    ));
+                }
                 Err(e) => {
                     pending_events.push(crate::events::EngineEvent::DurabilityFailure {
                         op: crate::events::DurabilityOp::SegmentRecovery,
@@ -349,6 +403,7 @@ impl Engine {
             persistence_healthy: skipped_segments == 0,
             skipped_segments,
             query_store,
+            source_file_name: "sources.dat".to_string(),
             vocab_epoch: 0,
             owns_manifest: true,
         };
@@ -372,7 +427,166 @@ impl Engine {
         // Replay WAL entries after last checkpoint
         replay_wal_tail(&mut engine, &wal_path, manifest.wal_seq_watermark)?;
 
+        // ADR-118 compiler-semantics migration: joining positive bare terms
+        // across an intervening clause could change any context-sensitive query
+        // normalization (phrases, grader state, number context, aliases, ...).
+        // Rebuild every legacy live materialization from retained `_source`
+        // before returning an engine that could serve it. The segment header
+        // stamp makes this idempotent; a missing/inconsistent source sidecar or
+        // failed durable commit refuses startup rather than retaining a silent
+        // false negative.
+        engine.migrate_legacy_clause_boundary_semantics()?;
+
         Ok(engine)
+    }
+
+    /// Whether any live row is materialized under the pre-ADR-118 AST lowering.
+    pub(crate) fn has_legacy_compiler_segments(&self) -> bool {
+        let current = crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION;
+        self.segments.iter().any(|segment| {
+            segment.alive_count() != 0 && segment.compiler_semantics_version() < current
+        }) || (!self.memtable.is_empty() && self.memtable.compiler_semantics_version() < current)
+    }
+
+    /// Whether serving this engine requires the ADR-118 source-driven compiler
+    /// migration. Every live semantics-v0 row is suspect: the old cross-clause
+    /// stream could affect ordinary phrase consumption, grader state, or number
+    /// context even when no alias is installed.
+    pub(crate) fn needs_clause_boundary_compiler_migration(&self) -> bool {
+        self.has_legacy_compiler_segments()
+    }
+
+    /// Standalone upgrade path for ADR-118. The normalizer and dict do not
+    /// change, but every live source must be re-lowered so clause boundaries are
+    /// reflected in exact predicates, signatures, and placement.
+    pub(crate) fn migrate_legacy_clause_boundary_semantics(&mut self) -> std::io::Result<()> {
+        if !self.needs_clause_boundary_compiler_migration() {
+            return Ok(());
+        }
+        if !self.owns_manifest {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cannot migrate legacy compiler semantics inside one cluster shard: query \
+                 placement must be rebuilt and committed by the coordinator",
+            ));
+        }
+        if !self.persistence_healthy || self.skipped_segments != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "cannot migrate legacy compiler semantics from a degraded recovery \
+                     (persistence_healthy={}, skipped_segments={}): repair the committed \
+                     segment set first",
+                    self.persistence_healthy, self.skipped_segments
+                ),
+            ));
+        }
+        if let Some(logical) = self.duplicate_live_logical_id() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "cannot migrate legacy compiler semantics: live query {logical} has multiple \
+                     physical predicates but only one canonical source document"
+                ),
+            ));
+        }
+
+        let live = self.live_source_documents_tagged().map_err(|logical| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "cannot migrate legacy compiler semantics: live query {logical} does not \
+                     have exactly one matching retained source document"
+                ),
+            )
+        })?;
+
+        // A legacy joint stream may have consumed component features that the
+        // persisted standalone dict never interned. Recompiling read-only would
+        // freeze those newly exposed names as synthetic IDs; a later ordinary
+        // standalone insert would intern the same name densely, making titles
+        // resolve dense while the migrated row still required synthetic. Build
+        // an append-only candidate dict off to the side by running the current
+        // mutable extractor over the complete live corpus. Existing IDs and
+        // frozen mask bits stay fixed. Existing frequencies are restored after
+        // the discovery pass; newly exposed features retain their corpus counts.
+        let mut proposed_dict = self.dict.as_ref().clone();
+        let old_len = proposed_dict.len();
+        let old_freqs: Vec<u32> = (0..old_len)
+            .map(|id| proposed_dict.freq(id as crate::dict::FeatureId))
+            .collect();
+        let old_masks: Vec<u8> = (0..old_len)
+            .map(|id| proposed_dict.mask_bit(id as crate::dict::FeatureId))
+            .collect();
+        let mut lc = String::new();
+        for (logical, text, ..) in &live {
+            let ast = crate::dsl::parse_for_recovery(text).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "cannot migrate legacy compiler semantics: stored query {logical} \
+                         no longer parses: {error}"
+                    ),
+                )
+            })?;
+            let ex = crate::compile::extract(&ast, &self.norm, &mut proposed_dict, &mut lc);
+            if let Some(width) = ex.column_overflow() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "cannot migrate legacy compiler semantics: stored query {logical} \
+                         exceeds the exact-store column limit ({width} features)"
+                    ),
+                ));
+            }
+        }
+        for id in 0..old_len {
+            proposed_dict.set_freq_and_mask(
+                id as crate::dict::FeatureId,
+                old_freqs[id],
+                old_masks[id],
+            );
+        }
+        // Newly interned equivalence members must be keyed by their new dense
+        // IDs before the read-only materialization pass below.
+        if let Some(vocab) = self.vocab.as_deref() {
+            let equiv = vocab.resolve_equivalences(&self.norm, &proposed_dict);
+            proposed_dict.set_equivalences(equiv);
+        }
+        self.dict = Arc::new(proposed_dict);
+
+        let previous_epoch = self.vocab_epoch;
+        self.vocab_epoch = self.vocab_epoch.checked_add(1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "cannot migrate legacy compiler semantics: vocab epoch exhausted",
+            )
+        })?;
+        let rebuilt = self.recompile_stale_segments();
+
+        if rebuilt != live.len() || self.has_legacy_compiler_segments() || !self.persistence_healthy
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "legacy compiler-semantics migration did not commit completely \
+                     (expected {} live queries, rebuilt {rebuilt}, persistence_healthy={})",
+                    live.len(),
+                    self.persistence_healthy
+                ),
+            ));
+        }
+
+        // The epoch was only a process-local trigger for a same-normalizer
+        // compiler migration. Restore it so introspection does not report a
+        // vocabulary change; the durable idempotency marker is the segment's
+        // compiler-semantics header word.
+        self.vocab_epoch = previous_epoch;
+        Arc::make_mut(&mut self.memtable).vocab_epoch = previous_epoch;
+        for segment in &mut self.segments {
+            Arc::make_mut(segment).set_vocab_epoch(previous_epoch);
+        }
+        Ok(())
     }
 
     /// Reopen a **cluster-shard** engine (ADR-032) by attaching an EXPLICIT list of
@@ -394,6 +608,77 @@ impl Engine {
         files: &[String],
         next_seg_id: u64,
     ) -> std::io::Result<Self> {
+        Self::open_shared_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            "sources.dat",
+            false,
+        )
+    }
+
+    /// Coordinator-selected source-sidecar attach seam. The source filename is
+    /// validated by the cluster manifest reader before it reaches this method.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_shared_segments_with_source_file(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+        source_file_name: &str,
+    ) -> std::io::Result<Self> {
+        Self::open_shared_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            source_file_name,
+            false,
+        )
+    }
+
+    /// Coordinator-only legacy attach with an explicitly manifest-selected
+    /// source sidecar.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_shared_segments_for_compiler_migration_with_source_file(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+        source_file_name: &str,
+    ) -> std::io::Result<Self> {
+        Self::open_shared_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            source_file_name,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_shared_segments_inner(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+        source_file_name: &str,
+        allow_legacy_compiler_semantics: bool,
+    ) -> std::io::Result<Self> {
         let dir = config.data_dir.as_ref().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -409,11 +694,11 @@ impl Engine {
             segments.push(Arc::new(BaseSegment::Mmap(mmap_seg)));
         }
         let query_store = Arc::new(SourceStore::open(
-            &dir.join("sources.dat"),
+            &dir.join(source_file_name),
             config.retain_source,
         )?);
         let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
-        Ok(Engine {
+        let engine = Engine {
             config: Arc::new(config),
             norm,
             vocab: None,
@@ -439,8 +724,119 @@ impl Engine {
             persistence_healthy: true,
             skipped_segments: 0,
             query_store,
+            source_file_name: source_file_name.to_string(),
             vocab_epoch: 0,
             owns_manifest: false,
-        })
+        };
+        if !allow_legacy_compiler_semantics && engine.needs_clause_boundary_compiler_migration() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "legacy compiler semantics require an atomic source-driven rebuild and \
+                 re-placement; reopen through ClusterEngine or recover this shard from a \
+                 current peer",
+            ));
+        }
+        Ok(engine)
+    }
+}
+
+#[cfg(test)]
+mod compiler_migration_tests {
+    use super::*;
+    use crate::segment::MatchScratch;
+
+    fn scratch_dir() -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "reverse_rusty_clause_migration_ids_{}_{}",
+            std::process::id(),
+            nonce
+        ))
+    }
+
+    fn stamp_legacy(path: &std::path::Path) {
+        let mut bytes = std::fs::read(path).expect("read segment");
+        bytes[12..16].copy_from_slice(&0u32.to_le_bytes());
+        let body = bytes.len() - 4;
+        let crc = crate::storage::crc32(&bytes[..body]);
+        bytes[body..].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(path, bytes).expect("write legacy stamp");
+    }
+
+    fn matches(engine: &Engine, title: &str, logical: u64) -> bool {
+        let mut scratch = MatchScratch::new();
+        let mut out = Vec::new();
+        engine.match_title(title, &mut scratch, &mut out, true);
+        out.contains(&logical)
+    }
+
+    #[test]
+    fn migration_interns_features_exposed_by_splitting_the_legacy_stream() {
+        let dir = scratch_dir();
+        let config = EngineConfig {
+            data_dir: Some(dir.clone()),
+            ..EngineConfig::default()
+        };
+        let mut vocab = crate::vocab::Vocab::new();
+        vocab.import_solr_aliases(
+            "ny => new york",
+            &Normalizer::default_vocab().expect("normalizer"),
+            &Dict::new(),
+        );
+
+        {
+            let mut engine =
+                Engine::with_vocab(vocab.clone(), config.clone()).expect("vocab engine");
+            // This exact plan contains only the collapsed alias entity, matching
+            // what the legacy cross-clause stream produced.
+            engine.build_from_queries(&[(1, "new york".to_string())]);
+            assert!(engine.dict().get("term:new").is_none());
+            assert!(engine.dict().get("term:york").is_none());
+
+            // Retain the same exact-row metadata but substitute the true source
+            // predicate that the legacy compiler mis-lowered.
+            let source = engine
+                .snapshot()
+                .get_query_document(1)
+                .expect("source metadata");
+            engine.query_store.insert_document_with_generation(
+                1,
+                "new -used york".to_string(),
+                source.version(),
+                source.source_generation(),
+                source.tags(),
+            );
+            engine.save_query_sources();
+        }
+
+        let manifest = crate::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+        for name in &manifest.segment_files {
+            stamp_legacy(&dir.join("segments").join(name));
+        }
+
+        let mut reopened = Engine::open_with_vocab(vocab, config).expect("source-driven migration");
+        let new_id = reopened
+            .dict()
+            .get("term:new")
+            .expect("newly exposed term is interned");
+        assert!(
+            reopened.dict().get("term:york").is_some(),
+            "every separated component must be dense before commit"
+        );
+        assert!(matches(&reopened, "new vintage collectible york", 1));
+
+        // A later standalone insert uses the same dense ID; it cannot turn the
+        // migrated row's synthetic feature into an unreachable split brain.
+        reopened
+            .try_insert_live("new", 2, 1)
+            .expect("post-migration insert");
+        assert_eq!(reopened.dict().get("term:new"), Some(new_id));
+        assert!(matches(&reopened, "new vintage collectible york", 1));
+
+        drop(reopened);
+        std::fs::remove_dir_all(dir).expect("cleanup");
     }
 }

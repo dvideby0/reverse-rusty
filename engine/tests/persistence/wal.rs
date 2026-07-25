@@ -55,6 +55,35 @@ fn writes_before_first_manifest_survive_crash() {
 }
 
 #[test]
+fn wal_replay_preserves_queries_accepted_above_current_defaults() {
+    let dir = test_dir("wal_recovery_structural_parse_limits");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        max_query_clauses: 300,
+        memtable_flush_threshold: usize::MAX,
+        ..EngineConfig::default()
+    };
+    let query = (0..257)
+        .map(|i| format!("term{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine
+            .try_insert_live(&query, 1, 1)
+            .expect("front door accepts configured limit");
+        assert!(!dir.join("manifest.bin").exists());
+    }
+
+    let reopened = Engine::open(make_norm(), config).expect("recovery uses structural limits");
+    assert!(
+        match_ids(&reopened, &query).contains(&1),
+        "an acknowledged query above today's default must survive WAL replay"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn tagged_inserts_survive_wal_recovery() {
     // Tags ride the WAL (v2, ADR-049): a live tagged insert that has NOT been flushed is
     // replayed on reopen WITH its tags, so a filter still narrows correctly.

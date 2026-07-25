@@ -259,6 +259,190 @@ fn durable_shard_self_restarts_from_translog() {
 }
 
 #[test]
+fn durable_shard_replays_an_acknowledged_query_above_default_parse_limits() {
+    let norm = Arc::new(Normalizer::default_vocab().expect("normalizer"));
+    let query = (0..=crate::dsl::MAX_CLAUSES)
+        .map(|i| format!("recoveryterm{i}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let limits = crate::dsl::ParseLimits {
+        max_clauses: crate::dsl::MAX_CLAUSES + 1,
+        ..Default::default()
+    };
+    let ast = crate::dsl::parse_with_limits(&query, &limits).expect("loose front-door parse");
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+    dict.finalize_mask();
+    let dict = Arc::new(dict);
+    let mut tag_dict = TagDict::new();
+    tag_dict.mark_finalized();
+    let tag_dict = Arc::new(tag_dict);
+
+    let tmp = scratch_dir("selfrestart_structural_parse_limit");
+    let cfg = EngineConfig {
+        data_dir: Some(tmp.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            cfg.clone(),
+        )
+        .expect("durable shard");
+        shard
+            .insert_extracted_with_tags(&ex, 1, 1, &query, &[])
+            .expect("already-validated query is acknowledged");
+        // Leave the query only in the translog tail.
+    }
+
+    let reopened = LocalShard::new_durable(norm, dict, tag_dict, cfg)
+        .expect("self-restart uses durable structural parse limits");
+    let (ids, _) = reopened
+        .percolate_filtered(&query, true, &TagPredicate::empty())
+        .expect("recovered query matches");
+    assert!(
+        ids.contains(&1),
+        "self-restart must not silently skip an acknowledged query above today's defaults"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn durable_shard_self_restart_refuses_legacy_clause_boundary_semantics() {
+    let mut vocab = crate::vocab::Vocab::new();
+    vocab.import_solr_aliases(
+        "ny => new york",
+        &Normalizer::default_vocab().expect("normalizer"),
+        &Dict::new(),
+    );
+    let norm = Arc::new(vocab.to_normalizer().expect("alias normalizer"));
+    let mut dict = Dict::new();
+    let mut lc = String::new();
+    let ast = crate::dsl::parse("new -used york").expect("query");
+    let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+    let tail_ast = crate::dsl::parse("alpha bravo").expect("tail query");
+    let tail_ex = crate::compile::extract(&tail_ast, &norm, &mut dict, &mut lc);
+    dict.finalize_mask();
+    let dict = Arc::new(dict);
+    let mut tag_dict = TagDict::new();
+    tag_dict.mark_finalized();
+    let tag_dict = Arc::new(tag_dict);
+
+    let tmp = scratch_dir("selfrestart_clause_migration");
+    let cfg = EngineConfig {
+        data_dir: Some(tmp.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            cfg.clone(),
+        )
+        .expect("durable shard");
+        shard
+            .insert_extracted_with_tags(&ex, 1, 1, "new -used york", &[])
+            .expect("base insert");
+        shard.seal_for_checkpoint().expect("seal legacy base");
+        shard
+            .insert_extracted_with_tags(&tail_ex, 2, 1, "alpha bravo", &[])
+            .expect("unsealed tail insert");
+    }
+
+    let legacy = crate::cluster::translog::read_sidecar(&tmp)
+        .expect("read sidecar")
+        .expect("sidecar");
+    for name in &legacy.segment_files {
+        let path = tmp.join("segments").join(name);
+        let mut bytes = std::fs::read(&path).expect("read segment");
+        bytes[12..16].copy_from_slice(&0u32.to_le_bytes());
+        let body = bytes.len() - 4;
+        let crc = crate::storage::crc32(&bytes[..body]);
+        bytes[body..].copy_from_slice(&crc.to_le_bytes());
+        std::fs::write(path, bytes).expect("write legacy compiler stamp");
+    }
+
+    let Err(error) = LocalShard::new_durable(norm, dict, tag_dict, cfg) else {
+        panic!("one shard cannot safely rewrite and preserve cluster placement");
+    };
+    assert!(
+        error.to_string().contains("legacy compiler semantics")
+            && error.to_string().contains("re-placement"),
+        "unexpected refusal: {error}"
+    );
+    assert_eq!(
+        crate::cluster::translog::read_sidecar(&tmp)
+            .expect("read unchanged sidecar")
+            .expect("sidecar"),
+        legacy,
+        "a refused shard-local restart must not advance its commit point or consume the tail"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn durable_shard_self_restart_refuses_legacy_tail_with_empty_base() {
+    let (norm, dict, tag_dict, corpus) = compile_corpus(&[(1, "alpha bravo")]);
+    let tmp = scratch_dir("selfrestart_legacy_tail_only");
+    let cfg = EngineConfig {
+        data_dir: Some(tmp.clone()),
+        ..EngineConfig::default()
+    };
+    {
+        let shard = LocalShard::new_durable(
+            Arc::clone(&norm),
+            Arc::clone(&dict),
+            Arc::clone(&tag_dict),
+            cfg.clone(),
+        )
+        .expect("durable shard");
+        shard
+            .insert_extracted_with_tags(&corpus[0].1, 1, 1, &corpus[0].2, &[])
+            .expect("unsealed tail insert");
+        // Deliberately do not seal: the checkpoint base stays empty and the
+        // acknowledged row exists only in the translog tail.
+    }
+
+    // Downgrade the v2 checkpoint to the exact v1 body. With no segment
+    // filenames the legacy body is the first 28 bytes (three u64s + count).
+    let sidecar_path = tmp.join("shard.ckpt");
+    let current = std::fs::read(&sidecar_path).expect("read current sidecar");
+    let legacy_body = current[12..12 + 28].to_vec();
+    let mut legacy_bytes = Vec::new();
+    legacy_bytes.extend_from_slice(b"RSCK");
+    legacy_bytes.extend_from_slice(&1u32.to_le_bytes());
+    legacy_bytes.extend_from_slice(&crate::storage::crc32(&legacy_body).to_le_bytes());
+    legacy_bytes.extend_from_slice(&legacy_body);
+    std::fs::write(&sidecar_path, &legacy_bytes).expect("write v1 sidecar");
+    let translog_before =
+        std::fs::read(tmp.join(crate::cluster::translog::TRANSLOG_FILE)).expect("read tail");
+
+    let Err(error) = LocalShard::new_durable(norm, dict, tag_dict, cfg) else {
+        panic!("a current binary must not replay a legacy-only tail");
+    };
+    assert!(
+        error.to_string().contains("legacy compiler semantics")
+            && error.to_string().contains("re-placement"),
+        "unexpected refusal: {error}"
+    );
+    assert_eq!(
+        std::fs::read(&sidecar_path).expect("sidecar remains"),
+        legacy_bytes,
+        "the refusal must not advance the empty-base checkpoint"
+    );
+    assert_eq!(
+        std::fs::read(tmp.join(crate::cluster::translog::TRANSLOG_FILE)).expect("translog remains"),
+        translog_before,
+        "the refusal must happen before the legacy tail can be reset or consumed"
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn add_recovered_replica_promotes_an_in_sync_set_equal_replica() {
     // ADR-040 finalize: add a replica to a live position at runtime — peer-recover + converge +
     // promote under a brief quiesce. The promoted replica is in-sync (a later write fans out to

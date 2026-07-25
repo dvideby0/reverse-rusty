@@ -719,7 +719,7 @@ impl Engine {
     }
 
     /// Replay an upsert from WAL recovery (does NOT write back to WAL). Same
-    /// default-parse-ceiling rule as [`replay_insert`](Self::replay_insert).
+    /// recovery-parse-ceiling rule as [`replay_insert`](Self::replay_insert).
     /// `tombstone_in_segments` is `seq > wal_seq_watermark` at the dispatch site —
     /// see [`apply_upsert`](Self::apply_upsert) for the two state domains.
     #[allow(clippy::too_many_arguments)]
@@ -734,7 +734,7 @@ impl Engine {
         tombstone_in_segments: bool,
         class_d_accepted: bool,
     ) {
-        if let Ok(ast) = crate::dsl::parse(text) {
+        if let Ok(ast) = crate::dsl::parse_for_recovery(text) {
             let mut lc = String::new();
             let ex = {
                 let dict = Arc::make_mut(&mut self.dict);
@@ -1108,7 +1108,10 @@ impl Engine {
             if rank.priority == 0 {
                 rank = self.cluster_rank_values(&item.tags, &tag_ids);
             }
-            let source_generation = self.allocate_source_generation();
+            let source_generation = match item.source_generation {
+                Some(source_generation) => self.replay_source_generation(Some(source_generation)),
+                None => self.allocate_source_generation(),
+            };
             if let Some(added) = seg.add_compiled_ranked_placed_with_source_generation(
                 &item.ex,
                 &tag_ids,
@@ -1228,11 +1231,11 @@ impl Engine {
 
     /// Replay an insert from WAL recovery (does NOT write back to WAL).
     ///
-    /// Replay uses the default (compiled-in) parse ceiling, NOT the configured
-    /// `parse_limits()`: a WAL entry was already accepted at its front-door write,
-    /// so re-applying a (possibly since-tightened) limit here could silently drop
-    /// an already-acknowledged write and diverge the recovered state from the log.
-    /// The compiled-in ceiling still bounds resource use during replay.
+    /// Replay uses the durable format's structural parse ceiling, NOT the
+    /// configured `parse_limits()` or today's defaults: a WAL entry was already
+    /// accepted at its front-door write, so re-applying a possibly tightened (or
+    /// originally looser) policy here could silently drop an acknowledged write
+    /// and diverge recovered state from the log.
     ///
     /// `class_d_accepted` is the frame's own marker (WAL v5, ADR-068), NOT the
     /// engine's knob: an op-5 frame was accepted at its write (the live path gates
@@ -1252,7 +1255,7 @@ impl Engine {
         source_generation: Option<u64>,
         class_d_accepted: bool,
     ) {
-        if let Ok(ast) = crate::dsl::parse(text) {
+        if let Ok(ast) = crate::dsl::parse_for_recovery(text) {
             let tag_ids = self.intern_tags(tags);
             let rank = rank.unwrap_or_else(|| self.legacy_rank_values(&tag_ids));
             let mut lc = String::new();
@@ -1318,6 +1321,7 @@ mod tests {
             ex,
             dsl: "1994 upper deck".into(),
             version: 1,
+            source_generation: None,
             tags: Vec::new(),
             // Nonempty carry-through bypasses the runtime max_tags check, but
             // the exact-store u16 count ceiling remains unconditional.

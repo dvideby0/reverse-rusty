@@ -983,6 +983,7 @@ impl MmapSegment {
 
         let mut seg = Segment::from_parts(main, broad, hot, exact, classes, alive);
         seg.vocab_epoch = self.vocab_epoch;
+        seg.compiler_semantics_version = self.compiler_semantics_version();
         seg
     }
 }

@@ -107,6 +107,7 @@ impl ClusterEngine {
                             ex: ex.clone(),
                             dsl: text.clone(),
                             version: *version,
+                            source_generation: None,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
                             rank: crate::rank::RankValues::default(),
@@ -121,6 +122,7 @@ impl ClusterEngine {
                             ex: ex.clone(),
                             dsl: text.clone(),
                             version: *version,
+                            source_generation: None,
                             tags: qtags.clone(),
                             tag_ids: Vec::new(),
                             rank: crate::rank::RankValues::default(),
@@ -485,10 +487,14 @@ impl ClusterEngine {
         placement: &crate::ownership::QueryPlacement,
     ) -> Result<(usize, AddOutcome), ShardError> {
         self.note_tags(tags);
-        let ast = match crate::dsl::parse(dsl) {
-            Ok(a) => a,
-            Err(e) => return Ok((0, AddOutcome::RejectedParse(e))),
-        };
+        // This mutation was accepted and appended already. Re-application (live
+        // or recovery) must not re-litigate it against today's configurable or
+        // compiled-in policy limits.
+        let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+            ShardError::Log(format!(
+                "parsing acknowledged cluster upsert during apply: {error}"
+            ))
+        })?;
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
         // Force accept=true: apply is reached ONLY for already-accepted writes (live upsert
@@ -675,10 +681,14 @@ impl ClusterEngine {
         // Latch tags_present (ADR-055, `/_stats` introspection) — covers both the live add
         // (`add_query_with_tags`) and a tagged log-tail entry replayed on `open`.
         self.note_tags(tags);
-        let ast = match crate::dsl::parse(dsl) {
-            Ok(a) => a,
-            Err(e) => return Ok(AddOutcome::RejectedParse(e)),
-        };
+        // The front door validated this row before appending it. Apply/replay
+        // uses only durable structural ceilings so a later policy/default
+        // tightening cannot discard an acknowledged mutation.
+        let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+            ShardError::Log(format!(
+                "parsing acknowledged cluster add during apply: {error}"
+            ))
+        })?;
         let mut lc = String::new();
         let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
         // Force accept=true (same only-accepted-writes invariant as apply_upsert): apply/replay

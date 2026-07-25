@@ -97,6 +97,7 @@ impl Engine {
             persistence_healthy: wal_healthy,
             skipped_segments: 0,
             query_store,
+            source_file_name: "sources.dat".to_string(),
             vocab_epoch: 0,
             owns_manifest: true,
         }
@@ -162,6 +163,7 @@ impl Engine {
             persistence_healthy: true,
             skipped_segments: 0,
             query_store,
+            source_file_name: "sources.dat".to_string(),
             vocab_epoch: 0,
             owns_manifest: false,
         })

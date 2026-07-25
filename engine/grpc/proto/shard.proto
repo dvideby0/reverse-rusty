@@ -472,6 +472,7 @@ message DictFingerprintReply {
   // Exclusive live remote-coordinator owner. A coordinator-stamped probe must
   // echo its own non-zero id; zero is an unowned or pre-lease server.
   uint64 coordinator_id = 6;
+  uint32 compiler_semantics_version = 7;
 }
 
 // The coordinator's authoritative frozen dict, serialized by `crate::storage::serialize_dict`,
@@ -493,6 +494,7 @@ message AdoptDictRequest {
   uint32 shard_id = 5;
   uint64 placement_generation = 6;
   uint32 num_shards = 7;
+  uint32 compiler_semantics_version = 8;
 }
 // The server's frozen-dict + tag-dict fingerprints AFTER adoption (equal the request's on success).
 message AdoptDictReply {
@@ -506,6 +508,7 @@ message AdoptDictReply {
   uint32 num_shards = 5;
   // Attests that this server enforced the caller's exclusive coordinator lease.
   uint64 coordinator_id = 6;
+  uint32 compiler_semantics_version = 7;
 }
 
 // Create a co-located slot on a node that has ALREADY adopted the dict (ADR-093 Stage 2). No dict
@@ -517,6 +520,7 @@ message AddShardRequest {
   uint64 tag_dict_fingerprint = 3;
   uint64 placement_generation = 4;
   uint32 num_shards = 5;
+  uint32 compiler_semantics_version = 6;
 }
 // The node's frozen-dict + tag-dict fingerprints after the slot is created (equal the request's on
 // success). `broad_replicate_all` mirrors `AdoptDictReply` for a symmetric client-side attestation.
@@ -527,6 +531,7 @@ message AddShardReply {
   uint64 placement_generation = 4;
   uint32 num_shards = 5;
   uint64 coordinator_id = 6;
+  uint32 compiler_semantics_version = 7;
 }
 
 // ---- peer recovery (ADR-035/036) ----
@@ -555,6 +560,10 @@ message FetchManifest {
   uint64 up_to_seqno = 5;
   uint64 placement_generation = 6;
   uint32 num_shards = 7;
+  // Compiler lowering semantics for the sealed base + tail. A pre-ADR-118
+  // sender leaves proto3 default 0; a current receiver refuses it rather than
+  // replaying legacy placement under current semantics.
+  uint32 compiler_semantics_version = 8;
 }
 // One run of bytes for a single file: contiguous chunks sharing `name`, terminated by `last`.
 // The sentinel name "sources.dat" carries the optional (display-only) source blob; every

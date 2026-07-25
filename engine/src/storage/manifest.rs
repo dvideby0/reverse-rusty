@@ -327,6 +327,12 @@ const CLUSTER_MANIFEST_VERSION_REPLICATE_ALL: u32 = 5;
 /// v6 (ADR-109): appends the monotonic placement generation and fences out
 /// durable clusters whose segments do not carry emission-ownership metadata.
 const CLUSTER_MANIFEST_VERSION_OWNERSHIP: u32 = 6;
+/// v7 (ADR-118): appends the compiler-semantics generation plus one
+/// manifest-selected source-sidecar basename per shard. The marker covers
+/// uncheckpointed coordinator-log tails even when the committed segment base is
+/// empty; the source names make a blue/green rebuild's source corpus atomic
+/// with the segment registry.
+const CLUSTER_MANIFEST_VERSION_COMPILER_SEMANTICS: u32 = 7;
 
 /// The coordinator's cluster-state document (the analogue of what a Raft quorum will
 /// later hold). Written atomically (tmp + CRC + rename) — the SINGLE commit point that
@@ -360,6 +366,12 @@ pub struct ClusterManifest {
     /// Per-shard next segment-id counter (parallel to `segment_registry`), so a flush
     /// after reopen never reuses/clobbers a committed segment filename.
     pub next_seg_ids: Vec<u64>,
+    /// Compiler lowering semantics for the committed base and coordinator-log
+    /// tail. A v6 manifest reads as zero and is rebuilt before serving.
+    pub compiler_semantics_version: u32,
+    /// Per-shard source-sidecar basenames, selected by the same atomic commit as
+    /// `segment_registry`. A v6 manifest defaults each shard to `sources.dat`.
+    pub source_files: Vec<String>,
     /// `serialize_dict(frozen dict)` — the authoritative feature space, stored ONCE here
     /// (shards do not embed their own dict copy).
     pub dict_data: Vec<u8>,
@@ -376,10 +388,32 @@ pub struct ClusterManifest {
 }
 
 pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Result<()> {
+    if manifest.segment_registry.len() != manifest.num_shards as usize
+        || manifest.next_seg_ids.len() != manifest.num_shards as usize
+        || manifest.source_files.len() != manifest.num_shards as usize
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cluster manifest per-shard columns do not match num_shards",
+        ));
+    }
+    if manifest.compiler_semantics_version != super::CURRENT_COMPILER_SEMANTICS_VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "cluster manifest compiler semantics {} does not equal current {}",
+                manifest.compiler_semantics_version,
+                super::CURRENT_COMPILER_SEMANTICS_VERSION
+            ),
+        ));
+    }
+    for name in &manifest.source_files {
+        super::validate_sidecar_basename(name)?;
+    }
     let tmp = path.with_extension("cmanifest.tmp");
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(&CLUSTER_MANIFEST_MAGIC)?;
-    write_u32(&mut f, CLUSTER_MANIFEST_VERSION_OWNERSHIP)?;
+    write_u32(&mut f, CLUSTER_MANIFEST_VERSION_COMPILER_SEMANTICS)?;
     write_u64(&mut f, manifest.epoch)?;
     write_u64(&mut f, manifest.snapshot_pos)?;
     write_u64(&mut f, manifest.dict_fingerprint)?;
@@ -410,6 +444,13 @@ pub fn write_cluster_manifest(manifest: &ClusterManifest, path: &Path) -> io::Re
     write_u32(&mut f, manifest.tag_dict_data.len() as u32)?;
     f.write_all(&manifest.tag_dict_data)?;
     write_u64(&mut f, manifest.placement_generation.0)?;
+    write_u32(&mut f, manifest.compiler_semantics_version)?;
+    write_u32(&mut f, manifest.source_files.len() as u32)?;
+    for name in &manifest.source_files {
+        let bytes = name.as_bytes();
+        write_u32(&mut f, bytes.len() as u32)?;
+        f.write_all(bytes)?;
+    }
     f.sync_all()?;
     drop(f);
     // Read back for the trailing CRC (same simple approach as write_manifest).
@@ -439,19 +480,21 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
             "cluster manifest CRC mismatch",
         ));
     }
-    if data[0..4] != CLUSTER_MANIFEST_MAGIC {
+    if content[0..4] != CLUSTER_MANIFEST_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "bad cluster manifest magic",
         ));
     }
-    let version = read_u32_at(&data, 4)?;
+    let version = read_u32_at(content, 4)?;
     // ADR-109 is a rebuild-only cluster migration: v1-v5 have no durable emission-owner
     // generation, while a future version must never be guessed at.
-    if version != CLUSTER_MANIFEST_VERSION_OWNERSHIP {
+    if !(CLUSTER_MANIFEST_VERSION_OWNERSHIP..=CLUSTER_MANIFEST_VERSION_COMPILER_SEMANTICS)
+        .contains(&version)
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            if version <= CLUSTER_MANIFEST_VERSION_REPLICATE_ALL {
+            if version < CLUSTER_MANIFEST_VERSION_OWNERSHIP {
                 format!(
                     "cluster manifest v{version} predates ADR-109 ownership metadata; rebuild the durable cluster with this binary"
                 )
@@ -461,33 +504,33 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         ));
     }
     let mut cursor = 8usize;
-    let epoch = read_u64_at(&data, cursor)?;
+    let epoch = read_u64_at(content, cursor)?;
     cursor += 8;
-    let snapshot_pos = read_u64_at(&data, cursor)?;
+    let snapshot_pos = read_u64_at(content, cursor)?;
     cursor += 8;
-    let dict_fingerprint = read_u64_at(&data, cursor)?;
+    let dict_fingerprint = read_u64_at(content, cursor)?;
     cursor += 8;
-    let num_shards = read_u32_at(&data, cursor)?;
+    let num_shards = read_u32_at(content, cursor)?;
     cursor += 4;
-    let vnodes = read_u32_at(&data, cursor)?;
+    let vnodes = read_u32_at(content, cursor)?;
     cursor += 4;
-    let include_broad = *data
+    let include_broad = *content
         .get(cursor)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated cluster manifest"))?
         != 0;
     cursor += 1;
     // Per-shard segment registry (outer count, then each shard's filename list).
-    let shard_count = read_u32_at(&data, cursor)? as usize;
+    let shard_count = read_u32_at(content, cursor)? as usize;
     cursor += 4;
     let mut segment_registry: Vec<Vec<String>> = Vec::with_capacity(shard_count);
     for _ in 0..shard_count {
-        let nfiles = read_u32_at(&data, cursor)? as usize;
+        let nfiles = read_u32_at(content, cursor)? as usize;
         cursor += 4;
         let mut files = Vec::with_capacity(nfiles);
         for _ in 0..nfiles {
-            let len = read_u32_at(&data, cursor)? as usize;
+            let len = read_u32_at(content, cursor)? as usize;
             cursor += 4;
-            let name = std::str::from_utf8(data.get(cursor..cursor + len).ok_or_else(|| {
+            let name = std::str::from_utf8(content.get(cursor..cursor + len).ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidData, "truncated registry filename")
             })?)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
@@ -498,25 +541,25 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         segment_registry.push(files);
     }
     // Per-shard next-seg-id counters (parallel to the registry).
-    let nids = read_u32_at(&data, cursor)? as usize;
+    let nids = read_u32_at(content, cursor)? as usize;
     cursor += 4;
     let mut next_seg_ids = Vec::with_capacity(nids);
     for _ in 0..nids {
-        next_seg_ids.push(read_u64_at(&data, cursor)?);
+        next_seg_ids.push(read_u64_at(content, cursor)?);
         cursor += 8;
     }
-    let dict_len = read_u32_at(&data, cursor)? as usize;
+    let dict_len = read_u32_at(content, cursor)? as usize;
     cursor += 4;
-    let dict_data = data
+    let dict_data = content
         .get(cursor..cursor + dict_len)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated dict blob"))?
         .to_vec();
     cursor += dict_len;
     // v3 appends the serialized vocab; v2 has none (read back as empty).
     let vocab_data = if version >= 3 {
-        let vlen = read_u32_at(&data, cursor)? as usize;
+        let vlen = read_u32_at(content, cursor)? as usize;
         cursor += 4;
-        let v = data
+        let v = content
             .get(cursor..cursor + vlen)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated vocab blob"))?
             .to_vec();
@@ -527,9 +570,9 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
     };
     // v4 appends the serialized tag dict; v2/v3 have none (read back as empty).
     let tag_dict_data = if version >= 4 {
-        let tlen = read_u32_at(&data, cursor)? as usize;
+        let tlen = read_u32_at(content, cursor)? as usize;
         cursor += 4;
-        let tags = data
+        let tags = content
             .get(cursor..cursor + tlen)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "truncated tag-dict blob"))?
             .to_vec();
@@ -538,11 +581,65 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
     } else {
         Vec::new()
     };
-    let placement_generation = crate::ownership::PlacementGeneration(read_u64_at(&data, cursor)?);
+    let placement_generation = crate::ownership::PlacementGeneration(read_u64_at(content, cursor)?);
+    cursor += 8;
     if placement_generation == crate::ownership::PlacementGeneration::STANDALONE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "cluster manifest has standalone placement generation zero",
+        ));
+    }
+
+    let (compiler_semantics_version, source_files) =
+        if version >= CLUSTER_MANIFEST_VERSION_COMPILER_SEMANTICS {
+            let semantics = read_u32_at(content, cursor)?;
+            cursor += 4;
+            if semantics > super::CURRENT_COMPILER_SEMANTICS_VERSION {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported compiler semantics version {semantics}"),
+                ));
+            }
+            let count = read_u32_at(content, cursor)? as usize;
+            cursor += 4;
+            let mut names = Vec::with_capacity(count);
+            for _ in 0..count {
+                let len = read_u32_at(content, cursor)? as usize;
+                cursor += 4;
+                let raw = content.get(cursor..cursor + len).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "truncated source filename")
+                })?;
+                cursor += len;
+                let name = std::str::from_utf8(raw)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                    .to_string();
+                super::validate_sidecar_basename(&name)?;
+                names.push(name);
+            }
+            (semantics, names)
+        } else {
+            (0, vec!["sources.dat".to_string(); num_shards as usize])
+        };
+    let expected_shards = num_shards as usize;
+    if segment_registry.len() != expected_shards
+        || next_seg_ids.len() != expected_shards
+        || source_files.len() != expected_shards
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cluster manifest per-shard columns do not match {num_shards} shards \
+                 (registry={}, next_ids={}, sources={})",
+                segment_registry.len(),
+                next_seg_ids.len(),
+                source_files.len(),
+            ),
+        ));
+    }
+    if cursor != content.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cluster manifest has trailing bytes",
         ));
     }
 
@@ -557,6 +654,8 @@ pub fn read_cluster_manifest(path: &Path) -> io::Result<ClusterManifest> {
         placement_generation,
         segment_registry,
         next_seg_ids,
+        compiler_semantics_version,
+        source_files,
         dict_data,
         vocab_data,
         tag_dict_data,
@@ -703,12 +802,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The v6 cluster manifest's nested per-shard registry + next-seg-id columns + the
+    /// The v7 cluster manifest's nested per-shard columns + compiler semantics + the
     /// appended vocab and tag-dict blobs must round-trip byte-exactly (varied per-shard
     /// file counts, including an empty shard). The hand-rolled length-prefixed encoding is
     /// easy to get cursor-wrong, so pin it.
     #[test]
-    fn cluster_manifest_v6_round_trips_registry_vocab_tagdict_and_generation() {
+    fn cluster_manifest_v7_round_trips_registry_vocab_tagdict_and_generation() {
         let dir = std::env::temp_dir().join(format!("rr_cmanifest_rt_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("cluster_manifest.bin");
@@ -728,6 +827,12 @@ mod tests {
                 vec!["seg_000002.seg".to_string()],
             ],
             next_seg_ids: vec![5, 1, 3],
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: vec![
+                "sources_g00000000000000000007.dat".into(),
+                "sources_g00000000000000000007.dat".into(),
+                "sources_g00000000000000000007.dat".into(),
+            ],
             dict_data: vec![1, 2, 3, 4, 5],
             vocab_data: vec![9, 8, 7, 6], // a non-empty (opaque) vocab blob — the v3 field
             tag_dict_data: vec![11, 22, 33], // a non-empty (opaque) tag-dict blob — the v4 field
@@ -746,11 +851,16 @@ mod tests {
         let raw = std::fs::read(&path).expect("read raw for version");
         assert_eq!(
             read_u32_at(&raw, 4).unwrap(),
-            6,
-            "ADR-109 durable clusters always write manifest v6"
+            7,
+            "ADR-118 durable clusters always write manifest v7"
         );
         assert_eq!(got.segment_registry, manifest.segment_registry);
         assert_eq!(got.next_seg_ids, manifest.next_seg_ids);
+        assert_eq!(
+            got.compiler_semantics_version,
+            manifest.compiler_semantics_version
+        );
+        assert_eq!(got.source_files, manifest.source_files);
         assert_eq!(got.dict_data, manifest.dict_data);
         assert_eq!(got.vocab_data, manifest.vocab_data);
         assert_eq!(got.tag_dict_data, manifest.tag_dict_data);
@@ -768,10 +878,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The ADR-109 migration fence: v6 round-trips ownership generation, v5 is
+    #[test]
+    fn cluster_manifest_rejects_mismatched_per_shard_columns() {
+        const REGISTRY_COUNT_OFFSET: usize = 4 + 4 + 8 + 8 + 8 + 4 + 4 + 1;
+
+        let dir = std::env::temp_dir().join(format!("rr_cmanifest_columns_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("cluster_manifest.bin");
+        let manifest = ClusterManifest {
+            epoch: 1,
+            snapshot_pos: 0,
+            dict_fingerprint: 7,
+            num_shards: 1,
+            vnodes: 64,
+            include_broad: true,
+            broad_replicate_all: true,
+            placement_generation: crate::ownership::PlacementGeneration::INITIAL,
+            segment_registry: vec![vec!["seg_000001.seg".into()]],
+            next_seg_ids: vec![2],
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: vec!["sources.dat".into()],
+            dict_data: Vec::new(),
+            vocab_data: Vec::new(),
+            tag_dict_data: Vec::new(),
+        };
+        write_cluster_manifest(&manifest, &path).expect("write valid manifest");
+
+        // Insert a second, empty registry row while leaving num_shards and the
+        // other two per-shard columns at one. Re-seal the CRC so structural
+        // validation—not corruption detection—is responsible for the error.
+        let mut bytes = std::fs::read(&path).expect("read manifest");
+        let body_len = bytes.len() - 4;
+        bytes.truncate(body_len);
+        let original_registry_count =
+            read_u32_at(&bytes, REGISTRY_COUNT_OFFSET).expect("registry count");
+        assert_eq!(original_registry_count, 1);
+        let mut cursor = REGISTRY_COUNT_OFFSET + 4;
+        let file_count = read_u32_at(&bytes, cursor).expect("file count") as usize;
+        cursor += 4;
+        for _ in 0..file_count {
+            let len = read_u32_at(&bytes, cursor).expect("filename length") as usize;
+            cursor += 4 + len;
+        }
+        bytes.splice(cursor..cursor, 0u32.to_le_bytes());
+        bytes[REGISTRY_COUNT_OFFSET..REGISTRY_COUNT_OFFSET + 4]
+            .copy_from_slice(&2u32.to_le_bytes());
+        let crc = crc32(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        std::fs::write(&path, bytes).expect("write malformed manifest");
+
+        let Err(error) = read_cluster_manifest(&path) else {
+            panic!("mismatched per-shard columns must fail in the reader");
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            error.to_string().contains("per-shard columns"),
+            "unexpected error: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ADR-109 migration fence: v7 round-trips ownership generation, v5 is
     /// rejected with an actionable rebuild error, and a future version is refused.
     #[test]
-    fn cluster_manifest_v6_ownership_fences_v5_and_future_versions() {
+    fn cluster_manifest_v7_ownership_fences_v5_and_future_versions() {
         let dir = std::env::temp_dir().join(format!("rr_cmanifest_v5_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("cluster_manifest_v5.bin");
@@ -787,6 +957,8 @@ mod tests {
             placement_generation: crate::ownership::PlacementGeneration::INITIAL,
             segment_registry: vec![vec![], vec![], vec![], vec![]],
             next_seg_ids: vec![1, 1, 1, 1],
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_files: vec!["sources.dat".into(); 4],
             dict_data: vec![1, 2, 3],
             vocab_data: Vec::new(),
             tag_dict_data: Vec::new(),
@@ -796,11 +968,11 @@ mod tests {
         let raw = std::fs::read(&path).expect("read raw");
         assert_eq!(
             read_u32_at(&raw, 4).unwrap(),
-            6,
-            "ADR-109 ownership metadata ⇒ cluster manifest v6"
+            7,
+            "ADR-118 compiler semantics metadata ⇒ cluster manifest v7"
         );
         let got = read_cluster_manifest(&path).expect("read");
-        assert!(got.broad_replicate_all, "v6 retains replicate-to-all");
+        assert!(got.broad_replicate_all, "v7 retains replicate-to-all");
         assert_eq!(
             got.placement_generation,
             crate::ownership::PlacementGeneration::INITIAL
@@ -822,7 +994,7 @@ mod tests {
             Ok(_) => panic!("legacy v5 cluster manifest must fail loud"),
         }
 
-        bytes[4..8].copy_from_slice(&7u32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&8u32.to_le_bytes());
         let crc = crc32(&bytes[..body]);
         bytes[body..].copy_from_slice(&crc.to_le_bytes());
         std::fs::write(&path, &bytes).expect("rewrite future");

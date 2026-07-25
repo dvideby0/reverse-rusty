@@ -3,12 +3,13 @@
 //! parts, used by both `build` and the distributed/gRPC builders) and `open`
 //! (reattach a durable cluster's committed segments + replay the log tail).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::cluster::clog::{FileClusterLog, LogPos};
-use crate::cluster::control::InMemoryControlPlane;
+use crate::cluster::clog::{ClusterMutation, FileClusterLog, LogPos};
+use crate::cluster::control::{ClusterStateChange, InMemoryControlPlane};
 use crate::cluster::coordinator::{
     into_shard, replica_dir, shard_dir, ClusterConfig, ClusterDurable, ClusterEngine,
     CLUSTER_LOG_FILE, CLUSTER_MANIFEST_FILE,
@@ -18,7 +19,29 @@ use crate::cluster::shard::{LocalShard, Shard, ShardError};
 use crate::dict::Dict;
 use crate::events::{DurabilityOp, EngineEvent};
 use crate::normalize::Normalizer;
-use crate::tagdict::TagDict;
+use crate::tagdict::{TagDict, TagId};
+
+/// Resolve an already-acknowledged coordinator-log row against the persisted,
+/// frozen tag space. Recovery must carry the resolved ids into the rebuild so a
+/// runtime `max_tags` tightening cannot reclassify the row as fresh ingestion.
+fn resolve_replayed_tag_ids(
+    tag_dict: &TagDict,
+    tags: &[(String, String)],
+) -> Result<Vec<TagId>, ShardError> {
+    let mut ids: Vec<TagId> = tags
+        .iter()
+        .map(|(key, value)| tag_dict.get_or_synthetic(key, value))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    if ids.len() > usize::from(u16::MAX) {
+        return Err(ShardError::Log(format!(
+            "replayed tag column exceeds the durable u16 ceiling ({} resolved tags)",
+            ids.len()
+        )));
+    }
+    Ok(ids)
+}
 
 impl ClusterEngine {
     /// Current logical placement generation (ADR-109). Physical checkpoints,
@@ -92,6 +115,7 @@ impl ClusterEngine {
             placement_generation: AtomicU64::new(durable.placement_generation.0),
             vnodes: durable.vnodes,
             data_dir: durable.data_dir,
+            source_files: durable.source_files,
             control: durable.control,
             // A fresh transport-metrics collector (ADR-085); the gRPC builders REPLACE it with
             // the shared one they also hand to each `RemoteShard` (via `with_transport_metrics`),
@@ -276,18 +300,31 @@ impl ClusterEngine {
         // is a silent shard-sized false negative).
         let rf = config.map_or(1, |c| c.replication_factor.max(1));
         let mut shards: Vec<Box<dyn Shard>> = Vec::with_capacity(num_shards);
+        // The manifest marker covers the coordinator-log tail as well as the
+        // segment base. A v6 manifest reads as semantics zero, so even an empty
+        // base must be rebuilt before its tail is interpreted by current code.
+        let mut needs_clause_boundary_compiler_migration = manifest.compiler_semantics_version
+            < crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION;
         for s in 0..num_shards {
             let primary_dir = shard_dir(&data_dir, s);
             let mut sc = per_shard.clone();
             sc.data_dir = Some(primary_dir.clone());
-            let primary = LocalShard::open_segments(
+            // Coordinator recovery is the one attach path allowed to load a
+            // pre-ADR-118 segment: after every shard and the log tail are
+            // present, `open` atomically blue/green rebuilds the whole cluster
+            // before returning it to a caller.
+            let primary = LocalShard::open_segments_for_compiler_migration_with_source_file(
                 Arc::clone(&norm),
                 Arc::clone(&dict),
                 Arc::clone(&tag_dict),
                 sc,
                 &manifest.segment_registry[s],
                 manifest.next_seg_ids[s],
+                &manifest.source_files[s],
             )?;
+            let shard_needs_clause_boundary_migration = needs_clause_boundary_compiler_migration
+                || primary.needs_clause_boundary_compiler_migration();
+            needs_clause_boundary_compiler_migration |= shard_needs_clause_boundary_migration;
             // Re-seed replicas (rf-1) by peer recovery from the just-attached primary — replicas
             // are not in the manifest, so they are rebuilt from the durable primary on every open.
             // The log-tail replay below then feeds primary AND replicas through the composite.
@@ -297,7 +334,12 @@ impl ClusterEngine {
                 // The high-water is irrelevant here: at open there are no concurrent writes,
                 // so the primary's translog tail is empty and this peer_recover is a pure
                 // segment copy; the coordinator-log replay below repopulates all copies.
-                let (replica, _hwm) = crate::cluster::replica::peer_recover(
+                let recover = if shard_needs_clause_boundary_migration {
+                    crate::cluster::replica::peer_recover_for_compiler_migration
+                } else {
+                    crate::cluster::replica::peer_recover
+                };
+                let (replica, _hwm) = recover(
                     &norm,
                     &dict,
                     &tag_dict,
@@ -325,6 +367,7 @@ impl ClusterEngine {
             data_dir: Some(data_dir.clone()),
             epoch: manifest.epoch,
             placement_generation: manifest.placement_generation,
+            source_files: manifest.source_files.clone(),
             vnodes: manifest.vnodes,
             control: Box::new(InMemoryControlPlane::single_node_with_generation(
                 manifest.num_shards,
@@ -401,8 +444,109 @@ impl ClusterEngine {
                 error: format!("{} bytes", replay.skipped_bytes),
             });
         }
-        for (_pos, m) in replay.entries {
-            engine.replay_apply(m)?;
+        // ADR-118: legacy segments compiled positive bare terms across clause
+        // boundaries. The fabricated stream can change phrase, grader, number,
+        // or alias normalization and bake a predicate no satisfying title can
+        // reach. Rebuild from the complete, replayed live corpus, append any
+        // newly exposed features without re-ranking the frozen mask, re-place
+        // at one fresh generation, update the control document, and commit the
+        // green registry before exposing the cluster. Any
+        // incomplete source sidecar or failed checkpoint returns an error; the
+        // old manifest stays authoritative and a later restart can retry.
+        if needs_clause_boundary_compiler_migration {
+            // Do not feed a legacy tail through `replay_apply`: that funnel
+            // intentionally validates the stored placement decision against
+            // the current compiler, and the whole reason for this migration is
+            // that the decision can have changed. Fold the raw logical
+            // mutations over the committed source corpus first, then compile
+            // and place the resulting set exactly once under current semantics.
+            let mut live: BTreeMap<u64, crate::cluster::shard::LiveTaggedQuery> = engine
+                .live_corpus_tagged()?
+                .into_iter()
+                .map(|row| (row.0, row))
+                .collect();
+            for (_pos, mutation) in replay.entries {
+                match mutation {
+                    ClusterMutation::Add {
+                        logical,
+                        version,
+                        dsl,
+                        tags,
+                        placement,
+                    } => {
+                        if live.contains_key(&logical) {
+                            return Err(ShardError::DuplicateLogicalId(logical));
+                        }
+                        let tag_ids = resolve_replayed_tag_ids(&engine.tag_dict, &tags)?;
+                        if !tags.is_empty() {
+                            engine.tags_present.store(true, Ordering::Relaxed);
+                        }
+                        live.insert(
+                            logical,
+                            (
+                                logical,
+                                dsl,
+                                version,
+                                0,
+                                tags,
+                                tag_ids,
+                                crate::rank::RankValues::default(),
+                                placement,
+                            ),
+                        );
+                    }
+                    ClusterMutation::Remove { logical } => {
+                        live.remove(&logical);
+                    }
+                    ClusterMutation::Upsert {
+                        logical,
+                        version,
+                        dsl,
+                        tags,
+                        placement,
+                    } => {
+                        let tag_ids = resolve_replayed_tag_ids(&engine.tag_dict, &tags)?;
+                        if !tags.is_empty() {
+                            engine.tags_present.store(true, Ordering::Relaxed);
+                        }
+                        live.insert(
+                            logical,
+                            (
+                                logical,
+                                dsl,
+                                version,
+                                0,
+                                tags,
+                                tag_ids,
+                                crate::rank::RankValues::default(),
+                                placement,
+                            ),
+                        );
+                    }
+                }
+            }
+            let next_generation = engine
+                .placement_generation()
+                .next()
+                .ok_or_else(|| ShardError::Config("placement generation exhausted".into()))?;
+            engine.rebuild_from_corpus(
+                live.into_values().collect(),
+                Arc::clone(&engine.norm),
+                engine.ring.clone(),
+                None,
+                next_generation,
+                true,
+            )?;
+            engine
+                .control
+                .propose(ClusterStateChange::BumpModelVersion {
+                    dict_fingerprint: engine.dict.fingerprint(),
+                })?;
+            engine.checkpoint()?;
+        } else {
+            for (_pos, mutation) in replay.entries {
+                engine.replay_apply(mutation)?;
+            }
         }
         Ok(engine)
     }

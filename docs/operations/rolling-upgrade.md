@@ -34,7 +34,7 @@ Durable formats are **versioned and fail loud, never corrupt silently** — an i
 a refused open with a versioned error, and a refusal is always recoverable by restoring the
 pre-upgrade backup:
 
-- **Segments** (`.seg` v3–v8) and **manifests** (engine v3–v6, cluster v4–v6): newer minor
+- **Segments** (`.seg` v3–v8) and **manifests** (engine v3–v6, cluster v4–v7): newer minor
   formats read older files back; an *older* binary refuses a *newer* file it cannot honor. The
   "fence" versions exist precisely to make a semantic change loud — e.g. a
   class-D-bearing segment is written v4 so a pre-ADR-068 binary refuses it rather than silently
@@ -49,6 +49,27 @@ pre-upgrade backup:
   standalone engine-manifest v6 fence; older binaries must not skip those rows and serve a partial
   corpus. Standalone `.seg` v1–v7 remains readable by the new binary, but clustered manifests v1–v5
   are intentionally rebuild-only because they cannot identify a unique emission owner.
+- **Compiler-semantics stamp (ADR-118):** segment header bytes `12..16` are semantics 0 (legacy) or
+  1 (maximal positive bare-term runs); this is not a layout-version bump. Every live semantics-0
+  standalone or local-cluster materialization source-rebuilds before serving, even without aliases
+  (grader and number context are also clause-sensitive). A durable shard cannot safely re-place
+  itself: shard-local restart, raw attach, and ordinary recovery from a still-legacy peer fail loud.
+  Standalone migration also refuses a degraded segment set, ambiguous duplicate live rows, or an
+  incomplete source sidecar without replacing the old manifest; WAL-tail sources are persisted
+  before its reset. Cluster manifest v7 and shard checkpoint v2 stamp semantics independently of
+  segment presence, so an empty base with a legacy coordinator/translog tail cannot evade the
+  fence. Cluster v7 also atomically selects generation-named source sidecars with its segment
+  registry; a failed rebuild leaves the prior corpus intact for retry. Compiler-only migration
+  appends newly exposed features but preserves existing frequencies and the frozen top-64 mask, so
+  recovery cannot move an unrelated default-visible query behind `include_broad`. Unknown future
+  compiler semantics are unsupported and abort open.
+- **ADR-118 mesh fence:** `DictFingerprint`, `AdoptDict`, `AddShard`, and recovery manifests attest
+  compiler semantics. The field is protobuf-additive but semantically mandatory: an old peer sends
+  zero and is rejected before adoption or recovery. This release therefore requires a
+  version-homogeneous shard/coordinator mesh. Back up, quiesce writes, upgrade or rebuild/re-place
+  through the coordinator, then bring up only current-semantics peers. Rolling back to a pre-ADR-118
+  writer is unsafe for **all new query writes** (it can create semantics-zero segments again);
+  restore the pre-upgrade backup or keep writes quiesced until rolling forward.
 - **Same-θ contract (ADR-105):** in remote cluster mode, run every `shardserver` (and the
   coordinator) with the same `--hot-anchor-threshold`. Divergence can never drop a match —
   class A and class H are both always-visible and place identically — it only decides which

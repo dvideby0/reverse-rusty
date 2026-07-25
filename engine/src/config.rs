@@ -149,7 +149,8 @@ pub struct EngineConfig {
     // via [`parse_limits`](Self::parse_limits), which the engine threads into the
     // DSL parser. They are dynamic (`PUT /_settings`); a tightened limit takes
     // effect on the next ingest. WAL replay deliberately ignores them and uses
-    // the compiled-in ceiling, so a tightened limit never drops an
+    // the durable format's structural ceiling, so a tightened limit (or a
+    // current default lower than the original accepted setting) never drops an
     // already-acknowledged write on recovery.
     /// Maximum query string length in bytes. Queries exceeding this are rejected
     /// at parse time with `ParseErrorKind::QueryTooLong`.

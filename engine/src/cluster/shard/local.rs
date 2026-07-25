@@ -144,6 +144,8 @@ impl LocalShard {
                 local_checkpoint: 0,
                 dict_fingerprint: dict.fingerprint(),
                 segment_files: Vec::new(),
+                compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+                source_file_name: engine.source_file_name().to_string(),
             },
         )?;
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
@@ -171,9 +173,104 @@ impl LocalShard {
         norm: Arc<Normalizer>,
         dict: Arc<Dict>,
         tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+    ) -> Result<Self, ShardError> {
+        Self::open_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            "sources.dat",
+            false,
+        )
+    }
+
+    /// Attach current-semantics segments using the source sidecar selected by
+    /// the coordinator commit document.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_segments_with_source_file(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+        source_file_name: &str,
+    ) -> Result<Self, ShardError> {
+        Self::open_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            source_file_name,
+            false,
+        )
+    }
+
+    /// Attach legacy compiler materializations only for the coordinator's
+    /// boot-time ADR-118 blue/green rebuild. This shard must not be published
+    /// for reads unless the coordinator finishes that rebuild and commits its
+    /// new manifest.
+    pub(crate) fn open_segments_for_compiler_migration(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+    ) -> Result<Self, ShardError> {
+        Self::open_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            "sources.dat",
+            true,
+        )
+    }
+
+    /// Coordinator-only legacy attach using the source sidecar selected by the
+    /// old manifest.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open_segments_for_compiler_migration_with_source_file(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
+        config: EngineConfig,
+        files: &[String],
+        next_seg_id: u64,
+        source_file_name: &str,
+    ) -> Result<Self, ShardError> {
+        Self::open_segments_inner(
+            norm,
+            dict,
+            tag_dict,
+            config,
+            files,
+            next_seg_id,
+            source_file_name,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_segments_inner(
+        norm: Arc<Normalizer>,
+        dict: Arc<Dict>,
+        tag_dict: Arc<TagDict>,
         mut config: EngineConfig,
         files: &[String],
         next_seg_id: u64,
+        source_file_name: &str,
+        allow_legacy_compiler_semantics: bool,
     ) -> Result<Self, ShardError> {
         // Coordinator-gated storage: the reopened shard always accepts class-D, so a clog-tail or
         // peer-recovery replay of an already-accepted class-D write is stored, not re-rejected by a
@@ -185,14 +282,27 @@ impl LocalShard {
             Some(d) => translog::open_fresh(d, config.wal_sync_on_write)?,
             None => translog::null(),
         };
-        let engine = Engine::open_shared_segments(
-            Arc::clone(&norm),
-            Arc::clone(&dict),
-            tag_dict,
-            config,
-            files,
-            next_seg_id,
-        )
+        let engine = if allow_legacy_compiler_semantics {
+            Engine::open_shared_segments_for_compiler_migration_with_source_file(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                tag_dict,
+                config,
+                files,
+                next_seg_id,
+                source_file_name,
+            )
+        } else {
+            Engine::open_shared_segments_with_source_file(
+                Arc::clone(&norm),
+                Arc::clone(&dict),
+                tag_dict,
+                config,
+                files,
+                next_seg_id,
+                source_file_name,
+            )
+        }
         .map_err(|e| ShardError::Log(format!("attaching shard segments: {e}")))?;
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
         Ok(LocalShard {
@@ -207,6 +317,12 @@ impl LocalShard {
             data_dir: dir,
             pits: Mutex::new(crate::util::fast_map()),
         })
+    }
+
+    /// True when this local shard contains a live pre-ADR-118 materialization
+    /// that must be rebuilt and re-placed before serving.
+    pub(crate) fn needs_clause_boundary_compiler_migration(&self) -> bool {
+        self.lock().needs_clause_boundary_compiler_migration()
     }
 
     /// Self-restart a durable shard from its checkpoint sidecar (ADR-039 §6): attach the committed
@@ -231,16 +347,31 @@ impl LocalShard {
                 actual: ckpt.dict_fingerprint,
             });
         }
+        if ckpt.compiler_semantics_version < crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+            return Err(ShardError::Log(format!(
+                "shard checkpoint uses legacy compiler semantics {} (current {}); a shard-local \
+                 restart cannot safely replay its translog tail without coordinator-wide rebuild \
+                 and re-placement",
+                ckpt.compiler_semantics_version,
+                crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION
+            )));
+        }
         let floor = LogPos(ckpt.local_checkpoint);
         let retention_lease_ttl = resolve_lease_ttl(&config);
         let translog = translog::open_existing(&dir, config.wal_sync_on_write, floor)?;
-        let engine = Engine::open_shared_segments(
+        // A shard-local restart cannot safely rewrite a legacy compiler plan:
+        // splitting a fabricated cross-clause feature can change both placement
+        // and visibility mode. The strict attach therefore refuses semantics-v0
+        // and requires coordinator-wide rebuild/re-placement (or recovery from
+        // a current peer) before this shard can serve.
+        let engine = Engine::open_shared_segments_with_source_file(
             Arc::clone(&norm),
             Arc::clone(&dict),
             tag_dict,
             config,
             &ckpt.segment_files,
             ckpt.next_seg_id,
+            &ckpt.source_file_name,
         )
         .map_err(|e| ShardError::Log(format!("attaching shard segments on self-restart: {e}")))?;
         let snapshot = ArcSwap::new(Arc::new(engine.snapshot()));
@@ -261,7 +392,7 @@ impl LocalShard {
         // double-applies an op already baked into the attached segments.
         let tail = shard.translog.replay(floor)?.entries;
         for (_pos, m) in &tail {
-            shard.apply_to_engine(m);
+            shard.apply_to_engine(m)?;
         }
         Ok(shard)
     }
@@ -269,8 +400,9 @@ impl LocalShard {
     /// Apply one logged mutation to the engine WITHOUT re-appending it to the translog — used by
     /// self-restart replay (ADR-039 §6), where the op is already durable in the translog. The
     /// translog-appending counterpart is the seam's `insert_extracted`/`delete_by_logical_id`.
-    /// Infallible: a segments-only engine has no WAL, so neither apply can error.
-    fn apply_to_engine(&self, m: &ClusterMutation) {
+    /// A malformed acknowledged frame fails restart loudly; silently skipping it
+    /// would shrink the recovered shard.
+    fn apply_to_engine(&self, m: &ClusterMutation) -> Result<(), ShardError> {
         let mut eng = self.lock();
         match m {
             ClusterMutation::Add {
@@ -280,12 +412,20 @@ impl LocalShard {
                 tags,
                 placement,
             } => {
-                if let Ok(ast) = crate::dsl::parse(dsl) {
-                    let mut lc = String::new();
-                    let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                    eng.insert_extracted_with_placement(
-                        &ex, *logical, *version, dsl, tags, placement,
-                    );
+                let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+                    ShardError::Log(format!(
+                        "parsing acknowledged shard add during self-restart: {error}"
+                    ))
+                })?;
+                let mut lc = String::new();
+                let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+                if eng
+                    .insert_extracted_with_placement(&ex, *logical, *version, dsl, tags, placement)
+                    .is_none()
+                {
+                    return Err(ShardError::Log(format!(
+                        "acknowledged shard add {logical} was rejected during self-restart"
+                    )));
                 }
             }
             ClusterMutation::Remove { logical } => {
@@ -303,17 +443,26 @@ impl LocalShard {
                 tags,
                 placement,
             } => {
+                let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+                    ShardError::Log(format!(
+                        "parsing acknowledged shard upsert during self-restart: {error}"
+                    ))
+                })?;
                 eng.delete_by_logical_id(*logical).unwrap_or(0);
-                if let Ok(ast) = crate::dsl::parse(dsl) {
-                    let mut lc = String::new();
-                    let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
-                    eng.insert_extracted_with_placement(
-                        &ex, *logical, *version, dsl, tags, placement,
-                    );
+                let mut lc = String::new();
+                let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+                if eng
+                    .insert_extracted_with_placement(&ex, *logical, *version, dsl, tags, placement)
+                    .is_none()
+                {
+                    return Err(ShardError::Log(format!(
+                        "acknowledged shard upsert {logical} was rejected during self-restart"
+                    )));
                 }
             }
         }
         Self::publish(&eng, &self.snapshot);
+        Ok(())
     }
 
     /// Bulk-ingest, infallibly — the build path uses this directly on a concrete
@@ -374,6 +523,8 @@ impl LocalShard {
                 local_checkpoint: prev,
                 dict_fingerprint: self.dict.fingerprint(),
                 segment_files,
+                compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+                source_file_name: eng.source_file_name().to_string(),
             },
         ) {
             emit_fail("writing shard.ckpt after bulk ingest".into(), e.to_string());
@@ -1056,6 +1207,10 @@ impl Shard for LocalShard {
         Ok(self.lock().next_seg_id())
     }
 
+    fn source_file_name(&self) -> Result<String, ShardError> {
+        Ok(self.lock().source_file_name().to_string())
+    }
+
     fn translog_tail(&self, from: LogPos) -> Result<Vec<(LogPos, ClusterMutation)>, ShardError> {
         Ok(self.translog.replay(from)?.entries)
     }
@@ -1170,6 +1325,8 @@ impl LocalShard {
                     local_checkpoint: p.0,
                     dict_fingerprint: self.dict.fingerprint(),
                     segment_files,
+                    compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+                    source_file_name: eng.source_file_name().to_string(),
                 },
             )?;
         }

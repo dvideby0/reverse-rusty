@@ -604,6 +604,7 @@ impl ShardServer {
                     ex,
                     dsl: dsl.clone(),
                     version: 1,
+                    source_generation: None,
                     tags: Vec::new(),
                     tag_ids: Vec::new(),
                     rank: crate::rank::RankValues::default(),

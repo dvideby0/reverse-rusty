@@ -227,6 +227,7 @@ impl ShardService for ShardServer {
             placement_generation: space.placement_generation.0,
             num_shards: space.num_shards,
             coordinator_id: self.coordinator_lease.owner(),
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
         }))
     }
 
@@ -293,6 +294,7 @@ impl ShardService for ShardServer {
                     // in-process / single-node path. Clamping here was a deployment-dependent
                     // divergence: the coordinator logged N while the shard stored N.max(1).
                     version: it.version,
+                    source_generation: None,
                     tags: proto::tags_from_proto(it.tags),
                     // The wire is dict-agnostic (raw tags only) — pre-resolved ids never arrive.
                     tag_ids: Vec::new(),

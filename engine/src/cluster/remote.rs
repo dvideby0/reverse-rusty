@@ -316,6 +316,13 @@ impl RemoteShard {
         if !reply.broad_replicate_all {
             return Err(legacy_broad_layout_err(endpoint));
         }
+        if reply.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+            return Err(ShardError::Remote(format!(
+                "compiler semantics mismatch at connect: coordinator {} != server {}",
+                crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+                reply.compiler_semantics_version
+            )));
+        }
         if reply.placement_generation == 0 || reply.num_shards == 0 {
             return Err(ShardError::OwnershipMismatch(
                 crate::ownership::OwnershipError::MissingGeneration,
@@ -514,6 +521,7 @@ impl RemoteShard {
             shard_id,
             placement_generation: placement_generation.0,
             num_shards,
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
         };
         let (
             adopted,
@@ -522,6 +530,7 @@ impl RemoteShard {
             adopted_generation,
             adopted_num_shards,
             adopted_coordinator,
+            adopted_compiler_semantics,
         ) = match block_on_in_context(&handle, async move { shipper.adopt_dict(req).await }) {
             Ok(reply) => {
                 let r = reply.into_inner();
@@ -532,6 +541,7 @@ impl RemoteShard {
                     r.placement_generation,
                     r.num_shards,
                     r.coordinator_id,
+                    r.compiler_semantics_version,
                 )
             }
             // The server holds data under a different dict and refused ours. Read its actual
@@ -579,6 +589,13 @@ impl RemoteShard {
         // (see `connect`), because our broad routing assumes every shard holds the replicated lane.
         if !adopted_replicate_all {
             return Err(legacy_broad_layout_err(endpoint));
+        }
+        if adopted_compiler_semantics != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+            return Err(ShardError::Remote(format!(
+                "compiler semantics mismatch after adopt: coordinator {} != server {}",
+                crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+                adopted_compiler_semantics
+            )));
         }
         if adopted_generation != placement_generation.0 || adopted_num_shards != num_shards {
             return Err(ShardError::OwnershipMismatch(
@@ -729,6 +746,7 @@ impl RemoteShard {
             tag_dict_fingerprint: expected_tag_fp,
             placement_generation: placement_generation.0,
             num_shards,
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
         };
         let (
             added,
@@ -737,6 +755,7 @@ impl RemoteShard {
             added_generation,
             added_num_shards,
             added_coordinator,
+            added_compiler_semantics,
         ) = match block_on_in_context(&handle, async move { shipper.add_shard(req).await }) {
             Ok(reply) => {
                 let r = reply.into_inner();
@@ -747,6 +766,7 @@ impl RemoteShard {
                     r.placement_generation,
                     r.num_shards,
                     r.coordinator_id,
+                    r.compiler_semantics_version,
                 )
             }
             // The node's adopted dict differs from ours (or it adopted none). Read its actual
@@ -787,6 +807,13 @@ impl RemoteShard {
         // every shard holds the replicated lane, so refuse it (see `connect_and_adopt`).
         if !added_replicate_all {
             return Err(legacy_broad_layout_err(endpoint));
+        }
+        if added_compiler_semantics != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+            return Err(ShardError::Remote(format!(
+                "compiler semantics mismatch after add_shard: coordinator {} != server {}",
+                crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+                added_compiler_semantics
+            )));
         }
         if added_generation != placement_generation.0 || added_num_shards != num_shards {
             return Err(ShardError::OwnershipMismatch(
@@ -2633,6 +2660,7 @@ mod tests {
             ex,
             dsl: "1994 upper deck".into(),
             version: 1,
+            source_generation: None,
             tags,
             tag_ids,
             rank: crate::rank::RankValues::default(),

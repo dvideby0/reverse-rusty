@@ -2,10 +2,11 @@
 //! `engine/src/compile/extract.rs::extract` + `Extracted::expand_equivalences`.
 //!
 //! Two behaviours that are easy to miss and load-bearing:
-//!   1. **Positive bare-word terms are normalized JOINTLY** — collected in order, space-joined, and
-//!      run through the normalizer as ONE stream, so multi-word entities (`michael jordan`,
-//!      `psa 10`) are recognized exactly as on the title side. Positive phrases, negations, and
-//!      any-of members are each normalized separately.
+//!   1. **Consecutive positive bare-word terms are normalized JOINTLY** — each maximal run is
+//!      collected in order, space-joined, and run through the normalizer as ONE stream, so
+//!      multi-word entities (`michael jordan`, `psa 10`) are recognized exactly as on the title
+//!      side. Positive phrases, negations, and any-of clauses delimit those runs and are normalized
+//!      separately.
 //!   2. **Any-of members use a rarest-by-frequency proxy**: each member is represented by its
 //!      single least-frequent normalized feature (frequency = how many prior queries carried the
 //!      feature as required / any-of proxy — built across the corpus in `matcher`), a singleton
@@ -51,6 +52,17 @@ fn rarest_proxy(feats: &[Feature], freq: &Freq) -> Option<Feature> {
         .cloned()
 }
 
+/// Normalize and append one maximal run of consecutive positive bare terms.
+/// A non-bare AST clause must flush the run before its own predicate is lowered;
+/// otherwise separated terms can be misread as one multi-word entity.
+fn flush_positive_run(words: &mut Vec<&str>, vocab: &RefVocab, required: &mut Vec<Feature>) {
+    if words.is_empty() {
+        return;
+    }
+    required.extend(norm_query(vocab, &words.join(" ")));
+    words.clear();
+}
+
 /// Extract a [`RefQuery`] from an AST. `freq` governs any-of proxy selection (reflecting queries
 /// processed before this one); `equiv` drives equivalence expansion. The returned query is fully
 /// expanded; the caller bumps `freq` with the PRE-expansion required + any-of proxies (it can
@@ -73,6 +85,9 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
     let mut pos_words: Vec<&str> = Vec::new();
 
     for clause in &ast.clauses {
+        if !matches!((&clause.atom, clause.negated), (Atom::Term(_), false)) {
+            flush_positive_run(&mut pos_words, vocab, &mut required);
+        }
         match (&clause.atom, clause.negated) {
             (Atom::Term(w), false) => pos_words.push(w.as_str()),
             (Atom::Term(w) | Atom::Phrase(w), true) => forbidden.extend(norm_query(vocab, w)),
@@ -101,10 +116,7 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
         }
     }
 
-    if !pos_words.is_empty() {
-        let joined = pos_words.join(" ");
-        required.extend(norm_query(vocab, &joined));
-    }
+    flush_positive_run(&mut pos_words, vocab, &mut required);
 
     required.sort();
     required.dedup();

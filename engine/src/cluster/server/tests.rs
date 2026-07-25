@@ -62,6 +62,7 @@ fn adopt_req_shard(dict: &Dict, shard_id: u32) -> Request<proto::AdoptDictReques
         shard_id,
         placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
         num_shards: TEST_NUM_SHARDS,
+        compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
     })
 }
 
@@ -78,6 +79,29 @@ fn current_fp(srv: &ShardServer) -> u64 {
         .expect("adopted")
         .dict
         .fingerprint()
+}
+
+/// Compiler lowering affects both candidate cover and placement. A legacy
+/// coordinator must be refused before its first AdoptDict can create a shard
+/// slot; otherwise a syntactically additive protobuf exchange could silently
+/// mix incompatible compiler semantics.
+#[test]
+fn adopt_dict_refuses_legacy_compiler_semantics_before_mutation() {
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let n = norm();
+    let d = frozen_dict(&["new -used york"], &n);
+    let srv = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
+    let mut request = adopt_req(&d);
+    request.get_mut().compiler_semantics_version = 0;
+
+    let error = rt
+        .block_on(srv.adopt_dict(request))
+        .expect_err("legacy compiler semantics must fail closed");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(
+        srv.slot(0).is_err(),
+        "a refused handshake must not create or mutate a shard slot"
+    );
 }
 
 /// Exercises every arm of the `AdoptDict` contract through the real async handler:
@@ -127,6 +151,7 @@ fn adopt_dict_state_machine() {
         shard_id: 0,
         placement_generation: crate::ownership::PlacementGeneration::INITIAL.get(),
         num_shards: TEST_NUM_SHARDS,
+        compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
     });
     assert_eq!(
         rt.block_on(srv.adopt_dict(bad))
@@ -449,6 +474,7 @@ fn add_shard_req(shard_id: u32, fp: u64, tag_fp: u64) -> Request<proto::AddShard
         tag_dict_fingerprint: tag_fp,
         placement_generation: 1,
         num_shards: TEST_NUM_SHARDS,
+        compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
     })
 }
 

@@ -300,14 +300,73 @@ pub(crate) fn peer_recover(
     norm: &Arc<Normalizer>,
     dict: &Arc<Dict>,
     tag_dict: &Arc<TagDict>,
-    mut config: EngineConfig,
+    config: EngineConfig,
     primary: &dyn Shard,
     primary_dir: &Path,
     replica_dir: &Path,
 ) -> Result<(LocalShard, LogPos), ShardError> {
-    // 1. Seal so the primary's on-disk segments are a consistent, tombstone-baked snapshot at
-    //    position `P`; the translog's remaining tail is exactly the un-sealed ops > P.
-    let snapshot_pos = primary.seal_for_checkpoint()?;
+    peer_recover_inner(
+        norm,
+        dict,
+        tag_dict,
+        config,
+        primary,
+        primary_dir,
+        replica_dir,
+        false,
+    )
+}
+
+/// Boot-time replica copy used only while `ClusterEngine::open` is immediately
+/// replacing pre-ADR-118 materializations under one atomic coordinator commit.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn peer_recover_for_compiler_migration(
+    norm: &Arc<Normalizer>,
+    dict: &Arc<Dict>,
+    tag_dict: &Arc<TagDict>,
+    config: EngineConfig,
+    primary: &dyn Shard,
+    primary_dir: &Path,
+    replica_dir: &Path,
+) -> Result<(LocalShard, LogPos), ShardError> {
+    peer_recover_inner(
+        norm,
+        dict,
+        tag_dict,
+        config,
+        primary,
+        primary_dir,
+        replica_dir,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn peer_recover_inner(
+    norm: &Arc<Normalizer>,
+    dict: &Arc<Dict>,
+    tag_dict: &Arc<TagDict>,
+    mut config: EngineConfig,
+    primary: &dyn Shard,
+    primary_dir: &Path,
+    replica_dir: &Path,
+    allow_legacy_compiler_semantics: bool,
+) -> Result<(LocalShard, LogPos), ShardError> {
+    // 1. Seal ordinary live sources so their on-disk segments are a
+    //    consistent, tombstone-baked snapshot at position P. The private
+    //    compiler-migration source was just attached from the coordinator's
+    //    immutable commit and has a fresh empty translog; sealing it would write
+    //    a CURRENT shard checkpoint that falsely points at LEGACY segments.
+    let snapshot_pos = if allow_legacy_compiler_semantics {
+        if !primary.translog_tail(LogPos(0))?.is_empty() {
+            return Err(ShardError::Log(
+                "compiler-migration replica source unexpectedly has a translog tail".into(),
+            ));
+        }
+        LogPos(0)
+    } else {
+        primary.seal_for_checkpoint()?
+    };
     let files = primary.segment_filenames()?;
     let next_seg_id = primary.next_seg_id()?;
 
@@ -334,30 +393,46 @@ pub(crate) fn peer_recover(
             .map_err(|e| ShardError::Log(format!("peer recovery: copying segment {name}: {e}")))?;
     }
 
-    // 3. `sources.dat` is display-only (never on the match path): copy it if present, but a
-    //    missing one must not fail recovery.
+    // 3. The source sidecar is display-only (never on the match path): copy the
+    //    generation selected by the source's commit document into the target's
+    //    canonical filename. A missing one must not fail recovery.
     let replica_sources = replica_dir.join("sources.dat");
     if replica_sources.exists() {
         std::fs::remove_file(&replica_sources).map_err(|e| {
             ShardError::Log(format!("peer recovery: clearing stale sources.dat: {e}"))
         })?;
     }
-    let primary_sources = primary_dir.join("sources.dat");
+    let primary_source_name = primary.source_file_name()?;
+    let primary_sources = primary_dir.join(&primary_source_name);
     if primary_sources.exists() {
-        std::fs::copy(&primary_sources, &replica_sources)
-            .map_err(|e| ShardError::Log(format!("peer recovery: copying sources.dat: {e}")))?;
+        std::fs::copy(&primary_sources, &replica_sources).map_err(|e| {
+            ShardError::Log(format!(
+                "peer recovery: copying {primary_source_name} as sources.dat: {e}"
+            ))
+        })?;
     }
 
     // 4. Attach the copied segments against the shared dict (fail-loud on any missing/corrupt).
     config.data_dir = Some(replica_dir.to_path_buf());
-    let replica = LocalShard::open_segments(
-        Arc::clone(norm),
-        Arc::clone(dict),
-        Arc::clone(tag_dict),
-        config,
-        &files,
-        next_seg_id,
-    )?;
+    let replica = if allow_legacy_compiler_semantics {
+        LocalShard::open_segments_for_compiler_migration(
+            Arc::clone(norm),
+            Arc::clone(dict),
+            Arc::clone(tag_dict),
+            config,
+            &files,
+            next_seg_id,
+        )
+    } else {
+        LocalShard::open_segments(
+            Arc::clone(norm),
+            Arc::clone(dict),
+            Arc::clone(tag_dict),
+            config,
+            &files,
+            next_seg_id,
+        )
+    }?;
 
     // 5. Replay the primary's translog tail (ops > P) — the writes that landed during the
     //    copy. This is what lifts the quiesce: the segment copy ran concurrently with writes,

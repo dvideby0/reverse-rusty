@@ -39,6 +39,12 @@ Semantics:
   -( a , b , c )                → MUST_NOT a AND MUST_NOT b AND MUST_NOT c
 ```
 
+The compiler jointly normalizes only each **maximal consecutive run of positive bare terms**. This
+lets `new york` recognize a configured multi-word entity without joining terms across a clause that
+was not contiguous in the source: `new -used york`, `new "collectible" york`, and
+`new (vintage,modern) york` all split the two bare-term runs. Mutable extraction, frozen-dict
+extraction, and the reference matcher share this clause-boundary contract (ADR-118).
+
 Worked example (from the spec):
 
 ```

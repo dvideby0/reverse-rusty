@@ -275,7 +275,7 @@ pub(in crate::segment) fn infallible<T>(r: Result<T, std::convert::Infallible>) 
 /// skip probes that would definitely miss, cutting read amplification when
 /// multiple segments exist. The memtable (mutable) has no filter; it's built
 /// at seal time (flush / bulk_ingest / compaction).
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct Segment {
     main: CandidateIndex,
     broad: CandidateIndex,
@@ -295,6 +295,10 @@ pub struct Segment {
     filter: Option<SegmentFilter>,
     /// Vocab epoch at which this segment's queries were compiled.
     pub vocab_epoch: u64,
+    /// AST→compiled-query lowering semantics baked into this segment. Mechanical
+    /// merges preserve the oldest source version; a source-driven recompile
+    /// creates a segment at the current version.
+    pub(crate) compiler_semantics_version: u32,
     /// Reverse index: logical_id → local_ids in this segment. Enables O(1)
     /// delete lookups instead of full segment scans.
     logical_index: crate::util::FastMap<u64, Vec<u32>>,
@@ -314,6 +318,12 @@ pub struct Segment {
     /// signature (collision candidates; equality is confirmed with
     /// `ExactStore::bodies_equal` before any sharing). Unused after sealing.
     body_index: crate::util::FastMap<u64, Vec<u32>>,
+}
+
+impl Default for Segment {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The compile-time knobs `Segment::add_compiled` consults, bundled (they grew
@@ -450,6 +460,7 @@ pub struct EngineSnapshot {
 /// (`get_or_synthetic`, never `intern` — dense ids would diverge per shard, ADR-055). Lives in the
 /// engine layer (not `cluster`) because the engine's ingest path consumes it, by reference, with no
 /// conversion. `tags` empty ⇒ untagged ⇒ byte-identical to the pre-tag path.
+#[derive(Clone)]
 pub struct PlacedQuery {
     /// Stable cross-shard logical id of the query.
     pub logical: u64,
@@ -459,6 +470,11 @@ pub struct PlacedQuery {
     pub dsl: String,
     /// Engine version tag (1 for in-process shards).
     pub version: u32,
+    /// Internal source-generation identity to preserve during a blue/green
+    /// rebuild. Fresh build/ingest callers pass `None` and receive a newly
+    /// allocated generation; rebuilds pass `Some` so the exact row and its
+    /// canonical source document keep the same identity.
+    pub source_generation: Option<u64>,
     /// Raw `(key, value)` metadata tags; resolved to `TagId`s read-only at ingest. Empty ⇒ untagged.
     pub tags: Vec<(String, String)>,
     /// Pre-resolved `TagId`s carried through a blue/green vocabulary rebuild (ADR-074): the tag
@@ -751,6 +767,12 @@ pub struct Engine {
     /// Maps logical_id → original query text for retrieval and search hit
     /// enrichment. Shared (not copied) into every snapshot — see [`SourceStore`].
     query_store: Arc<SourceStore>,
+    /// Basename of the durable source sidecar selected by the owning commit
+    /// point. Standalone engines and ordinary shards use `sources.dat`; cluster
+    /// blue/green rebuilds use a generation-specific name so the coordinator
+    /// manifest selects the new source corpus atomically with its segment
+    /// registry.
+    source_file_name: String,
     /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,

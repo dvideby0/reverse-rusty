@@ -75,11 +75,15 @@ pub(super) fn fetch_segments(
         .shard
         .next_seg_id()
         .map_err(|e| Status::internal(format!("next_seg_id: {e}")))?;
+    let source_file_name = st
+        .shard
+        .source_file_name()
+        .map_err(|e| Status::internal(format!("source_file_name: {e}")))?;
 
     let (tx, rx) = tokio::sync::mpsc::channel(8);
     tokio::spawn(async move {
         let seg_dir = dir.join("segments");
-        let sources = dir.join("sources.dat");
+        let sources = dir.join(&source_file_name);
         let has_sources = sources.exists();
         let manifest = proto::FetchSegmentsChunk {
             frame: Some(proto::fetch_segments_chunk::Frame::Manifest(
@@ -91,6 +95,7 @@ pub(super) fn fetch_segments(
                     up_to_seqno,
                     placement_generation: req.placement_generation,
                     num_shards: req.num_shards,
+                    compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
                 },
             )),
         };
@@ -363,9 +368,40 @@ async fn drain_recovery_stream(
 
     while let Some(chunk) = stream.message().await? {
         match chunk.frame {
-            Some(proto::fetch_segments_chunk::Frame::Manifest(m)) => manifest = Some(m),
+            Some(proto::fetch_segments_chunk::Frame::Manifest(m)) => {
+                if manifest.is_some() || cur.is_some() || !received.is_empty() {
+                    return Err(Status::internal(
+                        "recovery stream manifest must appear exactly once and before every file",
+                    ));
+                }
+                validate_recovery_manifest(&m, placement_generation, num_shards)?;
+                manifest = Some(m);
+            }
             Some(proto::fetch_segments_chunk::Frame::File(fc)) => {
+                let announced = manifest.as_ref().ok_or_else(|| {
+                    Status::internal("recovery stream file arrived before its manifest")
+                })?;
+                let expected = announced.segment_files.iter().any(|name| name == &fc.name)
+                    || (announced.has_sources && fc.name == "sources.dat");
+                if !expected {
+                    return Err(Status::internal(format!(
+                        "recovery stream sent unannounced file {}",
+                        fc.name
+                    )));
+                }
+                if received.contains(&fc.name) {
+                    return Err(Status::internal(format!(
+                        "recovery stream sent duplicate completed file {}",
+                        fc.name
+                    )));
+                }
                 if cur.as_ref().is_none_or(|(n, _, _)| *n != fc.name) {
+                    if let Some((name, _, _)) = cur.take() {
+                        return Err(Status::internal(format!(
+                            "recovery stream started {} before {name} completed",
+                            fc.name
+                        )));
+                    }
                     let fin = final_path(&fc.name);
                     let tmp = PathBuf::from(format!("{}.tmp", fin.display()));
                     let f = std::fs::File::create(&tmp)
@@ -392,10 +428,9 @@ async fn drain_recovery_stream(
     }
     let manifest =
         manifest.ok_or_else(|| Status::internal("recovery stream had no manifest frame"))?;
-    if manifest.placement_generation != placement_generation || manifest.num_shards != num_shards {
-        return Err(Status::failed_precondition(format!(
-            "recovery manifest placement mismatch: expected generation {placement_generation}/{num_shards} shards, got generation {}/{} shards",
-            manifest.placement_generation, manifest.num_shards
+    if let Some((name, _, _)) = cur {
+        return Err(Status::internal(format!(
+            "recovery stream truncated: file {name} did not fully arrive"
         )));
     }
     validate_received(&manifest, &received)?;
@@ -404,6 +439,43 @@ async fn drain_recovery_stream(
         manifest.next_seg_id,
         manifest.up_to_seqno,
     ))
+}
+
+/// Validate the first recovery frame before any target file is opened or
+/// renamed. In particular, a pre-ADR-118 peer reports semantics zero through
+/// the additive protobuf field and is rejected while the target's committed
+/// files are still untouched.
+fn validate_recovery_manifest(
+    manifest: &proto::FetchManifest,
+    placement_generation: u64,
+    num_shards: u32,
+) -> Result<(), Status> {
+    if manifest.placement_generation != placement_generation || manifest.num_shards != num_shards {
+        return Err(Status::failed_precondition(format!(
+            "recovery manifest placement mismatch: expected generation {placement_generation}/{num_shards} shards, got generation {}/{} shards",
+            manifest.placement_generation, manifest.num_shards
+        )));
+    }
+    if manifest.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+        return Err(Status::failed_precondition(format!(
+            "recovery manifest compiler semantics mismatch: expected {}, got {}",
+            crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            manifest.compiler_semantics_version
+        )));
+    }
+    for name in &manifest.segment_files {
+        crate::storage::validate_sidecar_basename(name).map_err(|error| {
+            Status::failed_precondition(format!(
+                "recovery manifest contains an unsafe segment filename: {error}"
+            ))
+        })?;
+        if name == "sources.dat" {
+            return Err(Status::failed_precondition(
+                "recovery manifest uses the reserved sources.dat name as a segment",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Body of [`ShardService::content_fingerprint`](crate::cluster::proto::shard_service_server::ShardService::content_fingerprint)
@@ -448,7 +520,7 @@ pub(super) fn content_fingerprint(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_received;
+    use super::{validate_received, validate_recovery_manifest};
     use crate::cluster::proto;
     use std::collections::HashSet;
 
@@ -461,11 +533,26 @@ mod tests {
             up_to_seqno: 0,
             placement_generation: 1,
             num_shards: 1,
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
         }
     }
 
     fn received(names: &[&str]) -> HashSet<String> {
         names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn legacy_compiler_manifest_is_rejected_before_file_processing() {
+        let mut m = manifest(&["seg-0.seg"], true);
+        m.compiler_semantics_version = 0;
+        let err = validate_recovery_manifest(&m, 1, 1)
+            .expect_err("a pre-ADR-118 source must fail closed");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            err.message().contains("compiler semantics"),
+            "unexpected refusal: {}",
+            err.message()
+        );
     }
 
     /// B3: a stream truncated after the final segment but before/while `sources.dat` —

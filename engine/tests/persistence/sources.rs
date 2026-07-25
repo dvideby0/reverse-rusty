@@ -479,6 +479,52 @@ fn missing_source_store_blocks_vocab_change_without_dropping_live_rows() {
 }
 
 #[test]
+fn source_write_failure_keeps_new_normalizer_and_exact_plans_coherent_in_memory() {
+    let dir = test_dir("sources_vocab_write_failure");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::with_config(make_norm(), config);
+    engine.build_from_queries(&[(7, "new york".to_string())]);
+    let committed_manifest =
+        std::fs::read(dir.join("manifest.bin")).expect("initial committed manifest");
+
+    // `sources.dat` writes stage through `sources.sources.tmp`. A directory at
+    // that path makes the source publication fail deterministically without
+    // preventing the green segment itself from being written.
+    std::fs::create_dir(dir.join("sources.sources.tmp")).expect("poison source tmp");
+
+    let mut vocab = reverse_rusty::vocab::Vocab::new();
+    vocab.add_phrase(
+        &["new", "york"],
+        "term:new_york",
+        reverse_rusty::dict::FeatureKind::Generic,
+    );
+    engine
+        .set_vocab(vocab)
+        .expect("preflight succeeds before the injected write failure");
+    assert_eq!(
+        engine.recompile_stale_segments(),
+        1,
+        "the complete green materialization remains live even though it is not durable"
+    );
+    assert!(!engine.has_stale_segments());
+    assert!(
+        match_ids(&engine, "new york").contains(&7),
+        "publishing the new title normalizer over old exact plans would be a false negative"
+    );
+    assert!(!engine.persistence_healthy);
+    assert_eq!(
+        std::fs::read(dir.join("manifest.bin")).expect("old manifest remains"),
+        committed_manifest,
+        "a failed source publication must not advance the durable commit point"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn lazy_overlay_insert_and_tombstone() {
     use reverse_rusty::storage::SourceStore;
     let dir = test_dir("lazy_overlay");

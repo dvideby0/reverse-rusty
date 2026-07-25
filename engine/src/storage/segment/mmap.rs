@@ -63,6 +63,10 @@ pub struct MmapSegment {
     /// hot-tier entries (the ADR-105 fence + the hot-index section) — surfaced so
     /// the manifest commit can propagate the fence to its own version word.
     format_version: u32,
+    /// AST→compiled-query lowering semantics baked into this segment. Zero is
+    /// the pre-ADR-118 legacy lowering; current writers stamp
+    /// [`CURRENT_COMPILER_SEMANTICS_VERSION`].
+    compiler_semantics_version: u32,
     // ExactStore slices (offsets into the mmap, cast at load time)
     req_mask: *const u64,
     forb_mask: *const u64,
@@ -269,6 +273,7 @@ impl Clone for MmapSegment {
             mmap: Arc::clone(&self.mmap),
             num_queries: self.num_queries,
             format_version: self.format_version,
+            compiler_semantics_version: self.compiler_semantics_version,
             req_mask: self.req_mask,
             forb_mask: self.forb_mask,
             req_off: self.req_off,
@@ -345,6 +350,12 @@ impl std::fmt::Debug for MmapSegment {
 }
 
 impl MmapSegment {
+    /// AST→compiled-query lowering semantics baked into this file. Legacy files
+    /// read as zero because this header word was previously reserved.
+    pub fn compiler_semantics_version(&self) -> u32 {
+        self.compiler_semantics_version
+    }
+
     /// Whether this segment's file carries the class-D rollback fence (format v4,
     /// ADR-068) — i.e. it holds at least one always-candidate. The manifest commit
     /// ORs this across registered segments to pick its own version word.
@@ -400,7 +411,7 @@ impl MmapSegment {
         // offsets/lengths, then construct pointers from the base after move.
 
         // Phase 1: validate and parse offsets/lengths from a temporary borrow
-        let format_version = {
+        let (format_version, compiler_semantics_version) = {
             let data = &mmap[..];
             if data[0..4] != MAGIC {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
@@ -410,13 +421,26 @@ impl MmapSegment {
             // back with an empty tag column; v4 is the class-D fence; v5 adds
             // the hot index; v6 priority, v7 ownership, and v8 source generation
             // append cumulative exact-row columns).
-            if !(1..=FORMAT_VERSION_SOURCE_GENERATION).contains(&version) {
+            if version == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
+                    "invalid format version 0",
+                ));
+            }
+            if version > FORMAT_VERSION_SOURCE_GENERATION {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
                     format!("unsupported format version {version}"),
                 ));
             }
-            version
+            let compiler_semantics_version = read_u32_at(data, 12)?;
+            if compiler_semantics_version > super::CURRENT_COMPILER_SEMANTICS_VERSION {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("unsupported compiler semantics version {compiler_semantics_version}"),
+                ));
+            }
+            (version, compiler_semantics_version)
         };
 
         // Phase 2: extract section layout using raw pointer arithmetic.
@@ -744,6 +768,7 @@ impl MmapSegment {
 
         Ok(MmapSegment {
             format_version,
+            compiler_semantics_version,
             mmap,
             num_queries,
             req_mask: req_mask_s.as_ptr(),

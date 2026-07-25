@@ -121,12 +121,20 @@ pub(crate) struct ShardCheckpoint {
     /// so a node never silently attaches segments built for a divergent feature space.
     pub dict_fingerprint: u64,
     pub segment_files: Vec<String>,
+    /// Compiler lowering semantics used by both the committed segments and the
+    /// unsealed translog tail. The sidecar marker is required even when
+    /// `segment_files` is empty: otherwise a current binary could replay a
+    /// legacy tail under different placement semantics.
+    pub compiler_semantics_version: u32,
+    /// Source sidecar selected atomically with this checkpoint.
+    pub source_file_name: String,
 }
 
 const CKPT_FILE: &str = "shard.ckpt";
 const CKPT_TMP: &str = "shard.ckpt.tmp";
 const CKPT_MAGIC: [u8; 4] = *b"RSCK";
-const CKPT_VERSION: u32 = 1;
+const CKPT_VERSION_LEGACY: u32 = 1;
+const CKPT_VERSION: u32 = 2;
 
 fn encode_ckpt_body(c: &ShardCheckpoint) -> Vec<u8> {
     let mut b = Vec::new();
@@ -139,11 +147,24 @@ fn encode_ckpt_body(c: &ShardCheckpoint) -> Vec<u8> {
         b.extend_from_slice(&(nb.len() as u32).to_le_bytes());
         b.extend_from_slice(nb);
     }
+    b.extend_from_slice(&c.compiler_semantics_version.to_le_bytes());
+    let source_name = c.source_file_name.as_bytes();
+    b.extend_from_slice(&(source_name.len() as u32).to_le_bytes());
+    b.extend_from_slice(source_name);
     b
 }
 
 /// Atomically write the per-shard checkpoint sidecar to `dir` (tmp + CRC + rename + parent fsync).
 pub(crate) fn write_sidecar(dir: &Path, c: &ShardCheckpoint) -> Result<(), ShardError> {
+    crate::storage::validate_sidecar_basename(&c.source_file_name)
+        .map_err(|e| ShardError::Log(format!("writing shard checkpoint: {e}")))?;
+    if c.compiler_semantics_version != crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+        return Err(ShardError::Log(format!(
+            "writing shard checkpoint: compiler semantics {} does not equal current {}",
+            c.compiler_semantics_version,
+            crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION
+        )));
+    }
     let body = encode_ckpt_body(c);
     let crc = crc32(&body);
     let path = dir.join(CKPT_FILE);
@@ -191,7 +212,7 @@ pub(crate) fn read_sidecar(dir: &Path) -> Result<Option<ShardCheckpoint>, ShardE
         return Err(bad("bad magic or too small"));
     }
     let version = g32(&data, 4).ok_or_else(|| bad("truncated header"))?;
-    if version != CKPT_VERSION {
+    if !(CKPT_VERSION_LEGACY..=CKPT_VERSION).contains(&version) {
         return Err(bad(&format!("unsupported version {version}")));
     }
     let stored_crc = g32(&data, 8).ok_or_else(|| bad("truncated header"))?;
@@ -217,11 +238,37 @@ pub(crate) fn read_sidecar(dir: &Path) -> Result<Option<ShardCheckpoint>, ShardE
             .map_err(|_| ShardError::Log("shard checkpoint: non-utf8 segment name".into()))?;
         segment_files.push(name.to_string());
     }
+    let (compiler_semantics_version, source_file_name) = if version >= CKPT_VERSION {
+        let semantics = get_u32(off).ok_or_else(trunc)?;
+        off += 4;
+        if semantics > crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION {
+            return Err(bad(&format!(
+                "unsupported compiler semantics version {semantics}"
+            )));
+        }
+        let len = get_u32(off).ok_or_else(trunc)? as usize;
+        off += 4;
+        let raw = body.get(off..off + len).ok_or_else(trunc)?;
+        off += len;
+        let name = std::str::from_utf8(raw)
+            .map_err(|_| ShardError::Log("shard checkpoint: non-utf8 source filename".into()))?
+            .to_string();
+        crate::storage::validate_sidecar_basename(&name)
+            .map_err(|e| ShardError::Log(format!("shard checkpoint: {e}")))?;
+        (semantics, name)
+    } else {
+        (0, "sources.dat".to_string())
+    };
+    if off != body.len() {
+        return Err(bad("trailing bytes"));
+    }
     Ok(Some(ShardCheckpoint {
         next_seg_id,
         local_checkpoint,
         dict_fingerprint,
         segment_files,
+        compiler_semantics_version,
+        source_file_name,
     }))
 }
 
@@ -332,6 +379,8 @@ mod tests {
             local_checkpoint: 42,
             dict_fingerprint: 0xDEAD_BEEF_CAFE_F00D,
             segment_files: vec!["seg_0000001.seg".into(), "seg_0000003.seg".into()],
+            compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
+            source_file_name: "sources_g00000000000000000007.dat".into(),
         };
         write_sidecar(&dir, &c).expect("write");
         assert_eq!(read_sidecar(&dir).expect("read").expect("present"), c);
