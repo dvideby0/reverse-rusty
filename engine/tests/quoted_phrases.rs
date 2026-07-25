@@ -209,6 +209,66 @@ fn deleting_the_last_phrase_row_restores_columnar_batch_mode() {
 }
 
 #[test]
+fn in_memory_compaction_preserves_phrase_matching_for_every_merge_variant() {
+    for (name, config) in [
+        (
+            "mechanical",
+            EngineConfig {
+                dedup_bodies: false,
+                ..EngineConfig::default()
+            },
+        ),
+        (
+            "grouped",
+            EngineConfig {
+                dedup_bodies: true,
+                ..EngineConfig::default()
+            },
+        ),
+        (
+            "reanchored",
+            EngineConfig {
+                dedup_bodies: true,
+                compaction_reanchor: true,
+                ..EngineConfig::default()
+            },
+        ),
+    ] {
+        let mut engine =
+            Engine::with_config(Normalizer::default_vocab().expect("normalizer"), config);
+        engine.bulk_ingest(&[
+            (1, "\"#\"".to_string()),
+            (2, "\"red shoe\"".to_string()),
+            (3, "\"red shoe\"".to_string()),
+        ]);
+        engine.bulk_ingest(&[(4, "filler".to_string())]);
+
+        assert_eq!(matched_with_broad(&engine, "#", false), vec![1], "{name}");
+        assert_eq!(
+            matched_with_broad(&engine, "red leather shoe", false),
+            Vec::<u64>::new(),
+            "{name}"
+        );
+        assert!(engine.compact_all().is_some(), "{name}: compacted");
+        assert_eq!(
+            matched_with_broad(&engine, "#", false),
+            vec![1],
+            "{name}: graph-only phrase cover must remain probeable"
+        );
+        assert_eq!(
+            matched_with_broad(&engine, "red shoe", false),
+            vec![2, 3],
+            "{name}: required phrase must remain exact"
+        );
+        assert_eq!(
+            matched_with_broad(&engine, "red leather shoe", false),
+            Vec::<u64>::new(),
+            "{name}: compaction must not flatten adjacency"
+        );
+    }
+}
+
+#[test]
 fn required_phrases_remain_visible_without_the_broad_lane() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
     engine.build_from_queries(&[(1, "\"red shoe\"".to_string())]);

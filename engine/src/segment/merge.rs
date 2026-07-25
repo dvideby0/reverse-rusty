@@ -50,6 +50,9 @@ impl Segment {
             for (old, &is_alive) in src.alive.iter().enumerate() {
                 if is_alive {
                     let new_id = src.exact.copy_entry(old as u32, &mut dest.exact);
+                    if dest.exact.row_has_phrase_predicates(new_id) {
+                        dest.live_phrase_predicates += 1;
+                    }
                     let logical = dest.exact.logical(new_id);
                     dest.class.push(src.class[old]);
                     dest.alive.push(true);
@@ -144,6 +147,9 @@ impl Segment {
                     continue;
                 }
                 let new_id = src.exact.copy_entry(old as u32, &mut dest.exact);
+                if dest.exact.row_has_phrase_predicates(new_id) {
+                    dest.live_phrase_predicates += 1;
+                }
                 let logical = dest.exact.logical(new_id);
                 let body_hash = dest.exact.body_signature(new_id);
                 let joined = dest.body_index.get(&body_hash).and_then(|leaders| {
@@ -286,6 +292,9 @@ impl Segment {
                 // Copy the exact-store entry verbatim (masks, forbidden, any-of, tags,
                 // identity) — re-anchoring must not touch the verified semantics.
                 let new_id = src.exact.copy_entry(old as u32, &mut dest.exact);
+                if dest.exact.row_has_phrase_predicates(new_id) {
+                    dest.live_phrase_predicates += 1;
+                }
                 let logical = dest.exact.logical(new_id);
                 let old_class = src.class[old];
 
