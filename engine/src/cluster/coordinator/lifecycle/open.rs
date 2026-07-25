@@ -444,9 +444,10 @@ impl ClusterEngine {
                 error: format!("{} bytes", replay.skipped_bytes),
             });
         }
-        // ADR-118/119/120: older segments may have lost clause boundaries,
-        // multi-token any-of member boundaries, or quoted adjacency. Rebuild from the complete,
-        // replayed live corpus, append any newly exposed features without
+        // ADR-118/119/120/#123: older segments may have lost clause boundaries,
+        // multi-token any-of member boundaries, quoted adjacency, or complete
+        // multi-feature forbidden terms. Rebuild from the complete, replayed
+        // live corpus, append any newly exposed features without
         // re-ranking the frozen mask, re-place at one fresh generation, update
         // the control document, and commit the green registry before exposing
         // the cluster. Any incomplete source sidecar or failed checkpoint

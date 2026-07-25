@@ -252,6 +252,44 @@ fn cancellation_polls_every_dead_body_group_member() {
 }
 
 #[test]
+fn rejected_body_group_skips_diagnostic_candidate_member_walk() {
+    let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    for logical in 0..2_048 {
+        engine
+            .try_insert_live("zzrejectgroup -blocked", logical, 1)
+            .expect("deduplicated insert");
+    }
+
+    let snapshot = engine.snapshot();
+    let mut sink = PollingCancelSink {
+        polls: 0,
+        cancel_at: 32,
+        chunks: 0,
+    };
+    let result = snapshot
+        .try_match_title_chunks(
+            "zzrejectgroup blocked",
+            ExhaustiveOptions {
+                query_scope: QueryScope::WithBroad,
+                chunk_size: 512,
+            },
+            None,
+            &TagPredicate::empty(),
+            &mut MatchScratch::new(),
+            None,
+            &mut sink,
+        )
+        .expect("shared exact rejection must not scan every identity");
+
+    assert_eq!(result.summary.exact_total, 0);
+    assert_eq!(sink.chunks, 0);
+    assert!(
+        sink.polls < sink.cancel_at,
+        "ordinary collectors must compile out diagnostic member observation"
+    );
+}
+
+#[test]
 fn every_chunk_boundary_is_fail_closed() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
     for logical in 0..6 {

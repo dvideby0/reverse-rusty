@@ -50,16 +50,16 @@ pre-upgrade backup:
   corpus. ADR-119 adds `.seg` v9 compound-predicate columns only when a multi-feature any-of member
   needs them; the layout bump is the rollback fence for readers that would otherwise ignore the
   member's full predicate. ADR-120 adds `.seg` v10 only while a quoted token-graph predicate exists;
-  an older reader must refuse instead of flattening quoted adjacency. Standalone `.seg` v1–v9 remains
+  an older reader must refuse instead of flattening quoted adjacency. Standalone `.seg` v1–v10 remains
   readable by the new binary, but clustered
   manifests v1–v5 are intentionally rebuild-only because they cannot identify a unique emission
   owner.
-- **Compiler-semantics stamp (ADR-118/119/120):** segment header bytes `12..16` are semantics 0 (legacy
+- **Compiler-semantics stamp (ADR-118/119/120/#123):** segment header bytes `12..16` are semantics 0 (legacy
   cross-clause lowering), 1 (maximal positive bare-term runs but proxy-only multi-token any-of
   members), 2 (complete member predicates but flattened quoted clauses), or 3 (quoted token-graph
-  adjacency). This is independent of the cumulative layout version.
-  Every live semantics-0, semantics-1, or semantics-2 standalone/local-cluster materialization
-  source-rebuilds
+  adjacency but flattened multi-feature negated bare terms), or 4 (complete forbidden-term
+  predicates). This is independent of the cumulative layout version.
+  Every live semantics-0 through semantics-3 standalone/local-cluster materialization source-rebuilds
   before serving. A durable shard cannot safely re-place itself: shard-local restart, raw attach, and
   ordinary recovery from a still-legacy peer fail loud.
   Standalone migration also refuses a degraded segment set, ambiguous duplicate live rows, or an
@@ -71,15 +71,16 @@ pre-upgrade backup:
   appends newly exposed features but preserves existing frequencies and the frozen top-64 mask, so
   recovery cannot move an unrelated default-visible query behind `include_broad`. Unknown future
   compiler semantics are unsupported and abort open.
-- **ADR-118/119/120 mesh fence:** `DictFingerprint`, `AdoptDict`, `AddShard`, and recovery manifests attest
+- **ADR-118/119/120/#123 mesh fence:** `DictFingerprint`, `AdoptDict`, `AddShard`, and recovery manifests attest
   compiler semantics. The field is protobuf-additive but semantically mandatory: an old peer sends
   zero and is rejected before adoption or recovery. This release therefore requires a
   version-homogeneous shard/coordinator mesh. Back up, quiesce writes, upgrade or rebuild/re-place
   through the coordinator, then bring up only current-semantics peers. Rolling back to a
   pre-ADR-118 writer is unsafe for **all new query writes**; rolling back to semantics 1 is unsafe
   for writes containing multi-token any-of members; rolling back to semantics 2 is unsafe for writes
-  containing quoted clauses. Restore the pre-upgrade backup or keep writes quiesced until rolling
-  forward.
+  containing quoted clauses; rolling back to semantics 3 is unsafe for writes containing
+  multi-feature negated bare terms. Restore the pre-upgrade backup or keep writes quiesced until
+  rolling forward.
 - **Same-θ contract (ADR-105):** in remote cluster mode, run every `shardserver` (and the
   coordinator) with the same `--hot-anchor-threshold`. Divergence can never drop a match —
   class A and class H are both always-visible and place identically — it only decides which

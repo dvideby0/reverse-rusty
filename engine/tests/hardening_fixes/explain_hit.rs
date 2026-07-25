@@ -189,3 +189,36 @@ fn explain_hit_matches_phrase_verifier_fail_open_guards() {
     );
     assert!(detail.failures.is_empty());
 }
+
+#[test]
+fn diagnostic_candidate_hit_observes_the_real_lane_traversal() {
+    let config = reverse_rusty::config::EngineConfig {
+        accept_class_d: true,
+        ..Default::default()
+    };
+    let mut engine = Engine::with_config(make_norm(), config);
+    assert_eq!(
+        engine
+            .build_from_queries(&[(1, "-blocked".to_string())])
+            .ingested,
+        1
+    );
+
+    let theoretical = engine
+        .explain_hit(1, "clean title")
+        .expect("stored source can be recompiled");
+    assert!(
+        theoretical.candidate,
+        "the source-derived cover contains the universal broad signature"
+    );
+
+    let mut scratch = reverse_rusty::segment::MatchScratch::new();
+    assert!(
+        !engine.diagnostic_candidate_hit(1, "clean title", &mut scratch, false),
+        "the actual traversal must not reach a broad-only posting when the lane is excluded"
+    );
+    assert!(
+        engine.diagnostic_candidate_hit(1, "clean title", &mut scratch, true),
+        "the actual traversal must reach the stored posting when the broad lane is included"
+    );
+}

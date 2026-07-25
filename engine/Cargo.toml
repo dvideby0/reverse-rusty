@@ -13,7 +13,8 @@ publish = false
 
 # `engine` is the workspace root package; `grpc` is the generated gRPC proto crate
 # (reverse-rusty-shard-proto), pulled in only under the `distributed` feature; `ref-matcher`
-# is the front-end-independent correctness reference (reverse-rusty-ref-matcher, ADR-087), a
+# is the front-end- and lowering-independent semantic reference (reverse-rusty-ref-matcher,
+# ADR-087/#123), a
 # std-only crate built ONLY as a `[dev-dependencies]` of this package — so the lean core, the
 # server build, and the distributed build never compile it. The root package + every documented
 # command stay unchanged — both members are built only when something pulls them in.

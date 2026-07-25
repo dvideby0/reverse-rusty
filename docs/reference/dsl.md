@@ -24,6 +24,10 @@ negations. **All top-level clauses are implicitly ANDed together.**
 Every top-level element is required (AND logic). Use groups for OR within that structure, and prefix
 with `-` for exclusion.
 
+Negation applies to the complete analyzed clause. If one unquoted spelling produces several
+canonical features (for example a configured grader token such as `psa10`), `-psa10` rejects only
+when that whole analyzed term predicate is present; a title containing merely `psa` is not enough.
+
 Consecutive positive bare terms are normalized together only within one uninterrupted run, so a
 configured multi-word entity can be recognized (`new york`). Every phrase, any-of group, or negated
 clause is a boundary. For example, `new -used york` means required `new` AND required `york` AND NOT

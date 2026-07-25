@@ -25,6 +25,30 @@ impl Engine {
         self.match_title_filtered(title, s, out, include_broad, &TagPredicate::empty())
     }
 
+    /// Whether the real stored candidate traversal reaches `logical_id` for
+    /// `title`. This diagnostic observes postings, segment filters, and lane
+    /// visibility but stops before tag/exact verification.
+    #[doc(hidden)]
+    pub fn diagnostic_candidate_hit(
+        &self,
+        logical_id: u64,
+        title: &str,
+        s: &mut MatchScratch,
+        include_broad: bool,
+    ) -> bool {
+        infallible(
+            MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+                has_phrase_predicates: self.has_phrase_predicates(),
+                pred: &TagPredicate::empty(),
+            }
+            .candidate_hit(title, logical_id, s, include_broad, NoDeadline),
+        )
+    }
+
     /// [`match_title`](Self::match_title) narrowed by a tag filter (ADR-049). An empty
     /// predicate is byte-identical to `match_title`; a non-empty one drops, in the
     /// post-candidate verify stage, every match whose query does not satisfy the filter.

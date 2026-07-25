@@ -672,6 +672,12 @@ impl Segment {
                     if !self.alive[local as usize] {
                         return true; // tombstoned
                     }
+                    if C::OBSERVE_CANDIDATES {
+                        collector.on_candidate(self.exact.logical(local));
+                        if collector.should_stop() {
+                            return false;
+                        }
+                    }
                     // Tag filter (ADR-049) — applied post-candidate inside verify.
                     if self.exact.verify(local, view, pred)
                         && emission.should_emit(self.exact.placement(local))
@@ -687,6 +693,26 @@ impl Segment {
                 let members = self.members_of(local);
                 if members.is_empty() && !self.alive[local as usize] {
                     return true; // tombstoned singleton — the cheap skip
+                }
+                // One stored leader posting retrieves every live identity in
+                // its canonical-body group. Observe all of those identities
+                // before shared-body verification so candidate diagnostics do
+                // not confuse an exact rejection with a retrieval miss.
+                if C::OBSERVE_CANDIDATES {
+                    if self.alive[local as usize] {
+                        collector.on_candidate(self.exact.logical(local));
+                        if collector.should_stop() {
+                            return false;
+                        }
+                    }
+                    for &member in members {
+                        if self.alive[member as usize] {
+                            collector.on_candidate(self.exact.logical(member));
+                            if collector.should_stop() {
+                                return false;
+                            }
+                        }
+                    }
                 }
                 if !self
                     .exact

@@ -46,8 +46,9 @@ pub struct RefVocab {
     /// A number immediately after one of these tokens is demoted to a generic term (ADR-069).
     /// Default `["pop"]`; empty = parity mode (position-insensitive number typing).
     pub number_context: Vec<String>,
-    /// Equivalence groups as **forms** (surface strings). At extract time a required feature that
-    /// resolves from one form in a group is widened required -> any-of over the group (ADR-054).
+    /// Equivalence groups as **forms** (surface strings). During semantic analysis a positive
+    /// feature requirement that resolves from one form is widened to alternatives over the
+    /// complete group (ADR-054).
     pub equivalences: Vec<Vec<String>>,
     pub punct: PunctTable,
 }

@@ -9,6 +9,7 @@
 //!
 use reverse_rusty::normalize::{Normalizer, NormalizerBuilder};
 use reverse_rusty::segment::{Engine, MatchScratch};
+use reverse_rusty_ref_matcher::vocab::PhraseMode;
 use reverse_rusty_ref_matcher::{RefMatcher, RefVocab};
 
 fn def_norm() -> Normalizer {
@@ -48,7 +49,10 @@ fn check(
     let mut eng = Engine::new(make_norm());
     eng.build_from_queries(&queries);
     let reference = RefMatcher::build(&queries, make_vocab());
+    check_pair(&eng, &reference, query, cases);
+}
 
+fn check_pair(eng: &Engine, reference: &RefMatcher, query: &str, cases: &[(&str, bool)]) {
     let mut s = MatchScratch::new();
     let mut out = Vec::new();
     for &(title, expect) in cases {
@@ -63,7 +67,32 @@ fn check(
             ref_match, expect,
             "REFERENCE disagrees: query {query:?} vs title {title:?} (expected {expect})"
         );
+        if expect {
+            let detail = eng
+                .explain_hit(1, title)
+                .expect("a hand-authored truth must retain explainable source");
+            assert!(
+                detail.candidate,
+                "CANDIDATE RECALL disagrees: query {query:?} vs title {title:?} was a semantic \
+                 truth but its signature cover did not retrieve it"
+            );
+        }
     }
+}
+
+fn check_with_ny_alias(query: &str, cases: &[(&str, bool)]) {
+    let queries = vec![(1u64, query.to_string())];
+    let mut eng = Engine::new(def_norm());
+    eng.build_from_queries(&queries);
+    eng.import_alias_synonyms("ny => new york")
+        .expect("install alias");
+    let reference = RefMatcher::build(
+        &queries,
+        RefVocab::default_vocab()
+            .phrase("new york", "term:new_york", PhraseMode::Alias)
+            .equivalence(&["new york", "ny"]),
+    );
+    check_pair(&eng, &reference, query, cases);
 }
 
 #[test]
@@ -84,6 +113,39 @@ fn negation_adjacency() {
     );
     // A trailing dash is the same parse error -> dropped.
     check(def_norm, def_vocab, "jordan -", &[("jordan", false)]);
+}
+
+#[test]
+fn clause_boundaries_are_semantic_not_a_global_positive_stream() {
+    check_with_ny_alias(
+        "new -used york",
+        &[("new vintage york", true), ("new used york", false)],
+    );
+    check_with_ny_alias(
+        "new -\"used item\" york",
+        &[
+            ("new vintage collectible york", true),
+            ("new used item york", false),
+        ],
+    );
+    check_with_ny_alias(
+        "new -(used,damaged) york",
+        &[("new vintage york", true), ("new damaged york", false)],
+    );
+    check_with_ny_alias(
+        "new \"vintage\" york",
+        &[
+            ("new vintage collectible york", true),
+            ("new collectible york", false),
+        ],
+    );
+    check_with_ny_alias(
+        "new (vintage,modern) york",
+        &[
+            ("new modern collectible york", true),
+            ("new collectible york", false),
+        ],
+    );
 }
 
 #[test]
@@ -127,6 +189,19 @@ fn psa10_fusion_default_vs_grader_vocab() {
         grader_vocab,
         "psa10",
         &[("psa10", true), ("psa 10", true)],
+    );
+    // Negation applies to the complete analyzed bare-term predicate. Seeing
+    // only `grader:psa` is not enough to satisfy the `psa10` exclusion.
+    check(
+        grader_norm,
+        grader_vocab,
+        "card -psa10",
+        &[
+            ("card psa", true),
+            ("card psa 9", true),
+            ("card psa10", false),
+            ("card psa 10", false),
+        ],
     );
 }
 
@@ -237,6 +312,31 @@ fn any_of_groups() {
             ("marker shoe", true),
             ("marker red shoe", false),
             ("marker boot", false),
+        ],
+    );
+}
+
+#[test]
+fn required_and_forbidden_phrases_are_ordered_contiguous_predicates() {
+    check(
+        def_norm,
+        def_vocab,
+        "\"red shoe\" marker",
+        &[
+            ("red shoe marker", true),
+            ("red-shoe marker", true),
+            ("red leather shoe marker", false),
+            ("shoe red marker", false),
+        ],
+    );
+    check(
+        def_norm,
+        def_vocab,
+        "marker -\"for parts\"",
+        &[
+            ("marker for parts", false),
+            ("marker for spare parts", true),
+            ("marker parts for", true),
         ],
     );
 }

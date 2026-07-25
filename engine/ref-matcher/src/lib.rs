@@ -1,10 +1,10 @@
 //! # reverse-rusty-ref-matcher — the front-end-independent correctness reference (ADR-087)
 //!
-//! A from-scratch reimplementation of Reverse Rusty's matching front end — the DSL parser,
-//! the shared query/title normalizer, the feature extractor, and the match predicate — written
-//! **purely from the spec** (`docs/reference/dsl.md`, `docs/design/normalization.md`, ADR-058 /
-//! 060 / 061 / 069, and the engine's spec-authored golden tests). It reuses **none** of the
-//! `reverse-rusty` crate.
+//! A from-scratch semantic model of Reverse Rusty's matching language — the DSL parser, the
+//! shared query/title normalizer, a grammar-preserving predicate tree, and its direct evaluator —
+//! written **purely from the spec** (`docs/reference/dsl.md`, `docs/design/normalization.md`,
+//! ADR-058/060/061/069/118/119/120, and human-authored truth tables). It reuses **none** of the
+//! `reverse-rusty` crate and contains no retrieval proxies, cost classes, or storage lowering.
 //!
 //! ## Why this exists
 //! The in-tree differential oracle (`engine/tests/oracle/`) compares the engine to a
@@ -12,7 +12,8 @@
 //! `compile::extract`, and `Normalizer`. So a bug in the parser/normalizer/extractor corrupts
 //! both sides identically and the oracle stays green — the documented shared-front-end blind
 //! spot (ADR-050). Diffing the engine against THIS reference, which shares no front-end code,
-//! catches engine-vs-spec drift the in-tree oracle structurally cannot.
+//! catches engine-vs-spec drift the in-tree oracle structurally cannot. The semantic tree also
+//! prevents this reference from copying production lowering choices while using different code.
 //!
 //! ## The independence contract
 //! This crate has **zero dependencies** — no `daachorse`, no `serde`, and above all no
@@ -37,17 +38,18 @@
 //! - [`normalize`] — the two-phase emit pipeline producing canonical features, including the
 //!   ADR-061 two title views `N(T)` / `P(T)`.
 //! - [`parse`] — the DSL parser (AND clauses, any-of groups, phrases, adjacent-`-` negation).
-//! - [`extract`] — AST → [`extract::RefQuery`] (required / forbidden / exact member-preserving
-//!   any-of) + equivalence expansion (required → any-of, ADR-054).
-//! - [`matcher`] — [`matcher::RefMatcher`]: build from queries + a vocab, then `matches(title)`.
+//! - [`semantic`] — AST → [`semantic::RefSemanticQuery`], retaining term, phrase, any-of, and
+//!   forbidden predicates as grammar nodes; direct evaluation against canonical title views.
+//! - [`matcher`] — [`matcher::RefMatcher`]: build semantic queries + a vocab, then
+//!   `matches(title)`.
 
 pub mod clean;
-pub mod extract;
 pub mod features;
 pub mod matcher;
 pub mod normalize;
 pub mod parse;
 pub mod phrases;
+pub mod semantic;
 pub mod vocab;
 
 pub use matcher::RefMatcher;

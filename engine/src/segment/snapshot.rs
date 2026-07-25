@@ -6,7 +6,9 @@ use super::{
     infallible, BaseSegment, BatchMatchOptions, DeadlineAt, DeadlineCheck, EngineSnapshot,
     MatchCancelled, MatchScratch, MatchStats, NoDeadline, Segment,
 };
-use crate::collect::{AllCollector, ChunkCollector, MatchCollector, TopKCollector};
+use crate::collect::{
+    AllCollector, CandidateHitCollector, ChunkCollector, MatchCollector, TopKCollector,
+};
 use crate::compile::CostClass;
 use crate::config::EngineConfig;
 use crate::delivery::{
@@ -318,6 +320,30 @@ impl MatchView<'_> {
         dl: D,
     ) -> Result<MatchStats, D::Cancelled> {
         self.match_title_with_policy(title, s, out, include_broad, dl, crate::ownership::EmitAll)
+    }
+
+    /// Run the real stored posting/filter/lane traversal and stop when it
+    /// reaches `logical_id`, before exact verification. Diagnostic only; the
+    /// ordinary match path uses its existing collectors whose candidate
+    /// callback compiles to a no-op.
+    pub(in crate::segment) fn candidate_hit<D: DeadlineCheck>(
+        &self,
+        title: &str,
+        logical_id: u64,
+        s: &mut MatchScratch,
+        include_broad: bool,
+        dl: D,
+    ) -> Result<bool, D::Cancelled> {
+        let mut collector = CandidateHitCollector::new(logical_id);
+        self.match_title_collect(
+            title,
+            s,
+            &mut collector,
+            include_broad,
+            dl,
+            crate::ownership::EmitAll,
+        )?;
+        Ok(collector.hit())
     }
 
     #[inline]
@@ -886,6 +912,30 @@ impl EngineSnapshot {
         include_broad: bool,
     ) -> MatchStats {
         self.match_title_filtered(title, s, out, include_broad, &TagPredicate::empty())
+    }
+
+    /// Whether the real stored candidate traversal reaches `logical_id` for
+    /// `title`. This diagnostic observes postings, segment filters, and lane
+    /// visibility but stops before tag/exact verification.
+    #[doc(hidden)]
+    pub fn diagnostic_candidate_hit(
+        &self,
+        logical_id: u64,
+        title: &str,
+        s: &mut MatchScratch,
+        include_broad: bool,
+    ) -> bool {
+        infallible(
+            MatchView {
+                norm: &self.norm,
+                dict: &self.dict,
+                segments: &self.segments,
+                memtable: &self.memtable,
+                has_phrase_predicates: self.has_phrase_predicates,
+                pred: &TagPredicate::empty(),
+            }
+            .candidate_hit(title, logical_id, s, include_broad, NoDeadline),
+        )
     }
 
     /// [`match_title`](Self::match_title) narrowed by a tag filter (ADR-049). An empty
