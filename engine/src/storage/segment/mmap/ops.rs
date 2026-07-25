@@ -635,7 +635,7 @@ impl MmapSegment {
         member: &mut [u64],
         choice: &mut [u64],
         pred: &crate::exact::TagPredicate,
-    ) {
+    ) -> Result<(), crate::exact::BatchEvalError> {
         crate::exact::eval_batch_slices(
             local as usize,
             tmask_batch,
@@ -664,7 +664,7 @@ impl MmapSegment {
             self.tag_off(),
             self.tag_len(),
             self.tag_blob(),
-        );
+        )
     }
 
     /// Filter check: is this signature key possibly in this segment?

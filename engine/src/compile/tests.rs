@@ -136,6 +136,32 @@ mod golden {
     }
 
     #[test]
+    fn query_frequency_deduplicates_positive_features_across_clause_families() {
+        let norm = Normalizer::default_vocab().unwrap();
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let ast = parse("x (x,y) \"x a\" \"x b\" -\"x z\"").expect("parse");
+        let _ = extract(&ast, &norm, &mut dict, &mut lc);
+
+        let x = dict.get("term:x").expect("x feature");
+        assert_eq!(
+            dict.freq(x),
+            1,
+            "one query document must bump a shared bare/any-of/phrase label once"
+        );
+        for name in ["term:y", "term:a", "term:b"] {
+            let feature = dict.get(name).expect("positive feature");
+            assert_eq!(dict.freq(feature), 1, "{name} belongs to one query");
+        }
+        let forbidden_only = dict.get("term:z").expect("forbidden feature");
+        assert_eq!(
+            dict.freq(forbidden_only),
+            0,
+            "forbidden phrase labels never affect retrieval frequency"
+        );
+    }
+
+    #[test]
     fn anyof_group_keeps_one_rep_per_member() {
         let n = Normalizer::default_vocab().unwrap();
         let (req, forb, anyof) = named(&n, "(red,blue,green) jacket");

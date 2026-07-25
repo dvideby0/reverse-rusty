@@ -327,6 +327,31 @@ fn mixed_hot_term_and_required_phrase_remain_visible_without_the_broad_lane() {
 }
 
 #[test]
+fn repeated_phrase_labels_do_not_hide_bare_rows_at_the_hot_boundary() {
+    let mut queries = Vec::new();
+    let mut logical = 1u64;
+    for i in 0..64 {
+        for _ in 0..3 {
+            queries.push((logical, format!("f{i}")));
+            logical += 1;
+        }
+    }
+    queries.push((logical, "\"x a\" \"x b\" \"x c\"".to_string()));
+    logical += 1;
+    let bare_x = logical;
+    queries.push((bare_x, "x".to_string()));
+
+    let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
+    engine.build_from_queries(&queries);
+
+    assert_eq!(
+        matched_with_broad(&engine, "x", false),
+        vec![bare_x],
+        "one phrase-bearing query must contribute one x document-frequency count"
+    );
+}
+
+#[test]
 fn positive_phrase_graph_includes_stateful_raw_token_paths() {
     let mut builder = Normalizer::builder();
     builder.add_grader("psa");

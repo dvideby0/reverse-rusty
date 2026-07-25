@@ -149,7 +149,10 @@ structurally validated `u32` subprogram. Program v1 contains ADR-119's nested Bo
 evaluated in both scalar and bitmap form. Program v2 appends ADR-120 required/forbidden token graphs;
 the scalar verifier intersects integer-labeled graph paths with reusable scratch. While any phrase
 row is live in a snapshot, the batch driver uses that positioned scalar path for broad/hot work rather
-than silently flattening the graph into its bitmap kernel. Phrase-free snapshots retain the old path.
+than silently flattening the graph into its bitmap kernel. The public low-level positionless
+`ExactStore::eval_batch` / `eval_batch_slices` surfaces reject a v2 row with
+`BatchEvalError::PositionedPredicate` and clear the output bitmap, so bypassing the driver cannot
+silently skip adjacency. Phrase-free snapshots retain the old path.
 
 **Two title feature views — multi-word aliases (ADR-061).** The steps above describe one title feature
 set `F`. With a multi-word alias active, the verifier instead receives a **`TitleView`** carrying *two*
@@ -173,7 +176,9 @@ several positions, and active aliases contribute alternate positive paths. Requi
 labels are equivalence-widened and checked against `P(T)`; forbidden labels remain canonical and are
 checked against `N(T)`. Every required graph label enters a **candidate-only** proxy family: every
 satisfying path has a labeled edge, but the proxy never enters the flat exact any-of columns and
-exact connected-path intersection decides truth. Phrase covers stay on the default-visible main
+exact connected-path intersection decides truth. Proxy labels contribute query-document frequency
+once per distinct label per query—even when several quoted/bare clauses share it—so clause repetition
+cannot perturb the frozen top-64 visibility boundary. Phrase covers stay on the default-visible main
 lane; every cluster cover that uses a phrase proxy is replicated rather than selectively placed by
 graph-only labels. Graph work is capped at 65,536 visited position pairs and 65,536 charged arc
 inspections, and positioned analysis bounds same-grader starts. Exhaustion or an incomplete bounded

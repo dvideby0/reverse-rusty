@@ -201,21 +201,23 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
     forbidden.sort_unstable();
     forbidden.dedup();
 
-    // bump frequency once per distinct required/anyof feature (gating-relevant).
+    // Bump QUERY-DOCUMENT frequency once per distinct positive retrieval feature.
     // Frequencies reflect the LITERAL query (before equivalence expansion below), so the
     // hot-mask and anchor selection stay a function of the real corpus distribution.
-    for &f in &required {
-        dict.bump_freq(f);
-    }
+    // Dedup across clause families too: `x (x,y) "x a" "x b"` is one query document
+    // containing `x`, not four documents. Over-counting at the top-64 boundary can move
+    // an ordinary `x` row into the opt-in class-C lane.
+    let mut frequency_features = required.clone();
     for g in &anyof {
-        for &f in g {
-            dict.bump_freq(f);
-        }
+        frequency_features.extend_from_slice(g);
     }
     for phrase in &required_phrases {
-        for f in phrase_proxy(phrase) {
-            dict.bump_freq(f);
-        }
+        frequency_features.extend(phrase_proxy(phrase));
+    }
+    frequency_features.sort_unstable();
+    frequency_features.dedup();
+    for f in frequency_features {
+        dict.bump_freq(f);
     }
 
     let mut out = Extracted {

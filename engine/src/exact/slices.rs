@@ -5,7 +5,10 @@
 //! [`verify_slices`] is the scalar per-candidate gate; [`eval_batch_slices`] is its
 //! columnar (bitmap-transpose) twin for the broad-lane batch path.
 
-use super::{eval_predicate_batch, query_passes_tags, verify_predicate, TagPredicate, TitleView};
+use super::{
+    eval_predicate_batch, predicate_has_phrases, query_passes_tags, verify_predicate,
+    BatchEvalError, TagPredicate, TitleView,
+};
 use crate::dict::FeatureId;
 use crate::tagdict::TagId;
 
@@ -197,6 +200,12 @@ pub fn prefilter_slices(
 /// features are consulted ONLY here in verification, never to retrieve/prune
 /// candidates — the "never gate on MUST_NOT" invariant, identical to the scalar
 /// path.
+///
+/// # Errors
+///
+/// Returns [`BatchEvalError::PositionedPredicate`] and clears `acc` when the row
+/// contains a quoted predicate. Presence bitmaps cannot represent token order;
+/// callers must use [`verify_slices`] with a positioned [`TitleView`] instead.
 #[allow(clippy::too_many_arguments)]
 #[inline]
 pub fn eval_batch_slices<'a>(
@@ -227,15 +236,24 @@ pub fn eval_batch_slices<'a>(
     tag_off: &[u32],
     tag_len: &[u16],
     tag_blob: &[TagId],
-) {
+) -> Result<(), BatchEvalError> {
+    let po = predicate_off.get(i).copied().unwrap_or(0) as usize;
+    let pl = predicate_len.get(i).copied().unwrap_or(0) as usize;
+    let predicate = &predicate_blob[po..po + pl];
+    if predicate_has_phrases(predicate) {
+        // Never leave a stale/success-looking bitmap behind on the unsupported
+        // positionless path. The error tells public callers to retry through
+        // scalar positioned verification; the engine routes there up front.
+        acc.fill(0);
+        return Err(BatchEvalError::PositionedPredicate);
+    }
+
     // 0) tag predicate (post-candidate; NEVER gates). The filter is title-independent, so
     //    it is a per-query scalar gate: a query failing the caller's tags matches no title.
     //    Mirrors verify step 5; skipped (one untaken branch) when no filter is supplied.
     if !pred.is_empty() && !query_passes_tags(i, pred, tag_off, tag_len, tag_blob) {
-        for a in acc.iter_mut() {
-            *a = 0;
-        }
-        return;
+        acc.fill(0);
+        return Ok(());
     }
 
     // 1) common-mask gate -> per-title gate bitmap (verify step 1, transposed)
@@ -267,14 +285,12 @@ pub fn eval_batch_slices<'a>(
                 nz |= *a;
             }
             if nz == 0 {
-                return;
+                return Ok(());
             }
         } else {
             // feature absent from the whole batch -> no title can match
-            for a in acc.iter_mut() {
-                *a = 0;
-            }
-            return;
+            acc.fill(0);
+            return Ok(());
         }
     }
 
@@ -289,7 +305,7 @@ pub fn eval_batch_slices<'a>(
                 nz |= *a;
             }
             if nz == 0 {
-                return;
+                return Ok(());
             }
         }
     }
@@ -316,22 +332,14 @@ pub fn eval_batch_slices<'a>(
             nz |= *a;
         }
         if nz == 0 {
-            return;
+            return Ok(());
         }
     }
 
     // 5) compound members. Ordinary queries have an empty program and pay only
     // the length load/branch.
-    let po = predicate_off.get(i).copied().unwrap_or(0) as usize;
-    let pl = predicate_len.get(i).copied().unwrap_or(0) as usize;
-    if pl != 0 {
-        eval_predicate_batch(
-            &predicate_blob[po..po + pl],
-            &lookup,
-            acc,
-            grp,
-            member,
-            choice,
-        );
+    if !predicate.is_empty() {
+        eval_predicate_batch(predicate, &lookup, acc, grp, member, choice);
     }
+    Ok(())
 }

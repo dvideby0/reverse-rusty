@@ -37,6 +37,30 @@ pub(crate) use predicate::{
 pub use slices::{eval_batch_slices, prefilter_slices, verify_slices};
 pub use store::ExactStore;
 
+/// Why a positionless columnar exact-evaluation request could not be evaluated.
+///
+/// The bitmap transpose carries feature-presence bitmaps, not ordered title token
+/// graphs. A row with a quoted predicate therefore needs the scalar positioned
+/// verifier (the engine routes all such batches there automatically).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BatchEvalError {
+    /// The row contains a required or forbidden quoted phrase.
+    PositionedPredicate,
+}
+
+impl std::fmt::Display for BatchEvalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PositionedPredicate => {
+                f.write_str("quoted predicate requires positioned scalar evaluation")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BatchEvalError {}
+
 /// The two title feature views threaded through exact verification (ADR-061).
 ///
 /// - **Probe** (`probe`) is the candidate-only positive label union. It normally aliases

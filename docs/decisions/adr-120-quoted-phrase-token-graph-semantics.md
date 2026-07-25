@@ -82,6 +82,9 @@
   snapshots keep the existing flat normalization/verifier path. A phrase-bearing snapshot routes
   the broad/hot batch lane through the scalar positioned verifier rather than the flat bitmap
   kernel; a columnar token-graph transpose is a performance follow-up, not a correctness shortcut.
+  The public positionless `ExactStore::eval_batch` / `eval_batch_slices` APIs return
+  `BatchEvalError::PositionedPredicate` and clear their accumulator for program v2, so a caller that
+  bypasses the snapshot driver cannot mistake flattened presence bits for phrase truth.
   The snapshot capability gate counts only live phrase rows in memory and mmap segments, so deleting
   the last quoted query immediately restores the phrase-free/columnar path without awaiting
   compaction.

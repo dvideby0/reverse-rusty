@@ -114,7 +114,7 @@ pub(in crate::segment) trait BroadBackend {
         member: &mut [u64],
         choice: &mut [u64],
         pred: &crate::exact::TagPredicate,
-    );
+    ) -> Result<(), crate::exact::BatchEvalError>;
 }
 
 /// Build the feature → title-bitmap lookup closure for one batch.
@@ -221,7 +221,7 @@ impl BroadBackend for &Segment {
         member: &mut [u64],
         choice: &mut [u64],
         pred: &crate::exact::TagPredicate,
-    ) {
+    ) -> Result<(), crate::exact::BatchEvalError> {
         self.exact.eval_batch(
             local,
             tmask_batch,
@@ -231,7 +231,7 @@ impl BroadBackend for &Segment {
             member,
             choice,
             pred,
-        );
+        )
     }
 }
 
@@ -304,7 +304,7 @@ impl BroadBackend for &MmapSegment {
         member: &mut [u64],
         choice: &mut [u64],
         pred: &crate::exact::TagPredicate,
-    ) {
+    ) -> Result<(), crate::exact::BatchEvalError> {
         self.eval_batch(
             local,
             tmask_batch,
@@ -314,7 +314,7 @@ impl BroadBackend for &MmapSegment {
             member,
             choice,
             pred,
-        );
+        )
     }
 }
 
@@ -514,7 +514,7 @@ pub(in crate::segment) fn eval_one_segment<
             Lane::Hot => stats.hot_queries_evaluated += 1,
         }
         if grouped {
-            backend.eval_into(
+            let evaluated = backend.eval_into(
                 local,
                 tmask_batch,
                 feat_row,
@@ -526,9 +526,13 @@ pub(in crate::segment) fn eval_one_segment<
                 choice,
                 &crate::exact::TagPredicate::empty(),
             );
+            assert!(
+                evaluated.is_ok(),
+                "positioned predicate reached the positionless columnar kernel"
+            );
             emit_from_bits(&backend, grouped, local, pred, acc, collector, policy);
         } else {
-            backend.eval_into(
+            let evaluated = backend.eval_into(
                 local,
                 tmask_batch,
                 feat_row,
@@ -539,6 +543,10 @@ pub(in crate::segment) fn eval_one_segment<
                 member,
                 choice,
                 pred,
+            );
+            assert!(
+                evaluated.is_ok(),
+                "positioned predicate reached the positionless columnar kernel"
             );
             let logical = backend.logical_id(local);
             let placement = backend.placement(local);

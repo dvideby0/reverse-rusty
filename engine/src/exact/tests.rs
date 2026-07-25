@@ -6,6 +6,7 @@
 use super::*;
 use crate::compile::Extracted;
 use crate::dict::{Dict, FeatureId, FeatureKind};
+use crate::normalize::{PhraseArc, PhraseGraph};
 
 #[test]
 fn sorted_intersects_basics() {
@@ -89,35 +90,88 @@ fn verify_filters_post_candidate_and_only_removes() {
             None
         }
     };
-    store.eval_batch(
-        0,
-        &[tmask],
-        lookup,
-        &mut acc,
-        &mut grp,
-        &mut member,
-        &mut choice,
-        &TagPredicate::new(vec![vec![10]]),
-    );
+    store
+        .eval_batch(
+            0,
+            &[tmask],
+            lookup,
+            &mut acc,
+            &mut grp,
+            &mut member,
+            &mut choice,
+            &TagPredicate::new(vec![vec![10]]),
+        )
+        .expect("flat predicate supports positionless batch evaluation");
     assert_eq!(
         acc[0] & 1,
         1,
         "columnar path matches with a satisfied filter"
     );
     let mut acc2 = [0u64; 1];
-    store.eval_batch(
-        0,
-        &[tmask],
-        lookup,
-        &mut acc2,
-        &mut grp,
-        &mut member,
-        &mut choice,
-        &TagPredicate::new(vec![vec![99]]),
-    );
+    store
+        .eval_batch(
+            0,
+            &[tmask],
+            lookup,
+            &mut acc2,
+            &mut grp,
+            &mut member,
+            &mut choice,
+            &TagPredicate::new(vec![vec![99]]),
+        )
+        .expect("flat predicate supports positionless batch evaluation");
     assert_eq!(
         acc2[0] & 1,
         0,
         "columnar path drops with an unsatisfied filter"
+    );
+}
+
+#[test]
+fn positionless_batch_evaluation_rejects_quoted_predicates() {
+    let mut dict = Dict::new();
+    let red = dict.intern("term:red", FeatureKind::Generic);
+    let shoe = dict.intern("term:shoe", FeatureKind::Generic);
+    let ex = Extracted {
+        required_phrases: vec![PhraseGraph {
+            positions: 2,
+            arcs: vec![
+                PhraseArc {
+                    start: 0,
+                    end: 1,
+                    alternatives: vec![red],
+                },
+                PhraseArc {
+                    start: 1,
+                    end: 2,
+                    alternatives: vec![shoe],
+                },
+            ],
+        }],
+        ..Extracted::default()
+    };
+    let mut store = ExactStore::new();
+    store.push(&ex, &[], &dict, 1, 100);
+
+    let mut acc = [u64::MAX];
+    let mut grp = [0u64];
+    let mut member = [0u64];
+    let mut choice = [0u64];
+    let result = store.eval_batch(
+        0,
+        &[0],
+        |_feature| Some(&[1u64]),
+        &mut acc,
+        &mut grp,
+        &mut member,
+        &mut choice,
+        &TagPredicate::empty(),
+    );
+
+    assert_eq!(result, Err(BatchEvalError::PositionedPredicate));
+    assert_eq!(
+        acc,
+        [0],
+        "an unsupported positioned row must not leave a success-looking bitmap"
     );
 }

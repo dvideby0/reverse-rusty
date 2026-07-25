@@ -8,7 +8,7 @@
 
 use super::{
     encode_predicate, eval_batch_slices, predicate_has_phrases, query_passes_tags,
-    verify_predicate, TagPredicate, TitleView,
+    verify_predicate, BatchEvalError, TagPredicate, TitleView,
 };
 use crate::compile::Extracted;
 use crate::dict::{Dict, FeatureId, NO_MASK_BIT};
@@ -382,6 +382,12 @@ impl ExactStore {
     /// the matching-title bitmap into `acc`. The bitmap transpose of [`verify`],
     /// sharing [`eval_batch_slices`] with the mmap path so the two cannot drift. `pred`
     /// is the request's compiled tag filter (applied as a per-query scalar gate).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BatchEvalError::PositionedPredicate`] (with `acc` cleared) when
+    /// `local` contains a quoted predicate. This positionless bitmap API cannot
+    /// represent adjacency; use [`Self::verify`] with a positioned [`TitleView`].
     // The four mutable bitmap slices are independent, caller-owned reusable
     // buffers. Keeping them explicit avoids a wrapper/indirection on this hot
     // path and mirrors `eval_batch_slices`, which carries the same exemption.
@@ -397,7 +403,7 @@ impl ExactStore {
         member: &mut [u64],
         choice: &mut [u64],
         pred: &TagPredicate,
-    ) {
+    ) -> Result<(), BatchEvalError> {
         eval_batch_slices(
             local as usize,
             tmask_batch,
@@ -426,7 +432,7 @@ impl ExactStore {
             &self.tag_off,
             &self.tag_len,
             &self.tag_blob,
-        );
+        )
     }
 
     /// Batch-level count-gate pre-reject (Broad-Query Cost Program lever 5a):
