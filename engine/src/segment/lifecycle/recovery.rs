@@ -4,7 +4,7 @@
 //! attach-an-explicit-file-list path, fail-loud). The construction builders live
 //! in [`construct`](super::construct).
 
-use crate::segment::{BaseSegment, Engine, Segment};
+use crate::segment::{BaseSegment, Engine, Segment, SourceCommitState};
 use std::sync::Arc;
 
 use crate::config::EngineConfig;
@@ -418,6 +418,11 @@ impl Engine {
             skipped_segments,
             query_store,
             source_file_name: manifest.source_file_name,
+            source_commit_state: if skipped_segments == 0 && !source_store_failed {
+                SourceCommitState::Ready
+            } else {
+                SourceCommitState::IncompleteRecovery
+            },
             vocab_epoch: 0,
             owns_manifest: true,
         };
@@ -746,6 +751,7 @@ impl Engine {
             skipped_segments: 0,
             query_store,
             source_file_name: source_file_name.to_string(),
+            source_commit_state: SourceCommitState::Ready,
             vocab_epoch: 0,
             owns_manifest: false,
         };

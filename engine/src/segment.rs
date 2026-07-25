@@ -712,6 +712,12 @@ pub struct CompactionReport {
 /// Boxed observer callback for engine events.
 type EventObserver = Box<dyn Fn(&crate::events::EngineEvent) + Send + Sync>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::segment) enum SourceCommitState {
+    Ready,
+    IncompleteRecovery,
+}
+
 pub struct Engine {
     /// Runtime configuration. `Arc` so the current settings ride in every
     /// `EngineSnapshot` (an O(1) clone), letting `GET /_settings` read them from
@@ -792,6 +798,12 @@ pub struct Engine {
     /// manifest selects the new source corpus atomically with its segment
     /// registry.
     source_file_name: String,
+    /// Whether this process has a complete source baseline from which it may
+    /// publish another standalone source generation. A missing/corrupt selected
+    /// sidecar or failed post-commit lazy remap clears this fence; restart/repair
+    /// must restore the selected corpus before any later manifest can replace it
+    /// with an accidentally partial snapshot.
+    source_commit_state: SourceCommitState,
     /// Monotonic counter incremented on each `set_vocab()` call. Segments compiled
     /// at an earlier epoch are stale (their normalizer differs from the current one).
     vocab_epoch: u64,
@@ -826,6 +838,7 @@ impl std::fmt::Debug for Engine {
             .field("persistence_healthy", &self.persistence_healthy)
             .field("skipped_segments", &self.skipped_segments)
             .field("query_store_entries", &self.query_store.len())
+            .field("source_commit_state", &self.source_commit_state)
             .field("vocab_epoch", &self.vocab_epoch)
             .field("owns_manifest", &self.owns_manifest)
             .finish()

@@ -2,13 +2,13 @@
 //! to disk (mmap'd back), the all-or-nothing commit point (ADR-017), WAL
 //! checkpoint/reset, and manifest + query-source persistence.
 
-use super::{AcceptedSource, BaseSegment, Engine, IngestReport, Segment};
+use super::{AcceptedSource, BaseSegment, Engine, IngestReport, Segment, SourceCommitState};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::storage::{MmapSegment, StoredSource};
 
-struct StagedSources {
+pub(in crate::segment) struct StagedSources {
     name: String,
     path: PathBuf,
 }
@@ -176,35 +176,22 @@ impl Engine {
         // The manifest write is the atomic commit point. It names both already-
         // durable artifacts. If it fails, roll the batch back entirely: drop the
         // in-memory segment and delete both orphans.
-        let selected_source = staged_sources.as_ref().map_or_else(
-            || self.source_file_name.clone(),
-            |staged| staged.name.clone(),
-        );
-        if !self.save_manifest_selecting_source(&selected_source) {
+        let staged_publishes_lazy = staged_sources.is_some() && self.query_store.is_lazy();
+        if !self.commit_staged_sources_and_manifest(staged_sources) {
             self.segments.pop();
             self.refresh_phrase_capability();
             if let Some(p) = seg_path {
                 self.best_effort_remove_segment(&p);
-            }
-            if let Some(staged) = staged_sources {
-                self.best_effort_remove_source(&staged.path);
             }
             return Err(std::io::Error::other(
                 "manifest write failed during ingest; batch rolled back",
             ));
         }
 
-        #[cfg(test)]
-        inject_crash_after_source_manifest_commit();
-
         // Past the joint commit point — both match data and canonical sources are
         // durable. Record the selected generation before any fallible live
         // publication. Lazy mode publishes by remapping the complete candidate;
         // resident/in-memory mode applies the prepared documents directly.
-        let staged_publishes_lazy = staged_sources.is_some() && self.query_store.is_lazy();
-        if let Some(staged) = staged_sources {
-            self.activate_staged_sources(staged);
-        }
         if !staged_publishes_lazy {
             for (logical, source) in pending_sources {
                 self.query_store.insert_stored(logical, source);
@@ -387,15 +374,26 @@ impl Engine {
         let Ok(staged) = self.stage_query_sources(&[]) else {
             return false;
         };
+        self.commit_staged_sources_and_manifest(staged)
+    }
+
+    /// Atomically select a prepared source generation with the engine's current
+    /// segment registry. On failure the unselected candidate is discarded.
+    pub(in crate::segment) fn commit_staged_sources_and_manifest(
+        &mut self,
+        staged: Option<StagedSources>,
+    ) -> bool {
         let selected = staged
             .as_ref()
             .map_or_else(|| self.source_file_name.clone(), |s| s.name.clone());
         if !self.save_manifest_selecting_source(&selected) {
-            if let Some(staged) = staged {
-                self.best_effort_remove_source(&staged.path);
-            }
+            self.discard_staged_sources(staged);
             return false;
         }
+
+        #[cfg(test)]
+        inject_crash_after_source_manifest_commit();
+
         if let Some(staged) = staged {
             self.activate_staged_sources(staged);
         }
@@ -476,7 +474,7 @@ impl Engine {
 
     /// Prepare a complete immutable standalone source corpus. `updates` are
     /// included in the file without becoming visible through `query_store`.
-    fn stage_query_sources(
+    pub(in crate::segment) fn stage_query_sources(
         &mut self,
         updates: &[(u64, StoredSource)],
     ) -> std::io::Result<Option<StagedSources>> {
@@ -486,6 +484,18 @@ impl Engine {
         let Some(dir) = self.config.data_dir.clone() else {
             return Ok(None);
         };
+        if self.source_commit_state == SourceCommitState::IncompleteRecovery {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "refusing source commit from an incomplete recovery baseline; restart after \
+                 repairing the manifest-selected source sidecar",
+            );
+            self.record_source_write_failure(
+                "joint source/manifest commit refused from incomplete recovery",
+                &error,
+            );
+            return Err(error);
+        }
         let name = match self.next_source_file_name() {
             Ok(name) => name,
             Err(e) => {
@@ -499,6 +509,12 @@ impl Engine {
             return Err(e);
         }
         Ok(Some(StagedSources { name, path }))
+    }
+
+    pub(in crate::segment) fn discard_staged_sources(&self, staged: Option<StagedSources>) {
+        if let Some(staged) = staged {
+            self.best_effort_remove_source(&staged.path);
+        }
     }
 
     fn next_source_file_name(&self) -> std::io::Result<String> {
@@ -538,6 +554,7 @@ impl Engine {
                 Ok(store) => self.query_store = Arc::new(store),
                 Err(e) => {
                     may_remove_old = false;
+                    self.source_commit_state = SourceCommitState::IncompleteRecovery;
                     self.persistence_healthy = false;
                     self.emit(crate::events::EngineEvent::DurabilityFailure {
                         op: crate::events::DurabilityOp::SourceStoreRemap,

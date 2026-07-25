@@ -43,9 +43,11 @@
   - WAL-backed flush writes the segment, prepares the source candidate, commits the joint manifest,
     and only then checkpoints/resets the WAL. A source failure therefore leaves the prior manifest
     and complete WAL recovery authority intact.
-  - Compaction, tombstone reseal, source-only publication, and source-driven recompile use the same
-    joint commit helper. This prevents a registry/watermark change from capturing exact-row changes
-    while retaining a stale source corpus.
+  - Compaction, tombstone reseal, and source-only publication use the same joint commit helper.
+    Source-driven recompile prepares its candidate first but selects it only after the replacement
+    segment is durable. The preparation step must not write a source-only manifest: that would
+    advance the WAL watermark before the new segment captures a memtable insert followed by its
+    logical delete, allowing recovery to replay the insert while skipping the delete.
   - Cluster shards retain their coordinator-owned protocol. They do not write a local manifest;
     `cluster_manifest.bin`/the shard checkpoint already owns source-sidecar selection and refuses to
     trim its log when source persistence is unhealthy.
@@ -53,10 +55,13 @@
 - **Recovery, availability, and diagnostics.** Matching still opens from committed segments when a
   selected source file is externally missing or corrupt. The engine marks persistence unhealthy and
   emits `SourceStoreLoad`; GET/explain/source-driven rebuilds fail loud rather than returning stale
-  content or committing a strict subset. In the ordinary crash case no repair action is necessary:
-  the selected immutable file was durable before the commit point. Lazy remap failure after commit is
-  also observable, while restart remains self-healing because the manifest already names the valid
-  file.
+  content or committing a strict subset. An explicit in-memory commit fence also refuses bulk,
+  flush, compaction, and source-only publication from that incomplete recovery baseline; otherwise a
+  valid empty replacement could hide the damage and make a later backup certify missing sources.
+  The fence clears only by restarting after the selected corpus is repaired. In the ordinary crash
+  case no repair action is necessary: the selected immutable file was durable before the commit
+  point. Lazy remap failure after commit closes the same fence, while restart remains self-healing
+  because the manifest already names the valid file.
 
 - **Backup and compatibility.** Single-node backup copies and verifies exactly the source basename
   selected by `manifest.bin`; an unselected generation is skipped, and a missing selected v7 file
@@ -75,6 +80,7 @@
   and before live source publication during WAL-free bulk ingest. Reopen proves matching, GET
   document, explain, source-driven rebuild, a subsequent checkpoint/reopen, and backup/restore all
   recover the same query. Persistence tests cover resident and lazy stores, stale/missing selected
-  files, same-version generation mismatch, source-write failure preserving the prior manifest, and
-  later live/bulk source ordering. Manifest tests pin v7 round-trip, rollback version, and basename
-  validation; backup tests require and copy only the selected generation.
+  files, refusal to replace an incomplete recovery baseline, same-version generation mismatch,
+  source-write failure preserving the prior manifest, recompile failure preserving a later logical
+  delete in the WAL, and later live/bulk source ordering. Manifest tests pin v7 round-trip, rollback
+  version, and basename validation; backup tests require and copy only the selected generation.
