@@ -190,6 +190,19 @@ fn psa10_fusion_default_vs_grader_vocab() {
         "psa10",
         &[("psa10", true), ("psa 10", true)],
     );
+    // Negation applies to the complete analyzed bare-term predicate. Seeing
+    // only `grader:psa` is not enough to satisfy the `psa10` exclusion.
+    check(
+        grader_norm,
+        grader_vocab,
+        "card -psa10",
+        &[
+            ("card psa", true),
+            ("card psa 9", true),
+            ("card psa10", false),
+            ("card psa 10", false),
+        ],
+    );
 }
 
 #[test]

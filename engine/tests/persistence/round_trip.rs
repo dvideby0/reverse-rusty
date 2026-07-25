@@ -267,8 +267,58 @@ fn semantics_two_materialization_is_source_rebuilt_for_quoted_adjacency() {
         reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
             .expect("migrated segment")
             .compiler_semantics_version()
-            == 3
+            == 4
     }));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn semantics_three_materialization_is_source_rebuilt_for_complete_forbidden_terms() {
+    let dir = test_dir("semantics_three_forbidden_term_migration");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let make_grader_norm = || {
+        let mut builder = reverse_rusty::normalize::NormalizerBuilder::new();
+        builder.add_grader("psa");
+        builder.build().expect("grader normalizer")
+    };
+    {
+        let mut engine = Engine::with_config(make_grader_norm(), config.clone());
+        engine.build_from_queries(&[(1, "card -psa10".to_string())]);
+    }
+    let before =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    for name in &before.segment_files {
+        stamp_compiler_semantics(&dir.join("segments").join(name), 3);
+    }
+
+    let reopened = Engine::open(make_grader_norm(), config.clone()).expect("semantics-3 migration");
+    assert_eq!(
+        match_ids(&reopened, "card psa"),
+        vec![1],
+        "a partial multi-feature forbidden term must not reject after source rebuild"
+    );
+    assert!(
+        match_ids(&reopened, "card psa10").is_empty(),
+        "the complete forbidden term must still reject after source rebuild"
+    );
+    let after = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    assert_ne!(before.segment_files, after.segment_files);
+    assert!(after.segment_files.iter().all(|name| {
+        reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
+            .expect("migrated segment")
+            .compiler_semantics_version()
+            == 4
+    }));
+    drop(reopened);
+    let reopened = Engine::open(make_grader_norm(), config).expect("mmap reopen");
+    let mut scratch = reverse_rusty::segment::MatchScratch::new();
+    assert!(
+        reopened.diagnostic_candidate_hit(1, "card psa10", &mut scratch, true),
+        "the mmap posting must be observable before the forbidden predicate rejects"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -320,7 +370,7 @@ fn semantics_one_anyof_materialization_rebuilds_before_serving() {
         reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
             .expect("open migrated segment")
             .compiler_semantics_version()
-            == 3
+            == 4
     }));
 
     drop(reopened);

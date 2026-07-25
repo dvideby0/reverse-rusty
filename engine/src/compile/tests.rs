@@ -226,6 +226,24 @@ mod golden {
     }
 
     #[test]
+    fn multi_feature_negated_term_remains_one_complete_predicate() {
+        let norm = spec_vocab();
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let negative = extract(&parse("card -psa10").unwrap(), &norm, &mut dict, &mut lc);
+
+        assert!(
+            negative.forbidden.is_empty(),
+            "a multi-feature term must not be flattened into independent exclusions"
+        );
+        assert_eq!(negative.forbidden_conjunctions.len(), 1);
+        assert!(semantic_match(&norm, &dict, &negative, "card psa"));
+        assert!(semantic_match(&norm, &dict, &negative, "card psa 9"));
+        assert!(!semantic_match(&norm, &dict, &negative, "card psa10"));
+        assert!(!semantic_match(&norm, &dict, &negative, "card psa 10"));
+    }
+
+    #[test]
     fn distinct_members_survive_a_shared_retrieval_proxy() {
         let norm = Normalizer::default_vocab().unwrap();
         let mut dict = Dict::new();

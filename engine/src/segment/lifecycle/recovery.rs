@@ -432,12 +432,13 @@ impl Engine {
         // Replay WAL entries after last checkpoint
         replay_wal_tail(&mut engine, &wal_path, manifest.wal_seq_watermark)?;
 
-        // ADR-118/119/120 compiler-semantics migration. Rebuild every older live
+        // ADR-118/119/120/#123 compiler-semantics migration. Rebuild every older live
         // materialization from retained `_source` before returning an engine
         // that could serve it: semantics 0 joined positive terms across clause
         // boundaries, semantics 1 discarded all but one feature from a
-        // multi-token any-of member, and semantics 2 flattened quoted adjacency.
-        // The header stamp makes this idempotent; a
+        // multi-token any-of member, semantics 2 flattened quoted adjacency,
+        // and semantics 3 flattened multi-feature negated bare terms. The
+        // header stamp makes this idempotent; a
         // missing/inconsistent source sidecar or failed durable commit refuses
         // startup rather than retaining a silent false negative.
         engine.migrate_legacy_compiler_semantics()?;
@@ -453,17 +454,17 @@ impl Engine {
         }) || (!self.memtable.is_empty() && self.memtable.compiler_semantics_version() < current)
     }
 
-    /// Whether serving this engine requires the ADR-118/119/120 source-driven
+    /// Whether serving this engine requires the ADR-118/119/120/#123 source-driven
     /// compiler migration. Every live row below the current stamp is suspect;
     /// only recompilation from the retained DSL can recover clause boundaries,
-    /// any-of member boundaries, and quoted adjacency.
+    /// any-of member boundaries, quoted adjacency, and complete forbidden terms.
     pub(crate) fn needs_compiler_semantics_migration(&self) -> bool {
         self.has_legacy_compiler_segments()
     }
 
-    /// Standalone upgrade path for ADR-118/119/120. The normalizer and dict do not
+    /// Standalone upgrade path for ADR-118/119/120/#123. The normalizer and dict do not
     /// change, but every live source must be re-lowered so clause and any-of
-    /// member boundaries plus quoted adjacency are reflected in exact
+    /// member boundaries, quoted adjacency, and complete forbidden terms are reflected in exact
     /// predicates, signatures, and placement.
     pub(crate) fn migrate_legacy_compiler_semantics(&mut self) -> std::io::Result<()> {
         if !self.needs_compiler_semantics_migration() {

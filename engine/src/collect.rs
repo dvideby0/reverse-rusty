@@ -1,8 +1,10 @@
-//! Monomorphized post-verification result collectors (ADR-107).
+//! Monomorphized candidate-observation and post-verification result collectors
+//! (ADR-107).
 //!
-//! The matcher calls [`MatchSink::on_match`] only after Boolean verification and
-//! member-level alive/tag checks. Collectors therefore cannot affect candidate
-//! retrieval or the lossless signature cover.
+//! The matcher calls [`MatchSink::on_candidate`] after a live stored posting is
+//! reached and [`MatchSink::on_match`] only after Boolean verification and
+//! member-level tag checks. Ordinary collectors use the no-op candidate callback;
+//! the diagnostic candidate-hit collector observes the real retrieval path.
 
 use crate::result::{TotalHits, TotalHitsRelation};
 use crate::util::FastSet;
@@ -26,6 +28,12 @@ pub(crate) struct CollectionSummary {
 /// The single hot-path emission operation. Generic callers monomorphize it.
 pub(crate) trait MatchSink {
     fn on_match(&mut self, logical_id: u64);
+
+    /// Observe one live logical query reached through the stored candidate
+    /// indexes, before tag/exact verification. The default compiles away for
+    /// every ordinary result collector.
+    #[inline]
+    fn on_candidate(&mut self, _logical_id: u64) {}
 
     /// Whether collection has failed or been cancelled and matching should
     /// return at the next candidate/probe boundary. Generic non-streaming
@@ -54,6 +62,59 @@ pub(crate) trait MatchCollector: MatchSink {
     fn reset(&mut self);
     fn finish(&mut self) -> CollectionSummary;
     fn abort(&mut self);
+}
+
+/// Diagnostic collector that stops once the real stored retrieval path reaches
+/// one target logical ID. It deliberately ignores exact matches: the question
+/// it answers is candidate recall, not final Boolean semantics.
+pub(crate) struct CandidateHitCollector {
+    target: u64,
+    hit: bool,
+}
+
+impl CandidateHitCollector {
+    pub(crate) fn new(target: u64) -> Self {
+        Self { target, hit: false }
+    }
+
+    pub(crate) fn hit(&self) -> bool {
+        self.hit
+    }
+}
+
+impl MatchSink for CandidateHitCollector {
+    #[inline]
+    fn on_match(&mut self, _logical_id: u64) {}
+
+    #[inline]
+    fn on_candidate(&mut self, logical_id: u64) {
+        self.hit |= logical_id == self.target;
+    }
+
+    #[inline]
+    fn should_stop(&mut self) -> bool {
+        self.hit
+    }
+}
+
+impl MatchCollector for CandidateHitCollector {
+    fn reset(&mut self) {
+        self.hit = false;
+    }
+
+    fn finish(&mut self) -> CollectionSummary {
+        let retained = usize::from(self.hit);
+        CollectionSummary {
+            retained,
+            total_hits: TotalHits::exact(retained as u64),
+            logical_emissions: 0,
+            duplicate_emissions: Some(0),
+        }
+    }
+
+    fn abort(&mut self) {
+        self.hit = false;
+    }
 }
 
 /// Compatibility collector over the caller's existing result vector.

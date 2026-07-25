@@ -1,4 +1,4 @@
-# ADR-087: A front-end-independent correctness oracle (the Phase 0 reference matcher)
+# ADR-087: A front-end and lowering-independent semantic oracle
 
 > [Back to the decisions index](../DECISIONS.md)
 
@@ -21,8 +21,15 @@
   Any-of members remain full conjunctions, a forbidden clause negates its complete predicate, and
   phrases remain analyzed graphs. The tree evaluates directly against independent canonical
   `P(T)`/`N(T)` title representations. The differential separately classifies any semantic truth
-  missed by the final engine as a candidate-cover miss or a post-retrieval verification miss;
+  missed by the final engine as a candidate-cover miss or a post-retrieval verification miss by
+  running a candidate-only collector through the real stored posting/filter/lane traversal;
   candidate generation is compared for **recall only**, since extra candidates are legal.
+
+  The first review of that model immediately exposed a production divergence: a negated bare term
+  that analyzes to several features (for example `-psa10`) was flattened into independent
+  exclusions, rejecting a title that contained only one feature. Production now stores it as one
+  complete forbidden conjunction, the human differential pins partial and complete cases, and
+  compiler semantics **4** source-rebuilds semantics 0–3 before serving.
 
 - **Context:** This is **Phase 0, item 2** of the reality/adversarial audit — the
   highest-value net-new item, prioritized above every product-roadmap tier. Reverse Rusty's cardinal
@@ -79,8 +86,9 @@
      a randomized at-scale alias corpus); a hand-written **gotcha table** asserted against BOTH sides
      (a human-authored expectation is the tiebreaker); and an **env-gated real corpus**
      (`RR_ORACLE_CORPUS=<jsonl>`, skipped when unset, so CI and the public repo never see user-supplied
-     real data). Candidate comparison is deliberately one-way: every semantic truth must be retrieved,
-     while false-positive candidates remain legal work for exact verification.
+     real data). Candidate comparison is deliberately one-way: every semantic truth must be retrieved
+     through the actual stored indexes, while false-positive candidates remain legal work for exact
+     verification.
   5. **Drift policy — the spec is the authority.** The reference is authored from the spec + the
      spec-authored golden tests, never from engine code. On a genuine divergence the triage authority
      is the spec + golden tests, not "trust the engine": spec mandates the reference's answer ⇒ an
@@ -125,12 +133,15 @@
   links `reverse-rusty`, so nothing structurally prevents reusing the front end — the exact way the
   in-tree oracle ended up sharing it).
 
-- **Why this is safe / what it buys:** the reference remains dev-only and zero-dependency; no
-  production code changed, so lean/server/distributed builds are byte-identical. The 2026-07-25
-  hardening replaces a reference-only execution-plan model with a smaller grammar tree and extends
-  test diagnostics. It closes both the shared-front-end blind spot and the “same lowering in
-  different code” blind spot for the covered grammar, while retaining the ground truth used by
-  Phase 0 item 3 (real-process crash injection).
+- **Why this is safe / what it buys:** the reference remains dev-only and zero-dependency. The
+  2026-07-25 hardening replaces a reference-only execution-plan model with a smaller grammar tree.
+  Its candidate observer is a diagnostic collector over the existing monomorphized traversal; every
+  production collector keeps a no-op callback that optimizes away. The one production semantic
+  correction reuses the existing integer-only forbidden-conjunction program, and compiler semantics
+  4 forces source-driven standalone/cluster migration before an older row can be served. This closes
+  both the shared-front-end blind spot and the “same lowering in different code” blind spot for the
+  covered grammar, while retaining the ground truth used by Phase 0 item 3 (real-process crash
+  injection).
 
 - **See also:** ADR-050 (the shared-front-end blind spot + the golden-test mitigation this completes),
   ADR-063 (the reference-free adversarial suite + the test-audit that motivated Phase 0), ADR-054

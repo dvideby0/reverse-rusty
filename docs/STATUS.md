@@ -288,10 +288,13 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   of the engine and none of its compiler execution plan (independence enforced by a `check.sh`
   `cargo tree` lane). The engine is diffed against it (`tests/independent_oracle/`) over
   default/populated/alias corpora + a gotcha table + an env-gated real corpus: final sets require zero
-  FN/FP, and candidate generation is separately checked for recall only. ADR-118/119/120's
+  FN/FP, and the real stored candidate traversal is separately checked for recall only.
+  ADR-118/119/120's
   shared-semantics blind spot is closed structurally: the reference has no query-frequency or
   rarest-proxy model, preserves complete any-of members and forbidden predicates, and retains quoted
-  graphs. Human pins still cover every clause boundary and required/forbidden phrase adjacency.
+  graphs. Its first review also corrected multi-feature negated bare terms in production and added
+  compiler-semantics-4 source migration. Human pins cover every clause boundary, complete negated
+  terms, and required/forbidden phrase adjacency.
 - **Real-process SIGKILL crash injection** (Phase 0 item 3, ADR-088) — a `crashwriter` lean-core bin +
   `tests/crash_injection/` spawn a real process and deliver a real external SIGKILL mid
   durable-operation (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**),

@@ -88,6 +88,24 @@ fn flush_positive_run_readonly(
     words.clear();
 }
 
+/// Preserve one negated bare term as one complete predicate. A query-side term
+/// can analyze to several features (for example `psa10` under a grader vocab);
+/// the DSL negates that whole analyzed term, not each feature independently.
+/// Single-feature terms retain the flat forbidden fast path.
+fn push_forbidden_term(
+    mut features: Vec<FeatureId>,
+    forbidden: &mut Vec<FeatureId>,
+    forbidden_conjunctions: &mut Vec<Vec<FeatureId>>,
+) {
+    features.sort_unstable();
+    features.dedup();
+    match features.as_slice() {
+        [feature] => forbidden.push(*feature),
+        [] => {}
+        _ => forbidden_conjunctions.push(features),
+    }
+}
+
 /// Extract required / forbidden / any-of from an AST, interning features and
 /// bumping their query-frequency. Run for every query in pass A.
 pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -> Extracted {
@@ -115,7 +133,7 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
             }
             (Atom::Term(w), true) => {
                 let feats = norm.compile_features(w, dict, lc);
-                forbidden.extend_from_slice(&feats);
+                push_forbidden_term(feats, &mut forbidden, &mut forbidden_conjunctions);
             }
             (Atom::Phrase(w), false) => {
                 let phrase = norm.compile_phrase(w, dict, lc);
@@ -263,7 +281,7 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
             }
             (Atom::Term(w), true) => {
                 let feats = norm.compile_features_readonly(w, dict, lc);
-                forbidden.extend_from_slice(&feats);
+                push_forbidden_term(feats, &mut forbidden, &mut forbidden_conjunctions);
             }
             (Atom::Phrase(w), false) => {
                 let phrase = norm.compile_phrase_readonly(w, dict, lc);

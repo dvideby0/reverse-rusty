@@ -40,7 +40,8 @@ active development** — the current top priority is the
    frequency/proxy/storage lowering (independence enforced by a `check.sh` `cargo tree` lane). The
    engine is diffed against it (`tests/independent_oracle/`) over default/populated/alias corpora + a
    hand-authored gotcha table + the env-gated `RR_ORACLE_CORPUS` real-corpus hook. Final sets require
-   zero FN/FP and production candidate generation is checked for recall only. This closes both the
+   zero FN/FP and the real stored candidate traversal is checked for recall only. The first review
+   also corrected multi-feature negated bare terms under compiler semantics 4. This closes both the
    ADR-050/063 shared-**code** blind spot and the shared-**semantics** lowering gap exposed by
    ADR-118/119/120 (issue #123).
 3. **Durability torture (crash injection) — ✅ shipped

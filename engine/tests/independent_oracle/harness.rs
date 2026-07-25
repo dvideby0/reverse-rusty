@@ -110,9 +110,10 @@ impl RefOracle {
     /// intentionally allowed and left to exact verification.
     ///
     /// A truth already present in `engine_set` necessarily traversed the real
-    /// candidate pipeline. Only a final-match miss needs the read-only explain
-    /// probe to distinguish a retrieval miss from an exact-verification miss,
-    /// avoiding an O(matches) recompile across the million-match scale corpus.
+    /// candidate pipeline. Only a final-match miss needs the candidate-only
+    /// diagnostic traversal to distinguish a retrieval miss from an
+    /// exact-verification miss, avoiding an O(matches) second pass across the
+    /// million-match scale corpus.
     pub fn diff(&self, titles: &[String]) -> DiffReport {
         let mut s = MatchScratch::new();
         let mut out = Vec::new();
@@ -134,18 +135,12 @@ impl RefOracle {
                     if report.sample_fn.len() < SAMPLE_CAP {
                         report.sample_fn.push((title.clone(), t));
                     }
-                    match self.eng.explain_hit(t, title) {
-                        Some(detail) if detail.candidate => {
-                            report.verification_false_neg += 1;
-                        }
-                        Some(_) => {
-                            report.candidate_false_neg += 1;
-                            if report.sample_candidate_fn.len() < SAMPLE_CAP {
-                                report.sample_candidate_fn.push((title.clone(), t));
-                            }
-                        }
-                        None => {
-                            report.candidate_check_unavailable += 1;
+                    if self.eng.diagnostic_candidate_hit(t, title, &mut s, true) {
+                        report.verification_false_neg += 1;
+                    } else {
+                        report.candidate_false_neg += 1;
+                        if report.sample_candidate_fn.len() < SAMPLE_CAP {
+                            report.sample_candidate_fn.push((title.clone(), t));
                         }
                     }
                 }
@@ -176,8 +171,6 @@ pub struct DiffReport {
     pub candidate_false_neg: usize,
     /// Semantic truths retrieved but rejected or lost after candidate generation.
     pub verification_false_neg: usize,
-    /// Missing source/explain state prevented classification of a final-match miss.
-    pub candidate_check_unavailable: usize,
     sample_fn: Vec<(String, u64)>,
     sample_fp: Vec<(String, u64)>,
     sample_candidate_fn: Vec<(String, u64)>,
@@ -188,14 +181,13 @@ impl DiffReport {
     pub fn assert_clean(&self, label: &str, dsl: &HashMap<u64, String>) {
         eprintln!(
             "[{label}] truth={} engine={} false_neg={} false_pos={} \
-             candidate_false_neg={} verification_false_neg={} candidate_check_unavailable={}",
+             candidate_false_neg={} verification_false_neg={}",
             self.total_truth,
             self.total_engine,
             self.false_neg,
             self.false_pos,
             self.candidate_false_neg,
             self.verification_false_neg,
-            self.candidate_check_unavailable,
         );
         if self.candidate_false_neg != 0 {
             eprintln!(
@@ -230,10 +222,6 @@ impl DiffReport {
             self.verification_false_neg, 0,
             "[{label}] VERIFICATION FALSE NEGATIVES — retrieval succeeded but final matching lost \
              a semantic truth"
-        );
-        assert_eq!(
-            self.candidate_check_unavailable, 0,
-            "[{label}] candidate recall could not be classified because source/explain was missing"
         );
         assert_eq!(
             self.false_neg, 0,
