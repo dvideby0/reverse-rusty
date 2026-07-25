@@ -488,6 +488,13 @@ impl SourceStore {
             tags.to_vec(),
             tags_known,
         );
+        self.insert_stored(logical, source);
+    }
+
+    /// Apply one already-canonical source document using the same monotonic
+    /// source-generation rule as WAL replay and ordinary inserts.
+    pub(crate) fn insert_stored(&self, logical: u64, source: StoredSource) {
+        let source_generation = source.source_generation();
         match self {
             SourceStore::Resident(m) => {
                 let mut store = rw_write(m);
@@ -637,11 +644,41 @@ impl SourceStore {
     /// map; `Lazy` merges the mmap base with the overlay (overlay wins;
     /// `None` = tombstone).
     pub fn write_to(&self, path: &Path) -> io::Result<()> {
+        self.write_to_with_updates(&[], path)
+    }
+
+    /// Write a complete candidate source corpus with `updates` overlaid without
+    /// publishing those updates in memory. This is the prepare phase of ADR-121's
+    /// bulk commit: the immutable sidecar becomes durable before the manifest
+    /// atomically selects it together with the new segment.
+    pub(crate) fn write_to_with_updates(
+        &self,
+        updates: &[(u64, StoredSource)],
+        path: &Path,
+    ) -> io::Result<()> {
+        let mut update_winners: crate::util::FastMap<u64, &StoredSource> = crate::util::fast_map();
+        for (logical, source) in updates {
+            if update_winners
+                .get(logical)
+                .is_none_or(|current| current.source_generation() <= source.source_generation())
+            {
+                update_winners.insert(*logical, source);
+            }
+        }
+
+        // An older replay/rebuild generation must not replace a newer canonical
+        // document already in the store. Filter it before suppressing the base row.
+        update_winners.retain(|logical, source| {
+            self.source_generation_of(*logical)
+                .is_none_or(|current| current <= source.source_generation())
+        });
+
         match self {
             SourceStore::Resident(m) => {
                 let g = rw_read(m);
                 let mut entries: Vec<SourceEntryRef<'_>> = g
                     .iter()
+                    .filter(|(logical, _)| !update_winners.contains_key(logical))
                     .map(|(logical, source)| SourceEntryRef {
                         logical: *logical,
                         query: source.query(),
@@ -652,6 +689,19 @@ impl SourceStore {
                         tags: TagsRef::Decoded(source.tags()),
                     })
                     .collect();
+                entries.extend(
+                    update_winners
+                        .iter()
+                        .map(|(logical, source)| SourceEntryRef {
+                            logical: *logical,
+                            query: source.query(),
+                            version: source.version(),
+                            source_generation: source.source_generation(),
+                            tags_known: source.tags_known(),
+                            metadata_known: source.metadata_known(),
+                            tags: TagsRef::Decoded(source.tags()),
+                        }),
+                );
                 entries.sort_unstable_by_key(|entry| entry.logical);
                 write_sources_v2(&entries, path)
             }
@@ -662,7 +712,9 @@ impl SourceStore {
                     for i in 0..b.count {
                         if let Some(record) = b.record(i) {
                             // overlay (incl. tombstones) shadows the mmap base
-                            if !ov.contains_key(&record.logical) {
+                            if !ov.contains_key(&record.logical)
+                                && !update_winners.contains_key(&record.logical)
+                            {
                                 entries.push(SourceEntryRef {
                                     logical: record.logical,
                                     query: record.query,
@@ -681,6 +733,9 @@ impl SourceStore {
                 }
                 for (logical, value) in ov.iter() {
                     if let Some(source) = value {
+                        if update_winners.contains_key(logical) {
+                            continue;
+                        }
                         entries.push(SourceEntryRef {
                             logical: *logical,
                             query: source.query(),
@@ -692,9 +747,38 @@ impl SourceStore {
                         });
                     }
                 }
+                entries.extend(
+                    update_winners
+                        .iter()
+                        .map(|(logical, source)| SourceEntryRef {
+                            logical: *logical,
+                            query: source.query(),
+                            version: source.version(),
+                            source_generation: source.source_generation(),
+                            tags_known: source.tags_known(),
+                            metadata_known: source.metadata_known(),
+                            tags: TagsRef::Decoded(source.tags()),
+                        }),
+                );
                 entries.sort_unstable_by_key(|entry| entry.logical);
                 write_sources_v2(&entries, path)
             }
+        }
+    }
+
+    fn source_generation_of(&self, logical: u64) -> Option<u64> {
+        match self {
+            SourceStore::Resident(m) => rw_read(m)
+                .get(&logical)
+                .map(StoredSource::source_generation),
+            SourceStore::Lazy { base, overlay } => match rw_read(overlay).get(&logical) {
+                Some(Some(source)) => Some(source.source_generation()),
+                Some(None) => None,
+                None => base
+                    .as_ref()
+                    .and_then(|base| base.find(logical))
+                    .map(|record| record.source_generation),
+            },
         }
     }
 

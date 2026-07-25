@@ -6,7 +6,28 @@ use super::{AcceptedSource, BaseSegment, Engine, IngestReport, Segment};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::storage::MmapSegment;
+use crate::storage::{MmapSegment, StoredSource};
+
+struct StagedSources {
+    name: String,
+    path: PathBuf,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CRASH_AFTER_SOURCE_MANIFEST_COMMIT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn inject_crash_after_source_manifest_commit() {
+    CRASH_AFTER_SOURCE_MANIFEST_COMMIT.with(|armed| {
+        assert!(
+            !armed.replace(false),
+            "injected crash after joint manifest commit"
+        );
+    });
+}
 
 impl Engine {
     /// Generate the next segment filename and increment the counter.
@@ -113,13 +134,11 @@ impl Engine {
     /// segment is dropped and the orphan file deleted, so nothing is committed
     /// (mirrors RocksDB's `IngestExternalFile`).
     ///
-    /// `accepted` carries the source documents of queries that compiled. It is
-    /// applied to the query store (display-only,
-    /// never on the match path) *after* the commit point and then persisted to
-    /// `sources.dat`.
-    /// Bulk ingest has no WAL backstop, so this is the sole point at which bulk
-    /// source text becomes durable; a `sources.dat` write failure is surfaced via
-    /// `persistence_healthy` but does not un-commit the already-durable match data.
+    /// `accepted` carries the source documents of queries that compiled. ADR-121
+    /// writes a complete immutable source candidate (including these documents)
+    /// before the manifest commit point. The manifest then selects the segment and
+    /// source corpus together; only after that durable selection are the documents
+    /// published into the live in-memory source store.
     pub(in crate::segment) fn commit_base_segment(
         &mut self,
         seg: Segment,
@@ -127,34 +146,70 @@ impl Engine {
         report: IngestReport,
     ) -> std::io::Result<IngestReport> {
         let (base, seg_path) = self.build_durable_base(seg)?;
+        let pending_sources: Vec<(u64, StoredSource)> = accepted
+            .into_iter()
+            .map(|source| {
+                (
+                    source.logical,
+                    StoredSource::with_generation(
+                        source.text,
+                        source.version,
+                        source.source_generation,
+                        source.tags,
+                        source.tags_known,
+                    ),
+                )
+            })
+            .collect();
+        let staged_sources = match self.stage_query_sources(&pending_sources) {
+            Ok(staged) => staged,
+            Err(e) => {
+                if let Some(p) = seg_path {
+                    self.best_effort_remove_segment(&p);
+                }
+                return Err(e);
+            }
+        };
         self.segments.push(Arc::new(base));
         self.refresh_phrase_capability();
 
-        // The manifest write is the atomic commit point. If it fails, roll the
-        // batch back entirely: drop the in-memory segment and delete the orphan.
-        if !self.save_manifest_if_persistent() {
+        // The manifest write is the atomic commit point. It names both already-
+        // durable artifacts. If it fails, roll the batch back entirely: drop the
+        // in-memory segment and delete both orphans.
+        let selected_source = staged_sources.as_ref().map_or_else(
+            || self.source_file_name.clone(),
+            |staged| staged.name.clone(),
+        );
+        if !self.save_manifest_selecting_source(&selected_source) {
             self.segments.pop();
             self.refresh_phrase_capability();
             if let Some(p) = seg_path {
                 self.best_effort_remove_segment(&p);
+            }
+            if let Some(staged) = staged_sources {
+                self.best_effort_remove_source(&staged.path);
             }
             return Err(std::io::Error::other(
                 "manifest write failed during ingest; batch rolled back",
             ));
         }
 
-        // Past the commit point — the match data is durable. Publish source text.
-        for source in accepted {
-            self.query_store.insert_document_with_generation_and_status(
-                source.logical,
-                source.text,
-                source.version,
-                source.source_generation,
-                &source.tags,
-                source.tags_known,
-            );
+        #[cfg(test)]
+        inject_crash_after_source_manifest_commit();
+
+        // Past the joint commit point — both match data and canonical sources are
+        // durable. Record the selected generation before any fallible live
+        // publication. Lazy mode publishes by remapping the complete candidate;
+        // resident/in-memory mode applies the prepared documents directly.
+        let staged_publishes_lazy = staged_sources.is_some() && self.query_store.is_lazy();
+        if let Some(staged) = staged_sources {
+            self.activate_staged_sources(staged);
         }
-        self.save_query_sources();
+        if !staged_publishes_lazy {
+            for (logical, source) in pending_sources {
+                self.query_store.insert_stored(logical, source);
+            }
+        }
 
         self.emit(crate::events::EngineEvent::Ingest {
             ingested: report.ingested,
@@ -205,6 +260,16 @@ impl Engine {
     /// Save the manifest file if persistence is enabled. Returns true if the
     /// write succeeded (or persistence is not enabled), false on failure.
     pub(in crate::segment) fn save_manifest_if_persistent(&mut self) -> bool {
+        let selected_source = self.source_file_name.clone();
+        self.save_manifest_selecting_source(&selected_source)
+    }
+
+    /// Write the standalone manifest selecting `source_file_name`. The caller
+    /// must have fsync'd a non-legacy immutable sidecar before invoking this.
+    pub(in crate::segment) fn save_manifest_selecting_source(
+        &mut self,
+        source_file_name: &str,
+    ) -> bool {
         // Cluster shards (ADR-032) do not own a manifest: the coordinator's
         // `cluster_manifest.bin` is the sole segment registry + dict store. Segment
         // `.seg` files are still written (by `make_base_segment`); only the per-shard
@@ -299,6 +364,7 @@ impl Engine {
                 // (single-writer: every frame already appended is already applied).
                 wal_seq_watermark: self.wal.as_ref().map_or(0, crate::wal::Wal::last_seq),
                 segment_tombstones,
+                source_file_name: source_file_name.to_string(),
             };
             let dir = dir.clone();
             if let Err(e) = crate::storage::write_manifest(&manifest, &dir.join("manifest.bin")) {
@@ -315,17 +381,48 @@ impl Engine {
         true
     }
 
+    /// Persist the current source corpus as a new immutable sidecar and atomically
+    /// select it with the current standalone segment registry.
+    pub(in crate::segment) fn commit_sources_and_manifest(&mut self) -> bool {
+        let Ok(staged) = self.stage_query_sources(&[]) else {
+            return false;
+        };
+        let selected = staged
+            .as_ref()
+            .map_or_else(|| self.source_file_name.clone(), |s| s.name.clone());
+        if !self.save_manifest_selecting_source(&selected) {
+            if let Some(staged) = staged {
+                self.best_effort_remove_source(&staged.path);
+            }
+            return false;
+        }
+        if let Some(staged) = staged {
+            self.activate_staged_sources(staged);
+        }
+        true
+    }
+
+    /// Standalone commits must select a source snapshot with every registry
+    /// change. Cluster shards delegate that atomic selection to their coordinator.
+    pub(in crate::segment) fn commit_manifest_with_current_sources(&mut self) -> bool {
+        if self.owns_manifest {
+            self.commit_sources_and_manifest()
+        } else {
+            self.save_manifest_if_persistent()
+        }
+    }
+
     /// [`flush`](Engine::flush), guaranteeing the on-disk source store is persisted even
     /// when the memtable is empty — the cluster checkpoint seal's seam (ADR-074). `flush`
-    /// saves `sources.dat` whenever it seals a non-empty memtable, but a checkpoint on a
+    /// persists sources whenever it seals a non-empty memtable, but a checkpoint on a
     /// CLEAN shard (empty memtable — e.g. right after a bulk build, or with only tombstone
-    /// deletes since the last seal) early-returns past that save, leaving `sources.dat`
-    /// absent or stale. The cluster trims its translog at the checkpoint, so a reopen
-    /// rebuilds `live_sources` from this file alone: an absent/stale file would omit
-    /// bulk-loaded ids from (or resurrect tombstone-deleted ids into) the source set the
-    /// vocabulary rebuild gathers — silent corpus loss/resurrection on the next
-    /// `set_vocab`. A write failure degrades `persistence_healthy`, which the seal turns
-    /// into a fail-closed abort before any translog trim.
+    /// deletes since the last seal) early-returns past that save, leaving the selected
+    /// source sidecar absent or stale. The cluster trims its translog at the checkpoint,
+    /// so a reopen rebuilds `live_sources` from this file alone: an absent/stale file
+    /// would omit bulk-loaded ids from (or resurrect tombstone-deleted ids into) the
+    /// source set the vocabulary rebuild gathers — silent corpus loss/resurrection on
+    /// the next `set_vocab`. A write failure degrades `persistence_healthy`, which the
+    /// seal turns into a fail-closed abort before any translog trim.
     pub(crate) fn flush_and_persist_sources_for_checkpoint(&mut self) {
         let memtable_was_empty = self.memtable.is_empty();
         self.flush();
@@ -335,6 +432,17 @@ impl Engine {
     }
 
     pub(in crate::segment) fn save_query_sources(&mut self) {
+        // A standalone source-only publication still goes through the same joint
+        // manifest commit. Cluster shards have no local manifest; their coordinator
+        // already selects the shard sidecar in `cluster_manifest.bin`.
+        if self.owns_manifest {
+            self.commit_sources_and_manifest();
+            return;
+        }
+        self.save_query_sources_in_place();
+    }
+
+    fn save_query_sources_in_place(&mut self) {
         let Some(dir) = self.config.data_dir.clone() else {
             return;
         };
@@ -363,6 +471,113 @@ impl Engine {
                     });
                 }
             }
+        }
+    }
+
+    /// Prepare a complete immutable standalone source corpus. `updates` are
+    /// included in the file without becoming visible through `query_store`.
+    fn stage_query_sources(
+        &mut self,
+        updates: &[(u64, StoredSource)],
+    ) -> std::io::Result<Option<StagedSources>> {
+        if !self.owns_manifest {
+            return Ok(None);
+        }
+        let Some(dir) = self.config.data_dir.clone() else {
+            return Ok(None);
+        };
+        let name = match self.next_source_file_name() {
+            Ok(name) => name,
+            Err(e) => {
+                self.record_source_write_failure("allocating immutable source filename", &e);
+                return Err(e);
+            }
+        };
+        let path = dir.join(&name);
+        if let Err(e) = self.query_store.write_to_with_updates(updates, &path) {
+            self.record_source_write_failure("writing immutable query-source candidate", &e);
+            return Err(e);
+        }
+        Ok(Some(StagedSources { name, path }))
+    }
+
+    fn next_source_file_name(&self) -> std::io::Result<String> {
+        let current = self
+            .source_file_name
+            .strip_prefix("sources_g")
+            .and_then(|rest| rest.strip_suffix(".dat"))
+            .map(str::parse::<u64>)
+            .transpose()
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "invalid immutable source filename {}",
+                        self.source_file_name
+                    ),
+                )
+            })?
+            .unwrap_or(0);
+        let next = current.checked_add(1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "source-sidecar generation space exhausted",
+            )
+        })?;
+        Ok(format!("sources_g{next:020}.dat"))
+    }
+
+    fn activate_staged_sources(&mut self, staged: StagedSources) {
+        let old_name = std::mem::replace(&mut self.source_file_name, staged.name);
+        let mut may_remove_old = true;
+        // Lazy mode: re-map the manifest-selected immutable file so reads hit it
+        // and the in-memory overlay resets. Resident mode already contains the
+        // published documents and needs no re-map.
+        if self.query_store.is_lazy() {
+            match crate::storage::SourceStore::open(&staged.path, false) {
+                Ok(store) => self.query_store = Arc::new(store),
+                Err(e) => {
+                    may_remove_old = false;
+                    self.persistence_healthy = false;
+                    self.emit(crate::events::EngineEvent::DurabilityFailure {
+                        op: crate::events::DurabilityOp::SourceStoreRemap,
+                        detail: format!(
+                            "query sources re-map failed after joint commit; manifest selects {}",
+                            staged.path.display()
+                        ),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+        if may_remove_old && old_name != self.source_file_name {
+            if let Some(dir) = self.config.data_dir.as_ref() {
+                self.best_effort_remove_source(&dir.join(old_name));
+            }
+        }
+    }
+
+    fn record_source_write_failure(&mut self, detail: &str, error: &std::io::Error) {
+        self.persistence_healthy = false;
+        self.emit(crate::events::EngineEvent::DurabilityFailure {
+            op: crate::events::DurabilityOp::SourceStoreWrite,
+            detail: detail.to_string(),
+            error: error.to_string(),
+        });
+    }
+
+    fn best_effort_remove_source(&self, path: &std::path::Path) {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => self.emit(crate::events::EngineEvent::DurabilityFailure {
+                op: crate::events::DurabilityOp::SourceStoreWrite,
+                detail: format!(
+                    "failed to remove unreferenced source sidecar {}",
+                    path.display()
+                ),
+                error: e.to_string(),
+            }),
         }
     }
 
@@ -408,6 +623,99 @@ impl Engine {
                 path: path.to_path_buf(),
                 error: e.to_string(),
             }),
+        }
+    }
+}
+
+#[cfg(test)]
+mod source_commit_tests {
+    use super::*;
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("rr-source-commit-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn config(dir: &std::path::Path) -> crate::config::EngineConfig {
+        crate::config::EngineConfig {
+            data_dir: Some(dir.to_path_buf()),
+            ..crate::config::EngineConfig::default()
+        }
+    }
+
+    #[test]
+    fn post_manifest_crash_recovers_source_explain_rebuild_checkpoint_and_backup() {
+        let dir = scratch_dir("post-manifest");
+        let backup = scratch_dir("post-manifest-backup-root").join("backup");
+        let mut engine = Engine::with_config(
+            crate::normalize::Normalizer::default_vocab().expect("normalizer"),
+            config(&dir),
+        );
+        CRASH_AFTER_SOURCE_MANIFEST_COMMIT.with(|armed| armed.set(true));
+        let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let rows = [(7, "1995 fleer".to_string())];
+            let _ = engine.try_bulk_ingest(&rows);
+        }));
+        assert!(crash.is_err(), "the injected post-commit crash must fire");
+        assert!(
+            engine.get_query_source(7).is_none(),
+            "the crash must precede live source publication"
+        );
+        drop(engine);
+
+        let mut reopened = Engine::open(
+            crate::normalize::Normalizer::default_vocab().expect("normalizer"),
+            config(&dir),
+        )
+        .expect("reopen from joint commit");
+        let snapshot = reopened.snapshot();
+        assert_eq!(
+            snapshot
+                .get_query_document(7)
+                .expect("GET document after recovery")
+                .query(),
+            "1995 fleer"
+        );
+        assert!(
+            snapshot.explain_hit(7, "1995 Fleer card").is_some(),
+            "explain must compile from the recovered canonical source"
+        );
+        let mut scratch = crate::segment::MatchScratch::new();
+        let mut matches = Vec::new();
+        snapshot.match_title("1995 Fleer card", &mut scratch, &mut matches, false);
+        assert!(
+            matches.contains(&7),
+            "matching remains available after recovery"
+        );
+
+        reopened
+            .set_vocab(crate::vocab::Vocab::default())
+            .expect("install rebuild trigger");
+        assert_eq!(
+            reopened.recompile_stale_segments(),
+            1,
+            "source-driven rebuild must see the recovered document"
+        );
+        reopened.flush();
+        reopened.backup_to(&backup).expect("backup joint commit");
+        drop(reopened);
+
+        for recovered_dir in [&dir, &backup] {
+            let recovered = Engine::open(
+                crate::normalize::Normalizer::default_vocab().expect("normalizer"),
+                config(recovered_dir),
+            )
+            .expect("checkpoint/backup reopen");
+            assert_eq!(recovered.get_query_source(7).as_deref(), Some("1995 fleer"));
+            assert!(recovered.explain_hit(7, "1995 Fleer card").is_some());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Some(root) = backup.parent() {
+            let _ = std::fs::remove_dir_all(root);
         }
     }
 }

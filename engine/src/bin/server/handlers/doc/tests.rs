@@ -269,7 +269,10 @@ async fn get_doc_does_not_report_a_live_row_as_missing_when_its_source_is_unavai
             .expect("insert");
         engine.flush();
     }
-    std::fs::remove_file(dir.join("sources.dat")).expect("remove source store");
+    let source_name = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin"))
+        .expect("manifest")
+        .source_file_name;
+    std::fs::remove_file(dir.join(source_name)).expect("remove source store");
     let engine = Engine::open(Normalizer::default_vocab().expect("vocab"), config).expect("reopen");
     assert!(engine.snapshot().has_live_query(7));
     let state = state_with_engine(engine);

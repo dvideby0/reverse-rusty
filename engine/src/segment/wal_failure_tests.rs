@@ -25,7 +25,7 @@ fn engine_with_wal(name: &str) -> Engine {
 }
 
 /// Micro-benchmark: cost of a single durable `bulk_ingest` as the base corpus
-/// grows. P1-15 added a `sources.dat` rewrite to the bulk commit; the manifest
+/// grows. P1-15 added a source-store rewrite to the bulk commit; the manifest
 /// (which serializes the whole dict) was already O(corpus), so this shows the
 /// per-call persistence cost stays in the same order. Ignored by default (it
 /// does real disk writes). Run with:

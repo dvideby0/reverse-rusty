@@ -16,10 +16,11 @@ impl Engine {
     /// no concurrent flush/compaction can delete a segment between reading the
     /// manifest and copying the files it lists — the copy is race-free by
     /// construction. Reads keep flowing off the lock-free snapshot. The copy is
-    /// manifest-driven (orphan `.seg` files are skipped) and includes `sources.dat`
-    /// and the WAL; on restore [`Engine::open`] replays the WAL tail, so no flush is
-    /// forced here. `copy_engine_dir` verifies the staged tree (segments + sources)
-    /// before the atomic commit, so a failure leaves no `dest` behind.
+    /// manifest-driven (orphan segment/source generations are skipped) and includes
+    /// the manifest-selected source sidecar and WAL; on restore [`Engine::open`]
+    /// replays the WAL tail, so no flush is forced here. `copy_engine_dir` verifies
+    /// the staged tree (segments + sources) before the atomic commit, so a failure
+    /// leaves no `dest` behind.
     ///
     /// Returns [`BackupError::NotDurable`] for an in-memory engine,
     /// [`BackupError::PersistenceDegraded`] when a prior durability write failed

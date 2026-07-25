@@ -780,7 +780,7 @@ impl EngineSnapshot {
     /// independent of source-store availability.
     ///
     /// Point-read adapters use this after a failed source lookup to distinguish
-    /// a legitimate missing document from a damaged/missing `sources.dat`.
+    /// a legitimate missing document from a damaged/missing selected source sidecar.
     #[must_use]
     pub fn has_live_query(&self, logical_id: u64) -> bool {
         self.source_metadata_for_logical(logical_id).is_some()

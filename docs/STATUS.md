@@ -122,6 +122,9 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   (ADR-018).
 - **Fail-closed flush / compaction / reseal / recompile** — build the replacement durable before
   destroying what it replaces (ADR-051).
+- **Atomic canonical-source commits** — manifest v7 selects an immutable source sidecar with the
+  segment registry; crash recovery, rebuild, and backup cannot observe a committed half-update
+  (ADR-121).
 - **Versioned binary formats** — `RDCT`/`RTGD` headers, fail-loud decode, legacy blobs still read
   (ADR-057).
 - **Compaction re-anchoring** — opt-in: a merge re-derives drifted covers; cluster no-op (ADR-056).

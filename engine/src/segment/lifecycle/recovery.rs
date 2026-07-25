@@ -356,26 +356,35 @@ impl Engine {
 
         // Load persisted query sources — resident, or lazily mmap'd per
         // config.retain_source (ADR-020 Item 1).
-        let sources_path = dir.join("sources.dat");
-        let query_store =
-            match crate::storage::SourceStore::open(&sources_path, config.retain_source) {
-                Ok(s) => Arc::new(s),
-                Err(e) => {
-                    // An absent file yields an empty store; an error here means a
-                    // corrupt sources.dat — surface it (display-only data) rather
-                    // than silently dropping all query _source data.
-                    pending_events.push(crate::events::EngineEvent::DurabilityFailure {
-                        op: crate::events::DurabilityOp::SourceStoreLoad,
-                        detail: format!(
-                            "failed to load query sources from {} — _source will be \
+        let sources_path = dir.join(&manifest.source_file_name);
+        let source_is_required = manifest.source_file_name != "sources.dat";
+        let mut source_store_failed = false;
+        let query_store = match if source_is_required && !sources_path.exists() {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "manifest-selected source sidecar is missing",
+            ))
+        } else {
+            crate::storage::SourceStore::open(&sources_path, config.retain_source)
+        } {
+            Ok(s) => Arc::new(s),
+            Err(e) => {
+                source_store_failed = true;
+                // A legacy absent file yields an empty store. A selected v7
+                // sidecar is mandatory; corruption or absence is surfaced while
+                // matching remains available from the committed segments.
+                pending_events.push(crate::events::EngineEvent::DurabilityFailure {
+                    op: crate::events::DurabilityOp::SourceStoreLoad,
+                    detail: format!(
+                        "failed to load query sources from {} — _source will be \
                              unavailable for recovered queries",
-                            sources_path.display()
-                        ),
-                        error: e.to_string(),
-                    });
-                    Arc::new(crate::storage::SourceStore::empty(config.retain_source))
-                }
-            };
+                        sources_path.display()
+                    ),
+                    error: e.to_string(),
+                });
+                Arc::new(crate::storage::SourceStore::empty(config.retain_source))
+            }
+        };
         let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
         let live_phrase_segments = segments
             .iter()
@@ -405,10 +414,10 @@ impl Engine {
             next_seg_id: manifest.next_seg_id,
             next_source_generation,
             wal_healthy: true,
-            persistence_healthy: skipped_segments == 0,
+            persistence_healthy: skipped_segments == 0 && !source_store_failed,
             skipped_segments,
             query_store,
-            source_file_name: "sources.dat".to_string(),
+            source_file_name: manifest.source_file_name,
             vocab_epoch: 0,
             owns_manifest: true,
         };
