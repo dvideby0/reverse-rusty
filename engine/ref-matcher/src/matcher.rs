@@ -8,7 +8,7 @@
 
 use crate::extract::{extract_literal, EquivMap, Freq, RefQuery};
 use crate::features::Feature;
-use crate::normalize::{emit, match_features_dual, Side};
+use crate::normalize::{emit, match_phrase_views, phrase_graph_matches, Side};
 use crate::parse::parse;
 use crate::vocab::RefVocab;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -57,6 +57,8 @@ impl RefMatcher {
                     && q.anyof.is_empty()
                     && q.forbidden.is_empty()
                     && q.forbidden_conjunctions.is_empty()
+                    && q.required_phrases.is_empty()
+                    && q.forbidden_phrases.is_empty()
             } else {
                 q.is_class_d()
             };
@@ -77,7 +79,7 @@ impl RefMatcher {
     /// multi-word alias the two views are identical.
     #[must_use]
     pub fn matches(&self, title: &str) -> HashSet<u64> {
-        let (neg, pos) = match_features_dual(&self.vocab, title);
+        let (neg, pos, positions, neg_arcs, pos_arcs) = match_phrase_views(&self.vocab, title);
         let in_pos = |f: &Feature| pos.binary_search(f).is_ok();
         let in_neg = |f: &Feature| neg.binary_search(f).is_ok();
         let mut out = HashSet::new();
@@ -97,6 +99,13 @@ impl RefMatcher {
                     .forbidden_conjunctions
                     .iter()
                     .any(|member| member.iter().all(&in_neg))
+                && q.required_phrases
+                    .iter()
+                    .all(|phrase| phrase_graph_matches(phrase, positions, &pos_arcs))
+                && !q
+                    .forbidden_phrases
+                    .iter()
+                    .any(|phrase| phrase_graph_matches(phrase, positions, &neg_arcs))
             {
                 out.insert(*logical);
             }

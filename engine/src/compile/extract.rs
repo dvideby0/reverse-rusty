@@ -16,6 +16,17 @@ use crate::dict::{Dict, FeatureId};
 use crate::dsl::{Ast, Atom};
 use crate::normalize::Normalizer;
 
+fn phrase_proxy(graph: &crate::normalize::PhraseGraph) -> Vec<FeatureId> {
+    let mut proxy: Vec<FeatureId> = graph
+        .arcs
+        .iter()
+        .flat_map(|arc| arc.alternatives.iter().copied())
+        .collect();
+    proxy.sort_unstable();
+    proxy.dedup();
+    proxy
+}
+
 /// "hot" == one of the 64 most frequent features (has a common-mask bit).
 /// Both compile and match agree on this, which is what keeps the cover lossless.
 ///
@@ -85,6 +96,8 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
     let mut anyof: Vec<Vec<FeatureId>> = Vec::new();
     let mut anyof_predicates: Vec<AnyOfPredicate> = Vec::new();
     let mut forbidden_conjunctions: Vec<Vec<FeatureId>> = Vec::new();
+    let mut required_phrases = Vec::new();
+    let mut forbidden_phrases = Vec::new();
 
     // Consecutive positive bare words are normalized JOINTLY (in original order)
     // so multiword entities ("michael jordan", "psa 10") are recognized exactly
@@ -100,13 +113,23 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
             (Atom::Term(w), false) => {
                 pos_words.push(w.as_str());
             }
-            (Atom::Term(w) | Atom::Phrase(w), true) => {
+            (Atom::Term(w), true) => {
                 let feats = norm.compile_features(w, dict, lc);
                 forbidden.extend_from_slice(&feats);
             }
             (Atom::Phrase(w), false) => {
-                let feats = norm.compile_features(w, dict, lc);
-                required.extend_from_slice(&feats);
+                let phrase = norm.compile_phrase(w, dict, lc);
+                let proxy = phrase_proxy(&phrase);
+                if !proxy.is_empty() {
+                    anyof.push(proxy);
+                    required_phrases.push(phrase);
+                }
+            }
+            (Atom::Phrase(w), true) => {
+                let phrase = norm.compile_phrase(w, dict, lc);
+                if !phrase.arcs.is_empty() {
+                    forbidden_phrases.push(phrase);
+                }
             }
             (Atom::AnyOf(members), neg) => {
                 if neg {
@@ -198,6 +221,8 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
         anyof,
         anyof_predicates,
         forbidden_conjunctions,
+        required_phrases,
+        forbidden_phrases,
     };
     // Apply learned equivalences (ADR-054). No-op unless a vocabulary installed them on the
     // dict; FN-safe (the match set only grows). See `Extracted::expand_equivalences`.
@@ -218,6 +243,8 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
     let mut anyof: Vec<Vec<FeatureId>> = Vec::new();
     let mut anyof_predicates: Vec<AnyOfPredicate> = Vec::new();
     let mut forbidden_conjunctions: Vec<Vec<FeatureId>> = Vec::new();
+    let mut required_phrases = Vec::new();
+    let mut forbidden_phrases = Vec::new();
 
     let mut pos_words: Vec<&str> = Vec::new();
 
@@ -229,13 +256,23 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
             (Atom::Term(w), false) => {
                 pos_words.push(w.as_str());
             }
-            (Atom::Term(w) | Atom::Phrase(w), true) => {
+            (Atom::Term(w), true) => {
                 let feats = norm.compile_features_readonly(w, dict, lc);
                 forbidden.extend_from_slice(&feats);
             }
             (Atom::Phrase(w), false) => {
-                let feats = norm.compile_features_readonly(w, dict, lc);
-                required.extend_from_slice(&feats);
+                let phrase = norm.compile_phrase_readonly(w, dict, lc);
+                let proxy = phrase_proxy(&phrase);
+                if !proxy.is_empty() {
+                    anyof.push(proxy);
+                    required_phrases.push(phrase);
+                }
+            }
+            (Atom::Phrase(w), true) => {
+                let phrase = norm.compile_phrase_readonly(w, dict, lc);
+                if !phrase.arcs.is_empty() {
+                    forbidden_phrases.push(phrase);
+                }
             }
             (Atom::AnyOf(members), neg) => {
                 if neg {
@@ -307,6 +344,8 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
         anyof,
         anyof_predicates,
         forbidden_conjunctions,
+        required_phrases,
+        forbidden_phrases,
     };
     // Apply learned equivalences (ADR-054); no-op unless installed on the dict. FN-safe.
     out.expand_equivalences(dict.equivalences());

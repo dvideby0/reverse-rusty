@@ -32,26 +32,28 @@ pub(super) fn canon_grader(g: &str) -> String {
     }
 }
 
-pub(super) fn emit_generic<F: FnMut(&str, FeatureKind)>(
+pub(super) fn emit_generic<F: FnMut(&str, FeatureKind, u32, u32)>(
     tok: &str,
     scratch: &mut String,
+    start: u32,
+    end: u32,
     emit: &mut F,
 ) {
     scratch.clear();
     scratch.push_str("term:");
     scratch.push_str(tok);
-    emit(scratch, FeatureKind::Generic);
+    emit(scratch, FeatureKind::Generic, start, end);
 }
 
 /// Age every active positive-view grader (ADR-061 `P(T)`) one window step, dropping those past the
 /// grader window (`> 3`, the same bound `pending_grader` uses). Called wherever `pending_grader` is
 /// aged. A no-op with no allocation on the empty Vec the query/compile and single-view title paths
 /// always hold — only the positive (`force_additive`) pass ever populates it.
-pub(super) fn age_active_graders(active: &mut Vec<(String, u8)>) {
+pub(super) fn age_active_graders(active: &mut Vec<(String, u8, u32)>) {
     if active.is_empty() {
         return;
     }
-    active.retain_mut(|(_, age)| {
+    active.retain_mut(|(_, age, _)| {
         *age = age.saturating_add(1);
         *age <= 3
     });

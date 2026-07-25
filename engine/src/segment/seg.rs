@@ -130,6 +130,11 @@ impl Segment {
         self.hot.num_signatures() > 0
     }
 
+    #[inline]
+    pub fn has_phrase_predicates(&self) -> bool {
+        self.exact.has_phrase_predicates()
+    }
+
     /// Append one already-extracted query. Returns the new segment-local id plus
     /// the plan's [`would_be_hot`](crate::compile::SigPlan::would_be_hot)
     /// observe-first flag (the Broad-Query Cost Program's reclassification

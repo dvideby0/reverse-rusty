@@ -3,6 +3,7 @@
 //! to keep that file within the size budget.
 
 use crate::dict::{Dict, FeatureId, FeatureKind};
+use crate::normalize::PositionArc;
 use daachorse::DoubleArrayAhoCorasick;
 
 /// The overlapping (`MatchKind::Standard`) phrase automaton + its per-pattern entity features
@@ -22,6 +23,8 @@ pub(in crate::normalize) struct AliasOverlap {
     /// phase-1 selection (codex R12) can recover each pattern's
     /// [`PhraseEntry`](crate::normalize::PhraseEntry) (its mode).
     pub(in crate::normalize) entry_idx: Vec<usize>,
+    /// Pattern index -> number of cleaned token positions spanned.
+    pub(in crate::normalize) token_lens: Vec<u32>,
 }
 
 impl AliasOverlap {
@@ -57,6 +60,54 @@ impl AliasOverlap {
             self.scan_overlapping(&collapsed, dict, out);
         } else {
             self.scan_overlapping(lc, dict, out);
+        }
+    }
+
+    /// Append every boundary-aligned overlapping phrase as a positioned graph
+    /// edge (ADR-120). This is the graph analogue of [`collect_into`](Self::collect_into):
+    /// it supplies alternate multi-word paths to the positive quoted-phrase
+    /// view while the canonical negative graph remains leftmost-longest.
+    pub(in crate::normalize) fn collect_positioned_into(
+        &self,
+        lc: &str,
+        dict: &Dict,
+        out: &mut Vec<PositionArc>,
+    ) {
+        if lc.as_bytes().windows(2).any(|w| w == b"  ") {
+            let mut collapsed = String::with_capacity(lc.len());
+            let mut prev_space = true;
+            for c in lc.chars() {
+                if c == ' ' {
+                    if !prev_space {
+                        collapsed.push(' ');
+                    }
+                    prev_space = true;
+                } else {
+                    collapsed.push(c);
+                    prev_space = false;
+                }
+            }
+            self.scan_positioned(&collapsed, dict, out);
+        } else {
+            self.scan_positioned(lc, dict, out);
+        }
+    }
+
+    fn scan_positioned(&self, text: &str, dict: &Dict, out: &mut Vec<PositionArc>) {
+        let bytes = text.as_bytes();
+        for m in self.automaton.find_overlapping_iter(text) {
+            let (s, e) = (m.start(), m.end());
+            let ok_start = s == 0 || bytes[s - 1] == b' ';
+            let ok_end = e == text.len() || bytes[e] == b' ';
+            if !ok_start || !ok_end {
+                continue;
+            }
+            let start = u32::try_from(text[..s].split_whitespace().count()).unwrap_or(u32::MAX);
+            out.push(PositionArc {
+                feature: dict.get_or_synthetic(&self.entries[m.value()].0),
+                start,
+                end: start.saturating_add(self.token_lens[m.value()]),
+            });
         }
     }
 

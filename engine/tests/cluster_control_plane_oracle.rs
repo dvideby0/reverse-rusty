@@ -64,11 +64,22 @@ impl Brute {
 
     fn matches(&self, title: &str, lc: &mut String, feats: &mut Vec<u32>) -> HashSet<u64> {
         let mut sc = reverse_rusty::normalize::NormScratch::new();
-        self.norm
-            .match_features(title, &self.dict, lc, &mut sc, feats);
+        let mut pos = Vec::new();
+        let mut neg_arcs = Vec::new();
+        let mut pos_arcs = Vec::new();
+        let positions = self.norm.match_phrase_views(
+            title,
+            &self.dict,
+            lc,
+            &mut sc,
+            feats,
+            &mut pos,
+            &mut neg_arcs,
+            &mut pos_arcs,
+        );
         let mut out = HashSet::new();
         for (logical, ex) in &self.queries {
-            if ex.matches_features(feats, feats) {
+            if ex.matches_positioned(&pos, feats, positions, &pos_arcs, positions, &neg_arcs) {
                 out.insert(*logical);
             }
         }

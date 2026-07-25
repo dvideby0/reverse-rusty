@@ -60,6 +60,7 @@ fn verify_filters_post_candidate_and_only_removes() {
         anyof: vec![],
         anyof_predicates: vec![],
         forbidden_conjunctions: vec![],
+        ..Extracted::default()
     };
     let mut store = ExactStore::new();
     store.push(&ex, &[10, 20], &dict, 1, 100);

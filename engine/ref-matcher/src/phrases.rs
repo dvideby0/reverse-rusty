@@ -102,6 +102,16 @@ pub fn select_leftmost_longest(lc: &str, phrases: &[RefPhrase]) -> Vec<(usize, u
 /// phrase, alias and non-alias, once an alias is active — the codex-R6 FN fix).
 #[must_use]
 pub fn scan_overlapping(lc: &str, phrases: &[RefPhrase]) -> Vec<usize> {
+    scan_overlapping_spans(lc, phrases)
+        .into_iter()
+        .map(|(_, _, idx)| idx)
+        .collect()
+}
+
+/// Positioned form of [`scan_overlapping`], returning cleaned token-position
+/// spans for the independent ADR-120 title graph.
+#[must_use]
+pub fn scan_overlapping_spans(lc: &str, phrases: &[RefPhrase]) -> Vec<(u32, u32, usize)> {
     let collapsed = collapse_ws_runs(lc);
     let bytes = collapsed.as_bytes();
     let mut out = Vec::new();
@@ -113,7 +123,10 @@ pub fn scan_overlapping(lc: &str, phrases: &[RefPhrase]) -> Vec<usize> {
         for s in find_all(&collapsed, &j) {
             let e = s + j.len();
             if boundary_ok(bytes, s, e) {
-                out.push(idx);
+                let start =
+                    u32::try_from(collapsed[..s].split_whitespace().count()).unwrap_or(u32::MAX);
+                let len = u32::try_from(p.tokens.len()).unwrap_or(u32::MAX);
+                out.push((start, start.saturating_add(len), idx));
             }
         }
     }

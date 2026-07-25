@@ -397,6 +397,13 @@ pub struct MatchScratch {
     /// Positive overlapping superset title view `P(T) ⊇ N(T)` (ADR-061). Equal to `feats`
     /// when no multi-word alias is active.
     feats_pos: Vec<FeatureId>,
+    /// Canonical / positive analyzed token-graph edges, populated only while
+    /// quoted predicates exist in the snapshot (ADR-120).
+    phrase_arcs: Vec<crate::normalize::PositionArc>,
+    phrase_arcs_pos: Vec<crate::normalize::PositionArc>,
+    /// Reusable graph-intersection state, interior-mutable so the borrowed
+    /// `TitleView` stays `Copy` through every segment verifier.
+    phrase_match: std::cell::RefCell<crate::exact::PhraseMatchScratch>,
     /// Reusable per-title working buffers for the normalizer's `emit` pipeline — keeps title
     /// normalization allocation-free in steady state (the hot-path invariant). Owned here, like
     /// `lc`/`feats`, so it persists across titles instead of being re-allocated per `emit`.

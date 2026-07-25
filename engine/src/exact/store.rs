@@ -7,8 +7,8 @@
 //! the compaction copy/re-anchor helpers, and the serialization slice accessors.
 
 use super::{
-    encode_predicate, eval_batch_slices, query_passes_tags, verify_predicate, TagPredicate,
-    TitleView,
+    encode_predicate, eval_batch_slices, predicate_has_phrases, query_passes_tags,
+    verify_predicate, TagPredicate, TitleView,
 };
 use crate::compile::Extracted;
 use crate::dict::{Dict, FeatureId, NO_MASK_BIT};
@@ -40,6 +40,8 @@ pub struct ExactStore {
     predicate_off: Vec<u32>,
     predicate_len: Vec<u32>,
     predicate_blob: Vec<u32>,
+    /// O(1) corpus capability bit: any row carries a v2 quoted graph.
+    has_phrase_predicates: bool,
     // per-query metadata tags (ADR-049): sorted TagIds sliced from tag_blob, exactly
     // parallel to the required tail. Verify-stage only — never gates retrieval (§5.3).
     tag_off: Vec<u32>,
@@ -87,6 +89,11 @@ impl ExactStore {
     }
     pub fn is_empty(&self) -> bool {
         self.req_mask.is_empty()
+    }
+
+    #[inline]
+    pub fn has_phrase_predicates(&self) -> bool {
+        self.has_phrase_predicates
     }
 
     /// Append a compiled query; returns its SegmentLocalQueryId. `tags` are the query's
@@ -197,6 +204,8 @@ impl ExactStore {
             self.group_len.push(group.len() as u16);
         }
         let (predicate_off, predicate_len) = encode_predicate(ex, &mut self.predicate_blob);
+        self.has_phrase_predicates |=
+            !ex.required_phrases.is_empty() || !ex.forbidden_phrases.is_empty();
 
         self.req_mask.push(rmask);
         self.forb_mask.push(fmask);
@@ -341,8 +350,7 @@ impl ExactStore {
         if predicate_len != 0
             && !verify_predicate(
                 &self.predicate_blob[predicate_off..predicate_off + predicate_len],
-                view.pos,
-                view.neg,
+                view,
             )
         {
             return false;
@@ -639,6 +647,7 @@ impl ExactStore {
             .extend_from_slice(&self.predicate_blob[po..po + pl]);
         dest.predicate_off.push(new_po);
         dest.predicate_len.push(pl as u32);
+        dest.has_phrase_predicates |= predicate_has_phrases(&self.predicate_blob[po..po + pl]);
 
         // tag column — compaction carries tags through the merge (ingestion §11)
         let to = self.tag_off[i] as usize;
@@ -888,7 +897,7 @@ impl ExactStore {
     }
 
     /// Raw-row reconstruction including an already-validated compound predicate
-    /// program. Used by the v9 mmap compaction path.
+    /// program. Used by the v9/v10 mmap compaction path.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn push_raw_placed_with_source_generation_and_predicate(
         &mut self,
@@ -936,6 +945,7 @@ impl ExactStore {
         self.predicate_blob.extend_from_slice(predicate);
         self.predicate_off.push(predicate_off);
         self.predicate_len.push(predicate.len() as u32);
+        self.has_phrase_predicates |= predicate_has_phrases(predicate);
 
         let t_off = self.tag_blob.len() as u32;
         self.tag_blob.extend_from_slice(tags);

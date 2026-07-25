@@ -7,7 +7,10 @@
 //! /generic tokenization), and the small free helpers `emit` relies on
 //! (`fold_diacritic`, number/year/grade parsing, generic emission).
 
-use super::{NormScratch, PhraseEntry, PhraseMode, PunctClass, PunctTable, Side};
+use super::{
+    NormScratch, PhraseArc, PhraseEntry, PhraseGraph, PhraseMode, PositionArc, PunctClass,
+    PunctTable, Side,
+};
 use crate::dict::{Dict, FeatureId, FeatureKind};
 use daachorse::DoubleArrayAhoCorasick;
 
@@ -19,6 +22,11 @@ use helpers::{
     age_active_graders, as_year, canon_grader, collapse_ws_runs_in_place, emit_generic,
     is_grade_value, parse_number,
 };
+
+#[inline]
+fn position_index(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
 
 pub struct Normalizer {
     /// daachorse automaton over space-joined phrase strings. Pattern value indexes
@@ -121,6 +129,29 @@ impl Normalizer {
     ///      skipped (the phrase feature is emitted once). All other tokens go
     ///      through the existing grader/number/synonym/generic pipeline.
     pub fn emit<F: FnMut(&str, FeatureKind)>(
+        &self,
+        text: &str,
+        lc: &mut String,
+        sc: &mut NormScratch,
+        side: Side,
+        force_additive: bool,
+        emit: &mut F,
+    ) {
+        self.emit_positioned(
+            text,
+            lc,
+            sc,
+            side,
+            force_additive,
+            &mut |name, kind, _start, _end| emit(name, kind),
+        );
+    }
+
+    /// Positioned twin of [`emit`](Self::emit), used only when at least one
+    /// stored quoted clause requires ADR-120 phrase verification. Ordinary
+    /// feature-only matching continues to call `emit`, whose wrapper erases the
+    /// two position integers after inlining.
+    fn emit_positioned<F: FnMut(&str, FeatureKind, u32, u32)>(
         &self,
         text: &str,
         lc: &mut String,
@@ -237,7 +268,16 @@ impl Normalizer {
                     }
                     if !phrase_emitted[pi] {
                         phrase_emitted[pi] = true;
-                        emit(&entry.feature, entry.kind);
+                        let mut end_pos = ti + 1;
+                        while end_pos < tokens.len() && tokens[end_pos].1 <= pe {
+                            end_pos += 1;
+                        }
+                        emit(
+                            &entry.feature,
+                            entry.kind,
+                            position_index(ti),
+                            position_index(end_pos),
+                        );
                     }
                     break;
                 }
@@ -253,7 +293,7 @@ impl Normalizer {
         active_graders.clear();
         let tok_at = |r: (usize, usize)| &lc[r.0..r.1];
         let mut i = 0;
-        let mut pending_grader: Option<String> = None;
+        let mut pending_grader: Option<(String, u32)> = None;
         let mut pending_grader_age = 0u8;
         let mut grade_ctx = false;
         let mut grade_ctx_age = 0u8;
@@ -299,10 +339,23 @@ impl Normalizer {
                 scratch.clear();
                 scratch.push_str("grader:");
                 scratch.push_str(&gcanon);
-                emit(scratch, FeatureKind::Grader);
+                emit(
+                    scratch,
+                    FeatureKind::Grader,
+                    position_index(i),
+                    position_index(i.saturating_add(1)),
+                );
                 let fused = rest.is_some();
                 if let Some(num) = rest {
-                    Self::emit_grade(&gcanon, &num, scratch, emit);
+                    Self::emit_grade(
+                        &gcanon,
+                        &num,
+                        scratch,
+                        position_index(i),
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                        emit,
+                    );
                 }
                 if force_additive {
                     // Positive view: keep this grader active (don't overwrite earlier ones), so a
@@ -314,15 +367,16 @@ impl Normalizer {
                     // strictly preserved, while the set stays bounded by the (small) distinct
                     // grader vocabulary — repeated grader tokens otherwise grow the set without
                     // bound and every number then emits per entry (a quadratic crafted-title DoS).
-                    if let Some(entry) = active_graders.iter_mut().find(|(g, _)| *g == gcanon) {
+                    if let Some(entry) = active_graders.iter_mut().find(|(g, _, _)| *g == gcanon) {
                         entry.1 = 0;
+                        entry.2 = position_index(i);
                     } else {
-                        active_graders.push((gcanon, 0));
+                        active_graders.push((gcanon, 0, position_index(i)));
                     }
                 } else if fused {
                     pending_grader = None;
                 } else {
-                    pending_grader = Some(gcanon);
+                    pending_grader = Some((gcanon, position_index(i)));
                     pending_grader_age = 0;
                 }
                 i += 1;
@@ -359,12 +413,23 @@ impl Normalizer {
                 });
 
                 if is_cardnum || is_serial || is_numctx {
-                    emit_generic(&numstr, scratch, emit);
+                    emit_generic(
+                        &numstr,
+                        scratch,
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                        emit,
+                    );
                 } else if let Some(y) = as_year(&numstr) {
                     scratch.clear();
                     scratch.push_str("year:");
                     scratch.push_str(&y);
-                    emit(scratch, FeatureKind::Year);
+                    emit(
+                        scratch,
+                        FeatureKind::Year,
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                    );
                 } else if force_additive {
                     // Positive view (P(T)) parse-union: grade this number with EVERY active grader
                     // still in window AND the grade context, all STICKY (never cleared by this
@@ -375,36 +440,80 @@ impl Normalizer {
                     let gradeable = is_grade_value(&numstr);
                     let mut graded = false;
                     if gradeable {
-                        for (g, _) in active_graders.iter() {
-                            Self::emit_grade(g, &numstr, scratch, emit);
+                        for (g, _, grader_start) in active_graders.iter() {
+                            Self::emit_grade(
+                                g,
+                                &numstr,
+                                scratch,
+                                *grader_start,
+                                position_index(i),
+                                position_index(i.saturating_add(1)),
+                                emit,
+                            );
                             graded = true;
                         }
                         if grade_ctx {
                             scratch.clear();
                             scratch.push_str("grade:");
                             scratch.push_str(&numstr);
-                            emit(scratch, FeatureKind::Grade);
+                            emit(
+                                scratch,
+                                FeatureKind::Grade,
+                                position_index(i),
+                                position_index(i.saturating_add(1)),
+                            );
                             graded = true;
                         }
                     }
                     if !graded {
-                        emit_generic(&numstr, scratch, emit);
+                        emit_generic(
+                            &numstr,
+                            scratch,
+                            position_index(i),
+                            position_index(i.saturating_add(1)),
+                            emit,
+                        );
                     }
-                } else if let Some(g) = pending_grader.clone() {
+                } else if let Some((g, grader_start)) = pending_grader.clone() {
                     if is_grade_value(&numstr) {
-                        Self::emit_grade(&g, &numstr, scratch, emit);
+                        Self::emit_grade(
+                            &g,
+                            &numstr,
+                            scratch,
+                            grader_start,
+                            position_index(i),
+                            position_index(i.saturating_add(1)),
+                            emit,
+                        );
                         pending_grader = None;
                     } else {
-                        emit_generic(&numstr, scratch, emit);
+                        emit_generic(
+                            &numstr,
+                            scratch,
+                            position_index(i),
+                            position_index(i.saturating_add(1)),
+                            emit,
+                        );
                     }
                 } else if grade_ctx && is_grade_value(&numstr) {
                     scratch.clear();
                     scratch.push_str("grade:");
                     scratch.push_str(&numstr);
-                    emit(scratch, FeatureKind::Grade);
+                    emit(
+                        scratch,
+                        FeatureKind::Grade,
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                    );
                     grade_ctx = false;
                 } else {
-                    emit_generic(&numstr, scratch, emit);
+                    emit_generic(
+                        &numstr,
+                        scratch,
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                        emit,
+                    );
                 }
                 i += 1;
                 continue;
@@ -413,13 +522,24 @@ impl Normalizer {
             // 4) closed-vocab synonym
             if let Some(&si) = self.syn_index.get(tok) {
                 let (_, canon, kind) = &self.synonyms[si];
-                emit(canon, *kind);
+                emit(
+                    canon,
+                    *kind,
+                    position_index(i),
+                    position_index(i.saturating_add(1)),
+                );
                 i += 1;
                 continue;
             }
 
             // 5) generic fallback term
-            emit_generic(tok, scratch, emit);
+            emit_generic(
+                tok,
+                scratch,
+                position_index(i),
+                position_index(i.saturating_add(1)),
+                emit,
+            );
             i += 1;
 
             // age out stale pending grader / grade context
@@ -439,21 +559,24 @@ impl Normalizer {
         }
     }
 
-    fn emit_grade<F: FnMut(&str, FeatureKind)>(
+    fn emit_grade<F: FnMut(&str, FeatureKind, u32, u32)>(
         grader: &str,
         num: &str,
         scratch: &mut String,
+        grader_start: u32,
+        start: u32,
+        end: u32,
         emit: &mut F,
     ) {
         scratch.clear();
         scratch.push_str("grade:");
         scratch.push_str(num);
-        emit(scratch, FeatureKind::Grade);
+        emit(scratch, FeatureKind::Grade, start, end);
         scratch.clear();
         scratch.push_str("grader_grade:");
         scratch.push_str(grader);
         scratch.push_str(num);
-        emit(scratch, FeatureKind::GraderGrade);
+        emit(scratch, FeatureKind::GraderGrade, grader_start, end);
     }
 
     /// Split a possibly-fused grader token like "psa10" -> ("psa", Some("10")).
@@ -623,6 +746,209 @@ impl Normalizer {
                 pos.dedup();
             }
         }
+    }
+
+    /// Compile one quoted DSL clause into its analyzed token graph, interning
+    /// query-side feature labels (ADR-120).
+    ///
+    /// This is deliberately separate from [`compile_features`](Self::compile_features):
+    /// unquoted clauses retain their set semantics and compact SoA columns,
+    /// while only quoted clauses preserve analyzer positions and alternate
+    /// multi-word paths.
+    pub fn compile_phrase(&self, text: &str, dict: &mut Dict, lc: &mut String) -> PhraseGraph {
+        let mut scratch = NormScratch::new();
+        let mut arcs = Vec::new();
+        let positions = self.analyze_position_arcs(
+            text,
+            lc,
+            &mut scratch,
+            Side::Query,
+            false,
+            &mut arcs,
+            |name, kind| dict.intern(name, kind),
+        );
+        phrase_graph(positions, arcs)
+    }
+
+    /// Read-only twin of [`compile_phrase`](Self::compile_phrase), resolving
+    /// out-of-dictionary labels to deterministic synthetic ids.
+    pub fn compile_phrase_readonly(&self, text: &str, dict: &Dict, lc: &mut String) -> PhraseGraph {
+        let mut scratch = NormScratch::new();
+        let mut arcs = Vec::new();
+        let positions = self.analyze_position_arcs(
+            text,
+            lc,
+            &mut scratch,
+            Side::Query,
+            false,
+            &mut arcs,
+            |name, _kind| dict.get_or_synthetic(name),
+        );
+        phrase_graph(positions, arcs)
+    }
+
+    /// Phrase-aware title normalization (ADR-120).
+    ///
+    /// The ordinary flat feature views are produced by the existing ADR-061
+    /// entry point first, so phrase support cannot silently change bare-term,
+    /// any-of, or MUST_NOT behavior. The extra graph pass is activated by the
+    /// engine only while at least one live row contains a quoted predicate.
+    /// Graph-only labels used as lossless retrieval proxies are added to the
+    /// positive view only; negatives continue to use the canonical flat view.
+    #[allow(clippy::too_many_arguments)]
+    pub fn match_phrase_views(
+        &self,
+        text: &str,
+        dict: &Dict,
+        lc: &mut String,
+        sc: &mut NormScratch,
+        neg: &mut Vec<FeatureId>,
+        pos: &mut Vec<FeatureId>,
+        neg_arcs: &mut Vec<PositionArc>,
+        pos_arcs: &mut Vec<PositionArc>,
+    ) -> u32 {
+        self.match_features_dual(text, dict, lc, sc, neg, pos);
+
+        let positions = self.analyze_position_arcs(
+            text,
+            lc,
+            sc,
+            Side::Title,
+            false,
+            neg_arcs,
+            |name, _kind| dict.get_or_synthetic(name),
+        );
+
+        if let Some(overlap) = &self.alias_overlap {
+            let _positive_positions = self.analyze_position_arcs(
+                text,
+                lc,
+                sc,
+                Side::Title,
+                true,
+                pos_arcs,
+                |name, _kind| dict.get_or_synthetic(name),
+            );
+            overlap.collect_positioned_into(lc, dict, pos_arcs);
+            pos_arcs.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
+            pos_arcs.dedup();
+        } else {
+            pos_arcs.clear();
+            pos_arcs.extend_from_slice(neg_arcs);
+        }
+
+        // Every exact phrase path has at least one graph edge. Making all
+        // positive graph labels probe-visible therefore supplies a lossless
+        // candidate proxy even for analyzer-only gap labels.
+        pos.extend(pos_arcs.iter().map(|arc| arc.feature));
+        pos.sort_unstable();
+        pos.dedup();
+        positions
+    }
+
+    /// Analyze `text` into a flat token-graph edge list. `out` is caller-owned
+    /// reusable storage on the title hot path.
+    #[allow(clippy::too_many_arguments)]
+    fn analyze_position_arcs<F>(
+        &self,
+        text: &str,
+        lc: &mut String,
+        sc: &mut NormScratch,
+        side: Side,
+        force_additive: bool,
+        out: &mut Vec<PositionArc>,
+        mut resolve: F,
+    ) -> u32
+    where
+        F: FnMut(&str, FeatureKind) -> FeatureId,
+    {
+        out.clear();
+        let mut composite_arcs = Vec::new();
+        self.emit_positioned(
+            text,
+            lc,
+            sc,
+            side,
+            force_additive,
+            &mut |name, kind, start, end| {
+                let arc = PositionArc {
+                    feature: resolve(name, kind),
+                    start,
+                    end,
+                };
+                if side == Side::Query && kind == FeatureKind::GraderGrade {
+                    composite_arcs.push(arc);
+                }
+                out.push(arc);
+            },
+        );
+
+        let positions = position_index(sc.tokens.len());
+
+        // The semantic analyzer intentionally emits nothing for structural
+        // markers and a few context words. Quoted phrases still need those
+        // lexical positions to remain contiguous, so fill only graph holes with
+        // a normalized raw term edge. Do NOT restore tokens consumed by a
+        // collapse/alias edge: that would defeat ADR-061's canonical negative
+        // parse and manufacture an unconfigured alternate path.
+        for i in 0..positions {
+            let has_start = out.iter().any(|arc| arc.start == i);
+            let covered = out.iter().any(|arc| arc.start < i && arc.end > i);
+            if has_start || covered {
+                continue;
+            }
+            let (start, end) = sc.tokens[i as usize];
+            sc.name.clear();
+            sc.name.push_str("term:");
+            sc.name.push_str(&lc[start..end]);
+            out.push(PositionArc {
+                feature: resolve(&sc.name, FeatureKind::Generic),
+                start: i,
+                end: i + 1,
+            });
+        }
+
+        // A fused grader token emits grader + grade + grader_grade at one
+        // position. Those are conjunctive semantic projections, not three
+        // interchangeable analyzer terms. The composite is the lossless query
+        // label; title graphs retain every projection so a simpler quoted query
+        // (for example "psa") can still match `psa10`.
+        if !composite_arcs.is_empty() {
+            out.retain(|arc| {
+                let composite_span = composite_arcs
+                    .iter()
+                    .any(|composite| (composite.start, composite.end) == (arc.start, arc.end));
+                !composite_span || composite_arcs.contains(arc)
+            });
+        }
+        out.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
+        out.dedup();
+        positions
+    }
+}
+
+/// Group singleton analyzed edges by span into the query-side alternatives
+/// stored in one quoted predicate.
+fn phrase_graph(positions: u32, mut arcs: Vec<PositionArc>) -> PhraseGraph {
+    arcs.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
+    arcs.dedup();
+    let mut grouped: Vec<PhraseArc> = Vec::new();
+    for arc in arcs {
+        if let Some(last) = grouped.last_mut() {
+            if last.start == arc.start && last.end == arc.end {
+                last.alternatives.push(arc.feature);
+                continue;
+            }
+        }
+        grouped.push(PhraseArc {
+            start: arc.start,
+            end: arc.end,
+            alternatives: vec![arc.feature],
+        });
+    }
+    PhraseGraph {
+        positions,
+        arcs: grouped,
     }
 }
 

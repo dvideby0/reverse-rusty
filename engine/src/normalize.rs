@@ -38,6 +38,101 @@ mod parse_union_oracle;
 pub use builder::NormalizerBuilder;
 pub use core::{fold_diacritic, Normalizer};
 
+/// One analyzed title-token-graph edge (ADR-120).
+///
+/// `start`/`end` are token-position nodes, not byte offsets. A normal token is
+/// an edge `i -> i + 1`; a collapsed multi-word entity is one longer edge. The
+/// feature label is already a dense/synthetic integer, so quoted-phrase exact
+/// verification stays allocation-free and string-free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PositionArc {
+    pub feature: crate::dict::FeatureId,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One edge in a compiled quoted-phrase graph (ADR-120).
+///
+/// Query-side equivalence expansion widens `alternatives`; the title graph has
+/// singleton labels ([`PositionArc`]). Parallel analyzer paths (for example a
+/// multi-word alias edge beside its component-token path) remain separate arcs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PhraseArc {
+    pub start: u32,
+    pub end: u32,
+    pub alternatives: Vec<crate::dict::FeatureId>,
+}
+
+/// The analyzed token graph for one quoted DSL clause (ADR-120).
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PhraseGraph {
+    /// Exclusive final token-position node.
+    pub positions: u32,
+    /// Canonical `(start, end, alternatives)` order.
+    pub arcs: Vec<PhraseArc>,
+}
+
+/// Whether a compiled quoted graph occurs as a contiguous analyzed path in a
+/// title graph (ADR-120).
+///
+/// This allocating form is for compile-time explain/oracle code. The match hot
+/// path interprets the persisted integer program with reusable scratch in
+/// `exact::predicate`; keeping this straightforward form here gives tests an
+/// independently-shaped semantic check over the same public graph types.
+#[must_use]
+pub fn phrase_graph_matches(
+    query: &PhraseGraph,
+    title_positions: u32,
+    title: &[PositionArc],
+) -> bool {
+    if query.positions == 0 || query.arcs.is_empty() {
+        return false;
+    }
+
+    let mut stack: Vec<(u32, u32)> = Vec::new();
+    let mut seen: Vec<(u32, u32)> = Vec::new();
+    for title_start in 0..title_positions {
+        stack.clear();
+        seen.clear();
+        stack.push((0, title_start));
+        seen.push((0, title_start));
+        while let Some((query_node, title_node)) = stack.pop() {
+            if query_node == query.positions {
+                return true;
+            }
+            for query_arc in query
+                .arcs
+                .iter()
+                .skip_while(|arc| arc.start < query_node)
+                .take_while(|arc| arc.start == query_node)
+            {
+                for title_arc in title
+                    .iter()
+                    .skip_while(|arc| arc.start < title_node)
+                    .take_while(|arc| arc.start == title_node)
+                {
+                    if query_arc
+                        .alternatives
+                        .binary_search(&title_arc.feature)
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let next = (query_arc.end, title_arc.end);
+                    match seen.binary_search(&next) {
+                        Ok(_) => {}
+                        Err(at) => {
+                            seen.insert(at, next);
+                            stack.push(next);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Reusable per-call working buffers for the normalizer's two-phase
 /// [`emit`](Normalizer::emit) pipeline and its match-time entry points
 /// ([`match_features`](Normalizer::match_features) /
@@ -75,7 +170,7 @@ pub struct NormScratch {
     scratch: String,
     /// Positive-view (`P(T)`, ADR-061 `force_additive`) active graders. Empty on the
     /// query/compile and single-view title paths (no allocation churn there).
-    active_graders: Vec<(String, u8)>,
+    active_graders: Vec<(String, u8, u32)>,
     /// The `"term:<token>"` builder used by [`Normalizer::match_features_dual`]'s
     /// positive-view raw-token pass (the dual path's only feature-name allocation otherwise).
     name: String,

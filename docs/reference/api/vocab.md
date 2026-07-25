@@ -111,9 +111,10 @@ multi-token entity **phrases** (e.g. `upper deck` → `upper_deck`) from the sup
 collocation mining, on top of the any-of synonyms. Phrases only — never aliases. They are applied
 **additively** (a match emits the phrase feature AND keeps the component features), so a query
 referencing a component never loses a candidate — important because this is a recall-first
-candidate generator. (A phrase-*form* query does tighten to requiring the adjacent phrase; for genuine
+candidate generator. A phrase-*form* query does tighten to requiring the adjacent phrase; for genuine
 entities, which appear adjacent in real titles, that is negligible — but it is why this is opt-in and
-reviewable.) Tunable:
+reviewable. Explicit DSL quotes use the same analyzed adjacency contract; see
+[`dsl.md#quoted-phrases`](../dsl.md#quoted-phrases) and ADR-120. Tunable:
 `npmi_min_count` (min adjacent co-occurrence, default 3), `npmi_tau` (binding-strength threshold,
 default 0.30), `npmi_iterations` (bigram→trigram passes, default 2). Absent ⇒ any-of learning only,
 exactly as before. Add `"learn_equivalences": true` to instead learn the any-of groups as

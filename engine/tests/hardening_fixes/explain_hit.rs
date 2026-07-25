@@ -100,3 +100,28 @@ fn explain_hit_uses_dual_view_for_multiword_alias() {
         detail.failures
     );
 }
+
+#[test]
+fn explain_hit_reports_quoted_graphs_and_adjacency_failures() {
+    let mut engine = Engine::new(reverse_rusty::normalize::Normalizer::default_vocab().unwrap());
+    engine.build_from_queries(&[(1u64, "\"red shoe\"".to_string())]);
+
+    let adjacent = engine.explain_hit(1, "red shoe").expect("adjacent explain");
+    assert!(adjacent.matched);
+    assert_eq!(adjacent.required_phrases.len(), 1);
+    assert_eq!(adjacent.required_phrases[0].positions, 2);
+    assert!(adjacent.failures.is_empty());
+
+    let separated = engine
+        .explain_hit(1, "red leather shoe")
+        .expect("separated explain");
+    assert!(!separated.matched);
+    assert!(
+        separated
+            .failures
+            .iter()
+            .any(|failure| failure == "required_phrase[0] not contiguous"),
+        "got: {:?}",
+        separated.failures
+    );
+}

@@ -64,9 +64,21 @@ mod golden {
     fn semantic_match(norm: &Normalizer, dict: &Dict, ex: &Extracted, title: &str) -> bool {
         let mut lc = String::new();
         let mut scratch = crate::normalize::NormScratch::new();
-        let mut features = Vec::new();
-        norm.match_features(title, dict, &mut lc, &mut scratch, &mut features);
-        ex.matches_features(&features, &features)
+        let mut neg = Vec::new();
+        let mut pos = Vec::new();
+        let mut neg_arcs = Vec::new();
+        let mut pos_arcs = Vec::new();
+        let positions = norm.match_phrase_views(
+            title,
+            dict,
+            &mut lc,
+            &mut scratch,
+            &mut neg,
+            &mut pos,
+            &mut neg_arcs,
+            &mut pos_arcs,
+        );
+        ex.matches_positioned(&pos, &neg, positions, &pos_arcs, positions, &neg_arcs)
     }
 
     #[test]
@@ -99,9 +111,22 @@ mod golden {
         assert_eq!(forb, s(&["term:belt", "term:wallet"]));
         assert!(anyof.is_empty());
 
-        // a negated phrase forbids all its features
-        let (_, forb, _) = named(&n, "jacket -\"for parts\"");
-        assert_eq!(forb, s(&["term:for", "term:parts"]));
+        // A negated phrase is one contiguous analyzed graph, not two
+        // independent forbidden features (ADR-120).
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let ast = parse("jacket -\"for parts\"").expect("parse phrase");
+        let ex = extract(&ast, &n, &mut dict, &mut lc);
+        assert!(ex.forbidden.is_empty());
+        assert_eq!(ex.forbidden_phrases.len(), 1);
+        let mut labels: Vec<String> = ex.forbidden_phrases[0]
+            .arcs
+            .iter()
+            .flat_map(|arc| arc.alternatives.iter())
+            .map(|&feature| dict.name(feature).to_string())
+            .collect();
+        labels.sort();
+        assert_eq!(labels, s(&["term:for", "term:parts"]));
 
         // a negated any-of forbids every member's features
         let (_, forb, _) = named(&n, "jacket -(used,returned)");
@@ -350,6 +375,7 @@ mod golden {
             anyof,
             anyof_predicates: Vec::new(),
             forbidden_conjunctions: Vec::new(),
+            ..Extracted::default()
         };
 
         // Class A anchored on a θ-frequency non-top64 feature: the defect shape.
@@ -458,6 +484,7 @@ mod equiv_tests {
             anyof: vec![],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         ex.expand_equivalences(&g);
         assert_eq!(ex.required, vec![5]);
@@ -474,6 +501,7 @@ mod equiv_tests {
             anyof: vec![vec![10, 30]],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         ex.expand_equivalences(&g);
         assert_eq!(ex.anyof, vec![vec![10, 20, 30]]);
@@ -497,6 +525,7 @@ mod equiv_tests {
                 ],
             }],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         ex.expand_equivalences(&g);
         assert_eq!(ex.anyof, vec![vec![10, 20, 40]]);
@@ -516,6 +545,7 @@ mod equiv_tests {
             anyof: vec![vec![4, 5]],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         let mut ex = before.clone();
         ex.expand_equivalences(&g);
@@ -533,6 +563,7 @@ mod equiv_tests {
             anyof: vec![],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         once.expand_equivalences(&g);
         let mut twice = once.clone();
@@ -558,6 +589,7 @@ mod class_d_universal_cover {
             anyof: vec![],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         }
     }
 
@@ -609,6 +641,7 @@ mod class_d_universal_cover {
                 anyof: vec![],
                 anyof_predicates: vec![],
                 forbidden_conjunctions: vec![],
+                ..Extracted::default()
             },
             &dict,
             0,

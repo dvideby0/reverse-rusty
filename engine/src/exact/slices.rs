@@ -5,7 +5,7 @@
 //! [`verify_slices`] is the scalar per-candidate gate; [`eval_batch_slices`] is its
 //! columnar (bitmap-transpose) twin for the broad-lane batch path.
 
-use super::{eval_predicate_batch, query_passes_tags, verify_predicate, TagPredicate};
+use super::{eval_predicate_batch, query_passes_tags, verify_predicate, TagPredicate, TitleView};
 use crate::dict::FeatureId;
 use crate::tagdict::TagId;
 
@@ -24,10 +24,7 @@ use crate::tagdict::TagId;
 #[inline]
 pub fn verify_slices(
     id: u32,
-    pos_mask: u64,
-    pos_feats: &[FeatureId],
-    neg_mask: u64,
-    neg_feats: &[FeatureId],
+    view: &TitleView<'_>,
     req_mask: &[u64],
     forb_mask: &[u64],
     req_off: &[u32],
@@ -54,10 +51,10 @@ pub fn verify_slices(
     // 1) common-mask gate — required against the positive view, forbidden against the
     //    negative (canonical) view so a MUST_NOT cannot trip on an overlap-only entity.
     let rm = req_mask[i];
-    if (rm & pos_mask) != rm {
+    if (rm & view.pos_mask) != rm {
         return false;
     }
-    if (forb_mask[i] & neg_mask) != 0 {
+    if (forb_mask[i] & view.neg_mask) != 0 {
         return false;
     }
 
@@ -65,7 +62,7 @@ pub fn verify_slices(
     let ro = req_off[i] as usize;
     let rl = req_len[i] as usize;
     for &f in &req_blob[ro..ro + rl] {
-        if pos_feats.binary_search(&f).is_err() {
+        if view.pos.binary_search(&f).is_err() {
             return false;
         }
     }
@@ -74,7 +71,7 @@ pub fn verify_slices(
     let fo = forb_off[i] as usize;
     let fl = forb_len[i] as usize;
     for &f in &forb_blob[fo..fo + fl] {
-        if neg_feats.binary_search(&f).is_ok() {
+        if view.neg.binary_search(&f).is_ok() {
             return false;
         }
     }
@@ -87,7 +84,7 @@ pub fn verify_slices(
         let gl = group_len[gi] as usize;
         let mut hit = false;
         for &f in &anyof_blob[go..go + gl] {
-            if pos_feats.binary_search(&f).is_ok() {
+            if view.pos.binary_search(&f).is_ok() {
                 hit = true;
                 break;
             }
@@ -100,7 +97,7 @@ pub fn verify_slices(
     // 5) compound any-of / forbidden-member predicates.
     let po = predicate_off.get(i).copied().unwrap_or(0) as usize;
     let pl = predicate_len.get(i).copied().unwrap_or(0) as usize;
-    if pl != 0 && !verify_predicate(&predicate_blob[po..po + pl], pos_feats, neg_feats) {
+    if pl != 0 && !verify_predicate(&predicate_blob[po..po + pl], view) {
         return false;
     }
 

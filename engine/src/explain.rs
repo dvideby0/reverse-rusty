@@ -26,6 +26,19 @@ pub struct ExplainAnyOfPredicate {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ExplainPhraseArc {
+    pub start: u32,
+    pub end: u32,
+    pub alternatives: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplainPhrase {
+    pub positions: u32,
+    pub arcs: Vec<ExplainPhraseArc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ExplainDetail {
     pub title_features: Vec<String>,
     pub candidate: bool,
@@ -41,6 +54,9 @@ pub struct ExplainDetail {
     /// Whole negative conjunctions; the query rejects only when every feature
     /// in one member is present.
     pub forbidden_conjunctions: Vec<Vec<String>>,
+    /// Required/forbidden analyzed token graphs for quoted clauses.
+    pub required_phrases: Vec<ExplainPhrase>,
+    pub forbidden_phrases: Vec<ExplainPhrase>,
     pub failures: Vec<String>,
 }
 
@@ -71,6 +87,18 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
         s.push_str(&format!(
             "  FORBIDDEN_MEMBER[{i}]: ALL OF ({})\n",
             names(conjunction, dict)
+        ));
+    }
+    for (i, phrase) in cq.extracted.required_phrases.iter().enumerate() {
+        s.push_str(&format!(
+            "  REQUIRED_PHRASE[{i}]: {}\n",
+            phrase_name(phrase, dict)
+        ));
+    }
+    for (i, phrase) in cq.extracted.forbidden_phrases.iter().enumerate() {
+        s.push_str(&format!(
+            "  FORBIDDEN_PHRASE[{i}]: {}\n",
+            phrase_name(phrase, dict)
         ));
     }
     s.push_str("  signatures (main): ");
@@ -124,7 +152,17 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
     // any-of; `neg` (canonical `N(T)`) drives forbidden — matching the real verifier so explain
     // can't disagree with the matcher under an active multi-word alias. No alias ⇒ pos == neg.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    norm.match_features_dual(title, dict, &mut lc, &mut sc, &mut neg, &mut pos);
+    let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
+    let positions = norm.match_phrase_views(
+        title,
+        dict,
+        &mut lc,
+        &mut sc,
+        &mut neg,
+        &mut pos,
+        &mut neg_arcs,
+        &mut pos_arcs,
+    );
 
     let mut s = String::new();
     s.push_str(&format!("title: {title:?}\n"));
@@ -191,6 +229,16 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
             fail.push(format!("forbidden_member[{i}] fully present"));
         }
     }
+    for (i, phrase) in cq.extracted.required_phrases.iter().enumerate() {
+        if !crate::normalize::phrase_graph_matches(phrase, positions, &pos_arcs) {
+            fail.push(format!("required_phrase[{i}] not contiguous"));
+        }
+    }
+    for (i, phrase) in cq.extracted.forbidden_phrases.iter().enumerate() {
+        if crate::normalize::phrase_graph_matches(phrase, positions, &neg_arcs) {
+            fail.push(format!("forbidden_phrase[{i}] present"));
+        }
+    }
     if fail.is_empty() {
         s.push_str("  exact match: PASS\n");
     } else {
@@ -215,7 +263,17 @@ pub fn explain_match_structured(
     // Two title views (ADR-061), matching the verifier: positive superset `pos` for retrieval +
     // required + any-of, canonical `neg` for forbidden. No active multi-word alias ⇒ pos == neg.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    norm.match_features_dual(title, dict, &mut lc, &mut sc, &mut neg, &mut pos);
+    let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
+    let positions = norm.match_phrase_views(
+        title,
+        dict,
+        &mut lc,
+        &mut sc,
+        &mut neg,
+        &mut pos,
+        &mut neg_arcs,
+        &mut pos_arcs,
+    );
 
     let title_features: Vec<String> = pos.iter().map(|&id| dict.name(id).to_string()).collect();
 
@@ -273,6 +331,16 @@ pub fn explain_match_structured(
             failures.push(format!("forbidden_member[{i}] fully present"));
         }
     }
+    for (i, phrase) in cq.extracted.required_phrases.iter().enumerate() {
+        if !crate::normalize::phrase_graph_matches(phrase, positions, &pos_arcs) {
+            failures.push(format!("required_phrase[{i}] not contiguous"));
+        }
+    }
+    for (i, phrase) in cq.extracted.forbidden_phrases.iter().enumerate() {
+        if crate::normalize::phrase_graph_matches(phrase, positions, &neg_arcs) {
+            failures.push(format!("forbidden_phrase[{i}] present"));
+        }
+    }
 
     ExplainDetail {
         title_features,
@@ -326,8 +394,49 @@ pub fn explain_match_structured(
             .iter()
             .map(|member| member.iter().map(|&id| dict.name(id).to_string()).collect())
             .collect(),
+        required_phrases: cq
+            .extracted
+            .required_phrases
+            .iter()
+            .map(|phrase| explain_phrase(phrase, dict))
+            .collect(),
+        forbidden_phrases: cq
+            .extracted
+            .forbidden_phrases
+            .iter()
+            .map(|phrase| explain_phrase(phrase, dict))
+            .collect(),
         failures,
     }
+}
+
+fn explain_phrase(phrase: &crate::normalize::PhraseGraph, dict: &Dict) -> ExplainPhrase {
+    ExplainPhrase {
+        positions: phrase.positions,
+        arcs: phrase
+            .arcs
+            .iter()
+            .map(|arc| ExplainPhraseArc {
+                start: arc.start,
+                end: arc.end,
+                alternatives: arc
+                    .alternatives
+                    .iter()
+                    .map(|&feature| dict.name(feature).to_string())
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn phrase_name(phrase: &crate::normalize::PhraseGraph, dict: &Dict) -> String {
+    let explained = explain_phrase(phrase, dict);
+    explained
+        .arcs
+        .iter()
+        .map(|arc| format!("{}->{}({})", arc.start, arc.end, arc.alternatives.join("|")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn predicate_name(predicate: &crate::compile::AnyOfPredicate, dict: &Dict) -> String {

@@ -120,7 +120,7 @@ required_blob:  [u32]   // remaining required feature IDs, sorted, beyond the co
 forbidden_blob: [u32]   // remaining forbidden feature IDs, sorted
 anyof_meta_off: [u32]   anyof_groups: [...]   // packed (offset,len) any-of groups
 predicate_off: [u32]   predicate_len: [u32]   // optional compound program per query
-predicate_blob: [u32]                         // OR-of-AND members + negative conjunctions
+predicate_blob: [u32]                         // OR-of-AND members + quoted token graphs
 version: [u32]   logical_id: [u64]            // resolved only on match
 ```
 
@@ -139,12 +139,17 @@ sorted tail):
 5. **Compound members:** for each positive group, at least one complete member must satisfy all of
    its requirements against `P(T)`; reject if any complete member of a negated group is present in
    `N(T)`.
-6. Survivors → resolve `logical_id`/`version`, emit.
+6. **Quoted clauses:** every required phrase graph must occur as a connected analyzed path in
+   `P(T)`; reject when a forbidden phrase graph occurs in canonical `N(T)` (ADR-120).
+7. Survivors → resolve `logical_id`/`version`, emit.
 
 No strings, no regex, no virtual dispatch, no allocation. Ordinary predicates stay entirely in the
-SoA mask+slice form. Only a query with a multi-feature any-of member carries a compact, structurally
-validated `u32` subprogram for its nested Boolean shape; scalar verification interprets integer words
-and the batch path evaluates the same program as bitmap operations (ADR-119).
+SoA mask+slice form. A query with a multi-feature any-of member or quoted clause carries a compact,
+structurally validated `u32` subprogram. Program v1 contains ADR-119's nested Boolean shape and is
+evaluated in both scalar and bitmap form. Program v2 appends ADR-120 required/forbidden token graphs;
+the scalar verifier intersects integer-labeled graph paths with reusable scratch. While any phrase
+row is live in a snapshot, the batch driver uses that positioned scalar path for broad/hot work rather
+than silently flattening the graph into its bitmap kernel. Phrase-free snapshots retain the old path.
 
 **Two title feature views — multi-word aliases (ADR-061).** The steps above describe one title feature
 set `F`. With a multi-word alias active, the verifier instead receives a **`TitleView`** carrying *two*
@@ -160,6 +165,17 @@ superset needed for retrieval over-rejects negation — the wall the first attem
 multi-word alias `P(T) == N(T)` and the verifier is byte-identical to the single-view path. Full design,
 including the FN-safety proof and the query-side collapse / title-side overlap asymmetry: [DECISIONS](../DECISIONS.md)
 ADR-061.
+
+**Quoted token graphs (ADR-120).** A flat `P(T)`/`N(T)` set cannot distinguish `red shoe` from
+`red leather shoe`, so phrase-bearing snapshots also build positioned positive/canonical edge lists
+with `Normalizer::match_phrase_views`. Ordinary tokens span `i → i+1`; analyzer entities may span
+several positions, and active aliases contribute alternate positive paths. Required query-graph
+labels are equivalence-widened and checked against `P(T)`; forbidden labels remain canonical and are
+checked against `N(T)`. The phrase's ordinary any-of group is a lossless retrieval proxy only: every
+satisfying path has a labeled edge, but exact connected-path intersection decides truth. Graph work
+is capped at 65,536 visited position pairs. Exhaustion fails open by polarity (required does not
+reject; forbidden does not trip), so the safety valve can add an over-match but never a false
+negative.
 
 ---
 

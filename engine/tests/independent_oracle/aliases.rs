@@ -170,6 +170,7 @@ fn multiword_alias_two_view_differential() {
         (6, "new york city subway".into()),
         (7, "(ny,boston) finals".into()), // any-of with an alias form
         (8, "brooklyn".into()),
+        (9, "\"new york\" knicks".into()), // quoted alias path keeps adjacency
     ];
     let titles: Vec<String> = [
         "new york mets opening day",
@@ -183,6 +184,8 @@ fn multiword_alias_two_view_differential() {
         "ny mets vs boston",
         "new york city",
         "new  york mets", // whitespace run: P(T) overlap scan still matches the alias
+        "ny knicks",
+        "new vintage york knicks",
     ]
     .iter()
     .map(ToString::to_string)

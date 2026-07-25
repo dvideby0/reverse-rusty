@@ -16,8 +16,8 @@ use crate::segment::Segment;
 use super::super::{crc32, durable_rename, write_u32, write_u64};
 use super::{
     align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_COMPOUND_PREDICATE,
-    FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK,
-    FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE, MAGIC,
+    FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_PHRASE_PREDICATE,
+    FORMAT_VERSION_RANK, FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE, MAGIC,
 };
 
 /// Build a frozen hash table + posting blob from an in-memory CandidateIndex.
@@ -141,6 +141,7 @@ enum ExactSectionLayout {
     Ownership,
     SourceGeneration,
     CompoundPredicate,
+    PhrasePredicate,
 }
 
 impl ExactSectionLayout {
@@ -151,6 +152,7 @@ impl ExactSectionLayout {
             Self::Ownership => FORMAT_VERSION_OWNERSHIP,
             Self::SourceGeneration => FORMAT_VERSION_SOURCE_GENERATION,
             Self::CompoundPredicate => FORMAT_VERSION_COMPOUND_PREDICATE,
+            Self::PhrasePredicate => FORMAT_VERSION_PHRASE_PREDICATE,
         }
     }
 }
@@ -170,7 +172,9 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     let exact_off = f.stream_position()?;
     // Exact layouts are cumulative: v9 includes v6 priority, v7 ownership, and
     // v8 source-generation columns before its predicate program.
-    let exact_layout = if !seg.exact_store().predicate_blobs().is_empty() {
+    let exact_layout = if seg.exact_store().has_phrase_predicates() {
+        ExactSectionLayout::PhrasePredicate
+    } else if !seg.exact_store().predicate_blobs().is_empty() {
         ExactSectionLayout::CompoundPredicate
     } else if seg
         .exact_store()

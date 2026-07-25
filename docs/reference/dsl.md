@@ -51,6 +51,31 @@ The compiler may choose one required feature from each member as a candidate-ret
 that proxy never replaces the member's full exact predicate. Quoted-phrase adjacency is a separate
 language rule and is not implied by this unquoted-member contract.
 
+### Quoted phrases
+
+A quoted clause is an **analyzed, ordered, contiguous path** (ADR-120). It uses the same normalizer as
+titles and has zero slop: every analyzed edge must connect directly to the next one, although a
+configured synonym or multi-word alias may represent one alternate analyzer path.
+
+| Query | Title | Result |
+|---|---|---|
+| `"red shoe"` | `red shoe` | match |
+| `"red shoe"` | `red-shoe` | match with the default `Split` punctuation |
+| `"red shoe"` | `red leather shoe` | no match |
+| `"red shoe"` | `shoe red` | no match |
+| `item -"for parts"` | `item for parts` | reject |
+| `item -"for parts"` | `item for spare parts` | match |
+
+Adjacency is over normalized positions, not raw bytes. Case/diacritic folding, number typing, and the
+configured punctuation table therefore apply before the phrase check. For example, declaring `-` as
+`Fold` turns `red-shoe` into the single token `redshoe`; it no longer has the two-position path
+`red → shoe`. A declared `ny ↔ new york` alias lets `"new york" knicks` match `ny knicks` without
+allowing `new vintage york knicks`.
+
+There is currently no slop parameter or transposition syntax. DSL quotes are also distinct from a
+vocabulary `phrases` entry: quotes constrain a stored query to adjacency, while vocabulary phrases
+define analyzer entity edges used by both quoted and unquoted clauses.
+
 ```
 # All of these terms are required (AND):
 vintage leather jacket

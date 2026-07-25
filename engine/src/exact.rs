@@ -20,6 +20,7 @@
 //!   - [`tests`]  — the tag-filter unit tests (`#[cfg(test)]`)
 
 use crate::dict::FeatureId;
+use crate::normalize::PositionArc;
 use crate::tagdict::TagId;
 
 mod predicate;
@@ -30,7 +31,8 @@ mod store;
 mod tests;
 
 pub(crate) use predicate::{
-    encode_predicate, eval_predicate_batch, validate_predicate, verify_predicate,
+    encode_predicate, eval_predicate_batch, predicate_has_phrases, validate_predicate,
+    verify_predicate,
 };
 pub use slices::{eval_batch_slices, prefilter_slices, verify_slices};
 pub use store::ExactStore;
@@ -48,11 +50,40 @@ pub use store::ExactStore;
 /// the verifier is byte-for-byte the pre-ADR-061 single-view path. `Copy` (two masks + two fat
 /// pointers); the per-query SoA columns stay raw args in [`verify_slices`] per the hot-path note.
 #[derive(Clone, Copy)]
+pub struct PositionGraph<'a> {
+    pub positions: u32,
+    pub arcs: &'a [PositionArc],
+}
+
+/// Reusable graph-intersection work buffers for quoted exact predicates.
+///
+/// One lives in each match thread's `MatchScratch`; clearing these containers per
+/// candidate preserves the allocation-free steady-state hot path.
+#[derive(Debug, Default)]
+pub struct PhraseMatchScratch {
+    pub(crate) stack: Vec<(u32, u32)>,
+    pub(crate) seen: std::collections::HashSet<(u32, u32)>,
+}
+
+impl PhraseMatchScratch {
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            stack: Vec::with_capacity(capacity),
+            seen: std::collections::HashSet::with_capacity(capacity),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct TitleView<'a> {
     pub pos_mask: u64,
     pub pos: &'a [FeatureId],
     pub neg_mask: u64,
     pub neg: &'a [FeatureId],
+    pub pos_graph: Option<PositionGraph<'a>>,
+    pub neg_graph: Option<PositionGraph<'a>>,
+    pub(crate) phrase_scratch: Option<&'a std::cell::RefCell<PhraseMatchScratch>>,
 }
 
 impl<'a> TitleView<'a> {
@@ -66,6 +97,9 @@ impl<'a> TitleView<'a> {
             pos: feats,
             neg_mask: mask,
             neg: feats,
+            pos_graph: None,
+            neg_graph: None,
+            phrase_scratch: None,
         }
     }
 
@@ -78,6 +112,42 @@ impl<'a> TitleView<'a> {
             pos,
             neg_mask,
             neg,
+            pos_graph: None,
+            neg_graph: None,
+            phrase_scratch: None,
+        }
+    }
+
+    /// Distinct flat views plus their analyzed token graphs for ADR-120 quoted
+    /// exact verification.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    #[must_use]
+    pub fn dual_positioned(
+        pos_mask: u64,
+        pos: &'a [FeatureId],
+        pos_positions: u32,
+        pos_arcs: &'a [PositionArc],
+        neg_mask: u64,
+        neg: &'a [FeatureId],
+        neg_positions: u32,
+        neg_arcs: &'a [PositionArc],
+        scratch: &'a std::cell::RefCell<PhraseMatchScratch>,
+    ) -> Self {
+        Self {
+            pos_mask,
+            pos,
+            neg_mask,
+            neg,
+            pos_graph: Some(PositionGraph {
+                positions: pos_positions,
+                arcs: pos_arcs,
+            }),
+            neg_graph: Some(PositionGraph {
+                positions: neg_positions,
+                arcs: neg_arcs,
+            }),
+            phrase_scratch: Some(scratch),
         }
     }
 }

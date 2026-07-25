@@ -76,7 +76,9 @@ pub use error::{NormalizerError, ParseError, ParseErrorKind, WriteError};
 pub use events::{
     CompactionTrigger, DurabilityOp, EngineEvent, EngineMetrics, SegmentInfo, SegmentKind,
 };
-pub use explain::ExplainDetail;
+pub use explain::{
+    ExplainAnyOfMember, ExplainAnyOfPredicate, ExplainDetail, ExplainPhrase, ExplainPhraseArc,
+};
 pub use normalize::{Normalizer, NormalizerBuilder, PunctClass};
 pub use pit::{PitConfig, PitError, PitId, PitRegistry};
 pub use rank::{

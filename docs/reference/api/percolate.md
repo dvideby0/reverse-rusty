@@ -384,6 +384,11 @@ from the index (`broad_candidates` is the subset that came from the quarantined 
 posting lists were scanned, how many bloom-filter probes were skipped, and how many candidates
 survived to become confirmed matches. The search body also accepts `explain` and
 `profile` options for per-query match tracing (see [`../design/matching.md`](../../design/matching.md) §6).
+For a stored quoted clause, `_explanation.required_phrases` or
+`_explanation.forbidden_phrases` contains its analyzed `positions` and
+`arcs: [{start, end, alternatives}]`. A separated required path reports
+`required_phrase[N] not contiguous`; a present forbidden path reports
+`forbidden_phrase[N] present` (ADR-120).
 
 ### Filtered percolation (ADR-049)
 

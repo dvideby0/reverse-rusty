@@ -297,11 +297,13 @@ fn build_alias_overlap(
     let mut pats: Vec<String> = Vec::new();
     let mut feats: Vec<(String, FeatureKind)> = Vec::new();
     let mut entry_idx: Vec<usize> = Vec::new();
+    let mut token_lens: Vec<u32> = Vec::new();
     for (i, (pat, entry)) in patterns.iter().zip(entries).enumerate() {
         if !pats.iter().any(|p| p == pat) {
             pats.push(pat.clone());
             feats.push((entry.feature.clone(), entry.kind));
             entry_idx.push(i);
+            token_lens.push(u32::try_from(pat.split_whitespace().count()).unwrap_or(u32::MAX));
         }
     }
     let automaton = DoubleArrayAhoCorasickBuilder::new()
@@ -312,5 +314,6 @@ fn build_alias_overlap(
         automaton,
         entries: feats,
         entry_idx,
+        token_lens,
     }))
 }

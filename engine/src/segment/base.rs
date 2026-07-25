@@ -223,6 +223,12 @@ impl BaseSegment {
             BaseSegment::Mmap(s) => s.has_hot_entries(),
         }
     }
+    pub fn has_phrase_predicates(&self) -> bool {
+        match self {
+            BaseSegment::Memory(s) => s.has_phrase_predicates(),
+            BaseSegment::Mmap(s) => s.has_phrase_predicates(),
+        }
+    }
     pub fn exact_bytes(&self) -> usize {
         match self {
             BaseSegment::Memory(s) => s.exact_bytes(),

@@ -12,7 +12,7 @@
 //!      rarest-by-frequency feature per member remains only as a lossless retrieval proxy.
 
 use crate::features::Feature;
-use crate::normalize::{emit, Side};
+use crate::normalize::{compile_phrase, emit, RefPhraseGraph, Side};
 use crate::parse::{Ast, Atom};
 use crate::vocab::RefVocab;
 use std::collections::HashMap;
@@ -45,6 +45,8 @@ pub struct RefQuery {
     pub anyof: Vec<Vec<Feature>>,
     pub anyof_predicates: Vec<RefAnyOfPredicate>,
     pub forbidden_conjunctions: Vec<Vec<Feature>>,
+    pub required_phrases: Vec<RefPhraseGraph>,
+    pub forbidden_phrases: Vec<RefPhraseGraph>,
 }
 
 /// Normalize one atom string on the query/compile side (sorted + deduped features).
@@ -53,6 +55,17 @@ fn norm_query(vocab: &RefVocab, w: &str) -> Vec<Feature> {
     v.sort();
     v.dedup();
     v
+}
+
+fn phrase_proxy(graph: &RefPhraseGraph) -> Vec<Feature> {
+    let mut proxy: Vec<Feature> = graph
+        .arcs
+        .iter()
+        .flat_map(|arc| arc.alternatives.iter().cloned())
+        .collect();
+    proxy.sort();
+    proxy.dedup();
+    proxy
 }
 
 /// The least-frequent feature of `feats` (the rarest member proxy). `feats` is sorted by string,
@@ -98,6 +111,8 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
     let mut anyof: Vec<Vec<Feature>> = Vec::new();
     let mut anyof_predicates: Vec<RefAnyOfPredicate> = Vec::new();
     let mut forbidden_conjunctions: Vec<Vec<Feature>> = Vec::new();
+    let mut required_phrases = Vec::new();
+    let mut forbidden_phrases = Vec::new();
     let mut pos_words: Vec<&str> = Vec::new();
 
     for clause in &ast.clauses {
@@ -106,8 +121,21 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
         }
         match (&clause.atom, clause.negated) {
             (Atom::Term(w), false) => pos_words.push(w.as_str()),
-            (Atom::Term(w) | Atom::Phrase(w), true) => forbidden.extend(norm_query(vocab, w)),
-            (Atom::Phrase(w), false) => required.extend(norm_query(vocab, w)),
+            (Atom::Term(w), true) => forbidden.extend(norm_query(vocab, w)),
+            (Atom::Phrase(w), false) => {
+                let phrase = compile_phrase(vocab, w);
+                let proxy = phrase_proxy(&phrase);
+                if !proxy.is_empty() {
+                    anyof.push(proxy);
+                    required_phrases.push(phrase);
+                }
+            }
+            (Atom::Phrase(w), true) => {
+                let phrase = compile_phrase(vocab, w);
+                if !phrase.arcs.is_empty() {
+                    forbidden_phrases.push(phrase);
+                }
+            }
             (Atom::AnyOf(members), true) => {
                 for m in members {
                     let feats = norm_query(vocab, m);
@@ -185,6 +213,8 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
         anyof,
         anyof_predicates,
         forbidden_conjunctions,
+        required_phrases,
+        forbidden_phrases,
     }
 }
 
@@ -255,11 +285,27 @@ impl RefQuery {
             predicate.members.sort();
             predicate.members.dedup();
         }
+        for phrase in &mut self.required_phrases {
+            for arc in &mut phrase.arcs {
+                let mut widened = Vec::with_capacity(arc.alternatives.len());
+                for feature in &arc.alternatives {
+                    match equiv.get(feature) {
+                        Some(group) => widened.extend(group.iter().cloned()),
+                        None => widened.push(feature.clone()),
+                    }
+                }
+                widened.sort();
+                widened.dedup();
+                arc.alternatives = widened;
+            }
+        }
         self.required.sort();
         self.required.dedup();
         self.anyof.sort();
         self.anyof.dedup();
         self.anyof_predicates.sort();
         self.anyof_predicates.dedup();
+        self.required_phrases.sort();
+        self.required_phrases.dedup();
     }
 }

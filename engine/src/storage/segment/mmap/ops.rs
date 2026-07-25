@@ -219,6 +219,11 @@ impl MmapSegment {
     }
 
     #[inline]
+    pub fn has_phrase_predicates(&self) -> bool {
+        self.has_phrase_predicates
+    }
+
+    #[inline]
     fn filter_data(&self) -> &[u64] {
         // Guard the null sentinel: a segment with no filter stores a null
         // `filter_data` pointer, which `mmap_slice`/`from_raw_parts` forbid.
@@ -426,10 +431,7 @@ impl MmapSegment {
     ) -> bool {
         crate::exact::verify_slices(
             id,
-            view.pos_mask,
-            view.pos,
-            view.neg_mask,
-            view.neg,
+            view,
             self.req_mask(),
             self.forb_mask(),
             self.req_off(),

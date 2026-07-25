@@ -20,6 +20,7 @@
 //!   - `tests`     — golden extraction cases + equivalence-expansion unit tests
 
 use crate::dict::FeatureId;
+use crate::normalize::{PhraseGraph, PositionArc};
 
 mod extract;
 mod plan;
@@ -111,7 +112,7 @@ impl AnyOfPredicate {
 }
 
 /// The positive/negative integer form of a query (no signatures yet).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Extracted {
     pub required: Vec<FeatureId>,  // AND
     pub forbidden: Vec<FeatureId>, // none may be present
@@ -125,6 +126,10 @@ pub struct Extracted {
     /// whole conjunction matches; singleton members use the flat `forbidden`
     /// column.
     pub forbidden_conjunctions: Vec<Vec<FeatureId>>,
+    /// Required quoted clauses as analyzed token graphs (ADR-120).
+    pub required_phrases: Vec<PhraseGraph>,
+    /// Forbidden quoted clauses, evaluated against the canonical title graph.
+    pub forbidden_phrases: Vec<PhraseGraph>,
 }
 
 impl Extracted {
@@ -132,7 +137,9 @@ impl Extracted {
     /// multi-feature member of a negated any-of group.
     #[inline]
     pub fn has_negative_predicate(&self) -> bool {
-        !self.forbidden.is_empty() || !self.forbidden_conjunctions.is_empty()
+        !self.forbidden.is_empty()
+            || !self.forbidden_conjunctions.is_empty()
+            || !self.forbidden_phrases.is_empty()
     }
 
     /// Whether the compiled query contains no positive or negative predicate.
@@ -141,13 +148,43 @@ impl Extracted {
         self.required.is_empty()
             && self.anyof.is_empty()
             && self.anyof_predicates.is_empty()
+            && self.required_phrases.is_empty()
             && !self.has_negative_predicate()
     }
 
     /// Direct semantic predicate over sorted positive/negative feature views.
-    /// Used by explain and the shared-front-end randomized oracles; the
-    /// independent reference matcher implements the same rules separately.
+    /// Quoted predicates require [`matches_positioned`](Self::matches_positioned);
+    /// this feature-only compatibility entry point therefore returns `false`
+    /// rather than silently treating a phrase as a conjunction.
     pub fn matches_features(&self, pos: &[FeatureId], neg: &[FeatureId]) -> bool {
+        self.required_phrases.is_empty()
+            && self.forbidden_phrases.is_empty()
+            && self.matches_flat_features(pos, neg)
+    }
+
+    /// Direct semantic predicate including quoted token graphs. Used by explain
+    /// and the shared-front-end randomized oracles; the independent reference
+    /// matcher implements the same graph-language intersection separately.
+    #[allow(clippy::too_many_arguments)]
+    pub fn matches_positioned(
+        &self,
+        pos: &[FeatureId],
+        neg: &[FeatureId],
+        pos_positions: u32,
+        pos_arcs: &[PositionArc],
+        neg_positions: u32,
+        neg_arcs: &[PositionArc],
+    ) -> bool {
+        self.matches_flat_features(pos, neg)
+            && self.required_phrases.iter().all(|phrase| {
+                crate::normalize::phrase_graph_matches(phrase, pos_positions, pos_arcs)
+            })
+            && !self.forbidden_phrases.iter().any(|phrase| {
+                crate::normalize::phrase_graph_matches(phrase, neg_positions, neg_arcs)
+            })
+    }
+
+    fn matches_flat_features(&self, pos: &[FeatureId], neg: &[FeatureId]) -> bool {
         let in_pos = |feature: &FeatureId| pos.binary_search(feature).is_ok();
         let in_neg = |feature: &FeatureId| neg.binary_search(feature).is_ok();
         self.required.iter().all(&in_pos)
@@ -189,6 +226,8 @@ impl Extracted {
             .retain(|conjunction| !conjunction.is_empty());
         self.forbidden_conjunctions.sort_unstable();
         self.forbidden_conjunctions.dedup();
+        canonicalize_phrases(&mut self.required_phrases);
+        canonicalize_phrases(&mut self.forbidden_phrases);
     }
 
     /// Expand learned equivalence groups (ADR-054) into the query — the FN-safe
@@ -248,6 +287,23 @@ impl Extracted {
                     widened.dedup();
                     *requirement = widened;
                 }
+            }
+        }
+        // Positive phrase edges are analyzer tokens too: widen each label by
+        // its learned equivalents. Forbidden phrases deliberately retain the
+        // canonical, unexpanded graph (ADR-061's MUST_NOT policy).
+        for phrase in &mut self.required_phrases {
+            for arc in &mut phrase.arcs {
+                let mut widened = Vec::with_capacity(arc.alternatives.len());
+                for &feature in &arc.alternatives {
+                    match equiv.get(&feature) {
+                        Some(group) => widened.extend_from_slice(group),
+                        None => widened.push(feature),
+                    }
+                }
+                widened.sort_unstable();
+                widened.dedup();
+                arc.alternatives = widened;
             }
         }
         // Canonicalize for deterministic exact-program bytes and semantic-body
@@ -335,11 +391,57 @@ impl Extracted {
                 None => return Some(usize::MAX),
             };
         }
+        if !self.required_phrases.is_empty() || !self.forbidden_phrases.is_empty() {
+            words = match words.checked_add(2) {
+                Some(words) => words,
+                None => return Some(usize::MAX),
+            };
+            for phrases in [&self.required_phrases, &self.forbidden_phrases] {
+                if phrases.len() > u32_ceiling {
+                    return Some(phrases.len());
+                }
+                for phrase in phrases {
+                    if phrase.arcs.len() > u32_ceiling {
+                        return Some(phrase.arcs.len());
+                    }
+                    words = match words.checked_add(2) {
+                        Some(words) => words,
+                        None => return Some(usize::MAX),
+                    };
+                    for arc in &phrase.arcs {
+                        if arc.alternatives.len() > u32_ceiling {
+                            return Some(arc.alternatives.len());
+                        }
+                        words = match words.checked_add(3 + arc.alternatives.len()) {
+                            Some(words) => words,
+                            None => return Some(usize::MAX),
+                        };
+                    }
+                }
+            }
+        }
         if words > u32_ceiling {
             return Some(words);
         }
         None
     }
+}
+
+fn canonicalize_phrases(phrases: &mut Vec<PhraseGraph>) {
+    for phrase in phrases.iter_mut() {
+        for arc in &mut phrase.arcs {
+            arc.alternatives.sort_unstable();
+            arc.alternatives.dedup();
+        }
+        phrase.arcs.retain(|arc| {
+            arc.start < arc.end && arc.end <= phrase.positions && !arc.alternatives.is_empty()
+        });
+        phrase.arcs.sort_unstable();
+        phrase.arcs.dedup();
+    }
+    phrases.retain(|phrase| phrase.positions != 0 && !phrase.arcs.is_empty());
+    phrases.sort_unstable();
+    phrases.dedup();
 }
 
 /// Fully compiled query (used for explain/demo; the at-scale path streams into
