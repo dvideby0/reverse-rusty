@@ -80,6 +80,9 @@
   snapshots keep the existing flat normalization/verifier path. A phrase-bearing snapshot routes
   the broad/hot batch lane through the scalar positioned verifier rather than the flat bitmap
   kernel; a columnar token-graph transpose is a performance follow-up, not a correctness shortcut.
+  The snapshot capability gate counts only live phrase rows in memory and mmap segments, so deleting
+  the last quoted query immediately restores the phrase-free/columnar path without awaiting
+  compaction.
 
 - **Decision — bounded complexity fails open.** Graph intersection admits at most 65,536 visited
   `(query-position, title-position)` states and 65,536 charged query/title arc inspections per

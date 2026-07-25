@@ -290,6 +290,9 @@ pub struct Segment {
     alive: Vec<bool>,
     /// O(1) counter of alive (non-tombstoned) entries.
     alive_counter: usize,
+    /// O(1) snapshot capability gate. Historical phrase programs remain in the
+    /// append-only exact store after deletion, so this counts only live rows.
+    live_phrase_predicates: usize,
     /// Anchor filter: present only on sealed (immutable) base segments.
     /// `None` for the memtable (mutable, entries added dynamically).
     filter: Option<SegmentFilter>,

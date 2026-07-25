@@ -117,7 +117,9 @@ pub struct MmapSegment {
     predicate_blob: *const u32,
     predicate_blob_len: usize,
     predicate_count: usize,
-    has_phrase_predicates: bool,
+    /// Live rows carrying a positioned predicate. The mmap payload is
+    /// append-only, so tombstones maintain this separately from its programs.
+    live_phrase_predicates: usize,
     // Main index
     main_slots: *const FrozenSlot,
     main_cap: usize,
@@ -361,7 +363,7 @@ impl Clone for MmapSegment {
             predicate_blob: self.predicate_blob,
             predicate_blob_len: self.predicate_blob_len,
             predicate_count: self.predicate_count,
-            has_phrase_predicates: self.has_phrase_predicates,
+            live_phrase_predicates: self.live_phrase_predicates,
             main_slots: self.main_slots,
             main_cap: self.main_cap,
             main_mask: self.main_mask,
@@ -832,15 +834,18 @@ impl MmapSegment {
             predicate_len_s,
             predicate_blob_s,
         )?;
-        let has_phrase_predicates =
-            predicate_off_s
-                .iter()
-                .zip(predicate_len_s)
-                .any(|(&off, &len)| {
+        let live_phrase_predicates = predicate_off_s
+            .iter()
+            .zip(predicate_len_s)
+            .enumerate()
+            .filter(|&(i, (&off, &len))| {
+                alive_overlay.get(i).copied().unwrap_or(false) && {
                     let start = off as usize;
                     let end = start + len as usize;
                     crate::exact::predicate_has_phrases(&predicate_blob_s[start..end])
-                });
+                }
+            })
+            .count();
 
         Ok(MmapSegment {
             format_version,
@@ -888,7 +893,7 @@ impl MmapSegment {
             predicate_blob: slice_ptr(predicate_blob_s),
             predicate_blob_len: predicate_blob_s.len(),
             predicate_count,
-            has_phrase_predicates,
+            live_phrase_predicates,
             main_slots: main_slots_s.as_ptr(),
             main_cap,
             main_mask: if main_cap > 0 {

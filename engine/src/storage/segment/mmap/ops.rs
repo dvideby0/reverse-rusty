@@ -220,7 +220,19 @@ impl MmapSegment {
 
     #[inline]
     pub fn has_phrase_predicates(&self) -> bool {
-        self.has_phrase_predicates
+        self.live_phrase_predicates != 0
+    }
+
+    #[inline]
+    fn row_has_phrase_predicates(&self, local_id: u32) -> bool {
+        let i = local_id as usize;
+        let Some((&off, &len)) = self.predicate_off().get(i).zip(self.predicate_len().get(i))
+        else {
+            return false;
+        };
+        let start = off as usize;
+        let end = start + len as usize;
+        crate::exact::predicate_has_phrases(&self.predicate_blob()[start..end])
     }
 
     #[inline]
@@ -272,9 +284,13 @@ impl MmapSegment {
     }
 
     pub fn tombstone(&mut self, local_id: u32) {
+        let had_phrase_predicate = self.row_has_phrase_predicates(local_id);
         if let Some(slot) = self.alive_overlay.get_mut(local_id as usize) {
             if *slot {
                 self.alive_counter -= 1;
+                if had_phrase_predicate {
+                    self.live_phrase_predicates -= 1;
+                }
                 // Keep the incremental dead set ≡ the overlay (ADR-066) — the
                 // already-dead branch is covered by the seed at open.
                 self.dead_overlay.insert(local_id);

@@ -185,6 +185,30 @@ fn phrase_rows_force_batch_exactness_instead_of_entering_the_flat_kernel() {
 }
 
 #[test]
+fn deleting_the_last_phrase_row_restores_columnar_batch_mode() {
+    let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
+    engine.build_from_queries(&[(1, "\"red shoe\"".to_string()), (2, "common".to_string())]);
+    let titles = vec!["common".to_string()];
+    let options = BatchMatchOptions {
+        include_broad: true,
+        broad_strategy: BroadStrategy::Columnar,
+        ..BatchMatchOptions::default()
+    };
+
+    let before = engine.match_titles_batch_stats(&titles, options);
+    assert_eq!(
+        before.broad_batches, 0,
+        "a live phrase row must force positioned scalar verification"
+    );
+    assert_eq!(engine.delete_by_logical_id(1).expect("delete phrase"), 1);
+    let after = engine.match_titles_batch_stats(&titles, options);
+    assert!(
+        after.broad_batches > 0,
+        "a dead phrase program must not keep a phrase-free memory segment in scalar mode"
+    );
+}
+
+#[test]
 fn required_phrases_remain_visible_without_the_broad_lane() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
     engine.build_from_queries(&[(1, "\"red shoe\"".to_string())]);

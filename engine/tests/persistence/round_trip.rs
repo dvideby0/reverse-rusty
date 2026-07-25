@@ -197,6 +197,48 @@ fn quoted_phrase_predicates_round_trip_through_v10_mmap() {
 }
 
 #[test]
+fn mmap_tombstone_of_last_phrase_row_restores_columnar_batch_mode() {
+    let dir = test_dir("quoted_phrase_live_capability");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let mut engine = Engine::with_config(make_norm(), config.clone());
+    engine.build_from_queries(&[(1, "\"red shoe\"".to_string()), (2, "common".to_string())]);
+    drop(engine);
+
+    let mut reopened = Engine::open(make_norm(), config).expect("reopen v10 mmap");
+    let titles = vec!["common".to_string()];
+    let options = reverse_rusty::segment::BatchMatchOptions {
+        include_broad: true,
+        broad_strategy: reverse_rusty::segment::BroadStrategy::Columnar,
+        ..reverse_rusty::segment::BatchMatchOptions::default()
+    };
+    assert_eq!(
+        reopened
+            .match_titles_batch_stats(&titles, options)
+            .broad_batches,
+        0,
+        "the live mmap phrase row must force positioned scalar verification"
+    );
+    assert_eq!(
+        reopened
+            .delete_by_logical_id(1)
+            .expect("delete mmap phrase"),
+        1
+    );
+    assert!(
+        reopened
+            .match_titles_batch_stats(&titles, options)
+            .broad_batches
+            > 0,
+        "a dead mmap phrase program must not keep phrase-free traffic in scalar mode"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn semantics_two_materialization_is_source_rebuilt_for_quoted_adjacency() {
     let dir = test_dir("semantics_two_phrase_migration");
     let config = EngineConfig {

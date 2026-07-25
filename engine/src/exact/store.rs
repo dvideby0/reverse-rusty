@@ -40,7 +40,9 @@ pub struct ExactStore {
     predicate_off: Vec<u32>,
     predicate_len: Vec<u32>,
     predicate_blob: Vec<u32>,
-    /// O(1) corpus capability bit: any row carries a v2 quoted graph.
+    /// O(1) layout bit: any appended row carries a v2 quoted graph. This is
+    /// intentionally historical for persistence-format selection; `Segment`
+    /// separately counts live phrase rows for snapshot matching mode.
     has_phrase_predicates: bool,
     // per-query metadata tags (ADR-049): sorted TagIds sliced from tag_blob, exactly
     // parallel to the required tail. Verify-stage only — never gates retrieval (§5.3).
