@@ -15,9 +15,9 @@ use crate::segment::Segment;
 
 use super::super::{crc32, durable_rename, write_u32, write_u64};
 use super::{
-    align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_HOT,
-    FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK, FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE,
-    MAGIC,
+    align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_COMPOUND_PREDICATE,
+    FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK,
+    FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE, MAGIC,
 };
 
 /// Build a frozen hash table + posting blob from an in-memory CandidateIndex.
@@ -146,11 +146,13 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     // ---- Exact section ----
     pad_to_8(&mut f)?;
     let exact_off = f.stream_position()?;
-    let has_source_generation = seg
-        .exact_store()
-        .source_generations()
-        .iter()
-        .any(|&generation| generation != 0);
+    let has_compound_predicate = !seg.exact_store().predicate_blobs().is_empty();
+    let has_source_generation = has_compound_predicate
+        || seg
+            .exact_store()
+            .source_generations()
+            .iter()
+            .any(|&generation| generation != 0);
     // v8 is cumulative: its reader expects both the v6 priority and v7
     // ownership columns before the appended source-generation column. Emit
     // standalone/zero values when source fencing is the only new capability.
@@ -167,6 +169,7 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
         has_priority,
         has_ownership,
         has_source_generation,
+        has_compound_predicate,
     )?;
 
     // ---- Main index ----
@@ -247,7 +250,9 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
         .any(|c| matches!(c, crate::compile::CostClass::D));
     write_u32(
         &mut f,
-        if has_source_generation {
+        if has_compound_predicate {
+            FORMAT_VERSION_COMPOUND_PREDICATE
+        } else if has_source_generation {
             FORMAT_VERSION_SOURCE_GENERATION
         } else if has_ownership {
             FORMAT_VERSION_OWNERSHIP
@@ -293,6 +298,7 @@ fn write_exact_section(
     write_priority: bool,
     write_ownership: bool,
     write_source_generation: bool,
+    write_compound_predicate: bool,
 ) -> io::Result<()> {
     let exact = seg.exact_store();
     write_u64_array(w, exact.req_masks())?;
@@ -323,6 +329,11 @@ fn write_exact_section(
     }
     if write_source_generation {
         write_u64_array(w, exact.source_generations())?;
+    }
+    if write_compound_predicate {
+        write_u32_array(w, exact.predicate_offs())?;
+        write_u32_array(w, exact.predicate_lens())?;
+        write_u32_array(w, exact.predicate_blobs())?;
     }
     Ok(())
 }

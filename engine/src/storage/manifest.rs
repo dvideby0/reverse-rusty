@@ -969,7 +969,7 @@ mod tests {
         assert_eq!(
             read_u32_at(&raw, 4).unwrap(),
             7,
-            "ADR-118 compiler semantics metadata ⇒ cluster manifest v7"
+            "compiler semantics metadata ⇒ cluster manifest v7"
         );
         let got = read_cluster_manifest(&path).expect("read");
         assert!(got.broad_replicate_all, "v7 retains replicate-to-all");

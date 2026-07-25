@@ -5,7 +5,7 @@
 //! [`verify_slices`] is the scalar per-candidate gate; [`eval_batch_slices`] is its
 //! columnar (bitmap-transpose) twin for the broad-lane batch path.
 
-use super::{query_passes_tags, TagPredicate};
+use super::{eval_predicate_batch, query_passes_tags, verify_predicate, TagPredicate};
 use crate::dict::FeatureId;
 use crate::tagdict::TagId;
 
@@ -41,6 +41,9 @@ pub fn verify_slices(
     group_off: &[u32],
     group_len: &[u16],
     anyof_blob: &[u32],
+    predicate_off: &[u32],
+    predicate_len: &[u32],
+    predicate_blob: &[u32],
     pred: &TagPredicate,
     tag_off: &[u32],
     tag_len: &[u16],
@@ -94,7 +97,14 @@ pub fn verify_slices(
         }
     }
 
-    // 5) tag predicate (post-candidate; NEVER gates retrieval — matching.md §5.3). Only a
+    // 5) compound any-of / forbidden-member predicates.
+    let po = predicate_off.get(i).copied().unwrap_or(0) as usize;
+    let pl = predicate_len.get(i).copied().unwrap_or(0) as usize;
+    if pl != 0 && !verify_predicate(&predicate_blob[po..po + pl], pos_feats, neg_feats) {
+        return false;
+    }
+
+    // 6) tag predicate (post-candidate; NEVER gates retrieval — matching.md §5.3). Only a
     //    candidate that already satisfies the query is filtered by the caller's tags, so a
     //    filter can only remove, never drop a wanted match. Skipped entirely (one untaken
     //    branch) when no filter is supplied, keeping the no-filter path unchanged.
@@ -211,6 +221,11 @@ pub fn eval_batch_slices<'a>(
     group_off: &[u32],
     group_len: &[u16],
     anyof_blob: &[u32],
+    predicate_off: &[u32],
+    predicate_len: &[u32],
+    predicate_blob: &[u32],
+    member: &mut [u64],
+    choice: &mut [u64],
     pred: &TagPredicate,
     tag_off: &[u32],
     tag_len: &[u16],
@@ -306,5 +321,20 @@ pub fn eval_batch_slices<'a>(
         if nz == 0 {
             return;
         }
+    }
+
+    // 5) compound members. Ordinary queries have an empty program and pay only
+    // the length load/branch.
+    let po = predicate_off.get(i).copied().unwrap_or(0) as usize;
+    let pl = predicate_len.get(i).copied().unwrap_or(0) as usize;
+    if pl != 0 {
+        eval_predicate_batch(
+            &predicate_blob[po..po + pl],
+            &lookup,
+            acc,
+            grp,
+            member,
+            choice,
+        );
     }
 }

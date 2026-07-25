@@ -37,8 +37,8 @@
 //! - [`normalize`] — the two-phase emit pipeline producing canonical features, including the
 //!   ADR-061 two title views `N(T)` / `P(T)`.
 //! - [`parse`] — the DSL parser (AND clauses, any-of groups, phrases, adjacent-`-` negation).
-//! - [`extract`] — AST → [`extract::RefQuery`] (required / forbidden / any-of) + equivalence
-//!   expansion (required → any-of, ADR-054).
+//! - [`extract`] — AST → [`extract::RefQuery`] (required / forbidden / exact member-preserving
+//!   any-of) + equivalence expansion (required → any-of, ADR-054).
 //! - [`matcher`] — [`matcher::RefMatcher`]: build from queries + a vocab, then `matches(title)`.
 
 pub mod clean;

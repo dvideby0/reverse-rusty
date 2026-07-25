@@ -442,9 +442,9 @@ async fn drain_recovery_stream(
 }
 
 /// Validate the first recovery frame before any target file is opened or
-/// renamed. In particular, a pre-ADR-118 peer reports semantics zero through
-/// the additive protobuf field and is rejected while the target's committed
-/// files are still untouched.
+/// renamed. In particular, any older compiler peer reports a non-current
+/// semantics stamp and is rejected while the target's committed files are
+/// still untouched.
 fn validate_recovery_manifest(
     manifest: &proto::FetchManifest,
     placement_generation: u64,

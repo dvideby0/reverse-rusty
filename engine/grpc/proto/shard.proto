@@ -561,8 +561,9 @@ message FetchManifest {
   uint64 placement_generation = 6;
   uint32 num_shards = 7;
   // Compiler lowering semantics for the sealed base + tail. A pre-ADR-118
-  // sender leaves proto3 default 0; a current receiver refuses it rather than
-  // replaying legacy placement under current semantics.
+  // sender leaves proto3 default 0 and a pre-ADR-119 sender reports 1; a current
+  // receiver refuses either rather than replaying older placement under current
+  // semantics.
   uint32 compiler_semantics_version = 8;
 }
 // One run of bytes for a single file: contiguous chunks sharing `name`, terminated by `last`.

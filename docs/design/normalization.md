@@ -28,15 +28,16 @@ Grammar (EBNF-ish):
   clause       := positive | negative
   positive     := term | phrase | anyof
   negative     := '-' term | '-' phrase | '-' anyof
-  anyof        := '(' term (',' term)* ')'        // OR group
+  anyof        := '(' member (',' member)* ')'    // OR across complete members
+  member       := term+                           // AND within one unquoted member
   phrase       := '"' term+ '"'
   term         := word | normalized-entity-literal
 
 Semantics:
   bare term / phrase            → MUST (required)
-  ( a , b , c )                 → MUST (a OR b OR c)   (required any-of group)
+  ( a b , c )                   → MUST ((a AND b) OR c)
   -term                         → MUST_NOT
-  -( a , b , c )                → MUST_NOT a AND MUST_NOT b AND MUST_NOT c
+  -( a b , c )                  → MUST_NOT ((a AND b) OR c)
 ```
 
 The compiler jointly normalizes only each **maximal consecutive run of positive bare terms**. This
@@ -44,6 +45,13 @@ lets `new york` recognize a configured multi-word entity without joining terms a
 was not contiguous in the source: `new -used york`, `new "collectible" york`, and
 `new (vintage,modern) york` all split the two bare-term runs. Mutable extraction, frozen-dict
 extraction, and the reference matcher share this clause-boundary contract (ADR-118).
+
+An unquoted multi-token any-of member is one conjunctive branch, not a bag of interchangeable
+features: `(red shoe,boot)` means `(red AND shoe) OR boot`; its negation rejects only a title that
+satisfies a complete branch. Normalization may collapse a configured multi-word entity to one feature.
+Otherwise the compiler preserves every normalized requirement through exact verification. A
+rarest-feature member proxy may be used for lossless candidate retrieval, but never as the member's
+exact truth condition (ADR-119).
 
 Worked example (from the spec):
 

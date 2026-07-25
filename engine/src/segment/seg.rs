@@ -32,8 +32,9 @@ pub(in crate::segment) fn rejects_class_d(
     ex: &Extracted,
     accept_class_d: bool,
 ) -> bool {
-    // Reject a class-D plan unless the lane is on AND there is something to forbid.
-    class == CostClass::D && (!accept_class_d || ex.forbidden.is_empty())
+    // Reject a class-D plan unless the lane is on AND there is something to
+    // forbid, including a whole multi-feature any-of member.
+    class == CostClass::D && (!accept_class_d || !ex.has_negative_predicate())
 }
 
 impl Segment {

@@ -39,16 +39,20 @@ For each query we must choose a set of signatures that (a) satisfies the lossles
 [overview](README.md) §2) and (b) minimizes expected match-time cost.
 
 **Candidate signature generation.** From a query's required features `R` and required any-of groups
-`G1..Gk` (each group is "≥1 of these must be present"):
+`G1..Gk`, where each group is an OR of semantic members and one unquoted multi-token member is an AND
+of its normalized requirements:
 
 - A valid signature must be **hittable by every matching title**. So a signature is any combination
-  that is a subset of `R` (always present) — and, to incorporate any-of groups losslessly, we must
-  emit a *cross-product family*: pick at most one representative from each group we include. The
-  cheapest correct scheme used by the engine:
+  that is a subset of `R` (always present). To incorporate an any-of group losslessly, choose one
+  feature requirement that must be present when each member matches and emit the resulting
+  *member-proxy family*. The complete member predicate remains in exact verification; a proxy is
+  never treated as sufficient. The cheapest correct scheme used by the engine:
   - Build the anchor from the **rarest features of `R`** (1–3 of them).
   - If `R` alone is empty or too common, we must cover via groups: emit one signature per element of
-    the rarest group (so whichever branch the title satisfies, a signature fires) — exactly the
-    "extract a term from every OR branch" rule, applied to the single cheapest group.
+    the rarest proxy group (so whichever semantic member the title satisfies, a signature fires) —
+    exactly the "extract a term from every OR branch" rule, applied to the single cheapest group.
+    Equivalence expansion widens the selected requirement to all equivalent alternatives without
+    flattening the member's other conjuncts (ADR-119).
 
 **Cost model.** For a candidate signature `s` we estimate expected candidates it contributes and its
 overheads using compile-time statistics:
@@ -115,6 +119,8 @@ forbidden_off: [u32]   forbidden_len: [u16]   // slice into forbidden_blob
 required_blob:  [u32]   // remaining required feature IDs, sorted, beyond the common mask
 forbidden_blob: [u32]   // remaining forbidden feature IDs, sorted
 anyof_meta_off: [u32]   anyof_groups: [...]   // packed (offset,len) any-of groups
+predicate_off: [u32]   predicate_len: [u32]   // optional compound program per query
+predicate_blob: [u32]                         // OR-of-AND members + negative conjunctions
 version: [u32]   logical_id: [u64]            // resolved only on match
 ```
 
@@ -128,20 +134,26 @@ sorted tail):
 2. **Required tail:** every ID in `required_blob[off..off+len]` must be present in `F.tail`
    (merge/galloping over two sorted slices).
 3. **Forbidden tail:** no ID in `forbidden_blob[..]` present in `F` → reject if any is.
-4. **Any-of groups:** each group needs ≥1 member present.
-5. Survivors → resolve `logical_id`/`version`, emit.
+4. **Any-of proxy groups:** each group needs ≥1 member proxy present. This is the complete exact
+   predicate for ordinary single-feature groups and a necessary precondition for compound groups.
+5. **Compound members:** for each positive group, at least one complete member must satisfy all of
+   its requirements against `P(T)`; reject if any complete member of a negated group is present in
+   `N(T)`.
+6. Survivors → resolve `logical_id`/`version`, emit.
 
-No strings, no regex, no virtual dispatch, no allocation. A "bytecode VM" variant is described as an
-alternative (a tiny opcode stream per query) but the SoA mask+slice form is faster for this shape and
-is what the engine implements.
+No strings, no regex, no virtual dispatch, no allocation. Ordinary predicates stay entirely in the
+SoA mask+slice form. Only a query with a multi-feature any-of member carries a compact, structurally
+validated `u32` subprogram for its nested Boolean shape; scalar verification interprets integer words
+and the batch path evaluates the same program as bitmap operations (ADR-119).
 
 **Two title feature views — multi-word aliases (ADR-061).** The steps above describe one title feature
 set `F`. With a multi-word alias active, the verifier instead receives a **`TitleView`** carrying *two*
 views (built once per title by `Normalizer::match_features_dual`): a **positive** overlapping superset
 `P(T)` and a **negative** canonical leftmost-longest set `N(T) ⊆ P(T)`. The required-mask gate, required
-tail, and any-of (steps 1-required, 2, 4) read `P(T)` — so a `new york` query finds a `new york city`
-title via the nested entity the overlap pass adds. The forbidden-mask gate and forbidden tail (steps
-1-forbidden, 3) read **only** `N(T)` — so `foo -"new york"` still matches `foo new york city` (the
+tail, any-of proxies, and positive compound members (steps 1-required, 2, 4, 5-positive) read `P(T)` —
+so a `new york` query finds a `new york city` title via the nested entity the overlap pass adds. The
+forbidden-mask gate, forbidden tail, and negative compound members (steps 1-forbidden, 3, 5-negative)
+read **only** `N(T)` — so `foo -"new york"` still matches `foo new york city` (the
 canonical parse reads `new york city`, which does not forbidden-contain `new york`). This split is what
 lets one verifier serve both polarities without a false negative; the single flat set could not (the
 superset needed for retrieval over-rejects negation — the wall the first attempt hit). With no active
@@ -217,9 +229,10 @@ free on hot-free corpora); its vacuous accept is `pure_tail_anchor` (a θ-hot an
 bit, so the single required feature lives in the required *tail* and `is_pure_anchor` is
 structurally false for it); and the universal-signature probe stays broad-only (class D lives in
 the broad index). The batch's **count-gate pre-reject** (`broad_prefilter`, lever 5a) serves both
-lanes: a reached candidate whose required features / any-of groups cannot all be satisfied by ANY
-title in the batch skips full bitmap verification — a necessary-condition filter (under-reject is
-the only possible error direction; forbidden features are never consulted).
+lanes: a reached candidate whose required features / any-of proxy groups cannot all be satisfied by
+ANY title in the batch skips full bitmap verification — a necessary-condition filter (compound
+members may under-reject here and are checked by the full kernel; forbidden features are never
+consulted).
 
 **Class-D always-candidates (the opt-in lane, ADR-068).** With `accept_class_d` on, a negation-only
 query is the *deliberate* version of that always-candidate: its lossless cover of an empty positive
@@ -239,8 +252,9 @@ always-candidate is visible only when the request includes the broad lane.
 ### 4.2 Canonical-body dedup, Stage A (ADR-106)
 
 Orthogonal to lane placement: queries whose **semantic bodies** are identical (masks +
-required/forbidden tails + canonical any-of groups — never identity: logical id, version,
-tags) share ONE posting entry per in-memory segment. At `add_compiled` a body-hash hit
+required/forbidden tails + canonical any-of groups + canonical compound predicate program — never
+identity: logical id, version, tags) share ONE posting entry per in-memory segment. At `add_compiled`
+a body-hash hit
 confirmed by exact equality joins the group — the duplicate inserts no postings and **adopts
 the leader's class** (identical bodies can plan A vs H across a θ-crossing frequency bump;
 adoption is lossless because A/B/H are all always-visible, and C/D are structural under the
@@ -451,8 +465,9 @@ mid-stream. `resync` and live shard mutations hold the shared side.
 
 ## 6. Explain / debug tooling (always available)
 
-For any query: show parsed AST, compiled required/forbidden/any-of, chosen signatures with their cost
-scores, and cost class. For any (title, query) pair: show the title's extracted features, which
-signature(s) made the query a candidate (or why it was never a candidate), and the exact-match
-pass/fail with the specific failing feature (missing required / present forbidden / unsatisfied
-any-of). This is built in, not bolted on — it's the same SoA data read in a verbose mode.
+For any query: show parsed AST, compiled required/forbidden/any-of proxy groups, complete compound
+member predicates, chosen signatures with their cost scores, and cost class. For any (title, query)
+pair: show the title's extracted features, which signature(s) made the query a candidate (or why it
+was never a candidate), and the exact-match pass/fail with the specific failing predicate (missing
+required / present forbidden / unsatisfied any-of member). This is built in, not bolted on — it's the
+same SoA data read in a verbose mode.

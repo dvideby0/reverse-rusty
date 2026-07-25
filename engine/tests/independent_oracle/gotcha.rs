@@ -7,12 +7,6 @@
 //! `#`/`/` markers, `psa10` fusion (default vs grader vocab), grader aging, number-context, diacritic
 //! fold, half-grades, any-of, number-typing boundaries, and class-D drops.
 //!
-//! NOTE on any-of: cases only ever use titles that contain a multi-token member COMPLETELY or not at
-//! all. The engine represents a multi-token any-of member by its rarest-by-id proxy; the reference
-//! uses the lexicographically-smallest feature on a frequency tie, so the two can differ on a title
-//! bearing SOME-but-not-all of a member's tokens (ADR-087). Such titles never arise from real
-//! surface forms; the gotchas avoid them deliberately.
-
 use reverse_rusty::normalize::{Normalizer, NormalizerBuilder};
 use reverse_rusty::segment::{Engine, MatchScratch};
 use reverse_rusty_ref_matcher::{RefMatcher, RefVocab};
@@ -206,7 +200,8 @@ fn any_of_groups() {
         "(red,blue) car",
         &[("red car", true), ("blue car", true), ("green car", false)],
     );
-    // Multi-token member ("upper deck"): titles carry the COMPLETE member or none (see module note).
+    // A multi-token member is a conjunction. A partial member must not pass just
+    // because it carries the retrieval proxy.
     check(
         def_norm,
         def_vocab,
@@ -214,7 +209,34 @@ fn any_of_groups() {
         &[
             ("upper deck card", true),
             ("ud card", true),
+            ("upper card", false),
+            ("deck card", false),
             ("topps card", false),
+        ],
+    );
+    // Distinct members can choose the same retrieval proxy; exact semantics must
+    // still retain both complete conjunctions.
+    check(
+        def_norm,
+        def_vocab,
+        "(red shoe,red boot)",
+        &[
+            ("red shoe", true),
+            ("red boot", true),
+            ("red hat", false),
+            ("shoe", false),
+        ],
+    );
+    // Negation rejects a complete member, not each component independently.
+    check(
+        def_norm,
+        def_vocab,
+        "marker -(red shoe,boot)",
+        &[
+            ("marker red hat", true),
+            ("marker shoe", true),
+            ("marker red shoe", false),
+            ("marker boot", false),
         ],
     );
 }

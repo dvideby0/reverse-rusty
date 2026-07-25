@@ -111,6 +111,8 @@ pub(in crate::segment) trait BroadBackend {
         words: usize,
         acc: &mut [u64],
         grp: &mut [u64],
+        member: &mut [u64],
+        choice: &mut [u64],
         pred: &crate::exact::TagPredicate,
     );
 }
@@ -216,6 +218,8 @@ impl BroadBackend for &Segment {
         words: usize,
         acc: &mut [u64],
         grp: &mut [u64],
+        member: &mut [u64],
+        choice: &mut [u64],
         pred: &crate::exact::TagPredicate,
     ) {
         self.exact.eval_batch(
@@ -224,6 +228,8 @@ impl BroadBackend for &Segment {
             lookup(feat_row, feat_bits, words),
             acc,
             grp,
+            member,
+            choice,
             pred,
         );
     }
@@ -295,6 +301,8 @@ impl BroadBackend for &MmapSegment {
         words: usize,
         acc: &mut [u64],
         grp: &mut [u64],
+        member: &mut [u64],
+        choice: &mut [u64],
         pred: &crate::exact::TagPredicate,
     ) {
         self.eval_batch(
@@ -303,6 +311,8 @@ impl BroadBackend for &MmapSegment {
             lookup(feat_row, feat_bits, words),
             acc,
             grp,
+            member,
+            choice,
             pred,
         );
     }
@@ -381,6 +391,8 @@ pub(in crate::segment) fn eval_one_segment<
     non_pure: &mut Vec<u32>,
     acc: &mut [u64],
     grp: &mut [u64],
+    member: &mut [u64],
+    choice: &mut [u64],
     collector: &mut S,
     materialize: bool,
     prefilter: bool,
@@ -510,6 +522,8 @@ pub(in crate::segment) fn eval_one_segment<
                 words,
                 acc,
                 grp,
+                member,
+                choice,
                 &crate::exact::TagPredicate::empty(),
             );
             emit_from_bits(&backend, grouped, local, pred, acc, collector, policy);
@@ -522,6 +536,8 @@ pub(in crate::segment) fn eval_one_segment<
                 words,
                 acc,
                 grp,
+                member,
+                choice,
                 pred,
             );
             let logical = backend.logical_id(local);

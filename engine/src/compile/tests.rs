@@ -61,6 +61,14 @@ mod golden {
         (required, forbidden, anyof)
     }
 
+    fn semantic_match(norm: &Normalizer, dict: &Dict, ex: &Extracted, title: &str) -> bool {
+        let mut lc = String::new();
+        let mut scratch = crate::normalize::NormScratch::new();
+        let mut features = Vec::new();
+        norm.match_features(title, dict, &mut lc, &mut scratch, &mut features);
+        ex.matches_features(&features, &features)
+    }
+
     #[test]
     fn required_from_positive_terms() {
         let n = Normalizer::default_vocab().unwrap();
@@ -107,6 +115,63 @@ mod golden {
         assert_eq!(req, s(&["term:jacket"]));
         assert!(forb.is_empty());
         assert_eq!(anyof, vec![s(&["term:blue", "term:green", "term:red"])]);
+    }
+
+    #[test]
+    fn multi_token_anyof_members_remain_whole_predicates() {
+        let norm = Normalizer::default_vocab().unwrap();
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let positive = extract(
+            &parse("(red shoe,boot) marker").unwrap(),
+            &norm,
+            &mut dict,
+            &mut lc,
+        );
+        assert_eq!(positive.anyof_predicates.len(), 1);
+        assert_eq!(positive.anyof_predicates[0].members.len(), 2);
+        assert!(semantic_match(&norm, &dict, &positive, "red shoe marker"));
+        assert!(semantic_match(&norm, &dict, &positive, "boot marker"));
+        assert!(!semantic_match(&norm, &dict, &positive, "red hat marker"));
+        assert!(!semantic_match(&norm, &dict, &positive, "shoe marker"));
+
+        let negative = extract(
+            &parse("marker -(red shoe,boot)").unwrap(),
+            &norm,
+            &mut dict,
+            &mut lc,
+        );
+        assert_eq!(negative.forbidden_conjunctions.len(), 1);
+        assert!(semantic_match(&norm, &dict, &negative, "marker red hat"));
+        assert!(!semantic_match(&norm, &dict, &negative, "marker red shoe"));
+        assert!(!semantic_match(&norm, &dict, &negative, "marker boot"));
+    }
+
+    #[test]
+    fn distinct_members_survive_a_shared_retrieval_proxy() {
+        let norm = Normalizer::default_vocab().unwrap();
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let ex = extract(
+            &parse("(red shoe,red boot)").unwrap(),
+            &norm,
+            &mut dict,
+            &mut lc,
+        );
+        assert_eq!(ex.anyof.len(), 1);
+        assert_eq!(
+            ex.anyof[0].len(),
+            1,
+            "the two members deliberately share one proxy"
+        );
+        assert_eq!(
+            ex.anyof_predicates[0].members.len(),
+            2,
+            "proxy dedup must not collapse semantic members"
+        );
+        assert!(semantic_match(&norm, &dict, &ex, "red shoe"));
+        assert!(semantic_match(&norm, &dict, &ex, "red boot"));
+        assert!(!semantic_match(&norm, &dict, &ex, "red hat"));
     }
 
     #[test]
@@ -283,6 +348,8 @@ mod golden {
             required,
             forbidden: Vec::new(),
             anyof,
+            anyof_predicates: Vec::new(),
+            forbidden_conjunctions: Vec::new(),
         };
 
         // Class A anchored on a θ-frequency non-top64 feature: the defect shape.
@@ -389,6 +456,8 @@ mod equiv_tests {
             required: vec![5, 10],
             forbidden: vec![99],
             anyof: vec![],
+            anyof_predicates: vec![],
+            forbidden_conjunctions: vec![],
         };
         ex.expand_equivalences(&g);
         assert_eq!(ex.required, vec![5]);
@@ -403,9 +472,39 @@ mod equiv_tests {
             required: vec![],
             forbidden: vec![],
             anyof: vec![vec![10, 30]],
+            anyof_predicates: vec![],
+            forbidden_conjunctions: vec![],
         };
         ex.expand_equivalences(&g);
         assert_eq!(ex.anyof, vec![vec![10, 20, 30]]);
+    }
+
+    #[test]
+    fn widens_one_compound_requirement_without_flattening_the_member() {
+        let g = equiv(&[(10, &[10, 20]), (20, &[10, 20])]);
+        let mut ex = Extracted {
+            required: vec![],
+            forbidden: vec![],
+            anyof: vec![vec![10, 40]],
+            anyof_predicates: vec![AnyOfPredicate {
+                members: vec![
+                    AnyOfMember {
+                        requirements: vec![vec![10], vec![30]],
+                    },
+                    AnyOfMember {
+                        requirements: vec![vec![40]],
+                    },
+                ],
+            }],
+            forbidden_conjunctions: vec![],
+        };
+        ex.expand_equivalences(&g);
+        assert_eq!(ex.anyof, vec![vec![10, 20, 40]]);
+        assert_eq!(
+            ex.anyof_predicates[0].members[0].requirements,
+            vec![vec![10, 20], vec![30]],
+            "equivalents widen one requirement; feature 30 remains conjunctive"
+        );
     }
 
     #[test]
@@ -415,6 +514,8 @@ mod equiv_tests {
             required: vec![1, 2],
             forbidden: vec![3],
             anyof: vec![vec![4, 5]],
+            anyof_predicates: vec![],
+            forbidden_conjunctions: vec![],
         };
         let mut ex = before.clone();
         ex.expand_equivalences(&g);
@@ -430,6 +531,8 @@ mod equiv_tests {
             required: vec![10],
             forbidden: vec![],
             anyof: vec![],
+            anyof_predicates: vec![],
+            forbidden_conjunctions: vec![],
         };
         once.expand_equivalences(&g);
         let mut twice = once.clone();
@@ -453,6 +556,8 @@ mod class_d_universal_cover {
             required: vec![],
             forbidden: vec![7, 9],
             anyof: vec![],
+            anyof_predicates: vec![],
+            forbidden_conjunctions: vec![],
         }
     }
 
@@ -502,6 +607,8 @@ mod class_d_universal_cover {
                 required: vec![],
                 forbidden: vec![1],
                 anyof: vec![],
+                anyof_predicates: vec![],
+                forbidden_conjunctions: vec![],
             },
             &dict,
             0,

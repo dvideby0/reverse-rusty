@@ -6,7 +6,10 @@
 //! [`eval_batch_slices`](super::eval_batch_slices)), the pure-anchor derivation,
 //! the compaction copy/re-anchor helpers, and the serialization slice accessors.
 
-use super::{eval_batch_slices, query_passes_tags, TagPredicate, TitleView};
+use super::{
+    encode_predicate, eval_batch_slices, query_passes_tags, verify_predicate, TagPredicate,
+    TitleView,
+};
 use crate::compile::Extracted;
 use crate::dict::{Dict, FeatureId, NO_MASK_BIT};
 use crate::ownership::{PlacementGeneration, PlacementMode, QueryPlacement, QueryPlacementRef};
@@ -32,6 +35,11 @@ pub struct ExactStore {
     group_off: Vec<u32>,
     group_len: Vec<u16>,
     anyof_blob: Vec<u32>,
+    // Optional compound any-of / forbidden-member program. Ordinary
+    // single-token queries store a zero length and never touch the blob.
+    predicate_off: Vec<u32>,
+    predicate_len: Vec<u32>,
+    predicate_blob: Vec<u32>,
     // per-query metadata tags (ADR-049): sorted TagIds sliced from tag_blob, exactly
     // parallel to the required tail. Verify-stage only — never gates retrieval (§5.3).
     tag_off: Vec<u32>,
@@ -64,6 +72,7 @@ impl std::fmt::Debug for ExactStore {
             .field("req_blob_len", &self.req_blob.len())
             .field("forb_blob_len", &self.forb_blob.len())
             .field("anyof_blob_len", &self.anyof_blob.len())
+            .field("predicate_blob_len", &self.predicate_blob.len())
             .finish()
     }
 }
@@ -187,6 +196,7 @@ impl ExactStore {
             self.group_off.push(off);
             self.group_len.push(group.len() as u16);
         }
+        let (predicate_off, predicate_len) = encode_predicate(ex, &mut self.predicate_blob);
 
         self.req_mask.push(rmask);
         self.forb_mask.push(fmask);
@@ -196,6 +206,8 @@ impl ExactStore {
         self.forb_len.push(f_len);
         self.q_group_start.push(g_start);
         self.q_group_count.push(g_count);
+        self.predicate_off.push(predicate_off);
+        self.predicate_len.push(predicate_len);
 
         let t_off = self.tag_blob.len() as u32;
         self.tag_blob.extend_from_slice(tags);
@@ -323,8 +335,21 @@ impl ExactStore {
             }
         }
 
-        // 5) tag predicate (post-candidate; never gates — matching.md §5.3). Mirrors
-        //    `verify_slices` clause 5; skipped (one untaken branch) with no filter.
+        // 5) compound members (integer-only program; empty for the common path).
+        let predicate_off = self.predicate_off[i] as usize;
+        let predicate_len = self.predicate_len[i] as usize;
+        if predicate_len != 0
+            && !verify_predicate(
+                &self.predicate_blob[predicate_off..predicate_off + predicate_len],
+                view.pos,
+                view.neg,
+            )
+        {
+            return false;
+        }
+
+        // 6) tag predicate (post-candidate; never gates — matching.md §5.3). Mirrors
+        //    `verify_slices` clause 6; skipped (one untaken branch) with no filter.
         if !pred.is_empty()
             && !query_passes_tags(i, pred, &self.tag_off, &self.tag_len, &self.tag_blob)
         {
@@ -346,6 +371,8 @@ impl ExactStore {
         lookup: impl Fn(FeatureId) -> Option<&'a [u64]>,
         acc: &mut [u64],
         grp: &mut [u64],
+        member: &mut [u64],
+        choice: &mut [u64],
         pred: &TagPredicate,
     ) {
         eval_batch_slices(
@@ -367,6 +394,11 @@ impl ExactStore {
             &self.group_off,
             &self.group_len,
             &self.anyof_blob,
+            &self.predicate_off,
+            &self.predicate_len,
+            &self.predicate_blob,
+            member,
+            choice,
             pred,
             &self.tag_off,
             &self.tag_len,
@@ -416,18 +448,20 @@ impl ExactStore {
             && self.forb_mask[i] == 0
             && self.forb_len[i] == 0
             && self.q_group_count[i] == 0
+            && self.predicate_len[i] == 0
             && self.req_mask[i].is_power_of_two()
     }
 
     /// The CANONICAL body signature of stored query `local` (dedup Stage A):
     /// a 64-bit hash over the query's SEMANTIC columns only — the two mask
-    /// words, the required/forbidden tails as SORTED sets, and the any-of
-    /// groups as a SORTED multiset of sorted member sets. Tags, version and
-    /// logical id are deliberately excluded (they are per-member identity, not
-    /// semantics). Two queries with equal signatures are *candidates* for
-    /// sharing; the caller must confirm with [`bodies_equal`](Self::bodies_equal)
-    /// (a hash collision must never cause false sharing — that would be a
-    /// correctness bug, not a missed optimization).
+    /// words, the required/forbidden tails as SORTED sets, the any-of groups as
+    /// a SORTED multiset of sorted proxy sets, and the canonical compound
+    /// predicate program. Tags, version and logical id are deliberately
+    /// excluded (they are per-member identity, not semantics). Two queries with
+    /// equal signatures are *candidates* for sharing; the caller must confirm
+    /// with [`bodies_equal`](Self::bodies_equal) (a hash collision must never
+    /// cause false sharing — that would be a correctness bug, not a missed
+    /// optimization).
     pub fn body_signature(&self, local: u32) -> u64 {
         let i = local as usize;
         let mut h = crate::util::fnv1a64(b"body");
@@ -461,6 +495,12 @@ impl ExactStore {
                 mix(u64::from(f));
             }
         }
+        mix(0xA5);
+        let predicate_off = self.predicate_off[i] as usize;
+        let predicate_len = self.predicate_len[i] as usize;
+        for &word in &self.predicate_blob[predicate_off..predicate_off + predicate_len] {
+            mix(u64::from(word));
+        }
         h
     }
 
@@ -484,8 +524,8 @@ impl ExactStore {
 
     /// Exact canonical-body equality between two stored rows — the collision
     /// check behind [`body_signature`](Self::body_signature). Compares the
-    /// SEMANTIC columns only (masks, sorted tails, canonicalized groups); never
-    /// tags/version/logical.
+    /// SEMANTIC columns only (masks, sorted tails, canonicalized proxy groups,
+    /// compound predicate); never tags/version/logical.
     pub fn bodies_equal(&self, a: u32, b: u32) -> bool {
         let (ia, ib) = (a as usize, b as usize);
         if self.req_mask[ia] != self.req_mask[ib]
@@ -493,6 +533,7 @@ impl ExactStore {
             || self.req_len[ia] != self.req_len[ib]
             || self.forb_len[ia] != self.forb_len[ib]
             || self.q_group_count[ia] != self.q_group_count[ib]
+            || self.predicate_len[ia] != self.predicate_len[ib]
         {
             return false;
         }
@@ -511,7 +552,15 @@ impl ExactStore {
         {
             return false;
         }
-        self.canonical_groups(ia) == self.canonical_groups(ib)
+        if self.canonical_groups(ia) != self.canonical_groups(ib) {
+            return false;
+        }
+        let predicate = |i: usize| {
+            let off = self.predicate_off[i] as usize;
+            let len = self.predicate_len[i] as usize;
+            &self.predicate_blob[off..off + len]
+        };
+        predicate(ia) == predicate(ib)
     }
 
     /// The hot-tier twin of [`is_pure_anchor`](Self::is_pure_anchor) (ADR-105):
@@ -531,6 +580,7 @@ impl ExactStore {
             && self.forb_mask[i] == 0
             && self.forb_len[i] == 0
             && self.q_group_count[i] == 0
+            && self.predicate_len[i] == 0
             && self.req_blob[self.req_off[i] as usize] == anchor
     }
 
@@ -577,6 +627,15 @@ impl ExactStore {
         dest.q_group_start.push(new_gs);
         dest.q_group_count.push(gc as u16);
 
+        // compound exact predicate
+        let po = self.predicate_off[i] as usize;
+        let pl = self.predicate_len[i] as usize;
+        let new_po = dest.predicate_blob.len() as u32;
+        dest.predicate_blob
+            .extend_from_slice(&self.predicate_blob[po..po + pl]);
+        dest.predicate_off.push(new_po);
+        dest.predicate_len.push(pl as u32);
+
         // tag column — compaction carries tags through the merge (ingestion §11)
         let to = self.tag_off[i] as usize;
         let tl = self.tag_len[i] as usize;
@@ -603,11 +662,13 @@ impl ExactStore {
     /// reads them (the lossless-cover invariant), and the stored forbidden columns are
     /// carried forward verbatim by [`copy_entry`](Self::copy_entry), never rebuilt.
     ///
-    /// The returned pair feeds `build_signatures(&Extracted { required, forbidden: vec![],
-    /// anyof }, dict)` to re-derive the cover. `mask_inverse` MUST come from the same
-    /// frozen dict the segment was built against (the engine's frozen-mask invariant), or
-    /// a set bit could map to the wrong feature. A query built before the mask was
-    /// finalized has `req_mask == 0`, so the un-masking loop is a natural no-op.
+    /// The returned pair feeds `build_signatures` through an `Extracted` whose
+    /// non-anchor semantic columns are empty; the original exact predicate is
+    /// carried separately and never rebuilt from these inputs. `mask_inverse`
+    /// MUST come from the same frozen dict the segment was built against (the
+    /// engine's frozen-mask invariant), or a set bit could map to the wrong
+    /// feature. A query built before the mask was finalized has `req_mask == 0`,
+    /// so the un-masking loop is a natural no-op.
     pub fn anchoring_inputs(
         &self,
         id: u32,
@@ -684,6 +745,15 @@ impl ExactStore {
     }
     pub fn anyof_blobs(&self) -> &[u32] {
         &self.anyof_blob
+    }
+    pub fn predicate_offs(&self) -> &[u32] {
+        &self.predicate_off
+    }
+    pub fn predicate_lens(&self) -> &[u32] {
+        &self.predicate_len
+    }
+    pub fn predicate_blobs(&self) -> &[u32] {
+        &self.predicate_blob
     }
     pub fn versions(&self) -> &[u32] {
         &self.version
@@ -797,6 +867,40 @@ impl ExactStore {
         placement: &QueryPlacement,
         source_generation: u64,
     ) -> u32 {
+        self.push_raw_placed_with_source_generation_and_predicate(
+            rmask,
+            fmask,
+            req_tail,
+            forb_tail,
+            groups,
+            &[],
+            tags,
+            version,
+            logical,
+            priority,
+            placement,
+            source_generation,
+        )
+    }
+
+    /// Raw-row reconstruction including an already-validated compound predicate
+    /// program. Used by the v9 mmap compaction path.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn push_raw_placed_with_source_generation_and_predicate(
+        &mut self,
+        rmask: u64,
+        fmask: u64,
+        req_tail: &[u32],
+        forb_tail: &[u32],
+        groups: (usize, usize, &[u32], &[u16], &[u32]),
+        predicate: &[u32],
+        tags: &[TagId],
+        version: u32,
+        logical: u64,
+        priority: i64,
+        placement: &QueryPlacement,
+        source_generation: u64,
+    ) -> u32 {
         let id = self.req_mask.len() as u32;
         self.req_mask.push(rmask);
         self.forb_mask.push(fmask);
@@ -823,6 +927,11 @@ impl ExactStore {
         }
         self.q_group_start.push(new_gs);
         self.q_group_count.push(gc as u16);
+
+        let predicate_off = self.predicate_blob.len() as u32;
+        self.predicate_blob.extend_from_slice(predicate);
+        self.predicate_off.push(predicate_off);
+        self.predicate_len.push(predicate.len() as u32);
 
         let t_off = self.tag_blob.len() as u32;
         self.tag_blob.extend_from_slice(tags);
@@ -852,6 +961,9 @@ impl ExactStore {
             + self.group_off.capacity() * size_of::<u32>()
             + self.group_len.capacity() * size_of::<u16>()
             + self.anyof_blob.capacity() * size_of::<u32>()
+            + self.predicate_off.capacity() * size_of::<u32>()
+            + self.predicate_len.capacity() * size_of::<u32>()
+            + self.predicate_blob.capacity() * size_of::<u32>()
             + self.tag_off.capacity() * size_of::<u32>()
             + self.tag_len.capacity() * size_of::<u16>()
             + self.tag_blob.capacity() * size_of::<TagId>()

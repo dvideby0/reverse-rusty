@@ -58,6 +58,8 @@ fn verify_filters_post_candidate_and_only_removes() {
         required: vec![7],
         forbidden: vec![],
         anyof: vec![],
+        anyof_predicates: vec![],
+        forbidden_conjunctions: vec![],
     };
     let mut store = ExactStore::new();
     store.push(&ex, &[10, 20], &dict, 1, 100);
@@ -77,6 +79,8 @@ fn verify_filters_post_candidate_and_only_removes() {
     // eval_batch (columnar) must agree with verify for the same predicate.
     let mut acc = [0u64; 1];
     let mut grp = [0u64; 1];
+    let mut member = [0u64; 1];
+    let mut choice = [0u64; 1];
     let lookup = |f: FeatureId| -> Option<&[u64]> {
         if f == 7 {
             Some(&[1u64]) // title 0 contains feature 7
@@ -90,6 +94,8 @@ fn verify_filters_post_candidate_and_only_removes() {
         lookup,
         &mut acc,
         &mut grp,
+        &mut member,
+        &mut choice,
         &TagPredicate::new(vec![vec![10]]),
     );
     assert_eq!(
@@ -104,6 +110,8 @@ fn verify_filters_post_candidate_and_only_removes() {
         lookup,
         &mut acc2,
         &mut grp,
+        &mut member,
+        &mut choice,
         &TagPredicate::new(vec![vec![99]]),
     );
     assert_eq!(

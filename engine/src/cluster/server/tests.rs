@@ -81,22 +81,23 @@ fn current_fp(srv: &ShardServer) -> u64 {
         .fingerprint()
 }
 
-/// Compiler lowering affects both candidate cover and placement. A legacy
-/// coordinator must be refused before its first AdoptDict can create a shard
-/// slot; otherwise a syntactically additive protobuf exchange could silently
-/// mix incompatible compiler semantics.
+/// Compiler lowering affects both candidate cover and placement. A coordinator
+/// on the immediately previous semantics must be refused before its first
+/// AdoptDict can create a shard slot; otherwise a syntactically additive
+/// protobuf exchange could silently mix incompatible compiler semantics.
 #[test]
-fn adopt_dict_refuses_legacy_compiler_semantics_before_mutation() {
+fn adopt_dict_refuses_previous_compiler_semantics_before_mutation() {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     let n = norm();
     let d = frozen_dict(&["new -used york"], &n);
     let srv = ShardServer::pending(Arc::clone(&n), EngineConfig::default());
     let mut request = adopt_req(&d);
-    request.get_mut().compiler_semantics_version = 0;
+    request.get_mut().compiler_semantics_version =
+        crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION - 1;
 
     let error = rt
         .block_on(srv.adopt_dict(request))
-        .expect_err("legacy compiler semantics must fail closed");
+        .expect_err("previous compiler semantics must fail closed");
     assert_eq!(error.code(), Code::FailedPrecondition);
     assert!(
         srv.slot(0).is_err(),

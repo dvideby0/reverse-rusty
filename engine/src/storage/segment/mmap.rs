@@ -14,8 +14,8 @@ use super::read::{
     parse_frozen_index, read_u16_slice, read_u32_slice, read_u64_slice, read_u8_slice,
 };
 use super::{
-    FrozenSlot, FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK,
-    FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE, MAGIC,
+    FrozenSlot, FORMAT_VERSION_COMPOUND_PREDICATE, FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP,
+    FORMAT_VERSION_RANK, FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE, MAGIC,
 };
 
 mod ops;
@@ -58,13 +58,13 @@ enum MmapLogicalIndex {
 pub struct MmapSegment {
     mmap: Arc<memmap2::Mmap>,
     num_queries: u32,
-    /// The file's header format version (1..=8). v4 ⇔ the segment holds class-D
+    /// The file's header format version (1..=9). v4 ⇔ the segment holds class-D
     /// always-candidates (the ADR-068 rollback fence); v5 ⇔ it holds class-H
     /// hot-tier entries (the ADR-105 fence + the hot-index section) — surfaced so
     /// the manifest commit can propagate the fence to its own version word.
     format_version: u32,
-    /// AST→compiled-query lowering semantics baked into this segment. Zero is
-    /// the pre-ADR-118 legacy lowering; current writers stamp
+    /// AST→compiled-query lowering semantics baked into this segment. Zero and
+    /// one are the pre-ADR-118 and pre-ADR-119 lowerings; current writers stamp
     /// [`CURRENT_COMPILER_SEMANTICS_VERSION`].
     compiler_semantics_version: u32,
     // ExactStore slices (offsets into the mmap, cast at load time)
@@ -110,6 +110,12 @@ pub struct MmapSegment {
     // pre-v8; accessors expose legacy generation zero in that case.
     source_generation: *const u64,
     source_generation_count: usize,
+    // Optional v9 compound exact-predicate columns.
+    predicate_off: *const u32,
+    predicate_len: *const u32,
+    predicate_blob: *const u32,
+    predicate_blob_len: usize,
+    predicate_count: usize,
     // Main index
     main_slots: *const FrozenSlot,
     main_cap: usize,
@@ -183,6 +189,9 @@ fn validate_columns(
     tag_off: &[u32],
     tag_len: &[u16],
     tag_blob_len: usize,
+    predicate_off: &[u32],
+    predicate_len: &[u32],
+    predicate_blob: &[u32],
 ) -> io::Result<()> {
     let invalid = |msg: &'static str| io::Error::new(io::ErrorKind::InvalidData, msg);
 
@@ -212,6 +221,13 @@ fn validate_columns(
     if tags_expected && (tag_off.len() < num_queries || tag_len.len() < num_queries) {
         return Err(invalid("segment tag column shorter than num_queries"));
     }
+    let predicates_expected =
+        format_version >= FORMAT_VERSION_COMPOUND_PREDICATE && num_queries > 0;
+    if predicates_expected
+        && (predicate_off.len() != num_queries || predicate_len.len() != num_queries)
+    {
+        return Err(invalid("segment compound-predicate column length mismatch"));
+    }
 
     // Each `off + len` must land inside its blob; `as usize` widens u32/u16 so the
     // add cannot wrap on a 64-bit target.
@@ -236,6 +252,17 @@ fn validate_columns(
         }
         if tags_expected && !fits(tag_off[i], tag_len[i], tag_blob_len) {
             return Err(invalid("segment tag column overruns tag_blob"));
+        }
+        if predicates_expected {
+            let start = predicate_off[i] as usize;
+            let end = start
+                .checked_add(predicate_len[i] as usize)
+                .ok_or_else(|| invalid("segment compound predicate window overflows usize"))?;
+            let program = predicate_blob
+                .get(start..end)
+                .ok_or_else(|| invalid("segment compound predicate overruns blob"))?;
+            crate::exact::validate_predicate(program)
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
         }
     }
 
@@ -310,6 +337,11 @@ impl Clone for MmapSegment {
             placement_count: self.placement_count,
             source_generation: self.source_generation,
             source_generation_count: self.source_generation_count,
+            predicate_off: self.predicate_off,
+            predicate_len: self.predicate_len,
+            predicate_blob: self.predicate_blob,
+            predicate_blob_len: self.predicate_blob_len,
+            predicate_count: self.predicate_count,
             main_slots: self.main_slots,
             main_cap: self.main_cap,
             main_mask: self.main_mask,
@@ -417,17 +449,17 @@ impl MmapSegment {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
             }
             let version = read_u32_at(data, 4)?;
-            // v1–v8 are supported (v1 reconstructs the reverse index; v1/v2 read
+            // v1–v9 are supported (v1 reconstructs the reverse index; v1/v2 read
             // back with an empty tag column; v4 is the class-D fence; v5 adds
             // the hot index; v6 priority, v7 ownership, and v8 source generation
-            // append cumulative exact-row columns).
+            // append cumulative exact-row columns; v9 adds compound predicates).
             if version == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid format version 0",
                 ));
             }
-            if version > FORMAT_VERSION_SOURCE_GENERATION {
+            if version > FORMAT_VERSION_COMPOUND_PREDICATE {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!("unsupported format version {version}"),
@@ -573,19 +605,30 @@ impl MmapSegment {
             )
         };
         let placement_count = placement_generation_s.len();
-        let source_generation_s = if format_version >= FORMAT_VERSION_SOURCE_GENERATION {
-            let (generation, _) = read_u64_slice(data_for_parse, after_placement)?;
-            if generation.len() != num_queries as usize {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "segment source-generation column length mismatch",
-                ));
-            }
-            generation
-        } else {
-            &[][..]
-        };
+        let (source_generation_s, after_source_generation) =
+            if format_version >= FORMAT_VERSION_SOURCE_GENERATION {
+                let (generation, next) = read_u64_slice(data_for_parse, after_placement)?;
+                if generation.len() != num_queries as usize {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "segment source-generation column length mismatch",
+                    ));
+                }
+                (generation, next)
+            } else {
+                (&[][..], after_placement)
+            };
         let source_generation_count = source_generation_s.len();
+        let (predicate_off_s, predicate_len_s, predicate_blob_s) =
+            if format_version >= FORMAT_VERSION_COMPOUND_PREDICATE {
+                let (off, next) = read_u32_slice(data_for_parse, after_source_generation)?;
+                let (len, next) = read_u32_slice(data_for_parse, next)?;
+                let (blob, _) = read_u32_slice(data_for_parse, next)?;
+                (off, len, blob)
+            } else {
+                (&[][..], &[][..], &[][..])
+            };
+        let predicate_count = predicate_off_s.len();
 
         // ---- Parse main index ----
         let (main_slots_s, main_blob_s, main_cap) = parse_frozen_index(data_for_parse, main_off)?;
@@ -764,6 +807,9 @@ impl MmapSegment {
             tag_off_s,
             tag_len_s,
             tag_blob_len,
+            predicate_off_s,
+            predicate_len_s,
+            predicate_blob_s,
         )?;
 
         Ok(MmapSegment {
@@ -807,6 +853,11 @@ impl MmapSegment {
             placement_count,
             source_generation: slice_ptr(source_generation_s),
             source_generation_count,
+            predicate_off: slice_ptr(predicate_off_s),
+            predicate_len: slice_ptr(predicate_len_s),
+            predicate_blob: slice_ptr(predicate_blob_s),
+            predicate_blob_len: predicate_blob_s.len(),
+            predicate_count,
             main_slots: main_slots_s.as_ptr(),
             main_cap,
             main_mask: if main_cap > 0 {
@@ -871,6 +922,9 @@ mod tests {
             tag_off,
             tag_len,
             0,
+            &[],
+            &[],
+            &[],
         )
     }
 

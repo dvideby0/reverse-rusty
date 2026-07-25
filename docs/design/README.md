@@ -77,12 +77,14 @@ source of correctness bugs in naive percolators and we forbid it structurally (t
 literally cannot see forbidden features).
 
 **Construction proof obligation.** Every signature is built only from a query's *required* features
-and *required any-of groups* (see [`matching.md`](matching.md) §1). Because each signature is a subset
-of features that must be present for the query to match, any matching title contains all of them, hence
-generates that signature. Disjunctions are covered by emitting one signature family per branch
-(mirroring the "extract from every OR branch" rule). Reverse Rusty includes a randomized **differential
-oracle** test (brute-force matcher vs. engine) asserting zero false negatives across millions of
-(title, query) pairs — this is how we *verify*, not just *assert*, the contract.
+and *required any-of groups* (see [`matching.md`](matching.md) §1). An unconditional required anchor is
+present in every match. For a disjunction, the compiler emits a cover family containing at least one
+feature that is required by each semantic branch; therefore whichever branch a matching title
+satisfies, it generates that branch's signature. A multi-token branch keeps its full conjunction for
+exact verification—the retrieval feature is only a necessary proxy (ADR-119). Reverse Rusty includes
+a randomized **differential oracle** test (brute-force matcher vs. engine) asserting zero false
+negatives across millions of (title, query) pairs — this is how we *verify*, not just *assert*, the
+contract.
 
 ---
 

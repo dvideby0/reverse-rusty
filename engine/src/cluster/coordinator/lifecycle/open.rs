@@ -303,16 +303,16 @@ impl ClusterEngine {
         // The manifest marker covers the coordinator-log tail as well as the
         // segment base. A v6 manifest reads as semantics zero, so even an empty
         // base must be rebuilt before its tail is interpreted by current code.
-        let mut needs_clause_boundary_compiler_migration = manifest.compiler_semantics_version
+        let mut needs_compiler_semantics_migration = manifest.compiler_semantics_version
             < crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION;
         for s in 0..num_shards {
             let primary_dir = shard_dir(&data_dir, s);
             let mut sc = per_shard.clone();
             sc.data_dir = Some(primary_dir.clone());
             // Coordinator recovery is the one attach path allowed to load a
-            // pre-ADR-118 segment: after every shard and the log tail are
-            // present, `open` atomically blue/green rebuilds the whole cluster
-            // before returning it to a caller.
+            // older compiler-semantics segment: after every shard and the log
+            // tail are present, `open` atomically blue/green rebuilds the whole
+            // cluster before returning it to a caller.
             let primary = LocalShard::open_segments_for_compiler_migration_with_source_file(
                 Arc::clone(&norm),
                 Arc::clone(&dict),
@@ -322,9 +322,9 @@ impl ClusterEngine {
                 manifest.next_seg_ids[s],
                 &manifest.source_files[s],
             )?;
-            let shard_needs_clause_boundary_migration = needs_clause_boundary_compiler_migration
-                || primary.needs_clause_boundary_compiler_migration();
-            needs_clause_boundary_compiler_migration |= shard_needs_clause_boundary_migration;
+            let shard_needs_compiler_migration =
+                needs_compiler_semantics_migration || primary.needs_compiler_semantics_migration();
+            needs_compiler_semantics_migration |= shard_needs_compiler_migration;
             // Re-seed replicas (rf-1) by peer recovery from the just-attached primary — replicas
             // are not in the manifest, so they are rebuilt from the durable primary on every open.
             // The log-tail replay below then feeds primary AND replicas through the composite.
@@ -334,7 +334,7 @@ impl ClusterEngine {
                 // The high-water is irrelevant here: at open there are no concurrent writes,
                 // so the primary's translog tail is empty and this peer_recover is a pure
                 // segment copy; the coordinator-log replay below repopulates all copies.
-                let recover = if shard_needs_clause_boundary_migration {
+                let recover = if shard_needs_compiler_migration {
                     crate::cluster::replica::peer_recover_for_compiler_migration
                 } else {
                     crate::cluster::replica::peer_recover
@@ -444,16 +444,15 @@ impl ClusterEngine {
                 error: format!("{} bytes", replay.skipped_bytes),
             });
         }
-        // ADR-118: legacy segments compiled positive bare terms across clause
-        // boundaries. The fabricated stream can change phrase, grader, number,
-        // or alias normalization and bake a predicate no satisfying title can
-        // reach. Rebuild from the complete, replayed live corpus, append any
-        // newly exposed features without re-ranking the frozen mask, re-place
-        // at one fresh generation, update the control document, and commit the
-        // green registry before exposing the cluster. Any
-        // incomplete source sidecar or failed checkpoint returns an error; the
-        // old manifest stays authoritative and a later restart can retry.
-        if needs_clause_boundary_compiler_migration {
+        // ADR-118/119: older segments may have lost either clause boundaries or
+        // multi-token any-of member boundaries. Rebuild from the complete,
+        // replayed live corpus, append any newly exposed features without
+        // re-ranking the frozen mask, re-place at one fresh generation, update
+        // the control document, and commit the green registry before exposing
+        // the cluster. Any incomplete source sidecar or failed checkpoint
+        // returns an error; the old manifest stays authoritative and a later
+        // restart can retry.
+        if needs_compiler_semantics_migration {
             // Do not feed a legacy tail through `replay_apply`: that funnel
             // intentionally validates the stored placement decision against
             // the current compiler, and the whole reason for this migration is

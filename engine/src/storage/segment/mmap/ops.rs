@@ -162,6 +162,18 @@ impl MmapSegment {
         self.mmap_slice(self.anyof_blob, self.anyof_blob_len)
     }
     #[inline]
+    fn predicate_off(&self) -> &[u32] {
+        self.mmap_slice(self.predicate_off, self.predicate_count)
+    }
+    #[inline]
+    fn predicate_len(&self) -> &[u32] {
+        self.mmap_slice(self.predicate_len, self.predicate_count)
+    }
+    #[inline]
+    fn predicate_blob(&self) -> &[u32] {
+        self.mmap_slice(self.predicate_blob, self.predicate_blob_len)
+    }
+    #[inline]
     fn tag_off(&self) -> &[u32] {
         self.mmap_slice(self.tag_off, self.tag_count)
     }
@@ -431,6 +443,9 @@ impl MmapSegment {
             self.group_off(),
             self.group_len(),
             self.anyof_blob(),
+            self.predicate_off(),
+            self.predicate_len(),
+            self.predicate_blob(),
             pred,
             self.tag_off(),
             self.tag_len(),
@@ -538,6 +553,7 @@ impl MmapSegment {
             && self.forb_mask()[i] == 0
             && self.forb_len()[i] == 0
             && self.q_group_count()[i] == 0
+            && self.predicate_len().get(i).copied().unwrap_or(0) == 0
             && self.req_blob()[self.req_off()[i] as usize] == anchor
     }
 
@@ -550,6 +566,7 @@ impl MmapSegment {
             && self.forb_mask()[i] == 0
             && self.forb_len()[i] == 0
             && self.q_group_count()[i] == 0
+            && self.predicate_len().get(i).copied().unwrap_or(0) == 0
             && self.req_mask()[i].is_power_of_two()
     }
 
@@ -593,6 +610,8 @@ impl MmapSegment {
         lookup: impl Fn(FeatureId) -> Option<&'a [u64]>,
         acc: &mut [u64],
         grp: &mut [u64],
+        member: &mut [u64],
+        choice: &mut [u64],
         pred: &crate::exact::TagPredicate,
     ) {
         crate::exact::eval_batch_slices(
@@ -614,6 +633,11 @@ impl MmapSegment {
             self.group_off(),
             self.group_len(),
             self.anyof_blob(),
+            self.predicate_off(),
+            self.predicate_len(),
+            self.predicate_blob(),
+            member,
+            choice,
             pred,
             self.tag_off(),
             self.tag_len(),
@@ -888,6 +912,8 @@ impl MmapSegment {
             let fl = self.forb_len()[i] as usize;
             let gs = self.q_group_start()[i] as usize;
             let gc = self.q_group_count()[i] as usize;
+            let po = self.predicate_off().get(i).copied().unwrap_or(0) as usize;
+            let pl = self.predicate_len().get(i).copied().unwrap_or(0) as usize;
             // SAFETY: the loop runs `i` over `0..n` where `n == num_queries`, and
             // `version_arr`/`logical_arr` are both `num_queries`-long arrays parsed
             // from the mmap in `open`, so both offsets are in bounds of the
@@ -909,7 +935,7 @@ impl MmapSegment {
                 stored
             };
             let placement = self.placement(i as u32).to_owned();
-            exact.push_raw_placed_with_source_generation(
+            exact.push_raw_placed_with_source_generation_and_predicate(
                 rm,
                 fm,
                 &self.req_blob()[ro..ro + rl],
@@ -921,6 +947,7 @@ impl MmapSegment {
                     self.group_len(),
                     self.anyof_blob(),
                 ),
+                &self.predicate_blob()[po..po + pl],
                 tags,
                 ver,
                 log,

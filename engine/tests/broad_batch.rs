@@ -10,7 +10,7 @@
 
 use reverse_rusty::gen::{generate, Dataset, GenConfig};
 use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy, Engine, MatchScratch};
-use reverse_rusty::Normalizer;
+use reverse_rusty::{EngineConfig, Normalizer};
 
 fn gen(seed: u64, num_queries: usize, num_titles: usize, broad_frac: f64) -> Dataset {
     generate(&GenConfig {
@@ -684,6 +684,57 @@ fn hot_multiword_alias_forced_inline() {
             assert_eq!(
                 batch, scalar,
                 "alias-forced-inline hot batch != scalar (bs={bs}, broad={include_broad})"
+            );
+        }
+    }
+}
+
+#[test]
+fn compound_anyof_members_match_identically_in_columnar_and_scalar_paths() {
+    let queries = vec![
+        (1, "(red shoe,boot)".to_string()),
+        (2, "marker -(red shoe,boot)".to_string()),
+        (3, "(red shoe,red boot)".to_string()),
+        (4, "-(red shoe,boot)".to_string()),
+    ];
+    let titles: Vec<String> = [
+        "red shoe marker",
+        "boot marker",
+        "red hat marker",
+        "shoe marker",
+        "red boot",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+    let mut engine = Engine::with_config(
+        Normalizer::default_vocab().expect("normalizer"),
+        EngineConfig {
+            accept_class_d: true,
+            ..EngineConfig::default()
+        },
+    );
+    engine.build_from_queries(&queries);
+
+    let expected = vec![vec![1, 3], vec![1], vec![2, 4], vec![2, 4], vec![1, 3]];
+    let scalar = scalar_baseline(&engine, &titles, true);
+    assert_eq!(scalar, expected);
+    for materialize in [false, true] {
+        for prefilter in [false, true] {
+            let columnar = batch_result(
+                &engine,
+                &titles,
+                BatchMatchOptions {
+                    include_broad: true,
+                    broad_batch_size: 64,
+                    broad_strategy: BroadStrategy::Columnar,
+                    broad_materialize: materialize,
+                    broad_prefilter: prefilter,
+                },
+            );
+            assert_eq!(
+                columnar, expected,
+                "compound predicate drift (materialize={materialize}, prefilter={prefilter})"
             );
         }
     }

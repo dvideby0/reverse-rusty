@@ -66,13 +66,9 @@ impl Brute {
         let mut sc = reverse_rusty::normalize::NormScratch::new();
         self.norm
             .match_features(title, &self.dict, lc, &mut sc, feats);
-        let present = |f: u32| feats.binary_search(&f).is_ok();
         let mut out = HashSet::new();
         for (logical, ex) in &self.queries {
-            if ex.required.iter().all(|&f| present(f))
-                && !ex.forbidden.iter().any(|&f| present(f))
-                && ex.anyof.iter().all(|g| g.iter().any(|&f| present(f)))
-            {
+            if ex.matches_features(feats, feats) {
                 out.insert(*logical);
             }
         }

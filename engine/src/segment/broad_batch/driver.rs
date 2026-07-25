@@ -49,6 +49,10 @@ pub(in crate::segment) struct BroadBatchScratch {
     acc: Vec<u64>,
     /// Per-any-of-group OR accumulator (`words` u64 words).
     grp: Vec<u64>,
+    /// Per-compound-member AND accumulator.
+    member: Vec<u64>,
+    /// Per-compound-requirement alternatives OR accumulator.
+    choice: Vec<u64>,
 }
 
 impl BroadBatchScratch {
@@ -64,6 +68,8 @@ impl BroadBatchScratch {
             non_pure: Vec::new(),
             acc: Vec::new(),
             grp: Vec::new(),
+            member: Vec::new(),
+            choice: Vec::new(),
         }
     }
 
@@ -94,6 +100,12 @@ impl BroadBatchScratch {
         }
         if self.grp.len() < words {
             self.grp.resize(words, 0);
+        }
+        if self.member.len() < words {
+            self.member.resize(words, 0);
+        }
+        if self.choice.len() < words {
+            self.choice.resize(words, 0);
         }
     }
 }
@@ -321,9 +333,13 @@ pub(super) fn match_batch_chunk<
         non_pure,
         acc,
         grp,
+        member,
+        choice,
     } = bs;
     let acc: &mut [u64] = &mut acc[..words];
     let grp: &mut [u64] = &mut grp[..words];
+    let member: &mut [u64] = &mut member[..words];
+    let choice: &mut [u64] = &mut choice[..words];
     let materialize = opts.broad_materialize;
     let prefilter = opts.broad_prefilter;
 
@@ -350,6 +366,8 @@ pub(super) fn match_batch_chunk<
                 non_pure,
                 acc,
                 grp,
+                member,
+                choice,
                 collector,
                 materialize,
                 prefilter,
@@ -375,6 +393,8 @@ pub(super) fn match_batch_chunk<
                 non_pure,
                 acc,
                 grp,
+                member,
+                choice,
                 collector,
                 materialize,
                 prefilter,
@@ -407,6 +427,8 @@ pub(super) fn match_batch_chunk<
                 non_pure,
                 acc,
                 grp,
+                member,
+                choice,
                 collector,
                 materialize,
                 prefilter,
@@ -432,6 +454,8 @@ pub(super) fn match_batch_chunk<
                 non_pure,
                 acc,
                 grp,
+                member,
+                choice,
                 collector,
                 materialize,
                 prefilter,
@@ -490,6 +514,8 @@ fn eval_base_lane<S: BatchMatchSink, P: BatchEmissionPolicy>(
     non_pure: &mut Vec<u32>,
     acc: &mut [u64],
     grp: &mut [u64],
+    member: &mut [u64],
+    choice: &mut [u64],
     collector: &mut S,
     materialize: bool,
     prefilter: bool,
@@ -513,6 +539,8 @@ fn eval_base_lane<S: BatchMatchSink, P: BatchEmissionPolicy>(
             non_pure,
             acc,
             grp,
+            member,
+            choice,
             collector,
             materialize,
             prefilter,
@@ -535,6 +563,8 @@ fn eval_base_lane<S: BatchMatchSink, P: BatchEmissionPolicy>(
             non_pure,
             acc,
             grp,
+            member,
+            choice,
             collector,
             materialize,
             prefilter,
