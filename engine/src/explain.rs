@@ -144,13 +144,50 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
     s
 }
 
+/// Mirror the matcher's lane-specific title signatures exactly. Positioned
+/// graph-only labels widen only arity-1 main probes; pair, hot, and broad
+/// signatures remain derived from the flat positive view.
+fn is_candidate(cq: &CompiledQuery, pos: &[u32], probe: &[u32], dict: &Dict) -> bool {
+    let mut main_sigs = std::collections::HashSet::new();
+    for &feature in probe {
+        main_sigs.insert(sig_key(&[feature]));
+    }
+    for &hot in pos {
+        if is_hot(dict, hot) {
+            for &other in pos {
+                if other != hot {
+                    let (a, b) = if hot < other {
+                        (hot, other)
+                    } else {
+                        (other, hot)
+                    };
+                    main_sigs.insert(sig_key(&[a, b]));
+                }
+            }
+        }
+    }
+
+    let flat_sigs: std::collections::HashSet<_> =
+        pos.iter().map(|&feature| sig_key(&[feature])).collect();
+    cq.main_sigs
+        .iter()
+        .any(|signature| main_sigs.contains(signature))
+        || cq
+            .hot_sigs
+            .iter()
+            .any(|signature| flat_sigs.contains(signature))
+        || cq.broad_sigs.iter().any(|signature| {
+            *signature == crate::util::universal_sig() || flat_sigs.contains(signature)
+        })
+}
+
 /// Explain a single title against a single compiled query.
 pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &Dict) -> String {
     let mut lc = String::new();
     let mut sc = crate::normalize::NormScratch::new();
     // ADR-061 semantic views plus ADR-120's candidate-only probe: `pos` (overlapping flat
-    // `P(T)`) drives required + any-of, `neg` (canonical `N(T)`) drives forbidden, and `probe`
-    // drives retrieval. No alias or positioned labels ⇒ all applicable views coincide.
+    // `P(T)`) drives required + any-of and every non-main-arity-1 probe, `neg` (canonical
+    // `N(T)`) drives forbidden, and `probe` widens main arity-1 retrieval only.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
     let mut probe = Vec::new();
     let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
@@ -170,29 +207,7 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
     s.push_str(&format!("title: {title:?}\n"));
     s.push_str(&format!("  title features: {}\n", names(&pos, dict)));
 
-    // would any signature retrieve this query? (retrieval is from the positive superset)
-    let mut title_sigs = std::collections::HashSet::new();
-    for &f in &probe {
-        title_sigs.insert(sig_key(&[f]));
-    }
-    for &h in &probe {
-        if is_hot(dict, h) {
-            for &o in &probe {
-                if o != h {
-                    let (a, b) = if h < o { (h, o) } else { (o, h) };
-                    title_sigs.insert(sig_key(&[a, b]));
-                }
-            }
-        }
-    }
-    // Every title implicitly generates the UNIVERSAL signature (ADR-068) — the broad
-    // matcher probes it once per segment, which is how a stored class-D
-    // always-candidate is retrieved. Mirror it here so explain can't report
-    // `candidate: false` for a query the matcher reaches.
-    title_sigs.insert(crate::util::universal_sig());
-    let retrieved = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.broad_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.hot_sigs.iter().any(|s| title_sigs.contains(s));
+    let retrieved = is_candidate(cq, &pos, &probe, dict);
     s.push_str(&format!(
         "  candidate? {retrieved} (title generates a signature in this query's cover)\n"
     ));
@@ -270,8 +285,9 @@ pub fn explain_match_structured(
 ) -> ExplainDetail {
     let mut lc = String::new();
     let mut sc = crate::normalize::NormScratch::new();
-    // ADR-061 semantic views plus ADR-120's candidate-only retrieval probe, matching the verifier.
-    // `pos` drives required + any-of, `neg` drives forbidden, and `probe` drives signatures.
+    // ADR-061 semantic views plus ADR-120's candidate-only retrieval probe. `pos` drives
+    // required + any-of and every non-main-arity-1 probe, `neg` drives forbidden, and
+    // `probe` widens main arity-1 signatures only.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
     let mut probe = Vec::new();
     let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
@@ -289,26 +305,7 @@ pub fn explain_match_structured(
 
     let title_features: Vec<String> = pos.iter().map(|&id| dict.name(id).to_string()).collect();
 
-    let mut title_sigs = std::collections::HashSet::new();
-    for &f in &probe {
-        title_sigs.insert(sig_key(&[f]));
-    }
-    for &h in &probe {
-        if is_hot(dict, h) {
-            for &o in &probe {
-                if o != h {
-                    let (a, b) = if h < o { (h, o) } else { (o, h) };
-                    title_sigs.insert(sig_key(&[a, b]));
-                }
-            }
-        }
-    }
-    // Every title implicitly generates the UNIVERSAL signature (ADR-068) — see
-    // `explain_match`.
-    title_sigs.insert(crate::util::universal_sig());
-    let candidate = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.broad_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.hot_sigs.iter().any(|s| title_sigs.contains(s));
+    let candidate = is_candidate(cq, &pos, &probe, dict);
 
     let in_pos = |f: u32| pos.binary_search(&f).is_ok();
     let in_neg = |f: u32| neg.binary_search(&f).is_ok();

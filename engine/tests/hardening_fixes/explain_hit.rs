@@ -127,6 +127,38 @@ fn explain_hit_reports_quoted_graphs_and_adjacency_failures() {
 }
 
 #[test]
+fn explain_candidate_uses_graph_labels_only_for_main_arity_one() {
+    let mut builder = reverse_rusty::Normalizer::builder();
+    builder.add_grade_word("gem");
+    builder.add_synonym(
+        "stone",
+        "term:gem",
+        reverse_rusty::dict::FeatureKind::Generic,
+    );
+    let mut engine = Engine::new(builder.build().expect("normalizer"));
+    engine.build_from_queries(&[(1, "\"red shoe\" stone common".to_string())]);
+
+    let title = "red shoe gem common";
+    assert!(
+        match_ids(&engine, title).is_empty(),
+        "the graph-only raw label for the grade word must not enter a class-B pair probe"
+    );
+    let detail = engine.explain_hit(1, title).expect("explain detail");
+    assert!(
+        !detail.candidate,
+        "explain must synthesize the same lane-specific signatures as the matcher"
+    );
+    assert!(
+        detail
+            .failures
+            .iter()
+            .any(|failure| failure == "missing required term:gem"),
+        "got: {:?}",
+        detail.failures
+    );
+}
+
+#[test]
 fn explain_hit_matches_phrase_verifier_fail_open_guards() {
     use reverse_rusty::dict::FeatureKind;
 
