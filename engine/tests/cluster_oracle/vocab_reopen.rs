@@ -53,6 +53,80 @@ fn downgrade_cluster_manifest_to_v6(
     std::fs::write(path, bytes).expect("write v6 manifest");
 }
 
+fn visibility_token(mut n: usize) -> String {
+    let mut suffix = [b'a'; 3];
+    for byte in suffix.iter_mut().rev() {
+        *byte += (n % 26) as u8;
+        n /= 26;
+    }
+    format!(
+        "maskword{}",
+        std::str::from_utf8(&suffix).expect("ASCII suffix")
+    )
+}
+
+#[test]
+fn compiler_migration_preserves_the_frozen_mask_and_default_visibility() {
+    // A compiler-only migration must not re-rank the persisted top-64 mask from
+    // the post-delete live corpus. If it did, the rank-65 target below would
+    // enter the mask after one hotter term is deleted and move from default-
+    // visible class A to opt-in class C during reopen.
+    let dir = std::env::temp_dir().join(format!("rr-adr118-frozen-mask-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = ClusterConfig {
+        num_shards: 1,
+        include_broad: true,
+        data_dir: Some(dir.clone()),
+        ..ClusterConfig::default()
+    };
+    let mut queries = Vec::new();
+    for i in 0..64 {
+        queries.push(((i * 2 + 1) as u64, visibility_token(i)));
+        queries.push(((i * 2 + 2) as u64, visibility_token(i)));
+    }
+    let target_id = 1_000;
+    let target = visibility_token(64);
+    queries.push((target_id, target.clone()));
+
+    let cluster = ClusterEngine::build(vocab(), &cfg, &queries).expect("durable build");
+    assert!(
+        cluster
+            .percolate_with_broad(&target, false)
+            .expect("default-visible read")
+            .contains(&target_id),
+        "the rank-65 target starts outside the mask and default-visible"
+    );
+    cluster.remove_query(1).expect("remove first hot row");
+    cluster.remove_query(2).expect("remove second hot row");
+    cluster.checkpoint().expect("checkpoint the deletes");
+    assert!(
+        cluster
+            .percolate_with_broad(&target, false)
+            .expect("post-delete read")
+            .contains(&target_id),
+        "deletes do not mutate the live frozen mask"
+    );
+    drop(cluster);
+
+    let manifest = reverse_rusty::storage::read_cluster_manifest(&dir.join("cluster_manifest.bin"))
+        .expect("cluster manifest");
+    stamp_cluster_segments_as_legacy(&dir, &manifest);
+    let reopened = ClusterEngine::open(
+        &dir,
+        reverse_rusty::normalize::Normalizer::default_vocab().expect("normalizer"),
+        Some(&cfg),
+    )
+    .expect("compiler-migrating reopen");
+    assert!(
+        reopened
+            .percolate_with_broad(&target, false)
+            .expect("post-migration default-visible read")
+            .contains(&target_id),
+        "a compiler-only migration must not move an unrelated query behind include_broad"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn build_with_vocab_persists_the_vocab_from_the_first_durable_commit() {
     // Review finding: the durable `build_with_vocab` path (vocab_data written by

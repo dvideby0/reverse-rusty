@@ -198,9 +198,11 @@ impl ClusterEngine {
 
     /// Rebuild from an already-folded logical corpus. Recovery uses this seam to
     /// fold a legacy coordinator-log tail without first validating its stale
-    /// placement decisions. `force_remint_dict` is true for compiler-semantics
+    /// placement decisions. `append_missing_features` is true for compiler-semantics
     /// migrations because splitting the legacy clause stream can expose feature
-    /// names that the old frozen dictionary never interned.
+    /// names that the old frozen dictionary never interned. That path appends only:
+    /// existing frequencies and top-64 mask bits stay frozen so a recovery-only
+    /// compiler rewrite cannot change an unrelated query's visibility.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn rebuild_from_corpus(
         &mut self,
@@ -209,7 +211,7 @@ impl ClusterEngine {
         new_ring: HashRing,
         new_vocab: Option<Vocab>,
         new_generation: PlacementGeneration,
-        force_remint_dict: bool,
+        append_missing_features: bool,
     ) -> Result<usize, ShardError> {
         // Pass A — produce the (dict, extracted) the rebuild re-places. Two paths, keyed off
         // whether the NORMALIZER changed (an `Arc::ptr_eq` against the current one):
@@ -223,12 +225,17 @@ impl ClusterEngine {
         //    state). `extract_readonly` resolves each query against it, auto-expanding installed
         //    equivalences (ADR-054) and resolving post-freeze terms to their stable synthetic ids
         //    (ADR-046) — so placement is exactly the live cluster's, just re-distributed.
+        //  - **Compiler semantics changed, normalizer unchanged:** append newly exposed
+        //    features to the frozen dict, preserving every existing frequency and mask bit.
+        //    Re-ranking the top-64 mask could move an unrelated A query behind class C's
+        //    `include_broad` boundary merely because deletes preceded the recovery.
         //  - **Normalizer changed (a `set_vocab`):** re-mint the dict over the live corpus under
         //    `new_norm` (interning + frequencies + hot-mask), exactly as `build`, then resolve +
         //    expand the new vocab's equivalence groups onto it.
         let mut lc = String::new();
         let mut extracted: Vec<RebuildExtractedQuery> = Vec::with_capacity(live.len());
-        let new_dict = if !force_remint_dict && Arc::ptr_eq(&new_norm, &self.norm) {
+        let same_normalizer = Arc::ptr_eq(&new_norm, &self.norm);
+        let new_dict = if same_normalizer && !append_missing_features {
             let dict = Arc::clone(&self.dict);
             for (logical, text, version, source_generation, raw_tags, tag_ids, rank, _placement) in
                 live
@@ -255,6 +262,73 @@ impl ClusterEngine {
                 ));
             }
             dict
+        } else if same_normalizer {
+            // ADR-118 migration is a compiler rewrite, not a vocabulary change.
+            // Discover component features exposed by splitting the legacy joint
+            // stream in an append-only clone. Existing IDs, frequencies, and mask
+            // bits are durability semantics: changing the top-64 membership can
+            // change class C visibility. Newly appended features keep the counts
+            // observed in this complete live corpus and receive no mask bit.
+            let mut dict = self.dict.as_ref().clone();
+            let old_len = dict.len();
+            let old_freqs: Vec<u32> = (0..old_len)
+                .map(|id| dict.freq(id as crate::dict::FeatureId))
+                .collect();
+            let old_masks: Vec<u8> = (0..old_len)
+                .map(|id| dict.mask_bit(id as crate::dict::FeatureId))
+                .collect();
+
+            for row in &live {
+                let logical = row.0;
+                let text = &row.1;
+                let ast = crate::dsl::parse_for_recovery(text).map_err(|error| {
+                    ShardError::Config(format!("stored query {logical} cannot be rebuilt: {error}"))
+                })?;
+                let ex = extract(&ast, &new_norm, &mut dict, &mut lc);
+                if let Some(width) = ex.column_overflow() {
+                    return Err(ShardError::Config(format!(
+                        "stored query {logical} exceeds the exact-store column limit \
+                         ({width} features) during rebuild"
+                    )));
+                }
+            }
+            for id in 0..old_len {
+                dict.set_freq_and_mask(id as crate::dict::FeatureId, old_freqs[id], old_masks[id]);
+            }
+
+            // Newly interned equivalence members must be resolved against their
+            // dense IDs before the final read-only materialization pass.
+            if let Some(vocab) = new_vocab.as_ref().or(self.vocab.as_deref()) {
+                let equiv = vocab.resolve_equivalences(&new_norm, &dict);
+                dict.set_equivalences(equiv);
+            }
+
+            lc.clear();
+            for (logical, text, version, source_generation, raw_tags, tag_ids, rank, _placement) in
+                live
+            {
+                let ast = crate::dsl::parse_for_recovery(&text).map_err(|error| {
+                    ShardError::Config(format!("stored query {logical} cannot be rebuilt: {error}"))
+                })?;
+                let ex = extract_readonly(&ast, &new_norm, &dict, &mut lc);
+                if let Some(width) = ex.column_overflow() {
+                    return Err(ShardError::Config(format!(
+                        "stored query {logical} exceeds the exact-store column limit \
+                         ({width} features) during rebuild"
+                    )));
+                }
+                extracted.push((
+                    logical,
+                    ex,
+                    text,
+                    version,
+                    source_generation,
+                    raw_tags,
+                    tag_ids,
+                    rank,
+                ));
+            }
+            Arc::new(dict)
         } else {
             let mut dict = Dict::new();
             for (logical, text, version, source_generation, raw_tags, tag_ids, rank, _placement) in
@@ -364,7 +438,7 @@ impl ClusterEngine {
             }
         }
 
-        // Construct fresh shards sharing the new norm + re-minted dict + unchanged tag space,
+        // Construct fresh shards sharing the new norm + rebuilt dict + unchanged tag space,
         // `replication_factor` copies per position, ingesting each bucket into EVERY copy
         // (identical op stream ⇒ copies set-equal, as in `build`). Two cases by position:
         //

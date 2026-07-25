@@ -447,9 +447,10 @@ impl ClusterEngine {
         // ADR-118: legacy segments compiled positive bare terms across clause
         // boundaries. The fabricated stream can change phrase, grader, number,
         // or alias normalization and bake a predicate no satisfying title can
-        // reach. Rebuild from the complete, replayed live corpus, re-mint the
-        // dict, re-place at one fresh generation, update the control document,
-        // and commit the green registry before exposing the cluster. Any
+        // reach. Rebuild from the complete, replayed live corpus, append any
+        // newly exposed features without re-ranking the frozen mask, re-place
+        // at one fresh generation, update the control document, and commit the
+        // green registry before exposing the cluster. Any
         // incomplete source sidecar or failed checkpoint returns an error; the
         // old manifest stays authoritative and a later restart can retry.
         if needs_clause_boundary_compiler_migration {

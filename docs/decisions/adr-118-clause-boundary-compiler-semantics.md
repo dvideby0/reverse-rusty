@@ -53,12 +53,15 @@
     efficient normal path;
   - durable `ClusterEngine::open` temporarily attaches committed local segments inside the recovery
     transaction, folds the coordinator-log tail by logical ID without first interpreting its legacy
-    placement, performs the existing blue/green source rebuild under the same normalizer while
-    re-minting the dict, re-places the resulting corpus exactly once at one new generation, bumps the
-    control document, and checkpoints the new registry atomically before returning. Replaying the
-    tail through the current placement validator first would reject a valid legacy write whose
-    clause-boundary fix changes its target. Raw tags in that already-acknowledged tail are resolved
-    against the persisted frozen tag dictionary before the rebuild, marking them as stored
+    placement, and performs the blue/green source rebuild under the same normalizer. The compiler
+    migration extends the persisted feature dictionary only with newly exposed component features;
+    every existing frequency and top-64 mask bit remains frozen. Re-ranking from the post-delete live
+    corpus could otherwise move an unrelated default-visible class-A query behind class C's
+    `include_broad` boundary. The rebuild re-places the corpus exactly once at one new generation,
+    bumps the control document, and checkpoints the new registry atomically before returning.
+    Replaying the tail through the current placement validator first would reject a valid legacy write
+    whose clause-boundary fix changes its target. Raw tags in that already-acknowledged tail are
+    resolved against the persisted frozen tag dictionary before the rebuild, marking them as stored
     carry-through rather than fresh ingestion. Tightening `max_tags` therefore cannot make migration
     omit a previously accepted tagged row;
   - cluster manifest v7 records the compiler-semantics stamp independently of its segment registry,
@@ -104,8 +107,9 @@
   attempts to reverse-engineer source clauses from a compiled integer plan. Standalone and
   coordinator recovery retain their old commit point until the complete replacement is durable, so
   every crash point selects either the old base plus its log tail and source corpus or the new base
-  plus its generation-selected source corpus—never a partial mixture. Ownerless, shard-local, and
-  mixed-wire paths fail closed instead of guessing at placement.
+  plus its generation-selected source corpus—never a partial mixture. Compiler-only rebuilds also
+  retain the old mask/visibility boundary while appending missing dense features. Ownerless,
+  shard-local, and mixed-wire paths fail closed instead of guessing at placement.
 
 - **Proof.** The regression matrix covers boundaries formed by a negated term, negated phrase,
   negated any-of, positive phrase, and positive any-of through both mutable build and read-only
@@ -118,11 +122,12 @@
   failure. Cluster coverage proves an RF=2 durable reopen rebuilds, bumps placement generation
   exactly once, and reopens idempotently; folds a legacy placement-divergent tail before validation;
   migrates an empty base with a tail; preserves a tagged tail accepted above the reopened
-  `max_tags`; and preserves the old source corpus across a failed manifest commit so the next open
-  can retry. Durable-shard tests prove self-restart refuses both a legacy segment base and an empty
-  legacy base with an unsealed translog tail without advancing `shard.ckpt`, and replays an
-  acknowledged query above today's default clause limit. Distributed units pin fail-closed
-  compiler-semantics handshakes and manifest refusal before target-file processing.
+  `max_tags`; preserves a rank-65 query's default visibility after deletes by retaining the frozen
+  mask; and preserves the old source corpus across a failed manifest commit so the next open can
+  retry. Durable-shard tests prove self-restart refuses both a legacy segment base and an empty legacy
+  base with an unsealed translog tail without advancing `shard.ckpt`, and replays an acknowledged
+  query above today's default clause limit. Distributed units pin fail-closed compiler-semantics
+  handshakes and manifest refusal before target-file processing.
 
 - **Oracle follow-up.** ADR-087 remains code-independent, but this finding proved code independence
   is not the same as semantic independence when both implementations translate the same ambiguous

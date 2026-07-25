@@ -59,8 +59,10 @@ pre-upgrade backup:
   before its reset. Cluster manifest v7 and shard checkpoint v2 stamp semantics independently of
   segment presence, so an empty base with a legacy coordinator/translog tail cannot evade the
   fence. Cluster v7 also atomically selects generation-named source sidecars with its segment
-  registry; a failed rebuild leaves the prior corpus intact for retry. Unknown future compiler
-  semantics are unsupported and abort open.
+  registry; a failed rebuild leaves the prior corpus intact for retry. Compiler-only migration
+  appends newly exposed features but preserves existing frequencies and the frozen top-64 mask, so
+  recovery cannot move an unrelated default-visible query behind `include_broad`. Unknown future
+  compiler semantics are unsupported and abort open.
 - **ADR-118 mesh fence:** `DictFingerprint`, `AdoptDict`, `AddShard`, and recovery manifests attest
   compiler semantics. The field is protobuf-additive but semantically mandatory: an old peer sends
   zero and is rejected before adoption or recovery. This release therefore requires a
