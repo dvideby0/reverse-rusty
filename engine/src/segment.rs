@@ -441,6 +441,9 @@ pub struct EngineSnapshot {
     tag_dict: Arc<TagDict>,
     segments: Vec<Arc<BaseSegment>>,
     memtable: Arc<Segment>,
+    /// Aggregate read capability captured at publication. Checking this once
+    /// here avoids walking every base segment for every matched title.
+    has_phrase_predicates: bool,
     query_store: Arc<SourceStore>,
     /// Vocabulary at snapshot time (shared via `Arc`), so vocab reads can use the
     /// lock-free snapshot instead of locking the engine (ADR-016).
@@ -735,6 +738,9 @@ pub struct Engine {
     /// mutable hot delta — insert_live / tombstone land here. `Arc` + CoW: a
     /// write clones only the (bounded) memtable, never the base segments.
     memtable: Arc<Segment>,
+    /// Number of segment states (including the memtable) with a live phrase row.
+    /// Updated on writes and reduced to an O(1) capability bit in snapshots.
+    live_phrase_segments: usize,
     rejected_parse: u64,   // queries dropped because the DSL failed to parse
     rejected_class_d: u64, // class-D queries rejected at compile (not stored)
     /// Observe-first hot-tier telemetry (the Broad-Query Cost Program): accepted

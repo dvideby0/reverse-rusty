@@ -89,9 +89,10 @@
   The public positionless `ExactStore::eval_batch` / `eval_batch_slices` APIs return
   `BatchEvalError::PositionedPredicate` and clear their accumulator for program v2, so a caller that
   bypasses the snapshot driver cannot mistake flattened presence bits for phrase truth.
-  The snapshot capability gate counts only live phrase rows in memory and mmap segments, so deleting
-  the last quoted query immediately restores the phrase-free/columnar path without awaiting
-  compaction.
+  Each segment counts only live phrase rows, and the engine refreshes their aggregate when writes
+  change row liveness or replace segment state. Snapshots capture that aggregate, making the
+  per-title capability gate O(1); deleting the last quoted query immediately restores the
+  phrase-free/columnar path without awaiting compaction.
 
 - **Decision — bounded complexity fails open.** Graph intersection admits at most 65,536 visited
   `(query-position, title-position)` states and 65,536 charged query/title arc inspections per

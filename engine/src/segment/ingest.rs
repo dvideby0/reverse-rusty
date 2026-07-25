@@ -464,6 +464,7 @@ impl Engine {
         );
         if let Some(added) = outcome {
             self.record_compiled(&added);
+            self.refresh_phrase_capability();
             self.query_store.insert_document_with_generation(
                 logical,
                 text.to_string(),
@@ -701,6 +702,7 @@ impl Engine {
                 Arc::make_mut(seg).tombstone(local);
             }
         }
+        self.refresh_phrase_capability();
         self.query_store.insert_document_with_generation(
             logical,
             text.to_string(),
@@ -771,6 +773,7 @@ impl Engine {
             }
         }
         Arc::make_mut(&mut self.memtable).tombstone(local_id);
+        self.refresh_phrase_capability();
         Ok(())
     }
 
@@ -788,6 +791,7 @@ impl Engine {
         if let Some(seg) = self.segments.get_mut(seg_idx) {
             Arc::make_mut(seg).tombstone(local_id);
         }
+        self.refresh_phrase_capability();
         Ok(())
     }
 
@@ -854,6 +858,7 @@ impl Engine {
 
         if count > 0 {
             self.query_store.remove(logical_id);
+            self.refresh_phrase_capability();
         }
         count
     }
@@ -1215,6 +1220,7 @@ impl Engine {
             );
         if let Some(added) = outcome {
             self.record_compiled(&added);
+            self.refresh_phrase_capability();
             self.query_store.insert_document_with_generation(
                 logical,
                 text.to_string(),
@@ -1281,6 +1287,7 @@ impl Engine {
                 )
             {
                 self.record_compiled(&added);
+                self.refresh_phrase_capability();
                 self.query_store.insert_document_with_generation(
                     logical,
                     text.to_string(),
@@ -1299,6 +1306,7 @@ impl Engine {
         } else if let Some(seg) = self.segments.get_mut(seg_idx as usize) {
             Arc::make_mut(seg).tombstone(local_id);
         }
+        self.refresh_phrase_capability();
     }
 }
 

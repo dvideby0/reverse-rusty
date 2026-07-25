@@ -718,15 +718,16 @@ impl MmapSegment {
         emission: P,
     ) {
         let has_filter = self.filter_num_blocks > 0;
-        // Retrieval uses the candidate-only positive probe view; exact verify
-        // applies the flat semantic views plus positioned graphs.
-        let feats = view.probe;
+        // Graph-only phrase proxies are arity-1 MAIN signatures. The pair,
+        // hot, and broad lanes are planned only from flat positive semantics.
+        let probe_feats = view.probe;
+        let feats = view.pos;
         if collector.should_stop() {
             return;
         }
 
         // arity-1 signatures
-        for &f in feats {
+        for &f in probe_feats {
             if collector.should_stop() {
                 return;
             }

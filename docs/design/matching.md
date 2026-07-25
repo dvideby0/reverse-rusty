@@ -177,14 +177,18 @@ even when no alias is active. Required query-graph
 labels are equivalence-widened and checked against `P(T)`; forbidden labels remain canonical and are
 checked against `N(T)`. Every required graph label enters a **candidate-only** proxy family: every
 satisfying path has a labeled edge, but the proxy never enters the flat exact any-of columns and
-exact connected-path intersection decides truth. Proxy labels contribute query-document frequency
+exact connected-path intersection decides truth. These graph-only proxies are probed solely as
+arity-1 main-lane signatures; pair, hot, and broad probes remain keyed to flat `P(T)` so positioned
+analysis cannot manufacture unrelated lane work. Proxy labels contribute query-document frequency
 once per distinct label per query—even when several quoted/bare clauses share it—so clause repetition
 cannot perturb the frozen top-64 visibility boundary. Phrase covers stay on the default-visible main
 lane; every cluster cover that uses a phrase proxy is replicated rather than selectively placed by
 graph-only labels. Graph work is capped at 65,536 visited position pairs and 65,536 charged arc
 inspections, and positioned analysis bounds same-grader starts. Exhaustion or an incomplete bounded
 graph fails open by polarity (required does not reject; forbidden does not trip), so the safety valve
-can add an over-match but never a false negative. Explain mirrors the same bounded outcome.
+can add an over-match but never a false negative. Explain mirrors the same bounded outcome. Each
+segment maintains a live phrase-row count; the engine refreshes an aggregate after mutations and
+captures it in each snapshot, keeping the phrase-capability decision O(1) per title.
 
 ---
 

@@ -485,8 +485,8 @@ fn graph_only_probe_labels_do_not_widen_bare_term_semantics() {
     engine.build_from_queries(&[(1, "stone".to_string()), (2, "\"red shoe\"".to_string())]);
 
     assert!(
-        matched_with_broad(&engine, "gem", false).is_empty(),
-        "enabling positioned matching must not make graph-hole labels satisfy ordinary rows"
+        matched(&engine, "gem").is_empty(),
+        "graph-only proxy labels must not widen ordinary rows or unrelated broad/hot probes"
     );
 }
 

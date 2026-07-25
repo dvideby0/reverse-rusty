@@ -80,6 +80,8 @@ pub(in crate::segment) struct MatchView<'a> {
     pub(in crate::segment) dict: &'a Dict,
     pub(in crate::segment) segments: &'a [Arc<BaseSegment>],
     pub(in crate::segment) memtable: &'a Segment,
+    /// Cached aggregate capability from the owning engine/snapshot.
+    pub(in crate::segment) has_phrase_predicates: bool,
     /// Request-scoped tag filter (ADR-049). `TagPredicate::empty()` ⇒ no filtering, so
     /// every existing (unfiltered) caller is byte-identical to before tags.
     pub(in crate::segment) pred: &'a crate::exact::TagPredicate,
@@ -125,11 +127,7 @@ impl<'a, P: crate::ownership::EmissionPolicy> ExhaustiveDeduper<'a, P> {
         let mut probe = Vec::new();
         let mut neg_arcs = Vec::new();
         let mut pos_arcs = Vec::new();
-        let has_positioned = snapshot.memtable.has_phrase_predicates()
-            || snapshot
-                .segments
-                .iter()
-                .any(|segment| segment.has_phrase_predicates());
+        let has_positioned = snapshot.has_phrase_predicates;
         let dual = snapshot.norm.has_multiword_aliases() || has_positioned;
         let positioned = if has_positioned {
             let (positions, pos_graph_complete) = snapshot.norm.match_phrase_views(
@@ -302,11 +300,7 @@ fn title_mask(dict: &Dict, feats: &[crate::dict::FeatureId]) -> u64 {
 impl MatchView<'_> {
     #[inline]
     pub(in crate::segment) fn has_phrase_predicates(&self) -> bool {
-        self.memtable.has_phrase_predicates()
-            || self
-                .segments
-                .iter()
-                .any(|segment| segment.has_phrase_predicates())
+        self.has_phrase_predicates
     }
 
     /// THE HOT PATH. Probe every base segment plus the memtable, union the
@@ -911,6 +905,7 @@ impl EngineSnapshot {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                has_phrase_predicates: self.has_phrase_predicates,
                 pred,
             }
             .match_title(title, s, out, include_broad, NoDeadline),
@@ -934,6 +929,7 @@ impl EngineSnapshot {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                has_phrase_predicates: self.has_phrase_predicates,
                 pred,
             }
             .match_title_with_policy(
@@ -967,6 +963,7 @@ impl EngineSnapshot {
             dict: &self.dict,
             segments: &self.segments,
             memtable: &self.memtable,
+            has_phrase_predicates: self.has_phrase_predicates,
             pred,
         };
         match deadline {
@@ -1070,6 +1067,7 @@ impl EngineSnapshot {
             dict: &self.dict,
             segments: &self.segments,
             memtable: &self.memtable,
+            has_phrase_predicates: self.has_phrase_predicates,
             pred,
         };
         let mut stats = match deadline {
@@ -1358,6 +1356,7 @@ impl EngineSnapshot {
             dict: &self.dict,
             segments: &self.segments,
             memtable: &self.memtable,
+            has_phrase_predicates: self.has_phrase_predicates,
             pred,
         };
         let include_broad = options.query_scope == crate::result::QueryScope::WithBroad;
@@ -1470,6 +1469,7 @@ impl EngineSnapshot {
             dict: &self.dict,
             segments: &self.segments,
             memtable: &self.memtable,
+            has_phrase_predicates: self.has_phrase_predicates,
             pred,
         };
         titles
@@ -1539,6 +1539,7 @@ impl EngineSnapshot {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                has_phrase_predicates: self.has_phrase_predicates,
                 pred,
             },
             titles,
@@ -1558,6 +1559,7 @@ impl EngineSnapshot {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                has_phrase_predicates: self.has_phrase_predicates,
                 pred: &TagPredicate::empty(),
             },
             titles,
@@ -1591,6 +1593,7 @@ impl EngineSnapshot {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                has_phrase_predicates: self.has_phrase_predicates,
                 pred,
             },
             titles,
@@ -1616,6 +1619,7 @@ impl EngineSnapshot {
                 dict: &self.dict,
                 segments: &self.segments,
                 memtable: &self.memtable,
+                has_phrase_predicates: self.has_phrase_predicates,
                 pred,
             },
             titles,

@@ -377,6 +377,10 @@ impl Engine {
                 }
             };
         let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
+        let live_phrase_segments = segments
+            .iter()
+            .filter(|segment| segment.has_phrase_predicates())
+            .count();
 
         let mut engine = Engine {
             config: Arc::new(config),
@@ -386,6 +390,7 @@ impl Engine {
             tag_dict: Arc::new(tag_dict),
             segments,
             memtable: Arc::new(Segment::new()),
+            live_phrase_segments,
             rejected_parse: manifest.rejected_parse,
             rejected_class_d: manifest.rejected_class_d,
             // Process-lifetime observe counter (deliberately not in the manifest);
@@ -699,6 +704,10 @@ impl Engine {
             config.retain_source,
         )?);
         let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
+        let live_phrase_segments = segments
+            .iter()
+            .filter(|segment| segment.has_phrase_predicates())
+            .count();
         let engine = Engine {
             config: Arc::new(config),
             norm,
@@ -710,6 +719,7 @@ impl Engine {
             tag_dict,
             segments,
             memtable: Arc::new(Segment::new()),
+            live_phrase_segments,
             rejected_parse: 0,
             rejected_class_d: 0,
             would_be_hot: 0,

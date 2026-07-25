@@ -197,6 +197,7 @@ impl Engine {
             }
         }
         self.segments = new_segments;
+        self.refresh_phrase_capability();
         // Manifest is the commit point: only after it succeeds is it safe to delete
         // the retired files. On a manifest failure the old files stay (still
         // referenced by the on-disk manifest) and the freshly resealed files become

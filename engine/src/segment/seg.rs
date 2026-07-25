@@ -461,16 +461,18 @@ impl Segment {
         emission: P,
     ) {
         let filter = self.filter.as_ref();
-        // Signatures are generated from the candidate-only POSITIVE probe view:
-        // flat P(T) plus graph labels when positioned matching is active. Exact
-        // verification still reads only the semantic pos/neg views.
-        let feats = view.probe;
+        // Graph-only phrase proxies are arity-1 MAIN signatures. Keep them out
+        // of the pair/hot/broad loops: those lanes are planned exclusively from
+        // flat positive semantics, so widening them only manufactures probes
+        // and false candidates that exact verification must reject.
+        let probe_feats = view.probe;
+        let feats = view.pos;
         if collector.should_stop() {
             return;
         }
 
         // arity-1 signatures (one per feature)
-        for &f in feats {
+        for &f in probe_feats {
             if collector.should_stop() {
                 return;
             }

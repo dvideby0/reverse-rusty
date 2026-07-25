@@ -90,6 +90,7 @@ impl Engine {
             tag_dict: Arc::clone(&self.tag_dict),
             segments: self.segments.clone(),
             memtable: Arc::clone(&self.memtable),
+            has_phrase_predicates: self.has_phrase_predicates(),
             query_store: Arc::clone(&self.query_store),
             vocab: self.vocab.clone(),
             config: Arc::clone(&self.config),
@@ -106,6 +107,23 @@ impl Engine {
             wal_size_bytes: self.wal.as_ref().map_or(0, Wal::size_bytes),
             wal_pending_entries: self.wal.as_ref().map_or(0, Wal::pending_entries),
         }
+    }
+
+    /// Recompute the aggregate positioned-predicate capability after a write
+    /// changes row liveness or replaces segment state. Writes may pay O(S);
+    /// every subsequently published/read title gets an O(1) capability gate.
+    pub(in crate::segment) fn refresh_phrase_capability(&mut self) {
+        self.live_phrase_segments = usize::from(self.memtable.has_phrase_predicates())
+            + self
+                .segments
+                .iter()
+                .filter(|segment| segment.has_phrase_predicates())
+                .count();
+    }
+
+    #[inline]
+    pub(in crate::segment) fn has_phrase_predicates(&self) -> bool {
+        self.live_phrase_segments != 0
     }
 
     /// Read-only access to the shared feature dictionary.
