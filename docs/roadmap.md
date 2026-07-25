@@ -35,14 +35,14 @@ active development** — the current top priority is the
    400) and had never been run end-to-end. A *real-cluster* deploy proof stays item 4 (needs a real
    cluster + corpus).
 2. **Independent correctness oracle — ✅ shipped ([ADR-087](decisions/adr-087-independent-correctness-oracle.md)).**
-   A std-only, zero-dependency reference matcher (`reverse-rusty-ref-matcher`) reimplements the whole
-   front end (parser/normalizer/extractor/predicate) from the spec, reusing none of the engine
-   (independence enforced by a `check.sh` `cargo tree` lane); the engine is diffed against it
-   (`tests/independent_oracle/`) over default/populated/alias corpora + a hand-written gotcha table +
-   the env-gated `RR_ORACLE_CORPUS` real-corpus hook. It closes the ADR-050/063 shared-**code**
-   front-end blind spot for the covered paths. ADR-118 later exposed and fixed a shared-**semantics**
-   lowering bug that both implementations had independently copied; issue #123 tracks strengthening
-   the reference around a semantic model.
+   A std-only, zero-dependency reference matcher (`reverse-rusty-ref-matcher`) independently parses
+   and normalizes the spec into a direct grammar predicate tree, reusing neither engine code nor its
+   frequency/proxy/storage lowering (independence enforced by a `check.sh` `cargo tree` lane). The
+   engine is diffed against it (`tests/independent_oracle/`) over default/populated/alias corpora + a
+   hand-authored gotcha table + the env-gated `RR_ORACLE_CORPUS` real-corpus hook. Final sets require
+   zero FN/FP and production candidate generation is checked for recall only. This closes both the
+   ADR-050/063 shared-**code** blind spot and the shared-**semantics** lowering gap exposed by
+   ADR-118/119/120 (issue #123).
 3. **Durability torture (crash injection) — ✅ shipped
    ([ADR-088](decisions/adr-088-crash-injection-harness.md)).** A `crashwriter` lean-core bin + the
    `tests/crash_injection/` suite spawn a real process, deliver a real external SIGKILL mid

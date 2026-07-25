@@ -282,15 +282,16 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   [`../CLAUDE.md`](../CLAUDE.md) + [`testing.md`](testing.md).
 - **Deterministic generation + messy mode** (ADR-008, ADR-063); golden front-end pins (ADR-050);
   reference-free adversarial property suites (ADR-063).
-- **Front-end-independent oracle** (Phase 0 item 2, ADR-087) — a std-only, zero-dependency reference
-  matcher (`reverse-rusty-ref-matcher`) reimplements the parser/normalizer/extractor/predicate from
-  the SPEC, reusing none of the engine (independence enforced by a `check.sh` `cargo tree` lane); the
-  engine is diffed against it (`tests/independent_oracle/`) over default/populated/alias corpora + a
-  gotcha table + an env-gated real corpus. It closes the **shared-code** ADR-050 blind spot for the
-  covered paths. ADR-118/119/120 later exposed shared-**semantics** blind spots: both independent
-  implementations can read ambiguous lowering prose the same wrong way. Clause boundaries and
-  multi-token any-of member truth tables plus quoted adjacency are now fixed and pinned against human
-  expectations; issue #123 tracks a stronger semantic-model oracle.
+- **Front-end and lowering-independent semantic oracle** (Phase 0 item 2, ADR-087/#123) — a
+  std-only, zero-dependency reference matcher (`reverse-rusty-ref-matcher`) independently parses and
+  normalizes the SPEC grammar into a direct term/any-of/phrase/forbidden predicate tree, reusing none
+  of the engine and none of its compiler execution plan (independence enforced by a `check.sh`
+  `cargo tree` lane). The engine is diffed against it (`tests/independent_oracle/`) over
+  default/populated/alias corpora + a gotcha table + an env-gated real corpus: final sets require zero
+  FN/FP, and candidate generation is separately checked for recall only. ADR-118/119/120's
+  shared-semantics blind spot is closed structurally: the reference has no query-frequency or
+  rarest-proxy model, preserves complete any-of members and forbidden predicates, and retains quoted
+  graphs. Human pins still cover every clause boundary and required/forbidden phrase adjacency.
 - **Real-process SIGKILL crash injection** (Phase 0 item 3, ADR-088) — a `crashwriter` lean-core bin +
   `tests/crash_injection/` spawn a real process and deliver a real external SIGKILL mid
   durable-operation (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**),

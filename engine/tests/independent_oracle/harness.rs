@@ -104,7 +104,15 @@ impl RefOracle {
         report.assert_clean(label, &self.dsl);
     }
 
-    /// Diff every title, returning the tallies + a bounded sample of divergences.
+    /// Diff every title, returning exact-set tallies plus candidate-recall
+    /// diagnostics. Candidate generation is judged ONLY for recall: every
+    /// semantic truth must have been retrieved, while extra candidates are
+    /// intentionally allowed and left to exact verification.
+    ///
+    /// A truth already present in `engine_set` necessarily traversed the real
+    /// candidate pipeline. Only a final-match miss needs the read-only explain
+    /// probe to distinguish a retrieval miss from an exact-verification miss,
+    /// avoiding an O(matches) recompile across the million-match scale corpus.
     pub fn diff(&self, titles: &[String]) -> DiffReport {
         let mut s = MatchScratch::new();
         let mut out = Vec::new();
@@ -125,6 +133,20 @@ impl RefOracle {
                     report.false_neg += 1;
                     if report.sample_fn.len() < SAMPLE_CAP {
                         report.sample_fn.push((title.clone(), t));
+                    }
+                    match self.eng.explain_hit(t, title) {
+                        Some(detail) if detail.candidate => {
+                            report.verification_false_neg += 1;
+                        }
+                        Some(_) => {
+                            report.candidate_false_neg += 1;
+                            if report.sample_candidate_fn.len() < SAMPLE_CAP {
+                                report.sample_candidate_fn.push((title.clone(), t));
+                            }
+                        }
+                        None => {
+                            report.candidate_check_unavailable += 1;
+                        }
                     }
                 }
             }
@@ -150,17 +172,40 @@ pub struct DiffReport {
     pub total_engine: usize,
     pub false_neg: usize,
     pub false_pos: usize,
+    /// Semantic truths not retrieved by the production candidate cover.
+    pub candidate_false_neg: usize,
+    /// Semantic truths retrieved but rejected or lost after candidate generation.
+    pub verification_false_neg: usize,
+    /// Missing source/explain state prevented classification of a final-match miss.
+    pub candidate_check_unavailable: usize,
     sample_fn: Vec<(String, u64)>,
     sample_fp: Vec<(String, u64)>,
+    sample_candidate_fn: Vec<(String, u64)>,
 }
 
 impl DiffReport {
     /// Assert zero FN / zero FP / non-degenerate, with rich diagnostics on failure.
     pub fn assert_clean(&self, label: &str, dsl: &HashMap<u64, String>) {
         eprintln!(
-            "[{label}] truth={} engine={} false_neg={} false_pos={}",
-            self.total_truth, self.total_engine, self.false_neg, self.false_pos
+            "[{label}] truth={} engine={} false_neg={} false_pos={} \
+             candidate_false_neg={} verification_false_neg={} candidate_check_unavailable={}",
+            self.total_truth,
+            self.total_engine,
+            self.false_neg,
+            self.false_pos,
+            self.candidate_false_neg,
+            self.verification_false_neg,
+            self.candidate_check_unavailable,
         );
+        if self.candidate_false_neg != 0 {
+            eprintln!(
+                "--- sample CANDIDATE FALSE NEGATIVES (semantic truth not retrieved) \
+                 [{label}] ---"
+            );
+            for (title, qid) in self.sample_candidate_fn.iter().take(10) {
+                eprintln!("  q#{qid} {:?}\n    title: {title:?}", dsl.get(qid));
+            }
+        }
         if self.false_neg != 0 {
             eprintln!(
                 "--- sample FALSE NEGATIVES (reference matched, engine missed) [{label}] ---"
@@ -178,6 +223,19 @@ impl DiffReport {
             }
         }
         assert_eq!(
+            self.candidate_false_neg, 0,
+            "[{label}] CANDIDATE FALSE NEGATIVES — the production cover missed a semantic truth"
+        );
+        assert_eq!(
+            self.verification_false_neg, 0,
+            "[{label}] VERIFICATION FALSE NEGATIVES — retrieval succeeded but final matching lost \
+             a semantic truth"
+        );
+        assert_eq!(
+            self.candidate_check_unavailable, 0,
+            "[{label}] candidate recall could not be classified because source/explain was missing"
+        );
+        assert_eq!(
             self.false_neg, 0,
             "[{label}] FALSE NEGATIVES — engine misses a spec match (cardinal sin)"
         );
@@ -189,5 +247,39 @@ impl DiffReport {
             self.total_truth > 0,
             "[{label}] degenerate: reference found no matches at all"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn deliberately_mismatched(
+        engine_query: &str,
+        semantic_query: &str,
+        title: &str,
+    ) -> DiffReport {
+        let engine_rows = vec![(1, engine_query.to_string())];
+        let semantic_rows = vec![(1, semantic_query.to_string())];
+        let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine.build_from_queries(&engine_rows);
+        let reference = RefMatcher::build(&semantic_rows, RefVocab::default_vocab());
+        RefOracle::from_parts(engine, reference, &semantic_rows).diff(&[title.to_string()])
+    }
+
+    #[test]
+    fn diff_classifies_a_cover_miss_separately() {
+        let report = deliberately_mismatched("z", "x", "x");
+        assert_eq!(report.false_neg, 1);
+        assert_eq!(report.candidate_false_neg, 1);
+        assert_eq!(report.verification_false_neg, 0);
+    }
+
+    #[test]
+    fn diff_classifies_a_post_candidate_miss_separately() {
+        let report = deliberately_mismatched("x -y", "x", "x y");
+        assert_eq!(report.false_neg, 1);
+        assert_eq!(report.candidate_false_neg, 0);
+        assert_eq!(report.verification_false_neg, 1);
     }
 }

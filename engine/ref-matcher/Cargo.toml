@@ -2,7 +2,7 @@
 name = "reverse-rusty-ref-matcher"
 version = "0.1.0"
 edition = "2021"
-description = "Front-end-INDEPENDENT reference matcher for reverse-rusty's correctness oracle (ADR-087). Reimplements the DSL parser, normalizer, extractor, and match predicate from the SPEC, reusing NONE of the engine — so a front-end bug the in-tree oracle shares (ADR-050 blind spot) is caught by diffing the engine against this. std-only by design: zero dependencies (no daachorse, no serde, no reverse-rusty) makes the independence mechanically provable via `cargo tree`, and naive from-scratch algorithms are maximally adversarial."
+description = "Front-end- and lowering-independent semantic matcher for reverse-rusty's correctness oracle (ADR-087). Reimplements the DSL parser and normalizer, preserves the public grammar as a direct predicate tree, and reuses NONE of the engine — so shared front-end or execution-lowering bugs are caught by differential testing. std-only by design: zero dependencies (no daachorse, no serde, no reverse-rusty) makes code independence mechanically provable via `cargo tree`."
 license = "MIT"
 publish = false
 

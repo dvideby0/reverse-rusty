@@ -40,7 +40,7 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 |---|---|---|
 | **Differential oracle** | `tests/oracle.rs` | The **correctness contract** — brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing test; never weaken it. Includes the **messy-corpus** passes (`messy.rs` — the same contract over `gen::messify_dataset`'s adversarial surfaces, per-title + batch, ADR-063) and the **degenerate-input** differential (`degenerate.rs` — grammar/feature-model edges, engine ≡ brute on both ingest paths). |
 | **Adversarial properties** | `tests/adversarial/` | **Reference-free** correctness properties that don't share code with the engine (ADR-063): the self-match diagonal (a query must match a title built from its own positive terms — clean, messy-query×clean-title, clean-query×perturbed-title), metamorphic set-identity under surface noise, the ADR-054/058/060/061 cross-form matrices (incl. the codex-R11 whitespace-run regression), and unicode-soup fuzz (no-panic, determinism, `P(T) ⊇ N(T)`, `match_features == N(T)`). These cover the front-end divergence the differential oracle is structurally blind to. |
-| **Independent oracle** | `tests/independent_oracle/` | **Front-end code-independent differential** (Phase 0 item 2, ADR-087): the engine diffed against `reverse-rusty-ref-matcher` — a std-only, zero-dependency reimplementation of the parser/normalizer/extractor/predicate from the spec that shares NO front-end code (independence enforced by a `check.sh` `cargo tree` lane). Zero FN/FP over generated default (clean + messy), populated graders/phrases, quoted adjacency, the multi-word alias two-view (controlled + ~989k-match at-scale), a hand-written **gotcha** table (asserted against both sides), and the env-gated `RR_ORACLE_CORPUS` real corpus (schema below). ADR-118/119/120 proved the boundary: both implementations can still copy one ambiguous semantic rule; human-expectation pins now cover clause boundaries, partial/shared-proxy multi-token any-of members, and required/forbidden phrase adjacency, while issue #123 tracks a stronger semantic-model reference. |
+| **Independent semantic oracle** | `tests/independent_oracle/` | **Front-end and lowering-independent differential** (Phase 0 item 2, ADR-087/#123): the engine is diffed against `reverse-rusty-ref-matcher`, a std-only zero-dependency parser/normalizer plus direct grammar predicate tree. The reference contains no query frequencies, retrieval proxies, signature classes, or production exact-store lowering; code independence remains enforced by the `check.sh` `cargo tree` lane. It asserts zero final FN/FP and separately classifies every missed semantic truth as candidate-cover vs post-retrieval loss, with candidate generation judged for recall only. Coverage: generated default (clean + messy), populated graders/phrases, quoted adjacency, multi-word alias two-view (controlled + ~989k-match at-scale), a hand-authored gotcha table, and the env-gated `RR_ORACLE_CORPUS` real corpus. Structural and human-expectation pins cover every clause boundary, complete multi-token any-of members, and required/forbidden phrase graphs. |
 | **Crash injection** | `tests/crash_injection/` | **Real-process SIGKILL** durability torture (Phase 0 item 3, ADR-088): spawns the `crashwriter` bin, delivers a real external SIGKILL mid durable-op (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**), reopens in-process, and diffs the recovered engine against the ADR-087 independent oracle — zero FN on every ACKed write, no resurrection/corruption. `upsert` proves ADR-067 atomic replace (race-immune); `watermark` proves the ADR-066 `ensure_seq_after` re-pin across a second reopen; the **cluster** mid-write analogue is `deploy/harness.sh` leg 3b. The real-kill-mid-syscall check the chmod/torn-tail/CRC *simulations* cannot be. **`#[ignore]`d** (spawns + kills real processes, real fsyncs) behind a `check.sh` `crash injection` lane — see [Crash injection](#crash-injection). |
 | **Broad-lane batch** | `tests/broad_batch.rs` | Broad-lane **batch ≡ scalar** equivalence matrix — including positive and negated compound any-of members under materialize/prefilter on and off — the load-bearing batch-correctness deliverable ([`design/matching.md`](design/matching.md) §4). |
 | **Quoted phrases** | `tests/quoted_phrases.rs` | ADR-120 hand-authored truth tables for required/forbidden adjacency and order, default split vs configured fold punctuation, alternate alias paths without conjunction weakening, independent-reference agreement, and requested-columnar batch parity through the positioned fallback. |
@@ -84,19 +84,24 @@ re-runs the differential over `gen::messify_dataset` output (case noise, whitesp
 unicode junk, out-of-dict tokens), and `tests/oracle/degenerate.rs` pins grammar/feature-model edge
 inputs. When adding corpus-driven tests, prefer running them messy unless there's a reason not to.
 
-The **third layer (ADR-087)** is a differential against a front-end **code-independent** reference.
+The **third layer (ADR-087, hardened by issue #123)** is a differential against a front-end and
+compiler-lowering **independent** reference.
 `tests/independent_oracle/` diffs the engine against
-`reverse-rusty-ref-matcher` — a std-only crate that reimplements the parser, normalizer, extractor, and
-predicate from the spec, depending on nothing in `reverse-rusty` (enforced by the `ref-matcher
-independence` `check.sh` lane). A code-local parser/normalizer/extractor bug therefore shows up as a
-divergence. It runs over the same default vocab the in-tree oracle uses *and* populated
+`reverse-rusty-ref-matcher` — a std-only crate that independently parses and normalizes the DSL, then
+retains it as explicit `RequiredTerm` / `RequiredPhrase` / `RequiredAnyOf` and complete forbidden
+semantic clauses. It depends on nothing in `reverse-rusty` (enforced by the `ref-matcher independence`
+`check.sh` lane) and contains none of the production compiler's frequencies, rarest-member proxies,
+signature classes, or exact-store columns. A code-local parser/normalizer bug or a shared lowering
+mistake therefore shows up as a divergence. It runs over the same default vocab the in-tree oracle uses
+*and* populated
 grader/phrase + multi-word-alias-two-view vocabularies, plus a hand-written gotcha table whose
 expectations are the human tiebreaker. It does not replace the golden tests or the in-tree oracle — it
-is the differential complement they structurally cannot be. ADR-118/119/120 found the residual boundary:
-independent code can still implement the same ambiguous prose incorrectly, so human semantic pins
-for clause boundaries, multi-token any-of truth tables, and quoted adjacency remain load-bearing; issue #123 tracks
-making that semantic layer more independent (full rationale →
-[`DECISIONS.md`](DECISIONS.md) ADR-087/118/119/120).
+is the differential complement they structurally cannot be. Final match sets are compared exactly
+(zero FN and zero FP). Candidate generation is compared **only for recall**: an engine miss is
+classified through structured explain as a candidate-cover miss or a post-retrieval verification miss;
+extra candidates are explicitly legal. Human semantic pins for every clause boundary, complete
+multi-token any-of predicates, and required/forbidden phrase adjacency remain load-bearing (full
+rationale → [`DECISIONS.md`](DECISIONS.md) ADR-087/118/119/120).
 
 **Real-corpus hook.** `tests/independent_oracle/corpus.rs` runs the same engine-vs-reference diff over a
 user-supplied corpus when `RR_ORACLE_CORPUS` points at a JSONL file, and is skipped (passing) when the

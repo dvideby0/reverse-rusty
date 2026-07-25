@@ -139,6 +139,7 @@
 
 - **Oracle follow-up.** ADR-087 remains code-independent, but this finding proved code independence
   is not the same as semantic independence when both implementations translate the same ambiguous
-  prose the same way. The human-expectation regression is now the tiebreaker for this case;
-  [issue #123](https://github.com/dvideby0/reverse-rusty/issues/123) tracks strengthening the
-  reference around a semantic AST/model so shared lowering assumptions are harder to duplicate.
+  prose the same way. The human-expectation regression remains the tiebreaker, and
+  [issue #123](https://github.com/dvideby0/reverse-rusty/issues/123) subsequently replaced the
+  reference's proxy-shaped extraction with a direct semantic clause tree so production lowering
+  assumptions are absent by construction.
