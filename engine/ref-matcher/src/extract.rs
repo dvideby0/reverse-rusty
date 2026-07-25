@@ -7,10 +7,9 @@
 //!      multi-word entities (`michael jordan`, `psa 10`) are recognized exactly as on the title
 //!      side. Positive phrases, negations, and any-of clauses delimit those runs and are normalized
 //!      separately.
-//!   2. **Any-of members use a rarest-by-frequency proxy**: each member is represented by its
-//!      single least-frequent normalized feature (frequency = how many prior queries carried the
-//!      feature as required / any-of proxy — built across the corpus in `matcher`), a singleton
-//!      group collapses to a required feature, and an empty group is dropped.
+//!   2. **Any-of member boundaries are semantic**: a multi-token member is the conjunction of all
+//!      its normalized features; the surrounding group ORs those member predicates. One
+//!      rarest-by-frequency feature per member remains only as a lossless retrieval proxy.
 
 use crate::features::Feature;
 use crate::normalize::{emit, Side};
@@ -24,12 +23,28 @@ pub type Freq = HashMap<Feature, u32>;
 /// Equivalence map: a feature -> the full set of features in its equivalence group (ADR-054).
 pub type EquivMap = HashMap<Feature, Vec<Feature>>;
 
-/// A compiled query: required (AND), forbidden (none present), any-of (each group: >=1 present).
+/// One any-of member: AND across requirements, OR across equivalent alternatives in one
+/// requirement.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RefAnyOfMember {
+    pub requirements: Vec<Vec<Feature>>,
+}
+
+/// A positive any-of predicate: OR across members.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RefAnyOfPredicate {
+    pub members: Vec<RefAnyOfMember>,
+}
+
+/// A compiled query. `anyof` stores proxy groups (and the full simple-group predicate);
+/// compound positive/negative member predicates retain their exact boundaries separately.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RefQuery {
     pub required: Vec<Feature>,
     pub forbidden: Vec<Feature>,
     pub anyof: Vec<Vec<Feature>>,
+    pub anyof_predicates: Vec<RefAnyOfPredicate>,
+    pub forbidden_conjunctions: Vec<Vec<Feature>>,
 }
 
 /// Normalize one atom string on the query/compile side (sorted + deduped features).
@@ -42,9 +57,8 @@ fn norm_query(vocab: &RefVocab, w: &str) -> Vec<Feature> {
 
 /// The least-frequent feature of `feats` (the rarest member proxy). `feats` is sorted by string,
 /// and `min_by_key` returns the first minimum, so a frequency tie breaks to the lexicographically
-/// smallest feature. (The engine breaks the tie by smallest interned id; the choice only affects
-/// titles bearing SOME but not all of a multi-token member, which the generated + gotcha corpora do
-/// not produce — see ADR-087.)
+/// smallest feature. The engine breaks a tie by smallest interned id; either proxy is lossless
+/// because exact matching independently checks the complete member predicate.
 fn rarest_proxy(feats: &[Feature], freq: &Freq) -> Option<Feature> {
     feats
         .iter()
@@ -82,6 +96,8 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
     let mut required: Vec<Feature> = Vec::new();
     let mut forbidden: Vec<Feature> = Vec::new();
     let mut anyof: Vec<Vec<Feature>> = Vec::new();
+    let mut anyof_predicates: Vec<RefAnyOfPredicate> = Vec::new();
+    let mut forbidden_conjunctions: Vec<Vec<Feature>> = Vec::new();
     let mut pos_words: Vec<&str> = Vec::new();
 
     for clause in &ast.clauses {
@@ -94,23 +110,55 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
             (Atom::Phrase(w), false) => required.extend(norm_query(vocab, w)),
             (Atom::AnyOf(members), true) => {
                 for m in members {
-                    forbidden.extend(norm_query(vocab, m));
+                    let feats = norm_query(vocab, m);
+                    match feats.as_slice() {
+                        [feature] => forbidden.push(feature.clone()),
+                        [] => {}
+                        _ => forbidden_conjunctions.push(feats),
+                    }
                 }
             }
             (Atom::AnyOf(members), false) => {
-                let mut group: Vec<Feature> = Vec::new();
+                let mut semantic_members: Vec<RefAnyOfMember> = Vec::new();
                 for m in members {
                     let feats = norm_query(vocab, m);
-                    if let Some(rep) = rarest_proxy(&feats, freq) {
-                        group.push(rep);
+                    if !feats.is_empty() {
+                        semantic_members.push(RefAnyOfMember {
+                            requirements: feats.into_iter().map(|feature| vec![feature]).collect(),
+                        });
                     }
                 }
-                group.sort();
-                group.dedup();
-                if group.len() == 1 {
-                    required.push(group.pop().expect("len==1"));
-                } else if !group.is_empty() {
-                    anyof.push(group);
+                semantic_members.sort();
+                semantic_members.dedup();
+                if semantic_members.len() == 1 {
+                    for requirement in &semantic_members[0].requirements {
+                        required.extend(requirement.iter().cloned());
+                    }
+                } else if !semantic_members.is_empty() {
+                    let mut proxies = Vec::with_capacity(semantic_members.len());
+                    for member in &semantic_members {
+                        let features: Vec<Feature> = member
+                            .requirements
+                            .iter()
+                            .filter_map(|requirement| requirement.first().cloned())
+                            .collect();
+                        if let Some(proxy) = rarest_proxy(&features, freq) {
+                            proxies.push(proxy);
+                        }
+                    }
+                    proxies.sort();
+                    proxies.dedup();
+                    if !proxies.is_empty() {
+                        anyof.push(proxies);
+                    }
+                    if semantic_members
+                        .iter()
+                        .any(|member| member.requirements.len() > 1)
+                    {
+                        anyof_predicates.push(RefAnyOfPredicate {
+                            members: semantic_members,
+                        });
+                    }
                 }
             }
         }
@@ -122,11 +170,21 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
     required.dedup();
     forbidden.sort();
     forbidden.dedup();
+    anyof_predicates.sort();
+    anyof_predicates.dedup();
+    for conjunction in &mut forbidden_conjunctions {
+        conjunction.sort();
+        conjunction.dedup();
+    }
+    forbidden_conjunctions.sort();
+    forbidden_conjunctions.dedup();
 
     RefQuery {
         required,
         forbidden,
         anyof,
+        anyof_predicates,
+        forbidden_conjunctions,
     }
 }
 
@@ -177,9 +235,31 @@ impl RefQuery {
             widened.dedup();
             *g = widened;
         }
+        for predicate in &mut self.anyof_predicates {
+            for member in &mut predicate.members {
+                for requirement in &mut member.requirements {
+                    let mut widened = Vec::with_capacity(requirement.len());
+                    for feature in requirement.iter() {
+                        match equiv.get(feature) {
+                            Some(group) => widened.extend(group.iter().cloned()),
+                            None => widened.push(feature.clone()),
+                        }
+                    }
+                    widened.sort();
+                    widened.dedup();
+                    *requirement = widened;
+                }
+                member.requirements.sort();
+                member.requirements.dedup();
+            }
+            predicate.members.sort();
+            predicate.members.dedup();
+        }
         self.required.sort();
         self.required.dedup();
         self.anyof.sort();
         self.anyof.dedup();
+        self.anyof_predicates.sort();
+        self.anyof_predicates.dedup();
     }
 }

@@ -15,9 +15,9 @@ use crate::segment::Segment;
 
 use super::super::{crc32, durable_rename, write_u32, write_u64};
 use super::{
-    align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_HOT,
-    FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK, FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE,
-    MAGIC,
+    align8, FrozenSlot, FORMAT_VERSION, FORMAT_VERSION_CLASS_D, FORMAT_VERSION_COMPOUND_PREDICATE,
+    FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP, FORMAT_VERSION_RANK,
+    FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE, MAGIC,
 };
 
 /// Build a frozen hash table + posting blob from an in-memory CandidateIndex.
@@ -133,6 +133,28 @@ fn write_u8_array(w: &mut (impl Write + Seek), data: &[u8]) -> io::Result<()> {
     pad_to_8(w)
 }
 
+/// Cumulative optional columns present in the exact section.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ExactSectionLayout {
+    Base,
+    Priority,
+    Ownership,
+    SourceGeneration,
+    CompoundPredicate,
+}
+
+impl ExactSectionLayout {
+    fn format_version(self) -> u32 {
+        match self {
+            Self::Base => FORMAT_VERSION,
+            Self::Priority => FORMAT_VERSION_RANK,
+            Self::Ownership => FORMAT_VERSION_OWNERSHIP,
+            Self::SourceGeneration => FORMAT_VERSION_SOURCE_GENERATION,
+            Self::CompoundPredicate => FORMAT_VERSION_COMPOUND_PREDICATE,
+        }
+    }
+}
+
 // ---- segment write ----
 
 /// Write a sealed Segment to a file. Uses atomic write (tmp + rename) for safety.
@@ -146,28 +168,30 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
     // ---- Exact section ----
     pad_to_8(&mut f)?;
     let exact_off = f.stream_position()?;
-    let has_source_generation = seg
+    // Exact layouts are cumulative: v9 includes v6 priority, v7 ownership, and
+    // v8 source-generation columns before its predicate program.
+    let exact_layout = if !seg.exact_store().predicate_blobs().is_empty() {
+        ExactSectionLayout::CompoundPredicate
+    } else if seg
         .exact_store()
         .source_generations()
         .iter()
-        .any(|&generation| generation != 0);
-    // v8 is cumulative: its reader expects both the v6 priority and v7
-    // ownership columns before the appended source-generation column. Emit
-    // standalone/zero values when source fencing is the only new capability.
-    let has_ownership = has_source_generation
-        || seg
-            .exact_store()
-            .placement_modes()
-            .iter()
-            .any(|&mode| mode != 0);
-    let has_priority = has_ownership || seg.exact_store().priorities().iter().any(|&v| v != 0);
-    write_exact_section(
-        &mut f,
-        seg,
-        has_priority,
-        has_ownership,
-        has_source_generation,
-    )?;
+        .any(|&generation| generation != 0)
+    {
+        ExactSectionLayout::SourceGeneration
+    } else if seg
+        .exact_store()
+        .placement_modes()
+        .iter()
+        .any(|&mode| mode != 0)
+    {
+        ExactSectionLayout::Ownership
+    } else if seg.exact_store().priorities().iter().any(|&v| v != 0) {
+        ExactSectionLayout::Priority
+    } else {
+        ExactSectionLayout::Base
+    };
+    write_exact_section(&mut f, seg, exact_layout)?;
 
     // ---- Main index ----
     pad_to_8(&mut f)?;
@@ -245,21 +269,16 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
         .classes()
         .iter()
         .any(|c| matches!(c, crate::compile::CostClass::D));
+    let lane_format_version = if has_hot {
+        FORMAT_VERSION_HOT
+    } else if has_class_d {
+        FORMAT_VERSION_CLASS_D
+    } else {
+        FORMAT_VERSION
+    };
     write_u32(
         &mut f,
-        if has_source_generation {
-            FORMAT_VERSION_SOURCE_GENERATION
-        } else if has_ownership {
-            FORMAT_VERSION_OWNERSHIP
-        } else if has_priority {
-            FORMAT_VERSION_RANK
-        } else if has_hot {
-            FORMAT_VERSION_HOT
-        } else if has_class_d {
-            FORMAT_VERSION_CLASS_D
-        } else {
-            FORMAT_VERSION
-        },
+        exact_layout.format_version().max(lane_format_version),
     )?;
     write_u32(&mut f, seg.len() as u32)?;
     write_u32(&mut f, seg.compiler_semantics_version())?;
@@ -290,9 +309,7 @@ pub fn write_segment(seg: &Segment, path: &Path) -> io::Result<()> {
 fn write_exact_section(
     w: &mut (impl Write + Seek),
     seg: &Segment,
-    write_priority: bool,
-    write_ownership: bool,
-    write_source_generation: bool,
+    layout: ExactSectionLayout,
 ) -> io::Result<()> {
     let exact = seg.exact_store();
     write_u64_array(w, exact.req_masks())?;
@@ -310,10 +327,10 @@ fn write_exact_section(
     write_u32_array(w, exact.anyof_blobs())?;
     write_u32_array(w, exact.versions())?;
     write_u64_array(w, exact.logicals())?;
-    if write_priority {
+    if layout >= ExactSectionLayout::Priority {
         write_i64_array(w, exact.priorities())?;
     }
-    if write_ownership {
+    if layout >= ExactSectionLayout::Ownership {
         write_u64_array(w, exact.placement_generations())?;
         write_u32_array(w, exact.placement_num_shards())?;
         write_u8_array(w, exact.placement_modes())?;
@@ -321,8 +338,13 @@ fn write_exact_section(
         write_u32_array(w, exact.placement_lens())?;
         write_u32_array(w, exact.placement_blobs())?;
     }
-    if write_source_generation {
+    if layout >= ExactSectionLayout::SourceGeneration {
         write_u64_array(w, exact.source_generations())?;
+    }
+    if layout >= ExactSectionLayout::CompoundPredicate {
+        write_u32_array(w, exact.predicate_offs())?;
+        write_u32_array(w, exact.predicate_lens())?;
+        write_u32_array(w, exact.predicate_blobs())?;
     }
     Ok(())
 }

@@ -91,6 +91,118 @@ fn persist_and_reopen() {
 }
 
 #[test]
+fn compound_anyof_predicates_round_trip_through_v9_mmap() {
+    let dir = test_dir("compound_anyof_v9");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let queries = vec![
+        (1, "(red shoe,boot)".to_string()),
+        (2, "marker -(red shoe,boot)".to_string()),
+        (3, "(red shoe,red boot)".to_string()),
+    ];
+    let cases = [
+        ("red shoe marker", vec![1, 3]),
+        ("boot marker", vec![1]),
+        ("red hat marker", vec![2]),
+        ("shoe marker", vec![2]),
+        ("red boot", vec![1, 3]),
+    ];
+
+    let mut engine = Engine::with_config(make_norm(), config.clone());
+    engine.build_from_queries(&queries);
+    for (title, expected) in &cases {
+        assert_eq!(
+            match_ids(&engine, title),
+            (*expected).clone(),
+            "memory path: {title}"
+        );
+    }
+    let segment = std::fs::read_dir(dir.join("segments"))
+        .expect("segment directory")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("seg"))
+        .expect("compound segment");
+    let bytes = std::fs::read(segment).expect("segment bytes");
+    assert_eq!(
+        u32::from_le_bytes(bytes[4..8].try_into().expect("format word")),
+        9,
+        "compound rows must carry the v9 rollback fence"
+    );
+    drop(engine);
+
+    let reopened = Engine::open(make_norm(), config).expect("reopen v9 segment");
+    for (title, expected) in &cases {
+        assert_eq!(
+            match_ids(&reopened, title),
+            (*expected).clone(),
+            "mmap path: {title}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn semantics_one_anyof_materialization_rebuilds_before_serving() {
+    let dir = test_dir("semantics_one_anyof_migration");
+    let config = EngineConfig {
+        data_dir: Some(dir.clone()),
+        ..EngineConfig::default()
+    };
+    let queries = vec![
+        (1, "(red shoe,boot)".to_string()),
+        (2, "marker -(red shoe,boot)".to_string()),
+    ];
+    let cases = [
+        ("red shoe marker", vec![1]),
+        ("boot marker", vec![1]),
+        ("red hat marker", vec![2]),
+        ("shoe marker", vec![2]),
+    ];
+
+    {
+        let mut engine = Engine::with_config(make_norm(), config.clone());
+        engine.build_from_queries(&queries);
+    }
+    let before =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    assert!(!before.segment_files.is_empty(), "persisted segment");
+    for name in &before.segment_files {
+        // The semantics stamp, independently of the cumulative layout version,
+        // decides whether retained source must be recompiled.
+        stamp_compiler_semantics(&dir.join("segments").join(name), 1);
+    }
+
+    let reopened = Engine::open(make_norm(), config.clone()).expect("semantics-1 migration");
+    for (title, expected) in &cases {
+        assert_eq!(
+            match_ids(&reopened, title),
+            (*expected).clone(),
+            "migrated semantics: {title}"
+        );
+    }
+    let after = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("manifest");
+    assert_ne!(
+        before.segment_files, after.segment_files,
+        "migration must atomically select a source-recompiled segment"
+    );
+    assert!(after.segment_files.iter().all(|name| {
+        reverse_rusty::storage::MmapSegment::open(&dir.join("segments").join(name))
+            .expect("open migrated segment")
+            .compiler_semantics_version()
+            == 2
+    }));
+
+    drop(reopened);
+    let reopened = Engine::open(make_norm(), config).expect("idempotent second reopen");
+    for (title, expected) in &cases {
+        assert_eq!(match_ids(&reopened, title), (*expected).clone());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn tagged_queries_survive_reopen_and_filter_on_mmap() {
     // The .seg v3 tag column (ADR-049) must survive reopen: build two queries that match
     // the same title but carry different category tags, persist, reopen (now mmap-backed),

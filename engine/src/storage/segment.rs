@@ -48,7 +48,8 @@ const MAGIC: [u8; 4] = *b"PERC";
 // internal `u64` source generation per exact row. New engine-owned writes use a
 // non-zero generation to prove that `_source` and the exact row came from the
 // same accepted mutation even when the caller-visible version repeats; legacy
-// rows use zero.
+// rows use zero. v9 appends the optional compound-predicate offsets, lengths,
+// and u32 program blob used to preserve multi-token any-of member boundaries.
 const FORMAT_VERSION: u32 = 3;
 const FORMAT_VERSION_CLASS_D: u32 = 4;
 const FORMAT_VERSION_HOT: u32 = 5;
@@ -63,16 +64,20 @@ const FORMAT_VERSION_OWNERSHIP: u32 = 7;
 /// whenever any row carries a non-zero generation; the version is also a
 /// rollback fence because an older reader cannot safely validate `_source`.
 const FORMAT_VERSION_SOURCE_GENERATION: u32 = 8;
+/// v9: exact section appends per-row compound-predicate offsets/lengths and the
+/// shared u32 program blob. Written only when at least one row needs a compound
+/// member predicate; v9 cumulatively includes v6-v8 columns.
+const FORMAT_VERSION_COMPOUND_PREDICATE: u32 = 9;
 /// Semantic version of the AST→compiled-query lowering baked into a segment.
 ///
 /// Version 0 is every segment written before ADR-118: positive bare terms were
 /// incorrectly gathered across intervening clauses before context-sensitive
 /// query normalization. Version 1 compiles each maximal consecutive positive
-/// bare-term run independently. This lives in the format's old reserved header
-/// word rather than `FORMAT_VERSION`: an older reader can safely execute a
-/// v1-compiled exact plan, while a newer reader must identify every legacy
-/// materialization for source-driven rebuild/re-placement.
-pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 1;
+/// bare-term run independently but still lowers a multi-token any-of member to
+/// one proxy. Version 2 preserves each member's complete conjunction through
+/// exact verification. This lives in the format's old reserved header word so
+/// recovery can source-rebuild every older materialization before serving it.
+pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 2;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -223,6 +228,41 @@ mod tests {
         (path, bytes)
     }
 
+    fn v9_segment_bytes() -> (std::path::PathBuf, Vec<u8>) {
+        let norm = crate::normalize::Normalizer::default_vocab().expect("normalizer");
+        let mut dict = crate::dict::Dict::new();
+        let mut lc = String::new();
+        let ast = crate::dsl::parse("(red shoe,boot)").expect("query");
+        let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+        dict.finalize_mask();
+        let mut segment = crate::segment::Segment::new();
+        segment
+            .add_compiled(
+                &ex,
+                &[],
+                &dict,
+                1,
+                7,
+                crate::segment::CompileKnobs {
+                    accept_class_d: true,
+                    hot_anchor_threshold: 0,
+                    dedup_bodies: true,
+                },
+            )
+            .expect("accepted query");
+        let dir = std::env::temp_dir().join(format!(
+            "rr_segment_v9_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("compound.seg");
+        write_segment(&segment, &path).expect("write v9 segment");
+        let bytes = std::fs::read(&path).expect("read segment");
+        (path, bytes)
+    }
+
     #[test]
     fn v7_ownership_columns_round_trip_and_malformed_columns_fail_loud() {
         let (path, original) = v7_segment_bytes();
@@ -262,6 +302,44 @@ mod tests {
         if let Some(dir) = path.parent() {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn v9_compound_predicate_round_trips_and_malformed_program_fails_loud() {
+        let (path, original) = v9_segment_bytes();
+        assert_eq!(read_u32(&original, 4), FORMAT_VERSION_COMPOUND_PREDICATE);
+        MmapSegment::open(&path).expect("open valid v9");
+
+        let mut cursor =
+            u64::from_le_bytes(original[16..24].try_into().expect("exact offset")) as usize;
+        for width in [8usize, 8, 4, 2, 4, 4, 2, 4, 4, 2, 4, 2, 4, 4, 8] {
+            cursor = skip_array(&original, cursor, width);
+        }
+        cursor = skip_array(&original, cursor, 8); // priority
+        for width in [8usize, 4, 1, 4, 4, 4] {
+            cursor = skip_array(&original, cursor, width);
+        }
+        cursor = skip_array(&original, cursor, 8); // source generation
+        cursor = skip_array(&original, cursor, 4); // predicate offsets
+        cursor = skip_array(&original, cursor, 4); // predicate lengths
+
+        let mut malformed = original;
+        assert!(
+            read_u32(&malformed, cursor) > 0,
+            "predicate blob is nonempty"
+        );
+        malformed[cursor + 4..cursor + 8].copy_from_slice(&99u32.to_le_bytes());
+        reseal(&mut malformed);
+        std::fs::write(&path, malformed).expect("write malformed program");
+        let error = MmapSegment::open(&path).expect_err("bad program version must fail loud");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported compound predicate version"),
+            "got: {error}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().expect("test directory"));
     }
 
     #[test]
@@ -335,6 +413,17 @@ mod tests {
                 .expect("open compacted legacy segment")
                 .compiler_semantics_version(),
             0
+        );
+
+        let mut previous = current.clone();
+        previous[12..16].copy_from_slice(&1u32.to_le_bytes());
+        reseal(&mut previous);
+        std::fs::write(&path, previous).expect("write semantics-one stamp");
+        assert_eq!(
+            MmapSegment::open(&path)
+                .expect("semantics one remains readable for source migration")
+                .compiler_semantics_version(),
+            1
         );
 
         let mut future = current;

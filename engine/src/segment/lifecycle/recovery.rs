@@ -427,20 +427,19 @@ impl Engine {
         // Replay WAL entries after last checkpoint
         replay_wal_tail(&mut engine, &wal_path, manifest.wal_seq_watermark)?;
 
-        // ADR-118 compiler-semantics migration: joining positive bare terms
-        // across an intervening clause could change any context-sensitive query
-        // normalization (phrases, grader state, number context, aliases, ...).
-        // Rebuild every legacy live materialization from retained `_source`
-        // before returning an engine that could serve it. The segment header
-        // stamp makes this idempotent; a missing/inconsistent source sidecar or
-        // failed durable commit refuses startup rather than retaining a silent
-        // false negative.
-        engine.migrate_legacy_clause_boundary_semantics()?;
+        // ADR-118/119 compiler-semantics migration. Rebuild every older live
+        // materialization from retained `_source` before returning an engine
+        // that could serve it: semantics 0 joined positive terms across clause
+        // boundaries, while semantics 1 discarded all but one feature from a
+        // multi-token any-of member. The header stamp makes this idempotent; a
+        // missing/inconsistent source sidecar or failed durable commit refuses
+        // startup rather than retaining a silent false negative.
+        engine.migrate_legacy_compiler_semantics()?;
 
         Ok(engine)
     }
 
-    /// Whether any live row is materialized under the pre-ADR-118 AST lowering.
+    /// Whether any live row uses an older AST→compiled-query lowering.
     pub(crate) fn has_legacy_compiler_segments(&self) -> bool {
         let current = crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION;
         self.segments.iter().any(|segment| {
@@ -448,19 +447,20 @@ impl Engine {
         }) || (!self.memtable.is_empty() && self.memtable.compiler_semantics_version() < current)
     }
 
-    /// Whether serving this engine requires the ADR-118 source-driven compiler
-    /// migration. Every live semantics-v0 row is suspect: the old cross-clause
-    /// stream could affect ordinary phrase consumption, grader state, or number
-    /// context even when no alias is installed.
-    pub(crate) fn needs_clause_boundary_compiler_migration(&self) -> bool {
+    /// Whether serving this engine requires the ADR-118/119 source-driven
+    /// compiler migration. Every live row below the current stamp is suspect;
+    /// only recompilation from the retained DSL can recover clause and any-of
+    /// member boundaries.
+    pub(crate) fn needs_compiler_semantics_migration(&self) -> bool {
         self.has_legacy_compiler_segments()
     }
 
-    /// Standalone upgrade path for ADR-118. The normalizer and dict do not
-    /// change, but every live source must be re-lowered so clause boundaries are
-    /// reflected in exact predicates, signatures, and placement.
-    pub(crate) fn migrate_legacy_clause_boundary_semantics(&mut self) -> std::io::Result<()> {
-        if !self.needs_clause_boundary_compiler_migration() {
+    /// Standalone upgrade path for ADR-118/119. The normalizer and dict do not
+    /// change, but every live source must be re-lowered so clause and any-of
+    /// member boundaries are reflected in exact predicates, signatures, and
+    /// placement.
+    pub(crate) fn migrate_legacy_compiler_semantics(&mut self) -> std::io::Result<()> {
+        if !self.needs_compiler_semantics_migration() {
             return Ok(());
         }
         if !self.owns_manifest {
@@ -728,7 +728,7 @@ impl Engine {
             vocab_epoch: 0,
             owns_manifest: false,
         };
-        if !allow_legacy_compiler_semantics && engine.needs_clause_boundary_compiler_migration() {
+        if !allow_legacy_compiler_semantics && engine.needs_compiler_semantics_migration() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "legacy compiler semantics require an atomic source-driven rebuild and \

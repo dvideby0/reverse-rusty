@@ -326,6 +326,8 @@ impl Segment {
                     required,
                     forbidden: Vec::new(),
                     anyof,
+                    anyof_predicates: Vec::new(),
+                    forbidden_conjunctions: Vec::new(),
                 };
                 // The pre-hash form: the margin gate below reads the re-derived
                 // anchors' FREQUENCIES, which the hashed SigPlan no longer carries.

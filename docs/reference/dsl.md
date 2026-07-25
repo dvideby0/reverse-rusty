@@ -14,10 +14,10 @@ negations. **All top-level clauses are implicitly ANDed together.**
 |---|---|---|
 | `word` | Required term (AND) | `laptop` |
 | `"a b"` | Required phrase (AND) | `"running shoes"` |
-| `(a,b,c)` | Any-of group (OR — at least one must match) | `(red,blue,green)` |
+| `(a,b,c)` | Any-of group (OR — at least one complete member must match) | `(red,blue,green)` |
 | `-word` | Must not contain (NOT) | `-refurbished` |
 | `-"a b"` | Must not contain phrase (NOT) | `-"for parts"` |
-| `-(a,b,c)` | Must not contain any of (NOT + OR) | `-(used,open box,returned)` |
+| `-(a,b,c)` | Must not contain any complete member (NOT + OR) | `-(used,open box,returned)` |
 
 ## Combining operators
 
@@ -28,6 +28,28 @@ Consecutive positive bare terms are normalized together only within one uninterr
 configured multi-word entity can be recognized (`new york`). Every phrase, any-of group, or negated
 clause is a boundary. For example, `new -used york` means required `new` AND required `york` AND NOT
 `used`; it never manufactures a contiguous `new york` entity across the negation (ADR-118).
+
+An unquoted any-of member may contain multiple tokens. Tokens are ANDed **within** that member, while
+members are ORed **across** the group (ADR-119):
+
+```
+(red shoe,boot) marker
+    = ((red AND shoe) OR boot) AND marker
+
+marker -(red shoe,boot)
+    = marker AND NOT ((red AND shoe) OR boot)
+```
+
+| Title | Positive query | Negated query |
+|---|---:|---:|
+| `red shoe marker` | match | reject |
+| `boot marker` | match | reject |
+| `red hat marker` | reject | match |
+| `shoe marker` | reject | match |
+
+The compiler may choose one required feature from each member as a candidate-retrieval proxy, but
+that proxy never replaces the member's full exact predicate. Quoted-phrase adjacency is a separate
+language rule and is not implied by this unquoted-member contract.
 
 ```
 # All of these terms are required (AND):

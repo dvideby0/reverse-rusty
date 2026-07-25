@@ -54,15 +54,143 @@ pub enum CostClass {
     H,
 }
 
+/// One semantic member of a positive any-of group.
+///
+/// A member is an AND of `requirements`; each requirement is an OR of equivalent
+/// feature ids. Before equivalence expansion the unquoted member `open box`
+/// lowers to `[[open], [box]]`. Learned aliases widen an individual requirement
+/// (for example `[[open, opened], [box]]`) without losing the conjunction.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AnyOfMember {
+    pub requirements: Vec<Vec<FeatureId>>,
+}
+
+impl AnyOfMember {
+    pub(crate) fn from_features(mut features: Vec<FeatureId>) -> Option<Self> {
+        features.sort_unstable();
+        features.dedup();
+        if features.is_empty() {
+            return None;
+        }
+        Some(Self {
+            requirements: features.into_iter().map(|feature| vec![feature]).collect(),
+        })
+    }
+
+    fn canonicalize(&mut self) {
+        for alternatives in &mut self.requirements {
+            alternatives.sort_unstable();
+            alternatives.dedup();
+        }
+        self.requirements
+            .retain(|alternatives| !alternatives.is_empty());
+        self.requirements.sort_unstable();
+        self.requirements.dedup();
+    }
+}
+
+/// One positive any-of predicate: OR across [`AnyOfMember`]s.
+///
+/// Only groups containing a multi-requirement member need this exact form.
+/// Ordinary `(red,blue)` groups remain entirely in the compact any-of SoA.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AnyOfPredicate {
+    pub members: Vec<AnyOfMember>,
+}
+
+impl AnyOfPredicate {
+    fn canonicalize(&mut self) {
+        for member in &mut self.members {
+            member.canonicalize();
+        }
+        self.members
+            .retain(|member| !member.requirements.is_empty());
+        self.members.sort_unstable();
+        self.members.dedup();
+    }
+}
+
 /// The positive/negative integer form of a query (no signatures yet).
 #[derive(Clone, Debug)]
 pub struct Extracted {
-    pub required: Vec<FeatureId>,   // AND
-    pub forbidden: Vec<FeatureId>,  // none may be present
-    pub anyof: Vec<Vec<FeatureId>>, // each group: >=1 member-proxy present
+    pub required: Vec<FeatureId>,  // AND
+    pub forbidden: Vec<FeatureId>, // none may be present
+    /// A necessary OR of retrieval proxies per group. For an ordinary
+    /// single-token any-of this is also the complete exact predicate. Compound
+    /// groups additionally use `anyof_predicates` for the sufficient check.
+    pub anyof: Vec<Vec<FeatureId>>,
+    /// Exact OR-of-AND predicates for groups containing a multi-token member.
+    pub anyof_predicates: Vec<AnyOfPredicate>,
+    /// Multi-feature members of negated any-of groups. A query rejects when any
+    /// whole conjunction matches; singleton members use the flat `forbidden`
+    /// column.
+    pub forbidden_conjunctions: Vec<Vec<FeatureId>>,
 }
 
 impl Extracted {
+    /// Whether the query has any negative semantic predicate, including a
+    /// multi-feature member of a negated any-of group.
+    #[inline]
+    pub fn has_negative_predicate(&self) -> bool {
+        !self.forbidden.is_empty() || !self.forbidden_conjunctions.is_empty()
+    }
+
+    /// Whether the compiled query contains no positive or negative predicate.
+    #[inline]
+    pub fn is_semantically_empty(&self) -> bool {
+        self.required.is_empty()
+            && self.anyof.is_empty()
+            && self.anyof_predicates.is_empty()
+            && !self.has_negative_predicate()
+    }
+
+    /// Direct semantic predicate over sorted positive/negative feature views.
+    /// Used by explain and the shared-front-end randomized oracles; the
+    /// independent reference matcher implements the same rules separately.
+    pub fn matches_features(&self, pos: &[FeatureId], neg: &[FeatureId]) -> bool {
+        let in_pos = |feature: &FeatureId| pos.binary_search(feature).is_ok();
+        let in_neg = |feature: &FeatureId| neg.binary_search(feature).is_ok();
+        self.required.iter().all(&in_pos)
+            && !self.forbidden.iter().any(&in_neg)
+            && self.anyof.iter().all(|group| group.iter().any(&in_pos))
+            && self.anyof_predicates.iter().all(|predicate| {
+                predicate.members.iter().any(|member| {
+                    member
+                        .requirements
+                        .iter()
+                        .all(|requirement| requirement.iter().any(&in_pos))
+                })
+            })
+            && !self
+                .forbidden_conjunctions
+                .iter()
+                .any(|member| member.iter().all(&in_neg))
+    }
+
+    fn canonicalize(&mut self) {
+        self.required.sort_unstable();
+        self.required.dedup();
+        self.forbidden.sort_unstable();
+        self.forbidden.dedup();
+        self.anyof.sort_unstable();
+        self.anyof.dedup();
+        for predicate in &mut self.anyof_predicates {
+            predicate.canonicalize();
+        }
+        self.anyof_predicates
+            .retain(|predicate| !predicate.members.is_empty());
+        self.anyof_predicates.sort_unstable();
+        self.anyof_predicates.dedup();
+        for conjunction in &mut self.forbidden_conjunctions {
+            conjunction.sort_unstable();
+            conjunction.dedup();
+        }
+        self.forbidden_conjunctions
+            .retain(|conjunction| !conjunction.is_empty());
+        self.forbidden_conjunctions.sort_unstable();
+        self.forbidden_conjunctions.dedup();
+    }
+
     /// Expand learned equivalence groups (ADR-054) into the query — the FN-safe
     /// "expansion, not collapse" application of an alias. A required feature in a group
     /// `G` is moved out of `required` and added as an any-of group `G` (so a title bearing
@@ -77,6 +205,7 @@ impl Extracted {
     /// `equiv` is empty, so the default path is byte-identical. Idempotent.
     pub fn expand_equivalences(&mut self, equiv: &crate::dict::EquivMap) {
         if equiv.is_empty() {
+            self.canonicalize();
             return;
         }
         // A required feature in an equivalence group becomes an any-of over the group.
@@ -88,7 +217,8 @@ impl Extracted {
             }
         }
         self.required = still_required;
-        // Widen every any-of group (incl. the ones just added) by its members' groups.
+        // Widen every proxy any-of group (incl. the ones just added) by its
+        // members' equivalence groups.
         for g in &mut self.anyof {
             let mut widened: Vec<FeatureId> = Vec::with_capacity(g.len());
             for &m in g.iter() {
@@ -101,11 +231,28 @@ impl Extracted {
             widened.dedup();
             *g = widened;
         }
-        // Canonicalize for determinism (dedup identical groups + keep required tidy).
-        self.required.sort_unstable();
-        self.required.dedup();
-        self.anyof.sort_unstable();
-        self.anyof.dedup();
+        // Widen each individual requirement of a compound member. Aliases are
+        // alternatives for that requirement, never substitutes for the member's
+        // other conjuncts.
+        for predicate in &mut self.anyof_predicates {
+            for member in &mut predicate.members {
+                for requirement in &mut member.requirements {
+                    let mut widened = Vec::with_capacity(requirement.len());
+                    for &feature in requirement.iter() {
+                        match equiv.get(&feature) {
+                            Some(group) => widened.extend_from_slice(group),
+                            None => widened.push(feature),
+                        }
+                    }
+                    widened.sort_unstable();
+                    widened.dedup();
+                    *requirement = widened;
+                }
+            }
+        }
+        // Canonicalize for deterministic exact-program bytes and semantic-body
+        // dedup. Forbidden predicates deliberately are not equivalence-expanded.
+        self.canonicalize();
     }
 
     /// Reject a compiled query whose any column would overflow the SoA exact store's
@@ -141,6 +288,55 @@ impl Extracted {
             if g.len() > ceiling {
                 return Some(g.len());
             }
+        }
+        // Compound programs use u32 word counts and offsets. Guard every count
+        // plus the full row length before ExactStore narrows them.
+        let u32_ceiling = u32::MAX as usize;
+        if self.anyof_predicates.len() > u32_ceiling {
+            return Some(self.anyof_predicates.len());
+        }
+        let mut words = 3usize; // program version + positive count + negative count
+        for predicate in &self.anyof_predicates {
+            if predicate.members.len() > u32_ceiling {
+                return Some(predicate.members.len());
+            }
+            words = match words.checked_add(1) {
+                Some(words) => words,
+                None => return Some(usize::MAX),
+            };
+            for member in &predicate.members {
+                if member.requirements.len() > u32_ceiling {
+                    return Some(member.requirements.len());
+                }
+                words = match words.checked_add(1) {
+                    Some(words) => words,
+                    None => return Some(usize::MAX),
+                };
+                for alternatives in &member.requirements {
+                    if alternatives.len() > u32_ceiling {
+                        return Some(alternatives.len());
+                    }
+                    words = match words.checked_add(1 + alternatives.len()) {
+                        Some(words) => words,
+                        None => return Some(usize::MAX),
+                    };
+                }
+            }
+        }
+        if self.forbidden_conjunctions.len() > u32_ceiling {
+            return Some(self.forbidden_conjunctions.len());
+        }
+        for conjunction in &self.forbidden_conjunctions {
+            if conjunction.len() > u32_ceiling {
+                return Some(conjunction.len());
+            }
+            words = match words.checked_add(1 + conjunction.len()) {
+                Some(words) => words,
+                None => return Some(usize::MAX),
+            };
+        }
+        if words > u32_ceiling {
+            return Some(words);
         }
         None
     }

@@ -956,6 +956,8 @@ fn legacy_tail_is_folded_before_current_placement_validation() {
             .norm
             .compile_features_readonly("used", &cluster.dict, &mut lc),
         anyof: Vec::new(),
+        anyof_predicates: Vec::new(),
+        forbidden_conjunctions: Vec::new(),
     };
     legacy.required.sort_unstable();
     legacy.required.dedup();

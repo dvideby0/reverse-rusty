@@ -14,6 +14,18 @@ use crate::util::sig_key;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ExplainAnyOfMember {
+    /// AND across requirements; OR across names inside one requirement.
+    pub requirements: Vec<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplainAnyOfPredicate {
+    /// OR across members.
+    pub members: Vec<ExplainAnyOfMember>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ExplainDetail {
     pub title_features: Vec<String>,
     pub candidate: bool,
@@ -21,7 +33,14 @@ pub struct ExplainDetail {
     pub cost_class: String,
     pub required: Vec<String>,
     pub forbidden: Vec<String>,
+    /// Compact simple groups and the lossless proxy groups used to retrieve
+    /// compound predicates.
     pub anyof_groups: Vec<Vec<String>>,
+    /// Exact member-preserving predicates for compound positive groups.
+    pub anyof_member_predicates: Vec<ExplainAnyOfPredicate>,
+    /// Whole negative conjunctions; the query rejects only when every feature
+    /// in one member is present.
+    pub forbidden_conjunctions: Vec<Vec<String>>,
     pub failures: Vec<String>,
 }
 
@@ -39,9 +58,21 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
             s.push_str(&format!("  ANY_OF[{i}]: {}\n", names(g, dict)));
         }
     }
+    for (i, predicate) in cq.extracted.anyof_predicates.iter().enumerate() {
+        s.push_str(&format!(
+            "  ANY_OF_PREDICATE[{i}]: {}\n",
+            predicate_name(predicate, dict)
+        ));
+    }
     s.push_str("  FORBIDDEN: ");
     s.push_str(&names(&cq.extracted.forbidden, dict));
     s.push('\n');
+    for (i, conjunction) in cq.extracted.forbidden_conjunctions.iter().enumerate() {
+        s.push_str(&format!(
+            "  FORBIDDEN_MEMBER[{i}]: ALL OF ({})\n",
+            names(conjunction, dict)
+        ));
+    }
     s.push_str("  signatures (main): ");
     for sg in &cq.main_sigs {
         s.push_str(&format!("{sg:#018x} "));
@@ -145,6 +176,21 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
             fail.push(format!("any_of[{i}] unsatisfied"));
         }
     }
+    for (i, predicate) in cq.extracted.anyof_predicates.iter().enumerate() {
+        if !predicate.members.iter().any(|member| {
+            member
+                .requirements
+                .iter()
+                .all(|requirement| requirement.iter().any(|&feature| in_pos(feature)))
+        }) {
+            fail.push(format!("any_of_predicate[{i}] unsatisfied"));
+        }
+    }
+    for (i, conjunction) in cq.extracted.forbidden_conjunctions.iter().enumerate() {
+        if conjunction.iter().all(|&feature| in_neg(feature)) {
+            fail.push(format!("forbidden_member[{i}] fully present"));
+        }
+    }
     if fail.is_empty() {
         s.push_str("  exact match: PASS\n");
     } else {
@@ -191,7 +237,8 @@ pub fn explain_match_structured(
     // `explain_match`.
     title_sigs.insert(crate::util::universal_sig());
     let candidate = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.broad_sigs.iter().any(|s| title_sigs.contains(s));
+        || cq.broad_sigs.iter().any(|s| title_sigs.contains(s))
+        || cq.hot_sigs.iter().any(|s| title_sigs.contains(s));
 
     let in_pos = |f: u32| pos.binary_search(&f).is_ok();
     let in_neg = |f: u32| neg.binary_search(&f).is_ok();
@@ -209,6 +256,21 @@ pub fn explain_match_structured(
     for (i, g) in cq.extracted.anyof.iter().enumerate() {
         if !g.iter().any(|&f| in_pos(f)) {
             failures.push(format!("any_of[{i}] unsatisfied"));
+        }
+    }
+    for (i, predicate) in cq.extracted.anyof_predicates.iter().enumerate() {
+        if !predicate.members.iter().any(|member| {
+            member
+                .requirements
+                .iter()
+                .all(|requirement| requirement.iter().any(|&feature| in_pos(feature)))
+        }) {
+            failures.push(format!("any_of_predicate[{i}] unsatisfied"));
+        }
+    }
+    for (i, conjunction) in cq.extracted.forbidden_conjunctions.iter().enumerate() {
+        if conjunction.iter().all(|&feature| in_neg(feature)) {
+            failures.push(format!("forbidden_member[{i}] fully present"));
         }
     }
 
@@ -235,8 +297,53 @@ pub fn explain_match_structured(
             .iter()
             .map(|g| g.iter().map(|&id| dict.name(id).to_string()).collect())
             .collect(),
+        anyof_member_predicates: cq
+            .extracted
+            .anyof_predicates
+            .iter()
+            .map(|predicate| ExplainAnyOfPredicate {
+                members: predicate
+                    .members
+                    .iter()
+                    .map(|member| ExplainAnyOfMember {
+                        requirements: member
+                            .requirements
+                            .iter()
+                            .map(|requirement| {
+                                requirement
+                                    .iter()
+                                    .map(|&id| dict.name(id).to_string())
+                                    .collect()
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        forbidden_conjunctions: cq
+            .extracted
+            .forbidden_conjunctions
+            .iter()
+            .map(|member| member.iter().map(|&id| dict.name(id).to_string()).collect())
+            .collect(),
         failures,
     }
+}
+
+fn predicate_name(predicate: &crate::compile::AnyOfPredicate, dict: &Dict) -> String {
+    predicate
+        .members
+        .iter()
+        .map(|member| {
+            member
+                .requirements
+                .iter()
+                .map(|alternatives| format!("({})", names(alternatives, dict)))
+                .collect::<Vec<_>>()
+                .join(" AND ")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 fn names(ids: &[u32], dict: &Dict) -> String {

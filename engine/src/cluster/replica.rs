@@ -318,7 +318,8 @@ pub(crate) fn peer_recover(
 }
 
 /// Boot-time replica copy used only while `ClusterEngine::open` is immediately
-/// replacing pre-ADR-118 materializations under one atomic coordinator commit.
+/// replacing older compiler materializations under one atomic coordinator
+/// commit.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn peer_recover_for_compiler_migration(
     norm: &Arc<Normalizer>,

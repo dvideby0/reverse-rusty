@@ -22,12 +22,16 @@
 use crate::dict::FeatureId;
 use crate::tagdict::TagId;
 
+mod predicate;
 mod slices;
 mod store;
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) use predicate::{
+    encode_predicate, eval_predicate_batch, validate_predicate, verify_predicate,
+};
 pub use slices::{eval_batch_slices, prefilter_slices, verify_slices};
 pub use store::ExactStore;
 

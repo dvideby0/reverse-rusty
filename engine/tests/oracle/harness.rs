@@ -70,7 +70,7 @@ impl Brute {
         for (logical, text) in queries {
             if let Ok(ast) = reverse_rusty::dsl::parse(text) {
                 let ex = extract(&ast, &norm, &mut dict, &mut lc);
-                if ex.required.is_empty() && ex.anyof.is_empty() && ex.forbidden.is_empty() {
+                if ex.is_semantically_empty() {
                     continue;
                 }
                 qs.push((*logical, ex));
@@ -133,14 +133,9 @@ impl Brute {
         let mut sc = reverse_rusty::normalize::NormScratch::new();
         self.norm
             .match_features_dual(title, &self.dict, lc, &mut sc, feats, &mut pos);
-        let in_pos = |f: u32| pos.binary_search(&f).is_ok();
-        let in_neg = |f: u32| feats.binary_search(&f).is_ok();
         let mut out = HashSet::new();
         for (logical, ex) in &self.queries {
-            if ex.required.iter().all(|&f| in_pos(f))
-                && !ex.forbidden.iter().any(|&f| in_neg(f))
-                && ex.anyof.iter().all(|g| g.iter().any(|&f| in_pos(f)))
-            {
+            if ex.matches_features(&pos, feats) {
                 out.insert(*logical);
             }
         }

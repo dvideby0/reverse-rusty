@@ -319,10 +319,10 @@ impl LocalShard {
         })
     }
 
-    /// True when this local shard contains a live pre-ADR-118 materialization
-    /// that must be rebuilt and re-placed before serving.
-    pub(crate) fn needs_clause_boundary_compiler_migration(&self) -> bool {
-        self.lock().needs_clause_boundary_compiler_migration()
+    /// True when this local shard contains a live materialization from an older
+    /// compiler semantics that must be rebuilt and re-placed before serving.
+    pub(crate) fn needs_compiler_semantics_migration(&self) -> bool {
+        self.lock().needs_compiler_semantics_migration()
     }
 
     /// Self-restart a durable shard from its checkpoint sidecar (ADR-039 §6): attach the committed
@@ -359,11 +359,11 @@ impl LocalShard {
         let floor = LogPos(ckpt.local_checkpoint);
         let retention_lease_ttl = resolve_lease_ttl(&config);
         let translog = translog::open_existing(&dir, config.wal_sync_on_write, floor)?;
-        // A shard-local restart cannot safely rewrite a legacy compiler plan:
-        // splitting a fabricated cross-clause feature can change both placement
-        // and visibility mode. The strict attach therefore refuses semantics-v0
-        // and requires coordinator-wide rebuild/re-placement (or recovery from
-        // a current peer) before this shard can serve.
+        // A shard-local restart cannot safely rewrite an older compiler plan:
+        // restoring a lost clause/member boundary can change both placement
+        // and visibility mode. The strict attach therefore refuses every
+        // pre-current stamp and requires coordinator-wide rebuild/re-placement
+        // (or recovery from a current peer) before this shard can serve.
         let engine = Engine::open_shared_segments_with_source_file(
             Arc::clone(&norm),
             Arc::clone(&dict),

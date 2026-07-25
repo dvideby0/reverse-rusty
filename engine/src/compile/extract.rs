@@ -11,7 +11,7 @@
 //! Both honour the lossless-cover invariant structurally: forbidden features are
 //! collected separately and never participate in anchor/signature selection.
 
-use super::Extracted;
+use super::{AnyOfMember, AnyOfPredicate, Extracted};
 use crate::dict::{Dict, FeatureId};
 use crate::dsl::{Ast, Atom};
 use crate::normalize::Normalizer;
@@ -83,6 +83,8 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
     let mut required: Vec<FeatureId> = Vec::new();
     let mut forbidden: Vec<FeatureId> = Vec::new();
     let mut anyof: Vec<Vec<FeatureId>> = Vec::new();
+    let mut anyof_predicates: Vec<AnyOfPredicate> = Vec::new();
+    let mut forbidden_conjunctions: Vec<Vec<FeatureId>> = Vec::new();
 
     // Consecutive positive bare words are normalized JOINTLY (in original order)
     // so multiword entities ("michael jordan", "psa 10") are recognized exactly
@@ -108,28 +110,63 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
             }
             (Atom::AnyOf(members), neg) => {
                 if neg {
-                    // -(a,b,c): reject if ANY member feature present
+                    // A negated group rejects if ANY WHOLE member matches.
+                    // Singleton members retain the flat forbidden fast path;
+                    // multi-feature members remain conjunctions for exact verify.
                     for m in members {
-                        let feats = norm.compile_features(m, dict, lc);
-                        forbidden.extend_from_slice(&feats);
-                    }
-                } else {
-                    // (a,b,c): >=1 member present. Represent each member by its
-                    // rarest (most specific) normalized feature.
-                    let mut group: Vec<FeatureId> = Vec::new();
-                    for m in members {
-                        let feats = norm.compile_features(m, dict, lc);
-                        if let Some(&rep) = feats.iter().min_by_key(|&&f| dict.freq(f)) {
-                            group.push(rep);
+                        let mut feats = norm.compile_features(m, dict, lc);
+                        feats.sort_unstable();
+                        feats.dedup();
+                        match feats.as_slice() {
+                            [feature] => forbidden.push(*feature),
+                            [] => {}
+                            _ => forbidden_conjunctions.push(feats),
                         }
                     }
-                    group.sort_unstable();
-                    group.dedup();
-                    if group.len() == 1 {
-                        // singleton group is just a required feature (more selective)
-                        required.push(group[0]);
-                    } else if !group.is_empty() {
-                        anyof.push(group);
+                } else {
+                    // OR across members, AND across every normalized feature in
+                    // one member. Keep rarest-feature proxies only as a lossless
+                    // retrieval condition; compound exact predicates carry the
+                    // complete member semantics.
+                    let mut semantic_members: Vec<AnyOfMember> = Vec::new();
+                    for m in members {
+                        let feats = norm.compile_features(m, dict, lc);
+                        if let Some(member) = AnyOfMember::from_features(feats) {
+                            semantic_members.push(member);
+                        }
+                    }
+                    semantic_members.sort_unstable();
+                    semantic_members.dedup();
+                    if semantic_members.len() == 1 {
+                        // OR over one member is simply that member's conjunction.
+                        for requirement in &semantic_members[0].requirements {
+                            required.extend_from_slice(requirement);
+                        }
+                    } else if !semantic_members.is_empty() {
+                        let mut proxies = Vec::with_capacity(semantic_members.len());
+                        for member in &semantic_members {
+                            if let Some(proxy) = member
+                                .requirements
+                                .iter()
+                                .filter_map(|alternatives| alternatives.first().copied())
+                                .min_by_key(|&feature| dict.freq(feature))
+                            {
+                                proxies.push(proxy);
+                            }
+                        }
+                        proxies.sort_unstable();
+                        proxies.dedup();
+                        if !proxies.is_empty() {
+                            anyof.push(proxies);
+                        }
+                        if semantic_members
+                            .iter()
+                            .any(|member| member.requirements.len() > 1)
+                        {
+                            anyof_predicates.push(AnyOfPredicate {
+                                members: semantic_members,
+                            });
+                        }
                     }
                 }
             }
@@ -159,6 +196,8 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
         required,
         forbidden,
         anyof,
+        anyof_predicates,
+        forbidden_conjunctions,
     };
     // Apply learned equivalences (ADR-054). No-op unless a vocabulary installed them on the
     // dict; FN-safe (the match set only grows). See `Extracted::expand_equivalences`.
@@ -177,6 +216,8 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
     let mut required: Vec<FeatureId> = Vec::new();
     let mut forbidden: Vec<FeatureId> = Vec::new();
     let mut anyof: Vec<Vec<FeatureId>> = Vec::new();
+    let mut anyof_predicates: Vec<AnyOfPredicate> = Vec::new();
+    let mut forbidden_conjunctions: Vec<Vec<FeatureId>> = Vec::new();
 
     let mut pos_words: Vec<&str> = Vec::new();
 
@@ -199,23 +240,54 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
             (Atom::AnyOf(members), neg) => {
                 if neg {
                     for m in members {
-                        let feats = norm.compile_features_readonly(m, dict, lc);
-                        forbidden.extend_from_slice(&feats);
-                    }
-                } else {
-                    let mut group: Vec<FeatureId> = Vec::new();
-                    for m in members {
-                        let feats = norm.compile_features_readonly(m, dict, lc);
-                        if let Some(&rep) = feats.iter().min_by_key(|&&f| dict.freq(f)) {
-                            group.push(rep);
+                        let mut feats = norm.compile_features_readonly(m, dict, lc);
+                        feats.sort_unstable();
+                        feats.dedup();
+                        match feats.as_slice() {
+                            [feature] => forbidden.push(*feature),
+                            [] => {}
+                            _ => forbidden_conjunctions.push(feats),
                         }
                     }
-                    group.sort_unstable();
-                    group.dedup();
-                    if group.len() == 1 {
-                        required.push(group[0]);
-                    } else if !group.is_empty() {
-                        anyof.push(group);
+                } else {
+                    let mut semantic_members: Vec<AnyOfMember> = Vec::new();
+                    for m in members {
+                        let feats = norm.compile_features_readonly(m, dict, lc);
+                        if let Some(member) = AnyOfMember::from_features(feats) {
+                            semantic_members.push(member);
+                        }
+                    }
+                    semantic_members.sort_unstable();
+                    semantic_members.dedup();
+                    if semantic_members.len() == 1 {
+                        for requirement in &semantic_members[0].requirements {
+                            required.extend_from_slice(requirement);
+                        }
+                    } else if !semantic_members.is_empty() {
+                        let mut proxies = Vec::with_capacity(semantic_members.len());
+                        for member in &semantic_members {
+                            if let Some(proxy) = member
+                                .requirements
+                                .iter()
+                                .filter_map(|alternatives| alternatives.first().copied())
+                                .min_by_key(|&feature| dict.freq(feature))
+                            {
+                                proxies.push(proxy);
+                            }
+                        }
+                        proxies.sort_unstable();
+                        proxies.dedup();
+                        if !proxies.is_empty() {
+                            anyof.push(proxies);
+                        }
+                        if semantic_members
+                            .iter()
+                            .any(|member| member.requirements.len() > 1)
+                        {
+                            anyof_predicates.push(AnyOfPredicate {
+                                members: semantic_members,
+                            });
+                        }
                     }
                 }
             }
@@ -233,6 +305,8 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
         required,
         forbidden,
         anyof,
+        anyof_predicates,
+        forbidden_conjunctions,
     };
     // Apply learned equivalences (ADR-054); no-op unless installed on the dict. FN-safe.
     out.expand_equivalences(dict.equivalences());

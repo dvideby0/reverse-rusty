@@ -171,7 +171,7 @@ fn reopen_with_flipped_theta_is_result_identical_and_fences_hold() {
         .join("segments")
         .join(&seg_name);
     let mut bytes = std::fs::read(&seg_path).expect("segment bytes");
-    bytes[4..8].copy_from_slice(&9u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
     let body = bytes.len() - 4;
     let crc = reverse_rusty::storage::crc32(&bytes[..body]);
     bytes[body..].copy_from_slice(&crc.to_le_bytes());

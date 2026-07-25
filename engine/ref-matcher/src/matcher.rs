@@ -53,7 +53,10 @@ impl RefMatcher {
             q.expand_equivalences(&equiv);
 
             let drop = if accept_class_d {
-                q.required.is_empty() && q.anyof.is_empty() && q.forbidden.is_empty()
+                q.required.is_empty()
+                    && q.anyof.is_empty()
+                    && q.forbidden.is_empty()
+                    && q.forbidden_conjunctions.is_empty()
             } else {
                 q.is_class_d()
             };
@@ -82,6 +85,18 @@ impl RefMatcher {
             if q.required.iter().all(&in_pos)
                 && !q.forbidden.iter().any(&in_neg)
                 && q.anyof.iter().all(|g| g.iter().any(&in_pos))
+                && q.anyof_predicates.iter().all(|predicate| {
+                    predicate.members.iter().any(|member| {
+                        member
+                            .requirements
+                            .iter()
+                            .all(|requirement| requirement.iter().any(&in_pos))
+                    })
+                })
+                && !q
+                    .forbidden_conjunctions
+                    .iter()
+                    .any(|member| member.iter().all(&in_neg))
             {
                 out.insert(*logical);
             }

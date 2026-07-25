@@ -228,6 +228,38 @@ fn stored_class_d_is_counted_and_introspectable() {
 }
 
 #[test]
+fn negated_multi_token_members_are_accepted_and_forbidden_as_whole_units() {
+    let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), lane_on());
+    assert!(matches!(
+        eng.try_insert_live("-(red shoe,boot)", 77, 1),
+        Ok(InsertOutcome::Inserted(_))
+    ));
+    assert_eq!(eng.class_counts()[3], 1);
+
+    let titles: Vec<String> = ["red hat", "shoe", "red shoe", "boot"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let sets = per_title_sets(&eng, &titles, true);
+    assert!(
+        sets[0].contains(&77),
+        "a partial member must remain allowed"
+    );
+    assert!(
+        sets[1].contains(&77),
+        "one conjunct alone must remain allowed"
+    );
+    assert!(
+        !sets[2].contains(&77),
+        "the complete red+shoe member is forbidden"
+    );
+    assert!(
+        !sets[3].contains(&77),
+        "the singleton boot member is forbidden"
+    );
+}
+
+#[test]
 fn effectively_empty_query_rejected_even_with_lane_on() {
     let mut eng = Engine::with_config(Normalizer::default_vocab().expect("vocab"), lane_on());
     // No positives AND no forbidden: parses to an empty AST, classifies D, and is
@@ -568,7 +600,7 @@ fn class_d_segments_write_the_v4_rollback_fence() {
         .find(|p| p.extension().is_some_and(|x| x == "seg"))
         .expect("segment file");
     let mut bytes = std::fs::read(&seg_path).expect("read");
-    bytes[4..8].copy_from_slice(&9u32.to_le_bytes());
+    bytes[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
     // Re-seal the trailing whole-file CRC so the version check (which runs after
     // it) is what fires.
     let body = bytes.len() - 4;
