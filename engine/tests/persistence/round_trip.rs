@@ -181,7 +181,7 @@ fn quoted_phrase_predicates_round_trip_through_v10_mmap() {
     );
     assert_eq!(
         u32::from_le_bytes(bytes[12..16].try_into().expect("semantics")),
-        3
+        4
     );
     drop(engine);
 
