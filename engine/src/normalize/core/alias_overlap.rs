@@ -1,20 +1,17 @@
-//! The overlapping (`MatchKind::Standard`) alias automaton (ADR-061): the `P(T)` entity
-//! collection pass and the boundary-aware phase-1 phrase selection. Split out of `core.rs`
-//! to keep that file within the size budget.
+//! The overlapping (`MatchKind::Standard`) phrase automaton: ADR-061 uses it
+//! for alias-enabled flat `P(T)`, while ADR-120 uses it for phrase-aware
+//! positive graphs regardless of alias activation. Split out of `core.rs` to
+//! keep that file within the size budget.
 
 use crate::dict::{Dict, FeatureId, FeatureKind};
+use crate::normalize::PositionArc;
 use daachorse::DoubleArrayAhoCorasick;
 
-/// The overlapping (`MatchKind::Standard`) phrase automaton + its per-pattern entity features
-/// (ADR-061), used on the title side by
-/// [`Normalizer::match_features_dual`](super::Normalizer::match_features_dual) to build the
-/// positive superset `P(T)`, and — when present — for the boundary-aware phase-1 selection in
-/// [`Normalizer::emit`](super::Normalizer::emit). Built by
-/// [`NormalizerBuilder::build`](crate::normalize::NormalizerBuilder::build) only when ≥1
-/// alias-mode phrase is registered, and then over **every** phrase (alias AND non-alias), so a
-/// non-alias phrase displaced from the leftmost-longest parse by an overlapping alias is still
-/// present in `P(T)` (the codex-R6 FN fix).
-pub(in crate::normalize) struct AliasOverlap {
+/// The overlapping phrase automaton + its per-pattern entity features. Built
+/// over every registered phrase. Flat ADR-061 callers use it only while an
+/// alias is active; positioned ADR-120 callers always use it so an ordinary
+/// collapse phrase cannot erase a valid component or overlapping-entity path.
+pub(in crate::normalize) struct PhraseOverlap {
     pub(in crate::normalize) automaton: DoubleArrayAhoCorasick<usize>,
     /// pattern index -> (entity feature name, kind).
     pub(in crate::normalize) entries: Vec<(String, FeatureKind)>,
@@ -22,18 +19,20 @@ pub(in crate::normalize) struct AliasOverlap {
     /// phase-1 selection (codex R12) can recover each pattern's
     /// [`PhraseEntry`](crate::normalize::PhraseEntry) (its mode).
     pub(in crate::normalize) entry_idx: Vec<usize>,
+    /// Pattern index -> number of cleaned token positions spanned.
+    pub(in crate::normalize) token_lens: Vec<u32>,
 }
 
-impl AliasOverlap {
+impl PhraseOverlap {
     /// Append the entity feature id of every word-boundary-aligned phrase occurrence in the
     /// already-cleaned text `lc` (overlapping matches included) to `out`. Unknown entities hash to
     /// a stable synthetic id (ADR-046), exactly as the leftmost-longest pass resolves.
     ///
     /// The scan **collapses whitespace runs** so a phrase (registered single-spaced) still matches
     /// a title with repeated spaces or adjacent split punctuation (`new  york`, `new---york`) —
-    /// codex R8. This is positive-view (`P(T)`) only and only ever ADDS entities (recall-safe); the
-    /// canonical `N(T)` and the compile path keep `lc` verbatim, so persisted segments are NOT
-    /// desynced by a whitespace-cleaning change. No allocation unless a run is actually present.
+    /// codex R8. This is the flat positive-view (`P(T)`) path and only ever ADDS entities
+    /// (recall-safe); flat canonical `N(T)` remains unchanged. No allocation unless a run is
+    /// actually present.
     pub(in crate::normalize) fn collect_into(
         &self,
         lc: &str,
@@ -57,6 +56,51 @@ impl AliasOverlap {
             self.scan_overlapping(&collapsed, dict, out);
         } else {
             self.scan_overlapping(lc, dict, out);
+        }
+    }
+
+    /// Append every boundary-aligned overlapping phrase as a positioned graph
+    /// edge (ADR-120). This is the graph analogue of [`collect_into`](Self::collect_into):
+    /// it supplies alternate multi-word paths to the positive quoted-phrase
+    /// view while the canonical negative graph remains leftmost-longest.
+    pub(in crate::normalize) fn collect_positioned_into(
+        &self,
+        lc: &str,
+        tokens: &[(usize, usize)],
+        dict: &Dict,
+        out: &mut Vec<PositionArc>,
+    ) {
+        // `emit_positioned` has already collapsed runs in its reusable `lc`
+        // buffer for both title graphs. Scan it directly: allocating another
+        // temporary String here would violate the match hot-path contract.
+        self.scan_positioned(lc, tokens, dict, out);
+    }
+
+    fn scan_positioned(
+        &self,
+        text: &str,
+        tokens: &[(usize, usize)],
+        dict: &Dict,
+        out: &mut Vec<PositionArc>,
+    ) {
+        let bytes = text.as_bytes();
+        for m in self.automaton.find_overlapping_iter(text) {
+            let (s, e) = (m.start(), m.end());
+            let ok_start = s == 0 || bytes[s - 1] == b' ';
+            let ok_end = e == text.len() || bytes[e] == b' ';
+            if !ok_start || !ok_end {
+                continue;
+            }
+            let Ok(start) = tokens.binary_search_by_key(&s, |&(token_start, _)| token_start) else {
+                debug_assert!(false, "boundary-aligned phrase missing token start");
+                continue;
+            };
+            let start = u32::try_from(start).unwrap_or(u32::MAX);
+            out.push(PositionArc {
+                feature: dict.get_or_synthetic(&self.entries[m.value()].0),
+                start,
+                end: start.saturating_add(self.token_lens[m.value()]),
+            });
         }
     }
 

@@ -20,6 +20,10 @@ use tonic::{Request, Response, Status};
 
 use crate::harness::*;
 
+fn current_compiler_semantics_version() -> u32 {
+    reverse_rusty::segment::Segment::new().compiler_semantics_version()
+}
+
 /// A minimal mock `ShardService` with matching feature-space fingerprints and a configurable
 /// ownership attestation. Every other RPC is unimplemented: the connect guard rejects first.
 struct LegacyOwnershipServer {
@@ -43,7 +47,7 @@ impl ShardService for LegacyOwnershipServer {
             placement_generation: self.placement_generation,
             num_shards: self.num_shards,
             coordinator_id: 0,
-            compiler_semantics_version: 2,
+            compiler_semantics_version: current_compiler_semantics_version(),
         }))
     }
 
@@ -66,7 +70,7 @@ impl ShardService for LegacyOwnershipServer {
             placement_generation: self.placement_generation,
             num_shards: self.num_shards,
             coordinator_id,
-            compiler_semantics_version: 2,
+            compiler_semantics_version: current_compiler_semantics_version(),
         }))
     }
 

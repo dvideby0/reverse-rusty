@@ -230,7 +230,7 @@ fn source_generations_coexist_across_the_rebuild_commit() {
 
     let manifest =
         read_cluster_manifest(&dir.join("cluster_manifest.bin")).expect("read v7 manifest");
-    assert_eq!(manifest.compiler_semantics_version, 2);
+    assert_eq!(manifest.compiler_semantics_version, 3);
     assert!(
         manifest
             .source_files

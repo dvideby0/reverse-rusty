@@ -444,8 +444,8 @@ impl ClusterEngine {
                 error: format!("{} bytes", replay.skipped_bytes),
             });
         }
-        // ADR-118/119: older segments may have lost either clause boundaries or
-        // multi-token any-of member boundaries. Rebuild from the complete,
+        // ADR-118/119/120: older segments may have lost clause boundaries,
+        // multi-token any-of member boundaries, or quoted adjacency. Rebuild from the complete,
         // replayed live corpus, append any newly exposed features without
         // re-ranking the frozen mask, re-place at one fresh generation, update
         // the control document, and commit the green registry before exposing

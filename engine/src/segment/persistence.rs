@@ -26,6 +26,7 @@ impl Engine {
     pub(in crate::segment) fn seal_and_push(&mut self, seg: Segment) -> bool {
         let (base, persisted) = self.make_base_segment(seg);
         self.segments.push(Arc::new(base));
+        self.refresh_phrase_capability();
         persisted
     }
 
@@ -127,11 +128,13 @@ impl Engine {
     ) -> std::io::Result<IngestReport> {
         let (base, seg_path) = self.build_durable_base(seg)?;
         self.segments.push(Arc::new(base));
+        self.refresh_phrase_capability();
 
         // The manifest write is the atomic commit point. If it fails, roll the
         // batch back entirely: drop the in-memory segment and delete the orphan.
         if !self.save_manifest_if_persistent() {
             self.segments.pop();
+            self.refresh_phrase_capability();
             if let Some(p) = seg_path {
                 self.best_effort_remove_segment(&p);
             }

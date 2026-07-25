@@ -159,7 +159,9 @@ pub(super) fn match_batch_chunk<
     // active we route the broad lane through the two-view *inline* path (`match_into`) — the
     // documented kill-switch (matching.md §4) — keeping forbidden checks recall-correct.
     // Columnar two-view is a perf follow-on; the per-title selective lane is always two-view.
-    let force_inline = view.norm.has_multiword_aliases();
+    let positioned = view.has_phrase_predicates();
+    let dual = view.norm.has_multiword_aliases() || positioned;
+    let force_inline = dual;
     let columnar = opts.include_broad
         && !force_inline
         && matches!(opts.broad_strategy, BroadStrategy::Columnar);
@@ -218,8 +220,33 @@ pub(super) fn match_batch_chunk<
         // Only with multi-word aliases active (`force_inline`) do we build the canonical `N(T)` +
         // the overlapping superset `P(T)`. Take the buffers out so we can iterate them while
         // mutating ms.seen (no aliasing, no allocation) — same trick as match_title.
-        let (feats, feats_pos);
-        if force_inline {
+        let (
+            feats,
+            feats_pos,
+            probe_feats,
+            phrase_arcs,
+            phrase_arcs_pos,
+            phrase_positions,
+            pos_graph_complete,
+        );
+        if positioned {
+            (phrase_positions, pos_graph_complete) = view.norm.match_phrase_views(
+                title.as_ref(),
+                view.dict,
+                &mut ms.lc,
+                &mut ms.norm,
+                &mut ms.feats,
+                &mut ms.feats_pos,
+                &mut ms.probe_feats,
+                &mut ms.phrase_arcs,
+                &mut ms.phrase_arcs_pos,
+            );
+            feats = std::mem::take(&mut ms.feats);
+            feats_pos = std::mem::take(&mut ms.feats_pos);
+            probe_feats = std::mem::take(&mut ms.probe_feats);
+            phrase_arcs = std::mem::take(&mut ms.phrase_arcs);
+            phrase_arcs_pos = std::mem::take(&mut ms.phrase_arcs_pos);
+        } else if dual {
             view.norm.match_features_dual(
                 title.as_ref(),
                 view.dict,
@@ -230,6 +257,11 @@ pub(super) fn match_batch_chunk<
             );
             feats = std::mem::take(&mut ms.feats);
             feats_pos = std::mem::take(&mut ms.feats_pos);
+            probe_feats = Vec::new();
+            phrase_arcs = Vec::new();
+            phrase_arcs_pos = Vec::new();
+            phrase_positions = 0;
+            pos_graph_complete = true;
         } else {
             view.norm.match_features(
                 title.as_ref(),
@@ -240,9 +272,28 @@ pub(super) fn match_batch_chunk<
             );
             feats = std::mem::take(&mut ms.feats);
             feats_pos = Vec::new();
+            probe_feats = Vec::new();
+            phrase_arcs = Vec::new();
+            phrase_arcs_pos = Vec::new();
+            phrase_positions = 0;
+            pos_graph_complete = true;
         }
         let neg_mask = view.title_mask(&feats);
-        let tview = if force_inline {
+        let tview = if positioned {
+            crate::exact::TitleView::dual_positioned(
+                &probe_feats,
+                view.title_mask(&feats_pos),
+                &feats_pos,
+                phrase_positions,
+                &phrase_arcs_pos,
+                pos_graph_complete,
+                neg_mask,
+                &feats,
+                phrase_positions,
+                &phrase_arcs,
+                &ms.phrase_match,
+            )
+        } else if dual {
             crate::exact::TitleView::dual(view.title_mask(&feats_pos), &feats_pos, neg_mask, &feats)
         } else {
             crate::exact::TitleView::single(neg_mask, &feats)
@@ -305,8 +356,13 @@ pub(super) fn match_batch_chunk<
         }
 
         ms.feats = feats; // restore the reusable buffers (positive only when it was used)
-        if force_inline {
+        if dual {
             ms.feats_pos = feats_pos;
+        }
+        if positioned {
+            ms.probe_feats = probe_feats;
+            ms.phrase_arcs = phrase_arcs;
+            ms.phrase_arcs_pos = phrase_arcs_pos;
         }
     }
 

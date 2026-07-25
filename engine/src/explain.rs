@@ -26,6 +26,19 @@ pub struct ExplainAnyOfPredicate {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ExplainPhraseArc {
+    pub start: u32,
+    pub end: u32,
+    pub alternatives: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ExplainPhrase {
+    pub positions: u32,
+    pub arcs: Vec<ExplainPhraseArc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ExplainDetail {
     pub title_features: Vec<String>,
     pub candidate: bool,
@@ -41,6 +54,9 @@ pub struct ExplainDetail {
     /// Whole negative conjunctions; the query rejects only when every feature
     /// in one member is present.
     pub forbidden_conjunctions: Vec<Vec<String>>,
+    /// Required/forbidden analyzed token graphs for quoted clauses.
+    pub required_phrases: Vec<ExplainPhrase>,
+    pub forbidden_phrases: Vec<ExplainPhrase>,
     pub failures: Vec<String>,
 }
 
@@ -71,6 +87,18 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
         s.push_str(&format!(
             "  FORBIDDEN_MEMBER[{i}]: ALL OF ({})\n",
             names(conjunction, dict)
+        ));
+    }
+    for (i, phrase) in cq.extracted.required_phrases.iter().enumerate() {
+        s.push_str(&format!(
+            "  REQUIRED_PHRASE[{i}]: {}\n",
+            phrase_name(phrase, dict)
+        ));
+    }
+    for (i, phrase) in cq.extracted.forbidden_phrases.iter().enumerate() {
+        s.push_str(&format!(
+            "  FORBIDDEN_PHRASE[{i}]: {}\n",
+            phrase_name(phrase, dict)
         ));
     }
     s.push_str("  signatures (main): ");
@@ -116,43 +144,70 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
     s
 }
 
+/// Mirror the matcher's lane-specific title signatures exactly. Positioned
+/// graph-only labels widen only arity-1 main probes; pair, hot, and broad
+/// signatures remain derived from the flat positive view.
+fn is_candidate(cq: &CompiledQuery, pos: &[u32], probe: &[u32], dict: &Dict) -> bool {
+    let mut main_sigs = std::collections::HashSet::new();
+    for &feature in probe {
+        main_sigs.insert(sig_key(&[feature]));
+    }
+    for &hot in pos {
+        if is_hot(dict, hot) {
+            for &other in pos {
+                if other != hot {
+                    let (a, b) = if hot < other {
+                        (hot, other)
+                    } else {
+                        (other, hot)
+                    };
+                    main_sigs.insert(sig_key(&[a, b]));
+                }
+            }
+        }
+    }
+
+    let flat_sigs: std::collections::HashSet<_> =
+        pos.iter().map(|&feature| sig_key(&[feature])).collect();
+    cq.main_sigs
+        .iter()
+        .any(|signature| main_sigs.contains(signature))
+        || cq
+            .hot_sigs
+            .iter()
+            .any(|signature| flat_sigs.contains(signature))
+        || cq.broad_sigs.iter().any(|signature| {
+            *signature == crate::util::universal_sig() || flat_sigs.contains(signature)
+        })
+}
+
 /// Explain a single title against a single compiled query.
 pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &Dict) -> String {
     let mut lc = String::new();
     let mut sc = crate::normalize::NormScratch::new();
-    // Two title views (ADR-061): `pos` (overlapping superset `P(T)`) drives retrieval + required +
-    // any-of; `neg` (canonical `N(T)`) drives forbidden — matching the real verifier so explain
-    // can't disagree with the matcher under an active multi-word alias. No alias ⇒ pos == neg.
+    // ADR-061 semantic views plus ADR-120's candidate-only probe: `pos` (overlapping flat
+    // `P(T)`) drives required + any-of and every non-main-arity-1 probe, `neg` (canonical
+    // `N(T)`) drives forbidden, and `probe` widens main arity-1 retrieval only.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    norm.match_features_dual(title, dict, &mut lc, &mut sc, &mut neg, &mut pos);
+    let mut probe = Vec::new();
+    let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
+    let (positions, positive_complete) = norm.match_phrase_views(
+        title,
+        dict,
+        &mut lc,
+        &mut sc,
+        &mut neg,
+        &mut pos,
+        &mut probe,
+        &mut neg_arcs,
+        &mut pos_arcs,
+    );
 
     let mut s = String::new();
     s.push_str(&format!("title: {title:?}\n"));
     s.push_str(&format!("  title features: {}\n", names(&pos, dict)));
 
-    // would any signature retrieve this query? (retrieval is from the positive superset)
-    let mut title_sigs = std::collections::HashSet::new();
-    for &f in &pos {
-        title_sigs.insert(sig_key(&[f]));
-    }
-    for &h in &pos {
-        if is_hot(dict, h) {
-            for &o in &pos {
-                if o != h {
-                    let (a, b) = if h < o { (h, o) } else { (o, h) };
-                    title_sigs.insert(sig_key(&[a, b]));
-                }
-            }
-        }
-    }
-    // Every title implicitly generates the UNIVERSAL signature (ADR-068) — the broad
-    // matcher probes it once per segment, which is how a stored class-D
-    // always-candidate is retrieved. Mirror it here so explain can't report
-    // `candidate: false` for a query the matcher reaches.
-    title_sigs.insert(crate::util::universal_sig());
-    let retrieved = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.broad_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.hot_sigs.iter().any(|s| title_sigs.contains(s));
+    let retrieved = is_candidate(cq, &pos, &probe, dict);
     s.push_str(&format!(
         "  candidate? {retrieved} (title generates a signature in this query's cover)\n"
     ));
@@ -191,6 +246,24 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
             fail.push(format!("forbidden_member[{i}] fully present"));
         }
     }
+    for (i, phrase) in cq.extracted.required_phrases.iter().enumerate() {
+        if crate::normalize::phrase_graph_matches_bounded(
+            phrase,
+            positions,
+            &pos_arcs,
+            positive_complete,
+        ) == Some(false)
+        {
+            fail.push(format!("required_phrase[{i}] not contiguous"));
+        }
+    }
+    for (i, phrase) in cq.extracted.forbidden_phrases.iter().enumerate() {
+        if crate::normalize::phrase_graph_matches_bounded(phrase, positions, &neg_arcs, true)
+            == Some(true)
+        {
+            fail.push(format!("forbidden_phrase[{i}] present"));
+        }
+    }
     if fail.is_empty() {
         s.push_str("  exact match: PASS\n");
     } else {
@@ -212,33 +285,27 @@ pub fn explain_match_structured(
 ) -> ExplainDetail {
     let mut lc = String::new();
     let mut sc = crate::normalize::NormScratch::new();
-    // Two title views (ADR-061), matching the verifier: positive superset `pos` for retrieval +
-    // required + any-of, canonical `neg` for forbidden. No active multi-word alias ⇒ pos == neg.
+    // ADR-061 semantic views plus ADR-120's candidate-only retrieval probe. `pos` drives
+    // required + any-of and every non-main-arity-1 probe, `neg` drives forbidden, and
+    // `probe` widens main arity-1 signatures only.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
-    norm.match_features_dual(title, dict, &mut lc, &mut sc, &mut neg, &mut pos);
+    let mut probe = Vec::new();
+    let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
+    let (positions, positive_complete) = norm.match_phrase_views(
+        title,
+        dict,
+        &mut lc,
+        &mut sc,
+        &mut neg,
+        &mut pos,
+        &mut probe,
+        &mut neg_arcs,
+        &mut pos_arcs,
+    );
 
     let title_features: Vec<String> = pos.iter().map(|&id| dict.name(id).to_string()).collect();
 
-    let mut title_sigs = std::collections::HashSet::new();
-    for &f in &pos {
-        title_sigs.insert(sig_key(&[f]));
-    }
-    for &h in &pos {
-        if is_hot(dict, h) {
-            for &o in &pos {
-                if o != h {
-                    let (a, b) = if h < o { (h, o) } else { (o, h) };
-                    title_sigs.insert(sig_key(&[a, b]));
-                }
-            }
-        }
-    }
-    // Every title implicitly generates the UNIVERSAL signature (ADR-068) — see
-    // `explain_match`.
-    title_sigs.insert(crate::util::universal_sig());
-    let candidate = cq.main_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.broad_sigs.iter().any(|s| title_sigs.contains(s))
-        || cq.hot_sigs.iter().any(|s| title_sigs.contains(s));
+    let candidate = is_candidate(cq, &pos, &probe, dict);
 
     let in_pos = |f: u32| pos.binary_search(&f).is_ok();
     let in_neg = |f: u32| neg.binary_search(&f).is_ok();
@@ -271,6 +338,24 @@ pub fn explain_match_structured(
     for (i, conjunction) in cq.extracted.forbidden_conjunctions.iter().enumerate() {
         if conjunction.iter().all(|&feature| in_neg(feature)) {
             failures.push(format!("forbidden_member[{i}] fully present"));
+        }
+    }
+    for (i, phrase) in cq.extracted.required_phrases.iter().enumerate() {
+        if crate::normalize::phrase_graph_matches_bounded(
+            phrase,
+            positions,
+            &pos_arcs,
+            positive_complete,
+        ) == Some(false)
+        {
+            failures.push(format!("required_phrase[{i}] not contiguous"));
+        }
+    }
+    for (i, phrase) in cq.extracted.forbidden_phrases.iter().enumerate() {
+        if crate::normalize::phrase_graph_matches_bounded(phrase, positions, &neg_arcs, true)
+            == Some(true)
+        {
+            failures.push(format!("forbidden_phrase[{i}] present"));
         }
     }
 
@@ -326,8 +411,49 @@ pub fn explain_match_structured(
             .iter()
             .map(|member| member.iter().map(|&id| dict.name(id).to_string()).collect())
             .collect(),
+        required_phrases: cq
+            .extracted
+            .required_phrases
+            .iter()
+            .map(|phrase| explain_phrase(phrase, dict))
+            .collect(),
+        forbidden_phrases: cq
+            .extracted
+            .forbidden_phrases
+            .iter()
+            .map(|phrase| explain_phrase(phrase, dict))
+            .collect(),
         failures,
     }
+}
+
+fn explain_phrase(phrase: &crate::normalize::PhraseGraph, dict: &Dict) -> ExplainPhrase {
+    ExplainPhrase {
+        positions: phrase.positions,
+        arcs: phrase
+            .arcs
+            .iter()
+            .map(|arc| ExplainPhraseArc {
+                start: arc.start,
+                end: arc.end,
+                alternatives: arc
+                    .alternatives
+                    .iter()
+                    .map(|&feature| dict.name(feature).to_string())
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn phrase_name(phrase: &crate::normalize::PhraseGraph, dict: &Dict) -> String {
+    let explained = explain_phrase(phrase, dict);
+    explained
+        .arcs
+        .iter()
+        .map(|arc| format!("{}->{}({})", arc.start, arc.end, arc.alternatives.join("|")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn predicate_name(predicate: &crate::compile::AnyOfPredicate, dict: &Dict) -> String {

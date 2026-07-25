@@ -32,37 +32,38 @@ pub(super) fn canon_grader(g: &str) -> String {
     }
 }
 
-pub(super) fn emit_generic<F: FnMut(&str, FeatureKind)>(
+pub(super) fn emit_generic<F: FnMut(&str, FeatureKind, u32, u32)>(
     tok: &str,
     scratch: &mut String,
+    start: u32,
+    end: u32,
     emit: &mut F,
 ) {
     scratch.clear();
     scratch.push_str("term:");
     scratch.push_str(tok);
-    emit(scratch, FeatureKind::Generic);
+    emit(scratch, FeatureKind::Generic, start, end);
 }
 
 /// Age every active positive-view grader (ADR-061 `P(T)`) one window step, dropping those past the
 /// grader window (`> 3`, the same bound `pending_grader` uses). Called wherever `pending_grader` is
 /// aged. A no-op with no allocation on the empty Vec the query/compile and single-view title paths
 /// always hold — only the positive (`force_additive`) pass ever populates it.
-pub(super) fn age_active_graders(active: &mut Vec<(String, u8)>) {
+pub(super) fn age_active_graders(active: &mut Vec<(String, u8, u32)>) {
     if active.is_empty() {
         return;
     }
-    active.retain_mut(|(_, age)| {
+    active.retain_mut(|(_, age, _)| {
         *age = age.saturating_add(1);
         *age <= 3
     });
 }
 
 /// Collapse whitespace runs in place (and strip a leading space). Phrase patterns are registered
-/// single-spaced, so a run inside the cleaned text hides a phrase from the automaton. Applied on
-/// the QUERY side only, and only when multi-word aliases are active (ADR-061, codex R11) — the
-/// title side keeps its cleaned text verbatim (codex R8: persisted canonical normalization must
-/// not change); title-side runs are handled by the additive overlap scan instead
-/// (`AliasOverlap::collect_into`).
+/// single-spaced, so a run inside the cleaned text hides a phrase from the automaton. Flat
+/// normalization applies this only to alias-enabled queries (ADR-061); ADR-120 positioned
+/// normalization applies it symmetrically to query and title graphs. Flat title-side runs remain
+/// handled by the additive overlap scan (`PhraseOverlap::collect_into`).
 pub(super) fn collapse_ws_runs_in_place(s: &mut String) {
     let mut prev_space = true; // initial `true` also strips a leading space
     s.retain(|c| {

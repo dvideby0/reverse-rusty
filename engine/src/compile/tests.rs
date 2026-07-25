@@ -64,9 +64,25 @@ mod golden {
     fn semantic_match(norm: &Normalizer, dict: &Dict, ex: &Extracted, title: &str) -> bool {
         let mut lc = String::new();
         let mut scratch = crate::normalize::NormScratch::new();
-        let mut features = Vec::new();
-        norm.match_features(title, dict, &mut lc, &mut scratch, &mut features);
-        ex.matches_features(&features, &features)
+        let mut neg = Vec::new();
+        let mut pos = Vec::new();
+        let mut probe = Vec::new();
+        let mut neg_arcs = Vec::new();
+        let mut pos_arcs = Vec::new();
+        let (positions, complete) = norm.match_phrase_views(
+            title,
+            dict,
+            &mut lc,
+            &mut scratch,
+            &mut neg,
+            &mut pos,
+            &mut probe,
+            &mut neg_arcs,
+            &mut pos_arcs,
+        );
+        ex.matches_positioned(
+            &pos, &neg, positions, &pos_arcs, complete, positions, &neg_arcs,
+        )
     }
 
     #[test]
@@ -92,6 +108,29 @@ mod golden {
     }
 
     #[test]
+    fn positioned_semantic_predicate_fails_open_on_incomplete_positive_graph() {
+        let mut builder = Normalizer::builder();
+        builder.add_grader("psa");
+        builder.add_phrase_alias(
+            &["unused", "alias"],
+            "term:unused_alias",
+            FeatureKind::Generic,
+        );
+        let norm = builder.build().expect("normalizer");
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let ast = parse("\"red shoe\"").expect("parse phrase");
+        let ex = extract(&ast, &norm, &mut dict, &mut lc);
+
+        let graders = std::iter::repeat_n("psa", 65).collect::<Vec<_>>().join(" ");
+        let title = format!("red {graders} boot");
+        assert!(
+            semantic_match(&norm, &dict, &ex, &title),
+            "the shared oracle predicate must mirror production's positive fail-open"
+        );
+    }
+
+    #[test]
     fn forbidden_from_negations() {
         let n = Normalizer::default_vocab().unwrap();
         let (req, forb, anyof) = named(&n, "jacket -wallet -belt");
@@ -99,13 +138,52 @@ mod golden {
         assert_eq!(forb, s(&["term:belt", "term:wallet"]));
         assert!(anyof.is_empty());
 
-        // a negated phrase forbids all its features
-        let (_, forb, _) = named(&n, "jacket -\"for parts\"");
-        assert_eq!(forb, s(&["term:for", "term:parts"]));
+        // A negated phrase is one contiguous analyzed graph, not two
+        // independent forbidden features (ADR-120).
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let ast = parse("jacket -\"for parts\"").expect("parse phrase");
+        let ex = extract(&ast, &n, &mut dict, &mut lc);
+        assert!(ex.forbidden.is_empty());
+        assert_eq!(ex.forbidden_phrases.len(), 1);
+        let mut labels: Vec<String> = ex.forbidden_phrases[0]
+            .arcs
+            .iter()
+            .flat_map(|arc| arc.alternatives.iter())
+            .map(|&feature| dict.name(feature).to_string())
+            .collect();
+        labels.sort();
+        assert_eq!(labels, s(&["term:for", "term:parts"]));
 
         // a negated any-of forbids every member's features
         let (_, forb, _) = named(&n, "jacket -(used,returned)");
         assert_eq!(forb, s(&["term:returned", "term:used"]));
+    }
+
+    #[test]
+    fn query_frequency_deduplicates_positive_features_across_clause_families() {
+        let norm = Normalizer::default_vocab().unwrap();
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let ast = parse("x (x,y) \"x a\" \"x b\" -\"x z\"").expect("parse");
+        let _ = extract(&ast, &norm, &mut dict, &mut lc);
+
+        let x = dict.get("term:x").expect("x feature");
+        assert_eq!(
+            dict.freq(x),
+            1,
+            "one query document must bump a shared bare/any-of/phrase label once"
+        );
+        for name in ["term:y", "term:a", "term:b"] {
+            let feature = dict.get(name).expect("positive feature");
+            assert_eq!(dict.freq(feature), 1, "{name} belongs to one query");
+        }
+        let forbidden_only = dict.get("term:z").expect("forbidden feature");
+        assert_eq!(
+            dict.freq(forbidden_only),
+            0,
+            "forbidden phrase labels never affect retrieval frequency"
+        );
     }
 
     #[test]
@@ -273,10 +351,9 @@ mod golden {
 
     #[test]
     fn forbidden_never_appears_in_anchors() {
-        // Signatures/anchors are built ONLY from required + any-of, never from forbidden
-        // (the lossless-cover invariant; ADR-006). anchor_plan reads only
-        // ex.required/ex.anyof, so this holds by construction — assert it at the data
-        // level as a regression guard against a future refactor.
+        // Signatures/anchors are built ONLY from positive requirements, never from forbidden
+        // features or graphs (the lossless-cover invariant; ADR-006). Assert it at the data level
+        // as a regression guard against a future refactor.
         let n = spec_vocab();
         let mut dict = Dict::new();
         let mut lc = String::new();
@@ -350,6 +427,7 @@ mod golden {
             anyof,
             anyof_predicates: Vec::new(),
             forbidden_conjunctions: Vec::new(),
+            ..Extracted::default()
         };
 
         // Class A anchored on a θ-frequency non-top64 feature: the defect shape.
@@ -458,6 +536,7 @@ mod equiv_tests {
             anyof: vec![],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         ex.expand_equivalences(&g);
         assert_eq!(ex.required, vec![5]);
@@ -474,6 +553,7 @@ mod equiv_tests {
             anyof: vec![vec![10, 30]],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         ex.expand_equivalences(&g);
         assert_eq!(ex.anyof, vec![vec![10, 20, 30]]);
@@ -497,6 +577,7 @@ mod equiv_tests {
                 ],
             }],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         ex.expand_equivalences(&g);
         assert_eq!(ex.anyof, vec![vec![10, 20, 40]]);
@@ -516,6 +597,7 @@ mod equiv_tests {
             anyof: vec![vec![4, 5]],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         let mut ex = before.clone();
         ex.expand_equivalences(&g);
@@ -533,6 +615,7 @@ mod equiv_tests {
             anyof: vec![],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         };
         once.expand_equivalences(&g);
         let mut twice = once.clone();
@@ -558,6 +641,7 @@ mod class_d_universal_cover {
             anyof: vec![],
             anyof_predicates: vec![],
             forbidden_conjunctions: vec![],
+            ..Extracted::default()
         }
     }
 
@@ -609,6 +693,7 @@ mod class_d_universal_cover {
                 anyof: vec![],
                 anyof_predicates: vec![],
                 forbidden_conjunctions: vec![],
+                ..Extracted::default()
             },
             &dict,
             0,

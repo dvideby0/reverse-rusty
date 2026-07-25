@@ -120,7 +120,7 @@ required_blob:  [u32]   // remaining required feature IDs, sorted, beyond the co
 forbidden_blob: [u32]   // remaining forbidden feature IDs, sorted
 anyof_meta_off: [u32]   anyof_groups: [...]   // packed (offset,len) any-of groups
 predicate_off: [u32]   predicate_len: [u32]   // optional compound program per query
-predicate_blob: [u32]                         // OR-of-AND members + negative conjunctions
+predicate_blob: [u32]                         // OR-of-AND members + quoted token graphs
 version: [u32]   logical_id: [u64]            // resolved only on match
 ```
 
@@ -139,12 +139,20 @@ sorted tail):
 5. **Compound members:** for each positive group, at least one complete member must satisfy all of
    its requirements against `P(T)`; reject if any complete member of a negated group is present in
    `N(T)`.
-6. Survivors → resolve `logical_id`/`version`, emit.
+6. **Quoted clauses:** every required phrase graph must occur as a connected analyzed path in
+   `P(T)`; reject when a forbidden phrase graph occurs in canonical `N(T)` (ADR-120).
+7. Survivors → resolve `logical_id`/`version`, emit.
 
 No strings, no regex, no virtual dispatch, no allocation. Ordinary predicates stay entirely in the
-SoA mask+slice form. Only a query with a multi-feature any-of member carries a compact, structurally
-validated `u32` subprogram for its nested Boolean shape; scalar verification interprets integer words
-and the batch path evaluates the same program as bitmap operations (ADR-119).
+SoA mask+slice form. A query with a multi-feature any-of member or quoted clause carries a compact,
+structurally validated `u32` subprogram. Program v1 contains ADR-119's nested Boolean shape and is
+evaluated in both scalar and bitmap form. Program v2 appends ADR-120 required/forbidden token graphs;
+the scalar verifier intersects integer-labeled graph paths with reusable scratch. While any phrase
+row is live in a snapshot, the batch driver uses that positioned scalar path for broad/hot work rather
+than silently flattening the graph into its bitmap kernel. The public low-level positionless
+`ExactStore::eval_batch` / `eval_batch_slices` surfaces reject a v2 row with
+`BatchEvalError::PositionedPredicate` and clear the output bitmap, so bypassing the driver cannot
+silently skip adjacency. Phrase-free snapshots retain the old path.
 
 **Two title feature views — multi-word aliases (ADR-061).** The steps above describe one title feature
 set `F`. With a multi-word alias active, the verifier instead receives a **`TitleView`** carrying *two*
@@ -160,6 +168,27 @@ superset needed for retrieval over-rejects negation — the wall the first attem
 multi-word alias `P(T) == N(T)` and the verifier is byte-identical to the single-view path. Full design,
 including the FN-safety proof and the query-side collapse / title-side overlap asymmetry: [DECISIONS](../DECISIONS.md)
 ADR-061.
+
+**Quoted token graphs (ADR-120).** A flat `P(T)`/`N(T)` set cannot distinguish `red shoe` from
+`red leather shoe`, so phrase-bearing snapshots also build positioned positive/canonical edge lists
+with `Normalizer::match_phrase_views`. Ordinary tokens span `i → i+1`; analyzer entities may span
+several positions, and every overlapping declared entity contributes an alternate positive path
+even when no alias is active. Required query-graph
+labels are equivalence-widened and checked against `P(T)`; forbidden labels remain canonical and are
+checked against `N(T)`. Every required graph label enters a **candidate-only** proxy family: every
+satisfying path has a labeled edge, but the proxy never enters the flat exact any-of columns and
+exact connected-path intersection decides truth. These graph-only proxies are probed solely as
+arity-1 main-lane signatures; pair, hot, and broad probes remain keyed to flat `P(T)` so positioned
+analysis cannot manufacture unrelated lane work. Proxy labels contribute query-document frequency
+once per distinct label per query—even when several quoted/bare clauses share it—so clause repetition
+cannot perturb the frozen top-64 visibility boundary. Phrase covers stay on the default-visible main
+lane; every cluster cover that uses a phrase proxy is replicated rather than selectively placed by
+graph-only labels. Graph work is capped at 65,536 visited position pairs and 65,536 charged arc
+inspections, and positioned analysis bounds same-grader starts. Exhaustion or an incomplete bounded
+graph fails open by polarity (required does not reject; forbidden does not trip), so the safety valve
+can add an over-match but never a false negative. Explain mirrors the same bounded outcome. Each
+segment maintains a live phrase-row count; the engine refreshes an aggregate after mutations and
+captures it in each snapshot, keeping the phrase-capability decision O(1) per title.
 
 ---
 

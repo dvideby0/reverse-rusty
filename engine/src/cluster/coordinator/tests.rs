@@ -958,6 +958,8 @@ fn legacy_tail_is_folded_before_current_placement_validation() {
         anyof: Vec::new(),
         anyof_predicates: Vec::new(),
         forbidden_conjunctions: Vec::new(),
+        required_phrases: Vec::new(),
+        forbidden_phrases: Vec::new(),
     };
     legacy.required.sort_unstable();
     legacy.required.dedup();

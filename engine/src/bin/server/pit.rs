@@ -161,7 +161,7 @@ impl PitTokens {
 /// cannot silently re-tokenize an in-flight cursor's title.
 ///
 /// The title component hashes the MATCHER's exact input — both ADR-061 feature
-/// views (`N(T)`/`P(T)`) from `match_features_dual` — not surface tokens: with
+/// views (`N(T)`/`P(T)`) plus ADR-120 canonical/positive position graphs — not surface tokens: with
 /// a collapsing phrase configured, `upper deck` and `upper  deck` clean to the
 /// same tokens but emit different feature sets (whitespace runs are
 /// phrase-significant), and the fingerprint must distinguish exactly what the
@@ -193,11 +193,34 @@ pub(crate) fn request_fingerprint(
     let mut sc = reverse_rusty::normalize::NormScratch::new();
     let mut neg: Vec<reverse_rusty::FeatureId> = Vec::new();
     let mut pos: Vec<reverse_rusty::FeatureId> = Vec::new();
-    norm.match_features_dual(title, dict, &mut lc, &mut sc, &mut neg, &mut pos);
+    let mut probe: Vec<reverse_rusty::FeatureId> = Vec::new();
+    let mut neg_arcs = Vec::new();
+    let mut pos_arcs = Vec::new();
+    let (positions, pos_graph_complete) = norm.match_phrase_views(
+        title,
+        dict,
+        &mut lc,
+        &mut sc,
+        &mut neg,
+        &mut pos,
+        &mut probe,
+        &mut neg_arcs,
+        &mut pos_arcs,
+    );
     for view in [&neg, &pos] {
         piece(&(view.len() as u64).to_le_bytes());
         for &id in view {
             piece(&id.to_le_bytes());
+        }
+    }
+    piece(&positions.to_le_bytes());
+    for (complete, arcs) in [(true, &neg_arcs), (pos_graph_complete, &pos_arcs)] {
+        piece(&[u8::from(complete)]);
+        piece(&(arcs.len() as u64).to_le_bytes());
+        for arc in arcs {
+            piece(&arc.feature.to_le_bytes());
+            piece(&arc.start.to_le_bytes());
+            piece(&arc.end.to_le_bytes());
         }
     }
 
@@ -443,6 +466,11 @@ mod tests {
             )
         );
         assert_ne!(base, fp("topps chrome", QueryScope::Standard, &rank, &[]));
+        assert_ne!(
+            fp("red shoe", QueryScope::Standard, &rank, &filter),
+            fp("shoe red", QueryScope::Standard, &rank, &filter),
+            "positionally distinct titles must not share a cursor fingerprint"
+        );
 
         // Filter value order is canonicalized.
         let two = vec![(

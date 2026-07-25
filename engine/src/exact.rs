@@ -20,6 +20,7 @@
 //!   - [`tests`]  — the tag-filter unit tests (`#[cfg(test)]`)
 
 use crate::dict::FeatureId;
+use crate::normalize::PositionArc;
 use crate::tagdict::TagId;
 
 mod predicate;
@@ -30,29 +31,95 @@ mod store;
 mod tests;
 
 pub(crate) use predicate::{
-    encode_predicate, eval_predicate_batch, validate_predicate, verify_predicate,
+    encode_predicate, eval_predicate_batch, predicate_has_phrases, validate_predicate,
+    verify_predicate,
 };
 pub use slices::{eval_batch_slices, prefilter_slices, verify_slices};
 pub use store::ExactStore;
 
+/// Why a positionless columnar exact-evaluation request could not be evaluated.
+///
+/// The bitmap transpose carries feature-presence bitmaps, not ordered title token
+/// graphs. A row with a quoted predicate therefore needs the scalar positioned
+/// verifier (the engine routes all such batches there automatically).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BatchEvalError {
+    /// The row contains a required or forbidden quoted phrase.
+    PositionedPredicate,
+}
+
+impl std::fmt::Display for BatchEvalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PositionedPredicate => {
+                f.write_str("quoted predicate requires positioned scalar evaluation")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BatchEvalError {}
+
 /// The two title feature views threaded through exact verification (ADR-061).
 ///
-/// - **Positive** (`pos_mask` / `pos`) is the overlapping superset `P(T)` — used for the
-///   required-mask gate, the required tail, and any-of groups. Built from all overlapping
-///   alias entities so a `new york` query finds a `new york city` title.
+/// - **Probe** (`probe`) is the candidate-only positive label union. It normally aliases
+///   `pos`; a phrase-bearing view additionally carries graph-only proxy labels.
+/// - **Positive** (`pos_mask` / `pos`) is the overlapping flat superset `P(T)` — used for
+///   the required-mask gate, the required tail, and any-of groups. Built from all overlapping
+///   alias entities so a `new york` query finds a `new york city` title. Graph-only labels
+///   never enter it.
 /// - **Negative** (`neg_mask` / `neg`) is the canonical leftmost-longest `N(T) ⊆ P(T)` — used
 ///   **only** for the forbidden-mask gate and the forbidden tail, so a MUST_NOT clause stays
 ///   recall-correct (`foo -"new york"` still matches `foo new york city`).
 ///
-/// With no active multi-word alias the two views are the same slice ([`TitleView::single`]) and
-/// the verifier is byte-for-byte the pre-ADR-061 single-view path. `Copy` (two masks + two fat
-/// pointers); the per-query SoA columns stay raw args in [`verify_slices`] per the hot-path note.
+/// With no active multi-word alias the two semantic views are the same slice
+/// ([`TitleView::single`]) and the verifier is byte-for-byte the pre-ADR-061
+/// single-view path. The per-query SoA columns stay raw args in [`verify_slices`]
+/// per the hot-path note.
+#[derive(Clone, Copy)]
+pub struct PositionGraph<'a> {
+    pub positions: u32,
+    pub arcs: &'a [PositionArc],
+    /// False means title analysis hit a bounded state guard. Graph predicates
+    /// fail open in that case: required phrases do not reject and forbidden
+    /// phrases do not trip.
+    pub complete: bool,
+}
+
+/// Reusable graph-intersection work buffers for quoted exact predicates.
+///
+/// One lives in each match thread's `MatchScratch`; clearing these containers per
+/// candidate preserves the allocation-free steady-state hot path.
+#[derive(Debug, Default)]
+pub struct PhraseMatchScratch {
+    pub(crate) stack: Vec<(u32, u32)>,
+    pub(crate) seen: std::collections::HashSet<(u32, u32)>,
+}
+
+impl PhraseMatchScratch {
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            stack: Vec::with_capacity(capacity),
+            seen: std::collections::HashSet::with_capacity(capacity),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct TitleView<'a> {
+    /// Candidate-only positive labels. Usually identical to `pos`; a
+    /// phrase-bearing view additionally contains graph-only retrieval labels.
+    /// Exact semantic checks never read this slice.
+    pub probe: &'a [FeatureId],
     pub pos_mask: u64,
     pub pos: &'a [FeatureId],
     pub neg_mask: u64,
     pub neg: &'a [FeatureId],
+    pub pos_graph: Option<PositionGraph<'a>>,
+    pub neg_graph: Option<PositionGraph<'a>>,
+    pub(crate) phrase_scratch: Option<&'a std::cell::RefCell<PhraseMatchScratch>>,
 }
 
 impl<'a> TitleView<'a> {
@@ -62,10 +129,14 @@ impl<'a> TitleView<'a> {
     #[must_use]
     pub fn single(mask: u64, feats: &'a [FeatureId]) -> Self {
         Self {
+            probe: feats,
             pos_mask: mask,
             pos: feats,
             neg_mask: mask,
             neg: feats,
+            pos_graph: None,
+            neg_graph: None,
+            phrase_scratch: None,
         }
     }
 
@@ -74,10 +145,52 @@ impl<'a> TitleView<'a> {
     #[must_use]
     pub fn dual(pos_mask: u64, pos: &'a [FeatureId], neg_mask: u64, neg: &'a [FeatureId]) -> Self {
         Self {
+            probe: pos,
             pos_mask,
             pos,
             neg_mask,
             neg,
+            pos_graph: None,
+            neg_graph: None,
+            phrase_scratch: None,
+        }
+    }
+
+    /// Distinct flat views plus their analyzed token graphs for ADR-120 quoted
+    /// exact verification.
+    #[allow(clippy::too_many_arguments)]
+    #[inline]
+    #[must_use]
+    pub fn dual_positioned(
+        probe: &'a [FeatureId],
+        pos_mask: u64,
+        pos: &'a [FeatureId],
+        pos_positions: u32,
+        pos_arcs: &'a [PositionArc],
+        pos_complete: bool,
+        neg_mask: u64,
+        neg: &'a [FeatureId],
+        neg_positions: u32,
+        neg_arcs: &'a [PositionArc],
+        scratch: &'a std::cell::RefCell<PhraseMatchScratch>,
+    ) -> Self {
+        Self {
+            probe,
+            pos_mask,
+            pos,
+            neg_mask,
+            neg,
+            pos_graph: Some(PositionGraph {
+                positions: pos_positions,
+                arcs: pos_arcs,
+                complete: pos_complete,
+            }),
+            neg_graph: Some(PositionGraph {
+                positions: neg_positions,
+                arcs: neg_arcs,
+                complete: true,
+            }),
+            phrase_scratch: Some(scratch),
         }
     }
 }

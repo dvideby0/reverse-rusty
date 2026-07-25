@@ -47,6 +47,7 @@ impl Segment {
             class: Vec::new(),
             alive: Vec::new(),
             alive_counter: 0,
+            live_phrase_predicates: 0,
             filter: None,
             vocab_epoch: 0,
             compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,
@@ -128,6 +129,11 @@ impl Segment {
     #[inline]
     pub fn has_hot_entries(&self) -> bool {
         self.hot.num_signatures() > 0
+    }
+
+    #[inline]
+    pub fn has_phrase_predicates(&self) -> bool {
+        self.live_phrase_predicates != 0
     }
 
     /// Append one already-extracted query. Returns the new segment-local id plus
@@ -310,6 +316,9 @@ impl Segment {
         }
         self.alive.push(true);
         self.alive_counter += 1;
+        if self.exact.row_has_phrase_predicates(local) {
+            self.live_phrase_predicates += 1;
+        }
         self.logical_index.entry(logical).or_default().push(local);
         Some(AddedCompiled {
             local,
@@ -323,6 +332,9 @@ impl Segment {
         if let Some(slot) = self.alive.get_mut(local_id as usize) {
             if *slot {
                 self.alive_counter -= 1;
+                if self.exact.row_has_phrase_predicates(local_id) {
+                    self.live_phrase_predicates -= 1;
+                }
             }
             *slot = false;
         }
@@ -449,15 +461,18 @@ impl Segment {
         emission: P,
     ) {
         let filter = self.filter.as_ref();
-        // Signatures are generated from the POSITIVE (superset) view so an overlapping alias
-        // entity retrieves its candidates (ADR-061); verify then applies both views.
+        // Graph-only phrase proxies are arity-1 MAIN signatures. Keep them out
+        // of the pair/hot/broad loops: those lanes are planned exclusively from
+        // flat positive semantics, so widening them only manufactures probes
+        // and false candidates that exact verification must reject.
+        let probe_feats = view.probe;
         let feats = view.pos;
         if collector.should_stop() {
             return;
         }
 
         // arity-1 signatures (one per feature)
-        for &f in feats {
+        for &f in probe_feats {
             if collector.should_stop() {
                 return;
             }
@@ -751,6 +766,15 @@ impl Segment {
             "from_parts: class/exact length mismatch"
         );
         let alive_counter = alive.iter().filter(|&&a| a).count();
+        let live_phrase_predicates = if exact.has_phrase_predicates() {
+            alive
+                .iter()
+                .enumerate()
+                .filter(|&(i, &is_alive)| is_alive && exact.row_has_phrase_predicates(i as u32))
+                .count()
+        } else {
+            0
+        };
         let mut logical_index: crate::util::FastMap<u64, Vec<u32>> = crate::util::fast_map();
         for (i, &is_alive) in alive.iter().enumerate() {
             if is_alive {
@@ -769,6 +793,7 @@ impl Segment {
             class,
             alive,
             alive_counter,
+            live_phrase_predicates,
             filter: None,
             vocab_epoch: 0,
             compiler_semantics_version: crate::storage::CURRENT_COMPILER_SEMANTICS_VERSION,

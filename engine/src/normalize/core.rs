@@ -7,28 +7,70 @@
 //! /generic tokenization), and the small free helpers `emit` relies on
 //! (`fold_diacritic`, number/year/grade parsing, generic emission).
 
-use super::{NormScratch, PhraseEntry, PhraseMode, PunctClass, PunctTable, Side};
+use super::{
+    NormScratch, PhraseArc, PhraseEntry, PhraseGraph, PhraseMode, PositionArc, PunctClass,
+    PunctTable, Side,
+};
 use crate::dict::{Dict, FeatureId, FeatureKind};
 use daachorse::DoubleArrayAhoCorasick;
 
 mod alias_overlap;
 mod helpers;
-pub(super) use alias_overlap::AliasOverlap;
+pub(super) use alias_overlap::PhraseOverlap;
 pub use helpers::fold_diacritic;
 use helpers::{
     age_active_graders, as_year, canon_grader, collapse_ws_runs_in_place, emit_generic,
     is_grade_value, parse_number,
 };
 
+#[inline]
+fn position_index(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// Retain enough same-grader starts to represent ordinary titles exactly while
+/// bounding a crafted run such as `psa psa psa ...`. If this bound is exceeded,
+/// flat `P(T)` remains complete and positioned verification fails open.
+const MAX_POSITIONED_STARTS_PER_GRADER: usize = 64;
+
+#[derive(Clone, Copy)]
+struct EmitMode {
+    side: Side,
+    force_additive: bool,
+    retain_positioned_starts: bool,
+}
+
+impl EmitMode {
+    fn flat(side: Side, force_additive: bool) -> Self {
+        Self {
+            side,
+            force_additive,
+            retain_positioned_starts: false,
+        }
+    }
+
+    fn positioned(side: Side, force_additive: bool) -> Self {
+        Self {
+            side,
+            force_additive,
+            retain_positioned_starts: true,
+        }
+    }
+}
+
 pub struct Normalizer {
     /// daachorse automaton over space-joined phrase strings. Pattern value indexes
     /// into `phrase_entries`.
     pub(super) automaton: DoubleArrayAhoCorasick<usize>,
     pub(super) phrase_entries: Vec<PhraseEntry>,
-    /// ADR-061: overlapping (`MatchKind::Standard`) automaton over the alias phrases, used on
-    /// the title side to build the positive superset `P(T)`. `None` ⇒ no active multi-word
-    /// alias ⇒ the title is single-view (`P(T) == N(T)`) and byte-identical to pre-ADR-061.
-    pub(super) alias_overlap: Option<AliasOverlap>,
+    /// Overlapping (`MatchKind::Standard`) automaton over every registered phrase.
+    /// ADR-061 uses it for alias-enabled flat `P(T)`; ADR-120 also uses it for
+    /// phrase-aware `P(T)` even when no alias is registered. `None` means there
+    /// are no multi-word phrases at all.
+    pub(super) phrase_overlap: Option<PhraseOverlap>,
+    /// Kept separate from `phrase_overlap`: ordinary vocabulary phrases must
+    /// not activate ADR-061's distinct flat positive view.
+    pub(super) has_multiword_aliases: bool,
 
     pub(super) graders: Vec<String>,
     /// single-token synonyms -> (canonical feature, kind).
@@ -80,7 +122,7 @@ impl Normalizer {
     /// path while multi-word aliases are active.
     #[must_use]
     pub fn has_multiword_aliases(&self) -> bool {
-        self.alias_overlap.is_some()
+        self.has_multiword_aliases
     }
 
     /// Build the default trading-card vocabulary. Rich enough to exercise the
@@ -129,19 +171,41 @@ impl Normalizer {
         force_additive: bool,
         emit: &mut F,
     ) {
+        self.emit_positioned(
+            text,
+            lc,
+            sc,
+            EmitMode::flat(side, force_additive),
+            &mut |name, kind, _start, _end| emit(name, kind),
+        );
+    }
+
+    /// Positioned twin of [`emit`](Self::emit), used only when at least one
+    /// stored quoted clause requires ADR-120 phrase verification. Ordinary
+    /// feature-only matching continues to call `emit`, whose wrapper erases the
+    /// two position integers after inlining.
+    fn emit_positioned<F: FnMut(&str, FeatureKind, u32, u32)>(
+        &self,
+        text: &str,
+        lc: &mut String,
+        sc: &mut NormScratch,
+        mode: EmitMode,
+        emit: &mut F,
+    ) {
+        let EmitMode {
+            side,
+            force_additive,
+            retain_positioned_starts,
+        } = mode;
+        sc.position_graph_incomplete = false;
         self.clean_into(text, lc);
 
-        // ADR-061 (codex R11): on the QUERY side, when multi-word aliases are active, collapse
-        // whitespace runs before the phrase scan. Alias patterns are registered single-spaced, so
-        // a run inside a quoted phrase (`"new  york"`) or any-of member would hide the alias from
-        // the leftmost-longest automaton: the query compiles to component terms, equivalence
-        // expansion never reaches the group, and `"new  york" mets` misses a `ny mets` title — a
-        // false negative. Tokenization is whitespace-agnostic, so token features are unchanged;
-        // only phrase alignment can differ — and a title-with-runs still matches a collapsed query
-        // entity through the `P(T)` overlap scan, which collapses runs itself. The title side
-        // keeps `lc` VERBATIM (codex R8: persisted canonical normalization must not change), and
-        // the gate on `alias_overlap` keeps the no-alias configuration byte-identical.
-        if side == Side::Query && self.alias_overlap.is_some() {
+        // Phrase patterns are registered single-spaced. ADR-061 collapses query
+        // whitespace while aliases are active; ADR-120 does the same for BOTH
+        // sides of every positioned graph so a forbidden phrase observes
+        // `"upper  deck"` exactly as it observes `"upper deck"`. Flat,
+        // alias-free analysis retains its historical byte-identical behavior.
+        if retain_positioned_starts || (side == Side::Query && self.has_multiword_aliases) {
             collapse_ws_runs_in_place(lc);
         }
 
@@ -151,13 +215,16 @@ impl Normalizer {
         // token sequences. We need to ensure matches align on word boundaries.
         let phrase_matches = &mut sc.phrase_matches;
         phrase_matches.clear();
-        if let Some(ov) = &self.alias_overlap {
+        if let (true, Some(ov)) = (
+            self.has_multiword_aliases || retain_positioned_starts,
+            self.phrase_overlap.as_ref(),
+        ) {
             // ADR-061 (codex R12): with multi-word aliases active, boundary validity must
-            // participate in match SELECTION — see `AliasOverlap::select_phrases`. The legacy
+            // participate in match SELECTION — see `PhraseOverlap::select_phrases`. The legacy
             // pass below commits to a boundary-invalid mid-token match and lets it suppress a
-            // valid overlapping phrase (a query-side FN). Gated on `alias_overlap`, so the
-            // no-alias configuration keeps the legacy pass byte-identical (its pathological
-            // collapse-phrase cases are baked into persisted canonical features — codex R8).
+            // valid overlapping phrase (a query-side FN). Positioned analysis
+            // also uses the corrected selection independently of alias activation;
+            // flat alias-free analysis keeps the legacy byte-identical path.
             ov.select_phrases(lc, phrase_matches);
         } else {
             for m in self.automaton.leftmost_find_iter(&**lc) {
@@ -237,7 +304,16 @@ impl Normalizer {
                     }
                     if !phrase_emitted[pi] {
                         phrase_emitted[pi] = true;
-                        emit(&entry.feature, entry.kind);
+                        let mut end_pos = ti + 1;
+                        while end_pos < tokens.len() && tokens[end_pos].1 <= pe {
+                            end_pos += 1;
+                        }
+                        emit(
+                            &entry.feature,
+                            entry.kind,
+                            position_index(ti),
+                            position_index(end_pos),
+                        );
                     }
                     break;
                 }
@@ -253,7 +329,7 @@ impl Normalizer {
         active_graders.clear();
         let tok_at = |r: (usize, usize)| &lc[r.0..r.1];
         let mut i = 0;
-        let mut pending_grader: Option<String> = None;
+        let mut pending_grader: Option<(String, u32)> = None;
         let mut pending_grader_age = 0u8;
         let mut grade_ctx = false;
         let mut grade_ctx_age = 0u8;
@@ -299,30 +375,70 @@ impl Normalizer {
                 scratch.clear();
                 scratch.push_str("grader:");
                 scratch.push_str(&gcanon);
-                emit(scratch, FeatureKind::Grader);
+                emit(
+                    scratch,
+                    FeatureKind::Grader,
+                    position_index(i),
+                    position_index(i.saturating_add(1)),
+                );
                 let fused = rest.is_some();
                 if let Some(num) = rest {
-                    Self::emit_grade(&gcanon, &num, scratch, emit);
+                    Self::emit_grade(
+                        &gcanon,
+                        &num,
+                        scratch,
+                        position_index(i),
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                        emit,
+                    );
                 }
                 if force_additive {
                     // Positive view: keep this grader active (don't overwrite earlier ones), so a
                     // later number grades with it too — the parse-union over which graders a parse
                     // frees by consuming the others. A grader token ages nothing (matches the
                     // single-pending path, where the new grader resets only its own age).
-                    // Deduped per CANONICAL grader, refreshing the age (codex R12): the freshest
-                    // occurrence outlives any older same-name one, so the parse-union superset is
-                    // strictly preserved, while the set stays bounded by the (small) distinct
-                    // grader vocabulary — repeated grader tokens otherwise grow the set without
-                    // bound and every number then emits per entry (a quadratic crafted-title DoS).
-                    if let Some(entry) = active_graders.iter_mut().find(|(g, _)| *g == gcanon) {
-                        entry.1 = 0;
+                    if retain_positioned_starts {
+                        // Positioned graphs must retain EACH live start: an overlapping phrase can
+                        // consume the later occurrence while leaving an earlier same-name grader to
+                        // form the connected `grader_grade` edge. Bound starts per canonical
+                        // grader; on overflow mark the graph incomplete so quoted verification
+                        // fails open rather than dropping a match.
+                        let same = active_graders
+                            .iter()
+                            .filter(|(g, _, _)| *g == gcanon)
+                            .count();
+                        if same < MAX_POSITIONED_STARTS_PER_GRADER {
+                            active_graders.push((gcanon, 0, position_index(i)));
+                        } else {
+                            sc.position_graph_incomplete = true;
+                            if let Some(entry) = active_graders
+                                .iter_mut()
+                                .rev()
+                                .find(|(g, _, _)| *g == gcanon)
+                            {
+                                entry.1 = 0;
+                                entry.2 = position_index(i);
+                            }
+                        }
                     } else {
-                        active_graders.push((gcanon, 0));
+                        // Flat P(T) remains a set: one live representative per canonical grader
+                        // emits the same feature labels without multiplying duplicate callbacks.
+                        if let Some(entry) = active_graders
+                            .iter_mut()
+                            .rev()
+                            .find(|(g, _, _)| *g == gcanon)
+                        {
+                            entry.1 = 0;
+                            entry.2 = position_index(i);
+                        } else {
+                            active_graders.push((gcanon, 0, position_index(i)));
+                        }
                     }
                 } else if fused {
                     pending_grader = None;
                 } else {
-                    pending_grader = Some(gcanon);
+                    pending_grader = Some((gcanon, position_index(i)));
                     pending_grader_age = 0;
                 }
                 i += 1;
@@ -359,12 +475,23 @@ impl Normalizer {
                 });
 
                 if is_cardnum || is_serial || is_numctx {
-                    emit_generic(&numstr, scratch, emit);
+                    emit_generic(
+                        &numstr,
+                        scratch,
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                        emit,
+                    );
                 } else if let Some(y) = as_year(&numstr) {
                     scratch.clear();
                     scratch.push_str("year:");
                     scratch.push_str(&y);
-                    emit(scratch, FeatureKind::Year);
+                    emit(
+                        scratch,
+                        FeatureKind::Year,
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                    );
                 } else if force_additive {
                     // Positive view (P(T)) parse-union: grade this number with EVERY active grader
                     // still in window AND the grade context, all STICKY (never cleared by this
@@ -375,36 +502,80 @@ impl Normalizer {
                     let gradeable = is_grade_value(&numstr);
                     let mut graded = false;
                     if gradeable {
-                        for (g, _) in active_graders.iter() {
-                            Self::emit_grade(g, &numstr, scratch, emit);
+                        for (g, _, grader_start) in active_graders.iter() {
+                            Self::emit_grade(
+                                g,
+                                &numstr,
+                                scratch,
+                                *grader_start,
+                                position_index(i),
+                                position_index(i.saturating_add(1)),
+                                emit,
+                            );
                             graded = true;
                         }
                         if grade_ctx {
                             scratch.clear();
                             scratch.push_str("grade:");
                             scratch.push_str(&numstr);
-                            emit(scratch, FeatureKind::Grade);
+                            emit(
+                                scratch,
+                                FeatureKind::Grade,
+                                position_index(i),
+                                position_index(i.saturating_add(1)),
+                            );
                             graded = true;
                         }
                     }
                     if !graded {
-                        emit_generic(&numstr, scratch, emit);
+                        emit_generic(
+                            &numstr,
+                            scratch,
+                            position_index(i),
+                            position_index(i.saturating_add(1)),
+                            emit,
+                        );
                     }
-                } else if let Some(g) = pending_grader.clone() {
+                } else if let Some((g, grader_start)) = pending_grader.clone() {
                     if is_grade_value(&numstr) {
-                        Self::emit_grade(&g, &numstr, scratch, emit);
+                        Self::emit_grade(
+                            &g,
+                            &numstr,
+                            scratch,
+                            grader_start,
+                            position_index(i),
+                            position_index(i.saturating_add(1)),
+                            emit,
+                        );
                         pending_grader = None;
                     } else {
-                        emit_generic(&numstr, scratch, emit);
+                        emit_generic(
+                            &numstr,
+                            scratch,
+                            position_index(i),
+                            position_index(i.saturating_add(1)),
+                            emit,
+                        );
                     }
                 } else if grade_ctx && is_grade_value(&numstr) {
                     scratch.clear();
                     scratch.push_str("grade:");
                     scratch.push_str(&numstr);
-                    emit(scratch, FeatureKind::Grade);
+                    emit(
+                        scratch,
+                        FeatureKind::Grade,
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                    );
                     grade_ctx = false;
                 } else {
-                    emit_generic(&numstr, scratch, emit);
+                    emit_generic(
+                        &numstr,
+                        scratch,
+                        position_index(i),
+                        position_index(i.saturating_add(1)),
+                        emit,
+                    );
                 }
                 i += 1;
                 continue;
@@ -413,13 +584,24 @@ impl Normalizer {
             // 4) closed-vocab synonym
             if let Some(&si) = self.syn_index.get(tok) {
                 let (_, canon, kind) = &self.synonyms[si];
-                emit(canon, *kind);
+                emit(
+                    canon,
+                    *kind,
+                    position_index(i),
+                    position_index(i.saturating_add(1)),
+                );
                 i += 1;
                 continue;
             }
 
             // 5) generic fallback term
-            emit_generic(tok, scratch, emit);
+            emit_generic(
+                tok,
+                scratch,
+                position_index(i),
+                position_index(i.saturating_add(1)),
+                emit,
+            );
             i += 1;
 
             // age out stale pending grader / grade context
@@ -439,21 +621,24 @@ impl Normalizer {
         }
     }
 
-    fn emit_grade<F: FnMut(&str, FeatureKind)>(
+    fn emit_grade<F: FnMut(&str, FeatureKind, u32, u32)>(
         grader: &str,
         num: &str,
         scratch: &mut String,
+        grader_start: u32,
+        start: u32,
+        end: u32,
         emit: &mut F,
     ) {
         scratch.clear();
         scratch.push_str("grade:");
         scratch.push_str(num);
-        emit(scratch, FeatureKind::Grade);
+        emit(scratch, FeatureKind::Grade, start, end);
         scratch.clear();
         scratch.push_str("grader_grade:");
         scratch.push_str(grader);
         scratch.push_str(num);
-        emit(scratch, FeatureKind::GraderGrade);
+        emit(scratch, FeatureKind::GraderGrade, grader_start, end);
     }
 
     /// Split a possibly-fused grader token like "psa10" -> ("psa", Some("10")).
@@ -551,12 +736,13 @@ impl Normalizer {
     ///   emit with **all phrases forced additive** (nothing consumed ⇒ every token feature plus
     ///   every leftmost-longest entity) ∪ the **overlapping** entity pass. So `P(T)` contains every
     ///   feature any parse could emit — every nested/overlapping alias entity AND the component
-    ///   tokens of a phrase displaced from the leftmost-longest parse. Used for retrieval +
-    ///   required + any-of, so a `new york` query finds a `new york city` title and a component
-    ///   query is never dropped. A strict superset of every parse ⇒ FN-safe; it only ever adds to
-    ///   the positive view (a wider positive read is a bounded false positive, never a negative).
+    ///   tokens of a phrase displaced from the leftmost-longest parse. It drives flat candidate
+    ///   retrieval plus required + any-of; the phrase-aware path extends a separate probe view
+    ///   with positioned-only labels. A strict superset of every parse ⇒ FN-safe; it only ever
+    ///   adds to the positive view (a wider positive read is a bounded false positive, never a
+    ///   negative).
     ///
-    /// With no active multi-word alias (`alias_overlap` is `None`), `P(T) == N(T)` and the two
+    /// With no active multi-word alias, `P(T) == N(T)` and the two
     /// outputs are identical — the caller then passes one slice for both views and the
     /// verifier is byte-identical to the single-view path. Both outputs are sorted + deduped.
     pub fn match_features_dual(
@@ -582,11 +768,11 @@ impl Normalizer {
         pos.dedup();
         neg.extend_from_slice(pos);
 
-        match &self.alias_overlap {
+        match (self.has_multiword_aliases, self.phrase_overlap.as_ref()) {
             // No alias phrases: positive view == negative view (single-view fast path elsewhere).
             // `pos` already holds N(T) == P(T); nothing more to add.
-            None => {}
-            Some(ov) => {
+            (false, _) => {}
+            (true, Some(ov)) => {
                 // P(T) = N(T) ∪ force-additive parse-union ∪ raw token features ∪ overlapping
                 // entities. `pos` already holds N(T); only ever ADD (never replace), so P(T) is a
                 // strict superset of every parse and activating an alias can never drop a feature.
@@ -622,7 +808,258 @@ impl Normalizer {
                 pos.sort_unstable();
                 pos.dedup();
             }
+            // Private builder state guarantees this arm is unreachable. Keep
+            // the library fail-safe if that invariant is ever broken.
+            (true, None) => debug_assert!(false, "alias phrase missing overlap automaton"),
         }
+    }
+
+    /// Compile one quoted DSL clause into its analyzed token graph, interning
+    /// query-side feature labels (ADR-120).
+    ///
+    /// This is deliberately separate from [`compile_features`](Self::compile_features):
+    /// unquoted clauses retain their set semantics and compact SoA columns,
+    /// while only quoted clauses preserve analyzer positions and alternate
+    /// multi-word paths.
+    pub fn compile_phrase(&self, text: &str, dict: &mut Dict, lc: &mut String) -> PhraseGraph {
+        let mut scratch = NormScratch::new();
+        let mut arcs = Vec::new();
+        let (positions, _complete) = self.analyze_position_arcs(
+            text,
+            lc,
+            &mut scratch,
+            Side::Query,
+            false,
+            &mut arcs,
+            |name, kind| dict.intern(name, kind),
+        );
+        phrase_graph(positions, arcs)
+    }
+
+    /// Read-only twin of [`compile_phrase`](Self::compile_phrase), resolving
+    /// out-of-dictionary labels to deterministic synthetic ids.
+    pub fn compile_phrase_readonly(&self, text: &str, dict: &Dict, lc: &mut String) -> PhraseGraph {
+        let mut scratch = NormScratch::new();
+        let mut arcs = Vec::new();
+        let (positions, _complete) = self.analyze_position_arcs(
+            text,
+            lc,
+            &mut scratch,
+            Side::Query,
+            false,
+            &mut arcs,
+            |name, _kind| dict.get_or_synthetic(name),
+        );
+        phrase_graph(positions, arcs)
+    }
+
+    /// Phrase-aware title normalization (ADR-120).
+    ///
+    /// The ordinary flat feature views are produced by the existing ADR-061
+    /// entry point first, so phrase support cannot silently change bare-term,
+    /// any-of, or MUST_NOT behavior. The extra graph pass is activated by the
+    /// engine only while at least one live row contains a quoted predicate.
+    /// `probe` is the candidate-only union of flat positive and graph labels.
+    /// Exact flat semantics remain in `pos`; keeping the two separate prevents
+    /// an unrelated quoted row from changing how ordinary queries verify.
+    ///
+    /// Returns `(positions, positive_graph_complete)`. An incomplete positive
+    /// graph hit a bounded analyzer-state guard and must fail open in exact
+    /// phrase verification.
+    #[allow(clippy::too_many_arguments)]
+    pub fn match_phrase_views(
+        &self,
+        text: &str,
+        dict: &Dict,
+        lc: &mut String,
+        sc: &mut NormScratch,
+        neg: &mut Vec<FeatureId>,
+        pos: &mut Vec<FeatureId>,
+        probe: &mut Vec<FeatureId>,
+        neg_arcs: &mut Vec<PositionArc>,
+        pos_arcs: &mut Vec<PositionArc>,
+    ) -> (u32, bool) {
+        self.match_features_dual(text, dict, lc, sc, neg, pos);
+
+        let (positions, _negative_complete) = self.analyze_position_arcs(
+            text,
+            lc,
+            sc,
+            Side::Title,
+            false,
+            neg_arcs,
+            |name, _kind| dict.get_or_synthetic(name),
+        );
+
+        let (positive_positions, positive_complete) =
+            self.analyze_position_arcs(text, lc, sc, Side::Title, true, pos_arcs, |name, _kind| {
+                dict.get_or_synthetic(name)
+            });
+        debug_assert_eq!(positions, positive_positions);
+
+        // Phrase-aware P(T) is a union independently of whether ADR-061 aliases
+        // are configured: retain the canonical path, force-additive analyzer
+        // paths, normalized raw-token alternatives, and every overlapping
+        // declared phrase entity. Gating this union on alias activation lets an
+        // ordinary collapse phrase erase a valid quoted component path.
+        pos_arcs.extend_from_slice(neg_arcs);
+        for (i, &(start, end)) in sc.tokens.iter().enumerate() {
+            let tok = &lc[start..end];
+            if tok == "#" || tok == "/" {
+                continue;
+            }
+            sc.name.clear();
+            sc.name.push_str("term:");
+            sc.name.push_str(tok);
+            pos_arcs.push(PositionArc {
+                feature: dict.get_or_synthetic(&sc.name),
+                start: position_index(i),
+                end: position_index(i.saturating_add(1)),
+            });
+        }
+        if let Some(overlap) = &self.phrase_overlap {
+            overlap.collect_positioned_into(lc, &sc.tokens, dict, pos_arcs);
+        }
+        pos_arcs.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
+        pos_arcs.dedup();
+
+        // Every exact phrase path has at least one graph edge. Making all
+        // positive graph labels CANDIDATE-visible therefore supplies a lossless
+        // proxy even for analyzer-only gap labels without widening flat exact
+        // semantics for phrase-free rows.
+        probe.clear();
+        probe.extend_from_slice(pos);
+        probe.extend(pos_arcs.iter().map(|arc| arc.feature));
+        probe.sort_unstable();
+        probe.dedup();
+        (positions, positive_complete)
+    }
+
+    /// Analyze `text` into a flat token-graph edge list. `out` is caller-owned
+    /// reusable storage on the title hot path.
+    #[allow(clippy::too_many_arguments)]
+    fn analyze_position_arcs<F>(
+        &self,
+        text: &str,
+        lc: &mut String,
+        sc: &mut NormScratch,
+        side: Side,
+        force_additive: bool,
+        out: &mut Vec<PositionArc>,
+        mut resolve: F,
+    ) -> (u32, bool)
+    where
+        F: FnMut(&str, FeatureKind) -> FeatureId,
+    {
+        out.clear();
+        let mut composite_arcs = Vec::new();
+        self.emit_positioned(
+            text,
+            lc,
+            sc,
+            EmitMode::positioned(side, force_additive),
+            &mut |name, kind, start, end| {
+                // `grader_grade` is a windowed flat semantic feature, but in a
+                // quoted graph it may shortcut only the fused (`psa10`) or
+                // adjacent (`psa 10`) spelling. A longer edge would jump over
+                // explicit quoted positions, making `"psa foo 10"` equivalent
+                // to `"psa bar 10"` (and over-triggering MUST_NOT phrases).
+                if kind == FeatureKind::GraderGrade && end.saturating_sub(start) > 2 {
+                    return;
+                }
+                let arc = PositionArc {
+                    feature: resolve(name, kind),
+                    start,
+                    end,
+                };
+                if side == Side::Query && kind == FeatureKind::GraderGrade {
+                    composite_arcs.push(arc);
+                }
+                out.push(arc);
+            },
+        );
+
+        let positions = position_index(sc.tokens.len());
+
+        // The semantic analyzer intentionally emits nothing for structural
+        // markers and a few context words. Quoted phrases still need those
+        // lexical positions to remain contiguous, so fill only graph holes with
+        // a normalized raw term edge. Build coverage as a difference array:
+        // the old pair of `out.iter().any(...)` scans per token made ordinary
+        // one-edge-per-token titles quadratic whenever any quoted row was live.
+        // Do NOT restore tokens consumed by a collapse/alias edge: that would
+        // defeat ADR-061's canonical negative parse and manufacture an
+        // unconfigured alternate path.
+        let position_count = positions as usize;
+        sc.position_coverage_delta.clear();
+        sc.position_coverage_delta
+            .resize(position_count.saturating_add(1), 0);
+        for arc in out.iter() {
+            let start = (arc.start as usize).min(position_count);
+            let end = (arc.end as usize).min(position_count);
+            if start < end {
+                sc.position_coverage_delta[start] += 1;
+                sc.position_coverage_delta[end] -= 1;
+            }
+        }
+        let mut coverage = 0i64;
+        for i in 0..position_count {
+            coverage += sc.position_coverage_delta[i];
+            if coverage > 0 {
+                continue;
+            }
+            let (start, end) = sc.tokens[i];
+            sc.name.clear();
+            sc.name.push_str("term:");
+            sc.name.push_str(&lc[start..end]);
+            out.push(PositionArc {
+                feature: resolve(&sc.name, FeatureKind::Generic),
+                start: position_index(i),
+                end: position_index(i.saturating_add(1)),
+            });
+        }
+
+        // A fused grader token emits grader + grade + grader_grade at one
+        // position. Those are conjunctive semantic projections, not three
+        // interchangeable analyzer terms. The composite is the lossless query
+        // label; title graphs retain every projection so a simpler quoted query
+        // (for example "psa") can still match `psa10`.
+        if !composite_arcs.is_empty() {
+            out.retain(|arc| {
+                let composite_span = composite_arcs
+                    .iter()
+                    .any(|composite| (composite.start, composite.end) == (arc.start, arc.end));
+                !composite_span || composite_arcs.contains(arc)
+            });
+        }
+        out.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
+        out.dedup();
+        (positions, !sc.position_graph_incomplete)
+    }
+}
+
+/// Group singleton analyzed edges by span into the query-side alternatives
+/// stored in one quoted predicate.
+fn phrase_graph(positions: u32, mut arcs: Vec<PositionArc>) -> PhraseGraph {
+    arcs.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
+    arcs.dedup();
+    let mut grouped: Vec<PhraseArc> = Vec::new();
+    for arc in arcs {
+        if let Some(last) = grouped.last_mut() {
+            if last.start == arc.start && last.end == arc.end {
+                last.alternatives.push(arc.feature);
+                continue;
+            }
+        }
+        grouped.push(PhraseArc {
+            start: arc.start,
+            end: arc.end,
+            alternatives: vec![arc.feature],
+        });
+    }
+    PhraseGraph {
+        positions,
+        arcs: grouped,
     }
 }
 
@@ -631,7 +1068,7 @@ impl Normalizer {
 /// registration (ADR-061). **Whitespace runs are NOT collapsed** — the cleaned text is verbatim,
 /// so this is byte-identical across versions and a persisted segment's features never desync on a
 /// binary upgrade (codex R8). Matching an alias against a title with whitespace runs is instead
-/// handled, recall-safely, by the positive-view overlap scan ([`AliasOverlap::collect_into`]).
+/// handled, recall-safely, by the positive-view overlap scan ([`PhraseOverlap::collect_into`]).
 pub(super) fn clean_with(punct: &PunctTable, text: &str, out: &mut String) {
     out.clear();
     for ch in text.chars() {

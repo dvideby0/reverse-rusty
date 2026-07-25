@@ -100,3 +100,92 @@ fn explain_hit_uses_dual_view_for_multiword_alias() {
         detail.failures
     );
 }
+
+#[test]
+fn explain_hit_reports_quoted_graphs_and_adjacency_failures() {
+    let mut engine = Engine::new(reverse_rusty::normalize::Normalizer::default_vocab().unwrap());
+    engine.build_from_queries(&[(1u64, "\"red shoe\"".to_string())]);
+
+    let adjacent = engine.explain_hit(1, "red shoe").expect("adjacent explain");
+    assert!(adjacent.matched);
+    assert_eq!(adjacent.required_phrases.len(), 1);
+    assert_eq!(adjacent.required_phrases[0].positions, 2);
+    assert!(adjacent.failures.is_empty());
+
+    let separated = engine
+        .explain_hit(1, "red leather shoe")
+        .expect("separated explain");
+    assert!(!separated.matched);
+    assert!(
+        separated
+            .failures
+            .iter()
+            .any(|failure| failure == "required_phrase[0] not contiguous"),
+        "got: {:?}",
+        separated.failures
+    );
+}
+
+#[test]
+fn explain_candidate_uses_graph_labels_only_for_main_arity_one() {
+    let mut builder = reverse_rusty::Normalizer::builder();
+    builder.add_grade_word("gem");
+    builder.add_synonym(
+        "stone",
+        "term:gem",
+        reverse_rusty::dict::FeatureKind::Generic,
+    );
+    let mut engine = Engine::new(builder.build().expect("normalizer"));
+    engine.build_from_queries(&[(1, "\"red shoe\" stone common".to_string())]);
+
+    let title = "red shoe gem common";
+    assert!(
+        match_ids(&engine, title).is_empty(),
+        "the graph-only raw label for the grade word must not enter a class-B pair probe"
+    );
+    let detail = engine.explain_hit(1, title).expect("explain detail");
+    assert!(
+        !detail.candidate,
+        "explain must synthesize the same lane-specific signatures as the matcher"
+    );
+    assert!(
+        detail
+            .failures
+            .iter()
+            .any(|failure| failure == "missing required term:gem"),
+        "got: {:?}",
+        detail.failures
+    );
+}
+
+#[test]
+fn explain_hit_matches_phrase_verifier_fail_open_guards() {
+    use reverse_rusty::dict::FeatureKind;
+
+    let mut builder = reverse_rusty::normalize::Normalizer::builder();
+    builder.add_grader("psa");
+    builder.add_phrase_alias(
+        &["unused", "alias"],
+        "term:unused_alias",
+        FeatureKind::Generic,
+    );
+    let mut engine = Engine::new(builder.build().expect("normalizer"));
+    engine.build_from_queries(&[(1u64, "\"red shoe\"".to_string())]);
+
+    let graders = std::iter::repeat_n("psa", 65).collect::<Vec<_>>().join(" ");
+    let title = format!("red {graders} boot");
+    assert_eq!(
+        match_ids(&engine, &title),
+        vec![1],
+        "the bounded positive graph deliberately fails open"
+    );
+
+    let detail = engine.explain_hit(1, &title).expect("explain detail");
+    assert!(detail.candidate);
+    assert!(
+        detail.matched,
+        "explain must apply the verifier's polarity-aware fail-open rule: {:?}",
+        detail.failures
+    );
+    assert!(detail.failures.is_empty());
+}

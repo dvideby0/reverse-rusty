@@ -15,7 +15,8 @@ use super::read::{
 };
 use super::{
     FrozenSlot, FORMAT_VERSION_COMPOUND_PREDICATE, FORMAT_VERSION_HOT, FORMAT_VERSION_OWNERSHIP,
-    FORMAT_VERSION_RANK, FORMAT_VERSION_SOURCE_GENERATION, HEADER_SIZE, MAGIC,
+    FORMAT_VERSION_PHRASE_PREDICATE, FORMAT_VERSION_RANK, FORMAT_VERSION_SOURCE_GENERATION,
+    HEADER_SIZE, MAGIC,
 };
 
 mod ops;
@@ -58,7 +59,7 @@ enum MmapLogicalIndex {
 pub struct MmapSegment {
     mmap: Arc<memmap2::Mmap>,
     num_queries: u32,
-    /// The file's header format version (1..=9). v4 ⇔ the segment holds class-D
+    /// The file's header format version (1..=10). v4 ⇔ the segment holds class-D
     /// always-candidates (the ADR-068 rollback fence); v5 ⇔ it holds class-H
     /// hot-tier entries (the ADR-105 fence + the hot-index section) — surfaced so
     /// the manifest commit can propagate the fence to its own version word.
@@ -110,12 +111,15 @@ pub struct MmapSegment {
     // pre-v8; accessors expose legacy generation zero in that case.
     source_generation: *const u64,
     source_generation_count: usize,
-    // Optional v9 compound exact-predicate columns.
+    // Optional v9/v10 compound exact-predicate columns.
     predicate_off: *const u32,
     predicate_len: *const u32,
     predicate_blob: *const u32,
     predicate_blob_len: usize,
     predicate_count: usize,
+    /// Live rows carrying a positioned predicate. The mmap payload is
+    /// append-only, so tombstones maintain this separately from its programs.
+    live_phrase_predicates: usize,
     // Main index
     main_slots: *const FrozenSlot,
     main_cap: usize,
@@ -234,6 +238,7 @@ fn validate_columns(
     let fits =
         |off: u32, len: u16, blob_len: usize| -> bool { off as usize + len as usize <= blob_len };
 
+    let mut saw_phrase_predicate = false;
     for i in 0..num_queries {
         if !fits(req_off[i], req_len[i], req_blob_len) {
             return Err(invalid("segment req column overruns req_blob"));
@@ -263,7 +268,23 @@ fn validate_columns(
                 .ok_or_else(|| invalid("segment compound predicate overruns blob"))?;
             crate::exact::validate_predicate(program)
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
+            if crate::exact::predicate_has_phrases(program) {
+                if format_version < FORMAT_VERSION_PHRASE_PREDICATE {
+                    return Err(invalid(
+                        "quoted predicate program requires segment format v10",
+                    ));
+                }
+                saw_phrase_predicate = true;
+            }
         }
+    }
+    if format_version >= FORMAT_VERSION_PHRASE_PREDICATE
+        && num_queries != 0
+        && !saw_phrase_predicate
+    {
+        return Err(invalid(
+            "segment format v10 has no quoted predicate program",
+        ));
     }
 
     // Every group's posting must land inside anyof_blob (groups are shared across
@@ -342,6 +363,7 @@ impl Clone for MmapSegment {
             predicate_blob: self.predicate_blob,
             predicate_blob_len: self.predicate_blob_len,
             predicate_count: self.predicate_count,
+            live_phrase_predicates: self.live_phrase_predicates,
             main_slots: self.main_slots,
             main_cap: self.main_cap,
             main_mask: self.main_mask,
@@ -449,17 +471,18 @@ impl MmapSegment {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
             }
             let version = read_u32_at(data, 4)?;
-            // v1–v9 are supported (v1 reconstructs the reverse index; v1/v2 read
+            // v1–v10 are supported (v1 reconstructs the reverse index; v1/v2 read
             // back with an empty tag column; v4 is the class-D fence; v5 adds
             // the hot index; v6 priority, v7 ownership, and v8 source generation
-            // append cumulative exact-row columns; v9 adds compound predicates).
+            // append cumulative exact-row columns; v9 adds compound predicates;
+            // v10 admits quoted token-graph programs).
             if version == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "invalid format version 0",
                 ));
             }
-            if version > FORMAT_VERSION_COMPOUND_PREDICATE {
+            if version > FORMAT_VERSION_PHRASE_PREDICATE {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     format!("unsupported format version {version}"),
@@ -811,6 +834,18 @@ impl MmapSegment {
             predicate_len_s,
             predicate_blob_s,
         )?;
+        let live_phrase_predicates = predicate_off_s
+            .iter()
+            .zip(predicate_len_s)
+            .enumerate()
+            .filter(|&(i, (&off, &len))| {
+                alive_overlay.get(i).copied().unwrap_or(false) && {
+                    let start = off as usize;
+                    let end = start + len as usize;
+                    crate::exact::predicate_has_phrases(&predicate_blob_s[start..end])
+                }
+            })
+            .count();
 
         Ok(MmapSegment {
             format_version,
@@ -858,6 +893,7 @@ impl MmapSegment {
             predicate_blob: slice_ptr(predicate_blob_s),
             predicate_blob_len: predicate_blob_s.len(),
             predicate_count,
+            live_phrase_predicates,
             main_slots: main_slots_s.as_ptr(),
             main_cap,
             main_mask: if main_cap > 0 {

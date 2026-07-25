@@ -219,6 +219,23 @@ impl MmapSegment {
     }
 
     #[inline]
+    pub fn has_phrase_predicates(&self) -> bool {
+        self.live_phrase_predicates != 0
+    }
+
+    #[inline]
+    fn row_has_phrase_predicates(&self, local_id: u32) -> bool {
+        let i = local_id as usize;
+        let Some((&off, &len)) = self.predicate_off().get(i).zip(self.predicate_len().get(i))
+        else {
+            return false;
+        };
+        let start = off as usize;
+        let end = start + len as usize;
+        crate::exact::predicate_has_phrases(&self.predicate_blob()[start..end])
+    }
+
+    #[inline]
     fn filter_data(&self) -> &[u64] {
         // Guard the null sentinel: a segment with no filter stores a null
         // `filter_data` pointer, which `mmap_slice`/`from_raw_parts` forbid.
@@ -267,9 +284,13 @@ impl MmapSegment {
     }
 
     pub fn tombstone(&mut self, local_id: u32) {
+        let had_phrase_predicate = self.row_has_phrase_predicates(local_id);
         if let Some(slot) = self.alive_overlay.get_mut(local_id as usize) {
             if *slot {
                 self.alive_counter -= 1;
+                if had_phrase_predicate {
+                    self.live_phrase_predicates -= 1;
+                }
                 // Keep the incremental dead set ≡ the overlay (ADR-066) — the
                 // already-dead branch is covered by the seed at open.
                 self.dead_overlay.insert(local_id);
@@ -426,10 +447,7 @@ impl MmapSegment {
     ) -> bool {
         crate::exact::verify_slices(
             id,
-            view.pos_mask,
-            view.pos,
-            view.neg_mask,
-            view.neg,
+            view,
             self.req_mask(),
             self.forb_mask(),
             self.req_off(),
@@ -617,7 +635,7 @@ impl MmapSegment {
         member: &mut [u64],
         choice: &mut [u64],
         pred: &crate::exact::TagPredicate,
-    ) {
+    ) -> Result<(), crate::exact::BatchEvalError> {
         crate::exact::eval_batch_slices(
             local as usize,
             tmask_batch,
@@ -646,7 +664,7 @@ impl MmapSegment {
             self.tag_off(),
             self.tag_len(),
             self.tag_blob(),
-        );
+        )
     }
 
     /// Filter check: is this signature key possibly in this segment?
@@ -700,14 +718,16 @@ impl MmapSegment {
         emission: P,
     ) {
         let has_filter = self.filter_num_blocks > 0;
-        // Retrieval uses the positive (superset) view; verify applies both (ADR-061).
+        // Graph-only phrase proxies are arity-1 MAIN signatures. The pair,
+        // hot, and broad lanes are planned only from flat positive semantics.
+        let probe_feats = view.probe;
         let feats = view.pos;
         if collector.should_stop() {
             return;
         }
 
         // arity-1 signatures
-        for &f in feats {
+        for &f in probe_feats {
             if collector.should_stop() {
                 return;
             }

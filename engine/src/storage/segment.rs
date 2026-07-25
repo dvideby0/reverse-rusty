@@ -50,6 +50,8 @@ const MAGIC: [u8; 4] = *b"PERC";
 // same accepted mutation even when the caller-visible version repeats; legacy
 // rows use zero. v9 appends the optional compound-predicate offsets, lengths,
 // and u32 program blob used to preserve multi-token any-of member boundaries.
+// v10 uses the same cumulative columns and admits predicate-program v2, whose
+// tail stores quoted analyzer token graphs (ADR-120).
 const FORMAT_VERSION: u32 = 3;
 const FORMAT_VERSION_CLASS_D: u32 = 4;
 const FORMAT_VERSION_HOT: u32 = 5;
@@ -68,6 +70,9 @@ const FORMAT_VERSION_SOURCE_GENERATION: u32 = 8;
 /// shared u32 program blob. Written only when at least one row needs a compound
 /// member predicate; v9 cumulatively includes v6-v8 columns.
 const FORMAT_VERSION_COMPOUND_PREDICATE: u32 = 9;
+/// v10 (ADR-120): predicate-program v2 may append required/forbidden analyzed
+/// token graphs. Written only when at least one quoted predicate is present.
+const FORMAT_VERSION_PHRASE_PREDICATE: u32 = 10;
 /// Semantic version of the AST→compiled-query lowering baked into a segment.
 ///
 /// Version 0 is every segment written before ADR-118: positive bare terms were
@@ -75,9 +80,11 @@ const FORMAT_VERSION_COMPOUND_PREDICATE: u32 = 9;
 /// query normalization. Version 1 compiles each maximal consecutive positive
 /// bare-term run independently but still lowers a multi-token any-of member to
 /// one proxy. Version 2 preserves each member's complete conjunction through
-/// exact verification. This lives in the format's old reserved header word so
+/// exact verification. Version 3 preserves quoted analyzer adjacency rather
+/// than lowering a quoted clause to unordered feature membership. This lives
+/// in the format's old reserved header word so
 /// recovery can source-rebuild every older materialization before serving it.
-pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 2;
+pub(crate) const CURRENT_COMPILER_SEMANTICS_VERSION: u32 = 3;
 const HEADER_SIZE: usize = 80;
 
 // Section offset positions within the header (byte offset from file start).
@@ -263,6 +270,56 @@ mod tests {
         (path, bytes)
     }
 
+    fn v10_segment_bytes() -> (std::path::PathBuf, Vec<u8>) {
+        let norm = crate::normalize::Normalizer::default_vocab().expect("normalizer");
+        let mut dict = crate::dict::Dict::new();
+        let mut lc = String::new();
+        let ast = crate::dsl::parse("\"red shoe\"").expect("query");
+        let ex = crate::compile::extract(&ast, &norm, &mut dict, &mut lc);
+        dict.finalize_mask();
+        let mut segment = crate::segment::Segment::new();
+        segment
+            .add_compiled(
+                &ex,
+                &[],
+                &dict,
+                1,
+                7,
+                crate::segment::CompileKnobs {
+                    accept_class_d: true,
+                    hot_anchor_threshold: 0,
+                    dedup_bodies: true,
+                },
+            )
+            .expect("accepted query");
+        let dir = std::env::temp_dir().join(format!(
+            "rr_segment_v10_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("quoted.seg");
+        write_segment(&segment, &path).expect("write v10 segment");
+        let bytes = std::fs::read(&path).expect("read segment");
+        (path, bytes)
+    }
+
+    fn predicate_blob_offset(bytes: &[u8]) -> usize {
+        let mut cursor =
+            u64::from_le_bytes(bytes[16..24].try_into().expect("exact offset")) as usize;
+        for width in [8usize, 8, 4, 2, 4, 4, 2, 4, 4, 2, 4, 2, 4, 4, 8] {
+            cursor = skip_array(bytes, cursor, width);
+        }
+        cursor = skip_array(bytes, cursor, 8); // priority
+        for width in [8usize, 4, 1, 4, 4, 4] {
+            cursor = skip_array(bytes, cursor, width);
+        }
+        cursor = skip_array(bytes, cursor, 8); // source generation
+        cursor = skip_array(bytes, cursor, 4); // predicate offsets
+        skip_array(bytes, cursor, 4) // predicate lengths
+    }
+
     #[test]
     fn v7_ownership_columns_round_trip_and_malformed_columns_fail_loud() {
         let (path, original) = v7_segment_bytes();
@@ -310,18 +367,7 @@ mod tests {
         assert_eq!(read_u32(&original, 4), FORMAT_VERSION_COMPOUND_PREDICATE);
         MmapSegment::open(&path).expect("open valid v9");
 
-        let mut cursor =
-            u64::from_le_bytes(original[16..24].try_into().expect("exact offset")) as usize;
-        for width in [8usize, 8, 4, 2, 4, 4, 2, 4, 4, 2, 4, 2, 4, 4, 8] {
-            cursor = skip_array(&original, cursor, width);
-        }
-        cursor = skip_array(&original, cursor, 8); // priority
-        for width in [8usize, 4, 1, 4, 4, 4] {
-            cursor = skip_array(&original, cursor, width);
-        }
-        cursor = skip_array(&original, cursor, 8); // source generation
-        cursor = skip_array(&original, cursor, 4); // predicate offsets
-        cursor = skip_array(&original, cursor, 4); // predicate lengths
+        let cursor = predicate_blob_offset(&original);
 
         let mut malformed = original;
         assert!(
@@ -337,6 +383,37 @@ mod tests {
             error
                 .to_string()
                 .contains("unsupported compound predicate version"),
+            "got: {error}"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().expect("test directory"));
+    }
+
+    #[test]
+    fn v10_phrase_predicate_round_trips_and_malformed_graph_fails_loud() {
+        let (path, original) = v10_segment_bytes();
+        assert_eq!(read_u32(&original, 4), FORMAT_VERSION_PHRASE_PREDICATE);
+        MmapSegment::open(&path).expect("open valid v10");
+
+        let blob_count = predicate_blob_offset(&original);
+        assert!(read_u32(&original, blob_count) > 0, "predicate blob");
+        let program = blob_count + 4;
+        assert_eq!(
+            read_u32(&original, program),
+            2,
+            "phrase rows use predicate-program v2"
+        );
+        assert_eq!(read_u32(&original, program + 16), 2, "query positions");
+
+        let mut malformed = original;
+        malformed[program + 16..program + 20].copy_from_slice(&0u32.to_le_bytes());
+        reseal(&mut malformed);
+        std::fs::write(&path, malformed).expect("write malformed phrase graph");
+        let error = MmapSegment::open(&path).expect_err("empty graph must fail loud");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            error
+                .to_string()
+                .contains("quoted predicate has an empty token graph"),
             "got: {error}"
         );
         let _ = std::fs::remove_dir_all(path.parent().expect("test directory"));

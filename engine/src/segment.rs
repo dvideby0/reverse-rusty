@@ -290,6 +290,9 @@ pub struct Segment {
     alive: Vec<bool>,
     /// O(1) counter of alive (non-tombstoned) entries.
     alive_counter: usize,
+    /// O(1) snapshot capability gate. Historical phrase programs remain in the
+    /// append-only exact store after deletion, so this counts only live rows.
+    live_phrase_predicates: usize,
     /// Anchor filter: present only on sealed (immutable) base segments.
     /// `None` for the memtable (mutable, entries added dynamically).
     filter: Option<SegmentFilter>,
@@ -397,6 +400,16 @@ pub struct MatchScratch {
     /// Positive overlapping superset title view `P(T) ⊇ N(T)` (ADR-061). Equal to `feats`
     /// when no multi-word alias is active.
     feats_pos: Vec<FeatureId>,
+    /// Candidate-only positive labels. Phrase graphs can contribute retrieval
+    /// labels that must never widen ordinary flat exact semantics.
+    probe_feats: Vec<FeatureId>,
+    /// Canonical / positive analyzed token-graph edges, populated only while
+    /// quoted predicates exist in the snapshot (ADR-120).
+    phrase_arcs: Vec<crate::normalize::PositionArc>,
+    phrase_arcs_pos: Vec<crate::normalize::PositionArc>,
+    /// Reusable graph-intersection state, interior-mutable so the borrowed
+    /// `TitleView` stays `Copy` through every segment verifier.
+    phrase_match: std::cell::RefCell<crate::exact::PhraseMatchScratch>,
     /// Reusable per-title working buffers for the normalizer's `emit` pipeline — keeps title
     /// normalization allocation-free in steady state (the hot-path invariant). Owned here, like
     /// `lc`/`feats`, so it persists across titles instead of being re-allocated per `emit`.
@@ -428,6 +441,9 @@ pub struct EngineSnapshot {
     tag_dict: Arc<TagDict>,
     segments: Vec<Arc<BaseSegment>>,
     memtable: Arc<Segment>,
+    /// Aggregate read capability captured at publication. Checking this once
+    /// here avoids walking every base segment for every matched title.
+    has_phrase_predicates: bool,
     query_store: Arc<SourceStore>,
     /// Vocabulary at snapshot time (shared via `Arc`), so vocab reads can use the
     /// lock-free snapshot instead of locking the engine (ADR-016).
@@ -722,6 +738,9 @@ pub struct Engine {
     /// mutable hot delta — insert_live / tombstone land here. `Arc` + CoW: a
     /// write clones only the (bounded) memtable, never the base segments.
     memtable: Arc<Segment>,
+    /// Number of segment states (including the memtable) with a live phrase row.
+    /// Updated on writes and reduced to an O(1) capability bit in snapshots.
+    live_phrase_segments: usize,
     rejected_parse: u64,   // queries dropped because the DSL failed to parse
     rejected_class_d: u64, // class-D queries rejected at compile (not stored)
     /// Observe-first hot-tier telemetry (the Broad-Query Cost Program): accepted

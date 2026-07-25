@@ -13,6 +13,7 @@ See the [overview](README.md) for the mental model and correctness contract.*
 - **Key invariant:** The same normalizer must process both queries and titles — feature spaces must align
 - **DSL:** `word` = MUST, `"phrase"` = MUST, `(a,b,c)` = required any-of, `-x` = MUST_NOT (user-facing syntax + vocabulary reference: [`../reference/dsl.md`](../reference/dsl.md))
 - **Normalizer pipeline:** clean bytes → daachorse multiword alias scan → tokenize → grader/grade/year patterns → synonyms → generic features
+- **Quoted clauses:** zero-slop contiguous paths through analyzed token graphs (ADR-120), not unordered feature conjunctions
 - **Status:** Fully implemented; daachorse v3 Aho-Corasick replaced the original token-trie
 - **Gotchas:** Grade detection is context-aware (§3.2); diacritic folding is lossy by design; `#`-prefixed card numbers need disambiguation from serial numbers
 
@@ -52,6 +53,20 @@ satisfies a complete branch. Normalization may collapse a configured multi-word 
 Otherwise the compiler preserves every normalized requirement through exact verification. A
 rarest-feature member proxy may be used for lossless candidate retrieval, but never as the member's
 exact truth condition (ADR-119).
+
+A quoted clause retains the analyzer's **position graph** instead of flattening it into the ordinary
+feature columns (ADR-120). Each edge is `(start, end, FeatureId alternatives)`: a normal token spans
+one position, while a collapsed entity or multi-word alias may span several. A phrase matches only
+when its complete graph is a connected path through the title graph; `"red shoe"` therefore rejects
+`red leather shoe` and `shoe red`. Required phrase edges are widened by active equivalences and use
+the overlapping positive title graph `P(T)`. Forbidden phrases are not widened and use canonical
+leftmost-longest `N(T)`, preserving ADR-061's negative policy. Analyzer-silent marker/context tokens
+receive a raw normalized term edge only when no semantic edge covers that position, so quoting does
+not accidentally remove a lexical position. The windowed `grader_grade` feature remains available
+to flat matching, but its quoted-graph shortcut is limited to fused or adjacent forms (`psa10` /
+`psa 10`) so it cannot jump over an explicit quoted token. Graph-only labels live in a separate
+candidate-probe view and never widen the flat `P(T)` used to verify ordinary rows. The user-facing
+truth table is in [`../reference/dsl.md`](../reference/dsl.md#quoted-phrases).
 
 Worked example (from the spec):
 
@@ -112,6 +127,13 @@ what makes the feature spaces line up. Pipeline, all over a reusable scratch buf
 
 Output is a `TitleFeatureSet`: a sorted, deduped `&[u32]` of feature IDs plus typed entity slots
 (year, grader, grade, ...) packed into a fixed-size struct for slot checks. Reused across titles.
+When a snapshot contains at least one quoted predicate, the same pass additionally materializes
+sorted canonical/positive `PositionArc` buffers in the caller's reusable match scratch. Phrase-free
+snapshots do not build them and remain on the existing flat path. The positive graph is the union of
+canonical, force-additive, positioned raw-token, and overlapping-entity paths regardless of whether
+an alias is active; this prevents an ordinary collapse phrase from hiding a valid quoted path.
+Whitespace runs produce the same token positions as one space. Positive-graph labels feed a separate
+candidate-only probe buffer.
 
 **MJ disambiguation note.** Ambiguous aliases (`MJ`) only fire when corroborated (e.g. co-occurring
 `bulls`, a basketball set, or another Jordan-specific token), otherwise they are dropped. Dropping is
@@ -147,8 +169,9 @@ same way at compile time — they are, because the normalizer is shared. Determi
   the **title** side it is **additive** (entity + components) and a second, *overlapping* automaton emits
   every nested alias entity. `match_features_dual` thus yields two title views — the canonical
   leftmost-longest `N(T)` and the overlapping superset `P(T)` — consumed by the two-view verifier
-  ([`matching.md`](matching.md) §3). No active multi-word alias ⇒ the second automaton is absent and the
-  two views are identical (byte-identical to before ADR-061).
+  ([`matching.md`](matching.md) §3). No active multi-word alias ⇒ the flat path does not consult the
+  overlap automaton and the two flat views are identical (byte-identical to before ADR-061);
+  phrase-aware ADR-120 analysis still consults it for ordinary declared entities.
 
 ---
 

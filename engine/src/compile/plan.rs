@@ -6,13 +6,47 @@
 //! `sig_key`s, so the two cannot drift. [`compile_one`] / [`compile_one_readonly`]
 //! are the full-compile convenience used by the explain/demo path.
 //!
-//! Invariant: only `ex.required` / `ex.anyof` are ever read here — forbidden
-//! features can never reach an anchor (the lossless-cover contract).
+//! Invariant: only positive requirements (`ex.required` / `ex.anyof` /
+//! `ex.required_phrases`) are ever read here — forbidden features and forbidden
+//! phrase graphs can never reach an anchor (the lossless-cover contract).
 
-use super::{is_hot, AnchorPlan, CompiledQuery, CostClass, Extracted, SigPlan};
+use super::{
+    extract::phrase_proxy, is_hot, AnchorPlan, CompiledQuery, CostClass, Extracted, SigPlan,
+};
 use crate::dict::{Dict, FeatureId};
 use crate::normalize::Normalizer;
 use crate::util::sig_key;
+
+fn phrase_proxy_plan(ex: &Extracted, dict: &Dict) -> Option<AnchorPlan> {
+    let best = ex
+        .required_phrases
+        .iter()
+        .map(phrase_proxy)
+        .filter(|group| !group.is_empty())
+        .min_by_key(|group| {
+            group
+                .iter()
+                .map(|&feature| dict.freq(feature))
+                .max()
+                .unwrap_or(u32::MAX)
+        })?;
+    Some(AnchorPlan {
+        main_anchors: best.into_iter().map(|feature| vec![feature]).collect(),
+        broad_anchors: Vec::new(),
+        hot_anchors: Vec::new(),
+        class: CostClass::B,
+        would_be_hot: false,
+    })
+}
+
+/// Whether [`anchor_plan`] uses a required phrase's candidate-only proxy instead
+/// of an ordinary flat anchor. Cluster placement shares this predicate so a
+/// graph-only proxy can never become a selective ring key that flat routing
+/// cannot reproduce.
+pub(crate) fn uses_required_phrase_proxy(ex: &Extracted, dict: &Dict) -> bool {
+    !ex.required_phrases.is_empty()
+        && (ex.required.is_empty() || (ex.required.len() == 1 && is_hot(dict, ex.required[0])))
+}
 
 /// Choose the lossless signature cover's *anchor feature groups* and the cost
 /// class (pass B, after the mask is finalized so `is_hot` is meaningful). This is
@@ -33,7 +67,7 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict, theta: u32) -> AnchorPlan {
     let mut broad_anchors: Vec<Vec<FeatureId>> = Vec::new();
     let mut hot_anchors: Vec<Vec<FeatureId>> = Vec::new();
 
-    if ex.required.is_empty() && ex.anyof.is_empty() {
+    if ex.required.is_empty() && ex.anyof.is_empty() && ex.required_phrases.is_empty() {
         // Class D: the cover of an empty positive set is the UNIVERSAL signature
         // (one empty broad-anchor group, hashed to `util::universal_sig()`), which
         // the match path probes once per segment — so an accepted class-D query is
@@ -41,6 +75,28 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict, theta: u32) -> AnchorPlan {
         // gated at ingest (`Segment::add_compiled`), not here; deriving the cover
         // unconditionally keeps every re-derivation site (compaction re-anchoring,
         // the vocab recompile, explain) reproducing it by construction.
+        broad_anchors.push(Vec::new());
+        return AnchorPlan {
+            main_anchors,
+            broad_anchors,
+            hot_anchors,
+            class: CostClass::D,
+            would_be_hot: false,
+        };
+    }
+
+    if ex.required.is_empty() && !ex.required_phrases.is_empty() {
+        // A required phrase is semantically selective even when every one of
+        // its analyzer labels is individually top-64-hot. Its label union is a
+        // candidate-only necessary condition, not an ordinary any-of predicate:
+        // keep it on the default-visible main lane and let exact graph
+        // intersection enforce adjacency. One arity-1 posting per label is a
+        // lossless cover because every satisfying path contains at least one
+        // query-graph label. Cluster placement replicates this shape rather than
+        // ring-placing graph-only labels (see `placement_of`).
+        if let Some(plan) = phrase_proxy_plan(ex, dict) {
+            return plan;
+        }
         broad_anchors.push(Vec::new());
         return AnchorPlan {
             main_anchors,
@@ -140,7 +196,15 @@ pub fn anchor_plan(ex: &Extracted, dict: &Dict, theta: u32) -> AnchorPlan {
                     would_be_hot: false,
                 }
             } else {
-                // single, hot required feature and nothing to pair -> broad lane
+                // A required phrase supplies a semantically-selective,
+                // default-visible candidate proxy when the only flat required
+                // feature would otherwise force this mixed query into class C.
+                // The cluster replicates this proxy because its graph-only
+                // labels are not necessarily present in flat routing.
+                if let Some(plan) = phrase_proxy_plan(ex, dict) {
+                    return plan;
+                }
+                // Single hot required feature and no phrase proxy -> broad lane.
                 broad_anchors.push(vec![r1]);
                 AnchorPlan {
                     main_anchors,

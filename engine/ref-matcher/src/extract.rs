@@ -12,7 +12,7 @@
 //!      rarest-by-frequency feature per member remains only as a lossless retrieval proxy.
 
 use crate::features::Feature;
-use crate::normalize::{emit, Side};
+use crate::normalize::{compile_phrase, emit, RefPhraseGraph, Side};
 use crate::parse::{Ast, Atom};
 use crate::vocab::RefVocab;
 use std::collections::HashMap;
@@ -45,6 +45,8 @@ pub struct RefQuery {
     pub anyof: Vec<Vec<Feature>>,
     pub anyof_predicates: Vec<RefAnyOfPredicate>,
     pub forbidden_conjunctions: Vec<Vec<Feature>>,
+    pub required_phrases: Vec<RefPhraseGraph>,
+    pub forbidden_phrases: Vec<RefPhraseGraph>,
 }
 
 /// Normalize one atom string on the query/compile side (sorted + deduped features).
@@ -98,6 +100,8 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
     let mut anyof: Vec<Vec<Feature>> = Vec::new();
     let mut anyof_predicates: Vec<RefAnyOfPredicate> = Vec::new();
     let mut forbidden_conjunctions: Vec<Vec<Feature>> = Vec::new();
+    let mut required_phrases = Vec::new();
+    let mut forbidden_phrases = Vec::new();
     let mut pos_words: Vec<&str> = Vec::new();
 
     for clause in &ast.clauses {
@@ -106,8 +110,19 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
         }
         match (&clause.atom, clause.negated) {
             (Atom::Term(w), false) => pos_words.push(w.as_str()),
-            (Atom::Term(w) | Atom::Phrase(w), true) => forbidden.extend(norm_query(vocab, w)),
-            (Atom::Phrase(w), false) => required.extend(norm_query(vocab, w)),
+            (Atom::Term(w), true) => forbidden.extend(norm_query(vocab, w)),
+            (Atom::Phrase(w), false) => {
+                let phrase = compile_phrase(vocab, w);
+                if !phrase.arcs.is_empty() {
+                    required_phrases.push(phrase);
+                }
+            }
+            (Atom::Phrase(w), true) => {
+                let phrase = compile_phrase(vocab, w);
+                if !phrase.arcs.is_empty() {
+                    forbidden_phrases.push(phrase);
+                }
+            }
             (Atom::AnyOf(members), true) => {
                 for m in members {
                     let feats = norm_query(vocab, m);
@@ -185,27 +200,37 @@ pub fn extract_literal(ast: &Ast, vocab: &RefVocab, freq: &Freq) -> RefQuery {
         anyof,
         anyof_predicates,
         forbidden_conjunctions,
+        required_phrases,
+        forbidden_phrases,
     }
 }
 
 impl RefQuery {
-    /// The distinct features whose frequency a query bumps: every required feature and every any-of
-    /// proxy (NOT forbidden), reflecting the literal query (call before expansion).
+    /// The distinct features whose frequency a query bumps: every required feature,
+    /// any-of proxy, and required-phrase candidate label (never forbidden),
+    /// reflecting the literal query (call before expansion).
     #[must_use]
     pub fn bump_features(&self) -> Vec<Feature> {
         let mut out = self.required.clone();
         for g in &self.anyof {
             out.extend(g.iter().cloned());
         }
+        for phrase in &self.required_phrases {
+            for arc in &phrase.arcs {
+                out.extend(arc.alternatives.iter().cloned());
+            }
+        }
+        out.sort();
+        out.dedup();
         out
     }
 
-    /// Whether the engine drops this query at ingest: no required feature AND no any-of group
-    /// (a negation-only / empty query — class D). Forbidden-only queries are kept only by the
-    /// always-candidate lane.
+    /// Whether the engine drops this query at ingest: no required feature,
+    /// any-of group, or required phrase (a negation-only / empty query — class
+    /// D). Forbidden-only queries are kept only by the always-candidate lane.
     #[must_use]
     pub fn is_class_d(&self) -> bool {
-        self.required.is_empty() && self.anyof.is_empty()
+        self.required.is_empty() && self.anyof.is_empty() && self.required_phrases.is_empty()
     }
 
     /// Expand learned equivalences (ADR-054): a required feature in a group becomes an any-of over
@@ -255,11 +280,27 @@ impl RefQuery {
             predicate.members.sort();
             predicate.members.dedup();
         }
+        for phrase in &mut self.required_phrases {
+            for arc in &mut phrase.arcs {
+                let mut widened = Vec::with_capacity(arc.alternatives.len());
+                for feature in &arc.alternatives {
+                    match equiv.get(feature) {
+                        Some(group) => widened.extend(group.iter().cloned()),
+                        None => widened.push(feature.clone()),
+                    }
+                }
+                widened.sort();
+                widened.dedup();
+                arc.alternatives = widened;
+            }
+        }
         self.required.sort();
         self.required.dedup();
         self.anyof.sort();
         self.anyof.dedup();
         self.anyof_predicates.sort();
         self.anyof_predicates.dedup();
+        self.required_phrases.sort();
+        self.required_phrases.dedup();
     }
 }

@@ -140,6 +140,7 @@ impl EngineSnapshot {
             dict: &self.dict,
             segments: &self.segments,
             memtable: &self.memtable,
+            has_phrase_predicates: self.has_phrase_predicates,
             pred,
         };
         let mut opts = batch_opts;

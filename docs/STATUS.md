@@ -113,7 +113,7 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 
 - **LSM write path** (`segment/`) — memtable + immutable segments + tombstones + score-based
   compaction with auto-triggers (ADR-004, ADR-009).
-- **mmap'd `.seg` format** (v3–v9) + frozen hash tables (ADR-012/105/108/109/116/119); flat mmap'd logical-index
+- **mmap'd `.seg` format** (v3–v10) + frozen hash tables (ADR-012/105/108/109/116/119/120); flat mmap'd logical-index
   columns + lazy on-disk source store → resident ~4.5 B/query (ADR-020, ADR-014).
 - **WAL** (v6) — CRC-framed, crash recovery, configurable fsync (ADR-013/108); address-free logical
   deletes + per-segment dead-locals bitmaps make tombstones durable at the commit point (ADR-066);
@@ -184,6 +184,11 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   across members, with whole-member negation. Rarest-feature proxies are retrieval-only; exact scalar
   and columnar verification retain the complete predicate. `.seg` v9 carries the optional integer
   program and compiler semantics 2 source-rebuilds semantics 0/1 before serving (ADR-119).
+- **Quoted clauses preserve analyzed adjacency** — required/forbidden quotes are zero-slop connected
+  token-graph paths, with positive alias alternatives and canonical negative behavior. Lossless
+  label proxies retrieve candidates; predicate-program v2 verifies the graph with bounded reusable
+  scratch. Phrase-bearing batches use the positioned scalar fallback; `.seg` v10 and compiler
+  semantics 3 source-rebuild semantics 0/1/2 before serving (ADR-120).
 - **Dynamic vocabulary** — feature-hashing for post-freeze terms + blue/green vocab rebuild
   (ADR-046); works on a tagged cluster via TagId carry-through (ADR-074).
 
@@ -282,10 +287,10 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   the SPEC, reusing none of the engine (independence enforced by a `check.sh` `cargo tree` lane); the
   engine is diffed against it (`tests/independent_oracle/`) over default/populated/alias corpora + a
   gotcha table + an env-gated real corpus. It closes the **shared-code** ADR-050 blind spot for the
-  covered paths. ADR-118/119 later exposed shared-**semantics** blind spots: both independent
+  covered paths. ADR-118/119/120 later exposed shared-**semantics** blind spots: both independent
   implementations can read ambiguous lowering prose the same wrong way. Clause boundaries and
-  multi-token any-of member truth tables are now fixed and pinned against human expectations; issue
-  #123 tracks a stronger semantic-model oracle.
+  multi-token any-of member truth tables plus quoted adjacency are now fixed and pinned against human
+  expectations; issue #123 tracks a stronger semantic-model oracle.
 - **Real-process SIGKILL crash injection** (Phase 0 item 3, ADR-088) — a `crashwriter` lean-core bin +
   `tests/crash_injection/` spawn a real process and deliver a real external SIGKILL mid
   durable-operation (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**),

@@ -34,7 +34,7 @@ Durable formats are **versioned and fail loud, never corrupt silently** — an i
 a refused open with a versioned error, and a refusal is always recoverable by restoring the
 pre-upgrade backup:
 
-- **Segments** (`.seg` v3–v9) and **manifests** (engine v3–v6, cluster v4–v7): newer minor
+- **Segments** (`.seg` v3–v10) and **manifests** (engine v3–v6, cluster v4–v7): newer minor
   formats read older files back; an *older* binary refuses a *newer* file it cannot honor. The
   "fence" versions exist precisely to make a semantic change loud — e.g. a
   class-D-bearing segment is written v4 so a pre-ADR-068 binary refuses it rather than silently
@@ -49,13 +49,17 @@ pre-upgrade backup:
   standalone engine-manifest v6 fence; older binaries must not skip those rows and serve a partial
   corpus. ADR-119 adds `.seg` v9 compound-predicate columns only when a multi-feature any-of member
   needs them; the layout bump is the rollback fence for readers that would otherwise ignore the
-  member's full predicate. Standalone `.seg` v1–v8 remains readable by the new binary, but clustered
+  member's full predicate. ADR-120 adds `.seg` v10 only while a quoted token-graph predicate exists;
+  an older reader must refuse instead of flattening quoted adjacency. Standalone `.seg` v1–v9 remains
+  readable by the new binary, but clustered
   manifests v1–v5 are intentionally rebuild-only because they cannot identify a unique emission
   owner.
-- **Compiler-semantics stamp (ADR-118/119):** segment header bytes `12..16` are semantics 0 (legacy
+- **Compiler-semantics stamp (ADR-118/119/120):** segment header bytes `12..16` are semantics 0 (legacy
   cross-clause lowering), 1 (maximal positive bare-term runs but proxy-only multi-token any-of
-  members), or 2 (complete member predicates). This is independent of the cumulative layout version.
-  Every live semantics-0 or semantics-1 standalone/local-cluster materialization source-rebuilds
+  members), 2 (complete member predicates but flattened quoted clauses), or 3 (quoted token-graph
+  adjacency). This is independent of the cumulative layout version.
+  Every live semantics-0, semantics-1, or semantics-2 standalone/local-cluster materialization
+  source-rebuilds
   before serving. A durable shard cannot safely re-place itself: shard-local restart, raw attach, and
   ordinary recovery from a still-legacy peer fail loud.
   Standalone migration also refuses a degraded segment set, ambiguous duplicate live rows, or an
@@ -67,14 +71,15 @@ pre-upgrade backup:
   appends newly exposed features but preserves existing frequencies and the frozen top-64 mask, so
   recovery cannot move an unrelated default-visible query behind `include_broad`. Unknown future
   compiler semantics are unsupported and abort open.
-- **ADR-118/119 mesh fence:** `DictFingerprint`, `AdoptDict`, `AddShard`, and recovery manifests attest
+- **ADR-118/119/120 mesh fence:** `DictFingerprint`, `AdoptDict`, `AddShard`, and recovery manifests attest
   compiler semantics. The field is protobuf-additive but semantically mandatory: an old peer sends
   zero and is rejected before adoption or recovery. This release therefore requires a
   version-homogeneous shard/coordinator mesh. Back up, quiesce writes, upgrade or rebuild/re-place
   through the coordinator, then bring up only current-semantics peers. Rolling back to a
   pre-ADR-118 writer is unsafe for **all new query writes**; rolling back to semantics 1 is unsafe
-  for writes containing multi-token any-of members. Restore the pre-upgrade backup or keep writes
-  quiesced until rolling forward.
+  for writes containing multi-token any-of members; rolling back to semantics 2 is unsafe for writes
+  containing quoted clauses. Restore the pre-upgrade backup or keep writes quiesced until rolling
+  forward.
 - **Same-θ contract (ADR-105):** in remote cluster mode, run every `shardserver` (and the
   coordinator) with the same `--hot-anchor-threshold`. Divergence can never drop a match —
   class A and class H are both always-visible and place identically — it only decides which

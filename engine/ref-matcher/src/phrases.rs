@@ -38,7 +38,7 @@ fn joined(p: &RefPhrase) -> String {
     p.tokens.join(" ")
 }
 
-/// Collapse whitespace runs (and strip a leading space), as `AliasOverlap::collect_into` does
+/// Collapse whitespace runs (and strip a leading space), as `PhraseOverlap::collect_into` does
 /// before its overlapping scan. Returns the input unchanged when there is no run.
 #[must_use]
 pub fn collapse_ws_runs(s: &str) -> String {
@@ -62,7 +62,7 @@ pub fn collapse_ws_runs(s: &str) -> String {
 }
 
 /// Boundary-aware leftmost-longest non-overlapping phrase selection over `phrases`, returning
-/// `(byte_start, byte_end, phrase_index)` in start order. Mirrors `AliasOverlap::select_phrases`
+/// `(byte_start, byte_end, phrase_index)` in start order. Mirrors `PhraseOverlap::select_phrases`
 /// (and the legacy leftmost-longest pass in the non-pathological case): collect every
 /// boundary-valid occurrence, prefer the smallest start then the longest match, drop later
 /// candidates overlapping an accepted span.
@@ -97,11 +97,21 @@ pub fn select_leftmost_longest(lc: &str, phrases: &[RefPhrase]) -> Vec<(usize, u
 }
 
 /// Every boundary-valid OVERLAPPING phrase occurrence's index (whitespace runs collapsed first),
-/// for building the positive view `P(T)`. Mirrors `AliasOverlap::collect_into` +
-/// `scan_overlapping`, but over ALL phrases (the engine builds the overlap automaton over every
-/// phrase, alias and non-alias, once an alias is active — the codex-R6 FN fix).
+/// for building the positive view `P(T)`. Mirrors `PhraseOverlap::collect_into` +
+/// `scan_overlapping` over all phrases. Flat ADR-061 uses it only with an
+/// active alias; positioned ADR-120 uses it for every declared phrase.
 #[must_use]
 pub fn scan_overlapping(lc: &str, phrases: &[RefPhrase]) -> Vec<usize> {
+    scan_overlapping_spans(lc, phrases)
+        .into_iter()
+        .map(|(_, _, idx)| idx)
+        .collect()
+}
+
+/// Positioned form of [`scan_overlapping`], returning cleaned token-position
+/// spans for the independent ADR-120 title graph.
+#[must_use]
+pub fn scan_overlapping_spans(lc: &str, phrases: &[RefPhrase]) -> Vec<(u32, u32, usize)> {
     let collapsed = collapse_ws_runs(lc);
     let bytes = collapsed.as_bytes();
     let mut out = Vec::new();
@@ -113,7 +123,10 @@ pub fn scan_overlapping(lc: &str, phrases: &[RefPhrase]) -> Vec<usize> {
         for s in find_all(&collapsed, &j) {
             let e = s + j.len();
             if boundary_ok(bytes, s, e) {
-                out.push(idx);
+                let start =
+                    u32::try_from(collapsed[..s].split_whitespace().count()).unwrap_or(u32::MAX);
+                let len = u32::try_from(p.tokens.len()).unwrap_or(u32::MAX);
+                out.push((start, start.saturating_add(len), idx));
             }
         }
     }

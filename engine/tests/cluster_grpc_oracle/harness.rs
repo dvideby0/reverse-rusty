@@ -39,7 +39,7 @@ impl Brute {
         for (logical, text) in queries {
             if let Ok(ast) = reverse_rusty::dsl::parse(text) {
                 let ex = extract(&ast, &norm, &mut dict, &mut lc);
-                if ex.required.is_empty() && ex.anyof.is_empty() {
+                if ex.required.is_empty() && ex.anyof.is_empty() && ex.required_phrases.is_empty() {
                     continue; // mirror class-D rejection
                 }
                 qs.push((*logical, ex));
@@ -60,11 +60,26 @@ impl Brute {
         feats: &mut Vec<u32>,
     ) -> HashSet<u64> {
         let mut sc = reverse_rusty::normalize::NormScratch::new();
-        self.norm
-            .match_features(title, &self.dict, lc, &mut sc, feats);
+        let mut pos = Vec::new();
+        let mut probe = Vec::new();
+        let mut neg_arcs = Vec::new();
+        let mut pos_arcs = Vec::new();
+        let (positions, complete) = self.norm.match_phrase_views(
+            title,
+            &self.dict,
+            lc,
+            &mut sc,
+            feats,
+            &mut pos,
+            &mut probe,
+            &mut neg_arcs,
+            &mut pos_arcs,
+        );
         let mut out = HashSet::new();
         for (logical, ex) in &self.queries {
-            if ex.matches_features(feats, feats) {
+            if ex.matches_positioned(
+                &pos, feats, positions, &pos_arcs, complete, positions, &neg_arcs,
+            ) {
                 out.insert(*logical);
             }
         }

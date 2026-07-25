@@ -377,6 +377,10 @@ impl Engine {
                 }
             };
         let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
+        let live_phrase_segments = segments
+            .iter()
+            .filter(|segment| segment.has_phrase_predicates())
+            .count();
 
         let mut engine = Engine {
             config: Arc::new(config),
@@ -386,6 +390,7 @@ impl Engine {
             tag_dict: Arc::new(tag_dict),
             segments,
             memtable: Arc::new(Segment::new()),
+            live_phrase_segments,
             rejected_parse: manifest.rejected_parse,
             rejected_class_d: manifest.rejected_class_d,
             // Process-lifetime observe counter (deliberately not in the manifest);
@@ -427,11 +432,12 @@ impl Engine {
         // Replay WAL entries after last checkpoint
         replay_wal_tail(&mut engine, &wal_path, manifest.wal_seq_watermark)?;
 
-        // ADR-118/119 compiler-semantics migration. Rebuild every older live
+        // ADR-118/119/120 compiler-semantics migration. Rebuild every older live
         // materialization from retained `_source` before returning an engine
         // that could serve it: semantics 0 joined positive terms across clause
-        // boundaries, while semantics 1 discarded all but one feature from a
-        // multi-token any-of member. The header stamp makes this idempotent; a
+        // boundaries, semantics 1 discarded all but one feature from a
+        // multi-token any-of member, and semantics 2 flattened quoted adjacency.
+        // The header stamp makes this idempotent; a
         // missing/inconsistent source sidecar or failed durable commit refuses
         // startup rather than retaining a silent false negative.
         engine.migrate_legacy_compiler_semantics()?;
@@ -447,18 +453,18 @@ impl Engine {
         }) || (!self.memtable.is_empty() && self.memtable.compiler_semantics_version() < current)
     }
 
-    /// Whether serving this engine requires the ADR-118/119 source-driven
+    /// Whether serving this engine requires the ADR-118/119/120 source-driven
     /// compiler migration. Every live row below the current stamp is suspect;
-    /// only recompilation from the retained DSL can recover clause and any-of
-    /// member boundaries.
+    /// only recompilation from the retained DSL can recover clause boundaries,
+    /// any-of member boundaries, and quoted adjacency.
     pub(crate) fn needs_compiler_semantics_migration(&self) -> bool {
         self.has_legacy_compiler_segments()
     }
 
-    /// Standalone upgrade path for ADR-118/119. The normalizer and dict do not
+    /// Standalone upgrade path for ADR-118/119/120. The normalizer and dict do not
     /// change, but every live source must be re-lowered so clause and any-of
-    /// member boundaries are reflected in exact predicates, signatures, and
-    /// placement.
+    /// member boundaries plus quoted adjacency are reflected in exact
+    /// predicates, signatures, and placement.
     pub(crate) fn migrate_legacy_compiler_semantics(&mut self) -> std::io::Result<()> {
         if !self.needs_compiler_semantics_migration() {
             return Ok(());
@@ -698,6 +704,10 @@ impl Engine {
             config.retain_source,
         )?);
         let next_source_generation = seed_next_source_generation(&segments, &query_store)?;
+        let live_phrase_segments = segments
+            .iter()
+            .filter(|segment| segment.has_phrase_predicates())
+            .count();
         let engine = Engine {
             config: Arc::new(config),
             norm,
@@ -709,6 +719,7 @@ impl Engine {
             tag_dict,
             segments,
             memtable: Arc::new(Segment::new()),
+            live_phrase_segments,
             rejected_parse: 0,
             rejected_class_d: 0,
             would_be_hot: 0,
