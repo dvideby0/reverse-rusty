@@ -908,9 +908,11 @@ impl MmapSegment {
                 if !self.alive_overlay[local as usize] {
                     continue;
                 }
-                collector.on_candidate(self.logical(local));
-                if collector.should_stop() {
-                    break;
+                if C::OBSERVE_CANDIDATES {
+                    collector.on_candidate(self.logical(local));
+                    if collector.should_stop() {
+                        break;
+                    }
                 }
                 // Tag filter (ADR-049) — applied post-candidate inside verify.
                 if self.verify(local, view, pred) && emission.should_emit(self.placement(local)) {

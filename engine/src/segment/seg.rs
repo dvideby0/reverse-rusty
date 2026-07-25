@@ -672,9 +672,11 @@ impl Segment {
                     if !self.alive[local as usize] {
                         return true; // tombstoned
                     }
-                    collector.on_candidate(self.exact.logical(local));
-                    if collector.should_stop() {
-                        return false;
+                    if C::OBSERVE_CANDIDATES {
+                        collector.on_candidate(self.exact.logical(local));
+                        if collector.should_stop() {
+                            return false;
+                        }
                     }
                     // Tag filter (ADR-049) — applied post-candidate inside verify.
                     if self.exact.verify(local, view, pred)
@@ -696,17 +698,19 @@ impl Segment {
                 // its canonical-body group. Observe all of those identities
                 // before shared-body verification so candidate diagnostics do
                 // not confuse an exact rejection with a retrieval miss.
-                if self.alive[local as usize] {
-                    collector.on_candidate(self.exact.logical(local));
-                    if collector.should_stop() {
-                        return false;
-                    }
-                }
-                for &member in members {
-                    if self.alive[member as usize] {
-                        collector.on_candidate(self.exact.logical(member));
+                if C::OBSERVE_CANDIDATES {
+                    if self.alive[local as usize] {
+                        collector.on_candidate(self.exact.logical(local));
                         if collector.should_stop() {
                             return false;
+                        }
+                    }
+                    for &member in members {
+                        if self.alive[member as usize] {
+                            collector.on_candidate(self.exact.logical(member));
+                            if collector.should_stop() {
+                                return false;
+                            }
                         }
                     }
                 }
