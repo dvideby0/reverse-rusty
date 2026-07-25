@@ -30,9 +30,9 @@ impl PhraseOverlap {
     ///
     /// The scan **collapses whitespace runs** so a phrase (registered single-spaced) still matches
     /// a title with repeated spaces or adjacent split punctuation (`new  york`, `new---york`) —
-    /// codex R8. This is positive-view (`P(T)`) only and only ever ADDS entities (recall-safe); the
-    /// canonical `N(T)` and the compile path keep `lc` verbatim, so persisted segments are NOT
-    /// desynced by a whitespace-cleaning change. No allocation unless a run is actually present.
+    /// codex R8. This is the flat positive-view (`P(T)`) path and only ever ADDS entities
+    /// (recall-safe); flat canonical `N(T)` remains unchanged. No allocation unless a run is
+    /// actually present.
     pub(in crate::normalize) fn collect_into(
         &self,
         lc: &str,
@@ -66,30 +66,23 @@ impl PhraseOverlap {
     pub(in crate::normalize) fn collect_positioned_into(
         &self,
         lc: &str,
+        tokens: &[(usize, usize)],
         dict: &Dict,
         out: &mut Vec<PositionArc>,
     ) {
-        if lc.as_bytes().windows(2).any(|w| w == b"  ") {
-            let mut collapsed = String::with_capacity(lc.len());
-            let mut prev_space = true;
-            for c in lc.chars() {
-                if c == ' ' {
-                    if !prev_space {
-                        collapsed.push(' ');
-                    }
-                    prev_space = true;
-                } else {
-                    collapsed.push(c);
-                    prev_space = false;
-                }
-            }
-            self.scan_positioned(&collapsed, dict, out);
-        } else {
-            self.scan_positioned(lc, dict, out);
-        }
+        // `emit_positioned` has already collapsed runs in its reusable `lc`
+        // buffer for both title graphs. Scan it directly: allocating another
+        // temporary String here would violate the match hot-path contract.
+        self.scan_positioned(lc, tokens, dict, out);
     }
 
-    fn scan_positioned(&self, text: &str, dict: &Dict, out: &mut Vec<PositionArc>) {
+    fn scan_positioned(
+        &self,
+        text: &str,
+        tokens: &[(usize, usize)],
+        dict: &Dict,
+        out: &mut Vec<PositionArc>,
+    ) {
         let bytes = text.as_bytes();
         for m in self.automaton.find_overlapping_iter(text) {
             let (s, e) = (m.start(), m.end());
@@ -98,7 +91,11 @@ impl PhraseOverlap {
             if !ok_start || !ok_end {
                 continue;
             }
-            let start = u32::try_from(text[..s].split_whitespace().count()).unwrap_or(u32::MAX);
+            let Ok(start) = tokens.binary_search_by_key(&s, |&(token_start, _)| token_start) else {
+                debug_assert!(false, "boundary-aligned phrase missing token start");
+                continue;
+            };
+            let start = u32::try_from(start).unwrap_or(u32::MAX);
             out.push(PositionArc {
                 feature: dict.get_or_synthetic(&self.entries[m.value()].0),
                 start,

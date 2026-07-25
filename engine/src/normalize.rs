@@ -264,6 +264,10 @@ pub struct NormScratch {
     /// grader than the bounded graph representation retains. Flat `P(T)` stays
     /// complete; quoted exact verification fails open for this title.
     position_graph_incomplete: bool,
+    /// Reused difference array for linear positioned-graph coverage. Entry `i`
+    /// records how many emitted arcs begin/end at token position `i`; a prefix
+    /// sum identifies analyzer holes without rescanning every arc per token.
+    position_coverage_delta: Vec<i64>,
     /// The `"term:<token>"` builder used by [`Normalizer::match_features_dual`]'s
     /// positive-view raw-token pass (the dual path's only feature-name allocation otherwise).
     name: String,

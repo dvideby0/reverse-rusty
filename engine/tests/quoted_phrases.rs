@@ -443,6 +443,7 @@ fn quoted_phrase_whitespace_is_normalized_without_aliases() {
     let queries = vec![
         (1, "\"upper deck\"".to_string()),
         (2, "\"upper  deck\"".to_string()),
+        (3, "item -\"upper deck\"".to_string()),
     ];
     let mut engine = Engine::new(builder.build().expect("normalizer"));
     engine.build_from_queries(&queries);
@@ -463,6 +464,16 @@ fn quoted_phrase_whitespace_is_normalized_without_aliases() {
             "{title:?}"
         );
     }
+    for title in ["item upper deck", "item upper  deck"] {
+        assert_eq!(matched(&engine, title), vec![1, 2]);
+        assert_eq!(
+            reference.matches(title),
+            [1, 2].into_iter().collect(),
+            "{title:?}"
+        );
+    }
+    assert_eq!(matched(&engine, "item card"), vec![3]);
+    assert_eq!(reference.matches("item card"), [3].into_iter().collect());
 }
 
 #[test]

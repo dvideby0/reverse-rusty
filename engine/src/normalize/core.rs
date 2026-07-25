@@ -201,11 +201,11 @@ impl Normalizer {
         self.clean_into(text, lc);
 
         // Phrase patterns are registered single-spaced. ADR-061 collapses query
-        // whitespace while aliases are active; ADR-120 does the same for every
-        // positioned query graph so `"upper  deck"` and `"upper deck"` compile
-        // to the same analyzed phrase. Flat, alias-free compilation retains its
-        // historical byte-identical behavior.
-        if side == Side::Query && (self.has_multiword_aliases || retain_positioned_starts) {
+        // whitespace while aliases are active; ADR-120 does the same for BOTH
+        // sides of every positioned graph so a forbidden phrase observes
+        // `"upper  deck"` exactly as it observes `"upper deck"`. Flat,
+        // alias-free analysis retains its historical byte-identical behavior.
+        if retain_positioned_starts || (side == Side::Query && self.has_multiword_aliases) {
             collapse_ws_runs_in_place(lc);
         }
 
@@ -918,7 +918,7 @@ impl Normalizer {
             });
         }
         if let Some(overlap) = &self.phrase_overlap {
-            overlap.collect_positioned_into(lc, dict, pos_arcs);
+            overlap.collect_positioned_into(lc, &sc.tokens, dict, pos_arcs);
         }
         pos_arcs.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
         pos_arcs.dedup();
@@ -984,23 +984,38 @@ impl Normalizer {
         // The semantic analyzer intentionally emits nothing for structural
         // markers and a few context words. Quoted phrases still need those
         // lexical positions to remain contiguous, so fill only graph holes with
-        // a normalized raw term edge. Do NOT restore tokens consumed by a
-        // collapse/alias edge: that would defeat ADR-061's canonical negative
-        // parse and manufacture an unconfigured alternate path.
-        for i in 0..positions {
-            let has_start = out.iter().any(|arc| arc.start == i);
-            let covered = out.iter().any(|arc| arc.start < i && arc.end > i);
-            if has_start || covered {
+        // a normalized raw term edge. Build coverage as a difference array:
+        // the old pair of `out.iter().any(...)` scans per token made ordinary
+        // one-edge-per-token titles quadratic whenever any quoted row was live.
+        // Do NOT restore tokens consumed by a collapse/alias edge: that would
+        // defeat ADR-061's canonical negative parse and manufacture an
+        // unconfigured alternate path.
+        let position_count = positions as usize;
+        sc.position_coverage_delta.clear();
+        sc.position_coverage_delta
+            .resize(position_count.saturating_add(1), 0);
+        for arc in out.iter() {
+            let start = (arc.start as usize).min(position_count);
+            let end = (arc.end as usize).min(position_count);
+            if start < end {
+                sc.position_coverage_delta[start] += 1;
+                sc.position_coverage_delta[end] -= 1;
+            }
+        }
+        let mut coverage = 0i64;
+        for i in 0..position_count {
+            coverage += sc.position_coverage_delta[i];
+            if coverage > 0 {
                 continue;
             }
-            let (start, end) = sc.tokens[i as usize];
+            let (start, end) = sc.tokens[i];
             sc.name.clear();
             sc.name.push_str("term:");
             sc.name.push_str(&lc[start..end]);
             out.push(PositionArc {
                 feature: resolve(&sc.name, FeatureKind::Generic),
-                start: i,
-                end: i + 1,
+                start: position_index(i),
+                end: position_index(i.saturating_add(1)),
             });
         }
 

@@ -14,8 +14,8 @@ use crate::features::Feature;
 use crate::phrases;
 use crate::vocab::{PhraseMode, RefVocab};
 
-/// Which side is being normalized (the query/compile side collapses whitespace runs before the
-/// phrase scan when aliases are active; the title side keeps cleaned text verbatim).
+/// Which side is being normalized (the flat query/compile side collapses whitespace runs before
+/// the phrase scan when aliases are active; positioned analysis normalizes both sides).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
     Query,
@@ -487,16 +487,11 @@ fn filled_position_arcs(
     side: Side,
     force_additive: bool,
 ) -> (u32, Vec<RefPositionArc>) {
-    // Quoted query phrases are whitespace-insensitive independently of alias
-    // activation. Keep flat `emit` unchanged; this normalization belongs only
-    // to the positioned reference path.
-    let normalized_query;
-    let analysis_text = if side == Side::Query {
-        normalized_query = phrases::collapse_ws_runs(&clean(text, &vocab.punct));
-        normalized_query.as_str()
-    } else {
-        text
-    };
+    // Quoted phrases are whitespace-insensitive on both sides independently of
+    // alias activation. Keep flat `emit` unchanged; this normalization belongs
+    // only to the positioned reference path.
+    let normalized = phrases::collapse_ws_runs(&clean(text, &vocab.punct));
+    let analysis_text = normalized.as_str();
     let (positions, mut arcs) = emit_positioned(vocab, analysis_text, side, force_additive);
     // The flat analyzer's grader window may span intervening words, but a
     // quoted graph must not let that composite edge bypass those positions.
