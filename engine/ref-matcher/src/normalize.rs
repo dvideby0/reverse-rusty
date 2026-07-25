@@ -487,7 +487,17 @@ fn filled_position_arcs(
     side: Side,
     force_additive: bool,
 ) -> (u32, Vec<RefPositionArc>) {
-    let (positions, mut arcs) = emit_positioned(vocab, text, side, force_additive);
+    // Quoted query phrases are whitespace-insensitive independently of alias
+    // activation. Keep flat `emit` unchanged; this normalization belongs only
+    // to the positioned reference path.
+    let normalized_query;
+    let analysis_text = if side == Side::Query {
+        normalized_query = phrases::collapse_ws_runs(&clean(text, &vocab.punct));
+        normalized_query.as_str()
+    } else {
+        text
+    };
+    let (positions, mut arcs) = emit_positioned(vocab, analysis_text, side, force_additive);
     // The flat analyzer's grader window may span intervening words, but a
     // quoted graph must not let that composite edge bypass those positions.
     // Preserve only fused (`psa10`) and adjacent (`psa 10`) shortcuts.
@@ -497,10 +507,7 @@ fn filled_position_arcs(
     arcs.sort();
     arcs.dedup();
 
-    let mut lc = clean(text, &vocab.punct);
-    if side == Side::Query && vocab.has_multiword_aliases() {
-        lc = phrases::collapse_ws_runs(&lc);
-    }
+    let lc = clean(analysis_text, &vocab.punct);
     let raw_tokens: Vec<&str> = lc.split_whitespace().collect();
     for i in 0..positions {
         let has_start = arcs.iter().any(|arc| arc.start == i);
@@ -565,33 +572,28 @@ pub fn match_phrase_views(
 ) {
     let (neg, pos) = match_features_dual(vocab, text);
     let (positions, neg_arcs) = filled_position_arcs(vocab, text, Side::Title, false);
-    let pos_arcs = if vocab.has_multiword_aliases() {
-        let (_, mut arcs) = filled_position_arcs(vocab, text, Side::Title, true);
-        let lc = clean(text, &vocab.punct);
-        arcs.extend(neg_arcs.iter().cloned());
-        for (i, token) in lc.split_whitespace().enumerate() {
-            if token == "#" || token == "/" {
-                continue;
-            }
-            arcs.push(RefPositionArc {
-                feature: Feature::term(token),
-                start: position_index(i),
-                end: position_index(i.saturating_add(1)),
-            });
+    let (_, mut pos_arcs) = filled_position_arcs(vocab, text, Side::Title, true);
+    let lc = clean(text, &vocab.punct);
+    pos_arcs.extend(neg_arcs.iter().cloned());
+    for (i, token) in lc.split_whitespace().enumerate() {
+        if token == "#" || token == "/" {
+            continue;
         }
-        for (start, end, idx) in phrases::scan_overlapping_spans(&lc, &vocab.phrases) {
-            arcs.push(RefPositionArc {
-                feature: Feature::raw(vocab.phrases[idx].feature.clone()),
-                start,
-                end,
-            });
-        }
-        arcs.sort_by(|a, b| (a.start, a.end, &a.feature).cmp(&(b.start, b.end, &b.feature)));
-        arcs.dedup();
-        arcs
-    } else {
-        neg_arcs.clone()
-    };
+        pos_arcs.push(RefPositionArc {
+            feature: Feature::term(token),
+            start: position_index(i),
+            end: position_index(i.saturating_add(1)),
+        });
+    }
+    for (start, end, idx) in phrases::scan_overlapping_spans(&lc, &vocab.phrases) {
+        pos_arcs.push(RefPositionArc {
+            feature: Feature::raw(vocab.phrases[idx].feature.clone()),
+            start,
+            end,
+        });
+    }
+    pos_arcs.sort_by(|a, b| (a.start, a.end, &a.feature).cmp(&(b.start, b.end, &b.feature)));
+    pos_arcs.dedup();
     (neg, pos, positions, neg_arcs, pos_arcs)
 }
 

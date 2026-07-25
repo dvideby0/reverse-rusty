@@ -55,7 +55,9 @@ language rule and is not implied by this unquoted-member contract.
 
 A quoted clause is an **analyzed, ordered, contiguous path** (ADR-120). It uses the same normalizer as
 titles and has zero slop: every analyzed edge must connect directly to the next one, although a
-configured synonym or multi-word alias may represent one alternate analyzer path.
+configured synonym or multi-word alias may represent one alternate analyzer path. Runs of
+whitespace still delimit the same token positions, so `"upper  deck"` is equivalent to
+`"upper deck"`.
 
 | Query | Title | Result |
 |---|---|---|

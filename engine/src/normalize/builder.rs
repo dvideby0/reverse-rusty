@@ -252,16 +252,20 @@ impl NormalizerBuilder {
             .build(&self.phrase_patterns)
             .map_err(|e| crate::error::NormalizerError::new(e.to_string()))?;
 
-        // ADR-061: a second, **overlapping** automaton over the alias phrases only, used on
-        // the title side to build the positive superset `P(T)` (every nested/overlapping
-        // alias entity, not just leftmost-longest). `None` when there are no alias phrases,
-        // so the default path stays single-view and byte-identical.
-        let alias_overlap = build_alias_overlap(&self.phrase_patterns, &self.phrase_entries)?;
+        let has_multiword_aliases = self
+            .phrase_entries
+            .iter()
+            .any(|entry| entry.mode == PhraseMode::Alias);
+        // The overlapping automaton covers every registered phrase. ADR-061
+        // consults it only when `has_multiword_aliases`; ADR-120 consults it for
+        // every phrase-aware title graph.
+        let phrase_overlap = build_phrase_overlap(&self.phrase_patterns, &self.phrase_entries)?;
 
         Ok(Normalizer {
             automaton,
             phrase_entries: self.phrase_entries,
-            alias_overlap,
+            phrase_overlap,
+            has_multiword_aliases,
             graders: self.graders,
             synonyms: self.synonyms,
             syn_index: self.syn_index,
@@ -275,23 +279,24 @@ impl NormalizerBuilder {
     }
 }
 
-/// Build the overlapping (`MatchKind::Standard`) automaton for the title positive view `P(T)`
-/// (ADR-061). Returns `None` unless ≥1 **alias-mode** phrase is registered (otherwise the title is
-/// single-view and byte-identical to pre-ADR-061).
+/// Build the overlapping (`MatchKind::Standard`) automaton used by the title
+/// positive views. Returns `None` only when no phrase is registered.
 ///
-/// When alias phrases ARE present, the automaton covers **every** phrase (alias AND non-alias),
-/// not just the alias subset. This is the codex-R6 fix: adding an alias to the shared
+/// The automaton covers **every** phrase (alias AND non-alias). This is the
+/// codex-R6 fix for ADR-061: adding an alias to the shared
 /// leftmost-longest automaton can *displace* an overlapping non-alias phrase from the canonical
 /// `N(T)` parse (e.g. activating `new york` makes `new york city` no longer emit a pre-existing
 /// `york city` entity), so `P(T)` must re-include **every** phrase entity present — alias and
-/// displaced non-alias alike — or a query on the displaced phrase becomes a false negative. The
-/// overlap pass only ever *adds* entities to the positive view, so this is recall-safe.
+/// displaced non-alias alike — or a query on the displaced phrase becomes a false negative.
+/// ADR-120 additionally needs the same union even with no aliases: an ordinary
+/// collapse phrase may otherwise hide a quoted component or overlapping entity.
+/// The overlap pass only ever adds entities to the applicable positive view.
 /// Patterns are deduped (a duplicate would make daachorse reject the build).
-fn build_alias_overlap(
+fn build_phrase_overlap(
     patterns: &[String],
     entries: &[PhraseEntry],
-) -> Result<Option<super::core::AliasOverlap>, crate::error::NormalizerError> {
-    if !entries.iter().any(|e| e.mode == PhraseMode::Alias) {
+) -> Result<Option<super::core::PhraseOverlap>, crate::error::NormalizerError> {
+    if patterns.is_empty() {
         return Ok(None);
     }
     let mut pats: Vec<String> = Vec::new();
@@ -310,7 +315,7 @@ fn build_alias_overlap(
         .match_kind(MatchKind::Standard)
         .build(&pats)
         .map_err(|e| crate::error::NormalizerError::new(e.to_string()))?;
-    Ok(Some(super::core::AliasOverlap {
+    Ok(Some(super::core::PhraseOverlap {
         automaton,
         entries: feats,
         entry_idx,

@@ -374,6 +374,98 @@ fn positive_phrase_graph_includes_stateful_raw_token_paths() {
 }
 
 #[test]
+fn ordinary_collapse_phrase_preserves_quoted_component_paths() {
+    let mut builder = Normalizer::builder();
+    builder.add_phrase(&["new", "york"], "term:new_york", FeatureKind::Generic);
+    let queries = vec![(1, "\"york city\"".to_string())];
+    let mut engine = Engine::new(builder.build().expect("normalizer"));
+    engine.build_from_queries(&queries);
+
+    assert_eq!(
+        matched_with_broad(&engine, "new york city", false),
+        vec![1],
+        "an ordinary collapse phrase must not erase a required component path"
+    );
+
+    let reference = RefMatcher::build(
+        &queries,
+        RefVocab::default_vocab().phrase(
+            "new york",
+            "term:new_york",
+            reverse_rusty_ref_matcher::vocab::PhraseMode::Collapse,
+        ),
+    );
+    assert_eq!(
+        reference.matches("new york city"),
+        [1].into_iter().collect()
+    );
+}
+
+#[test]
+fn ordinary_overlapping_phrase_entities_remain_quoted_paths() {
+    let mut builder = Normalizer::builder();
+    builder.add_phrase(&["new", "york"], "term:new_york", FeatureKind::Generic);
+    builder.add_phrase(&["york", "city"], "term:york_city", FeatureKind::Generic);
+    let queries = vec![(1, "\"york city\"".to_string())];
+    let mut engine = Engine::new(builder.build().expect("normalizer"));
+    engine.build_from_queries(&queries);
+
+    assert_eq!(
+        matched_with_broad(&engine, "new york city", false),
+        vec![1],
+        "the leftmost phrase must not displace an overlapping quoted entity path"
+    );
+
+    let reference = RefMatcher::build(
+        &queries,
+        RefVocab::default_vocab()
+            .phrase(
+                "new york",
+                "term:new_york",
+                reverse_rusty_ref_matcher::vocab::PhraseMode::Collapse,
+            )
+            .phrase(
+                "york city",
+                "term:york_city",
+                reverse_rusty_ref_matcher::vocab::PhraseMode::Collapse,
+            ),
+    );
+    assert_eq!(
+        reference.matches("new york city"),
+        [1].into_iter().collect()
+    );
+}
+
+#[test]
+fn quoted_phrase_whitespace_is_normalized_without_aliases() {
+    let mut builder = Normalizer::builder();
+    builder.add_phrase(&["upper", "deck"], "term:upper_deck", FeatureKind::Generic);
+    let queries = vec![
+        (1, "\"upper deck\"".to_string()),
+        (2, "\"upper  deck\"".to_string()),
+    ];
+    let mut engine = Engine::new(builder.build().expect("normalizer"));
+    engine.build_from_queries(&queries);
+    let reference = RefMatcher::build(
+        &queries,
+        RefVocab::default_vocab().phrase(
+            "upper deck",
+            "term:upper_deck",
+            reverse_rusty_ref_matcher::vocab::PhraseMode::Collapse,
+        ),
+    );
+
+    for title in ["upper deck", "upper  deck"] {
+        assert_eq!(matched_with_broad(&engine, title, false), vec![1, 2]);
+        assert_eq!(
+            reference.matches(title),
+            [1, 2].into_iter().collect(),
+            "{title:?}"
+        );
+    }
+}
+
+#[test]
 fn graph_only_probe_labels_do_not_widen_bare_term_semantics() {
     let mut builder = Normalizer::builder();
     builder.add_grade_word("gem");

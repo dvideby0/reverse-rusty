@@ -172,7 +172,8 @@ ADR-061.
 **Quoted token graphs (ADR-120).** A flat `P(T)`/`N(T)` set cannot distinguish `red shoe` from
 `red leather shoe`, so phrase-bearing snapshots also build positioned positive/canonical edge lists
 with `Normalizer::match_phrase_views`. Ordinary tokens span `i → i+1`; analyzer entities may span
-several positions, and active aliases contribute alternate positive paths. Required query-graph
+several positions, and every overlapping declared entity contributes an alternate positive path
+even when no alias is active. Required query-graph
 labels are equivalence-widened and checked against `P(T)`; forbidden labels remain canonical and are
 checked against `N(T)`. Every required graph label enters a **candidate-only** proxy family: every
 satisfying path has a labeled edge, but the proxy never enters the flat exact any-of columns and

@@ -28,6 +28,8 @@
   - configuring `-` as `Fold` makes `"red-shoe"` one `redshoe` token instead;
   - case, diacritics, synonyms, grader/number typing, phrase entities, and punctuation use the same
     normalizer on both sides;
+  - whitespace runs delimit the same positions as one space, so `"upper  deck"` and
+    `"upper deck"` have the same analyzed graph;
   - the windowed `grader_grade` composite is a phrase-graph shortcut only for fused or immediately
     adjacent forms (`psa10` / `psa 10`); longer spans retain their intervening lexical positions;
   - analyzer-silent structural/context positions receive a normalized raw-term edge only when no
@@ -45,10 +47,12 @@
 
 - **Decision — preserve the ADR-061 polarity split.** Required phrases are checked against the
   overlapping positive graph `P(T)`: query-side equivalence expansion widens edge labels, and
-  title-side aliases/entities add alternate graph paths. `P(T)` unions the canonical path,
-  force-additive analysis, positioned raw-token readings, and overlapping entity edges; retaining
-  every live grader start preserves alternate stateful paths. Forbidden phrases are checked against
-  the canonical leftmost-longest graph `N(T)` and are never equivalence-expanded. Thus
+  title-side aliases/entities add alternate graph paths. Independently of whether an alias is
+  configured, `P(T)` unions the canonical path, force-additive analysis, positioned raw-token
+  readings, and every overlapping declared entity edge; otherwise an ordinary collapse phrase
+  could erase a valid component or overlapping-entity path. Retaining every live grader start
+  preserves alternate stateful paths. Forbidden phrases are checked against the canonical
+  leftmost-longest graph `N(T)` and are never equivalence-expanded. Thus
   `"new york" knicks` can match `ny knicks`, while `foo -"new york"` retains the established
   canonical behavior on `foo new york city`.
 
@@ -135,8 +139,8 @@
 - **Proof.** Hand-authored tests pin required/forbidden order and adjacency, default split vs
   configured fold punctuation, alias compression/expansion, stateful raw-token paths, repeated
   grader starts, non-skipping grader composites, default visibility, graph-label isolation from
-  bare rows, replicated cluster
-  routing, scalar vs requested-columnar batch parity, and structured explain. PIT tests distinguish
+  bare rows, replicated cluster routing, alias-free collapse/overlap paths, whitespace-run parity,
+  scalar vs requested-columnar batch parity, and structured explain. PIT tests distinguish
   reordered positional inputs. Predicate-program units cover v2 truth and malformed graphs. `.seg`
   v10 round-trip/malformed refusal and semantics-2 source migration pin persistence. The independent
   oracle covers plain and alias-bearing quotes; the randomized single-node, cluster, durability,

@@ -130,8 +130,10 @@ Output is a `TitleFeatureSet`: a sorted, deduped `&[u32]` of feature IDs plus ty
 When a snapshot contains at least one quoted predicate, the same pass additionally materializes
 sorted canonical/positive `PositionArc` buffers in the caller's reusable match scratch. Phrase-free
 snapshots do not build them and remain on the existing flat path. The positive graph is the union of
-canonical, force-additive, positioned raw-token, and overlapping-entity paths; its labels feed a
-separate candidate-only probe buffer.
+canonical, force-additive, positioned raw-token, and overlapping-entity paths regardless of whether
+an alias is active; this prevents an ordinary collapse phrase from hiding a valid quoted path.
+Whitespace runs produce the same token positions as one space. Positive-graph labels feed a separate
+candidate-only probe buffer.
 
 **MJ disambiguation note.** Ambiguous aliases (`MJ`) only fire when corroborated (e.g. co-occurring
 `bulls`, a basketball set, or another Jordan-specific token), otherwise they are dropped. Dropping is
@@ -167,8 +169,9 @@ same way at compile time — they are, because the normalizer is shared. Determi
   the **title** side it is **additive** (entity + components) and a second, *overlapping* automaton emits
   every nested alias entity. `match_features_dual` thus yields two title views — the canonical
   leftmost-longest `N(T)` and the overlapping superset `P(T)` — consumed by the two-view verifier
-  ([`matching.md`](matching.md) §3). No active multi-word alias ⇒ the second automaton is absent and the
-  two views are identical (byte-identical to before ADR-061).
+  ([`matching.md`](matching.md) §3). No active multi-word alias ⇒ the flat path does not consult the
+  overlap automaton and the two flat views are identical (byte-identical to before ADR-061);
+  phrase-aware ADR-120 analysis still consults it for ordinary declared entities.
 
 ---
 

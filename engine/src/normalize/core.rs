@@ -16,7 +16,7 @@ use daachorse::DoubleArrayAhoCorasick;
 
 mod alias_overlap;
 mod helpers;
-pub(super) use alias_overlap::AliasOverlap;
+pub(super) use alias_overlap::PhraseOverlap;
 pub use helpers::fold_diacritic;
 use helpers::{
     age_active_graders, as_year, canon_grader, collapse_ws_runs_in_place, emit_generic,
@@ -63,10 +63,14 @@ pub struct Normalizer {
     /// into `phrase_entries`.
     pub(super) automaton: DoubleArrayAhoCorasick<usize>,
     pub(super) phrase_entries: Vec<PhraseEntry>,
-    /// ADR-061: overlapping (`MatchKind::Standard`) automaton over the alias phrases, used on
-    /// the title side to build the positive superset `P(T)`. `None` ⇒ no active multi-word
-    /// alias ⇒ the title is single-view (`P(T) == N(T)`) and byte-identical to pre-ADR-061.
-    pub(super) alias_overlap: Option<AliasOverlap>,
+    /// Overlapping (`MatchKind::Standard`) automaton over every registered phrase.
+    /// ADR-061 uses it for alias-enabled flat `P(T)`; ADR-120 also uses it for
+    /// phrase-aware `P(T)` even when no alias is registered. `None` means there
+    /// are no multi-word phrases at all.
+    pub(super) phrase_overlap: Option<PhraseOverlap>,
+    /// Kept separate from `phrase_overlap`: ordinary vocabulary phrases must
+    /// not activate ADR-061's distinct flat positive view.
+    pub(super) has_multiword_aliases: bool,
 
     pub(super) graders: Vec<String>,
     /// single-token synonyms -> (canonical feature, kind).
@@ -118,7 +122,7 @@ impl Normalizer {
     /// path while multi-word aliases are active.
     #[must_use]
     pub fn has_multiword_aliases(&self) -> bool {
-        self.alias_overlap.is_some()
+        self.has_multiword_aliases
     }
 
     /// Build the default trading-card vocabulary. Rich enough to exercise the
@@ -196,17 +200,12 @@ impl Normalizer {
         sc.position_graph_incomplete = false;
         self.clean_into(text, lc);
 
-        // ADR-061 (codex R11): on the QUERY side, when multi-word aliases are active, collapse
-        // whitespace runs before the phrase scan. Alias patterns are registered single-spaced, so
-        // a run inside a quoted phrase (`"new  york"`) or any-of member would hide the alias from
-        // the leftmost-longest automaton: the query compiles to component terms, equivalence
-        // expansion never reaches the group, and `"new  york" mets` misses a `ny mets` title — a
-        // false negative. Tokenization is whitespace-agnostic, so token features are unchanged;
-        // only phrase alignment can differ — and a title-with-runs still matches a collapsed query
-        // entity through the `P(T)` overlap scan, which collapses runs itself. The title side
-        // keeps `lc` VERBATIM (codex R8: persisted canonical normalization must not change), and
-        // the gate on `alias_overlap` keeps the no-alias configuration byte-identical.
-        if side == Side::Query && self.alias_overlap.is_some() {
+        // Phrase patterns are registered single-spaced. ADR-061 collapses query
+        // whitespace while aliases are active; ADR-120 does the same for every
+        // positioned query graph so `"upper  deck"` and `"upper deck"` compile
+        // to the same analyzed phrase. Flat, alias-free compilation retains its
+        // historical byte-identical behavior.
+        if side == Side::Query && (self.has_multiword_aliases || retain_positioned_starts) {
             collapse_ws_runs_in_place(lc);
         }
 
@@ -216,13 +215,16 @@ impl Normalizer {
         // token sequences. We need to ensure matches align on word boundaries.
         let phrase_matches = &mut sc.phrase_matches;
         phrase_matches.clear();
-        if let Some(ov) = &self.alias_overlap {
+        if let (true, Some(ov)) = (
+            self.has_multiword_aliases || retain_positioned_starts,
+            self.phrase_overlap.as_ref(),
+        ) {
             // ADR-061 (codex R12): with multi-word aliases active, boundary validity must
-            // participate in match SELECTION — see `AliasOverlap::select_phrases`. The legacy
+            // participate in match SELECTION — see `PhraseOverlap::select_phrases`. The legacy
             // pass below commits to a boundary-invalid mid-token match and lets it suppress a
-            // valid overlapping phrase (a query-side FN). Gated on `alias_overlap`, so the
-            // no-alias configuration keeps the legacy pass byte-identical (its pathological
-            // collapse-phrase cases are baked into persisted canonical features — codex R8).
+            // valid overlapping phrase (a query-side FN). Positioned analysis
+            // also uses the corrected selection independently of alias activation;
+            // flat alias-free analysis keeps the legacy byte-identical path.
             ov.select_phrases(lc, phrase_matches);
         } else {
             for m in self.automaton.leftmost_find_iter(&**lc) {
@@ -740,7 +742,7 @@ impl Normalizer {
     ///   adds to the positive view (a wider positive read is a bounded false positive, never a
     ///   negative).
     ///
-    /// With no active multi-word alias (`alias_overlap` is `None`), `P(T) == N(T)` and the two
+    /// With no active multi-word alias, `P(T) == N(T)` and the two
     /// outputs are identical — the caller then passes one slice for both views and the
     /// verifier is byte-identical to the single-view path. Both outputs are sorted + deduped.
     pub fn match_features_dual(
@@ -766,11 +768,11 @@ impl Normalizer {
         pos.dedup();
         neg.extend_from_slice(pos);
 
-        match &self.alias_overlap {
+        match (self.has_multiword_aliases, self.phrase_overlap.as_ref()) {
             // No alias phrases: positive view == negative view (single-view fast path elsewhere).
             // `pos` already holds N(T) == P(T); nothing more to add.
-            None => {}
-            Some(ov) => {
+            (false, _) => {}
+            (true, Some(ov)) => {
                 // P(T) = N(T) ∪ force-additive parse-union ∪ raw token features ∪ overlapping
                 // entities. `pos` already holds N(T); only ever ADD (never replace), so P(T) is a
                 // strict superset of every parse and activating an alias can never drop a feature.
@@ -806,6 +808,9 @@ impl Normalizer {
                 pos.sort_unstable();
                 pos.dedup();
             }
+            // Private builder state guarantees this arm is unreachable. Keep
+            // the library fail-safe if that invariant is ever broken.
+            (true, None) => debug_assert!(false, "alias phrase missing overlap automaton"),
         }
     }
 
@@ -886,45 +891,37 @@ impl Normalizer {
             |name, _kind| dict.get_or_synthetic(name),
         );
 
-        let positive_complete = if let Some(overlap) = &self.alias_overlap {
-            let (positive_positions, complete) = self.analyze_position_arcs(
-                text,
-                lc,
-                sc,
-                Side::Title,
-                true,
-                pos_arcs,
-                |name, _kind| dict.get_or_synthetic(name),
-            );
-            debug_assert_eq!(positions, positive_positions);
+        let (positive_positions, positive_complete) =
+            self.analyze_position_arcs(text, lc, sc, Side::Title, true, pos_arcs, |name, _kind| {
+                dict.get_or_synthetic(name)
+            });
+        debug_assert_eq!(positions, positive_positions);
 
-            // `P(T)` is a union, not a replacement: retain the canonical path
-            // and add the raw token alternatives that the flat ADR-061 view
-            // exposes for stateful analyzer readings.
-            pos_arcs.extend_from_slice(neg_arcs);
-            for (i, &(start, end)) in sc.tokens.iter().enumerate() {
-                let tok = &lc[start..end];
-                if tok == "#" || tok == "/" {
-                    continue;
-                }
-                sc.name.clear();
-                sc.name.push_str("term:");
-                sc.name.push_str(tok);
-                pos_arcs.push(PositionArc {
-                    feature: dict.get_or_synthetic(&sc.name),
-                    start: position_index(i),
-                    end: position_index(i.saturating_add(1)),
-                });
+        // Phrase-aware P(T) is a union independently of whether ADR-061 aliases
+        // are configured: retain the canonical path, force-additive analyzer
+        // paths, normalized raw-token alternatives, and every overlapping
+        // declared phrase entity. Gating this union on alias activation lets an
+        // ordinary collapse phrase erase a valid quoted component path.
+        pos_arcs.extend_from_slice(neg_arcs);
+        for (i, &(start, end)) in sc.tokens.iter().enumerate() {
+            let tok = &lc[start..end];
+            if tok == "#" || tok == "/" {
+                continue;
             }
+            sc.name.clear();
+            sc.name.push_str("term:");
+            sc.name.push_str(tok);
+            pos_arcs.push(PositionArc {
+                feature: dict.get_or_synthetic(&sc.name),
+                start: position_index(i),
+                end: position_index(i.saturating_add(1)),
+            });
+        }
+        if let Some(overlap) = &self.phrase_overlap {
             overlap.collect_positioned_into(lc, dict, pos_arcs);
-            pos_arcs.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
-            pos_arcs.dedup();
-            complete
-        } else {
-            pos_arcs.clear();
-            pos_arcs.extend_from_slice(neg_arcs);
-            true
-        };
+        }
+        pos_arcs.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
+        pos_arcs.dedup();
 
         // Every exact phrase path has at least one graph edge. Making all
         // positive graph labels CANDIDATE-visible therefore supplies a lossless
@@ -1056,7 +1053,7 @@ fn phrase_graph(positions: u32, mut arcs: Vec<PositionArc>) -> PhraseGraph {
 /// registration (ADR-061). **Whitespace runs are NOT collapsed** — the cleaned text is verbatim,
 /// so this is byte-identical across versions and a persisted segment's features never desync on a
 /// binary upgrade (codex R8). Matching an alias against a title with whitespace runs is instead
-/// handled, recall-safely, by the positive-view overlap scan ([`AliasOverlap::collect_into`]).
+/// handled, recall-safely, by the positive-view overlap scan ([`PhraseOverlap::collect_into`]).
 pub(super) fn clean_with(punct: &PunctTable, text: &str, out: &mut String) {
     out.clear();
     for ch in text.chars() {

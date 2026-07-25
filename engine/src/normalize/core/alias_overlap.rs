@@ -1,21 +1,17 @@
-//! The overlapping (`MatchKind::Standard`) alias automaton (ADR-061): the `P(T)` entity
-//! collection pass and the boundary-aware phase-1 phrase selection. Split out of `core.rs`
-//! to keep that file within the size budget.
+//! The overlapping (`MatchKind::Standard`) phrase automaton: ADR-061 uses it
+//! for alias-enabled flat `P(T)`, while ADR-120 uses it for phrase-aware
+//! positive graphs regardless of alias activation. Split out of `core.rs` to
+//! keep that file within the size budget.
 
 use crate::dict::{Dict, FeatureId, FeatureKind};
 use crate::normalize::PositionArc;
 use daachorse::DoubleArrayAhoCorasick;
 
-/// The overlapping (`MatchKind::Standard`) phrase automaton + its per-pattern entity features
-/// (ADR-061), used on the title side by
-/// [`Normalizer::match_features_dual`](super::Normalizer::match_features_dual) to build the
-/// positive superset `P(T)`, and — when present — for the boundary-aware phase-1 selection in
-/// [`Normalizer::emit`](super::Normalizer::emit). Built by
-/// [`NormalizerBuilder::build`](crate::normalize::NormalizerBuilder::build) only when ≥1
-/// alias-mode phrase is registered, and then over **every** phrase (alias AND non-alias), so a
-/// non-alias phrase displaced from the leftmost-longest parse by an overlapping alias is still
-/// present in `P(T)` (the codex-R6 FN fix).
-pub(in crate::normalize) struct AliasOverlap {
+/// The overlapping phrase automaton + its per-pattern entity features. Built
+/// over every registered phrase. Flat ADR-061 callers use it only while an
+/// alias is active; positioned ADR-120 callers always use it so an ordinary
+/// collapse phrase cannot erase a valid component or overlapping-entity path.
+pub(in crate::normalize) struct PhraseOverlap {
     pub(in crate::normalize) automaton: DoubleArrayAhoCorasick<usize>,
     /// pattern index -> (entity feature name, kind).
     pub(in crate::normalize) entries: Vec<(String, FeatureKind)>,
@@ -27,7 +23,7 @@ pub(in crate::normalize) struct AliasOverlap {
     pub(in crate::normalize) token_lens: Vec<u32>,
 }
 
-impl AliasOverlap {
+impl PhraseOverlap {
     /// Append the entity feature id of every word-boundary-aligned phrase occurrence in the
     /// already-cleaned text `lc` (overlapping matches included) to `out`. Unknown entities hash to
     /// a stable synthetic id (ADR-046), exactly as the leftmost-longest pass resolves.
