@@ -363,6 +363,10 @@ impl ExactStore {
     /// the matching-title bitmap into `acc`. The bitmap transpose of [`verify`],
     /// sharing [`eval_batch_slices`] with the mmap path so the two cannot drift. `pred`
     /// is the request's compiled tag filter (applied as a per-query scalar gate).
+    // The four mutable bitmap slices are independent, caller-owned reusable
+    // buffers. Keeping them explicit avoids a wrapper/indirection on this hot
+    // path and mirrors `eval_batch_slices`, which carries the same exemption.
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn eval_batch<'a>(
         &self,

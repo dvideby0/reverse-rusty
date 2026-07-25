@@ -239,16 +239,13 @@ pub(crate) fn eval_predicate_batch<'a>(
         let features = &words[at..at + feature_count];
         at += feature_count;
         for &feature in features {
-            match lookup(feature) {
-                Some(bitmap) => {
-                    for (dst, present) in member.iter_mut().zip(bitmap) {
-                        *dst &= *present;
-                    }
+            if let Some(bitmap) = lookup(feature) {
+                for (dst, present) in member.iter_mut().zip(bitmap) {
+                    *dst &= *present;
                 }
-                None => {
-                    member.fill(0);
-                    break;
-                }
+            } else {
+                member.fill(0);
+                break;
             }
         }
         let mut nonzero = 0u64;

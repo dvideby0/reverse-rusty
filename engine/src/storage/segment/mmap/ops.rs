@@ -602,6 +602,10 @@ impl MmapSegment {
     /// [`crate::exact::ExactStore::eval_batch`]; shares
     /// [`crate::exact::eval_batch_slices`] so the in-memory and mmap broad-batch
     /// paths cannot drift.
+    // The four mutable bitmap slices are independent, caller-owned reusable
+    // buffers. Keeping them explicit avoids a wrapper/indirection on this hot
+    // path and mirrors `eval_batch_slices`, which carries the same exemption.
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     pub(crate) fn eval_batch<'a>(
         &self,
