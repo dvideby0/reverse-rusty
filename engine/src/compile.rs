@@ -29,6 +29,7 @@ mod plan;
 mod tests;
 
 pub use extract::{extract, extract_readonly, is_hot, is_hot_anchor};
+pub(crate) use plan::uses_required_phrase_proxy;
 pub use plan::{anchor_plan, build_signatures, compile_one, compile_one_readonly};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

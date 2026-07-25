@@ -125,3 +125,35 @@ fn explain_hit_reports_quoted_graphs_and_adjacency_failures() {
         separated.failures
     );
 }
+
+#[test]
+fn explain_hit_matches_phrase_verifier_fail_open_guards() {
+    use reverse_rusty::dict::FeatureKind;
+
+    let mut builder = reverse_rusty::normalize::Normalizer::builder();
+    builder.add_grader("psa");
+    builder.add_phrase_alias(
+        &["unused", "alias"],
+        "term:unused_alias",
+        FeatureKind::Generic,
+    );
+    let mut engine = Engine::new(builder.build().expect("normalizer"));
+    engine.build_from_queries(&[(1u64, "\"red shoe\"".to_string())]);
+
+    let graders = std::iter::repeat_n("psa", 65).collect::<Vec<_>>().join(" ");
+    let title = format!("red {graders} boot");
+    assert_eq!(
+        match_ids(&engine, &title),
+        vec![1],
+        "the bounded positive graph deliberately fails open"
+    );
+
+    let detail = engine.explain_hit(1, &title).expect("explain detail");
+    assert!(detail.candidate);
+    assert!(
+        detail.matched,
+        "explain must apply the verifier's polarity-aware fail-open rule: {:?}",
+        detail.failures
+    );
+    assert!(detail.failures.is_empty());
+}

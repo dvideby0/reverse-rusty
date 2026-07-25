@@ -57,9 +57,10 @@
   therefore hits at least one proxy signature; exact graph intersection remains the sole phrase
   truth condition. Phrase covers use the always-visible main lane even when each individual label
   is top-64-hot—the phrase's semantic selectivity must not be confused with proxy-label cost.
-  A cluster replicates a phrase-only cover as `ReplicatedAlwaysVisible`, so graph-only labels never
-  become selective ring-placement keys that flat coordinator routing cannot see. Forbidden graph
-  labels never participate in signatures.
+  A cluster replicates any phrase-proxy cover as `ReplicatedAlwaysVisible`, including a mixed query
+  whose sole flat required term is top-64-hot and would otherwise be class C. Thus graph-only labels
+  never become selective ring-placement keys that flat coordinator routing cannot see. Forbidden
+  graph labels never participate in signatures.
 
 - **Decision — extend the narrow integer program.** ADR-119 predicate-program v1 is unchanged for
   compound any-of rows. Program v2 appends canonical required and forbidden phrase graphs:
@@ -81,13 +82,14 @@
   kernel; a columnar token-graph transpose is a performance follow-up, not a correctness shortcut.
 
 - **Decision — bounded complexity fails open.** Graph intersection admits at most 65,536 visited
-  `(query-position, title-position)` states per candidate. Positioned positive analysis retains up
-  to 64 live starts per canonical grader; exceeding that crafted-title guard marks the graph
-  incomplete rather than discarding a path silently. Missing/incomplete positioned context, scratch
-  re-entry, or state-budget exhaustion is interpreted by polarity: a required phrase does not reject
-  and a forbidden phrase does not trip. That can over-match, but can never create a false negative.
-  Persisted query graphs themselves are validated and bounded by the existing parse/compiled-column
-  limits.
+  `(query-position, title-position)` states and 65,536 charged query/title arc inspections per
+  candidate. Positioned positive analysis retains up to 64 live starts per canonical grader;
+  exceeding that crafted-title guard marks the graph incomplete rather than discarding a path
+  silently. Missing/incomplete positioned context, scratch re-entry, or either graph budget's
+  exhaustion is interpreted by polarity: a required phrase does not reject and a forbidden phrase
+  does not trip. Explain applies the same budgets and polarity rule, so it cannot contradict the
+  verifier. That can over-match, but can never create a false negative. Persisted query graphs
+  themselves are validated and bounded by the existing parse/compiled-column limits.
 
 - **Decision — persistence and compiler fence.** `.seg` v10 uses the cumulative v9 predicate columns
   and admits program v2; it is written only while a quoted predicate exists. Compiler semantics
@@ -109,8 +111,8 @@
   feature set. The proxy family therefore retrieves the query without widening flat exact
   semantics. Exact graph intersection accepts the connected path.
   Forbidden graphs are absent from retrieval and can only reject after the query is already a
-  candidate. Alias expansion only adds positive labels/paths. Phrase-only cluster placement is
-  replicated, so coordinator routing cannot miss its owner. Consequently the implementation may
+  candidate. Alias expansion only adds positive labels/paths. Every phrase-proxy cluster placement
+  is replicated, so coordinator routing cannot miss its owner. Consequently the implementation may
   retrieve or accept extra work under its explicit fail-open guard, but cannot drop a true match.
 
 - **Alternatives declined.**

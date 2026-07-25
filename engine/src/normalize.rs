@@ -72,6 +72,20 @@ pub struct PhraseGraph {
     pub arcs: Vec<PhraseArc>,
 }
 
+/// Per-predicate graph-intersection guards shared by the hot verifier and
+/// explain. Exhaustion fails open according to predicate polarity.
+pub(crate) const PHRASE_GRAPH_MAX_STATES: usize = 65_536;
+pub(crate) const PHRASE_GRAPH_MAX_WORK: usize = 65_536;
+
+#[inline]
+fn spend_phrase_graph_work(work: &mut usize) -> bool {
+    if *work >= PHRASE_GRAPH_MAX_WORK {
+        return false;
+    }
+    *work += 1;
+    true
+}
+
 /// Whether a compiled quoted graph occurs as a contiguous analyzed path in a
 /// title graph (ADR-120).
 ///
@@ -131,6 +145,81 @@ pub fn phrase_graph_matches(
         }
     }
     false
+}
+
+/// Bounded counterpart used by explain so its result cannot disagree with the
+/// hot verifier's documented complexity fail-open behavior.
+///
+/// `None` means positive title analysis was incomplete or the state/work budget
+/// was exhausted. Callers interpret that by predicate polarity: a required
+/// phrase does not reject, and a forbidden phrase does not trip.
+pub(crate) fn phrase_graph_matches_bounded(
+    query: &PhraseGraph,
+    title_positions: u32,
+    title: &[PositionArc],
+    complete: bool,
+) -> Option<bool> {
+    if !complete {
+        return None;
+    }
+    if query.positions == 0 || query.arcs.is_empty() {
+        return Some(false);
+    }
+    if title_positions as usize > PHRASE_GRAPH_MAX_STATES {
+        return None;
+    }
+
+    let mut stack = Vec::with_capacity(title_positions as usize);
+    let mut seen = std::collections::HashSet::with_capacity(title_positions as usize);
+    for title_start in 0..title_positions {
+        let state = (0, title_start);
+        stack.push(state);
+        seen.insert(state);
+    }
+
+    let mut work = 0usize;
+    while let Some((query_node, title_node)) = stack.pop() {
+        if query_node == query.positions {
+            return Some(true);
+        }
+
+        let title_start = title.partition_point(|arc| arc.start < title_node);
+        let title_end =
+            title_start + title[title_start..].partition_point(|arc| arc.start == title_node);
+        for query_arc in &query.arcs {
+            if !spend_phrase_graph_work(&mut work) {
+                return None;
+            }
+            if query_arc.start < query_node {
+                continue;
+            }
+            if query_arc.start > query_node {
+                break;
+            }
+            for title_arc in &title[title_start..title_end] {
+                if !spend_phrase_graph_work(&mut work) {
+                    return None;
+                }
+                if query_arc
+                    .alternatives
+                    .binary_search(&title_arc.feature)
+                    .is_err()
+                {
+                    continue;
+                }
+                let next = (query_arc.end, title_arc.end);
+                if seen.contains(&next) {
+                    continue;
+                }
+                if seen.len() >= PHRASE_GRAPH_MAX_STATES {
+                    return None;
+                }
+                seen.insert(next);
+                stack.push(next);
+            }
+        }
+    }
+    Some(false)
 }
 
 /// Reusable per-call working buffers for the normalizer's two-phase

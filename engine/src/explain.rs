@@ -154,7 +154,7 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
     let mut probe = Vec::new();
     let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
-    let (positions, _complete) = norm.match_phrase_views(
+    let (positions, positive_complete) = norm.match_phrase_views(
         title,
         dict,
         &mut lc,
@@ -232,12 +232,20 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
         }
     }
     for (i, phrase) in cq.extracted.required_phrases.iter().enumerate() {
-        if !crate::normalize::phrase_graph_matches(phrase, positions, &pos_arcs) {
+        if crate::normalize::phrase_graph_matches_bounded(
+            phrase,
+            positions,
+            &pos_arcs,
+            positive_complete,
+        ) == Some(false)
+        {
             fail.push(format!("required_phrase[{i}] not contiguous"));
         }
     }
     for (i, phrase) in cq.extracted.forbidden_phrases.iter().enumerate() {
-        if crate::normalize::phrase_graph_matches(phrase, positions, &neg_arcs) {
+        if crate::normalize::phrase_graph_matches_bounded(phrase, positions, &neg_arcs, true)
+            == Some(true)
+        {
             fail.push(format!("forbidden_phrase[{i}] present"));
         }
     }
@@ -267,7 +275,7 @@ pub fn explain_match_structured(
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
     let mut probe = Vec::new();
     let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
-    let (positions, _complete) = norm.match_phrase_views(
+    let (positions, positive_complete) = norm.match_phrase_views(
         title,
         dict,
         &mut lc,
@@ -336,12 +344,20 @@ pub fn explain_match_structured(
         }
     }
     for (i, phrase) in cq.extracted.required_phrases.iter().enumerate() {
-        if !crate::normalize::phrase_graph_matches(phrase, positions, &pos_arcs) {
+        if crate::normalize::phrase_graph_matches_bounded(
+            phrase,
+            positions,
+            &pos_arcs,
+            positive_complete,
+        ) == Some(false)
+        {
             failures.push(format!("required_phrase[{i}] not contiguous"));
         }
     }
     for (i, phrase) in cq.extracted.forbidden_phrases.iter().enumerate() {
-        if crate::normalize::phrase_graph_matches(phrase, positions, &neg_arcs) {
+        if crate::normalize::phrase_graph_matches_bounded(phrase, positions, &neg_arcs, true)
+            == Some(true)
+        {
             failures.push(format!("forbidden_phrase[{i}] present"));
         }
     }

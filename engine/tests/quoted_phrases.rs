@@ -197,6 +197,18 @@ fn required_phrases_remain_visible_without_the_broad_lane() {
 }
 
 #[test]
+fn mixed_hot_term_and_required_phrase_remain_visible_without_the_broad_lane() {
+    let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
+    engine.build_from_queries(&[(1, "\"red shoe\" common".to_string())]);
+
+    assert_eq!(
+        matched_with_broad(&engine, "red shoe common", false),
+        vec![1],
+        "a phrase proxy must keep a mixed query default-visible when its sole flat anchor is hot"
+    );
+}
+
+#[test]
 fn positive_phrase_graph_includes_stateful_raw_token_paths() {
     let mut builder = Normalizer::builder();
     builder.add_grader("psa");
@@ -319,4 +331,27 @@ fn cluster_replicates_graph_only_phrase_covers_for_flat_routing() {
             "graph-only cover missed through cluster routing for {title:?}"
         );
     }
+}
+
+#[test]
+fn cluster_replicates_mixed_phrase_proxy_covers_for_flat_routing() {
+    let cfg = ClusterConfig {
+        num_shards: 8,
+        include_broad: false,
+        ..ClusterConfig::default()
+    };
+    let cluster = ClusterEngine::build(
+        Normalizer::default_vocab().expect("normalizer"),
+        &cfg,
+        &[(1, "\"red shoe\" common".to_string())],
+    )
+    .expect("cluster");
+
+    assert_eq!(
+        cluster
+            .percolate("red shoe common")
+            .expect("percolate mixed phrase"),
+        vec![1],
+        "a mixed phrase proxy must be replicated rather than ring-placed by graph labels"
+    );
 }

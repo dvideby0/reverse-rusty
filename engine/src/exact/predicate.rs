@@ -29,7 +29,7 @@
 use crate::compile::Extracted;
 use crate::dict::FeatureId;
 use crate::exact::{PositionGraph, TitleView};
-use crate::normalize::PhraseGraph;
+use crate::normalize::{PhraseGraph, PHRASE_GRAPH_MAX_STATES, PHRASE_GRAPH_MAX_WORK};
 
 const FEATURE_PROGRAM_VERSION: u32 = 1;
 const PHRASE_PROGRAM_VERSION: u32 = 2;
@@ -328,15 +328,13 @@ fn graph_matches(
     title: PositionGraph<'_>,
     scratch: &mut crate::exact::PhraseMatchScratch,
 ) -> Option<bool> {
-    const MAX_STATES: usize = 65_536;
-
     if !title.complete {
         return None;
     }
     let query_positions = query[0];
     scratch.stack.clear();
     scratch.seen.clear();
-    if title.positions as usize > MAX_STATES {
+    if title.positions as usize > PHRASE_GRAPH_MAX_STATES {
         return None;
     }
     for title_start in 0..title.positions {
@@ -345,28 +343,38 @@ fn graph_matches(
         scratch.seen.insert(state);
     }
 
+    let mut work = 0usize;
     while let Some((query_node, title_node)) = scratch.stack.pop() {
         if query_node == query_positions {
             return Some(true);
         }
 
+        let title_start = title.arcs.partition_point(|arc| arc.start < title_node);
+        let title_end =
+            title_start + title.arcs[title_start..].partition_point(|arc| arc.start == title_node);
         let mut query_at = 2usize;
         let query_arc_count = query[1] as usize;
         for _ in 0..query_arc_count {
+            if work >= PHRASE_GRAPH_MAX_WORK {
+                return None;
+            }
+            work += 1;
             let start = query[query_at];
             let end = query[query_at + 1];
             let alternative_count = query[query_at + 2] as usize;
             let alternatives = &query[query_at + 3..query_at + 3 + alternative_count];
             query_at += 3 + alternative_count;
-            if start != query_node {
+            if start < query_node {
                 continue;
             }
-            for title_arc in title
-                .arcs
-                .iter()
-                .skip_while(|arc| arc.start < title_node)
-                .take_while(|arc| arc.start == title_node)
-            {
+            if start > query_node {
+                break;
+            }
+            for title_arc in &title.arcs[title_start..title_end] {
+                if work >= PHRASE_GRAPH_MAX_WORK {
+                    return None;
+                }
+                work += 1;
                 if alternatives.binary_search(&title_arc.feature).is_err() {
                     continue;
                 }
@@ -374,7 +382,7 @@ fn graph_matches(
                 if scratch.seen.contains(&next) {
                     continue;
                 }
-                if scratch.seen.len() >= MAX_STATES {
+                if scratch.seen.len() >= PHRASE_GRAPH_MAX_STATES {
                     return None;
                 }
                 scratch.seen.insert(next);
@@ -659,6 +667,54 @@ mod tests {
             validate_predicate(&[PHRASE_PROGRAM_VERSION, 0, 0, 1, 1, 1, 0, 1, 2, 9, 7, 0,])
                 .is_err(),
             "labels must be strictly canonical"
+        );
+    }
+
+    #[test]
+    fn phrase_intersection_charges_arc_scans_to_the_fail_open_budget() {
+        let positions = 300u32;
+        let query_arcs: Vec<PhraseArc> = (1..=positions)
+            .map(|end| PhraseArc {
+                start: 0,
+                end,
+                alternatives: vec![1_000 + end],
+            })
+            .collect();
+        let graph = PhraseGraph {
+            positions,
+            arcs: query_arcs,
+        };
+        let mut query = vec![graph.positions, graph.arcs.len() as u32];
+        for arc in &graph.arcs {
+            query.extend_from_slice(&[arc.start, arc.end, arc.alternatives.len() as u32]);
+            query.extend_from_slice(&arc.alternatives);
+        }
+        let title_arcs: Vec<PositionArc> = (0..positions)
+            .map(|start| PositionArc {
+                feature: 7,
+                start,
+                end: start + 1,
+            })
+            .collect();
+
+        let mut scratch = crate::exact::PhraseMatchScratch::default();
+        assert_eq!(
+            graph_matches(
+                &query,
+                PositionGraph {
+                    positions,
+                    arcs: &title_arcs,
+                    complete: true,
+                },
+                &mut scratch,
+            ),
+            None,
+            "repeated query/title arc scans must exhaust a bounded work budget"
+        );
+        assert_eq!(
+            crate::normalize::phrase_graph_matches_bounded(&graph, positions, &title_arcs, true,),
+            None,
+            "explain and the hot verifier must share the same work fail-open"
         );
     }
 }

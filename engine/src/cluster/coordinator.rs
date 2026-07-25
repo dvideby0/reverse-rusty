@@ -85,7 +85,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, RwLock};
 
-use crate::compile::{anchor_plan, CostClass, Extracted};
+use crate::compile::{anchor_plan, uses_required_phrase_proxy, CostClass, Extracted};
 use crate::config::EngineConfig;
 use crate::dict::Dict;
 use crate::error::ParseError;
@@ -521,14 +521,13 @@ fn placement_of(
     theta: u32,
 ) -> Target {
     let ap = anchor_plan(ex, dict, theta);
-    // A phrase-only positive cover can contain analyzer labels that ordinary
+    // A phrase-proxy positive cover can contain analyzer labels that ordinary
     // flat routing intentionally omits (structural/context gap labels). Keep
     // those candidate-only proxies off the ring: replicate the always-visible
     // class-B row, then whichever shard the title already probes can retrieve
-    // it from its positioned probe labels. A query with an ordinary required
-    // feature remains safely selective on that independently-necessary anchor.
-    if ex.required.is_empty()
-        && !ex.required_phrases.is_empty()
+    // it from its positioned probe labels. This includes mixed queries whose
+    // sole flat required feature is top-64-hot and would otherwise be class C.
+    if uses_required_phrase_proxy(ex, dict)
         && matches!(ap.class, CostClass::A | CostClass::B | CostClass::H)
     {
         return Target::ReplicatedAlwaysVisible;
