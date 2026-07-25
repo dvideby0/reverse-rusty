@@ -488,6 +488,12 @@ fn filled_position_arcs(
     force_additive: bool,
 ) -> (u32, Vec<RefPositionArc>) {
     let (positions, mut arcs) = emit_positioned(vocab, text, side, force_additive);
+    // The flat analyzer's grader window may span intervening words, but a
+    // quoted graph must not let that composite edge bypass those positions.
+    // Preserve only fused (`psa10`) and adjacent (`psa 10`) shortcuts.
+    arcs.retain(|arc| {
+        !arc.feature.as_str().starts_with("grader_grade:") || arc.end.saturating_sub(arc.start) <= 2
+    });
     arcs.sort();
     arcs.dedup();
 

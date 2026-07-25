@@ -62,9 +62,11 @@ when its complete graph is a connected path through the title graph; `"red shoe"
 the overlapping positive title graph `P(T)`. Forbidden phrases are not widened and use canonical
 leftmost-longest `N(T)`, preserving ADR-061's negative policy. Analyzer-silent marker/context tokens
 receive a raw normalized term edge only when no semantic edge covers that position, so quoting does
-not accidentally remove a lexical position. Graph-only labels live in a separate candidate-probe
-view and never widen the flat `P(T)` used to verify ordinary rows. The user-facing truth table is in
-[`../reference/dsl.md`](../reference/dsl.md#quoted-phrases).
+not accidentally remove a lexical position. The windowed `grader_grade` feature remains available
+to flat matching, but its quoted-graph shortcut is limited to fused or adjacent forms (`psa10` /
+`psa 10`) so it cannot jump over an explicit quoted token. Graph-only labels live in a separate
+candidate-probe view and never widen the flat `P(T)` used to verify ordinary rows. The user-facing
+truth table is in [`../reference/dsl.md`](../reference/dsl.md#quoted-phrases).
 
 Worked example (from the spec):
 

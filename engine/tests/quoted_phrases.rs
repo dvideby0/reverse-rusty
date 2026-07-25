@@ -153,6 +153,40 @@ fn fused_grader_features_are_composite_phrase_edges_not_alternatives() {
 }
 
 #[test]
+fn grader_composites_do_not_skip_quoted_interior_tokens() {
+    let mut builder = Normalizer::builder();
+    builder.add_grader("psa");
+    let queries = vec![
+        (1, "\"psa foo 10\"".to_string()),
+        (2, "\"psa gem mint 10\"".to_string()),
+        (3, "item -\"psa foo 10\"".to_string()),
+        (4, "\"psa 10\"".to_string()),
+    ];
+    let mut engine = Engine::new(builder.build().expect("normalizer"));
+    engine.build_from_queries(&queries);
+    let reference = RefMatcher::build(&queries, RefVocab::default_vocab().grader("psa"));
+
+    for (title, expected) in [
+        ("psa foo 10", vec![1]),
+        ("psa bar 10", vec![]),
+        ("psa 10", vec![4]),
+        ("psa10", vec![4]),
+        ("psa gem mint 10", vec![2]),
+        ("psa zip zap 10", vec![]),
+        ("item psa foo 10", vec![1]),
+        ("item psa bar 10", vec![3]),
+        ("item psa 10", vec![3, 4]),
+    ] {
+        assert_eq!(matched(&engine, title), expected, "engine: {title}");
+        assert_eq!(
+            reference.matches(title),
+            expected.into_iter().collect(),
+            "independent reference: {title}"
+        );
+    }
+}
+
+#[test]
 fn phrase_rows_force_batch_exactness_instead_of_entering_the_flat_kernel() {
     let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
     engine.build_from_queries(&[
@@ -329,7 +363,7 @@ fn graph_only_probe_labels_do_not_widen_bare_term_semantics() {
 }
 
 #[test]
-fn repeated_graders_preserve_every_connected_phrase_start() {
+fn repeated_graders_do_not_create_nonadjacent_phrase_shortcuts() {
     let mut builder = Normalizer::builder();
     builder.add_grader("psa");
     builder.add_phrase_alias(&["a", "x"], "term:a_x", FeatureKind::Generic);
@@ -339,7 +373,10 @@ fn repeated_graders_preserve_every_connected_phrase_start() {
     engine.build_from_queries(&queries);
     let title = "foo psa a x psa 10 bar";
 
-    assert_eq!(matched_with_broad(&engine, title, false), vec![1]);
+    assert!(
+        matched_with_broad(&engine, title, false).is_empty(),
+        "alternate analyzer paths must not let a fused quoted grade skip title positions"
+    );
 
     let reference = RefMatcher::build(
         &queries,
@@ -356,7 +393,7 @@ fn repeated_graders_preserve_every_connected_phrase_start() {
                 reverse_rusty_ref_matcher::vocab::PhraseMode::Collapse,
             ),
     );
-    assert_eq!(reference.matches(title), [1].into_iter().collect());
+    assert!(reference.matches(title).is_empty());
 }
 
 #[test]

@@ -70,7 +70,8 @@ Adjacency is over normalized positions, not raw bytes. Case/diacritic folding, n
 configured punctuation table therefore apply before the phrase check. For example, declaring `-` as
 `Fold` turns `red-shoe` into the single token `redshoe`; it no longer has the two-position path
 `red → shoe`. A declared `ny ↔ new york` alias lets `"new york" knicks` match `ny knicks` without
-allowing `new vintage york knicks`.
+allowing `new vintage york knicks`. Likewise, the grader composite lets `"psa 10"` match `psa10`,
+but `"psa foo 10"` still requires the `foo` position and does not match `psa bar 10`.
 
 There is currently no slop parameter or transposition syntax. DSL quotes are also distinct from a
 vocabulary `phrases` entry: quotes constrain a stored query to adjacency, while vocabulary phrases

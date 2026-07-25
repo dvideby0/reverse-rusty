@@ -28,6 +28,8 @@
   - configuring `-` as `Fold` makes `"red-shoe"` one `redshoe` token instead;
   - case, diacritics, synonyms, grader/number typing, phrase entities, and punctuation use the same
     normalizer on both sides;
+  - the windowed `grader_grade` composite is a phrase-graph shortcut only for fused or immediately
+    adjacent forms (`psa10` / `psa 10`); longer spans retain their intervening lexical positions;
   - analyzer-silent structural/context positions receive a normalized raw-term edge only when no
     semantic edge covers them, so quoting never erases a lexical position.
 
@@ -129,7 +131,8 @@
 
 - **Proof.** Hand-authored tests pin required/forbidden order and adjacency, default split vs
   configured fold punctuation, alias compression/expansion, stateful raw-token paths, repeated
-  grader starts, default visibility, graph-label isolation from bare rows, replicated cluster
+  grader starts, non-skipping grader composites, default visibility, graph-label isolation from
+  bare rows, replicated cluster
   routing, scalar vs requested-columnar batch parity, and structured explain. PIT tests distinguish
   reordered positional inputs. Predicate-program units cover v2 truth and malformed graphs. `.seg`
   v10 round-trip/malformed refusal and semantics-2 source migration pin persistence. The independent
