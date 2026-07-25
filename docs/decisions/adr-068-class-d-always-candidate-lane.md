@@ -108,7 +108,8 @@
   class-D query the positive semantics are vacuous — **every** title could satisfy them — so the
   lossless cover of `Q` is a signature every title generates: the universal signature. The lane is the
   contract's natural extension, not an exception to it. "Never gate on MUST_NOT" is untouched —
-  forbidden features still never reach an anchor (`anchor_plan` still reads only `required`/`anyof`),
+  forbidden features still never reach an anchor (`anchor_plan` reads only positive
+  `required`/`anyof`/`required_phrases`),
   and the always-candidate's forbidden features are checked only in exact verification, exactly like
   every other query's. False positives are bounded by the broad lane's batch evaluator (the analogue
   of OS's blind per-doc `MemoryIndex` evaluation). Default-off keeps every existing corpus, test, and

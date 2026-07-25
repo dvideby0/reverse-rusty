@@ -147,7 +147,8 @@
   every request (scalar) or per batch (columnar — the same lossless transpose as ADR-026, with
   the two-view forcing inherited from ADR-061); exact verification is byte-identical (the SoA
   entry is untouched by classification). Forbidden features still never reach an anchor
-  (`anchor_plan` reads only required/any-of — the invariant holds structurally for the new
+  (`anchor_plan` reads only required/any-of/required-phrase positives — the invariant holds
+  structurally for the new
   branch too). Default behavior is byte-identical: θ=0 reproduces the pre-ADR-105 classifier
   exactly, hot-free segments serialize byte-identically, and the empty hot index adds zero
   probes.

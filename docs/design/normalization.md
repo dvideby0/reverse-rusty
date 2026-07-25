@@ -62,7 +62,8 @@ when its complete graph is a connected path through the title graph; `"red shoe"
 the overlapping positive title graph `P(T)`. Forbidden phrases are not widened and use canonical
 leftmost-longest `N(T)`, preserving ADR-061's negative policy. Analyzer-silent marker/context tokens
 receive a raw normalized term edge only when no semantic edge covers that position, so quoting does
-not accidentally remove a lexical position. The user-facing truth table is in
+not accidentally remove a lexical position. Graph-only labels live in a separate candidate-probe
+view and never widen the flat `P(T)` used to verify ordinary rows. The user-facing truth table is in
 [`../reference/dsl.md`](../reference/dsl.md#quoted-phrases).
 
 Worked example (from the spec):
@@ -126,7 +127,9 @@ Output is a `TitleFeatureSet`: a sorted, deduped `&[u32]` of feature IDs plus ty
 (year, grader, grade, ...) packed into a fixed-size struct for slot checks. Reused across titles.
 When a snapshot contains at least one quoted predicate, the same pass additionally materializes
 sorted canonical/positive `PositionArc` buffers in the caller's reusable match scratch. Phrase-free
-snapshots do not build them and remain on the existing flat path.
+snapshots do not build them and remain on the existing flat path. The positive graph is the union of
+canonical, force-additive, positioned raw-token, and overlapping-entity paths; its labels feed a
+separate candidate-only probe buffer.
 
 **MJ disambiguation note.** Ambiguous aliases (`MJ`) only fire when corroborated (e.g. co-occurring
 `bulls`, a basketball set, or another Jordan-specific token), otherwise they are dropped. Dropping is

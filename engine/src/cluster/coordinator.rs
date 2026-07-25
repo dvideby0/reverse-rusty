@@ -494,8 +494,9 @@ fn into_shard(copies: Vec<LocalShard>) -> Result<Box<dyn Shard>, ShardError> {
 /// The placement decision for one compiled query — see the module-level table. A free
 /// fn over (`dict`, `ring`) so [`ClusterEngine::build`] can bucket the corpus before
 /// the cluster value exists, and [`ClusterEngine::placement`] can delegate. Forbidden
-/// features can't leak in: `anchor_plan` reads only `required`/`anyof`, never
-/// `forbidden` (ADR-006 holds structurally).
+/// features can't leak in: `anchor_plan` reads only positive `required` /
+/// `anyof` / `required_phrases`, never either forbidden representation
+/// (ADR-006 holds structurally).
 ///
 /// `accept_class_d` (the per-shard [`EngineConfig`](crate::config::EngineConfig) knob)
 /// gates the cluster always-candidate lane (ADR-068/080): a negation-only class-D query
@@ -520,6 +521,18 @@ fn placement_of(
     theta: u32,
 ) -> Target {
     let ap = anchor_plan(ex, dict, theta);
+    // A phrase-only positive cover can contain analyzer labels that ordinary
+    // flat routing intentionally omits (structural/context gap labels). Keep
+    // those candidate-only proxies off the ring: replicate the always-visible
+    // class-B row, then whichever shard the title already probes can retrieve
+    // it from its positioned probe labels. A query with an ordinary required
+    // feature remains safely selective on that independently-necessary anchor.
+    if ex.required.is_empty()
+        && !ex.required_phrases.is_empty()
+        && matches!(ap.class, CostClass::A | CostClass::B | CostClass::H)
+    {
+        return Target::ReplicatedAlwaysVisible;
+    }
     match ap.class {
         CostClass::D => {
             // Stored only when the lane is on AND there is something to forbid: an

@@ -318,9 +318,40 @@ impl Segment {
                 dest.dup_of.push(new_id);
                 dest.body_index.entry(body_hash).or_default().push(new_id);
 
-                // Re-derive the cover from the (unchanged) stored required/any-of features
-                // against the current dict. `anchor_plan` reads only required + any-of, so the
-                // empty `forbidden` here is irrelevant to selection.
+                // A source member carries no postings of its own — its keep-old cover
+                // (and the did-it-move comparison) is its source LEADER's key set,
+                // a valid lossless cover for the shared body. Identity for
+                // singletons. Read at most once (see `compact_from_grouped`).
+                let src_leader = src.dup_leader_of(old as u32) as usize;
+                let prev_main = std::mem::take(&mut old_main[src_leader]);
+                let prev_broad = std::mem::take(&mut old_broad[src_leader]);
+                let prev_hot = std::mem::take(&mut old_hot[src_leader]);
+
+                // Phrase proxies are candidate-only and therefore absent from
+                // the flat SoA anchoring columns. Preserve their already-proven
+                // cover through the optional re-anchoring optimization; exact
+                // predicate bytes were copied verbatim above. A later source
+                // recompile may choose a fresh phrase cover from the DSL.
+                if dest.exact.row_has_phrase_predicates(new_id) {
+                    for &key in &prev_main {
+                        dest.main.insert(key, new_id);
+                    }
+                    for &key in &prev_broad {
+                        dest.broad.insert(key, new_id);
+                    }
+                    for &key in &prev_hot {
+                        dest.hot.insert(key, new_id);
+                    }
+                    dest.class.push(old_class);
+                    dest.alive.push(true);
+                    dest.alive_counter += 1;
+                    dest.logical_index.entry(logical).or_default().push(new_id);
+                    continue;
+                }
+
+                // Re-derive this phrase-free row's cover from the (unchanged) stored
+                // required/any-of features against the current dict. The empty
+                // `forbidden` here is irrelevant to selection.
                 let (required, anyof) = dest.exact.anchoring_inputs(new_id, &mask_inverse);
                 let ex = Extracted {
                     required,
@@ -341,15 +372,6 @@ impl Segment {
                     old_class == CostClass::D || plan.class != CostClass::D,
                     "a stored non-D query must never re-anchor to class D"
                 );
-
-                // A source member carries no postings of its own — its keep-old cover
-                // (and the did-it-move comparison) is its source LEADER's key set,
-                // a valid lossless cover for the shared body. Identity for
-                // singletons. Read at most once (see `compact_from_grouped`).
-                let src_leader = src.dup_leader_of(old as u32) as usize;
-                let prev_main = std::mem::take(&mut old_main[src_leader]);
-                let prev_broad = std::mem::take(&mut old_broad[src_leader]);
-                let prev_hot = std::mem::take(&mut old_hot[src_leader]);
 
                 // CORRECTNESS GUARD — never demote an always-visible (A/B/H) query into the
                 // broad lane. The main index and the hot tier are probed on every percolate;

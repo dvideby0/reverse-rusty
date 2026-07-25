@@ -702,8 +702,9 @@ impl MmapSegment {
         emission: P,
     ) {
         let has_filter = self.filter_num_blocks > 0;
-        // Retrieval uses the positive (superset) view; verify applies both (ADR-061).
-        let feats = view.pos;
+        // Retrieval uses the candidate-only positive probe view; exact verify
+        // applies the flat semantic views plus positioned graphs.
+        let feats = view.probe;
         if collector.should_stop() {
             return;
         }

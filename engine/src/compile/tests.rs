@@ -66,15 +66,17 @@ mod golden {
         let mut scratch = crate::normalize::NormScratch::new();
         let mut neg = Vec::new();
         let mut pos = Vec::new();
+        let mut probe = Vec::new();
         let mut neg_arcs = Vec::new();
         let mut pos_arcs = Vec::new();
-        let positions = norm.match_phrase_views(
+        let (positions, _complete) = norm.match_phrase_views(
             title,
             dict,
             &mut lc,
             &mut scratch,
             &mut neg,
             &mut pos,
+            &mut probe,
             &mut neg_arcs,
             &mut pos_arcs,
         );
@@ -298,10 +300,9 @@ mod golden {
 
     #[test]
     fn forbidden_never_appears_in_anchors() {
-        // Signatures/anchors are built ONLY from required + any-of, never from forbidden
-        // (the lossless-cover invariant; ADR-006). anchor_plan reads only
-        // ex.required/ex.anyof, so this holds by construction — assert it at the data
-        // level as a regression guard against a future refactor.
+        // Signatures/anchors are built ONLY from positive requirements, never from forbidden
+        // features or graphs (the lossless-cover invariant; ADR-006). Assert it at the data level
+        // as a regression guard against a future refactor.
         let n = spec_vocab();
         let mut dict = Dict::new();
         let mut lc = String::new();

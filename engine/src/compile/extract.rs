@@ -16,7 +16,7 @@ use crate::dict::{Dict, FeatureId};
 use crate::dsl::{Ast, Atom};
 use crate::normalize::Normalizer;
 
-fn phrase_proxy(graph: &crate::normalize::PhraseGraph) -> Vec<FeatureId> {
+pub(super) fn phrase_proxy(graph: &crate::normalize::PhraseGraph) -> Vec<FeatureId> {
     let mut proxy: Vec<FeatureId> = graph
         .arcs
         .iter()
@@ -119,9 +119,7 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
             }
             (Atom::Phrase(w), false) => {
                 let phrase = norm.compile_phrase(w, dict, lc);
-                let proxy = phrase_proxy(&phrase);
-                if !proxy.is_empty() {
-                    anyof.push(proxy);
+                if !phrase.arcs.is_empty() {
                     required_phrases.push(phrase);
                 }
             }
@@ -214,6 +212,11 @@ pub fn extract(ast: &Ast, norm: &Normalizer, dict: &mut Dict, lc: &mut String) -
             dict.bump_freq(f);
         }
     }
+    for phrase in &required_phrases {
+        for f in phrase_proxy(phrase) {
+            dict.bump_freq(f);
+        }
+    }
 
     let mut out = Extracted {
         required,
@@ -262,9 +265,7 @@ pub fn extract_readonly(ast: &Ast, norm: &Normalizer, dict: &Dict, lc: &mut Stri
             }
             (Atom::Phrase(w), false) => {
                 let phrase = norm.compile_phrase_readonly(w, dict, lc);
-                let proxy = phrase_proxy(&phrase);
-                if !proxy.is_empty() {
-                    anyof.push(proxy);
+                if !phrase.arcs.is_empty() {
                     required_phrases.push(phrase);
                 }
             }

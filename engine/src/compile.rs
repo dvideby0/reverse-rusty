@@ -486,8 +486,9 @@ pub struct SigPlan {
 /// Exists so the cluster coordinator can place a query by its *anchor feature
 /// identity* (not just the opaque hash) while reusing the optimizer's per-class
 /// selection verbatim — see [`crate::cluster`]. The forbidden-feature invariant
-/// holds for free: like `build_signatures`, this only ever reads
-/// `ex.required` / `ex.anyof`, never `ex.forbidden`.
+/// holds for free: like `build_signatures`, this only ever reads positive
+/// requirements (`ex.required` / `ex.anyof` / `ex.required_phrases`), never
+/// `ex.forbidden` or `ex.forbidden_phrases`.
 #[derive(Clone, Debug)]
 pub struct AnchorPlan {
     /// Each group = one main-index signature's features (arity 1, or 2 for the

@@ -171,6 +171,10 @@ pub struct NormScratch {
     /// Positive-view (`P(T)`, ADR-061 `force_additive`) active graders. Empty on the
     /// query/compile and single-view title paths (no allocation churn there).
     active_graders: Vec<(String, u8, u32)>,
+    /// A positioned positive analysis had more live starts for one canonical
+    /// grader than the bounded graph representation retains. Flat `P(T)` stays
+    /// complete; quoted exact verification fails open for this title.
+    position_graph_incomplete: bool,
     /// The `"term:<token>"` builder used by [`Normalizer::match_features_dual`]'s
     /// positive-view raw-token pass (the dual path's only feature-name allocation otherwise).
     name: String,

@@ -39,20 +39,28 @@ pub use store::ExactStore;
 
 /// The two title feature views threaded through exact verification (ADR-061).
 ///
-/// - **Positive** (`pos_mask` / `pos`) is the overlapping superset `P(T)` — used for the
-///   required-mask gate, the required tail, and any-of groups. Built from all overlapping
-///   alias entities so a `new york` query finds a `new york city` title.
+/// - **Probe** (`probe`) is the candidate-only positive label union. It normally aliases
+///   `pos`; a phrase-bearing view additionally carries graph-only proxy labels.
+/// - **Positive** (`pos_mask` / `pos`) is the overlapping flat superset `P(T)` — used for
+///   the required-mask gate, the required tail, and any-of groups. Built from all overlapping
+///   alias entities so a `new york` query finds a `new york city` title. Graph-only labels
+///   never enter it.
 /// - **Negative** (`neg_mask` / `neg`) is the canonical leftmost-longest `N(T) ⊆ P(T)` — used
 ///   **only** for the forbidden-mask gate and the forbidden tail, so a MUST_NOT clause stays
 ///   recall-correct (`foo -"new york"` still matches `foo new york city`).
 ///
-/// With no active multi-word alias the two views are the same slice ([`TitleView::single`]) and
-/// the verifier is byte-for-byte the pre-ADR-061 single-view path. `Copy` (two masks + two fat
-/// pointers); the per-query SoA columns stay raw args in [`verify_slices`] per the hot-path note.
+/// With no active multi-word alias the two semantic views are the same slice
+/// ([`TitleView::single`]) and the verifier is byte-for-byte the pre-ADR-061
+/// single-view path. The per-query SoA columns stay raw args in [`verify_slices`]
+/// per the hot-path note.
 #[derive(Clone, Copy)]
 pub struct PositionGraph<'a> {
     pub positions: u32,
     pub arcs: &'a [PositionArc],
+    /// False means title analysis hit a bounded state guard. Graph predicates
+    /// fail open in that case: required phrases do not reject and forbidden
+    /// phrases do not trip.
+    pub complete: bool,
 }
 
 /// Reusable graph-intersection work buffers for quoted exact predicates.
@@ -77,6 +85,10 @@ impl PhraseMatchScratch {
 
 #[derive(Clone, Copy)]
 pub struct TitleView<'a> {
+    /// Candidate-only positive labels. Usually identical to `pos`; a
+    /// phrase-bearing view additionally contains graph-only retrieval labels.
+    /// Exact semantic checks never read this slice.
+    pub probe: &'a [FeatureId],
     pub pos_mask: u64,
     pub pos: &'a [FeatureId],
     pub neg_mask: u64,
@@ -93,6 +105,7 @@ impl<'a> TitleView<'a> {
     #[must_use]
     pub fn single(mask: u64, feats: &'a [FeatureId]) -> Self {
         Self {
+            probe: feats,
             pos_mask: mask,
             pos: feats,
             neg_mask: mask,
@@ -108,6 +121,7 @@ impl<'a> TitleView<'a> {
     #[must_use]
     pub fn dual(pos_mask: u64, pos: &'a [FeatureId], neg_mask: u64, neg: &'a [FeatureId]) -> Self {
         Self {
+            probe: pos,
             pos_mask,
             pos,
             neg_mask,
@@ -124,10 +138,12 @@ impl<'a> TitleView<'a> {
     #[inline]
     #[must_use]
     pub fn dual_positioned(
+        probe: &'a [FeatureId],
         pos_mask: u64,
         pos: &'a [FeatureId],
         pos_positions: u32,
         pos_arcs: &'a [PositionArc],
+        pos_complete: bool,
         neg_mask: u64,
         neg: &'a [FeatureId],
         neg_positions: u32,
@@ -135,6 +151,7 @@ impl<'a> TitleView<'a> {
         scratch: &'a std::cell::RefCell<PhraseMatchScratch>,
     ) -> Self {
         Self {
+            probe,
             pos_mask,
             pos,
             neg_mask,
@@ -142,10 +159,12 @@ impl<'a> TitleView<'a> {
             pos_graph: Some(PositionGraph {
                 positions: pos_positions,
                 arcs: pos_arcs,
+                complete: pos_complete,
             }),
             neg_graph: Some(PositionGraph {
                 positions: neg_positions,
                 arcs: neg_arcs,
+                complete: true,
             }),
             phrase_scratch: Some(scratch),
         }

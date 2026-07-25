@@ -163,7 +163,7 @@ fn tombstone_originals(eng: &mut Engine, build_batch: &[(u64, String)], updated:
         if let Ok(ast) = reverse_rusty::dsl::parse(text) {
             let ex = extract(&ast, &norm, &mut dict, &mut lc);
             // mirror class-D rejection (these are NOT assigned a local id)
-            if ex.required.is_empty() && ex.anyof.is_empty() {
+            if ex.required.is_empty() && ex.anyof.is_empty() && ex.required_phrases.is_empty() {
                 continue;
             }
             if updated.contains(logical) {

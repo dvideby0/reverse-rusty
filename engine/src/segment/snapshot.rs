@@ -25,6 +25,7 @@ impl MatchScratch {
             lc: String::with_capacity(256),
             feats: Vec::with_capacity(64),
             feats_pos: Vec::with_capacity(64),
+            probe_feats: Vec::with_capacity(64),
             phrase_arcs: Vec::with_capacity(64),
             phrase_arcs_pos: Vec::with_capacity(64),
             phrase_match: std::cell::RefCell::new(crate::exact::PhraseMatchScratch::with_capacity(
@@ -87,6 +88,14 @@ pub(in crate::segment) struct MatchView<'a> {
 /// Exhaustive-only logical-id dedup (ADR-114). It reuses the snapshot's reverse
 /// indexes to select the deterministic first physical copy that matches this
 /// already-normalized title, avoiding a result-sized `HashSet`.
+struct PositionedTitle {
+    positions: u32,
+    pos_graph_complete: bool,
+    neg_arcs: Vec<crate::normalize::PositionArc>,
+    pos_arcs: Vec<crate::normalize::PositionArc>,
+    phrase_match: std::cell::RefCell<crate::exact::PhraseMatchScratch>,
+}
+
 struct ExhaustiveDeduper<'a, P> {
     snapshot: &'a EngineSnapshot,
     pred: &'a TagPredicate,
@@ -94,14 +103,11 @@ struct ExhaustiveDeduper<'a, P> {
     emission: P,
     neg: Vec<crate::dict::FeatureId>,
     pos: Vec<crate::dict::FeatureId>,
+    probe: Vec<crate::dict::FeatureId>,
     neg_mask: u64,
     pos_mask: u64,
     dual: bool,
-    positioned: bool,
-    positions: u32,
-    neg_arcs: Vec<crate::normalize::PositionArc>,
-    pos_arcs: Vec<crate::normalize::PositionArc>,
-    phrase_match: std::cell::RefCell<crate::exact::PhraseMatchScratch>,
+    positioned: Option<PositionedTitle>,
 }
 
 impl<'a, P: crate::ownership::EmissionPolicy> ExhaustiveDeduper<'a, P> {
@@ -116,25 +122,36 @@ impl<'a, P: crate::ownership::EmissionPolicy> ExhaustiveDeduper<'a, P> {
         let mut norm = crate::normalize::NormScratch::new();
         let mut neg = Vec::new();
         let mut pos = Vec::new();
+        let mut probe = Vec::new();
         let mut neg_arcs = Vec::new();
         let mut pos_arcs = Vec::new();
-        let positioned = snapshot.memtable.has_phrase_predicates()
+        let has_positioned = snapshot.memtable.has_phrase_predicates()
             || snapshot
                 .segments
                 .iter()
                 .any(|segment| segment.has_phrase_predicates());
-        let dual = snapshot.norm.has_multiword_aliases() || positioned;
-        let positions = if positioned {
-            snapshot.norm.match_phrase_views(
+        let dual = snapshot.norm.has_multiword_aliases() || has_positioned;
+        let positioned = if has_positioned {
+            let (positions, pos_graph_complete) = snapshot.norm.match_phrase_views(
                 title,
                 &snapshot.dict,
                 &mut lc,
                 &mut norm,
                 &mut neg,
                 &mut pos,
+                &mut probe,
                 &mut neg_arcs,
                 &mut pos_arcs,
-            )
+            );
+            Some(PositionedTitle {
+                positions,
+                pos_graph_complete,
+                neg_arcs,
+                pos_arcs,
+                phrase_match: std::cell::RefCell::new(
+                    crate::exact::PhraseMatchScratch::with_capacity(64),
+                ),
+            })
         } else if dual {
             snapshot.norm.match_features_dual(
                 title,
@@ -144,12 +161,12 @@ impl<'a, P: crate::ownership::EmissionPolicy> ExhaustiveDeduper<'a, P> {
                 &mut neg,
                 &mut pos,
             );
-            0
+            None
         } else {
             snapshot
                 .norm
                 .match_features(title, &snapshot.dict, &mut lc, &mut norm, &mut neg);
-            0
+            None
         };
         let neg_mask = title_mask(&snapshot.dict, &neg);
         let pos_mask = if dual {
@@ -164,31 +181,28 @@ impl<'a, P: crate::ownership::EmissionPolicy> ExhaustiveDeduper<'a, P> {
             emission,
             neg,
             pos,
+            probe,
             neg_mask,
             pos_mask,
             dual,
             positioned,
-            positions,
-            neg_arcs,
-            pos_arcs,
-            phrase_match: std::cell::RefCell::new(crate::exact::PhraseMatchScratch::with_capacity(
-                64,
-            )),
         }
     }
 
     fn view(&self) -> crate::exact::TitleView<'_> {
-        if self.positioned {
+        if let Some(positioned) = &self.positioned {
             crate::exact::TitleView::dual_positioned(
+                &self.probe,
                 self.pos_mask,
                 &self.pos,
-                self.positions,
-                &self.pos_arcs,
+                positioned.positions,
+                &positioned.pos_arcs,
+                positioned.pos_graph_complete,
                 self.neg_mask,
                 &self.neg,
-                self.positions,
-                &self.neg_arcs,
-                &self.phrase_match,
+                positioned.positions,
+                &positioned.neg_arcs,
+                &positioned.phrase_match,
             )
         } else if self.dual {
             crate::exact::TitleView::dual(self.pos_mask, &self.pos, self.neg_mask, &self.neg)
@@ -384,20 +398,30 @@ impl MatchView<'_> {
         // can iterate them while mutating `s.seen` (no aliasing, no allocation).
         let positioned = self.has_phrase_predicates();
         let dual = self.norm.has_multiword_aliases() || positioned;
-        let (feats, feats_pos, phrase_arcs, phrase_arcs_pos, phrase_positions);
+        let (
+            feats,
+            feats_pos,
+            probe_feats,
+            phrase_arcs,
+            phrase_arcs_pos,
+            phrase_positions,
+            pos_graph_complete,
+        );
         if positioned {
-            phrase_positions = self.norm.match_phrase_views(
+            (phrase_positions, pos_graph_complete) = self.norm.match_phrase_views(
                 title,
                 self.dict,
                 &mut s.lc,
                 &mut s.norm,
                 &mut s.feats,
                 &mut s.feats_pos,
+                &mut s.probe_feats,
                 &mut s.phrase_arcs,
                 &mut s.phrase_arcs_pos,
             );
             feats = std::mem::take(&mut s.feats);
             feats_pos = std::mem::take(&mut s.feats_pos);
+            probe_feats = std::mem::take(&mut s.probe_feats);
             phrase_arcs = std::mem::take(&mut s.phrase_arcs);
             phrase_arcs_pos = std::mem::take(&mut s.phrase_arcs_pos);
         } else if dual {
@@ -411,27 +435,33 @@ impl MatchView<'_> {
             );
             feats = std::mem::take(&mut s.feats);
             feats_pos = std::mem::take(&mut s.feats_pos);
+            probe_feats = Vec::new();
             phrase_arcs = Vec::new();
             phrase_arcs_pos = Vec::new();
             phrase_positions = 0;
+            pos_graph_complete = true;
         } else {
             self.norm
                 .match_features(title, self.dict, &mut s.lc, &mut s.norm, &mut s.feats);
             feats = std::mem::take(&mut s.feats);
             feats_pos = Vec::new();
+            probe_feats = Vec::new();
             phrase_arcs = Vec::new();
             phrase_arcs_pos = Vec::new();
             phrase_positions = 0;
+            pos_graph_complete = true;
         }
 
         // 2) title common-mask word(s) + the verifier view.
         let neg_mask = self.title_mask(&feats);
         let view = if positioned {
             crate::exact::TitleView::dual_positioned(
+                &probe_feats,
                 self.title_mask(&feats_pos),
                 &feats_pos,
                 phrase_positions,
                 &phrase_arcs_pos,
+                pos_graph_complete,
                 neg_mask,
                 &feats,
                 phrase_positions,
@@ -505,6 +535,7 @@ impl MatchView<'_> {
             s.feats_pos = feats_pos;
         }
         if positioned {
+            s.probe_feats = probe_feats;
             s.phrase_arcs = phrase_arcs;
             s.phrase_arcs_pos = phrase_arcs_pos;
         }

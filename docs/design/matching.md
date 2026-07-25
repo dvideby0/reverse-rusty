@@ -171,10 +171,13 @@ ADR-061.
 with `Normalizer::match_phrase_views`. Ordinary tokens span `i → i+1`; analyzer entities may span
 several positions, and active aliases contribute alternate positive paths. Required query-graph
 labels are equivalence-widened and checked against `P(T)`; forbidden labels remain canonical and are
-checked against `N(T)`. The phrase's ordinary any-of group is a lossless retrieval proxy only: every
-satisfying path has a labeled edge, but exact connected-path intersection decides truth. Graph work
-is capped at 65,536 visited position pairs. Exhaustion fails open by polarity (required does not
-reject; forbidden does not trip), so the safety valve can add an over-match but never a false
+checked against `N(T)`. Every required graph label enters a **candidate-only** proxy family: every
+satisfying path has a labeled edge, but the proxy never enters the flat exact any-of columns and
+exact connected-path intersection decides truth. Phrase covers stay on the default-visible main
+lane; phrase-only cluster covers are replicated rather than selectively placed by graph-only
+labels. Graph work is capped at 65,536 visited position pairs, and positioned analysis bounds
+same-grader starts. Exhaustion or an incomplete bounded graph fails open by polarity (required does
+not reject; forbidden does not trip), so the safety valve can add an over-match but never a false
 negative.
 
 ---

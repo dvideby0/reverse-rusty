@@ -43,17 +43,23 @@
 
 - **Decision — preserve the ADR-061 polarity split.** Required phrases are checked against the
   overlapping positive graph `P(T)`: query-side equivalence expansion widens edge labels, and
-  title-side aliases/entities add alternate graph paths. Forbidden phrases are checked against the
-  canonical leftmost-longest graph `N(T)` and are never equivalence-expanded. Thus
+  title-side aliases/entities add alternate graph paths. `P(T)` unions the canonical path,
+  force-additive analysis, positioned raw-token readings, and overlapping entity edges; retaining
+  every live grader start preserves alternate stateful paths. Forbidden phrases are checked against
+  the canonical leftmost-longest graph `N(T)` and are never equivalence-expanded. Thus
   `"new york" knicks` can match `ny knicks`, while `foo -"new york"` retains the established
   canonical behavior on `foo new york city`.
 
-- **Decision — lossless retrieval proxy plus exact graph.** Every label on a required phrase graph
-  enters one ordinary any-of proxy group. A title satisfying the phrase traverses at least one
-  labeled edge and therefore hits at least one proxy signature. The proxy is only a necessary
-  candidate condition; the graph remains the exact truth condition. Forbidden graph labels never
-  participate in signatures. This preserves the lossless-cover contract while allowing extra
-  candidates.
+- **Decision — candidate-only, default-visible retrieval proxy.** Every label on a required phrase
+  graph enters one candidate-only proxy family. It is deliberately absent from the flat exact
+  any-of columns: otherwise enabling one unrelated quoted row could make a graph-hole label satisfy
+  an ordinary bare-term query. A title satisfying the phrase traverses at least one labeled edge and
+  therefore hits at least one proxy signature; exact graph intersection remains the sole phrase
+  truth condition. Phrase covers use the always-visible main lane even when each individual label
+  is top-64-hot—the phrase's semantic selectivity must not be confused with proxy-label cost.
+  A cluster replicates a phrase-only cover as `ReplicatedAlwaysVisible`, so graph-only labels never
+  become selective ring-placement keys that flat coordinator routing cannot see. Forbidden graph
+  labels never participate in signatures.
 
 - **Decision — extend the narrow integer program.** ADR-119 predicate-program v1 is unchanged for
   compound any-of rows. Program v2 appends canonical required and forbidden phrase graphs:
@@ -75,7 +81,9 @@
   kernel; a columnar token-graph transpose is a performance follow-up, not a correctness shortcut.
 
 - **Decision — bounded complexity fails open.** Graph intersection admits at most 65,536 visited
-  `(query-position, title-position)` states per candidate. Missing positioned context, scratch
+  `(query-position, title-position)` states per candidate. Positioned positive analysis retains up
+  to 64 live starts per canonical grader; exceeding that crafted-title guard marks the graph
+  incomplete rather than discarding a path silently. Missing/incomplete positioned context, scratch
   re-entry, or state-budget exhaustion is interpreted by polarity: a required phrase does not reject
   and a forbidden phrase does not trip. That can over-match, but can never create a false negative.
   Persisted query graphs themselves are validated and bounded by the existing parse/compiled-column
@@ -96,11 +104,13 @@
   implements positioned analysis and graph intersection.
 
 - **Correctness argument.** Let a title satisfy required phrase graph `Q`. Its matching title path
-  contains at least one edge label from `Q`; that label is in the positive proxy group, and
-  `match_phrase_views` adds every positive graph label to the probe-visible feature set. The proxy
-  family therefore retrieves the query. Exact graph intersection accepts the connected path.
+  contains at least one edge label from `Q`; that label is in the candidate-only positive proxy
+  family, and `match_phrase_views` adds every positive graph label to the separate probe-visible
+  feature set. The proxy family therefore retrieves the query without widening flat exact
+  semantics. Exact graph intersection accepts the connected path.
   Forbidden graphs are absent from retrieval and can only reject after the query is already a
-  candidate. Alias expansion only adds positive labels/paths. Consequently the implementation may
+  candidate. Alias expansion only adds positive labels/paths. Phrase-only cluster placement is
+  replicated, so coordinator routing cannot miss its owner. Consequently the implementation may
   retrieve or accept extra work under its explicit fail-open guard, but cannot drop a true match.
 
 - **Alternatives declined.**
@@ -113,9 +123,10 @@
   - Treat aliases as unordered alternatives: restores the original conjunction bug around the alias.
 
 - **Proof.** Hand-authored tests pin required/forbidden order and adjacency, default split vs
-  configured fold punctuation, alias compression/expansion, canonical forbidden aliases, scalar vs
-  requested-columnar batch parity, and structured explain. Predicate-program units cover v2 truth
-  and malformed graphs. `.seg` v10 round-trip/malformed refusal and semantics-2 source migration pin
-  persistence. The independent oracle covers plain and alias-bearing quotes; the randomized
-  single-node, cluster, durability, stress, coverage-gap, and gRPC harnesses all evaluate the
-  positioned semantic predicate.
+  configured fold punctuation, alias compression/expansion, stateful raw-token paths, repeated
+  grader starts, default visibility, graph-label isolation from bare rows, replicated cluster
+  routing, scalar vs requested-columnar batch parity, and structured explain. PIT tests distinguish
+  reordered positional inputs. Predicate-program units cover v2 truth and malformed graphs. `.seg`
+  v10 round-trip/malformed refusal and semantics-2 source migration pin persistence. The independent
+  oracle covers plain and alias-bearing quotes; the randomized single-node, cluster, durability,
+  stress, coverage-gap, and gRPC harnesses all evaluate the positioned semantic predicate.

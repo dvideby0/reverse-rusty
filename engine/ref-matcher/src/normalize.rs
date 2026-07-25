@@ -310,13 +310,10 @@ pub fn emit_positioned(
                 );
             }
             if force_additive {
-                // Positive view: keep this grader active, refreshing the age of a same-name entry.
-                if let Some(entry) = active_graders.iter_mut().find(|(gg, _, _)| *gg == gcanon) {
-                    entry.1 = 0;
-                    entry.2 = position_index(i);
-                } else {
-                    active_graders.push((gcanon, 0, position_index(i)));
-                }
+                // Positioned parse-union: retain every live same-name start.
+                // An overlapping phrase may consume a later grader while an
+                // earlier occurrence remains connected to the grade edge.
+                active_graders.push((gcanon, 0, position_index(i)));
             } else if fused {
                 pending_grader = None;
             } else {
@@ -560,11 +557,22 @@ pub fn match_phrase_views(
     Vec<RefPositionArc>,
     Vec<RefPositionArc>,
 ) {
-    let (neg, mut pos) = match_features_dual(vocab, text);
+    let (neg, pos) = match_features_dual(vocab, text);
     let (positions, neg_arcs) = filled_position_arcs(vocab, text, Side::Title, false);
     let pos_arcs = if vocab.has_multiword_aliases() {
         let (_, mut arcs) = filled_position_arcs(vocab, text, Side::Title, true);
         let lc = clean(text, &vocab.punct);
+        arcs.extend(neg_arcs.iter().cloned());
+        for (i, token) in lc.split_whitespace().enumerate() {
+            if token == "#" || token == "/" {
+                continue;
+            }
+            arcs.push(RefPositionArc {
+                feature: Feature::term(token),
+                start: position_index(i),
+                end: position_index(i.saturating_add(1)),
+            });
+        }
         for (start, end, idx) in phrases::scan_overlapping_spans(&lc, &vocab.phrases) {
             arcs.push(RefPositionArc {
                 feature: Feature::raw(vocab.phrases[idx].feature.clone()),
@@ -578,9 +586,6 @@ pub fn match_phrase_views(
     } else {
         neg_arcs.clone()
     };
-    pos.extend(pos_arcs.iter().map(|arc| arc.feature.clone()));
-    pos.sort();
-    pos.dedup();
     (neg, pos, positions, neg_arcs, pos_arcs)
 }
 
@@ -633,9 +638,10 @@ pub fn match_features(vocab: &RefVocab, text: &str) -> Vec<Feature> {
     v
 }
 
-/// The two title views (ADR-061): `neg` = canonical `N(T)` (forbidden checks), `pos` = the maximal
-/// positive superset `P(T) ⊇ N(T)` (retrieval + required + any-of). With no active multi-word
-/// alias the two are identical. Translation of `core.rs::match_features_dual`.
+/// The two semantic title views (ADR-061): `neg` = canonical `N(T)` (forbidden checks), `pos` =
+/// the maximal flat positive superset `P(T) ⊇ N(T)` (flat retrieval + required + any-of).
+/// Phrase-aware callers build their candidate-only graph-label probe separately. With no active
+/// multi-word alias the two are identical. Translation of `core.rs::match_features_dual`.
 #[must_use]
 pub fn match_features_dual(vocab: &RefVocab, text: &str) -> (Vec<Feature>, Vec<Feature>) {
     let mut neg = emit(vocab, text, Side::Title, false);

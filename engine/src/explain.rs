@@ -148,18 +148,20 @@ pub fn explain_compiled(cq: &CompiledQuery, dict: &Dict) -> String {
 pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &Dict) -> String {
     let mut lc = String::new();
     let mut sc = crate::normalize::NormScratch::new();
-    // Two title views (ADR-061): `pos` (overlapping superset `P(T)`) drives retrieval + required +
-    // any-of; `neg` (canonical `N(T)`) drives forbidden — matching the real verifier so explain
-    // can't disagree with the matcher under an active multi-word alias. No alias ⇒ pos == neg.
+    // ADR-061 semantic views plus ADR-120's candidate-only probe: `pos` (overlapping flat
+    // `P(T)`) drives required + any-of, `neg` (canonical `N(T)`) drives forbidden, and `probe`
+    // drives retrieval. No alias or positioned labels ⇒ all applicable views coincide.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    let mut probe = Vec::new();
     let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
-    let positions = norm.match_phrase_views(
+    let (positions, _complete) = norm.match_phrase_views(
         title,
         dict,
         &mut lc,
         &mut sc,
         &mut neg,
         &mut pos,
+        &mut probe,
         &mut neg_arcs,
         &mut pos_arcs,
     );
@@ -170,12 +172,12 @@ pub fn explain_match(cq: &CompiledQuery, title: &str, norm: &Normalizer, dict: &
 
     // would any signature retrieve this query? (retrieval is from the positive superset)
     let mut title_sigs = std::collections::HashSet::new();
-    for &f in &pos {
+    for &f in &probe {
         title_sigs.insert(sig_key(&[f]));
     }
-    for &h in &pos {
+    for &h in &probe {
         if is_hot(dict, h) {
-            for &o in &pos {
+            for &o in &probe {
                 if o != h {
                     let (a, b) = if h < o { (h, o) } else { (o, h) };
                     title_sigs.insert(sig_key(&[a, b]));
@@ -260,17 +262,19 @@ pub fn explain_match_structured(
 ) -> ExplainDetail {
     let mut lc = String::new();
     let mut sc = crate::normalize::NormScratch::new();
-    // Two title views (ADR-061), matching the verifier: positive superset `pos` for retrieval +
-    // required + any-of, canonical `neg` for forbidden. No active multi-word alias ⇒ pos == neg.
+    // ADR-061 semantic views plus ADR-120's candidate-only retrieval probe, matching the verifier.
+    // `pos` drives required + any-of, `neg` drives forbidden, and `probe` drives signatures.
     let (mut neg, mut pos) = (Vec::new(), Vec::new());
+    let mut probe = Vec::new();
     let (mut neg_arcs, mut pos_arcs) = (Vec::new(), Vec::new());
-    let positions = norm.match_phrase_views(
+    let (positions, _complete) = norm.match_phrase_views(
         title,
         dict,
         &mut lc,
         &mut sc,
         &mut neg,
         &mut pos,
+        &mut probe,
         &mut neg_arcs,
         &mut pos_arcs,
     );
@@ -278,12 +282,12 @@ pub fn explain_match_structured(
     let title_features: Vec<String> = pos.iter().map(|&id| dict.name(id).to_string()).collect();
 
     let mut title_sigs = std::collections::HashSet::new();
-    for &f in &pos {
+    for &f in &probe {
         title_sigs.insert(sig_key(&[f]));
     }
-    for &h in &pos {
+    for &h in &probe {
         if is_hot(dict, h) {
-            for &o in &pos {
+            for &o in &probe {
                 if o != h {
                     let (a, b) = if h < o { (h, o) } else { (o, h) };
                     title_sigs.insert(sig_key(&[a, b]));

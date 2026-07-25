@@ -76,6 +76,10 @@ There is currently no slop parameter or transposition syntax. DSL quotes are als
 vocabulary `phrases` entry: quotes constrain a stored query to adjacency, while vocabulary phrases
 define analyzer entity edges used by both quoted and unquoted clauses.
 
+Required quoted phrases remain in the standard/default-visible query scope. Their analyzer labels
+are candidate hints only; individually common labels do not move a phrase into the opt-in broad
+scope.
+
 ```
 # All of these terms are required (AND):
 vintage leather jacket

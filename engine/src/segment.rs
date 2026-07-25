@@ -397,6 +397,9 @@ pub struct MatchScratch {
     /// Positive overlapping superset title view `P(T) ⊇ N(T)` (ADR-061). Equal to `feats`
     /// when no multi-word alias is active.
     feats_pos: Vec<FeatureId>,
+    /// Candidate-only positive labels. Phrase graphs can contribute retrieval
+    /// labels that must never widen ordinary flat exact semantics.
+    probe_feats: Vec<FeatureId>,
     /// Canonical / positive analyzed token-graph edges, populated only while
     /// quoted predicates exist in the snapshot (ADR-120).
     phrase_arcs: Vec<crate::normalize::PositionArc>,

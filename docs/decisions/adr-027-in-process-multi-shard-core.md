@@ -36,7 +36,8 @@
      refactored to compute the pre-hash anchor feature *groups* and then hash them (byte-identical
      output — the existing oracle is the guard), so the coordinator places by anchor *identity* without
      re-deriving the optimizer's per-class selection. Forbidden features can't leak in: `anchor_plan`
-     reads only `required`/`anyof`, never `forbidden` (ADR-006 holds structurally).
+     reads only positive `required`/`anyof`/`required_phrases`, never forbidden features or
+     phrase graphs (ADR-006 holds structurally).
   4. **Placement by cost class; queries with no rare anchor go to a designated replicated lane (shard 0).**
      Class A (one rare anchor) → one shard; class-B any-of (rare members) → one shard per member; **class-B
      arity-2** (rarest required is hot ⇒ *all* required hot ⇒ no rare anchor to hash on) and **class C**
@@ -81,4 +82,3 @@
   ADR-016 (the lock-free snapshot each shard reads), the lossless-cover contract
   ([design/README.md](../design/README.md) §2), `src/cluster/{ring,shard,coordinator}.rs`,
   `src/compile.rs` (`anchor_plan`), `tests/cluster_oracle.rs`.
-

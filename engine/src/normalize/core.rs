@@ -28,6 +28,36 @@ fn position_index(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
 
+/// Retain enough same-grader starts to represent ordinary titles exactly while
+/// bounding a crafted run such as `psa psa psa ...`. If this bound is exceeded,
+/// flat `P(T)` remains complete and positioned verification fails open.
+const MAX_POSITIONED_STARTS_PER_GRADER: usize = 64;
+
+#[derive(Clone, Copy)]
+struct EmitMode {
+    side: Side,
+    force_additive: bool,
+    retain_positioned_starts: bool,
+}
+
+impl EmitMode {
+    fn flat(side: Side, force_additive: bool) -> Self {
+        Self {
+            side,
+            force_additive,
+            retain_positioned_starts: false,
+        }
+    }
+
+    fn positioned(side: Side, force_additive: bool) -> Self {
+        Self {
+            side,
+            force_additive,
+            retain_positioned_starts: true,
+        }
+    }
+}
+
 pub struct Normalizer {
     /// daachorse automaton over space-joined phrase strings. Pattern value indexes
     /// into `phrase_entries`.
@@ -141,8 +171,7 @@ impl Normalizer {
             text,
             lc,
             sc,
-            side,
-            force_additive,
+            EmitMode::flat(side, force_additive),
             &mut |name, kind, _start, _end| emit(name, kind),
         );
     }
@@ -156,10 +185,15 @@ impl Normalizer {
         text: &str,
         lc: &mut String,
         sc: &mut NormScratch,
-        side: Side,
-        force_additive: bool,
+        mode: EmitMode,
         emit: &mut F,
     ) {
+        let EmitMode {
+            side,
+            force_additive,
+            retain_positioned_starts,
+        } = mode;
+        sc.position_graph_incomplete = false;
         self.clean_into(text, lc);
 
         // ADR-061 (codex R11): on the QUERY side, when multi-word aliases are active, collapse
@@ -362,16 +396,42 @@ impl Normalizer {
                     // later number grades with it too — the parse-union over which graders a parse
                     // frees by consuming the others. A grader token ages nothing (matches the
                     // single-pending path, where the new grader resets only its own age).
-                    // Deduped per CANONICAL grader, refreshing the age (codex R12): the freshest
-                    // occurrence outlives any older same-name one, so the parse-union superset is
-                    // strictly preserved, while the set stays bounded by the (small) distinct
-                    // grader vocabulary — repeated grader tokens otherwise grow the set without
-                    // bound and every number then emits per entry (a quadratic crafted-title DoS).
-                    if let Some(entry) = active_graders.iter_mut().find(|(g, _, _)| *g == gcanon) {
-                        entry.1 = 0;
-                        entry.2 = position_index(i);
+                    if retain_positioned_starts {
+                        // Positioned graphs must retain EACH live start: an overlapping phrase can
+                        // consume the later occurrence while leaving an earlier same-name grader to
+                        // form the connected `grader_grade` edge. Bound starts per canonical
+                        // grader; on overflow mark the graph incomplete so quoted verification
+                        // fails open rather than dropping a match.
+                        let same = active_graders
+                            .iter()
+                            .filter(|(g, _, _)| *g == gcanon)
+                            .count();
+                        if same < MAX_POSITIONED_STARTS_PER_GRADER {
+                            active_graders.push((gcanon, 0, position_index(i)));
+                        } else {
+                            sc.position_graph_incomplete = true;
+                            if let Some(entry) = active_graders
+                                .iter_mut()
+                                .rev()
+                                .find(|(g, _, _)| *g == gcanon)
+                            {
+                                entry.1 = 0;
+                                entry.2 = position_index(i);
+                            }
+                        }
                     } else {
-                        active_graders.push((gcanon, 0, position_index(i)));
+                        // Flat P(T) remains a set: one live representative per canonical grader
+                        // emits the same feature labels without multiplying duplicate callbacks.
+                        if let Some(entry) = active_graders
+                            .iter_mut()
+                            .rev()
+                            .find(|(g, _, _)| *g == gcanon)
+                        {
+                            entry.1 = 0;
+                            entry.2 = position_index(i);
+                        } else {
+                            active_graders.push((gcanon, 0, position_index(i)));
+                        }
                     }
                 } else if fused {
                     pending_grader = None;
@@ -674,10 +734,11 @@ impl Normalizer {
     ///   emit with **all phrases forced additive** (nothing consumed ⇒ every token feature plus
     ///   every leftmost-longest entity) ∪ the **overlapping** entity pass. So `P(T)` contains every
     ///   feature any parse could emit — every nested/overlapping alias entity AND the component
-    ///   tokens of a phrase displaced from the leftmost-longest parse. Used for retrieval +
-    ///   required + any-of, so a `new york` query finds a `new york city` title and a component
-    ///   query is never dropped. A strict superset of every parse ⇒ FN-safe; it only ever adds to
-    ///   the positive view (a wider positive read is a bounded false positive, never a negative).
+    ///   tokens of a phrase displaced from the leftmost-longest parse. It drives flat candidate
+    ///   retrieval plus required + any-of; the phrase-aware path extends a separate probe view
+    ///   with positioned-only labels. A strict superset of every parse ⇒ FN-safe; it only ever
+    ///   adds to the positive view (a wider positive read is a bounded false positive, never a
+    ///   negative).
     ///
     /// With no active multi-word alias (`alias_overlap` is `None`), `P(T) == N(T)` and the two
     /// outputs are identical — the caller then passes one slice for both views and the
@@ -758,7 +819,7 @@ impl Normalizer {
     pub fn compile_phrase(&self, text: &str, dict: &mut Dict, lc: &mut String) -> PhraseGraph {
         let mut scratch = NormScratch::new();
         let mut arcs = Vec::new();
-        let positions = self.analyze_position_arcs(
+        let (positions, _complete) = self.analyze_position_arcs(
             text,
             lc,
             &mut scratch,
@@ -775,7 +836,7 @@ impl Normalizer {
     pub fn compile_phrase_readonly(&self, text: &str, dict: &Dict, lc: &mut String) -> PhraseGraph {
         let mut scratch = NormScratch::new();
         let mut arcs = Vec::new();
-        let positions = self.analyze_position_arcs(
+        let (positions, _complete) = self.analyze_position_arcs(
             text,
             lc,
             &mut scratch,
@@ -793,8 +854,13 @@ impl Normalizer {
     /// entry point first, so phrase support cannot silently change bare-term,
     /// any-of, or MUST_NOT behavior. The extra graph pass is activated by the
     /// engine only while at least one live row contains a quoted predicate.
-    /// Graph-only labels used as lossless retrieval proxies are added to the
-    /// positive view only; negatives continue to use the canonical flat view.
+    /// `probe` is the candidate-only union of flat positive and graph labels.
+    /// Exact flat semantics remain in `pos`; keeping the two separate prevents
+    /// an unrelated quoted row from changing how ordinary queries verify.
+    ///
+    /// Returns `(positions, positive_graph_complete)`. An incomplete positive
+    /// graph hit a bounded analyzer-state guard and must fail open in exact
+    /// phrase verification.
     #[allow(clippy::too_many_arguments)]
     pub fn match_phrase_views(
         &self,
@@ -804,12 +870,13 @@ impl Normalizer {
         sc: &mut NormScratch,
         neg: &mut Vec<FeatureId>,
         pos: &mut Vec<FeatureId>,
+        probe: &mut Vec<FeatureId>,
         neg_arcs: &mut Vec<PositionArc>,
         pos_arcs: &mut Vec<PositionArc>,
-    ) -> u32 {
+    ) -> (u32, bool) {
         self.match_features_dual(text, dict, lc, sc, neg, pos);
 
-        let positions = self.analyze_position_arcs(
+        let (positions, _negative_complete) = self.analyze_position_arcs(
             text,
             lc,
             sc,
@@ -819,8 +886,8 @@ impl Normalizer {
             |name, _kind| dict.get_or_synthetic(name),
         );
 
-        if let Some(overlap) = &self.alias_overlap {
-            let _positive_positions = self.analyze_position_arcs(
+        let positive_complete = if let Some(overlap) = &self.alias_overlap {
+            let (positive_positions, complete) = self.analyze_position_arcs(
                 text,
                 lc,
                 sc,
@@ -829,21 +896,46 @@ impl Normalizer {
                 pos_arcs,
                 |name, _kind| dict.get_or_synthetic(name),
             );
+            debug_assert_eq!(positions, positive_positions);
+
+            // `P(T)` is a union, not a replacement: retain the canonical path
+            // and add the raw token alternatives that the flat ADR-061 view
+            // exposes for stateful analyzer readings.
+            pos_arcs.extend_from_slice(neg_arcs);
+            for (i, &(start, end)) in sc.tokens.iter().enumerate() {
+                let tok = &lc[start..end];
+                if tok == "#" || tok == "/" {
+                    continue;
+                }
+                sc.name.clear();
+                sc.name.push_str("term:");
+                sc.name.push_str(tok);
+                pos_arcs.push(PositionArc {
+                    feature: dict.get_or_synthetic(&sc.name),
+                    start: position_index(i),
+                    end: position_index(i.saturating_add(1)),
+                });
+            }
             overlap.collect_positioned_into(lc, dict, pos_arcs);
             pos_arcs.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
             pos_arcs.dedup();
+            complete
         } else {
             pos_arcs.clear();
             pos_arcs.extend_from_slice(neg_arcs);
-        }
+            true
+        };
 
         // Every exact phrase path has at least one graph edge. Making all
-        // positive graph labels probe-visible therefore supplies a lossless
-        // candidate proxy even for analyzer-only gap labels.
-        pos.extend(pos_arcs.iter().map(|arc| arc.feature));
-        pos.sort_unstable();
-        pos.dedup();
-        positions
+        // positive graph labels CANDIDATE-visible therefore supplies a lossless
+        // proxy even for analyzer-only gap labels without widening flat exact
+        // semantics for phrase-free rows.
+        probe.clear();
+        probe.extend_from_slice(pos);
+        probe.extend(pos_arcs.iter().map(|arc| arc.feature));
+        probe.sort_unstable();
+        probe.dedup();
+        (positions, positive_complete)
     }
 
     /// Analyze `text` into a flat token-graph edge list. `out` is caller-owned
@@ -858,7 +950,7 @@ impl Normalizer {
         force_additive: bool,
         out: &mut Vec<PositionArc>,
         mut resolve: F,
-    ) -> u32
+    ) -> (u32, bool)
     where
         F: FnMut(&str, FeatureKind) -> FeatureId,
     {
@@ -868,8 +960,7 @@ impl Normalizer {
             text,
             lc,
             sc,
-            side,
-            force_additive,
+            EmitMode::positioned(side, force_additive),
             &mut |name, kind, start, end| {
                 let arc = PositionArc {
                     feature: resolve(name, kind),
@@ -923,7 +1014,7 @@ impl Normalizer {
         }
         out.sort_unstable_by_key(|arc| (arc.start, arc.end, arc.feature));
         out.dedup();
-        positions
+        (positions, !sc.position_graph_incomplete)
     }
 }
 

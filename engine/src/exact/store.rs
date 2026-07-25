@@ -96,6 +96,15 @@ impl ExactStore {
         self.has_phrase_predicates
     }
 
+    /// Whether one row carries the v2 positioned predicate program.
+    #[inline]
+    pub(crate) fn row_has_phrase_predicates(&self, id: u32) -> bool {
+        let i = id as usize;
+        let off = self.predicate_off[i] as usize;
+        let len = self.predicate_len[i] as usize;
+        predicate_has_phrases(&self.predicate_blob[off..off + len])
+    }
+
     /// Append a compiled query; returns its SegmentLocalQueryId. `tags` are the query's
     /// interned metadata `TagId`s (ADR-049); the caller MUST pass them sorted + deduped
     /// (like `ex.required`) so the verify-stage filter is a sorted-slice intersection.

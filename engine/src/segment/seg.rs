@@ -454,9 +454,10 @@ impl Segment {
         emission: P,
     ) {
         let filter = self.filter.as_ref();
-        // Signatures are generated from the POSITIVE (superset) view so an overlapping alias
-        // entity retrieves its candidates (ADR-061); verify then applies both views.
-        let feats = view.pos;
+        // Signatures are generated from the candidate-only POSITIVE probe view:
+        // flat P(T) plus graph labels when positioned matching is active. Exact
+        // verification still reads only the semantic pos/neg views.
+        let feats = view.probe;
         if collector.should_stop() {
             return;
         }

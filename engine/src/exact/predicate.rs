@@ -330,6 +330,9 @@ fn graph_matches(
 ) -> Option<bool> {
     const MAX_STATES: usize = 65_536;
 
+    if !title.complete {
+        return None;
+    }
     let query_positions = query[0];
     scratch.stack.clear();
     scratch.seen.clear();
@@ -565,10 +568,12 @@ mod tests {
             verify_predicate(
                 words,
                 &TitleView::dual_positioned(
+                    &[],
                     0,
                     &[],
                     positions,
                     arcs,
+                    true,
                     0,
                     &[],
                     positions,
