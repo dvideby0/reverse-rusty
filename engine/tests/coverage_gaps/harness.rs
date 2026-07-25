@@ -50,7 +50,7 @@ impl Brute {
         let mut probe = Vec::new();
         let mut neg_arcs = Vec::new();
         let mut pos_arcs = Vec::new();
-        let (positions, _complete) = self.norm.match_phrase_views(
+        let (positions, complete) = self.norm.match_phrase_views(
             title,
             &self.dict,
             lc,
@@ -63,7 +63,9 @@ impl Brute {
         );
         let mut out = HashSet::new();
         for (logical, ex) in &self.queries {
-            if ex.matches_positioned(&pos, feats, positions, &pos_arcs, positions, &neg_arcs) {
+            if ex.matches_positioned(
+                &pos, feats, positions, &pos_arcs, complete, positions, &neg_arcs,
+            ) {
                 out.insert(*logical);
             }
         }

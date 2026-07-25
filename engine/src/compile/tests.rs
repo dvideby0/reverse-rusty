@@ -69,7 +69,7 @@ mod golden {
         let mut probe = Vec::new();
         let mut neg_arcs = Vec::new();
         let mut pos_arcs = Vec::new();
-        let (positions, _complete) = norm.match_phrase_views(
+        let (positions, complete) = norm.match_phrase_views(
             title,
             dict,
             &mut lc,
@@ -80,7 +80,9 @@ mod golden {
             &mut neg_arcs,
             &mut pos_arcs,
         );
-        ex.matches_positioned(&pos, &neg, positions, &pos_arcs, positions, &neg_arcs)
+        ex.matches_positioned(
+            &pos, &neg, positions, &pos_arcs, complete, positions, &neg_arcs,
+        )
     }
 
     #[test]
@@ -103,6 +105,29 @@ mod golden {
         assert_eq!(req, s(&["player:michael_jordan"]));
         let (req, _, _) = named(&n, "michael jordan sp");
         assert_eq!(req, s(&["card_term:sp", "player:michael_jordan"]));
+    }
+
+    #[test]
+    fn positioned_semantic_predicate_fails_open_on_incomplete_positive_graph() {
+        let mut builder = Normalizer::builder();
+        builder.add_grader("psa");
+        builder.add_phrase_alias(
+            &["unused", "alias"],
+            "term:unused_alias",
+            FeatureKind::Generic,
+        );
+        let norm = builder.build().expect("normalizer");
+        let mut dict = Dict::new();
+        let mut lc = String::new();
+        let ast = parse("\"red shoe\"").expect("parse phrase");
+        let ex = extract(&ast, &norm, &mut dict, &mut lc);
+
+        let graders = std::iter::repeat_n("psa", 65).collect::<Vec<_>>().join(" ");
+        let title = format!("red {graders} boot");
+        assert!(
+            semantic_match(&norm, &dict, &ex, &title),
+            "the shared oracle predicate must mirror production's positive fail-open"
+        );
     }
 
     #[test]

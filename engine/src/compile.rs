@@ -166,6 +166,11 @@ impl Extracted {
     /// Direct semantic predicate including quoted token graphs. Used by explain
     /// and the shared-front-end randomized oracles; the independent reference
     /// matcher implements the same graph-language intersection separately.
+    ///
+    /// `pos_graph_complete` carries the positive analyzer's bounded-work signal.
+    /// An incomplete positive graph, or either graph exhausting the intersection
+    /// budget, fails open by predicate polarity exactly like the hot verifier:
+    /// required phrases do not reject and forbidden phrases do not trip.
     #[allow(clippy::too_many_arguments)]
     pub fn matches_positioned(
         &self,
@@ -173,15 +178,26 @@ impl Extracted {
         neg: &[FeatureId],
         pos_positions: u32,
         pos_arcs: &[PositionArc],
+        pos_graph_complete: bool,
         neg_positions: u32,
         neg_arcs: &[PositionArc],
     ) -> bool {
         self.matches_flat_features(pos, neg)
             && self.required_phrases.iter().all(|phrase| {
-                crate::normalize::phrase_graph_matches(phrase, pos_positions, pos_arcs)
+                crate::normalize::phrase_graph_matches_bounded(
+                    phrase,
+                    pos_positions,
+                    pos_arcs,
+                    pos_graph_complete,
+                ) != Some(false)
             })
             && !self.forbidden_phrases.iter().any(|phrase| {
-                crate::normalize::phrase_graph_matches(phrase, neg_positions, neg_arcs)
+                crate::normalize::phrase_graph_matches_bounded(
+                    phrase,
+                    neg_positions,
+                    neg_arcs,
+                    true,
+                ) == Some(true)
             })
     }
 
