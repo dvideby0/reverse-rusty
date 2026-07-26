@@ -1,6 +1,6 @@
 # ADR-072: The multi-machine test harness — containers, kill-and-recover, handoff under load (Distributed-v1 criterion 3)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** [ADR-065](adr-065-distributed-v1-graduation.md) criterion 3, the last of the three
   that unblock everything else. Every distributed layer is oracle-proven **in-process / on

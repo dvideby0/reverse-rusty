@@ -1,6 +1,6 @@
 # ADR-065: Distributed v1 — graduation criteria (experimental → release-candidate)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — elasticity & repair decisions](areas/clustering-elasticity-and-repair.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** **Accepted (2026-06-10) — a program ADR.** Defines the milestone and its acceptance

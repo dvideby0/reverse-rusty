@@ -1,5 +1,7 @@
 # ADR-094: Group-aware data-moving reassignment — RF>1 reconcile (`reassign_group_and_move`)
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-07-01)
 
 **Context.** Every data-moving sweep was RF=1-only. [`execute_handoff`](../../engine/src/cluster/coordinator/distributed.rs)

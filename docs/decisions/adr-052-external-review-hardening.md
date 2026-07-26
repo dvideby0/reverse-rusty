@@ -1,6 +1,6 @@
 # ADR-052: External-review hardening — parser, signature-key, segment-bounds, request-cap, timeout, and network-posture fixes
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Engine, errors, dependencies & ops decisions](areas/engine-quality-and-operations.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** A 2026-06 external review raised 7 source-level findings. Each was verified against

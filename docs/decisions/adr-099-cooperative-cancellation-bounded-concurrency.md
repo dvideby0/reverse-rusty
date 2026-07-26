@@ -1,6 +1,6 @@
 # ADR-099: Cooperative match cancellation + bounded search concurrency (Tier 5 M3)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 - **Status:** **Done (2026-07-02; bounded-polling amendment ADR-123 on 2026-07-25).** The ADR-052
   deferral ("cooperative cancellation on the match path — weigh a coarse per-segment deadline

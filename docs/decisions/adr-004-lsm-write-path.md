@@ -1,6 +1,6 @@
 # ADR-004: LSM write path over full rebuild
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** The naive approach is to rebuild the entire index when queries change. At

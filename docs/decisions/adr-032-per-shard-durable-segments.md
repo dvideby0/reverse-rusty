@@ -1,6 +1,6 @@
 # ADR-032: Per-shard durable compiled segments — attach-and-mmap on open, not re-ingest (clustering step 3b)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — core & transport decisions](areas/clustering-core-and-transport.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

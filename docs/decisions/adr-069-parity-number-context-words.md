@@ -1,6 +1,6 @@
 # ADR-069: Parity-mode number typing — the `pop` demotion becomes a configurable number-context word list
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** [ADR-064](adr-064-percolator-drop-in-parity-audit.md) item 3. The normalizer's number
   typing is **position-sensitive** in exactly one place that no configuration can reach: a hard-coded

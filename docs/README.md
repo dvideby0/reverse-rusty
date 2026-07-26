@@ -19,9 +19,12 @@ Three levels, each giving *just enough* to decide whether to go deeper:
   [`DECISIONS.md`](DECISIONS.md), [`design/README.md`](design/README.md),
   [`performance/README.md`](performance/README.md), [`research/README.md`](research/README.md), and the
   top [`../README.md`](../README.md). Each answers its domain's top question and links deeper.
-- **Level 2 — deep dives:** the topic files below — including the per-ADR records in
-  [`decisions/`](decisions/) and the per-group endpoint files in [`reference/api/`](reference/api/).
-  Read only when a task needs the detail.
+- **Level 2 — catalogs and deep dives:** the topic files below, the ADR area catalogs in
+  [`decisions/areas/`](decisions/areas/), and the per-group endpoint files in
+  [`reference/api/`](reference/api/). Read only when a task needs the detail.
+- **Level 3 — individual records:** the one-file-per-decision ADR records in
+  [`decisions/`](decisions/). The decision tree deliberately adds this final hop so no gateway or
+  area catalog grows back into a repository-wide wall of summaries.
 
 ## Map — what to read when
 
@@ -36,9 +39,10 @@ Three levels, each giving *just enough* to decide whether to go deeper:
   spec** for the current top roadmap priority (the Broad-Query Cost Program): problem +
   measurements, today's mechanics, the four design obligations, the lever designs, and the
   review-adopted sequencing. Each increment still ships under its own ADR.
-- [`DECISIONS.md`](DECISIONS.md) — the **index** of ADRs (architecture decision records); each ADR's
-  full record is one file under [`decisions/`](decisions/). Read when asking "why was it done this
-  way?" or "why was X *not* built?" (declined → ADR-019).
+- [`DECISIONS.md`](DECISIONS.md) — the ADR **area hub**: choose a compact catalog under
+  [`decisions/areas/`](decisions/areas/), then open the one canonical record under
+  [`decisions/`](decisions/). Read when asking "why was it done this way?" or "why was X *not*
+  built?" (declined → ADR-019).
 - [`testing.md`](testing.md) — **how we test**: the suites, pressure/soak tests, benchmarks, the git
   hooks, and the CI pipeline. Read when running or changing tests, benchmarks, or the gate.
 
@@ -141,7 +145,7 @@ never a second copy. This is what keeps the docs from drifting.
 | Implemented vs design-only | [`STATUS.md`](STATUS.md) (one line per capability) | `../CLAUDE.md` keeps a 3–4 line skeleton + link. |
 | Roadmap / next steps | [`roadmap.md`](roadmap.md) (open items only) | [`STATUS.md`](STATUS.md) keeps a one-line tier glance; "tracked in Tier N" refs resolve via either. |
 | Completed-work narrative (what shipped, how, scope, proof) | the one ADR file in [`decisions/`](decisions/) | `STATUS.md` carries one line + the ADR number; `roadmap.md` deletes the item on ship. Never a second prose copy. |
-| Architecture decisions / "why" | [`DECISIONS.md`](DECISIONS.md) index → one file per ADR in [`decisions/`](decisions/) | referenced by `ADR-NNN` (pointers, never copies). |
+| Architecture decisions / "why" | [`DECISIONS.md`](DECISIONS.md) hub → area catalog in [`decisions/areas/`](decisions/areas/) → one ADR in [`decisions/`](decisions/) | referenced by `ADR-NNN` (pointers, never copies). |
 | Test count | `cargo test` | docs describe the suites qualitatively; no hand-maintained integer. |
 | Testing / benchmark / CI workflow | [`testing.md`](testing.md) | `../CLAUDE.md` Build/test/run keeps the commands; CI rationale in [`DECISIONS.md`](DECISIONS.md) ADR-024; benchmark numbers in `performance/`. |
 | REST API / query DSL | [`reference/api.md`](reference/api.md) index + [`reference/api/`](reference/api/) subfiles · [`reference/dsl.md`](reference/dsl.md) | `../README.md` links here instead of inlining. |
@@ -154,14 +158,23 @@ Read before adding or moving docs. These rules are the only thing keeping a flat
 text from growing back (the repo is maintained largely by an LLM agent, and there is no automated doc
 link-checker in CI — the discipline has to live here).
 
-- **Progressive disclosure.** `CLAUDE.md` (rails + router) → gateways → deep dives. Any fact should be
-  reachable in ≤1 hop from a gateway. Don't make a reader open three files to answer one question.
+- **Progressive disclosure.** `CLAUDE.md` (rails + router) → gateways → deep dives. A fact should
+  normally be reachable in one hop from its domain gateway. ADRs intentionally use
+  `DECISIONS.md` → area catalog → record so the catalogs remain bounded; opening a known ADR number
+  directly still reaches the canonical record immediately.
+- **Bounded pages, coherent splits.** Treat roughly 600 lines as a soft review signal for both code
+  and documentation, not a mechanical limit. When a hub grows, add a catalog/topic layer and move
+  complete responsibilities beneath it; keep one canonical owner and preserve direct navigation
+  back to the hub. A cohesive record (especially one ADR) may exceed the signal rather than being
+  cut into arbitrary fragments.
 - **Single source of truth.** Each fact has one owner (registry above). Elsewhere: a one-line summary
   + a section link, or nothing. Before adding a paragraph, ask "does this already live somewhere?" —
   if yes, link it.
 - **Where new information goes:**
-  - New architecture decision → a new `decisions/adr-NNN-slug.md` file (next number) + an index row in
-    [`DECISIONS.md`](DECISIONS.md); **never renumber or delete** — superseded ones are marked, not removed.
+  - New architecture decision → a new `decisions/adr-NNN-slug.md` file (next number) + one row in the
+    matching [`decisions/areas/`](decisions/areas/) catalog. Add an area to
+    [`DECISIONS.md`](DECISIONS.md) only when no existing catalog is coherent. **Never renumber or
+    delete** — superseded ones are marked, not removed.
   - Component/algorithm design → the matching `design/<topic>.md` (extend, don't fork).
   - "Is it built?" → [`STATUS.md`](STATUS.md) — **one line per capability**, the ADR carries the
     narrative. "What's next?" → [`roadmap.md`](roadmap.md) — **open items only**. When an item

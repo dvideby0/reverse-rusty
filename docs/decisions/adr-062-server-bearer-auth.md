@@ -1,6 +1,6 @@
 # ADR-062: Opt-in bearer-token auth for the HTTP server's mutating/admin endpoints
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** The external-review hardening pass (ADR-052) moved the HTTP server to a loopback bind
   by default but deliberately deferred authentication: the REST API exposed its mutating/admin

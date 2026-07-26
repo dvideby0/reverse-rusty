@@ -1,6 +1,6 @@
 # ADR-088: Real-process SIGKILL crash-injection harness (the Phase 0 durability torture)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 - **Status:** **Built + passing (2026-06-25).** A new lean-core bin `src/bin/crashwriter.rs` and a new
   integration suite `engine/tests/crash_injection/` that spawns the bin, SIGKILLs it mid

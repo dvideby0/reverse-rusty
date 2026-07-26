@@ -1,6 +1,6 @@
 # ADR-073: REST surface honesty — tag-value coercion, flush wiring, per-request broad
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted (2026-06-10). Closes [ADR-064](adr-064-percolator-drop-in-parity-audit.md)

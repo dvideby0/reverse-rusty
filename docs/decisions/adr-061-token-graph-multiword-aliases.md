@@ -1,6 +1,6 @@
 # ADR-061: Token-graph multi-word aliases — Phase 2 (positive / negative title feature views)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** [ADR-060](adr-060-learned-alias-evolution.md) (Phase 1) shipped the alias *governance*
   layer — the `AliasRegistry` records, classifies, and persists alias groups — but only **single-token**

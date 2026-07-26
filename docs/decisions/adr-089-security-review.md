@@ -1,6 +1,6 @@
 # ADR-089: Security review — threat model + container image scan (Phase 0 item 5)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 - **Status:** **Done (2026-06-25).** A new threat-model doc
   ([`operations/threat-model.md`](../operations/threat-model.md)), a container-scan wrapper

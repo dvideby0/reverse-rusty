@@ -1,6 +1,6 @@
 # ADR-006: Forbidden features never gate (structural enforcement)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Matching & verification decisions](areas/matching-and-verification.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Gating on MUST_NOT features is tempting (they look selective) but lethal for

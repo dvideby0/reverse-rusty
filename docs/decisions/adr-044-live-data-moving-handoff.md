@@ -1,6 +1,6 @@
 # ADR-044: Live data-moving handoff — the cross-node move that drives the swap (clustering step 6b)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — elasticity & repair decisions](areas/clustering-elasticity-and-repair.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

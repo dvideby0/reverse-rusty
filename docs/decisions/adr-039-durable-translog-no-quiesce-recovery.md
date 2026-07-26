@@ -1,6 +1,6 @@
 # ADR-039: Durable + replicated per-shard query log (the translog) + no-quiesce peer recovery (clustering step 5c)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — replication & control plane decisions](areas/clustering-replication-and-control-plane.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

@@ -1,6 +1,6 @@
 # ADR-031: Externalized single-node coordinator mutation log behind `trait ClusterLog` (clustering step 3a)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — core & transport decisions](areas/clustering-core-and-transport.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

@@ -1,5 +1,7 @@
 # ADR-086: Coordinator routes by committed assignments + multi-control-endpoint failover
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-24)
 
 **Context.** ADR-083 wired a deployed coordinator to the durable openraft quorum as a thin

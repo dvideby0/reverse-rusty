@@ -1,6 +1,6 @@
 # ADR-066: Tombstone durability at the commit point (manifest liveness bitmaps + address-free delete log)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** Found while building the ADR-064 atomic upsert (whose replace-by-id semantics tombstone a
   query's prior copies): **two pre-existing single-node durability bugs around base-segment tombstones**,

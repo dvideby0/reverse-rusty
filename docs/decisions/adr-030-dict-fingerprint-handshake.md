@@ -1,6 +1,6 @@
 # ADR-030: Dict-fingerprint handshake + fallible cluster construction (ADR-029 sharp-edge closure)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — core & transport decisions](areas/clustering-core-and-transport.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

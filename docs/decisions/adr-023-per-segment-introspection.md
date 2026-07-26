@@ -1,6 +1,6 @@
 # ADR-023: Per-segment introspection endpoint (`GET /_cat/segments`)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Engine, errors, dependencies & ops decisions](areas/engine-quality-and-operations.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** The only window into the index was the *aggregate* `/_stats` (+ a bare size/holes table in

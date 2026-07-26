@@ -1,6 +1,6 @@
 # ADR-013: Write-ahead log (WAL) for crash recovery
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** With mmap'd segments, sealed data is durable on disk. But the mutable memtable

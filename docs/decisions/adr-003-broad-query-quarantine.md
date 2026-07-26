@@ -1,6 +1,6 @@
 # ADR-003: Broad-query quarantine via cost classes
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Matching & verification decisions](areas/matching-and-verification.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Some queries are inherently non-selective (e.g., a bare "jordan" with no

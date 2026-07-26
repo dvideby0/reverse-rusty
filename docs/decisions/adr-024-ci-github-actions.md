@@ -1,6 +1,6 @@
 # ADR-024: CI via GitHub Actions mirroring `check.sh`; commit pressure tests + benchmark baseline
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Engine, errors, dependencies & ops decisions](areas/engine-quality-and-operations.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** The quality gate was `engine/check.sh` (fmt + clippy + test + audit + deny), run by hand

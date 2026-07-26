@@ -1,0 +1,564 @@
+use super::{
+    extract_readonly, placement_of, AddOutcome, ClusterEngine, ClusterMutation, DurabilityOp,
+    EngineEvent, Extracted, ShardError, Target,
+};
+
+impl ClusterEngine {
+    /// Add one query incrementally (lands in the target shard's memtable). Uses a
+    /// read-only compile against the frozen shared dict: vocabulary not seen at
+    /// [`Self::build`] time is **absorbed** into the reserved synthetic-ID range (a
+    /// deterministic hash, ADR-046), not dropped — so a required term new to the dict
+    /// still anchors its query (a hash collision is a bounded over-match the exact
+    /// matcher rejects, never a dropped required term).
+    ///
+    /// WAL-first: an ACCEPTED mutation is durably logged BEFORE it is applied to any shard, so a
+    /// crash can never leave an acknowledged add that [`Self::open`] would lose. A log append
+    /// failure rejects the add (shards untouched) and surfaces a
+    /// [`DurabilityFailure`](EngineEvent::DurabilityFailure) — the cluster analogue of the
+    /// engine's WAL-first write path (ADR-013). A REJECTED write (class D with the lane off, an
+    /// empty query, or a parse error) is classified out BEFORE the log, so the log holds only
+    /// accepted mutations and replay is configuration-independent (codex review).
+    pub fn add_query(&self, id: u64, dsl: &str) -> Result<AddOutcome, ShardError> {
+        self.add_query_with_tags(id, dsl, &[])
+    }
+
+    /// [`add_query`](Self::add_query) carrying per-query metadata tags (ADR-049/055). The raw tags
+    /// ride the cluster log alongside the DSL (logged BEFORE apply, like the DSL), and are resolved
+    /// read-only against the shared frozen tag space on each target shard, so a tagged add and a
+    /// later filtered percolate agree on the tag's `TagId`. Empty tags ⇒ byte-identical to
+    /// [`add_query`](Self::add_query).
+    pub fn add_query_with_tags(
+        &self,
+        id: u64,
+        dsl: &str,
+        tags: &[(String, String)],
+    ) -> Result<AddOutcome, ShardError> {
+        self.create_query_with_tags(id, dsl, 1, tags)
+    }
+
+    /// Atomically create one query only when `id` is absent. This is the
+    /// cluster-core operation behind REST `op_type=create`: the logical-id
+    /// stripe makes the absence check + reservation indivisible from every
+    /// add/upsert/remove of the same id, and a conflict writes no log frame.
+    ///
+    /// Unlike [`add_query_with_tags`](Self::add_query_with_tags), the caller's
+    /// display `version` is preserved in the coordinator log and every shard,
+    /// matching the versioned REST upsert path.
+    pub fn create_query_with_tags(
+        &self,
+        id: u64,
+        dsl: &str,
+        version: u32,
+        tags: &[(String, String)],
+    ) -> Result<AddOutcome, ShardError> {
+        // Check conflicts before compilation, matching the single-node REST
+        // boundary: an already-live id is the decisive create-only error even
+        // when the replacement body would fail DSL compilation. The stripe is
+        // load-bearing here. The directory also contains provisional reservations
+        // while their coordinator-log append is in flight; an unlocked read could
+        // report a false conflict if that append subsequently failed and rolled the
+        // reservation back. Waiting on the stripe observes the committed/rolled-back
+        // result. This is still only an early conflict return, never an absence
+        // proof — the second check below closes a create arriving during compilation.
+        if self.logical_ids_authoritative() {
+            // Preserve the global mutation lock order: PIT barrier, then logical
+            // stripe. Resync/exhaustive mutation code relies on this order.
+            let _pit_barrier = self
+                .pit_open_barrier
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _logical_guard = self.logical_write_guard(id);
+            if self.contains_logical_id(id) {
+                return Err(ShardError::DuplicateLogicalId(id));
+            }
+        }
+        // Reject malformed DSL up front: it carries no replayable mutation, so it must
+        // never reach the log (a logged record must parse on replay).
+        let ast = match crate::dsl::parse(dsl) {
+            Ok(a) => a,
+            Err(e) => return Ok(AddOutcome::RejectedParse(e)),
+        };
+        // Reject an over-large tag set BEFORE the log too: it would truncate the u16 tag
+        // column on apply and silently drop a real tag. Like a parse error, it carries no
+        // replayable mutation (cluster analogue of the single-node front-door gate).
+        if let Err(e) = self.check_tag_limit(tags) {
+            return Ok(AddOutcome::RejectedParse(e));
+        }
+        // Classify BEFORE logging (against the CURRENT knob): a REJECTED write — class D with the
+        // lane off, or an effectively-empty query — carries no replayable mutation and must NEVER
+        // reach the log. Else, replaying it under a since-flipped knob would resurrect a query the
+        // caller was told was rejected (codex review). This is the cluster analogue of the
+        // single-node "the WAL records only accepted mutations" (ADR-068); the apply/replay funnel
+        // then forces accept=true, so replay reproduces the writer's decision regardless of config.
+        let mut lc = String::new();
+        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        // Reject a column-overflowing compiled query before the log too: it would
+        // truncate the shards' u16 exact-store counts on apply (a false negative).
+        if let Err(e) = Self::check_column_limit(&ex) {
+            return Ok(AddOutcome::RejectedParse(e));
+        }
+        let target = self.placement(&ex);
+        if matches!(target, Target::Reject) {
+            return Ok(AddOutcome::RejectedClassD);
+        }
+        let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        // Global lock order is PIT/mutation barrier -> logical stripe. Resync
+        // uses the same order; taking the stripe first can deadlock behind a
+        // queued exhaustive writer on writer-preferring RwLock implementations.
+        // Hold the barrier through the durable append and complete shard fan-out.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // ADR-110's bounded merge requires one live distributed row per logical id.
+        // Content-derived placement cannot guarantee a common owner for two different
+        // rows sharing an id, so cluster adds are insert-only; replacements use upsert.
+        // The stripe closes the same-id check/reservation race without serializing
+        // unrelated writes.
+        let _logical_guard = self.logical_write_guard(id);
+        // A coordinator attached to an already-populated cluster it could not
+        // enumerate (the gRPC connect shape) has an unauthoritative directory, so
+        // the duplicate check below would be vacuous — fail closed instead of
+        // silently admitting a second physical row for a live id (review finding).
+        // `upsert_query` stays available: it re-drives replace-by-id on every
+        // shard and does not depend on the directory.
+        if !self.logical_ids_authoritative() {
+            return Err(ShardError::Config(
+                "insert-only add_query requires the logical-id directory, which this \
+                 coordinator could not seed from its (already-populated) remote shards; \
+                 use upsert_query"
+                    .to_string(),
+            ));
+        }
+        if self.contains_logical_id(id) {
+            return Err(ShardError::DuplicateLogicalId(id));
+        }
+        let inserted = self.insert_logical_id(id);
+        debug_assert!(inserted);
+        let m = ClusterMutation::Add {
+            logical: id,
+            version,
+            dsl: dsl.to_string(),
+            tags: tags.to_vec(),
+            placement: placement.clone(),
+        };
+        if let Err(e) = self.log.append(&m) {
+            self.remove_logical_id(id);
+            self.emit(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::WalAppend,
+                detail: format!("cluster add_query(id={id}) not durably logged; rejected"),
+                error: e.to_string(),
+            });
+            return Err(e);
+        }
+        self.apply_add(id, version, dsl, tags, &placement)
+    }
+
+    /// Atomically replace a query by logical id — ES `index` semantics at the cluster
+    /// (ADR-070, the coordinator analogue of the engine's ADR-067 upsert): every prior
+    /// live copy is tombstoned and the new version inserted under ONE log frame
+    /// ([`ClusterMutation::Upsert`]), so a crash replays the whole replacement or none
+    /// of it — never a remove that lost its re-add. Returns the number of prior entries
+    /// removed (0 ⇒ created, >0 ⇒ updated) plus where the new version landed. A
+    /// rejected new version (parse / class D) **never deletes** — the prior version
+    /// stays live and matchable. `version` is the caller-supplied per-logical version
+    /// (default 1 from the REST layer); it rides the log frame so replay reproduces the
+    /// stored version — passing 1 keeps the in-process / RF=1 path byte-identical.
+    pub fn upsert_query(
+        &self,
+        id: u64,
+        dsl: &str,
+        version: u32,
+    ) -> Result<(usize, AddOutcome), ShardError> {
+        self.upsert_query_with_tags(id, dsl, version, &[])
+    }
+
+    /// [`upsert_query`](Self::upsert_query) carrying per-query metadata tags for the NEW
+    /// version (ADR-055 semantics: raw tags ride the log frame and resolve read-only
+    /// against the shared frozen tag space on each target shard). `version` is threaded
+    /// into [`ClusterMutation::Upsert`] so a `PUT /_doc/{id} {"version":N}` stores version
+    /// N and reopens to N (matching single-node `try_upsert_live_with_tags`).
+    pub fn upsert_query_with_tags(
+        &self,
+        id: u64,
+        dsl: &str,
+        version: u32,
+        tags: &[(String, String)],
+    ) -> Result<(usize, AddOutcome), ShardError> {
+        // Reject malformed DSL up front: it carries no replayable mutation, so it must
+        // never reach the log (a logged record must parse on replay) — and a failed
+        // replace never deletes.
+        let ast = match crate::dsl::parse(dsl) {
+            Ok(a) => a,
+            Err(e) => return Ok((0, AddOutcome::RejectedParse(e))),
+        };
+        // Reject an over-large tag set BEFORE the log (and before any tombstone): it would
+        // truncate the u16 tag column on apply. A failed replace never deletes, so this
+        // returns 0 replaced — the prior version stays live.
+        if let Err(e) = self.check_tag_limit(tags) {
+            return Ok((0, AddOutcome::RejectedParse(e)));
+        }
+        // Classify BEFORE logging (current knob): a rejected new version carries no replayable
+        // mutation AND must not delete the prior version, so it never reaches the log or the
+        // tombstone pass. Same config-independent-replay discipline as add (codex review): the
+        // log holds only accepted mutations, and apply/replay forces accept=true.
+        let mut lc = String::new();
+        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        // Reject a column-overflowing compiled query before the log (and before any
+        // tombstone): it would truncate the shards' u16 exact-store counts on apply.
+        // A failed replace never deletes, so the prior version stays live (0 replaced).
+        if let Err(e) = Self::check_column_limit(&ex) {
+            return Ok((0, AddOutcome::RejectedParse(e)));
+        }
+        let target = self.placement(&ex);
+        if matches!(target, Target::Reject) {
+            return Ok((0, AddOutcome::RejectedClassD));
+        }
+        let placement = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        // Keep the same barrier -> logical-stripe order as add/remove/resync.
+        // The barrier spans the log append and both delete/insert fan-out passes.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Serialize against an insert-only add/remove for the same id. An upsert
+        // keeps the id present; a fresh upsert reserves it before the log append so
+        // a concurrent add cannot create a second physical row.
+        let _logical_guard = self.logical_write_guard(id);
+        let fresh_id = self.insert_logical_id(id);
+        let m = ClusterMutation::Upsert {
+            logical: id,
+            version,
+            dsl: dsl.to_string(),
+            tags: tags.to_vec(),
+            placement: placement.clone(),
+        };
+        if let Err(e) = self.log.append(&m) {
+            if fresh_id {
+                self.remove_logical_id(id);
+            }
+            self.emit(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::WalAppend,
+                detail: format!("cluster upsert_query(id={id}) not durably logged; rejected"),
+                error: e.to_string(),
+            });
+            return Err(e);
+        }
+        self.apply_upsert(id, version, dsl, tags, &placement)
+    }
+
+    /// Apply an UPSERT to the shards — the state-machine `apply` for replace-by-id,
+    /// shared by the live write path (after logging) and log replay, so live and
+    /// replayed application are byte-identical. Placement is decided FIRST: a class-D /
+    /// parse rejection returns before any tombstone (a failed replace never deletes,
+    /// ADR-067 parity). Then pass 1 tombstones the id on every shard (a re-placed query
+    /// may live anywhere) and pass 2 inserts the new version on its placement shards —
+    /// the two-pass order guarantees delete-before-insert on every shard that keeps the
+    /// query. Partial failures ride the ADR-047 machinery with the `Upsert` itself as
+    /// the queued repair mutation (re-driving it per shard is an idempotent
+    /// delete + insert).
+    pub(super) fn apply_upsert(
+        &self,
+        id: u64,
+        version: u32,
+        dsl: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Result<(usize, AddOutcome), ShardError> {
+        self.note_tags(tags);
+        // This mutation was accepted and appended already. Re-application (live
+        // or recovery) must not re-litigate it against today's configurable or
+        // compiled-in policy limits.
+        let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+            ShardError::Log(format!(
+                "parsing acknowledged cluster upsert during apply: {error}"
+            ))
+        })?;
+        let mut lc = String::new();
+        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        // Force accept=true: apply is reached ONLY for already-accepted writes (live upsert
+        // classified + accepted before logging; replay sees only logged=accepted frames), so this
+        // placement is configuration-independent — a knob flip on reopen neither drops nor
+        // resurrects (codex review). The empty-class-D guard in `placement_of` still rejects a
+        // never-stored empty query defensively.
+        let target = placement_of(
+            &self.dict,
+            &self.ring,
+            &ex,
+            true,
+            self.per_shard.hot_anchor_threshold,
+        );
+        let expected = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        if &expected != placement {
+            return Err(crate::ownership::OwnershipError::PlacementDecisionMismatch.into());
+        }
+        let (insert_shards, outcome) = match target {
+            Target::Reject => return Ok((0, AddOutcome::RejectedClassD)),
+            // The broad lane is replicated to every shard (ADR-080); pass 1 already tombstones
+            // every shard, so pass 2 re-inserts the new version on every shard.
+            Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
+                ((0..self.shards.len()).collect(), AddOutcome::Replicated)
+            }
+            Target::Selective(shards) => (
+                shards.clone(),
+                AddOutcome::Placed {
+                    shards: shards.clone(),
+                },
+            ),
+        };
+        // Pass 1 — tombstone every prior copy, everywhere (idempotent on non-holders).
+        let mut removed = 0usize;
+        let mut failed: Vec<usize> = Vec::new();
+        let mut first_err: Option<ShardError> = None;
+        for (s, shard) in self.shards.iter().enumerate() {
+            match shard.delete_by_logical_id(id) {
+                Ok(n) => removed += n,
+                Err(e) => {
+                    failed.push(s);
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        // Pass 2 — insert the new version on its placement shards. A shard whose delete
+        // failed is skipped (its repair re-drives the WHOLE upsert, preserving the
+        // per-shard delete-before-insert order).
+        let mut inserted: Vec<usize> = Vec::with_capacity(insert_shards.len());
+        for &s in &insert_shards {
+            if failed.contains(&s) {
+                continue;
+            }
+            match self.shards[s]
+                .insert_extracted_with_placement(&ex, id, version, dsl, tags, placement)
+            {
+                Ok(_) => inserted.push(s),
+                Err(e) => {
+                    failed.push(s);
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if !failed.is_empty() {
+            failed.sort_unstable();
+            failed.dedup();
+            // `applied` reports the shards that now HOLD the new version (the insert
+            // pass succeeded there) — not every shard that merely completed its
+            // tombstone half, which would overstate where the replacement lives
+            // (review finding). Repair targets only `failed`, so this is diagnostic.
+            return Err(self.note_partial(
+                ClusterMutation::Upsert {
+                    logical: id,
+                    version,
+                    dsl: dsl.to_string(),
+                    tags: tags.to_vec(),
+                    placement: placement.clone(),
+                },
+                id,
+                inserted,
+                failed,
+                first_err,
+            ));
+        }
+        self.clear_pending(id);
+        Ok((removed, outcome))
+    }
+
+    /// Remove a query by logical id. Fans the (idempotent) delete out to every
+    /// shard and sums the count — sidestepping any placement journal (a replicated
+    /// or any-of query may live on several shards; a re-add may have moved it).
+    /// WAL-first, like [`Self::add_query`].
+    pub fn remove_query(&self, id: u64) -> Result<usize, ShardError> {
+        // Canonical barrier -> logical-stripe order; see add/upsert. Keeping
+        // this guard through append + fan-out excludes torn exhaustive/PIT views.
+        let _pit_barrier = self
+            .pit_open_barrier
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _logical_guard = self.logical_write_guard(id);
+        let m = ClusterMutation::Remove { logical: id };
+        if let Err(e) = self.log.append(&m) {
+            self.emit(EngineEvent::DurabilityFailure {
+                op: DurabilityOp::WalAppend,
+                detail: format!("cluster remove_query(id={id}) not durably logged; rejected"),
+                error: e.to_string(),
+            });
+            return Err(e);
+        }
+        let removed = self.apply_remove(id);
+        // A partially-applied remove keeps the id reserved: allowing a fresh Add
+        // before repair could coexist with an old row on the failed shard. Upsert
+        // remains available because it re-drives delete+insert on every shard.
+        if removed.is_ok() {
+            self.remove_logical_id(id);
+        }
+        removed
+    }
+
+    /// Insert a compiled query on a set of target shards, collecting partial-apply failures
+    /// (ADR-047): try EVERY shard rather than bailing on the first error, so a mid-fan-out
+    /// remote failure is queued for repair (keyed by logical id, an idempotent re-insert on the
+    /// failed shards) instead of leaving a silent partial mutation. In-process inserts are
+    /// infallible ⇒ `failed` stays empty ⇒ byte-identical to a plain loop. On any failure it
+    /// queues the repair, emits, and returns the honest error; otherwise it returns `success`.
+    /// Shared by the `Selective` (its placement shards) and `Replicated` (every shard, ADR-080)
+    /// arms of [`Self::apply_add`].
+    #[allow(clippy::too_many_arguments)]
+    fn insert_on_shards(
+        &self,
+        shards: &[usize],
+        ex: &Extracted,
+        id: u64,
+        version: u32,
+        dsl: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+        success: AddOutcome,
+    ) -> Result<AddOutcome, ShardError> {
+        let mut applied = Vec::with_capacity(shards.len());
+        let mut failed = Vec::new();
+        let mut first_err: Option<ShardError> = None;
+        for &s in shards {
+            match self.shards[s]
+                .insert_extracted_with_placement(ex, id, version, dsl, tags, placement)
+            {
+                Ok(_) => applied.push(s),
+                Err(e) => {
+                    failed.push(s);
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if !failed.is_empty() {
+            return Err(self.note_partial(
+                ClusterMutation::Add {
+                    logical: id,
+                    version,
+                    dsl: dsl.to_string(),
+                    tags: tags.to_vec(),
+                    placement: placement.clone(),
+                },
+                id,
+                applied,
+                failed,
+                first_err,
+            ));
+        }
+        Ok(success)
+    }
+
+    /// Apply an ADD to the shards — the state-machine `apply` for adds, shared by the live
+    /// write path ([`Self::add_query`], after logging) and log replay ([`Self::open`]).
+    /// Re-deriving placement here from the frozen dict makes live and replayed application
+    /// byte-identical.
+    pub(super) fn apply_add(
+        &self,
+        id: u64,
+        version: u32,
+        dsl: &str,
+        tags: &[(String, String)],
+        placement: &crate::ownership::QueryPlacement,
+    ) -> Result<AddOutcome, ShardError> {
+        // Latch tags_present (ADR-055, `/_stats` introspection) — covers both the live add
+        // (`add_query_with_tags`) and a tagged log-tail entry replayed on `open`.
+        self.note_tags(tags);
+        // The front door validated this row before appending it. Apply/replay
+        // uses only durable structural ceilings so a later policy/default
+        // tightening cannot discard an acknowledged mutation.
+        let ast = crate::dsl::parse_for_recovery(dsl).map_err(|error| {
+            ShardError::Log(format!(
+                "parsing acknowledged cluster add during apply: {error}"
+            ))
+        })?;
+        let mut lc = String::new();
+        let ex = extract_readonly(&ast, &self.norm, &self.dict, &mut lc);
+        // Force accept=true (same only-accepted-writes invariant as apply_upsert): apply/replay
+        // reproduces the writer's decision regardless of the current knob, so a knob flip on
+        // reopen cannot drop or resurrect a class-D write (codex review). Rejected writes never
+        // reach the log (classified out in add_query), so the Reject arm is defensive.
+        let target = placement_of(
+            &self.dict,
+            &self.ring,
+            &ex,
+            true,
+            self.per_shard.hot_anchor_threshold,
+        );
+        let expected = target.placement(self.placement_generation(), self.shards.len() as u32)?;
+        if &expected != placement {
+            return Err(crate::ownership::OwnershipError::PlacementDecisionMismatch.into());
+        }
+        let outcome = match target {
+            // Defensive: an effectively-empty query is rejected before logging, so a logged
+            // mutation never lands here; a replayed no-op (stored nowhere) is still safe.
+            Target::Reject => return Ok(AddOutcome::RejectedClassD),
+            // The broad lane (class C / B arity-2 / accepted D): replicated to EVERY shard
+            // (ADR-080). Same fail-collect fan-out as Selective, so a mid-fan-out remote failure
+            // is queued for repair rather than a silent partial. In-process inserts are infallible
+            // ⇒ the outcome is byte-identical save that the entry now lands on every shard.
+            Target::ReplicatedAlwaysVisible | Target::ReplicatedBroad => {
+                let all: Vec<usize> = (0..self.shards.len()).collect();
+                self.insert_on_shards(
+                    &all,
+                    &ex,
+                    id,
+                    version,
+                    dsl,
+                    tags,
+                    placement,
+                    AddOutcome::Replicated,
+                )?
+            }
+            Target::Selective(shards) => self.insert_on_shards(
+                &shards,
+                &ex,
+                id,
+                version,
+                dsl,
+                tags,
+                placement,
+                AddOutcome::Placed {
+                    shards: shards.clone(),
+                },
+            )?,
+        };
+        // A successful full apply supersedes any stale partial-apply queued for this id, so
+        // `resync` never re-drives an outdated mutation. Cheap no-op on the default path.
+        self.clear_pending(id);
+        Ok(outcome)
+    }
+
+    /// Apply a REMOVE to the shards — the state-machine `apply` for removes. The shard
+    /// memtable/segment liveness is the authority; there is no separate coordinator live
+    /// set to keep in sync (the durable base is the per-shard segments — ADR-032).
+    pub(super) fn apply_remove(&self, id: u64) -> Result<usize, ShardError> {
+        // Remove fans the idempotent delete out to EVERY shard. Try them all (don't bail on the
+        // first error) and collect failures, so a partial remove is repairable rather than a
+        // silent half-delete (ADR-047). In-process deletes are infallible ⇒ `failed` stays empty
+        // ⇒ byte-identical to the old `.sum()`.
+        let mut removed = 0usize;
+        let mut failed = Vec::new();
+        let mut first_err: Option<ShardError> = None;
+        for (s, shard) in self.shards.iter().enumerate() {
+            match shard.delete_by_logical_id(id) {
+                Ok(n) => removed += n,
+                Err(e) => {
+                    failed.push(s);
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if !failed.is_empty() {
+            let applied: Vec<usize> = (0..self.shards.len())
+                .filter(|s| !failed.contains(s))
+                .collect();
+            return Err(self.note_partial(
+                ClusterMutation::Remove { logical: id },
+                id,
+                applied,
+                failed,
+                first_err,
+            ));
+        }
+        // A successful full delete supersedes any queued partial Add/Remove for this id.
+        self.clear_pending(id);
+        Ok(removed)
+    }
+}

@@ -1,6 +1,6 @@
 # ADR-056: Compaction-that-improves — re-anchoring drifted queries during a merge
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** A query's *anchor* — the signature/posting list it is retrieved under — is chosen at
   compile time by `anchor_plan(ex, dict)` as a function of feature frequency: the rarest required

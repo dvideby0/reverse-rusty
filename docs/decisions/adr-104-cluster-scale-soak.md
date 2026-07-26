@@ -1,6 +1,6 @@
 # ADR-104: The 20M multi-shard scale soak (Distributed-v1 criterion 12, scale half)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 - **Status:** **Built + passing (2026-07-02).** A new `#[ignore]`d test target
   `engine/tests/cluster_soak/` — one soak (`twenty_million_multi_shard_soak`) that builds a

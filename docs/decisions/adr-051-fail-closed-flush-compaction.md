@@ -1,6 +1,6 @@
 # ADR-051: Fail-closed flush, compaction & reseal — never destroy durable state before the replacement is committed
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** ADR-017 made the *bulk-ingest* path durable-or-rejected by routing it through

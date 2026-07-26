@@ -1,6 +1,6 @@
 # ADR-005: Typed errors over stringly-typed Results
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Engine, errors, dependencies & ops decisions](areas/engine-quality-and-operations.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Early on, Reverse Rusty used `Result<_, String>` for parse failures and silently dropped

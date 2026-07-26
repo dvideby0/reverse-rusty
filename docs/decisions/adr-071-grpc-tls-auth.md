@@ -1,6 +1,6 @@
 # ADR-071: TLS + mesh auth on the gRPC transports (Distributed-v1 criterion 2)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** [ADR-065](adr-065-distributed-v1-graduation.md) criterion 2. Both gRPC surfaces — the
   shard transport (`ShardService`: percolate/ingest/recovery RPCs, ADR-029) and the control plane

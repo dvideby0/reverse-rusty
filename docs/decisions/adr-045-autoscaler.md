@@ -1,6 +1,6 @@
 # ADR-045: Autoscaler — the policy/trigger layer over rebalance + advisories (clustering step 6c)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — elasticity & repair decisions](areas/clustering-elasticity-and-repair.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

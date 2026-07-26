@@ -1,6 +1,6 @@
 # ADR-122: Fail-closed positional tombstones
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** `Engine::tombstone_in(segment, local_id)` is an expert physical-address API.
   It appended a positional WAL frame before checking whether the segment or row existed, and

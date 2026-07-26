@@ -1,6 +1,6 @@
 # ADR-067: Atomic upsert — `PUT /_doc/{id}` is replace-by-id (ES `index` semantics)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** [ADR-064](adr-064-percolator-drop-in-parity-audit.md) item 1, the first item of the
   drop-in-parity work package and the audit's headline *update* divergence: a re-PUT through

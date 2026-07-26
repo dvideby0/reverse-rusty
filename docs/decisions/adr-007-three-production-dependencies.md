@@ -1,6 +1,6 @@
 # ADR-007: Three production dependencies (daachorse, roaring, rayon)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Engine, errors, dependencies & ops decisions](areas/engine-quality-and-operations.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Reverse Rusty started std-only with hand-rolled alternatives (token-trie for alias

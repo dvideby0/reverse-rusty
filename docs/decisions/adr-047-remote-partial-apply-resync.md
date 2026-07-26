@@ -1,6 +1,6 @@
 # ADR-047: Remote live-write partial-apply — observe, fail-closed, repair (`resync`) + the `block_on` thread-context contract
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — elasticity & repair decisions](areas/clustering-elasticity-and-repair.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted + **implemented** (distributed-layer hardening from an external review). The

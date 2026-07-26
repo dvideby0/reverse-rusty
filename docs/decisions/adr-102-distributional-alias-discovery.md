@@ -1,6 +1,6 @@
 # ADR-102: Distributional alias discovery (review-first candidates)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 - **Status:** **Accepted (2026-07-02).** `POST /_vocab/aliases/discover[_and_record]` — PPMI-cosine
   context-similarity candidates over the stored queries, filed as review-only `Candidate`s under a

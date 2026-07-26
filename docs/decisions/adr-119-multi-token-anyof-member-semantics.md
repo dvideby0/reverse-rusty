@@ -1,6 +1,6 @@
 # ADR-119: Preserve multi-token any-of member semantics
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** The DSL parser retains each comma-delimited any-of member as one string, but the
   compiler previously normalized a member to several features and kept only its rarest feature.

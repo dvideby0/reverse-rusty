@@ -1,6 +1,6 @@
 # ADR-022: ES-style runtime settings API (`GET/PUT /_settings`)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Engine, errors, dependencies & ops decisions](areas/engine-quality-and-operations.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Every engine tuning knob (`EngineConfig`) was fixed at process start from CLI flags.

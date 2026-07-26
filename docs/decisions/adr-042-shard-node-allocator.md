@@ -1,6 +1,6 @@
 # ADR-042: Shard→node allocator (rendezvous hashing) — committing the placement map (clustering step 5f)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — elasticity & repair decisions](areas/clustering-elasticity-and-repair.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

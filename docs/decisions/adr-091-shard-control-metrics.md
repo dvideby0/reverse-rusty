@@ -1,5 +1,7 @@
 # ADR-091: Per-node Prometheus metrics — shard/control `/_metrics`
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-30)
 
 **Context.** Observability stopped at the coordinator. The single-node / `--cluster` HTTP server

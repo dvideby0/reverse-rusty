@@ -1,6 +1,6 @@
 # ADR-012: mmap'd segment file format with frozen hash tables
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Sealed segments are immutable — perfect for memory-mapped I/O. The in-memory

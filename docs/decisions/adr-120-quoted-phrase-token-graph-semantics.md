@@ -1,6 +1,6 @@
 # ADR-120: Quoted phrases use analyzed token-graph adjacency
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** The DSL documented `"a b"` and `-"a b"` as phrase predicates, but extraction lowered
   their normalized features into the same unordered required/forbidden columns as bare terms.

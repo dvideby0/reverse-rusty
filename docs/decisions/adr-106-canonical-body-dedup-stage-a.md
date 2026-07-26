@@ -1,5 +1,7 @@
 # ADR-106: Canonical-body deduplication, Stage A — per-segment posting sharing
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** accepted (2026-07-03) · **Program:** Broad-Query Cost Program increment 2
 ([`../proposals/broad-cost-program.md`](../proposals/broad-cost-program.md) §5.1), paired with
 increment 1's hot tier (ADR-105) per the review outcome: the two ship together because the

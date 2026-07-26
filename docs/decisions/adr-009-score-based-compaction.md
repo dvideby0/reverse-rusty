@@ -1,6 +1,6 @@
 # ADR-009: ClickHouse-inspired score-based compaction over RocksDB-style leveled compaction
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Compaction needs to bound the base segment count because percolation (unlike a

@@ -1,6 +1,6 @@
 # ADR-040: Translog retention leases + finalize under sustained writes (clustering step 5d)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — replication & control plane decisions](areas/clustering-replication-and-control-plane.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

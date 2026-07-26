@@ -1,6 +1,6 @@
 # ADR-019: Query-family factoring evaluated and declined
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Declined
+> [Matching & verification decisions](areas/matching-and-verification.md) · [Decision hub](../DECISIONS.md) · **Status:** Declined
 
 
 - **Context:** The design carried an explicit **query-family / shared-prefix DAG** as a roadmap item

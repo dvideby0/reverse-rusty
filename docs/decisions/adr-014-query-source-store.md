@@ -1,6 +1,6 @@
 # ADR-014: Engine-level query source store (not in segment files)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** The audit (P1-7) identified that search results returning bare integer IDs with

@@ -1,6 +1,6 @@
 # ADR-025: Wire query-complexity limits into the parser (the config knobs were cosmetic)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Matching & verification decisions](areas/matching-and-verification.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** `EngineConfig` exposed three query-complexity limits — `max_query_length`,

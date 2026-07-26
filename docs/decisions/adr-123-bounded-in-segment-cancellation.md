@@ -1,6 +1,6 @@
 # ADR-123: Bounded in-segment cooperative cancellation
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** ADR-099 checks an armed request at entry, title, segment, and columnar-block
   boundaries. That stops abandoned work, but one dense posting or canonical-body group can occupy

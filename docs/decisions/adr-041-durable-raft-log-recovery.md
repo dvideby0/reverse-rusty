@@ -1,6 +1,6 @@
 # ADR-041: Durable Raft log + control-plane restart recovery (clustering step 5e)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — replication & control plane decisions](areas/clustering-replication-and-control-plane.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

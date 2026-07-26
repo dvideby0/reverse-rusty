@@ -1,6 +1,6 @@
 # ADR-002: Integer-only exact verification (no strings on the hot path)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Matching & verification decisions](areas/matching-and-verification.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Most percolators re-run a scorer or mini-query-engine on each candidate. This

@@ -1,5 +1,7 @@
 # ADR-095: Parallel multi-position moves — the busy-endpoint move ledger + conflict-free waves
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-07-01)
 
 **Context.** Every data-moving sweep was strictly sequential. ADR-090 introduced

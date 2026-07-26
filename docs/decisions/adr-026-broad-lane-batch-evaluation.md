@@ -1,6 +1,6 @@
 # ADR-026: Broad-lane batch / columnar evaluation (`match_titles_batch`, `POST /_mpercolate`)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Matching & verification decisions](areas/matching-and-verification.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Class-C ("broad") queries are quarantined out of the selective path (ADR-003) because

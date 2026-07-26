@@ -1,6 +1,6 @@
 # ADR-036: gRPC multi-node per-shard replication + peer recovery (clustering step 4b)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — replication & control plane decisions](areas/clustering-replication-and-control-plane.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

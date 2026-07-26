@@ -1,6 +1,6 @@
 # ADR-103: Match-feedback alias validation (behavioral evidence for candidates)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 - **Status:** **Accepted (2026-07-02).** Opt-in passive capture of the live title→query match
   stream, aggregated into per-candidate-pair behavioral evidence

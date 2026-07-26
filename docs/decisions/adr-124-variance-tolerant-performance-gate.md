@@ -1,6 +1,6 @@
 # ADR-124: Variance-tolerant performance regression gate and scheduled soak
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Done (2026-07-25)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Done (2026-07-25)
 
 ## Context
 

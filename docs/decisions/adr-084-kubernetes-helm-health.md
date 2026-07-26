@@ -1,5 +1,7 @@
 # ADR-084: Kubernetes/Helm packaging + gRPC health endpoints
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-23)
 
 **Context.** [ADR-081](adr-081-deployment-packaging-runbook.md) shipped the production compose +

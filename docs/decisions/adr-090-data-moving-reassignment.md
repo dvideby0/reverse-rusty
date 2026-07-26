@@ -1,5 +1,7 @@
 # ADR-090: Data-moving live reassignment (`reassign_and_move` / `rebalance_and_move`)
 
+> [Clustering — elasticity & repair decisions](areas/clustering-elasticity-and-repair.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-25)
 
 **Context.** ADR-086 shipped the *boot-time* half of "route by the committed shard→node map": a

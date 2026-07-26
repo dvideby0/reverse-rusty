@@ -1,6 +1,6 @@
 # ADR-037: Cluster-state control-plane seam behind `trait ControlPlane` (clustering step 5a)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — replication & control plane decisions](areas/clustering-replication-and-control-plane.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted (increment 5a — the dependency-free seam; the openraft backend is 5b, the quiesce-gap

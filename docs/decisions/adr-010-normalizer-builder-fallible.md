@@ -1,6 +1,6 @@
 # ADR-010: NormalizerBuilder + fallible construction
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Normalization & vocabulary decisions](areas/normalization-and-vocabulary.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** The `Normalizer::default_vocab()` constructor was the only way to build a

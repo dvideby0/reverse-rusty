@@ -1,6 +1,6 @@
 # ADR-070: Cluster REST surface — the coordinator-mode server (Distributed-v1 criterion 1)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** [ADR-065](adr-065-distributed-v1-graduation.md) criterion 1 — the first of the three
   items that unblock testing everything else. The HTTP server fronts a **single-node `Engine` only**;

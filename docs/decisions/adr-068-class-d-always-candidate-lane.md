@@ -1,6 +1,6 @@
 # ADR-068: The class-D always-candidate lane (opt-in accept-and-quarantine for negation-only queries)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** [ADR-064](adr-064-percolator-drop-in-parity-audit.md) item 2. A **class-D** query has no
   required feature and no any-of group — nothing to anchor a signature on — so the engine rejects it at

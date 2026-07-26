@@ -1,6 +1,6 @@
 # ADR-087: A front-end and lowering-independent semantic oracle
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 - **Status:** **Built + passing (2026-06-24; semantic-model hardening 2026-07-25).** New std-only workspace member
   `engine/ref-matcher/` (`reverse-rusty-ref-matcher`) reimplementing the DSL parser, normalizer,

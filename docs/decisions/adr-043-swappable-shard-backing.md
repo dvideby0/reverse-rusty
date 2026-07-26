@@ -1,6 +1,6 @@
 # ADR-043: Swappable shard backing — the live-handoff routing-flip mechanism (clustering step 6a)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — elasticity & repair decisions](areas/clustering-elasticity-and-repair.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.
