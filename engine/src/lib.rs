@@ -1,9 +1,9 @@
 //! Reverse Rusty — a domain-aware reverse product-query matcher.
 //!
-//! Design: docs/design/README.md (architecture overview); CLAUDE.md (agent entry point)
+//! Design: docs/design/README.md (architecture overview); AGENTS.md (agent entry point)
 //! Invariant: Lossless signature cover — if a title could positively match a
 //!   query, the title must generate a signature that retrieves that query
-//! Verified by: tests/oracle.rs (differential correctness oracle)
+//! Verified by: tests/oracle/ (differential correctness oracle)
 //!
 //! Pipeline:
 //!   raw title -> normalize -> dense feature IDs -> title signatures

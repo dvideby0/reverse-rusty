@@ -133,7 +133,9 @@ Learn synonyms from the engine's **own** already-ingested queries and apply them
 `POST /_vocab/learn`, which only returns synonyms learned from caller-supplied queries for review). The
 engine re-mints its vocabulary, recompiles every stored query under the new normalizer, and atomically
 swaps — so both surface forms of each learned alias match immediately, with zero false negatives
-(ADR-046). The change is durable (it survives reopen).
+(ADR-046). It has the same persistence boundary as `PUT /_vocab`: a durable cluster checkpoints the
+vocabulary in its coordinator manifest; a single-node operator must save `GET /_vocab` to the
+configured `--vocab-file` before restart.
 
 ```bash
 curl -X POST 'localhost:9200/_vocab/learn_and_apply?min_count=2'
@@ -163,15 +165,28 @@ curl -X POST 'localhost:9200/_vocab/learn_and_apply?corpus_phrases=true&npmi_min
 
 ---
 
-## Learned-alias registry (ADR-060)
+## Learned-alias registry (ADR-060/061/102/103)
 
-A governance layer over equivalence expansion (ADR-054): a registry of alias **candidates** with
-provenance, a structural **kind**, a confidence score, and a lifecycle **status** (`candidate` /
-`active` / `rejected`). Only **active** single-token groups affect matching (via FN-safe expansion);
-candidates are recorded for review and never change results. Conservative by construction —
-single-token spelling/abbreviation variants auto-activate, while learned multi-form category
-alternatives (`(psa, bgs, sgc)`), multi-word aliases (a Phase-2 token-graph feature), and mixed-kind
-groups are recorded as candidates, **never silently active**. Single-node (like ADR-054).
+The registry governs equivalence expansion with provenance, a structural **kind**, confidence,
+optional feedback evidence, and a lifecycle **status** (`candidate`, `active`, or `rejected`).
+Candidates and rejected entries are metadata only. Active, expressible groups widen positive
+matching through the false-negative-safe equivalence path.
+
+Current activation policy:
+
+| Source and kind | Default status |
+|---|---|
+| Operator-imported or manually edited single-token or multi-word group | `active` |
+| Any-of-learned clear single-token spelling/abbreviation variant | `active` |
+| Any-of-learned distinct-token or multi-word group | `candidate` |
+| Distributionally discovered group, of any kind | `candidate` |
+| Mixed-feature-kind or otherwise unexpressible group | `candidate`; it cannot affect matching |
+
+Multi-word aliases are implemented, not deferred: ADR-061 supplies query-side collapse plus the
+two title feature views, and ADR-076 makes cluster routing positive-view-aware. Import,
+learn-and-apply, and an edited registry installed through `PUT /_vocab` work in single-node and
+cluster modes. The lower-confidence discovery-record and match-feedback workflows remain
+single-node where noted below.
 
 ### `GET /_vocab/aliases`
 
@@ -200,9 +215,9 @@ curl 'localhost:9200/_vocab/aliases'
 
 Import a Solr/Lucene synonym file (the format ES's `synonyms_path` consumes) into the registry and
 apply it live. Comma lists are one equivalence group; `a, b => c, d` mappings are unioned into one
-**bidirectional** group (RR equivalences are bidirectional — a recall-safe over-approximation); `#`
-comments and `\,` escapes are honored. Safe single-token groups auto-activate; multi-word groups are
-recorded as candidates.
+**bidirectional** group (Reverse Rusty equivalences are bidirectional); `#` comments and `\,`
+escapes are honored. An imported single-token or multi-word group activates because the file is an
+operator declaration. An unexpressible or mixed-feature-kind group remains a candidate.
 
 ```bash
 curl -X POST localhost:9200/_vocab/aliases/import \
@@ -220,7 +235,96 @@ rebuilt in place so the change takes effect immediately (no restart), with zero 
 
 ### `POST /_vocab/aliases/learn_and_apply`
 
-Learn alias candidates from the engine's OWN stored queries (any-of co-occurrence) into the registry
-and apply. Conservative: only clear single-token variants auto-activate; everything else lands as a
-candidate (inspect via `GET /_vocab/aliases`, then declare via an import to activate). `?min_count=N`
-(default 2). Response shape matches `import`.
+Learn alias candidates from the engine's own stored queries (any-of co-occurrence) into the registry
+and apply. Only clear single-token variants auto-activate; distinct-token and multi-word groups land
+as candidates. Inspect them with `GET /_vocab/aliases`, then make an operator declaration through an
+import or an edited `PUT /_vocab` document if appropriate. `?min_count=N` defaults to 2. The response
+shape matches `import`.
+
+### `POST /_vocab/aliases/discover`
+
+Run deterministic, distributional discovery (ADR-102) and return review proposals without recording
+or activating anything. With no body, single-node mode analyzes its live stored query sources. An
+explicit corpus is accepted in either mode:
+
+```json
+{
+  "queries": [[1, "upper deck rookie"], [2, "ud rookie"]],
+  "min_token_freq": 5,
+  "min_similarity": 0.60,
+  "max_pairs": 100,
+  "max_vocab": 4096,
+  "max_cooccurrence_rate": 0.05,
+  "glue_phrases": true,
+  "include_numeric": false
+}
+```
+
+The fields shown are the defaults. The response is
+`{"count":N,"proposals":[{"forms":["ud","upper deck"],"similarity":0.91,
+"cooccurrence_rate":0.0}]}` in best-first deterministic order. Cluster mode requires the explicit
+`queries` corpus because the coordinator has no cross-shard source-gather operation; omitting it is
+a 400.
+
+### `POST /_vocab/aliases/discover_and_record`
+
+Single-node only. Run discovery over this engine's own stored queries and record every proposal as a
+review `candidate`. The body may override the same knobs as `discover`, but may not supply
+`queries`. Nothing activates, matching does not change, and `recompiled` is always zero:
+
+```json
+{
+  "acknowledged": true,
+  "proposed": 12,
+  "new_candidates": 8,
+  "rediscovered": 3,
+  "rejected_sticky": 1,
+  "recompiled": 0,
+  "summary": {"active": 2, "candidate": 8, "rejected": 1}
+}
+```
+
+Cluster mode returns 501. Run the dry discovery against an explicit corpus, review it, and install
+the resulting registry with `PUT /_vocab` instead.
+
+### Match-feedback validation
+
+ADR-103 can passively compare which queries match titles containing each form of a tracked
+two-form candidate. Capture is single-node, in memory, default off, and applies to compatibility
+`/_search` and `/_mpercolate` traffic. Enable it with the dynamic settings
+`alias_feedback_capture=true`; `alias_feedback_max_pairs` bounds the tracked candidate set.
+
+`GET /_vocab/aliases/feedback` returns the rolling evidence. Threshold query parameters default to
+`min_overlap=0.5`, `min_titles=50`, and `min_queries=20`:
+
+```json
+{
+  "capture_enabled": true,
+  "tracked_pairs": 1,
+  "min_overlap": 0.5,
+  "min_titles": 50,
+  "min_queries": 20,
+  "pairs": [{
+    "forms": ["ud", "upper deck"],
+    "titles_a": 75,
+    "titles_b": 81,
+    "titles_both": 2,
+    "sampled_a": 43,
+    "sampled_b": 46,
+    "excluded": 4,
+    "overlap": 0.78,
+    "validated": true
+  }]
+}
+```
+
+`POST /_vocab/aliases/validate_and_apply` with the same thresholds stamps evidence and raises
+confidence for validated candidates without changing matching. Add `?activate=true` to explicitly
+promote eligible validated candidates through the full recompile path; rejected or mixed-kind
+entries are never resurrected by automation. The response reports `validated`, `stamped`,
+`activated`, `recompiled`, and the status `summary`.
+
+`POST /_vocab/aliases/feedback/reset` clears the process-local evidence window and returns
+`{"acknowledged":true}`. All three feedback endpoints return 501 in cluster mode; run capture on a
+single-node replica of the title stream and install reviewed activations through cluster
+`PUT /_vocab`.

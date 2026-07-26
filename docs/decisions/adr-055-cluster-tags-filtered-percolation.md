@@ -83,12 +83,15 @@
   `AdoptDict` + the fingerprint handshake, so a recovery source / re-adopted data-dir already shares it);
   it is a defensive guard for a future multi-coordinator / mixed-data-dir deployment, tracked as a
   follow-up.
-- **Proven by:** `tests/cluster_oracle.rs` (`filtered_percolation_matches_single_node_and_oracle` —
+- **Proven by:** `tests/cluster_oracle/filtered.rs`
+  (`filtered_percolation_matches_single_node_and_oracle` —
   cluster ≡ single-node ≡ brute under a filter sweep, across K∈{1,3,8,16}×RF∈{1,2}, filtered ⊆
   unfiltered; `live_tagged_add_is_filterable_with_post_freeze_tag` — synthetic-tag cross-shard
-  consistency), `tests/cluster_durability_oracle.rs` (`tagged_cluster_survives_checkpoint_and_reopen` —
+  consistency), `tests/cluster_durability_oracle/checkpoint.rs`
+  (`tagged_cluster_survives_checkpoint_and_reopen` —
   the manifest `tag_dict_data` + clog/segment tag round-trips), and
-  `tests/cluster_grpc_oracle.rs` (`grpc_filtered_percolation_matches_single_node_and_oracle` — tag-dict
+  `tests/cluster_grpc_oracle/filtered.rs`
+  (`grpc_filtered_percolation_matches_single_node_and_oracle` — tag-dict
   shipping + fingerprint handshake + tagged bulk load + filtered percolate + a live tagged add, all over
   the wire).
 - **Design:** [`design/matching.md`](../design/matching.md) §5;

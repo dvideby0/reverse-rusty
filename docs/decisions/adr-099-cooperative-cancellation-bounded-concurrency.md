@@ -5,6 +5,10 @@
 - **Status:** **Done (2026-07-02; bounded-polling amendment ADR-123 on 2026-07-25).** The ADR-052
   deferral ("cooperative cancellation on the match path — weigh a coarse per-segment deadline
   check against simply bounding concurrency"), closed with **both**, as one combined design.
+- **Current outcome:** ADR-107–114 subsequently threaded one request deadline through bounded
+  ranked and exhaustive shard reads, and ADR-123 bounded polling inside dense segment scans.
+  Compatibility unranked gRPC cancellation, reject-on-saturation QoS, and runtime permit resizing
+  remain open.
 
 - **Context:** `timeout_ms` on `/_search` / `/_mpercolate` was a **response deadline only**:
   `tokio::time::timeout` raced the `spawn_blocking` future, so on expiry the client got its 408

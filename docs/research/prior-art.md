@@ -108,16 +108,18 @@ rates mean frequent refreshes, segment churn, and merge pressure — near-real-t
 3. **An explicit "unsupported / un-gateable" category.** This is the single most valuable lesson:
    a query you cannot gate cheaply must be *recognized as such and quarantined*, never allowed to
    silently become an always-candidate that everyone pays for. This directly motivates our
-   **broad-query classifier and separate broad lane** (cost classes A/B/C/D).
+   **two-axis placement classifier** (A/B/C/D/H): opt-in C/D broad work and an always-visible H
+   scheduling tier.
 
 **What we reject / improve:**
 
-- **General Lucene boolean queries.** We don't need arbitrary nested boolean/span/interval/geo. A
-  constrained product DSL means *every* supported query is gateable by construction — we can make
-  "un-gateable" a **compile-time rejection (class D)** rather than a silent runtime tax.
+- **General Lucene boolean queries.** We don't need arbitrary nested boolean/span/interval/geo. The
+  constrained product DSL compiles to bounded integer predicates and identifies no-positive-anchor
+  class D explicitly. D is rejected by default or accepted deliberately as an opt-in universal broad
+  row; it never becomes a hidden tax.
 - **Index-refresh update model.** Segment+refresh latency and merge amplification are too heavy for
-  frequent query churn. We use **immutable segments + a small hot delta + tombstones + atomic epoch
-  swap** (see the [ingestion design](../design/ingestion-and-updates.md)), giving sub-segment
+  frequent query churn. We use **immutable segments + a small hot delta + tombstones + atomic snapshot
+  publication** (see the [ingestion design](../design/ingestion-and-updates.md)), giving sub-segment
   update visibility without rebuilding postings in place.
 - **Generic query execution for verification.** We compile verification to **integer mask / sorted-
   slice checks**, not a Lucene `Scorer` tree.
@@ -125,28 +127,28 @@ rates mean frequent refreshes, segment churn, and merge pressure — near-real-t
 **Capability mapping — what a deployed percolator offers vs Reverse Rusty.** Beyond candidate
 selection, production percolator deployments lean on a handful of *operational* capabilities. The
 abstract reference workload is written up in [`percolator-workload.md`](percolator-workload.md); the
-mapping below is the canonical alignment/gap record (statuses tracked in [`../STATUS.md`](../STATUS.md)
-Tier 4):
+mapping below records the current alignment. The API reference owns exact request and response
+support; unfinished compatibility work belongs in the roadmap.
 
 | Capability | Generic ES/OS percolator | Reverse Rusty today | Disposition |
 |---|---|---|---|
 | Boolean query shape (include / exclude / OR) | Lucene bool / span / interval (arbitrary nesting) | required / forbidden / any-of (CNF) | ✅ parity for the product-DSL subset (ADR-001) |
 | Compile-time extract + match-time select | term extraction stored with the query | signature-cover optimizer | ✅ same architecture |
-| Un-gateable query handling | silently becomes an always-candidate | compile-time **class-D reject** / **class-C broad lane** | ✅ improves (ADR-003) |
+| Un-gateable query handling | silently becomes an always-candidate | class-D reject by default or explicit universal broad lane; class-C broad lane | ✅ explicit visibility/cost contract — ADR-003/068 |
 | Recall → verify | over-matches; **caller must exact-re-test** | integer-exact verifier ⇒ output false-positive-free | ✅ **subsumes** — one stage, final matches |
-| Per-query **metadata** stored with the query | arbitrary JSON fields | interned `(key,value)` tags in the SoA | ✅ **built (single-node)** — ADR-049 |
-| **Filter** results by metadata (bool clauses) | `bool.filter` on stored fields | ES `bool`/`terms` + native filter, pushed into verify | ✅ **built (single-node)** — ADR-049 (the dominant read pattern) |
-| `_score` / relevance ranking | per-hit Lucene score | pure boolean (`Vec<u64>`) | ❌ gap → Tier 4 (lower priority) |
-| `function_score` boost by metadata | yes | none | ❌ gap → Tier 4 (lower priority) |
-| Pagination (`from` / `size`) | yes | `/_search` yes; `/_mpercolate` size-only | ◑ partial → Tier 4 |
+| Per-query **metadata** stored with the query | arbitrary JSON fields | interned `(key,value)` tags in the SoA | ✅ built locally and through the cluster — ADR-049/055 |
+| **Filter** results by metadata (bool clauses) | `bool.filter` on stored fields | ES `bool`/`terms` + native filter, pushed into verify | ✅ built locally and through the cluster — ADR-049/055 |
+| `_score` / relevance ranking | per-hit Lucene score | post-match additive scoring + bounded top-K | ✅ built locally and through the cluster — ADR-059/075/107/110 |
+| `function_score` boost by metadata | yes | request tag boosts + priority-tag value | ✅ supported by the rank contract — ADR-059/075 |
+| Pagination (`from` / `size`) | yes | legacy `from`/`size`; PIT + `search_after` on `/v2/_search` | ◑ remote PIT remains unsupported — ADR-113 |
 | Batch percolate (many docs / request) | yes | `/_mpercolate` (columnar broad lane) | ✅ have (ADR-026) |
 | Update / visibility model | index + **refresh** (segment churn) | immutable segments + memtable + epoch swap | ✅ improves (NRT, no refresh stall) |
 
-The **metadata + filter pair** — the workload's dominant read pattern — is **built and oracle-proven on
-the single-node engine** (designed in [`../design/matching.md`](../design/matching.md) §5, decided in
-[`../DECISIONS.md`](../DECISIONS.md) ADR-049). The remaining Tier-4 rows are ranking / `function_score` and
-`/_mpercolate` pagination (lower priority); threading tags through the experimental cluster path is a
-separate follow-on.
+The workload's dominant metadata + filter pair, additive ranking, and bounded pagination are built
+and oracle-proven; see [`../design/matching.md`](../design/matching.md) §5 and the
+[`API reference`](../reference/api.md). The open credibility gap is representative-corpus evidence,
+tracked as the roadmap's
+[`real-corpus audit`](../roadmap.md#real-corpus-correctness-and-throughput-audit).
 
 ---
 
@@ -253,7 +255,8 @@ gives us principled candidate-pruning, not just engineering folklore.
    the title lacks a shared feature) but **declined to build it** — the implicit anchor-sharing already
    present in our candidate index captures the near-duplicate-clustering benefit, and an explicit
    prefix DAG's cost (mmap serialization, compaction rebuild) was not justified against an already-flat
-   ~54 candidates/title on a path that is not the bottleneck. See [`../DECISIONS.md`](../DECISIONS.md)
+   a scale-flat selective candidate set on a path that is not the bottleneck. See
+   [`../DECISIONS.md`](../DECISIONS.md)
    ADR-019. **LIMIT+** (the bounded-depth successor to PRETTI) corroborates the concern — it exists
    specifically because PRETTI's full prefix tree grows too large.
 2. **Global token ordering by frequency.** Ordering elements by global frequency and filtering on the
@@ -274,20 +277,20 @@ frequent updates and a fixed small probe set (one title at a time, or a small ba
 
 ---
 
-## 7. Optional advanced topics (scouted, staged for later)
+## 7. Advanced topics: disposition
 
-- **Static membership filters (xor / binary-fuse / ribbon).** ~1.6× smaller than Bloom at the same
-  false-positive rate, immutable, branch-light. A natural fit for the **forbidden-feature** pre-check
-  ("does this title contain *any* excluded feature for this query?") and for segment-level "could any
-  query here match?" gates. Immutability matches our segment model. Staged for a later iteration.
+- **Static membership filters (xor / binary-fuse / ribbon).** The original design considered these
+  for immutable segment signature skipping. ADR-011 instead shipped a cache-line blocked Bloom filter,
+  which fits the one-memory-access budget better. It is used only for positive signature membership;
+  forbidden features never gate retrieval.
 - **SIMD set intersection** (e.g. shuffle/`_mm_cmpestrm`-style on x86, NEON on aarch64). Applies to
   medium sorted-array postings. Reverse Rusty uses sorted-array galloping/merge intersection that
   auto-vectorizes; explicit SIMD kernels are a documented optimization.
 - **Learned Bloom filters.** Interesting but add ML inference and model-drift risk on the hot path —
   contrary to the spec's "no ML inference per candidate." Rejected for the hot path.
-- **NUMA-aware sharding & mmap.** 100M queries → multiple shards. Pin shards to NUMA nodes, mmap
-  immutable segments per node, avoid cross-NUMA shared mutable state. Design-level concern; Reverse Rusty is
-  single-node but the segment model is shard-ready.
+- **NUMA-aware placement.** Immutable mmap segments and multi-shard-per-node slots are built, but
+  explicit NUMA pinning/locality policy is not. Treat it as a measured deployment optimization rather
+  than current behavior.
 
 ---
 

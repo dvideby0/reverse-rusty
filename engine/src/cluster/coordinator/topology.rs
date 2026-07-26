@@ -12,8 +12,10 @@
 //! `position`'s primary node physically holds that position's data. The HRW
 //! [`rebalance`](super::ClusterEngine::rebalance) permutes the map WITHOUT moving data, so routing a
 //! post-rebalance map would send a position's titles to a node holding a different shard (a false
-//! negative). The coordinator guards this by asserting the resolved topology equals its
-//! `--shard-endpoint` list on boot; data-moving reassignment (live handoff) is a deferred follow-on.
+//! negative). The coordinator guards this by asserting the resolved topology equals any static
+//! `--shard-endpoint` list supplied on boot. ADR-090/092 now provide data-moving reassignment and
+//! reconciliation; an assignment-authoritative restart omits that static list and resolves the
+//! committed, physically moved topology.
 
 use std::collections::HashMap;
 

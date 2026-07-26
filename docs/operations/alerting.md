@@ -1,6 +1,6 @@
 # Alerting
 
-What to alert on and why (roadmap Tier 5 M3). The **expressions live in one place** —
+What to alert on and why. The **expressions live in one place** —
 [`deploy/prometheus-alerts.yml`](../../deploy/prometheus-alerts.yml), a loadable Prometheus rule
 file validated by `promtool` in CI — and this page explains each rule *by name*: what it means,
 why that threshold, what to do. Tune thresholds in the yml; the metric inventory itself is in
@@ -30,15 +30,19 @@ DR flow ([`disaster-recovery.md` §3.1](disaster-recovery.md)).
 `tombstoned_entries > 1M` for 30m — deletes are outpacing compaction. Cost problem first (dead
 entries burn memory + scan time), disk-pressure problem later. **Do:** check compaction is
 running (single-node: `flush/compaction_total` counters; cluster: the backlog should sawtooth,
-not climb), lower the compaction trigger thresholds (`/_settings`, ADR-022), and check disk
-headroom — compaction needs transient space ([`sizing.md` §5](sizing.md)).
+not climb), and check disk headroom — compaction needs transient space
+([`sizing.md` §5](sizing.md)). In standalone mode, lower triggers through `PUT /_settings`
+(ADR-022). Cluster `PUT /_settings` is 501; change the consistent per-shard startup configuration
+and restart/redeploy instead.
 
 ### RRShardStaleSegments
 `stale_segments > 0` for 15m — segments still compiled under an older vocab epoch. A vocab
 change (`set_vocab` / alias activation) recompiles synchronously, so sustained staleness means a
-rebuild was interrupted. Matching stays zero-FN under the OLD vocab semantics for those segments;
-the new vocab's widenings just aren't live there yet. **Do:** re-apply the vocab (`PUT /_vocab` —
-idempotent) and watch the gauge drain.
+rebuild was interrupted. Matching stays zero-FN under the old compiled semantics for those segments;
+the new vocab's widenings just are not live there yet. **Do:** on standalone/in-process deployments,
+re-apply the vocab (`PUT /_vocab`) and watch the gauge drain. Remote shard servers support only the
+stock vocabulary; a custom-vocabulary deployment must use the in-process cluster rather than calling
+the refused remote endpoint.
 
 ### RRShardPercolateP99High
 `histogram_quantile(0.99, …rate(…_bucket{method="percolate"}…))` > 250ms for 10m — shard-side
@@ -50,11 +54,10 @@ network + queueing (ADR-085 transport metrics).
 
 ### RRShardBroadShareHigh
 ADR-101 counters ÷ the ADR-100 request count: broad-lane candidates per percolate > 500 for 15m.
-The selective path holds ~54 candidates/title *flat*; hundreds-per-title sustained means the
-corpus mix shifted toward class-C (broad) queries — a cost regression, not a correctness problem.
-**Do:** check the class split (`reverse_rusty_class_queries{class="c"}` — did someone bulk-load
-broad queries?), consider `include_broad: false` defaults for callers that don't need the broad
-lane, and batch broad-heavy traffic through `/_mpercolate` (the columnar lane —
+Hundreds per title sustained means the corpus or request mix shifted toward class C / accepted
+class D — a cost regression, not a correctness problem. **Do:** check
+`reverse_rusty_class_queries{class=~"c|d"}`, consider `include_broad: false` defaults for callers
+that do not need the opt-in scope, and batch broad-heavy traffic through `/_mpercolate` (the columnar lane —
 [`../performance/results.md`](../performance/results.md) §9).
 
 ## Control-plane rules
@@ -126,6 +129,8 @@ guardrail working (ADR-068 documents the opt-in lane if those queries are intent
 
 - **`wal_size_bytes` / `wal_pending_entries` growth** — checkpoint/flush cadence varies by
   deployment; the durability-failure counter is the actual failure signal.
-- **Coordinator memory** — stateless and small; alert at the platform layer if at all.
+- **Coordinator memory** — no dedicated rule is shipped; alert on process/container memory at the
+  platform layer. Remote coordinators still retain feature/tag spaces and request/control state, so
+  do not assume the footprint is zero.
 - **Per-request HTTP latency quantiles** (`http_request_duration_seconds`) — client-side SLOs
   belong to the caller's dashboards; the engine-side signals above localize the cause faster.

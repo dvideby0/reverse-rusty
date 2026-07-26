@@ -6,7 +6,7 @@
 //! `use crate::harness::*;`.
 //!
 //! The `Brute`, `vocab`, and `build_corpus` helpers are copied from
-//! `tests/cluster_oracle.rs` (the same deliberate "shares nothing with the engine"
+//! `tests/cluster_oracle/` (the same deliberate "shares nothing with the engine"
 //! oracle), so a compile/index/exact bug cannot hide by being present on both sides.
 
 pub(crate) use reverse_rusty::cluster::{ClusterConfig, ClusterEngine, ShardError};
@@ -23,7 +23,7 @@ pub(crate) fn vocab() -> Normalizer {
     Normalizer::default_vocab().expect("built-in vocab")
 }
 
-/// Independent ground-truth matcher (copied from `tests/cluster_oracle.rs` — shares
+/// Independent ground-truth matcher (copied from `tests/cluster_oracle/` — shares
 /// nothing with the engine or cluster).
 pub(crate) struct Brute {
     norm: Normalizer,
@@ -149,7 +149,7 @@ impl Brute {
     }
 }
 
-/// Build the test corpus (copied from `tests/cluster_oracle.rs`): a generated base
+/// Build the test corpus (copied from `tests/cluster_oracle/`): a generated base
 /// (class A + C) plus injected class-B any-of, class-B arity-2, and class-A coverage,
 /// plus multi-entity titles. Returns `(queries, titles)`.
 pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
@@ -197,7 +197,7 @@ pub(crate) fn build_corpus() -> (Vec<(u64, String)>, Vec<String>) {
     (queries, titles)
 }
 
-// ---- per-query tags + filtered percolation (ADR-049/055), copied from `tests/cluster_oracle.rs` ----
+// ---- per-query tags + filtered percolation (ADR-049/055), copied from `tests/cluster_oracle/` ----
 pub(crate) const CATEGORIES: [&str; 6] = ["cards", "coins", "stamps", "comics", "toys", "art"];
 pub(crate) const STATUSES: [&str; 3] = ["active", "inactive", "archived"];
 

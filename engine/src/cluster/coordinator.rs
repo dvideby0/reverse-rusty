@@ -276,8 +276,8 @@ pub(crate) struct ClusterDurable {
     pub log: Box<dyn ClusterLog>,
     /// The durable-artifact directory (`Some` ⇔ durable).
     pub data_dir: Option<PathBuf>,
-    /// The current checkpoint generation / log epoch (the future Raft term; lives in the
-    /// manifest, the cluster-state document, not in the log).
+    /// The current local checkpoint generation / log epoch. This lives in the coordinator
+    /// manifest and is distinct from both the control document's semantic epoch and Raft term.
     pub epoch: u64,
     /// ADR-109 placement generation restored from the durable cluster fence.
     pub placement_generation: crate::ownership::PlacementGeneration,
@@ -287,9 +287,9 @@ pub(crate) struct ClusterDurable {
     /// Ring vnode count, captured so the manifest can re-derive a byte-identical ring.
     pub vnodes: u32,
     /// The cluster-state control plane (membership + shard→node map + ring params + model
-    /// version + epoch — ADR-037). A single-node [`InMemoryControlPlane`] today (one logical
-    /// node owns every shard ⇒ the default path is byte-identical to before ADR-037); an
-    /// openraft-backed backend drops in here in step 5b.
+    /// version + epoch — ADR-037). The default in-process path uses
+    /// [`InMemoryControlPlane`]; distributed assembly can replace it with the openraft-backed
+    /// remote control plane without changing coordinator logic.
     pub control: Box<dyn ControlPlane>,
 }
 

@@ -51,10 +51,10 @@
     counted only in-memory/memtable segments, returning 0 for a reopened durable cluster's attached base).
 - **Consequence:** A durable in-process cluster reopens by attach-and-mmap — no recompilation of the corpus — and
   still rebuilds byte-identical placement (zero false negatives). Proven by an extended
-  `tests/cluster_durability_oracle.rs`: the existing rebuild ≡ pre-crash ≡ brute (K∈{1,3,8} × broad) plus new
+  `tests/cluster_durability_oracle/`: the existing rebuild ≡ pre-crash ≡ brute (K∈{1,3,8} × broad) plus new
   tests for attach-with-the-log-deleted, the **checkpoint-after-removing-a-build-time-query** bug-catcher (verified
   to fail without the re-seal), orphan-segment-ignored-and-GC'd, and corrupt-segment-fails-loud. Dependency-free
-  (lean core, **not** behind `distributed`); `tests/cluster_oracle.rs` (in-memory) and the gRPC oracle are
+  (lean core, **not** behind `distributed`); `tests/cluster_oracle/` (in-memory) and the gRPC oracle are
   unchanged. **Deliberately deferred:** ~~object-store segments (S3 behind a path abstraction)~~ *(this
   "multi-node half" framing is superseded by **ADR-033** — the cluster is **shared-nothing**: per-shard local
   segments stay the durable base, no object store)*, a Raft-backed `ClusterLog`, cross-process / remote-shard
@@ -65,5 +65,4 @@
   ADR-030 (the dict-fingerprint check reused on `open`), ADR-017 (all-or-nothing durable ingest), ADR-012 (the mmap
   segment format attached here), ADR-021 (the `DurabilityFailure` event), `clustering-and-scaling.md` §4.2 + §10
   step 3b, `src/cluster/coordinator.rs`, `src/cluster/shard.rs`, `src/segment/{lifecycle,compaction,persistence}.rs`,
-  `src/storage.rs` (cluster manifest v2 + `MmapSegment::class_counts`), `tests/cluster_durability_oracle.rs`.
-
+  `src/storage.rs` (cluster manifest v2 + `MmapSegment::class_counts`), `tests/cluster_durability_oracle/`.

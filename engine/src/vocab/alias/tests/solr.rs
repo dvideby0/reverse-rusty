@@ -61,7 +61,7 @@ fn registry_active_groups_includes_variants_and_declared_multiword() {
         &n,
         &dict,
     );
-    // declared multi-word → active (the Phase-2 matcher expresses it, ADR-061)
+    // declared multi-word → active (the ADR-061 matcher expresses it)
     reg.add_classified(
         &forms(&["ud", "upper deck"]),
         AliasProvenance::DeclaredFile,
@@ -197,7 +197,7 @@ fn activate_accepts_multiword_refuses_mixed_kind() {
     );
     assert!(
         reg.activate(&forms(&["ny", "new york"])),
-        "multi-word activates in Phase 2"
+        "multi-word activates through the ADR-061 matcher"
     );
     assert_eq!(reg.active_alias_forms(), forms(&["new york", "ny"]));
 

@@ -39,7 +39,8 @@ ES-style sibling fields — exactly as `PUT /_doc` does, e.g. `{"query": "...", 
 
 ## `POST /_flush` — Flush memtable
 
-Flush the in-memory memtable to an immutable on-disk segment:
+Flush the in-memory memtable to an immutable base segment. A durable engine writes and mmap-attaches
+the segment; an in-memory engine keeps the immutable segment in memory:
 
 ```bash
 curl -X POST localhost:9200/_flush
@@ -58,6 +59,12 @@ segment so reads keep matching, but it is **not** durable: the response is
 **`503 Service Unavailable`** with `"acknowledged": false`, and `persistence_healthy` flips false
 (see `GET /_health`). The data is retained in the WAL and recovers on restart — `acknowledged: true`
 is never returned for a write that isn't on disk (ADR-051).
+
+Cluster mode flushes every logical position and returns the smaller
+`{"acknowledged":true}` envelope. For a durable in-process cluster, the full durability commit is
+`POST /_checkpoint`. On a stateless remote coordinator that route is only a local maintenance
+boundary and does not flush or checkpoint shard-node files, so take a quiesced snapshot of every
+node volume for a whole-cluster recovery point.
 
 ## `POST /_compact` — Force compaction
 
@@ -93,3 +100,5 @@ back, or an earlier durable write failed — `/_compact` returns **`503 Service 
 `"acknowledged": false` and `"message": "persistence degraded; compaction not durably acknowledged"`.
 A failed compaction always rolls back to its source segments, so it never loses data (ADR-051).
 
+`/_compact` is single-node only. Cluster mode returns 501; each shard engine runs its own configured
+flush/compaction policy.

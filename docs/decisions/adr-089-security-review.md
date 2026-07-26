@@ -23,8 +23,10 @@
      = zero-false-negatives-or-loud-failure, corpus integrity, in-transit confidentiality, host
      integrity), the controls per boundary mapped to `file.rs`, the adversary model, and — explicitly —
      the **v1 non-goals** (no mTLS, no per-RPC authorization tiers, single shared tokens, the
-     experimental/localhost-proven distributed layers, power-loss beyond the WAL fsync policy). It
-     consolidates the previously-scattered operator security checklist.
+     then-experimental/localhost-proven distributed layers, power-loss beyond the WAL fsync policy).
+     The living threat model now records the broader current evidence—single-host container
+     lifecycle coverage as well as in-process and localhost gRPC—and the remaining independent
+     multi-machine/security work. It consolidates the previously-scattered operator checklist.
   2. **Container image scanning** via **Trivy**, wrapped by `deploy/scan-image.sh` (prefers a local
      `trivy`, else the `aquasec/trivy` image over the Docker socket; `--full` for all severities,
      `--strict` to fail on HIGH/CRITICAL). The **baseline** scan is recorded + triaged in the threat

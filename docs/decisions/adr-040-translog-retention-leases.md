@@ -62,7 +62,8 @@
   oracle is unchanged and green. Proven by: `replica.rs::seal_honors_retention_lease_so_concurrent_seal_keeps_the_recovery_tail`
   (a second seal during a held lease keeps the tail; releasing it lets the source GC) and
   `::add_recovered_replica_promotes_an_in_sync_set_equal_replica` (runtime growth → an in-sync, set-equal
-  replica that receives post-promotion writes); `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_converges_under_sustained_writes`
+  replica that receives post-promotion writes);
+  `tests/cluster_grpc_oracle/recovery.rs::grpc_peer_recovery_converges_under_sustained_writes`
   (a writer thread streams adds CONCURRENTLY with the recovery; the lease keeps the racing writes safe and the
   target converges to live source ≡ brute over the final set). Full `check.sh` green. The lease registry +
   finalize are std-only (lean core); the `RetentionLease` RPC is `distributed`-gated.
@@ -70,4 +71,3 @@
   in-process peer recovery the lease protects), ADR-031 (the `LogPos`/`ClusterLog` machinery), ADR-042 (the
   allocator that will drive cross-node promotion), ADR-033 (shared-nothing),
   `src/cluster/{shard,replica,coordinator,server,remote}.rs`, `engine/grpc/proto/shard.proto` (`RetentionLease`).
-

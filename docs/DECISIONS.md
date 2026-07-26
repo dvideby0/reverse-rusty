@@ -22,8 +22,10 @@ decision, and consequences.
 
 - **Know the topic?** Open the matching area catalog above.
 - **Know the number?** Search `decisions/adr-NNN-` or use the repository file finder.
-- **Need implementation status?** Use [STATUS.md](STATUS.md); ADRs record decisions, not the current
-  build inventory.
+- **Need current behavior?** Use the matching [design](design/README.md),
+  [reference](reference/api.md), or [operations](operations/deployment-modes.md) page.
+- **Need shipped history or future work?** Use [CHANGELOG.md](CHANGELOG.md) or
+  [roadmap.md](roadmap.md); ADRs record rationale, not a current-state inventory or backlog.
 - **Adding an ADR?** Create `decisions/adr-NNN-slug.md` using the next free number and add one row
   to the appropriate area catalog. Add a new area here only when no existing catalog is coherent.
 

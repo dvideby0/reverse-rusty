@@ -43,6 +43,5 @@
 - **See also:** ADR-029 (the edges this closes), ADR-005 (typed errors / no panics in library code),
   ADR-027 (the in-process core), `src/dict.rs` (`fingerprint`),
   `src/cluster/{shard,ring,coordinator,remote,server,proto}.rs`, `engine/grpc/proto/shard.proto`,
-  `tests/cluster_grpc_oracle.rs`, `tests/cluster_oracle.rs`.
-
+  `tests/cluster_grpc_oracle/`, `tests/cluster_oracle/`.
 

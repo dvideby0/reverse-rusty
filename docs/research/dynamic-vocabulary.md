@@ -2,16 +2,18 @@
 
 The output of the **research spike** that picked how Reverse Rusty's clustered core absorbs vocabulary
 that first appears in a *live write* (a query added after the shared dictionary is frozen). This is the
-headline **Cluster v1** correctness item ([`../STATUS.md`](../STATUS.md) Tier 0). The decision is recorded
+headline **Cluster v1** correctness item. The decision is recorded
 in [`../DECISIONS.md`](../DECISIONS.md) **ADR-046**; this file is the prior-art survey + the codebase
 feasibility + the reasoning behind it, per the "research first, implement second" ethos
-([`../../CLAUDE.md`](../../CLAUDE.md)).
+([`../../AGENTS.md`](../../AGENTS.md)).
 
 > **Status: spike complete → BUILT + oracle-proven (ADR-046).** Decision: **(1) deterministic
 > feature-hashing for new tokens + (2) runtime normalizer learning for new alias/synonym rules.** Both
-> are now built in the in-process Cluster v1 core (see [`../STATUS.md`](../STATUS.md) Tier 0 + ADR-046);
-> the cross-process *shipping* of alias updates is deferred to the experimental distributed layers. The
-> prior-art survey + reasoning below are preserved as the research artifact that motivated the build.
+> are now built in the in-process Cluster v1 core (ADR-046);
+> cross-process alias changes remain deploy-time configuration by ADR-076. A future change would ride
+> the roadmap's
+> [versioned feature-model path](../roadmap.md#versioned-feature-models-with-bluegreen-re-materialization).
+> The prior-art survey + reasoning below are preserved as the research artifact that motivated the build.
 
 ---
 
@@ -88,8 +90,9 @@ the id before another → transient FN), and couples to the Raft control plane.
 RocksDB's trained ZSTD **dictionary compression** shares one dictionary across many immutable SSTs and
 versions it by a dictionary id stored per file. It is a *compression* dictionary, not a term dictionary,
 so the analogy is loose — but it is the precedent for "**if you must evolve a frozen shared artifact,
-version it and let immutable files reference the version**," which informs the deferred cross-process
-normalizer-shipping path (§6) rather than the token id-assignment.
+version it and let immutable files reference the version**," which informs the proposed
+[versioned feature-model path](../roadmap.md#versioned-feature-models-with-bluegreen-re-materialization)
+rather than token id-assignment.
 
 ### 3d. The technique that fits — deterministic feature hashing
 
@@ -179,7 +182,7 @@ with the experimental distributed layers and is **beyond v1**.
    `compile::anchor_plan` treats an out-of-dict id as rare/non-hot without a `freq` lookup panic.
 3. **Vocab-epoch recompile** — exact trigger + cost of recompiling queries when an alias bumps the epoch
    in-process (lazy vs eager); confirm it preserves zero-FN under concurrent writes.
-4. **Oracle assertions** — extend `tests/cluster_oracle.rs` with absorb-correctly cases: a live add whose
+4. **Oracle assertions** — extend `tests/cluster_oracle/` with absorb-correctly cases: a live add whose
    query introduces a new token is found (zero FN); an all-unknown any-of group is satisfiable; a declared
    alias makes both surface forms match; a measured-bounded false-positive check.
 

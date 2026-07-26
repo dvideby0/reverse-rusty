@@ -410,7 +410,7 @@ mod tests {
     // These pin the exact parse output for every DSL construct, with expectations
     // authored by hand from the spec (docs/reference/dsl.md operator table +
     // docs/design/normalization.md §1 grammar) — NOT captured from the parser. They
-    // exist because the differential oracle (tests/oracle.rs) builds its ground truth
+    // exist because the differential oracle (tests/oracle/) builds its ground truth
     // by calling this same `parse`, so a parser bug would corrupt both sides equally
     // and stay invisible there. A hand-written `assert_eq!` cannot share that bug.
     // See docs/DECISIONS.md ADR-050.

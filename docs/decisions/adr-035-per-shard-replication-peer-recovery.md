@@ -49,9 +49,9 @@
     dir → `LocalShard::open_segments` (fail-loud on a missing/corrupt segment). The in-process stand-in for ES
     "stream segments from a peer," and the basis for the gRPC streaming RPC in ADR-036. Durable-primary only
     (an in-memory primary has no files; in-memory clusters seed replicas by op-stream replay).
-- **Consequence:** Dependency-free (lean core untouched). Proven by the extended `tests/cluster_oracle.rs`
+- **Consequence:** Dependency-free (lean core untouched). Proven by the extended `tests/cluster_oracle/`
   (RF ∈ {2,3} × K ∈ {1,3,8} × broad ≡ single-node ≡ brute; counts not inflated by replicas; live add/remove
-  with primary-only remove counts) and `tests/cluster_durability_oracle.rs` (durable RF=2 reopen ≡ pre-crash ≡
+  with primary-only remove counts) and `tests/cluster_durability_oracle/` (durable RF=2 reopen ≡ pre-crash ≡
   brute; checkpoint seals primaries only), plus `replica.rs` unit tests (in-sync failover, no-failover on
   `DictMismatch`, primary-write-failure propagation, replica-failure tolerance + `ReplicaDesync` event,
   set-equality through an op stream, peer recovery reproducing the primary set incl. a baked tombstone). One
@@ -64,5 +64,4 @@
   reuses), ADR-031 (the coordinator log = the WAL replicas replay), ADR-032 (per-shard durable segments = what
   peer recovery streams), ADR-033 (the shared-nothing model this implements step 4 of), ADR-036 (the gRPC lift),
   `src/cluster/replica.rs`, `src/cluster/coordinator.rs` (`replication_factor`, `build`/`open` wiring),
-  `src/cluster/shard.rs` (`set_event_sink`), `tests/cluster_oracle.rs`, `tests/cluster_durability_oracle.rs`.
-
+  `src/cluster/shard.rs` (`set_event_sink`), `tests/cluster_oracle/`, `tests/cluster_durability_oracle/`.

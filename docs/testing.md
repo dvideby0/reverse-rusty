@@ -39,41 +39,39 @@ suites generate large seeded corpora — debug is far too slow). Run one suite w
 
 | Suite | Where | Covers |
 |---|---|---|
-| **Differential oracle** | `tests/oracle.rs` | The **correctness contract** — brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing test; never weaken it. Includes the **messy-corpus** passes (`messy.rs` — the same contract over `gen::messify_dataset`'s adversarial surfaces, per-title + batch, ADR-063) and the **degenerate-input** differential (`degenerate.rs` — grammar/feature-model edges, engine ≡ brute on both ingest paths). |
+| **Differential oracle** | `tests/oracle/` | The **correctness contract** — shared-front-end brute force vs engine, asserting zero false negatives/positives ([`design/README.md`](design/README.md) §2). The load-bearing retrieval/lowering test; never weaken it. Includes the **messy-corpus** passes (`messy.rs` — the same contract over `gen::messify_dataset`'s adversarial surfaces, per-title + batch, ADR-063) and the **degenerate-input** differential (`degenerate.rs` — grammar/feature-model edges, engine ≡ brute on both ingest paths). |
 | **Adversarial properties** | `tests/adversarial/` | **Reference-free** correctness properties that don't share code with the engine (ADR-063): the self-match diagonal (a query must match a title built from its own positive terms — clean, messy-query×clean-title, clean-query×perturbed-title), metamorphic set-identity under surface noise, the ADR-054/058/060/061 cross-form matrices (incl. the codex-R11 whitespace-run regression), and unicode-soup fuzz (no-panic, determinism, `P(T) ⊇ N(T)`, `match_features == N(T)`). These cover the front-end divergence the differential oracle is structurally blind to. |
-| **Independent semantic oracle** | `tests/independent_oracle/` | **Front-end and lowering-independent differential** (Phase 0 item 2, ADR-087/#123): the engine is diffed against `reverse-rusty-ref-matcher`, a std-only zero-dependency parser/normalizer plus direct grammar predicate tree. The reference contains no query frequencies, retrieval proxies, signature classes, or production exact-store lowering; code independence remains enforced by the `check.sh` `cargo tree` lane. It asserts zero final FN/FP and separately classifies every missed semantic truth as candidate-cover vs post-retrieval loss by observing the real stored posting/filter/lane traversal, with candidate generation judged for recall only. Coverage: generated default (clean + messy), populated graders/phrases, quoted adjacency, multi-word alias two-view (controlled + ~989k-match at-scale), a hand-authored gotcha table, and the env-gated `RR_ORACLE_CORPUS` real corpus. Structural and human-expectation pins cover every clause boundary, complete multi-token any-of and negated-term predicates, and required/forbidden phrase graphs. |
-| **Crash injection** | `tests/crash_injection/` | **Real-process SIGKILL** durability torture (Phase 0 item 3, ADR-088): spawns the `crashwriter` bin, delivers a real external SIGKILL mid durable-op (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**), reopens in-process, and diffs the recovered engine against the ADR-087 independent oracle — zero FN on every ACKed write, no resurrection/corruption. `upsert` proves ADR-067 atomic replace (race-immune); `watermark` proves the ADR-066 `ensure_seq_after` re-pin across a second reopen; the **cluster** mid-write analogue is `deploy/harness.sh` leg 3b. The real-kill-mid-syscall check the chmod/torn-tail/CRC *simulations* cannot be. **`#[ignore]`d** (spawns + kills real processes, real fsyncs) behind a `check.sh` `crash injection` lane — see [Crash injection](#crash-injection). |
+| **Independent semantic oracle** | `tests/independent_oracle/` | **Front-end and lowering-independent differential** (ADR-087/#123): the engine is diffed against `reverse-rusty-ref-matcher`, a std-only zero-dependency parser/normalizer plus direct grammar predicate tree. The reference contains no query frequencies, retrieval proxies, signature classes, or production exact-store lowering; code independence remains enforced by the `check.sh` `cargo tree` lane. It asserts zero final FN/FP and separately classifies every missed semantic truth as candidate-cover vs post-retrieval loss by observing the real stored posting/filter/lane traversal, with candidate generation judged for recall only. Coverage: generated default (clean + messy), populated graders/phrases, quoted adjacency, multi-word alias two-view (controlled + ~989k-match at-scale), a hand-authored gotcha table, and the env-gated `RR_ORACLE_CORPUS` real corpus. Structural and human-expectation pins cover every clause boundary, complete multi-token any-of and negated-term predicates, and required/forbidden phrase graphs. |
+| **Crash injection** | `tests/crash_injection/` | **Real-process SIGKILL** durability torture (ADR-088): spawns the `crashwriter` bin, delivers a real external SIGKILL mid durable-op (WAL append / flush / compaction / backup / churn / **upsert** / **watermark**), reopens in-process, and diffs the recovered engine against the ADR-087 independent oracle — zero FN on every ACKed write, no resurrection/corruption. `upsert` proves ADR-067 atomic replace (race-immune); `watermark` proves the ADR-066 `ensure_seq_after` re-pin across a second reopen; the **cluster** mid-write analogue is `deploy/harness.sh` leg 3b. The real-kill-mid-syscall check the chmod/torn-tail/CRC *simulations* cannot be. **`#[ignore]`d** (spawns + kills real processes, real fsyncs) behind a `check.sh` `crash injection` lane — see [Crash injection](#crash-injection). |
 | **Broad-lane batch** | `tests/broad_batch.rs` | Broad-lane **batch ≡ scalar** equivalence matrix — including positive and negated compound any-of members under materialize/prefilter on and off — the load-bearing batch-correctness deliverable ([`design/matching.md`](design/matching.md) §4). |
 | **Quoted phrases** | `tests/quoted_phrases.rs` | ADR-120 hand-authored truth tables for required/forbidden adjacency and order, default split vs configured fold punctuation, alternate alias paths without conjunction weakening, independent-reference agreement, and requested-columnar batch parity through the positioned fallback. |
 | **Ranked batch** | `tests/ranked_batch.rs` | ADR-112 **batch ≡ per-title scalar top-K** differential (winners + totals; order-dependent rank counters deliberately uncompared): scope × strategy × materialize/prefilter × chunk size × K × threshold, filtered, ADR-106 dedup-heavy with tombstoned leader/member, multi-word-alias forced-inline, admission rejects, expired-deadline all-or-nothing. Cluster legs: `cluster_oracle/ranked_batch` (batch ≡ per-title distributed ≡ standalone; cross-title fetch dedup + under-credit 413; admission), `cluster_grpc_oracle/ranked_batch` (real servers: batch ≡ single RPCs ≡ reference; frame-cap refusal; deadline), and the durability `ranked` leg carries the batch view through checkpoint/reopen/backup-restore (mmap-backed coverage). |
 | **Exhaustive delivery** | `tests/exhaustive_delivery.rs` + coordinator exhaustive units + `tests/cluster_grpc_oracle/exhaustive.rs` + server job tests | ADR-114 bounded chunks ≡ compatibility all-ID collection across A/B/C/D/H and both scopes; legacy duplicate physical rows (including an older matching body beneath a newer non-match), pre-setup cancellation, cancellation polling inside both duplicate-selection and newest-live ranked-metadata 2K-copy reverse-index scans, and per-member polling through a 2K-member all-dead canonical-body group; cluster ownership/resequencing plus fail-closed broad-evaluator admission; a cross-owner partially-applied upsert is refused before emission until resync, an injected successful-lower/failing-later initial bulk ingest revokes convergence authority despite an empty repair map, populated remote attachment remains unauthoritative, and a second coordinator is rejected by an attested node lease even while every shared shard is empty; a successful concurrent re-placement is held behind the full-stream mutation barrier and barrier-before-logical lock order is pinned; injected sink failure at every chunk boundary (never a terminal summary), final-send post-polling, zero-chunk out-of-band cancellation, cancellation during a backpressured completion send retaining the `cancelled` lifecycle, terminal status withheld until completion dequeue (queued-response drop fails without summary and its first invalid cause survives a later DELETE), and deterministic cancellation/deadline-versus-dequeue arbitration through one terminal transition; gRPC full-channel deadline bounding, pre-spawn node admission, queued-closure permit expiry, immediate watcher-sender release after worker start, rejection of caller deadlines above the server-owned ceiling, Tokio capacity validation without constructor panics, non-runtime-worker timer construction, real-wire exact scored stream + frame-cap failure; score-presence checksum collision regression; boot-unique job-generation namespace; raw-semantic HTTP idempotency across standalone tag-dictionary growth plus ambiguous synthetic-boost collision rejection, HEAD-safe single-consumer claims, and busy admission preserving retained history; shutdown/cancelled write-barrier waits and disconnected consumers release without completion. |
 | Ranking | `tests/ranking.rs` + cluster ranking suites + server handler tests | Compatibility ranking (ADR-059/075) plus bounded typed ranking (ADR-107/108/110): collect-all/full-sort differentials, signed/saturating scores, ties, filters/scopes, newest-live duplicate precedence, K/threshold bounds, every A/B/C/D/H class, dynamic vocabulary/canonical bodies, strict HTTP ingest, permit deadlines, and winner-only fail-closed enrichment ([`design/matching.md`](design/matching.md) §5.4). |
 | Unit tests | `src/*.rs` | DSL parsing, vocab, WAL framing, loader, anchor filter (inline `#[cfg(test)]` modules). |
-| Persistence | `tests/persistence.rs` + storage/cluster unit modules | Segment round-trip, WAL crash-recovery replay, mmap compaction, durability-failure events, ADR-108 typed-priority v6/legacy fallback, and ADR-109 segment-v7 / cluster-manifest-v6 / clog+translog-v4 / adopted-space-v2 round-trips, malformed-column refusal, and rebuild-only migration fences. ADR-118/119/120/#123 add compiler-semantics 0/1/2/3/4 codec coverage; cluster-manifest-v7 and shard-checkpoint-v2 round trips; one-shot standalone migration from older stamps (including multi-token any-of, quoted-phrase, and complete forbidden-term source recompilation), with aliases, and with number context only; newly exposed dense-ID stability; equivalence-aware legacy `open` + `adopt_vocab`; genuine duplicate-row/degraded-subset refusal; manifest-captured insert/upsert WAL de-duplication without suppressing a watermarked memtable-only insert; mismatched per-shard manifest-column refusal; WAL-tail source survival across a second reopen; coherent live state after source persistence failure; above-default accepted-limit recovery in both WAL and shard-translog replay; RF=2 local-cluster rebuild/re-placement; legacy-tail logical folding before current placement validation; empty-base coordinator/translog-tail fences; tagged-tail survival after `max_tags` tightening; frozen-mask/default-visibility preservation after deletes; failed-cluster-migration source retry safety; fail-loud future semantics/shard-local restart without advancing its sidecar/translog commit point; and mixed-peer handshake/manifest refusal before adoption or target-file processing. ADR-110 adds top-K/source continuity through checkpoint/reopen and backup/restore with **no new layout version**. ADR-119 adds v9 compound-predicate round-trip/malformed-program refusal; ADR-120 adds v10 phrase-program round-trip/malformed-graph refusal and semantics-2 migration; #123 adds semantics-3 complete-forbidden-term migration without a new layout version. Standalone segment layouts v1–v10 are readable subject to their semantic migration/fence checks. |
-| Hardening | `tests/hardening_fixes.rs` | Vocab-epoch staleness, fallible deserialization, reverse-index delete. |
-| Coverage gaps | `tests/coverage_gaps.rs` | Parallel matching, compaction, broad-lane isolation, edge cases. |
+| Persistence | `tests/persistence/` + storage/cluster unit modules | Current segment-v10 / manifest-v7 / WAL-v7 paths plus all supported legacy reads and semantic fences: round-trip, crash replay, mmap compaction, source-generation/watermark continuity, tags/rank/placement/compound/phrase columns, malformed-column/program refusal, checkpoint/reopen, backup/restore, and rebuild-only cluster migrations. The authoritative readable/current version matrix is [`operations/rolling-upgrade.md`](operations/rolling-upgrade.md). |
+| Hardening | `tests/hardening_fixes/` | Vocab-epoch staleness, fallible deserialization, reverse-index delete. |
+| Coverage gaps | `tests/coverage_gaps/` | Parallel matching, compaction, broad-lane isolation, edge cases. |
 | Error paths | `tests/error_paths.rs` | API error handling (parse errors, class-D rejection). |
-| **Pressure / soak** | `tests/stress.rs` | Mixed read/write/delete churn, parallel-vs-sequential agreement under mutation, metrics/event consistency, and the ADR-099 **proves-work-stopped** cancellation legs (self-calibrating: cancelled wall-clock asserted against the measured uncancelled runtime). ADR-123 adds deterministic 256-work counter tests for scalar + columnar in-segment cancellation/no-partial cleanup, collector-failure precedence at a coincident poll, and an ignored dense-posting/body-group before/after overshoot benchmark. Self-contained (seeded `gen`, no data files). |
-| **Cluster oracle** | `tests/cluster_oracle.rs` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}; every A/B/C/D/H placement class + fan-out asserted; filters/ranking/ties, any-of, canonical bodies, dynamic vocabulary, repeated resize, and ADR-109 owned replies with `duplicate_emissions == 0`. ADR-110 compares bounded distributed top-K against single-node collect-all/full-sort over K/threshold matrices, including global-threshold overflow, K=0, stale placement, and missing current source. **Half the Cluster-v1 gate (below).** |
-| **Cluster durability** | `tests/cluster_durability_oracle.rs` | A `data_dir` cluster rebuilt from manifest + per-shard segments + coordinator log ≡ pre-crash ≡ brute, K∈{1,3,8} × broad; checkpoint, both compaction paths, backup/restore, torn-tail recovery, migration fences, vocabulary rebuild, resize/reopen, ownership-generation preservation, and ADR-110 top-K/winner-source continuity. **Half the Cluster-v1 gate (below).** |
-| **Distributed gRPC** | `tests/cluster_grpc_oracle.rs` | Localhost wire oracle for co-location, RF>1 failover, peer recovery under writes, retained-member fingerprints, live handoff/reassignment/reconcile, protocol ownership attestation, missing/stale peer refusal, and zero-FN result identity. ADR-110 adds real-wire top-K/source streaming, exact response caps, mixed-version refusal, one absolute deadline, post-freeze signed priority, and bounded failover/recovery/handoff reads. Requires localhost TCP permission. |
+| **Pressure / soak** | `tests/stress/` | Mixed read/write/delete churn, parallel-vs-sequential agreement under mutation, metrics/event consistency, and the ADR-099 **proves-work-stopped** cancellation legs (self-calibrating: cancelled wall-clock asserted against the measured uncancelled runtime). ADR-123 adds deterministic 256-work counter tests for scalar + columnar in-segment cancellation/no-partial cleanup, collector-failure precedence at a coincident poll, and an ignored dense-posting/body-group before/after overshoot benchmark. Self-contained (seeded `gen`, no data files). |
+| **Cluster oracle** | `tests/cluster_oracle/` | Multi-shard differential oracle: cluster ≡ single-node ≡ brute, K∈{1,3,8,16} × broad × RF∈{1,2,3}; every A/B/C/D/H placement class + fan-out asserted; filters/ranking/ties, any-of, canonical bodies, dynamic vocabulary, repeated resize, and ADR-109 owned replies with `duplicate_emissions == 0`. ADR-110 compares bounded distributed top-K against single-node collect-all/full-sort over K/threshold matrices, including global-threshold overflow, K=0, stale placement, and missing current source. **Half the Cluster-v1 gate (below).** |
+| **Cluster durability** | `tests/cluster_durability_oracle/` | A `data_dir` cluster rebuilt from manifest + per-shard segments + coordinator log tail ≡ pre-crash ≡ brute, K∈{1,3,8} × broad; checkpoint, both compaction paths, backup/restore, torn-tail recovery, migration fences, vocabulary rebuild, resize/reopen, ownership-generation preservation, and ADR-110 top-K/winner-source continuity. **Half the Cluster-v1 gate (below).** |
+| **Distributed gRPC** | `tests/cluster_grpc_oracle/` | Localhost wire oracle for co-location, RF>1 failover, peer recovery under writes, retained-member fingerprints, live handoff/reassignment/reconcile, protocol ownership attestation, missing/stale peer refusal, and zero-FN result identity. ADR-110 adds real-wire top-K/source streaming, exact response caps, mixed-version refusal, one absolute deadline, post-freeze signed priority, and bounded failover/recovery/handoff reads. Requires localhost TCP permission. |
 | **Cluster scale soak** | `tests/cluster_soak/` | The **≥20M multi-shard scale proof** (ADR-104, the scale half of Distributed-v1 criterion 12): a durable K=8 in-process cluster at 20M queries ≡ the single-node engine over 50k titles, planted absolute-FN sentinels, mirrored live mutations (incl. a synthetic-ID retrievability check), and a checkpoint → reopen re-verify. `#[ignore]`d, **run explicitly by name only — in no gate and no CI workflow** (a one-off acceptance run; numbers pinned in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)) — see [Pressure & soak](#pressure--soak-tests). |
 
 ### What the oracle does and does not verify
 
-The differential oracle independently reimplements only the **back half** of the pipeline — candidate
-retrieval and exact verification (a brute-force scan with its own `Dict`/`Normalizer` instances). For the
-**front half** it calls the engine's own `dsl::parse`, `compile::extract`, and `Normalizer`, and runs them
-under the empty `default_vocab`. So a semantic bug in the parser, the feature extractor, or the
-normalization model would corrupt the brute-force ground truth and the engine identically — the oracle
-would still pass — and the vocab-driven normalization paths (multiword phrases, synonyms, graders) are
-never exercised by it at all. Those three front-end stages are instead pinned by **hand-authored golden
-tests** (in-module `#[cfg(test)] mod golden` in `src/dsl.rs`, `src/normalize.rs`, `src/compile.rs`), whose
-expected values are written from the spec ([`reference/dsl.md`](reference/dsl.md),
-[`design/normalization.md`](design/normalization.md), [`design/matching.md`](design/matching.md) §1); the
-vocab-driven path is additionally run end-to-end by `zero_false_negatives_with_populated_vocab` in
-`tests/oracle.rs`. Rationale + the declined "independent reference extractor" alternative →
-[`DECISIONS.md`](DECISIONS.md) ADR-050.
+The main differential oracle independently checks the **retrieval and lowering back half**: it scans
+every extracted query predicate for brute-force truth, then compares that result with the signature
+index + exact store. It deliberately shares the production `dsl::parse`, `compile::extract`, and
+`Normalizer` front end. The suite exercises default, populated-vocabulary, alias, phrase, messy, and
+degenerate paths, but a front-end semantic bug can still corrupt both sides identically.
+
+Hand-authored golden tests pin parser/normalizer/extractor expectations from
+[`reference/dsl.md`](reference/dsl.md), [`design/normalization.md`](design/normalization.md), and
+[`design/matching.md`](design/matching.md). The populated-vocabulary differential lives under
+`tests/oracle/`. ADR-050 records the original shared-front-end gap; ADR-087 subsequently added the
+separate independent reference below.
 
 Two further layers close what golden tests can't (ADR-063): the `P(T)` parse-union oracle
 (`src/normalize/parse_union_oracle.rs`) independently re-derives the positive title view by exhaustive
@@ -120,7 +118,7 @@ It runs under the default vocabulary (the front-end check that needs no domain c
 
 ### The Cluster-v1 acceptance gate
 
-`tests/cluster_oracle.rs` + `tests/cluster_durability_oracle.rs` are the **named acceptance gate for
+`tests/cluster_oracle/` + `tests/cluster_durability_oracle/` are the **named acceptance gate for
 Cluster v1** (the in-process multi-shard core + durable reopen + dynamic vocabulary): _cluster ≡
 single-node ≡ brute_ and _reopen ≡ pre-crash ≡ brute_, with the dynamic-vocabulary absorb-correctly
 assertions baked in (ADR-046). Both already run on the default `cargo test --release`, so the gate is
@@ -130,14 +128,15 @@ live — naming them here makes the contract explicit: keep them green, never we
 `tests/cluster_allocator_oracle.rs` (the shard→node allocator gate — ADR-042), each asserting
 `percolate` is byte-identical across a reassignment/rebalance. The
 experimental distributed layers add three more oracles that `check.sh` runs in its
-`--features distributed` lane — `tests/cluster_grpc_oracle.rs` (gRPC transport + dict shipping +
+`--features distributed` lane — `tests/cluster_grpc_oracle/` (gRPC transport + dict shipping +
 replication/recovery; the `block_on` **rayon-fanout** and **single-target-from-a-tokio-worker** guards;
 **remote partial-apply detection** over the wire — ADR-047; ADR-109 generation/configuration,
 ownership-applied reply, recovery/fingerprint, old-peer, and stale-peer guards; and ADR-110 bounded
 top-K/fetch, cap, deadline, mixed-version, failover, and handoff guards),
 `tests/cluster_control_raft_oracle.rs`
 (openraft control plane), and `tests/cluster_autoscale_oracle.rs` (autoscaler). Those are
-oracle-proven **on localhost**, not a multi-machine gate. The partial-apply → `resync` **convergence**
+oracle-proven **on localhost**. The Compose harness additionally crosses real single-host container
+network/process boundaries, but neither is an independent multi-machine gate. The partial-apply → `resync` **convergence**
 cycle (ADR-047) is proven deterministically in the lean core by `cluster/coordinator/tests.rs`
 (`partial_apply_is_detected_then_resync_converges` + `resync_requeues_when_shard_still_failing`).
 
@@ -176,7 +175,7 @@ durable cluster's temp dir.)
 
 ## Crash injection
 
-[`tests/crash_injection/`](../engine/tests/crash_injection/) (ADR-088, Phase 0 item 3) is the
+[`tests/crash_injection/`](../engine/tests/crash_injection/) (ADR-088) is the
 **real-process SIGKILL** durability torture: it spawns the `crashwriter` bin, delivers a real external
 SIGKILL while a durable op is in flight, reopens the data dir in-process, and diffs the recovered engine
 against the front-end-independent oracle (ADR-087) — proving every acknowledged write survives a crash
@@ -190,7 +189,7 @@ The seven scenarios are `--workload`s steering the kill into one durable window:
 buffer, so the reference cannot assume "unrecorded ⇒ still old"; instead each id carries `qstem`/`qold`/
 `qnew` tokens and a `both`-title that matches whichever version survived (`match(both_X) == {X}` catches
 a vanish or corruption regardless of the race), with the stronger new-present/old-gone check applied
-only to ids whose ACK the parent actually recorded. Its **cluster** analogue lives in the multi-machine
+only to ids whose ACK the parent actually recorded. Its **cluster** analogue lives in the container-network
 harness ([`deploy/harness.sh`](../deploy/harness.sh) leg 3b): SIGKILL a `shardserver` mid-write-loop,
 restart it, converge the queued partial-applies with `POST /_cluster/resync` (ADR-047), and assert every
 acknowledged (2xx) write is matchable — zero FN across a real kill mid-write.
@@ -213,7 +212,8 @@ stays green) — all verified RED during development.
 
 Plain seeded binaries (not `criterion`), reproducible via fixed seeds:
 `bench` (build/match throughput + cost-class split + memory), `segbench` (read-amplification vs
-segment count), `snapbench` (snapshot-publish cost), and `clusterbench` (routing fan-out).
+segment count), `snapbench` (snapshot-publish cost), `clusterbench` (routing fan-out), and
+`rankbench` (bounded-ranking behavior/cost).
 **Commands, arguments, the broader machine-independent invariants, and the dated capture log live
 in one place —
 [`performance/benchmark-results.txt`](performance/benchmark-results.txt); narrative analysis in
@@ -233,7 +233,7 @@ ADR-124 adds a deliberately smaller automated contract in `perfgate`:
 
 The reviewed baseline is
 [`performance/perf-baseline.json`](performance/perf-baseline.json). Every PR uploads its
-`perf-current.json`. Deep `bench`/`segbench`/`snapbench`/`clusterbench` sweeps remain advisory
+`perf-current.json`. Deep `bench`/`segbench`/`snapbench`/`clusterbench`/`rankbench` sweeps remain advisory
 because they include signals too noisy or expensive to block a merge.
 
 An intentional rebaseline requires at least five distinct CI reports and a reason; the command
@@ -271,7 +271,7 @@ manual dispatch. The required job runs on pinned `ubuntu-24.04`:
 2. `Swatinem/rust-cache` (the release+LTO build is slow; caching is what keeps PR runs reasonable).
 3. `cargo-audit` + `cargo-deny` installed as prebuilt binaries.
 4. **`./engine/check.sh`** — the must-pass gate (now including the committed stress suite).
-5. **`./deploy/local-smoke.sh --prebuilt`** — the Tier 5 M1 deployable smoke (ADR-098): both local
+5. **`./deploy/local-smoke.sh --prebuilt`** — the deployable smoke (ADR-098): both local
    modes (single-node + in-process cluster) end-to-end over the release bin — ingest, search,
    SIGTERM-restart-reopen, restore-from-backup. A deployment gate over the built artifact, like the
    harness; `check.sh` stays the engine-gate SSOT.
@@ -295,7 +295,7 @@ exact candidate image (Compose + kind/Helm + parity) → publish to GHCR (`vX.Y.
 never `:latest`); a `workflow_dispatch` run is the same pipeline with publishing skipped — the
 no-tag rehearsal.
 
-## The multi-machine harness (ADR-072)
+## The container-network harness (ADR-072)
 
 The compose-based lifecycle suite — the analogue of the localhost oracles across **real container
 network boundaries** (kill-and-recover, rolling restarts, coordinator restart, live handoff under
@@ -309,17 +309,21 @@ load, all on the fully secured ADR-071 mesh):
 Requires Docker (compose v2), `curl`, `jq`, `openssl`. Generates an ephemeral CA + corpus per run
 (nothing committed), brings up `deploy/compose.harness.yml` (3 durable shard nodes + a handoff
 target + the REST coordinator + a 3-node control-plane quorum), runs the assertion legs, and tears
-everything down — exit 0 ⇔ PASS. CI runs it on every PR as the `multi-machine harness` job
-(natively built bins wrapped via `deploy/Dockerfile.prebuilt`), followed by the production-compose
+everything down — exit 0 ⇔ PASS. CI runs it on every PR with natively built binaries wrapped by
+`deploy/Dockerfile.prebuilt` (the workflow retains the historical `multi-machine harness` job label),
+followed by the production-compose
 smoke (`deploy/cluster-smoke.sh`) on the same image (ADR-098). Its assertions are black-box REST
 invariants: a dead shard **fails loud** (502, never a silently truncated result), every lifecycle
 event lands **≡ the percolate baseline**, and every acknowledged write stays matchable across a
-live cross-node handoff.
+live cross-process handoff. Because all containers share one host, this proves process/network
+boundaries but not independent-machine failure domains.
 
 ## Adding tests (for agents)
 
-- Integration tests → a file in `engine/tests/`; unit tests → an inline `#[cfg(test)]` module next to
-  the code. Keep data generation **seeded** (ADR-008) so the oracle and benchmarks stay reproducible.
+- Small integration targets may be one file in `engine/tests/`; larger targets follow the existing
+  `tests/<target>/main.rs` + focused module pattern. Unit tests stay in an inline `#[cfg(test)]` module
+  next to the code. Keep data generation **seeded** (ADR-008) so the oracle and benchmarks remain
+  reproducible.
 - The oracle encodes the [correctness contract](design/README.md). If a change makes it fail, the
   change is wrong — don't relax the oracle.
 - **Run `./engine/check.sh` before declaring work done** (or rely on the pre-push hook). CI will run

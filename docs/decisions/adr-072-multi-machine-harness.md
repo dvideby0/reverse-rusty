@@ -2,6 +2,10 @@
 
 > [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
+> **Current evidence scope:** despite the historical criterion/title, the shipped Compose harness is
+> multi-process on one host. It exercises real container network namespaces and process lifecycle;
+> it is not independent multi-machine evidence.
+
 - **Context.** [ADR-065](adr-065-distributed-v1-graduation.md) criterion 3, the last of the three
   that unblock everything else. Every distributed layer is oracle-proven **in-process / on
   localhost** — which structurally cannot catch the failure class real deployments hit: separate
@@ -66,9 +70,9 @@
 - **Scope / explicitly deferred.** Multi-host (non-compose) topologies — the network boundary is
   real but single-machine; cross-host is a deployment of the same images (criterion 10's runbook).
   Fault injection beyond kill/restart (network partitions, latency, disk-full) — valuable, post-v1.
-  The control-plane → coordinator wiring (the REST coordinator still runs the in-memory control
-  plane; attaching it to a controlserver quorum is part of the deployment-model maturation noted in
-  ADR-048's scope).
+  At this ADR's landing the REST coordinator still used the in-memory control plane; ADR-083/086
+  subsequently attached it to the controlserver quorum and made committed assignments the optional
+  routing source of truth.
 
 - **See also:** ADR-065 (the program; criterion 3), ADR-070 (the REST surface the harness drives),
   ADR-071 (the secured mesh it runs on), ADR-044/048 (the handoff the new endpoint exposes),

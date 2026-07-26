@@ -55,5 +55,5 @@
   (`/_health` exposes `wal_healthy`/`persistence_healthy` from the snapshot — the coarse gate this
   complements), ADR-017 (durable bulk ingest — the all-or-nothing rollback now emits `IngestRollback`),
   ADR-020 (the resident-memory work that introduced the lazy source store whose write/remap/load
-  failures are among the routed sites), `STATUS.md` (operational-polish backlog).
-
+  failures are among the routed sites), the roadmap's
+  [`Code and error-surface cleanup`](../roadmap.md#code-and-error-surface-cleanup).

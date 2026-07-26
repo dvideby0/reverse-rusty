@@ -99,18 +99,25 @@ cluster-level counters + a per-shard `reverse_rusty_cluster_shard_queries{shard=
   2. Re-ingest the full corpus into the green coordinator and validate it.
   3. Cut traffic over (swap the Service/Ingress upstream), then `helm uninstall` blue.
 
-  Cross-process / online resize is a deferred follow-on (ADR-078).
+  Cross-process / online resize remains a
+  [roadmap item](../roadmap.md#automatic-and-remote-cluster-resize) under ADR-078's constraints.
 - **RF>1:** not modeled by this chart at v1 (`replicationFactor` is documentation-only). A replica per
   position needs a second StatefulSet per shard + the coordinator's `--replication-factor`; see
-  [cluster-deployment.md §5](cluster-deployment.md).
+  [cluster-deployment.md §5](cluster-deployment.md) and the
+  [operator/RF>1 roadmap item](../roadmap.md#kubernetes-operator-and-rf1-topology).
+- **Shard co-location:** the engine can host several logical positions on one `ShardServer`
+  (ADR-093), but the chart currently emits one position and endpoint per shard pod. K positions on
+  N&lt;K pods require custom manifests or chart changes that pass a repeated endpoint list and keep
+  the control plane's `--shards` value equal to K.
 - **Recovery:** a restarted shard/control pod self-restores from its PVC (durable `--data-dir`,
   ADR-036/041). Don't wipe the PVC on restart.
-- **Backup:** the remote/stateless coordinator has no cross-shard backup barrier — back up each shard's
-  PVC (a volume snapshot per `data` PVC) per [backup-restore.md](backup-restore.md); rehearse the
-  restore (its Rehearsal section) and see [disaster-recovery.md](disaster-recovery.md) for the flows
-  that need those snapshots.
-- **Upgrades:** `helm upgrade --set image.tag=vX.Y.Z` — the StatefulSets set
-  `updateStrategy: RollingUpdate` explicitly (one pod at a time, gated on Ready) and ship
+- **Backup:** the remote/stateless coordinator has no cross-shard backup barrier. Quiesce writes and
+  snapshot **every shard and control-plane PVC as one set** per
+  [backup-restore.md](backup-restore.md); rehearse the restore and see
+  [disaster-recovery.md](disaster-recovery.md) for the flows that need those snapshots.
+- **Upgrades:** `helm upgrade --set image.tag=vX.Y.Z` — each StatefulSet sets
+  `updateStrategy: RollingUpdate` explicitly (one pod at a time *within that workload*, gated on
+  Ready; the control, shard, and coordinator workloads may roll concurrently) and ships
   PodDisruptionBudgets (`podDisruptionBudget.enabled`, default on) so node drains cannot take a
   second shard or break the control quorum mid-roll. Full procedure incl. the
   compatibility-fence contract and rollback: [rolling-upgrade.md](rolling-upgrade.md).
@@ -122,11 +129,19 @@ attaches to the durable quorum via `--control-endpoint` (ADR-083), so the cluste
 durable + HA (all members listed for failover, ADR-086). With `coordinator.routeByAssignments` (default
 true) it **routes by the committed shard→node assignments** (ADR-086) — seeded position-preservingly from
 the StatefulSet ordinals on first boot, so for a fixed `shardCount` the placement equals the ordinal
-order while the durable document becomes the source of truth; *data-moving* live re-pointing is still
-deferred (don't HRW-`rebalance` a populated cluster expecting routing to follow). Set `controlPlane.enabled=false`
+order while the durable document becomes the source of truth; *data-moving* live re-pointing is
+available through `POST /_cluster/reassign` and `POST /_cluster/reconcile` (ADR-090/092). Do not use
+the map-only HRW `rebalance` on a populated cluster expecting data to follow. Set `controlPlane.enabled=false`
 for the stateless-coordinator topology (placement re-derived from the frozen dict + ring on every
-start). Other v1 limits (remote vocab is deploy-time, no online resize, no gRPC `SIGTERM` drain) are
-unchanged — see [cluster-deployment.md](cluster-deployment.md) and ADR-084.
+start).
+
+Keep `coordinator.replicas=1`. Stateless means a coordinator can be replaced without restoring a
+local data volume; it does **not** make coordinators active-active. The shard-node owner lease fences
+a second coordinator from serving the same slots, and the chart does not provide leader election for
+the REST tier.
+
+Other v1 limits (remote custom vocabulary is unsupported, no online resize, no gRPC `SIGTERM`
+drain) are unchanged — see [cluster-deployment.md](cluster-deployment.md) and ADR-084.
 
 ## 7. Smoke test
 

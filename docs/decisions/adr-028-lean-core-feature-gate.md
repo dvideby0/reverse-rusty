@@ -5,8 +5,9 @@
 
 - **Context:** The library crate unconditionally compiled the full HTTP/observability stack
   (`axum`, `tokio`, `clap`, `parking_lot`, `tower`, `uuid`, `tracing`, `tracing-subscriber`,
-  `prometheus`) even for pure-engine embeddings and the engine-only CLI bins — STATUS flagged this as a
-  build-hygiene gap (compile time, binary size, supply-chain surface). It also became *timely*: the next
+  `prometheus`) even for pure-engine embeddings and the engine-only CLI bins — the project inventory
+  flagged this as a build-hygiene gap (compile time, binary size, supply-chain surface). It also became
+  *timely*: the next
   increment (gRPC `ShardServer`, ADR-029) adds `tonic`/`prost` — a heavy, network-only dependency that
   needs a clean home behind a feature, not bolted onto the always-on surface. A usage audit confirmed
   all nine crates are imported **only** in the `src/bin/server/` bin; none leak into the library.
@@ -34,7 +35,6 @@
   default build. No runtime or behavior change. This is the clean seam beside which ADR-029's
   `distributed` (gRPC) feature slots — tonic/prost land off-by-default without touching the core surface.
 - **See also:** ADR-007 (the original three-production-deps philosophy this extends), ADR-029 (gRPC
-  `ShardServer` — the `distributed` feature that reuses this seam), [`STATUS.md`](../STATUS.md),
+  `ShardServer` — the `distributed` feature that reuses this seam), [`CHANGELOG.md`](../CHANGELOG.md),
   [`engine/Cargo.toml`](../../engine/Cargo.toml) (authoritative pins + feature defs),
   `engine/check.sh` (the lean-core lane).
-

@@ -1,165 +1,66 @@
-# Distributed v1 graduation decisions
+# Distributed v1 — graduation program decisions
 
 > [Architecture decision hub](../../DECISIONS.md)
 
-These decisions make up the ADR-065 graduation program and its later
-distributed-v1 hardening work. This page is a navigation catalog; the linked
-ADRs remain canonical for rationale, trade-offs, implementation details, and
-validation evidence.
+The reliability, deployment, security, operability, ranking, scale, and semantic hardening work
+that followed the ADR-065 graduation program.
 
-## Cluster foundations
-
-- [ADR-070 — Cluster REST surface](../adr-070-cluster-rest-surface.md) — Accepted.
-  Adds coordinator mode to the existing REST server, including cluster-atomic
-  upserts and fail-loud unsupported features.
-- [ADR-071 — TLS and mesh authentication](../adr-071-grpc-tls-auth.md) — Accepted.
-  Secures shard and control gRPC with optional TLS and constant-time shared-token
-  authentication.
-- [ADR-072 — Multi-machine test harness](../adr-072-multi-machine-harness.md) —
-  Accepted. Exercises secure multi-node recovery, restart, and live handoff
-  through public surfaces in containers.
-- [ADR-074 — Tagged-cluster vocabulary changes](../adr-074-tagged-cluster-vocab-change.md)
-  — Accepted. Carries `TagId`s through vocabulary rebuilds and closes tagged
-  source-durability gaps.
-- [ADR-075 — Cluster ranking](../adr-075-cluster-ranking.md) — Accepted. Ranks
-  within each shard, then deduplicates and merges scored results at the
-  coordinator.
-- [ADR-076 — Multi-word aliases and vocabulary shipping](../adr-076-cluster-multiword-aliases-vocab-shipping.md)
-  — Accepted. Makes routing positive-view-aware for multi-word aliases and keeps
-  remote vocabulary changes deploy-time only.
-- [ADR-077 — Tag-dictionary recovery fingerprints](../adr-077-tagdict-recovery-fingerprint.md)
-  — Accepted. Attests tag spaces during recovery and fencing so divergence
-  fails closed.
-- [ADR-078 — Cluster resize](../adr-078-cluster-resize.md) — Accepted. Resizes
-  in-process clusters through full blue/green re-placement under a new ring.
-- [ADR-079 — Backup and restore](../adr-079-backup-restore.md) — Accepted.
-  Provides engine-driven consistent backups, verification, and
-  restore-through-open.
-- [ADR-080 — Replicate broad queries to all shards](../adr-080-cluster-replicate-broad-to-all.md)
-  — Accepted. Replicates broad and class-D queries to every shard while
-  evaluating that lane on one shard per title.
-
-## Deployment and control-plane hardening
-
-- [ADR-081 — Deployment packaging and operations runbook](../adr-081-deployment-packaging-runbook.md)
-  — Accepted. Defines production images, compose topology, operator procedures,
-  and smoke workflows.
-- [ADR-082 — Packaging deploy-correctness follow-up](../adr-082-packaging-deploy-correctness.md)
-  — Accepted. Adds control-plane advertise URLs and coordinator gating for
-  class-D configuration.
-- [ADR-083 — Control-plane coordinator wiring](../adr-083-control-plane-coordinator-wiring.md)
-  — Accepted. Connects the coordinator to the control quorum without making it
-  a Raft participant.
-- [ADR-084 — Kubernetes, Helm, and health endpoints](../adr-084-kubernetes-helm-health.md)
-  — Accepted. Adds Helm packaging and separate gRPC liveness and readiness
-  endpoints.
-- [ADR-085 — gRPC transport hardening](../adr-085-grpc-transport-hardening.md) —
-  Accepted. Adds deadlines, keepalive, bounded retries, and transport metrics.
-- [ADR-086 — Control-plane routing and failover](../adr-086-control-plane-routing-and-failover.md)
-  — Accepted. Routes by committed shard assignments and fails over across
-  control endpoints.
-- [ADR-087 — Independent correctness oracle](../adr-087-independent-correctness-oracle.md)
-  — Accepted. Adds an independent parser, normalizer, and matcher to catch
-  shared-implementation errors.
-- [ADR-088 — Crash-injection harness](../adr-088-crash-injection-harness.md) —
-  Accepted. Exercises real-process crash points and recovery with `SIGKILL`.
-- [ADR-089 — Security review](../adr-089-security-review.md) — Accepted.
-  Establishes the threat model and container-image security scanning.
-- [ADR-091 — Shard and control metrics](../adr-091-shard-control-metrics.md) —
-  Accepted. Exports lean per-node Prometheus metrics for shard and control
-  processes.
-- [ADR-092 — Unattended reconciler](../adr-092-unattended-reconciler.md) —
-  Accepted. Converges committed placement after membership drift.
-- [ADR-093 — Multiple shards per node](../adr-093-multi-shard-per-node.md) —
-  Accepted. Lets one shard server host multiple slots under a shared adopted
-  feature space.
-- [ADR-094 — Replicated-group reassignment](../adr-094-replicated-group-reassignment.md)
-  — Accepted. Moves complete replicated shard groups while preserving RF>1
-  correctness.
-- [ADR-095 — Parallel multi-position moves](../adr-095-parallel-multi-position-moves.md)
-  — Accepted. Runs non-conflicting moves in parallel under an endpoint
-  reservation ledger.
-- [ADR-096 — Orphan-slot garbage collection](../adr-096-orphan-slot-gc.md) —
-  Accepted. Lists and safely removes orphaned shard slots after reassignment.
-- [ADR-097 — Content-fingerprint copy skipping](../adr-097-content-fingerprint-skip.md)
-  — Accepted. Skips retained-member copies only when fingerprints prove the
-  destination complete.
-- [ADR-098 — Deployable gate and release pipeline](../adr-098-deployable-gate-and-release-pipeline.md)
-  — Accepted. Defines the deployment matrix, smoke gates, and versioned release
-  publishing.
-
-## Runtime performance and observability
-
-- [ADR-099 — Cooperative cancellation and bounded concurrency](../adr-099-cooperative-cancellation-bounded-concurrency.md)
-  — Done. Adds cooperative deadlines and bounded search admission without
-  changing the unarmed hot path.
-- [ADR-100 — Shard RPC latency histograms](../adr-100-shard-rpc-latency-histogram.md)
-  — Done. Measures per-shard RPC latency with lean Prometheus histograms.
-- [ADR-101 — Broad-lane cost counters](../adr-101-shard-broad-lane-cost-counters.md)
-  — Done. Exports per-shard broad-lane work counters at the gRPC boundary.
-- [ADR-102 — Distributional alias discovery](../adr-102-distributional-alias-discovery.md)
-  — Done. Discovers review-first alias candidates from distributional evidence.
-- [ADR-103 — Match-feedback alias validation](../adr-103-match-feedback-alias-validation.md)
-  — Done. Validates alias candidates from behavioral overlap before optional
-  activation.
-- [ADR-104 — Multi-shard scale soak](../adr-104-cluster-scale-soak.md) — Done.
-  Exercises 20 million queries across eight durable shards, live mutations, and
-  reopen.
-- [ADR-105 — Always-visible hot tier](../adr-105-hot-tier-two-axis-placement.md)
-  — Done. Adds columnar hot-query evaluation while keeping visibility and
-  scheduling independent.
-- [ADR-106 — Canonical-body deduplication](../adr-106-canonical-body-dedup-stage-a.md)
-  — Done. Shares postings for identical semantic bodies and regroups them during
-  compaction.
-
-## Ranked delivery and query semantics
-
-- [ADR-107 — Ranked result contract](../adr-107-ranked-percolation-result-contract.md)
-  — Done. Separates exact match truth from ranked delivery modes, totals, and
-  termination.
-- [ADR-108 — Typed priority and local bounded ranking](../adr-108-typed-priority-local-bounded-ranking.md)
-  — Done. Adds typed priority and bounded local top-K ranked percolation.
-- [ADR-109 — Deterministic distributed emission ownership](../adr-109-deterministic-distributed-emission-ownership.md)
-  — Done. Selects one emitting shard per logical match to eliminate duplicates.
-- [ADR-110 — Distributed top-K and query-then-fetch](../adr-110-distributed-top-k-query-then-fetch.md)
-  — Done. Adds bounded global top-K merging and winner-only source fetch.
-- [ADR-111 — Typed ranked wire errors](../adr-111-typed-ranked-wire-errors.md) —
-  Done. Carries typed ranked errors in gRPC metadata with a legacy fallback.
-- [ADR-112 — Distributed title batching](../adr-112-distributed-title-batching.md)
-  — Done. Batches per-title top-K work and deduplicates winner fetches across
-  titles.
-- [ADR-113 — PIT and cursor pagination](../adr-113-pit-cursor-pagination.md) —
-  Done. Pins snapshots and signs cursor state with generation checks.
-- [ADR-114 — Exhaustive job and stream delivery](../adr-114-exhaustive-job-stream-delivery.md)
-  — Done. Adds bounded exhaustive delivery with idempotent chunks and terminal
-  checksums.
-- [ADR-115 — Competitive pruning deferred](../adr-115-competitive-pruning-deferred.md)
-  — Declined. Defers score-bound pruning because profiling did not justify its
-  complexity.
-- [ADR-116 — Document source readback](../adr-116-get-document-source-readback.md)
-  — Accepted. Persists source metadata and adds honest `GET` and `HEAD`
-  document readback.
-- [ADR-117 — PUT document contract](../adr-117-put-document-index-contract.md) —
-  Accepted. Defines strict create/index semantics, refresh parsing, conflicts,
-  and response metadata.
-- [ADR-118 — Clause-boundary compiler semantics](../adr-118-clause-boundary-compiler-semantics.md)
-  — Accepted. Compiles positive clauses in separate runs and safely rebuilds
-  legacy materializations.
-- [ADR-119 — Multi-token any-of semantics](../adr-119-multi-token-anyof-member-semantics.md)
-  — Accepted. Preserves OR-of-AND semantics for multi-token any-of members.
-- [ADR-120 — Quoted-phrase token graphs](../adr-120-quoted-phrase-token-graph-semantics.md)
-  — Accepted. Implements analyzed token-graph adjacency for required and
-  forbidden phrases.
-
-## Follow-up hardening
-
-- [ADR-123 — Bounded in-segment cancellation](../adr-123-bounded-in-segment-cancellation.md)
-  — Accepted. Bounds cancellation latency inside long segment scans.
-- [ADR-124 — Variance-tolerant performance gate](../adr-124-variance-tolerant-performance-gate.md)
-  — Accepted. Uses variance-aware regression gating with scheduled soak
-  coverage.
+| ADR | Decision | Summary | Status |
+|---|---|---|---|
+| [070](../adr-070-cluster-rest-surface.md) | Cluster REST surface | Adds coordinator mode, cluster-atomic upserts, and fail-loud handling for unsupported request features. | Accepted |
+| [071](../adr-071-grpc-tls-auth.md) | TLS + mesh authentication | Secures shard and control gRPC with optional TLS and constant-time shared-token authentication. | Accepted |
+| [072](../adr-072-multi-machine-harness.md) | Container lifecycle harness | Exercises secure recovery, restart, and live handoff through public surfaces across a multi-process, single-host container network. | Accepted |
+| [074](../adr-074-tagged-cluster-vocab-change.md) | Tagged-cluster vocabulary changes | Carries `TagId`s through vocabulary rebuilds and closes tagged source-durability gaps. | Accepted |
+| [075](../adr-075-cluster-ranking.md) | Cluster ranking | Ranks within each shard, then deduplicates and merges scored results at the coordinator. | Accepted |
+| [076](../adr-076-cluster-multiword-aliases-vocab-shipping.md) | Multi-word aliases + vocabulary boundary | Makes cluster routing positive-view-aware; remote shards remain stock-vocabulary-only because the wire does not ship normalizers. | Accepted |
+| [077](../adr-077-tagdict-recovery-fingerprint.md) | Tag-dictionary recovery fingerprints | Attests tag spaces during recovery and fencing so divergence fails closed. | Accepted |
+| [078](../adr-078-cluster-resize.md) | Cluster resize | Resizes in-process clusters through full blue/green re-placement under a new ring. | Accepted |
+| [079](../adr-079-backup-restore.md) | Backup and restore | Provides consistent backups and restore-through-open for durable engines and in-process clusters. | Accepted |
+| [080](../adr-080-cluster-replicate-broad-to-all.md) | Replicate broad queries to all shards | Replicates broad and class-D queries while evaluating the broad lane on one shard per title. | Accepted |
+| [081](../adr-081-deployment-packaging-runbook.md) | Deployment packaging + runbook | Defines release images, compose topology, operator procedures, and smoke workflows. | Accepted |
+| [082](../adr-082-packaging-deploy-correctness.md) | Packaging correctness follow-up | Adds control-plane advertise URLs and coordinator gating for class-D configuration. | Accepted |
+| [083](../adr-083-control-plane-coordinator-wiring.md) | Control-plane coordinator wiring | Connects the coordinator to the control quorum without making it a Raft participant. | Accepted |
+| [084](../adr-084-kubernetes-helm-health.md) | Kubernetes, Helm, and health | Adds Helm packaging and separate gRPC liveness and readiness endpoints. | Accepted |
+| [085](../adr-085-grpc-transport-hardening.md) | gRPC transport hardening | Adds deadlines, keepalive, bounded read retries, and transport metrics. | Accepted |
+| [086](../adr-086-control-plane-routing-and-failover.md) | Control routing + failover | Routes by committed assignments and fails over across control endpoints. | Accepted |
+| [087](../adr-087-independent-correctness-oracle.md) | Independent correctness oracle | Adds an independent parser, normalizer, and matcher to catch shared-implementation errors. | Accepted |
+| [088](../adr-088-crash-injection-harness.md) | Crash-injection harness | Exercises real-process crash points and recovery with external `SIGKILL`. | Accepted |
+| [089](../adr-089-security-review.md) | Security review | Establishes the threat model and container-image security scanning. | Accepted |
+| [091](../adr-091-shard-control-metrics.md) | Shard + control metrics | Exports lean per-node Prometheus metrics for shard and control processes. | Accepted |
+| [092](../adr-092-unattended-reconciler.md) | Unattended reconciler | Converges committed placement after membership drift through data-moving repair. | Accepted |
+| [093](../adr-093-multi-shard-per-node.md) | Multiple shards per node | Lets one shard server host multiple slots under a shared adopted feature space. | Accepted |
+| [094](../adr-094-replicated-group-reassignment.md) | Replicated-group reassignment | Moves complete replicated shard groups while preserving RF>1 correctness. | Accepted |
+| [095](../adr-095-parallel-multi-position-moves.md) | Parallel multi-position moves | Runs non-conflicting moves in parallel under an endpoint reservation ledger. | Accepted |
+| [096](../adr-096-orphan-slot-gc.md) | Orphan-slot garbage collection | Lists and safely removes orphaned shard slots after reassignment. | Accepted |
+| [097](../adr-097-content-fingerprint-skip.md) | Content-fingerprint copy skipping | Skips retained-member copies only when fingerprints prove the destination complete. | Accepted |
+| [098](../adr-098-deployable-gate-and-release-pipeline.md) | Deployable gate + release pipeline | Defines the deployment matrix, smoke gates, and versioned release publishing. | Accepted |
+| [099](../adr-099-cooperative-cancellation-bounded-concurrency.md) | Cooperative cancellation + bounded concurrency | Adds cooperative deadlines and bounded search admission without changing the unarmed hot path. | Done |
+| [100](../adr-100-shard-rpc-latency-histogram.md) | Shard RPC latency histograms | Measures per-shard RPC latency with lean Prometheus histograms. | Done |
+| [101](../adr-101-shard-broad-lane-cost-counters.md) | Broad-lane cost counters | Exports per-shard broad-lane work counters at the gRPC boundary. | Done |
+| [102](../adr-102-distributional-alias-discovery.md) | Distributional alias discovery | Discovers review-first alias candidates from distributional evidence. | Accepted |
+| [103](../adr-103-match-feedback-alias-validation.md) | Match-feedback alias validation | Validates alias candidates from behavioral overlap before optional activation. | Accepted |
+| [104](../adr-104-cluster-scale-soak.md) | Multi-shard scale soak | Exercises 20 million queries across eight durable shards, live mutations, and reopen. | Done |
+| [105](../adr-105-hot-tier-two-axis-placement.md) | Always-visible hot tier | Adds columnar hot-query evaluation while keeping visibility and scheduling independent. | Accepted |
+| [106](../adr-106-canonical-body-dedup-stage-a.md) | Canonical-body deduplication | Shares postings for identical semantic bodies and regroups them during compaction. | Accepted |
+| [107](../adr-107-ranked-percolation-result-contract.md) | Ranked result contract | Separates exact match truth from ranked delivery modes, totals, and termination. | Accepted |
+| [108](../adr-108-typed-priority-local-bounded-ranking.md) | Typed priority + local bounded ranking | Adds typed priority and bounded local top-K ranked percolation. | Accepted |
+| [109](../adr-109-deterministic-distributed-emission-ownership.md) | Deterministic emission ownership | Selects one emitting shard per logical match to eliminate duplicates. | Accepted |
+| [110](../adr-110-distributed-top-k-query-then-fetch.md) | Distributed top-K + query-then-fetch | Adds bounded global top-K merging and winner-only source fetch. | Accepted |
+| [111](../adr-111-typed-ranked-wire-errors.md) | Typed ranked wire errors | Carries typed ranked errors in gRPC metadata with a legacy fallback. | Accepted |
+| [112](../adr-112-distributed-title-batching.md) | Distributed title batching | Batches per-title top-K work and deduplicates winner fetches across titles. | Accepted |
+| [113](../adr-113-pit-cursor-pagination.md) | PIT + cursor pagination | Pins snapshots and signs cursor state with generation checks. | Accepted |
+| [114](../adr-114-exhaustive-job-stream-delivery.md) | Exhaustive job + stream delivery | Adds bounded exhaustive delivery with idempotent chunks and terminal checksums. | Accepted |
+| [115](../adr-115-competitive-pruning-deferred.md) | Competitive pruning deferred | Defers score-bound pruning because profiling did not justify its complexity. | **Declined** |
+| [116](../adr-116-get-document-source-readback.md) | Document source readback | Persists source metadata and adds honest `GET` and `HEAD` document readback. | Accepted |
+| [117](../adr-117-put-document-index-contract.md) | PUT document contract | Defines strict create/index semantics, refresh parsing, conflicts, and response metadata. | Accepted |
+| [118](../adr-118-clause-boundary-compiler-semantics.md) | Clause-boundary compiler semantics | Compiles positive clauses separately and safely rebuilds legacy materializations. | Accepted |
+| [119](../adr-119-multi-token-anyof-member-semantics.md) | Multi-token any-of semantics | Preserves OR-of-AND semantics for multi-token any-of members. | Accepted |
+| [120](../adr-120-quoted-phrase-token-graph-semantics.md) | Quoted-phrase token graphs | Implements analyzed token-graph adjacency for required and forbidden phrases. | Accepted |
+| [123](../adr-123-bounded-in-segment-cancellation.md) | Bounded in-segment cancellation | Bounds cancellation latency inside long segment scans. | Accepted |
+| [124](../adr-124-variance-tolerant-performance-gate.md) | Variance-tolerant performance gate | Uses variance-aware regression gating with scheduled soak coverage. | Done |
 
 ---
 
-Implementation status belongs in [STATUS.md](../../STATUS.md). Documentation
-placement rules belong in [the documentation hub](../../README.md).
+Shipped changes are recorded in [CHANGELOG.md](../../CHANGELOG.md); unfinished work belongs in
+[roadmap.md](../../roadmap.md). Documentation placement rules live in
+[the documentation hub](../../README.md).

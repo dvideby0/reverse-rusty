@@ -11,10 +11,10 @@
   the vocab-epoch staleness) for the single engine + a cluster **blue/green rebuild**
   (`ClusterEngine::set_vocab` — re-mint the dict, re-place every query, atomic swap; durable via a
   manifest `vocab_data` blob, manifest **v3**) + **auto-learning** (`learn_and_apply` wires the ADR-015
-  any-of learner as a runtime vocab source). Proven by `tests/cluster_oracle.rs`
+  any-of learner as a runtime vocab source). Proven by `tests/cluster_oracle/`
   (absorb-without-broadening, satisfiable all-unknown any-of, **declared alias makes both surface forms
-  match**, auto-learn) + `tests/cluster_durability_oracle.rs` (alias survives reopen + rebind) +
-  `tests/hardening_fixes.rs` (single-engine recompile + learn). **In-process only:** `set_vocab` refuses a
+  match**, auto-learn) + `tests/cluster_durability_oracle/` (alias survives reopen + rebind) +
+  `tests/hardening_fixes/` (single-engine recompile + learn). **In-process only:** `set_vocab` refuses a
   non-local cluster (an alias is normalizer-only and is not shipped to a `RemoteShard` — the cross-process
   shipping below is beyond v1). Prior-art survey: [`research/dynamic-vocabulary.md`](../research/dynamic-vocabulary.md).
 - **Context:** The cluster freezes one shared dictionary so every shard agrees on each term's integer
@@ -70,9 +70,9 @@
   node computes them), so the token half works in-process *and* cross-process for free. The alias half's
   **cross-process normalizer *shipping*** (a versioned normalizer + the propagation-window consistency
   design, analogous to dict shipping ADR-034) rides with the experimental distributed layers and is
-  **beyond v1** *(decided at v1 by [ADR-076](adr-076-cluster-multiword-aliases-vocab-shipping.md): live
-  shipping stays refused — remote-cluster vocabulary is deploy-time configuration, the ES
-  analyzer-reindex precedent)*.
+  **beyond v1** *(decided at v1 by [ADR-076](adr-076-cluster-multiword-aliases-vocab-shipping.md):
+  live shipping stays refused; the shipped remote topology runs the stock normalizer and rejects a
+  custom vocab file, while custom vocabulary uses the in-process blue/green path)*.
 - **Alternatives declined:** *coordinator-assigned exact ids* (ES global-ordinals style via the control
   plane) — exact, but adds a coordination step + a propagation window (transient FN) + Raft coupling, a
   hazard hashing avoids; *post-freeze dict mutation* — the dict is an immutable shared `Arc`, and breaking
@@ -83,11 +83,10 @@
   per-shard `sources.dat` accumulation across repeated `set_vocab` calls — matching uses segments and
   `live_sources` de-dups, so correctness is unaffected; a future sources rewrite reclaims it). Both
   mechanisms + the absorb-correctly oracle assertions are **built** — the Cluster-v1 Tier-0 deliverable
-  (STATUS.md).
+  defined by this decision.
 - **See also:** ADR-027 (the shared frozen dict + content routing this preserves), ADR-015 (the `Vocab`
   synonym-learning the alias half reuses), ADR-034 (dict shipping — the template for the deferred
   cross-process normalizer shipping), [`research/dynamic-vocabulary.md`](../research/dynamic-vocabulary.md).
   Code sites: `src/dict.rs`, `src/normalize.rs` (`match_features`, `compile_features_readonly`),
   `src/compile.rs` (`extract_readonly`), `src/vocab.rs`, `src/cluster/coordinator/ingest.rs`,
   `src/cluster/server.rs`.
-

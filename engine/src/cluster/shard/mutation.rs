@@ -58,8 +58,8 @@ pub(crate) fn apply_mutation(
             // delete half fans to every shard, so a repair can legitimately target a
             // delete-only position; ADR-109 made shard-side inserts validate placement
             // coverage, so re-driving the insert there is refused (`LocalPositionMissing`)
-            // and would wedge `resync` on that mutation forever (multi-machine harness
-            // catch). Replicated modes cover every position; only Selective restricts.
+            // and would wedge `resync` on that mutation forever (distributed recovery
+            // regression catch). Replicated modes cover every position; only Selective restricts.
             shard.delete_by_logical_id(*logical)?;
             let covered = position.is_none_or(|p| {
                 placement.mode() != crate::ownership::PlacementMode::Selective

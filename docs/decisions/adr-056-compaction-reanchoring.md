@@ -51,7 +51,7 @@
   posting list a query lives in; the exact-store data is untouched, so the match set is identical.
   Each segment (and the memtable) is probed independently with the title's full signature set, so a
   re-anchored segment coexisting with non-re-anchored ones is safe. Proven by
-  `tests/oracle.rs::compaction_reanchoring_preserves_correctness` (a controlled drift forces a
+  `tests/oracle/reanchor.rs::compaction_reanchoring_preserves_correctness` (a controlled drift forces a
   guaranteed anchor flip; pre == post == brute oracle across class-A flip / any-of / forbidden /
   broad shapes) and `::compaction_reanchoring_matches_oracle_at_scale` (a realistically-drifted 30k
   corpus re-anchors ~15% of queries with zero FN, per-title **and** through the columnar broad
@@ -78,7 +78,7 @@
     `bulk_ingest` makes hot. That is a hotness reclassification, exactly the major-version blue/green
     case this ADR defers — not a silent compaction change — so such an entry keeps its original
     cover. (The reverse, broad→main, only adds findability and is kept.) Caught by
-    `tests/oracle.rs::reanchoring_never_demotes_a_main_query_into_the_broad_lane`, which matches with
+    `tests/oracle/reanchor.rs::reanchoring_never_demotes_a_main_query_into_the_broad_lane`, which matches with
     `include_broad = false`. *(Found by the Codex pre-PR review; the initial matched-pair argument
     implicitly assumed the broad lane was always probed.)*
 
@@ -88,7 +88,7 @@
   re-anchoring is a guaranteed no-op (`reanchored == 0`) and can never change a query's shard
   placement or within-shard retrievability. The feature is therefore single-node-only in effect; the
   cluster leaves the knob off. Proven by
-  `tests/oracle.rs::reanchoring_is_a_noop_under_a_frozen_dict`.
+  `tests/oracle/reanchor.rs::reanchoring_is_a_noop_under_a_frozen_dict`.
 
 - **Alternatives.** (1) *Re-extract each query from its source text* (the `recompile_stale_segments`
   pattern) — rejected: it depends on `query_store`, re-parses/re-normalizes, re-runs equivalence
@@ -108,7 +108,7 @@
   validation pass.
 
 - **Testing.** `dict.rs` units (`mask_inverse` round-trips `mask_bit`; empty before finalize);
-  `tests/oracle.rs` — the controlled-drift flip (asserts re-anchoring *fired*, all shapes lossless),
+  `tests/oracle/reanchor.rs` — the controlled-drift flip (asserts re-anchoring *fired*, all shapes lossless),
   the at-scale realistic-drift oracle (per-title + columnar batch), and the frozen-dict no-op.
   Full `check.sh` green (incl. the cluster + distributed oracles, unaffected).
 

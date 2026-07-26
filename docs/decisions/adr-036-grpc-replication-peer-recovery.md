@@ -4,6 +4,11 @@
 
 
 - **Status:** Accepted.
+- **Current outcome:** the scope boundaries below describe this increment at landing. ADR-039/040
+  subsequently added translog-tail recovery without write quiescence, ADR-042 added placement,
+  ADR-071 added mesh TLS/authentication, and ADR-093 made recovery slot-scoped on multi-shard nodes.
+  Fetching a segment still buffers one complete segment file at the source before emitting bounded
+  wire chunks.
 - **Context:** ADR-035 built per-shard replication + peer recovery **in-process** (the `ReplicatedShard`
   composite + the `peer_recover` primitive). This lifts it onto the gRPC transport — replicas on different
   nodes, with cross-node peer recovery — completing build-path step 4, following the ADR-027 (in-process) →
@@ -40,7 +45,7 @@
   (plaintext localhost), and true bounded-memory file streaming (the source reads one segment file into memory
   at a time today).
 - **Consequence:** A coordinator can run replicas on separate gRPC nodes that fail over, and bring a fresh
-  node up by streaming a peer's segments. Proven by `tests/cluster_grpc_oracle.rs`'s new
+  node up by streaming a peer's segments. Proven by `tests/cluster_grpc_oracle/`'s new
   `grpc_replicated_failover_and_peer_recovery`: K=3 × RF=2 durable servers, `connect_replicated` ≡ brute;
   stopping a primary still serves correct reads via its replica (failover — which also proves ingest fanned
   out to the replica); and a fresh node peer-recovers a position's segments from a live peer and then serves
@@ -50,5 +55,4 @@
   transport + the DSL-on-wire invariant), ADR-034 (dict shipping — reused per endpoint), ADR-031/032 (the
   coordinator log + per-shard durable segments peer recovery streams), ADR-033 (the shared-nothing model),
   `engine/grpc/proto/shard.proto`, `src/cluster/{server,remote,coordinator}.rs`, `src/bin/shardserver.rs`,
-  `tests/cluster_grpc_oracle.rs`.
-
+  `tests/cluster_grpc_oracle/`.

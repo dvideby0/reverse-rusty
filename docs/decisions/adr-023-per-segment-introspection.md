@@ -42,6 +42,5 @@
   remain in the ops-ergonomics backlog.)
 - **See also:** ADR-016 (lock-free snapshot reads), ADR-020 (the resident-vs-off-heap byte accounting this
   surfaces per segment), ADR-022 (the sibling ES-style endpoint), `events.rs` (`SegmentInfo`/`SegmentKind`),
-  `STATUS.md` (ops-ergonomics backlog).
-
+  the roadmap's [`API and operator ergonomics`](../roadmap.md#api-and-operator-ergonomics).
 

@@ -2,11 +2,11 @@
 
 > [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
-**Status:** accepted (2026-07-03) · **Program:** Broad-Query Cost Program increment 2
-([`../proposals/broad-cost-program.md`](../proposals/broad-cost-program.md) §5.1), paired with
+**Status:** accepted (2026-07-03) · **Program:** Broad-Query Cost Program increment 2, paired with
 increment 1's hot tier (ADR-105) per the review outcome: the two ship together because the
 *measured* 20M defect is an **identical-query concentration**, which the hot tier alone cannot
-recover.
+recover. The measurement-gated persisted follow-on lives in the
+[roadmap](../roadmap.md#persist-canonical-body-indirection-on-disk).
 
 ## Context
 

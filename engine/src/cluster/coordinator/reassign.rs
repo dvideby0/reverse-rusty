@@ -39,8 +39,9 @@
 //! [`rebalance_and_move_with`](super::ClusterEngine::rebalance_and_move_with) waves). A
 //! compare-and-set on the committed primary just before the commit is a best-effort guard against a
 //! *second* coordinator; making it truly atomic across horizontally-scaled stateless coordinators
-//! needs a control-plane **conditional-propose** (compare-and-set `AssignShard`) primitive — which,
-//! with an unattended assignment-watch → re-point controller, is the deferred follow-on (ADR-090).
+//! needs a control-plane **conditional-propose** (compare-and-set `AssignShard`) primitive. ADR-092
+//! adds the opt-in unattended reconcile loop, but it does not make the final proposal conditional;
+//! the supported deployment therefore remains one active coordinator.
 //! The whole module is `distributed`-gated; the in-process/default path never compiles it and is
 //! byte-identical.
 
@@ -333,8 +334,8 @@ impl ClusterEngine {
         // single-coordinator deployment stays zero-FN; the operator (or the autoscaler's next tick)
         // re-runs to reconcile the durable map (idempotent — a fenced source still serves the
         // read-only recovery RPCs). The narrow residual — a coordinator restart while the quorum is
-        // still down, before that reconcile — is the boundary the deferred assignment-watch controller
-        // closes (with a conditional-propose / 2-phase commit primitive).
+        // still down, before that reconcile — is the boundary a durable move intent or
+        // conditional-propose / two-phase-commit primitive would close.
         self.emit(EngineEvent::DurabilityFailure {
             op: DurabilityOp::ReplicaDesync,
             detail: format!(

@@ -1,6 +1,6 @@
 //! Unit tests for the equivalence expansion pass (ADR-054). These exercise the pure
 //! `Extracted::expand_equivalences` rewrite in isolation; the end-to-end zero-false-
-//! negative + monotonicity proofs live in tests/oracle.rs and tests/cluster_oracle.rs.
+//! negative + monotonicity proofs live in tests/oracle/ and tests/cluster_oracle/.
 use super::super::*;
 
 fn equiv(pairs: &[(FeatureId, &[FeatureId])]) -> crate::dict::EquivMap {

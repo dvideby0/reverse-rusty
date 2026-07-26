@@ -106,7 +106,7 @@ This last query matches titles that contain: `vintage`, either `leather` or `sue
 `replica`, `faux`, or `vegan`.
 
 > Negations (`-`) are **never** used to retrieve candidates — they're checked only during exact
-> verification. This is a core correctness invariant (see [`../../CLAUDE.md`](../../CLAUDE.md) and
+> verification. This is a core correctness invariant (see [`../../AGENTS.md`](../../AGENTS.md) and
 > [`../design/README.md`](../design/README.md) §2); it's why an absent forbidden feature can never
 > drop a real match.
 
@@ -118,8 +118,9 @@ shared pipeline is what makes synonyms and aliases work automatically:
 - **Case folding and diacritic removal** — `Café` becomes `cafe`, `Jokić` becomes `jokic`.
 - **Number disambiguation** — years, quantities, model numbers, and other numeric types are
   classified separately based on context.
-- **Domain-agnostic by default** — the normalizer ships with no hardcoded vocabulary. All domain
-  knowledge (phrases, synonyms, graders) is supplied via vocabulary configuration.
+- **No built-in entity dictionary** — named phrases, synonyms, aliases, graders, and grade words
+  come from vocabulary configuration. The stock compatibility rules still include numeric typing
+  and the default number-context word `pop`; set `number_context: []` to disable that special case.
 
 Because the same normalizer processes both sides, a query containing `sneakers` will match a title
 containing `running shoes` if those are configured as equivalent in the vocabulary. The normalizer
@@ -165,7 +166,7 @@ The optional `punctuation` array (ADR-058) reclassifies how individual character
 byte-cleaning, so punctuation-only spelling differences stop dropping candidates:
 
 - `"fold"` — delete the character so its neighbors **join** into one token (`O'Brien`, `O-Brien`, and
-  `OBrien` all become `obrien`). Declare a corpus's mid-word `'` (and the curly apostrophe `'`) and `-`
+  `OBrien` all become `obrien`). Declare a corpus's mid-word `'` (and the curly apostrophe `’`) and `-`
   here.
 - `"split"` — make the character a word boundary.
 - `"keep"` — leave it literally in place inside the token (`9.5` stays `9.5`).
@@ -176,4 +177,7 @@ omit the array (as older vocab files do) to get exactly that historical behavior
 to **both** queries and titles, so a query and a title that differ only in punctuation match.
 
 The `NormalizerBuilder` API remains available for programmatic vocabulary construction when you need
-fine-grained control (`fold_punctuation` / `set_punct_class`).
+fine-grained control (`fold_punctuation` / `set_punct_class`). In a single-node server, a REST
+vocabulary change remains process-local metadata until the resulting `GET /_vocab` document is saved
+to the configured `--vocab-file`; a durable cluster checkpoints its vocabulary in the coordinator
+manifest.

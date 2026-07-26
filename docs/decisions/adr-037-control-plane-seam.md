@@ -5,6 +5,11 @@
 
 - **Status:** Accepted (increment 5a — the dependency-free seam; the openraft backend is 5b, the quiesce-gap
   fix is 5c, both roadmap).
+- **Current outcome:** the staged follow-ons shipped. ADR-038 added openraft and the gRPC control
+  service, ADR-041 made manager state durable, ADR-039/040 added the durable per-shard translog and
+  retention leases, and ADR-083/086 connected the coordinator to the quorum. ADR-090/092 later added
+  data-moving reassignment and reconciliation. The decision below preserves the seam-first context
+  in which those increments were chosen.
 - **Context:** Build-path step 5 is the **quorum/Raft control plane**: a small, quorum-replicated
   cluster-state document (consistent-hash ring params + the **shard→node map** + membership + feature-model
   version + an epoch) — the Elasticsearch cluster-manager model the shared-nothing design (ADR-033 §4.3)
@@ -28,8 +33,9 @@
     `leader()`. **Not** a log-append seam — a consensus library owns its own log, so the seam abstracts
     *committed state* + *proposals*, not framed bytes.
   - **The document.** `ClusterState { epoch, nodes, voters, assignments, num_shards, vnodes, dict_fingerprint,
-    model_version }` (`serde`, self-contained — the future Raft snapshot payload); `ClusterStateChange`
-    (`AddNode`/`RemoveNode`/`AssignShard`/`BumpModelVersion`) is the future log-entry payload; `NodeId`
+    model_version }` (`serde`, self-contained — later used by ADR-038 as the Raft snapshot payload);
+    `ClusterStateChange` (`AddNode`/`RemoveNode`/`AssignShard`/`BumpModelVersion`) is the Raft
+    log-entry payload; `NodeId`
     (newtype), `NodeRole`, `NodeDescriptor`, `ShardAssignment`, `StateVersion`, and a typed `ControlError`.
   - **The backend.** `InMemoryControlPlane` applies every proposal immediately and is always `Ok` (a single
     node trivially has a quorum) — the `NullClusterLog` analogue + the fast differential-test backend.
@@ -45,7 +51,7 @@
     exists from day one (a follower's `client_write` returns it); `change_membership` is **distinct** from
     `propose` (joint consensus is special in Raft — folding it in would force a re-cut); reads are a snapshot
     *pull*, not a watch (openraft has no watch of an application document); `ClusterState.epoch` (an app
-    counter) is kept distinct from the future Raft term **and** from `ClusterManifest.epoch` (the local
+    counter) is kept distinct from the openraft term **and** from `ClusterManifest.epoch` (the local
     checkpoint generation) — three distinct notions, deliberately not unified.
 - **Honest scope (the correction to carry forward).** The roadmap shorthand "the Raft step unblocks the
   quiesce-during-recovery gap" is **imprecise**. The control-plane Raft holds the *cluster-state doc*, which is
@@ -73,4 +79,3 @@
   *above*, and the quiesce gap 5c closes), `src/cluster/control.rs`, `src/cluster/coordinator.rs`
   (`control` field, `control_state`/`assignment_for`/`reassign_shard`), `src/cluster/shard.rs`
   (`ShardError::ControlPlane`), `tests/cluster_control_plane_oracle.rs`.
-

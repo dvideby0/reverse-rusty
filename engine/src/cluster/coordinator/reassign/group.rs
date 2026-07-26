@@ -63,7 +63,7 @@
 //!    (loud event, first fan-out desyncs it). `cp ∉ D` stays fenced forever: serve-then-drop +
 //!    stale-coordinator write protection, the ADR-090 posture. Orphan slots on `C ∖ D` nodes are
 //!    unrouted post-swap and post-restart (the committed map is what `resolve_topology` reads);
-//!    GC stays deferred.
+//!    ADR-096 reclaims them separately through the opt-in, fence-probed orphan-slot GC.
 //! 9. **Move-then-commit.** Re-read the committed state and compare the FULL group against the `C`
 //!    we planned from (strictly stronger than the RF=1 primary-only compare), then commit the full
 //!    `AssignShard(desired)` with bounded retries. Outcomes reuse [`ReassignOutcome`] (`from`/`to`

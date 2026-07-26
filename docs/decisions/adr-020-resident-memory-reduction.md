@@ -2,6 +2,11 @@
 
 > [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
+> **Current outcome:** the lazy `retain_source=false` profile remains shipped and is the measured
+> low-resident-memory option. ADR-057 subsequently closed the dictionary format-versioning hazard
+> left open below, and ADR-116 added source metadata/readback on top of the durable source store.
+> Current measurements live in [`performance/results.md`](../performance/results.md).
+
 
 - **Context:** Once the exact-match SoA and candidate index are mmap'd (ADR-012), they are paged from
   disk and no longer dominate *resident* RAM. The structures that stay fully in RAM are auxiliary and
@@ -49,5 +54,5 @@
 - **See also:** ADR-012 (mmap segments — the precondition), ADR-014 (extracting `sources.dat` from the
   segment — the precedent), ADR-016 (snapshot publish stays an `Arc::clone`), ADR-017 (durable bulk —
   source becomes durable only at the commit point), ADR-019 (the family work this redirected energy
-  from), `STATUS.md` (roadmap), `performance/results.md` §9.
-
+  from), the roadmap's [`memory headroom`](../roadmap.md#memory-headroom-for-100m-query-deployments),
+  `performance/results.md` §9.

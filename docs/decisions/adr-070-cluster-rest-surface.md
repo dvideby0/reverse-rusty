@@ -2,6 +2,12 @@
 
 > [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
+> **Current outcome:** the major decision-time deferrals below shipped under ADR-071, ADR-075, and
+> ADR-080. Cluster reads now support filtering and ranking, the mesh supports TLS/token
+> authentication, and broad/class-D rows use replicate-to-all placement. Cluster explain and dynamic
+> `PUT /_settings` remain unsupported and fail loudly; the current endpoint matrix lives in
+> [`reference/api.md`](../reference/api.md).
+
 - **Context.** [ADR-065](adr-065-distributed-v1-graduation.md) criterion 1 — the first of the three
   items that unblock testing everything else. The HTTP server fronts a **single-node `Engine` only**;
   the cluster is a library API (`ClusterEngine`) plus raw gRPC bins (`shardserver`, `controlserver`).

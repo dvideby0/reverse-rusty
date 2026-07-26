@@ -44,7 +44,7 @@
 - **Consequence:** a shard can be moved between owners **live**, under concurrent writes, with **zero false
   negatives** and **uninterrupted reads** — the missing decide→move→flip wiring (the allocator decides, peer
   recovery moves, the 6a `HandoffShard` flips, the fence guards). Proven by
-  `tests/cluster_grpc_oracle.rs::grpc_live_handoff_under_sustained_writes` (reassign a position source→target
+  `tests/cluster_grpc_oracle/handoff.rs::grpc_live_handoff_under_sustained_writes` (reassign a position source→target
   under a concurrent writer that retries the brief fence-window rejections; the SAME cluster — its position
   re-pointed to the new owner — ≡ the brute oracle over the final live set; the handoff generation bumps; every
   add converges onto the new owner) + `src/cluster/server.rs::fence_rejects_writes_but_serves_reads` (writes
@@ -54,5 +54,4 @@
   reassignment acts on), ADR-036/039/040 (peer recovery + the per-shard translog + retention leases — the byte
   mover, the no-quiesce tail, and the lease this holds), ADR-033 (shared-nothing — the move is peer recovery,
   no shared storage), `src/cluster/{coordinator,server,remote,handoff}.rs`, `grpc/proto/shard.proto`,
-  `tests/cluster_grpc_oracle.rs`.
-
+  `tests/cluster_grpc_oracle/`.

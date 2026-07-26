@@ -1,24 +1,26 @@
 # Performance Results — Reverse Rusty
 
-All numbers below are **measured**, not modeled, on Reverse Rusty in `engine/`. The benchmark runbook,
+All numbers below are **measured**, not modeled, on Reverse Rusty in `engine/`, but they come from
+several dated captures. Early prototype tables are retained as historical algorithm evidence and are
+labelled as such; the current persisted-memory profile and 20M scale proof have their own sections.
+The benchmark runbook,
 the machine-independent **invariants** to verify on any box, and the dated **capture log** are in
 [`benchmark-results.txt`](benchmark-results.txt). Where the report extrapolates to the 100M-query
 target, the assumptions are stated explicitly. See [`README.md`](README.md) for the headline numbers
-and reproduction commands; [`../STATUS.md`](../STATUS.md) for what's implemented vs design-only.
+and reproduction commands; [`../CHANGELOG.md`](../CHANGELOG.md) for the chronology of later shipped
+changes.
 
-**Test machine:** aarch64, **4 cores, 3.8 GiB RAM** (a small sandbox — this matters for the scale
-ceiling). `rustc 1.95.0`, release profile (`opt-level=3`, LTO, `codegen-units=1`). Throughput numbers
-are reported **per core** (measured single-threaded); rayon parallel matching (~3.8× on 4 cores) has
-since been added — see [`../STATUS.md`](../STATUS.md). **These captures predate the daachorse / roaring /
-rayon swap-ins**, so they reflect the core algorithm's per-core cost rather than the current crate set
-(the engine now has 16 dependencies — it is no longer "zero external crates").
+Capture hardware and toolchain are recorded beside each dated entry in
+[`benchmark-results.txt`](benchmark-results.txt). The early §1–§7 prototype capture used a small
+4-core/3.8-GiB aarch64 sandbox and predates the daachorse, roaring, mmap, and rayon implementations;
+do not use its process-RSS table as the current memory profile.
 
 The workload target from the spec: **100M stored queries, 10M titles/hour (~2,778 titles/sec),
 frequent updates, zero false negatives.**
 
 ---
 
-## 1. Headline results
+## 1. Historical prototype throughput capture
 
 | Config | Queries | Candidates/title (avg, p99) | Throughput (titles/s/core) | p99 latency | RSS/query |
 |---|---:|---|---:|---:|---:|
@@ -53,9 +55,9 @@ frequent updates, zero false negatives.**
 
 ## 2. Correctness (the hard requirement)
 
-The differential oracle (`tests/oracle.rs`) builds an **independent** brute-force matcher (its own
-dictionary, checking every query's extracted features against every title) and compares it to the
-engine over 40,000 queries × 4,000 titles:
+The shared-front-end differential suite (`tests/oracle/`) compares candidate retrieval + exact
+verification with brute-force evaluation over the same compiled feature semantics. Its pinned
+historical run covered 40,000 queries × 4,000 titles:
 
 ```
 oracle: truth_matches=109024 engine_matches=109024 false_neg=0 false_pos=0
@@ -65,9 +67,14 @@ oracle: truth_matches=109024 engine_matches=109024 false_neg=0 false_pos=0
 The lossless-cover invariant holds empirically over ~109k real matches. The spec's worked example
 also passes its hand-written PASS/FAIL expectations (`spec_example_matches_expected`).
 
+Independence from the production parser/normalizer is tested separately under
+`tests/independent_oracle/`, which uses the zero-dependency `ref-matcher/` implementation and compares
+canonical feature strings. Calling the in-tree `tests/oracle/` brute force “front-end independent”
+would overstate what that suite proves.
+
 ---
 
-## 3. Build throughput
+## 3. Historical prototype build throughput
 
 Building (parse → extract → finalize mask → choose signatures → SoA + index) runs at a steady
 **~650,000 queries/sec/core** across all scales:
@@ -109,56 +116,53 @@ reflects this.
 
 ---
 
-## 5. Memory and the path to 100M queries
+## 5. Current memory and durable-size profile
 
-Measured steady-state RSS is **~256 bytes per stored query**, stable across scales:
+ADR-020's source-store work changed the profile enough that the old ~256 B/query process-RSS table
+must not drive deployment sizing.
 
-| Queries | exact SoA | main index postings | process RSS |
+Current pinned captures:
+
+| Workload/profile | Engine-accounted resident | Durable bytes | Interpretation |
+|---|---:|---:|---|
+| 1M persisted, `retain_source=false` | 5,926,332 B (5.93 B/query) | 237,808,740 B (237.81 B/query) | the CI regression baseline in `perf-baseline.json`; four committed files |
+| 20M selective, `retain_source=false` | ~5.2 B/query | — | compiled structures + dictionary, source excluded from resident accounting |
+| 20M selective, `retain_source=true` | ~109.0 B/query | — | resident source dominates |
+| 1M component capture, resident source | source ~113.5 B/query; dict ~4.9 B/query | — | illustrates why source policy is the first sizing choice |
+
+These are engine-reported/accounted bytes for the named workloads, not a promise about process RSS.
+Allocator overhead, mmap residency, filesystem page cache, source/explain access, tags, predicates,
+and lane mix still consume real host memory. Durable bytes include source/file-format data and must be
+measured independently from resident memory.
+
+The earlier prototype capture is preserved below only to show that its process RSS scaled linearly:
+
+| Queries | historical exact SoA | historical main postings | historical process RSS |
 |---:|---:|---:|---:|
 | 1,000,000 | 73 MB | 4.9 MB | 258 MB |
 | 3,000,000 | 243 MB | 14.6 MB | 767 MB |
 | 5,000,000 | 487 MB | 24.3 MB | 1,289 MB |
 
-The index postings are tiny (the adaptive inline-posting representation keeps most postings off the
-heap); the bulk is the exact-match SoA plus dictionary/string overhead. 5M queries was the
-comfortable ceiling on this 3.8 GiB box (build peaks higher than steady state because pass-A holds
-extracted queries transiently before folding to SoA).
-
-**Extrapolation to 100M queries:** at ~256 B/query the index is **~25.6 GB** — it does not fit on
-one small node, which is exactly why the design shards (see
-[`../design/clustering-and-scaling.md`](../design/clustering-and-scaling.md)). Concretely:
-
-- **~8 shards** of ~12.5M queries each (≈3.3 GB/shard) on commodity 8–16 GB nodes, or **~16 shards**
-  for headroom and per-shard cache residency.
-- Production would shrink the 256 B/query materially: intern feature *strings* once per segment
-  (the engine keeps per-feature `String`s in the dict — a large fraction of the 256 B), use mmap'd
-  immutable segments so the OS page cache (not RSS) holds cold data, and pack the SoA tighter. A
-  realistic target is **80–140 B/query**, i.e. **8–14 GB for 100M** — a handful of nodes.
-- Throughput: the measured **per-core selective rate of 158–710k titles/sec** is **57–255× the
-  2,778/s target on a single core**. The 10M-titles/hour requirement is met with enormous headroom
-  by a single core; sharding is driven by *memory*, not throughput. A title is routed only to the
-  shards whose entities it contains, so fan-out is small.
-
-The throughput decline from 710k (1M) to 437k (5M) is a **memory/cache effect** (the index outgrows
-L2/L3), not algorithmic — candidates/title are flat. Keeping each shard's hot structures
-cache-resident (the sharding motivation) recovers the higher per-core numbers.
+Do not turn either table into a fixed shard count. Selective A/B/H rows divide across positions,
+while C/D and unroutable default-visible rows replicate to every position; RF multiplies physical
+copies. The current sizing method, including page-cache and transient-copy headroom, is in
+[`../operations/sizing.md`](../operations/sizing.md).
 
 ---
 
 ## 6. Updates
 
-The hot-delta + tombstone + (conceptual) epoch-swap model gives:
+The hot-delta + tombstone path measured in the early capture gave:
 
 ```
 live updates : 50,000 in ~0.065 s  ≈ 750,000 updates/sec/core   visibility: immediate
 ```
 
-An update is *compile new version → append to delta → tombstone old id*, all O(size-of-one-query)
-with no postings rebuild and no index-wide refresh. Visibility is immediate (no segment refresh
-latency, unlike the Lucene/percolator index-refresh model). At 750k/s/core, even aggressive query
-churn (e.g. millions of edits/hour) is comfortably absorbed; background compaction (the "improving"
-compaction of [`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §7) folds
-the delta and re-optimizes covers off the hot path.
+The shipped durable path is log-first, applies the new version/tombstone, and publishes a new
+immutable snapshot before a successful operation returns. Background compaction folds the delta,
+reclaims dead rows, rebuilds postings/filters, and can optionally re-anchor under deterministic
+visibility guards; it does not run a learned cover optimizer. Treat the historical update rate as a
+dated microbenchmark, not a durability or multi-node write-SLO guarantee.
 
 ---
 
@@ -183,8 +187,10 @@ fanning every title across all segments (one signature-map lookup per probe per 
 **Candidates/postings per title stay nearly flat** because, over a large synthetic entity space,
 signatures are highly selective: most per-segment probes hit empty/tiny postings, so the dominant
 added cost is the probe (hash-lookup) *count*, not extra exact-verified candidates. Compaction
-(merging K segments back to 1) repays this read tax; per-segment anchor filters would cut it further
-(see [`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §6). Run time ~6.5s
+(merging K segments back to 1) repays this read tax. Cache-line blocked per-segment Bloom filters are
+now built and skip definite-miss signature probes; the historical table predates that implementation,
+so it does not quantify the current filter benefit (see
+[`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §6). Run time ~6.5s
 (<40s budget). Reproduce: `cargo run --release --bin segbench -- 300000 3000 0.0`.
 
 ---
@@ -208,10 +214,15 @@ added cost is the probe (hash-lookup) *count*, not extra exact-verified candidat
 
 ## 9. Bottleneck analysis & where Reverse Rusty is honest about its limits
 
-- **#1 bottleneck: the broad lane.** Confirmed, quantified, and now *resolved* — quarantine +
-  columnar batch evaluation (ADR-026): the broad lane runs once per title-batch (postings scanned
-  amortize ~1/batch_size; ~2.4× over the inline path on the dev box), byte-identical to the per-title
-  result. This was the single most important operational lever.
+- **#1 bottleneck: repeated broad/hot work.** Quarantine + columnar batch evaluation (ADR-026)
+  amortize broad postings across a title batch, and the always-visible hot tier (ADR-105) moves
+  runtime-hot non-top-64 anchors off the scalar lane without changing visibility. Canonical-body
+  sharing (ADR-106) addresses concentration: in the latest 20M broad-bearing in-memory capture it
+  reduced body candidates/title from 6,616.65 to 53.75 and the largest main posting from 43,533 to
+  103 while emitting the identical ~6.5k matches/title. That recovery was dedup-driven; only 782
+  rows entered H at θ=1024 in this synthetic corpus. Current mmap segments expand body members at
+  flush, so the persisted/durable counterpart remains measured roadmap work rather than a solved
+  cost.
 - **#2: memory bandwidth at scale.** Candidate counts are flat but absolute throughput drops as the
   index leaves cache. Mitigation: sharding for cache residency, tighter SoA packing, mmap segments.
 - **Simplifications at the time of this capture (status updated inline):**
@@ -226,8 +237,10 @@ added cost is the probe (hash-lookup) *count*, not extra exact-verified candidat
     selective path is not the bottleneck (the broad lane and memory bandwidth are), and the DAG's
     mmap-serialization / compaction-rebuild cost was not justified against an already-flat ~54
     candidates/title.
-  - The dictionary retains per-feature `String`s, inflating bytes/query. **Still true** — interning +
-    segment mmap is the documented production change for the memory extrapolation above.
+  - The dictionary retains one string per interned feature, but current component captures put it at
+    roughly 4–5 B/query on the synthetic 1M/20M workloads. Resident query source—not duplicate
+    per-query dictionary strings—dominates the `retain_source=true` profile. Mmap/source-store
+    residency must be measured separately.
   - ~~Matching is single-threaded here.~~ **Resolved:** rayon parallel matching (`match_titles_par`)
     delivers ~3.8× on 4 cores; the per-core numbers above remain the right unit for the algorithm's cost.
 
@@ -238,14 +251,17 @@ added cost is the probe (hash-lookup) *count*, not extra exact-verified candidat
 > *Produce a design and prototype … that can plausibly outperform Lucene/OpenSearch-style generic
 > percolation by one or more orders of magnitude on eBay-style product listing titles.*
 
-On the selective realtime path Reverse Rusty sustains **158–255× the throughput target on a single core**
-with **flat ~54 candidates/title** and **zero false negatives**, and it reproduces and then
-neutralizes the broad-query failure mode that dominates generic percolators. The order-of-magnitude
-claim is supported by measurement for the selective majority of the workload; the remaining work
-(broad-lane batching, tighter SoA / dict interning, multi-shard) is specified and is about *memory and
-the broad lane*, not the core matching speed. (daachorse, roaring, mmap'd segments, and rayon parallel matching have since
-shipped — see [`../STATUS.md`](../STATUS.md); the multi-shard leg is now *measured*, not just
-specified, at 20M — §11.)
+In the historical selective capture Reverse Rusty sustained **158–255× the throughput target on a
+single core** with **flat ~54 candidates/title** and zero false negatives; the 20M current capture
+extends the candidate-flatness result. The engine reproduces and then controls—rather than
+eliminates—the broad-query failure mode with opt-in visibility, columnar batching,
+visibility-neutral hot scheduling, and in-memory body sharing. The
+order-of-magnitude claim is supported by measurement for the selective majority of the synthetic
+workload. Since the earliest
+captures, daachorse, roaring, mmap'd segments, rayon parallel matching, broad-lane batching, and the
+multi-shard core have shipped; see [`../CHANGELOG.md`](../CHANGELOG.md). The multi-shard leg is now
+*measured*, not just specified, at 20M (§11); remaining evidence and memory work lives in the
+[`roadmap`](../roadmap.md).
 
 ---
 
@@ -281,8 +297,13 @@ candidates/title (p95 96, p99 112, max 152; max main posting 104)** — bit-comp
 54.5 pinned at 1M and 54.29 at 5M — at **~438k titles/sec/core**. Commands, pins, and the dated
 capture: [`benchmark-results.txt`](benchmark-results.txt).
 
+ADR-106 does not invalidate this durable baseline: its Stage-A body groups are expanded when an
+in-memory segment flushes. The post-ADR-106 durable K=8 rerun therefore reproduced the same
+10,035.55 candidates/title and stayed fully correct across reopen. The corresponding in-memory
+capture retained the sharing and recovered the repeated-body scan described in §9.
+
 **What this run deliberately does not prove:** the gRPC wire at scale (the scale dimensions —
 dict, postings tiers, placement, manifest — are transport-identical; the wire's own failure modes
-are owned by the gRPC oracles + the ADR-072 multi-machine harness), and the **real-corpus
+are owned by the gRPC oracles + the ADR-072 single-host container-network harness), and the **real-corpus
 FN/throughput audit**, which remains criterion 12's open half (intake: the ADR-087
 `RR_ORACLE_CORPUS` hook).

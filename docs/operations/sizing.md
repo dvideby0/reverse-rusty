@@ -1,95 +1,158 @@
 # Resource sizing
 
-How to size a Reverse Rusty deployment (roadmap Tier 5 M3). This page gives the *method*; the
-measured numbers it plugs in live in **[`../performance/results.md`](../performance/results.md) §5
-(memory) and §1–4 (throughput)** — that file is the SSOT, this one rounds and links.
+How to turn a representative corpus capture into a deployment shape. Exact, dated measurements live
+only in [`../performance/results.md`](../performance/results.md) and
+[`../performance/benchmark-results.txt`](../performance/benchmark-results.txt); this page owns the
+method.
 
-> TL;DR — sizing is **memory-driven, not CPU-driven**. Budget ~256 B of resident memory per stored
-> query at today's baseline (production-optimization target 80–140 B — results.md §5), give each
-> node ~2× steady-state headroom, and pick the shard count from the corpus size — throughput takes
-> care of itself (the selective path clears the spec target by 57–255× per core).
+> **Do not size from the old 256 B/query process-RSS capture.** Current persisted-profile captures
+> separate engine-accounted resident memory from durable bytes and show that source retention changes
+> the result by an order of magnitude. Measure the profile you will actually deploy.
 
-## 1. Memory: the shard-count formula
+## 1. Pick the source-retention profile first
 
-Steady-state resident memory scales linearly with stored queries (measured flat 1M→5M —
-results.md §5). Size from the corpus:
+`--retain-source` defaults to `true`.
+
+| Profile | What the engine keeps | Sizing consequence |
+|---|---|---|
+| `retain_source=true` | canonical query text resident with compiled state | easiest source/explain/admin reads; current captures are roughly a little over 100 B/query of engine-accounted resident memory |
+| `retain_source=false` + durable `--data-dir` | compiled state resident; canonical source in the durable source store and read lazily | current captures report roughly 5–6 B/query of engine-accounted resident memory, but source pages, filesystem cache, and source-read I/O still consume host resources |
+
+Those rounded ranges describe the current pinned workloads, not constants. Vocabulary size, tag
+count, predicate shape, duplicate bodies, lane mix, allocator behavior, and source length all move
+them. The durable 1M capture is also much larger per query than the no-source resident number because
+it includes source and file-format data. Use the exact current figures in the performance pages only
+as a bootstrap estimate.
+
+## 2. Capture the quantities your topology needs
+
+Run the persisted benchmark/profile with:
+
+- the real `retain_source` setting;
+- representative DSL/source lengths and tags/rank fields;
+- representative class A/B/C/D/H distribution;
+- the intended shard count and replication factor;
+- a steady snapshot after flush/checkpoint, plus a compaction/rebuild peak.
+
+Record:
 
 ```
-corpus_bytes ≈ num_queries × bytes_per_query        (≈256 B baseline today)
-K_min        ≈ corpus_bytes / (node_memory × 0.5)   (0.5 = the headroom factor, §2)
+B_engine   = reverse_rusty_memory_bytes / live logical queries
+B_rss      = process RSS / live logical queries
+B_durable  = committed data-dir bytes / live logical queries
+P99_shard  = shard service-time p99 under the expected title mix
+fanout     = routed logical positions per title
 ```
 
-Worked example (the results.md §5 extrapolation): 100M queries ≈ 25.6 GB ⇒ **8 shards of
-~12.5M queries (~3.3 GB each) on commodity 8–16 GB nodes**, or ~16 shards for more headroom +
-better cache residency (§3). Don't size shards above a few GB of index each even when memory
-allows — §3 is why.
+`B_engine` is useful for component attribution. `B_rss` includes allocator overhead and resident mmap
+pages. Neither predicts filesystem cache perfectly; observe the node over a realistic source/explain
+read workload. `B_durable` must come from file sizes, not from the memory gauge.
 
-Two refinements:
+## 3. Separate selective and replicated query cost
 
-- **Broad share matters more than count alone:** class-C (broad) queries cost far more per title
-  than selective ones. Watch the live cost-class split (`reverse_rusty_class_queries{class="c"}`)
-  and the per-shard broad counters (ADR-101) rather than assuming the benchmark mix.
-- **Trust the gauges over the formula:** `reverse_rusty_memory_bytes{component=…}` on every
-  shard's `/_metrics` (ADR-091) is the real number, broken down by component. The formula gets
-  you a starting topology; the gauge tells you when it was wrong.
+Selective A/B/H rows divide across ring positions. Class C, accepted D, top-64 class-B pairs, and
+required-phrase proxy rows are replicated to every logical position. Therefore the simple
+`total_queries / K` formula is incomplete.
 
-## 2. Headroom: why ~2×
+For one logical position, start with:
 
-Steady-state is not peak. Transients that ride on top of resident index memory:
+```
+Q_position ≈ Q_selective / K + Q_replicated
+M_position ≈ measured_bytes_for_that_mix(Q_position)
+```
 
-- **Flush + compaction** build the next segment while the old ones still serve — briefly holding
-  both (bounded by segment size, but real).
-- **Blue/green operations** (vocab rebuild, resize — ADR-046/078) build a second engine before
-  swapping: an in-process cluster doing `set_vocab` needs ~2× its own footprint for the rebuild
-  window.
-- **Ingest bursts** grow the memtable ahead of the flush trigger.
+At RF>1, multiply physical copies by the position's replica count. Adding logical positions can
+reduce selective rows per position while increasing total replicated storage across the deployment.
+Use `class_counts`, per-position query counts, and actual data-dir/RSS measurements after a trial
+build; class B contains both selective and replicated shapes, so its aggregate count alone cannot
+model the split exactly.
 
-Halving the usable node memory in the formula (`× 0.5`) covers these plus the OS page cache the
-mmap'd segments want. If you never run blue/green ops on the node, 0.6–0.7 is defensible;
-`reverse_rusty_memory_bytes` over a week of real traffic is the tiebreaker.
+## 4. Convert the capture into nodes and positions
 
-## 3. Cache residency: why more, smaller shards
+Choose a target steady-state memory utilization `U` that leaves room for the OS and transients. A
+conservative first pass is `U = 0.5`:
 
-Per-core throughput *declines* as one engine's hot structures outgrow L2/L3 (measured 710k → 437k
-titles/s/core from 1M → 5M queries — results.md §5's cache-residency note). Sharding is the fix:
-each shard's postings + SoA stay cache-resident, recovering the higher per-core rate. This is why
-the 100M plan says 8–16 shards, not "one big node with 32 GB".
+```
+usable_memory_per_node = node_memory × U
+positions_per_node     = floor(usable_memory_per_node / M_position)
+nodes_min              = ceil(K × replication_factor / positions_per_node)
+```
 
-**Positions vs pods (ADR-093):** shard *positions* (K) and *pods* need not be 1:1 — a pod can host
-several co-located positions (`shard_id`-keyed slots). So you can pick K for cache residency and
-data-movement granularity, and separately pick how many pods to spread K over
-([`kubernetes-deployment.md`](kubernetes-deployment.md); the chart models 1:1 by default).
-Entity-anchor routing keeps read fan-out at ~2–5 shards per title regardless of K — fan-out does
-not argue against more shards.
+Then validate failure-domain constraints: replicas of one position must not share a node, and loss of
+one node must leave enough CPU/memory for failover traffic.
 
-## 4. CPU and throughput
+Logical positions and pods are not inherently 1:1 (ADR-093). A `ShardServer` can host several
+`shard_id` slots, so choose:
 
-CPU is not the constraint: the measured selective path clears the 2,778 titles/s spec target by
-**57–255× per core** (results.md §1/§4), and matching parallelizes across titles. Provision CPU
-for: the broad lane if your corpus is broad-heavy (watch the ADR-101 counters; the batch endpoint
-`/_mpercolate` amortizes it — results.md §9), ingest/compaction background work, and the
-coordinator's fan-out merge. A handful of cores per shard node is typically plenty; the
-`reverse_rusty_shard_rpc_duration_seconds` p99 (ADR-100) tells you when it isn't.
+- `K` for selective working-set size, placement granularity, and movement cost;
+- physical node count for memory, CPU, replicas, and failure domains.
 
-## 5. The other components
+The shipped Helm chart is RF=1 and models a simple topology. More complex RF placement is currently
+operator-managed; see [`deployment-modes.md`](deployment-modes.md).
 
-- **Coordinator:** stateless in the remote topologies; memory = the frozen dict + tag space +
-  request buffers (small next to shards). Scale horizontally behind a load balancer for HTTP
-  concurrency, not memory.
-- **Control plane:** tiny (a Raft log of rare membership/assignment ops). The chart's defaults are
-  fine; give it stable storage, not size.
-- **Disk per shard:** segments ≈ resident index bytes (the mmap'd files ARE the resident data) +
-  translog + one compaction transient (≈ the largest segment being rewritten). 2× the shard's
-  memory budget in disk is a comfortable start; `persistence.size` in
-  [`values.yaml`](../../deploy/helm/reverse-rusty/values.yaml) (default 10 Gi) is the knob.
-- **Kubernetes requests/limits:** set `resources.requests.memory` to the shard budget from §1–2
-  and the limit modestly above it (the engine's footprint is stable; a limit close to the request
-  catches leaks loudly). The chart ships `resources: {}` — set it per environment.
+## 5. Reserve transient memory and disk
 
-## 6. When the numbers move
+Steady state is not the peak:
 
-The bytes-per-query baseline improves with the planned production optimizations (string interning,
-mmap-resident dicts, SoA tightening — the Tier 3 "memory headroom" roadmap item; target 80–140
-B/query). This page deliberately quotes rounded anchors and defers to
-[`../performance/results.md`](../performance/results.md) — when that file's §5 numbers change,
-re-derive K from the formula, don't re-tune prose here.
+- flush/compaction writes a replacement while old segments still serve;
+- in-process vocabulary rebuild and resize build replacement state before swapping;
+- peer recovery temporarily holds source and target copies;
+- open PITs retain snapshots and may keep unlinked mmap segments alive;
+- ingest bursts grow the memtable before its flush threshold.
+
+Two-times steady-state memory/disk is a useful **starting reserve**, not a guarantee. Large source
+stores can make disk the dominant dimension, and the largest compaction/rebuild unit determines the
+temporary copy. Measure a forced compaction, vocabulary rebuild, resize, and peer recovery against the
+representative data before tightening headroom.
+
+For disk, budget separately:
+
+```
+committed segments + source store
++ WAL/coordinator-log/translog tail
++ largest expected compaction/rebuild/recovery transient
++ backup staging if backups share the volume
+```
+
+Do not assume mmap segment bytes equal resident bytes: untouched mappings consume address space and
+disk without being resident, while hot pages enter RSS/page cache.
+
+## 6. CPU, routing, and broad work
+
+The selective benchmark has substantial throughput headroom in the pinned captures, but CPU can still
+become the constraint when:
+
+- C/D traffic enables the broad lane frequently;
+- θ moves many fat postings into the always-visible H batch lane;
+- title routing reaches many positions;
+- ranking/source/explain enrichment dominates;
+- ingest, compaction, recovery, or reconciliation overlaps search.
+
+Track `reverse_rusty_shard_rpc_duration_seconds`, broad/hot candidate counters, routed `_shards.total`,
+transport queue/error metrics, and node CPU. Batch broad-heavy traffic through `/_mpercolate` or
+`/v2/_mpercolate` so the columnar evaluator can amortize postings.
+
+Content routing usually reaches only a few positions in the captured product-title workload, but
+fan-out is input-dependent and can grow with the number of non-top-64 features. Measure it; do not use
+“2–5 regardless of K” as a capacity invariant.
+
+## 7. Other components
+
+- **Coordinator:** remote deployments do not persist shard corpus files in the coordinator, but the
+  process still holds dictionaries, the logical-ID/admission directory when authoritative, control
+  and repair state, request buffers, and enrichment data. Measure it under bulk ingest and concurrent
+  search; do not call it zero-memory or universally stateless.
+- **Control plane:** cluster-state traffic is low-rate, but each manager needs durable storage and
+  enough CPU/IO to avoid election churn. Size for reliability, not corpus bytes.
+- **Network:** title fan-out is small payload/high request rate; peer recovery and source fetch are
+  bulk paths. Ensure recovery cannot starve interactive RPCs.
+- **Kubernetes:** set requests from observed steady state and limits above observed peak. The chart
+  intentionally ships without environment-specific resource defaults.
+
+## 8. Re-size when the profile changes
+
+Repeat the capture after normalizer/vocabulary changes, a materially different tag/source mix, hot or
+broad reclassification, a shard-count/RF change, or persistent body-dedup work. The roadmap's
+[`memory-headroom`](../roadmap.md#memory-headroom-for-100m-query-deployments) item may change the
+profile; when it does, update the canonical performance capture first and recompute topology from the
+formula here.

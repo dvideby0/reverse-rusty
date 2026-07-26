@@ -166,8 +166,9 @@ is still placed under the old one — searches in that window silently miss quer
 2. Re-ingest the full corpus into the green coordinator and validate it.
 3. Cut traffic over (swap the published port / proxy upstream), then decommission blue.
 
-Do **not** add a shard to the live cluster and re-ingest in place. Cross-process / online resize is a
-deferred follow-on (ADR-078, ADR-081 §Deferred).
+Do **not** add a shard to the live cluster and re-ingest in place. Cross-process / online resize is
+tracked in the [roadmap](../roadmap.md#automatic-and-remote-cluster-resize) under ADR-078's
+compatibility constraints.
 
 **Move a single shard to another node** (without changing K) — data-moving reassignment (ADR-090, a
 `--features distributed` coordinator):
@@ -201,9 +202,10 @@ flows that need a backup (volume loss, quorum-majority loss, whole-cluster loss)
 | **Replica failover** (RF>1) | Reads fail over to an in-sync replica; the primary stays authoritative for writes (ADR-035). | None — automatic. |
 | **Replica replacement** (RF>1) | A replacement reusing the **same durable volume** self-restores from its own segments + translog. A **fresh-volume** replica simply listed in the endpoint group is assembled as *in-sync without recovery* — reads could then serve it empty (silent FN). | Prefer same-volume restart. A fresh replica must complete an explicit peer recovery (`RecoverFrom`, ADR-036) **before** it serves reads — not a plain "start it"; treat fresh-volume replica replacement as a care-needed v1 operation. |
 
-The lifecycle invariants above are exercised end-to-end by the multi-machine harness
-([`deploy/harness.sh`](../../deploy/harness.sh), ADR-072): kill-and-recover, rolling restart, coordinator
-restart, live handoff under load, control-plane restart.
+The lifecycle invariants above are exercised end-to-end by the multi-process, single-host
+container-network harness ([`deploy/harness.sh`](../../deploy/harness.sh), ADR-072):
+kill-and-recover, rolling restart, coordinator restart, live handoff under load, and control-plane
+restart. Independent failure domains remain a roadmap acceptance exercise.
 
 ## 7. Backup & restore
 
@@ -213,14 +215,16 @@ Backup depends on topology, because the durable state lives in different places:
   engine-driven `POST /_backup` — a consistent, self-contained snapshot taken under the engine's write
   lock. This is the path with a real consistency barrier. Full procedure:
   [backup-restore.md](backup-restore.md).
-- **Remote topology** (this compose — the coordinator is **stateless**): `POST /_backup` and
-  `POST /_checkpoint` do **not** seal the remote shards — they no-op on a coordinator that has no
-  `data_dir`. The durable state is each node's own `--data-dir` volume (`shardN-data`, `controlN-data`),
-  fsync'd by that node per its WAL policy. **There is no coordinator-driven cross-shard consistency
-  barrier in v1**, so for a globally consistent backup you must **quiesce writes**:
+- **Remote topology** (this compose — the coordinator is **stateless**): `POST /_checkpoint` does
+  not seal the remote shards, and `POST /_backup` returns 400 because the coordinator has no
+  `data_dir`. The durable state is each node's own `--data-dir` volume (`shardN-data`,
+  `controlN-data`), fsync'd by that node per its log policy. **There is no coordinator-driven
+  cross-shard consistency barrier in v1**, so for a globally consistent backup you must
+  **quiesce writes**:
   1. Stop the ingest source (no `_doc`/`_bulk` writes in flight).
-  2. Snapshot each `shardN-data` and `controlN-data` volume at the filesystem layer (ZFS/LVM/EBS/GCP disk
-     snapshot — instantaneous; see [backup-restore.md](backup-restore.md#zero-write-stall-backups-large-deployments)).
+  2. Snapshot each `shardN-data` and `controlN-data` volume at the filesystem layer
+     (ZFS/LVM/EBS/GCP disk snapshot—instantaneous; see
+     [backup-restore.md](backup-restore.md#filesystem-snapshots-and-remote-deployments)).
   3. Resume writes.
 
   Restore = mount the snapshots back into the same `--data-dir` volumes and restart the nodes; each shard
@@ -243,7 +247,8 @@ coordinator owns the in-process shards' normalizer. Change it **blue/green**: st
 in-process cluster built with the new `--vocab-file`, validate (percolate your golden titles), cut traffic
 over (swap the published port / proxy upstream), decommission the old one.
 
-This is the deployment-level realization of ADR-076's "vocab is deploy-time" decision. Background:
+This is the shipped boundary behind ADR-076's decision-time wording: the current remote topology is
+stock-vocabulary-only; custom vocabulary requires an in-process blue/green deployment. Background:
 [research/dynamic-vocabulary.md](../research/dynamic-vocabulary.md).
 
 ## 9. Monitoring & observability
@@ -251,7 +256,7 @@ This is the deployment-level realization of ADR-076's "vocab is deploy-time" dec
 `GET /_metrics` on the **coordinator** exposes Prometheus text with the `reverse_rusty_` prefix,
 including a per-shard `reverse_rusty_cluster_shard_queries{shard="N"}` gauge. Each `shardserver` /
 `controlserver` ALSO exposes its own `/_metrics` on the plaintext `--metrics-addr` port (ADR-091) —
-the production compose binds shards on `9100` and control nodes on `9101` on the `rrmesh` network
+the reference Compose topology binds shards on `9100` and control nodes on `9101` on the `rrmesh` network
 (not published to the host; scrape from a Prometheus on that network). Shard nodes report
 `reverse_rusty_total_queries`, `reverse_rusty_memory_bytes{component=…}`,
 `reverse_rusty_tombstoned_entries` (compaction backlog), `reverse_rusty_class_queries{class=…}`, and

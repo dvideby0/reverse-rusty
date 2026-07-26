@@ -1,15 +1,26 @@
 # Performance
 
-Measured results for Reverse Rusty (single core, aarch64 4-core / 3.8 GiB sandbox, std-only).
+Canonical entry point for measured behavior. Throughput and latency are hardware-dependent; compare
+them only within a dated same-machine capture. Candidate shape, result equality, fan-out, class
+counts, and serialized/accounted sizes are deterministic for the pinned workloads.
 
-## Headline numbers
+## Current headline
 
-- Selective realtime path: **710k titles/sec/core @ 1M queries**, **437k @ 5M** — 158–255× the
-  2,778 titles/sec spec target. **Candidates/title flat at ~54** regardless of query count.
-- **Zero false negatives and zero false positives** vs a brute-force oracle over 109k matches.
-- Updates: **~750k/sec/core**, immediate (epoch) visibility. Memory: **~256 B/query**.
-- Build: **~650k queries/sec/core**. Broad queries inline cost ~9× throughput → quarantined.
-- LSM read amplification: throughput falls ~2× from 1→8 segments while candidates/title stay flat.
+- **Correctness:** zero candidate false negatives and zero final-set mismatches in the shared-front-end
+  and independent differential suites; the durable 20M K=8 soak also reports no sentinel misses,
+  ghosts, or reopen drift.
+- **Selective structure:** the broad-off capture remains scale-flat at **54.56 candidates/title at
+  20M queries** (p95 96, p99 112), consistent with the pinned 1M and 5M workloads.
+- **Broad/hot cost:** class-H scheduling is visibility-neutral. In the latest 20M broad-bearing
+  in-memory capture, canonical-body sharing reduced repeated body candidates from 6,616.65 to 53.75
+  per title while leaving the emitted match set unchanged. Flush still expands members into the
+  current mmap format, so the durable cluster does not retain that Stage-A saving.
+- **Memory and disk:** the pinned 1M `retain_source=false` baseline accounts for **5.93 B/query
+  resident** and **237.81 B/query durable**. At 20M, resident accounting is about 5.2 B/query
+  without retained source and 109 B/query with it. These are engine-accounted values, not host RSS
+  or page-cache guarantees.
+- **Regression policy:** deterministic work shape and resource ceilings plus variance-banded timing
+  are merge-blocking through ADR-124; the 10M mixed-operations soak runs weekly and on demand.
 
 Full analysis, tables, bottlenecks, and the 100M extrapolation are in [`results.md`](results.md).
 The **benchmark runbook** — how to run each harness, the machine-independent **invariants** to

@@ -36,7 +36,7 @@
     and reproduced identically on any node, so the default case works end-to-end after shipping. Shipping +
     fingerprinting the vocab→normalizer is the explicit next hardening, **deferred** here.
 - **Consequence:** A data node starts **empty** and is handed the frozen dict by the coordinator — no corpus,
-  no out-of-band dict coordination. Proven by `tests/cluster_grpc_oracle.rs`: a new
+  no out-of-band dict coordination. Proven by `tests/cluster_grpc_oracle/`: a new
   `grpc_cluster_with_dict_shipping` stands up K **pending** servers, ships the dict via `connect_remote`, and
   asserts the cluster ≡ single-node ≡ brute (broad on/off); the divergence test is updated to load data first
   (an empty server correctly *adopts*, so the guard now fires on a populated server holding a divergent dict);
@@ -47,5 +47,4 @@
   dict-fingerprint handshake this turns from verify-only into ship-then-verify), ADR-033 (the shared-nothing
   realignment this is the first step of), ADR-027 (the one-frozen-dict invariant), `src/cluster/server.rs`
   (`pending` + `AdoptDict`), `src/cluster/remote.rs` (`connect_and_adopt`), `src/cluster/coordinator.rs`
-  (`connect_remote`), `engine/grpc/proto/shard.proto`, `tests/cluster_grpc_oracle.rs`.
-
+  (`connect_remote`), `engine/grpc/proto/shard.proto`, `tests/cluster_grpc_oracle/`.

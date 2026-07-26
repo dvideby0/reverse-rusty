@@ -2,6 +2,10 @@
 
 > [Normalization & vocabulary decisions](areas/normalization-and-vocabulary.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
+> **Current outcome:** the deliberately deferred proposal sources now exist: ADR-102 adds
+> review-first distributional discovery and ADR-103 adds match-feedback validation. Both still feed
+> this widening-only expansion primitive; neither changes its false-negative safety argument.
+
 - **Context.** Surface-form variation is the dominant threat to recall in this engine's domain —
   eBay titles spell the same entity many ways (`UD`/`Upper Deck`/`upperdeck`, `rc`/`rookie`,
   `psa10`/`PSA 10`). A saved search that misses a listing because of a variant is a **false
@@ -50,7 +54,8 @@
   discipline that collapse needs. A wrong/low-confidence equivalence degrades to a **bounded false
   positive** (the engine's tolerable failure mode). It also correctly relaxes the common-mask gate
   (a hot feature moved to any-of leaves the required mask, so the gate can't wrongly reject a title
-  bearing only an alias). Proven by `tests/oracle.rs::wrong_equivalence_never_causes_false_negatives`
+  bearing only an alias). Proven by
+  `tests/oracle/equivalence.rs::wrong_equivalence_never_causes_false_negatives`
   (a nonsense equivalence drops zero true matches vs the original-semantics oracle) +
   `::equivalence_expansion_grows_matches_and_is_fn_safe` (monotone).
 
@@ -73,10 +78,11 @@
 
 - **Testing.** `compile.rs` units (the pure rewrite: required→any-of, widening, no-op, idempotent);
   `vocab.rs` units (learns equivalences from any-of; expansion mode emits groups not synonyms);
-  `tests/oracle.rs` (declared equivalence makes both forms match + monotone; the wrong-equivalence
-  FN-safety proof; the learned-via-expansion end-to-end path); `tests/cluster_oracle.rs` (declared
+  `tests/oracle/equivalence.rs` (declared equivalence makes both forms match + monotone; the
+  wrong-equivalence FN-safety proof; the learned-via-expansion end-to-end path);
+  `tests/cluster_oracle/` (declared
   equivalence ≡ an equivalence-aware brute across K∈{1,3,8}, re-placement under expansion, zero FN);
-  `tests/cluster_durability_oracle.rs` (equivalence survives crash + reopen ≡ pre-crash ≡ oracle).
+  `tests/cluster_durability_oracle/` (equivalence survives crash + reopen ≡ pre-crash ≡ oracle).
 
 - **Consequences.** The engine can now express and apply entity equivalences the FN-safe way —
   declared by operators or learned from the corpus's any-of groups — closing the alias half of

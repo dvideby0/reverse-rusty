@@ -2,8 +2,8 @@
 
 A basic threat model for Reverse Rusty: the trust boundaries, the assets, the adversaries we defend
 against (and the ones we explicitly do not, at v1), and how each boundary's controls map to the code.
-This is the [Phase 0](../roadmap.md) item-5 deliverable — the security-review companion to the deploy
-checklist ([`build-and-smoke.md`](build-and-smoke.md)) and the deployment runbooks
+This is the security-review companion to the deploy checklist
+([`build-and-smoke.md`](build-and-smoke.md)) and the deployment runbooks
 ([`cluster-deployment.md`](cluster-deployment.md), [`kubernetes-deployment.md`](kubernetes-deployment.md)).
 Decisions behind the controls: bearer auth → [ADR-062](../decisions/adr-062-server-bearer-auth.md), mesh
 TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hardening →
@@ -45,11 +45,12 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
 
 ### 1. REST API — opt-in bearer auth, default-deny on mutation (ADR-062)
 
-- **Auth model.** A single bearer token (`--auth-token` / `RR_AUTH_TOKEN`) gates **every non-GET/HEAD
-  request except the read-via-POST percolate endpoints** (`/_search`, `/_mpercolate`). The protected
-  set is **default-deny** (`requires_auth` in `bin/server/auth.rs`): a future mutating endpoint is
-  covered without anyone listing it. `--auth-protect-reads` extends the gate to everything except the
-  `/_health` liveness probe.
+- **Auth model.** A single bearer token (`--auth-token` / `RR_AUTH_TOKEN`) gates every non-GET/HEAD
+  request except an explicit read-via-POST allowlist: `/_search`, `/v2/_search`, `/_mpercolate`,
+  `/_percolate/jobs`, and the `/v2/_pit` lifecycle. `POST /v2/_mpercolate` and exhaustive-job
+  cancellation remain protected. The protected set is otherwise **default-deny** (`requires_auth` in
+  `bin/server/auth.rs`), so a future mutating endpoint is covered without anyone listing it.
+  `--auth-protect-reads` extends the gate to everything except the `/_health` liveness probe.
 - **Fail-loud, never fail-open.** `AuthConfig::resolve` (`auth.rs`) refuses to start on an empty,
   non-printable, or **set-but-not-UTF-8** `RR_AUTH_TOKEN` (the latter was a real fail-open bug, fixed
   in ADR-062) — the server never silently serves open when a token was intended.
@@ -89,9 +90,11 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
 - **Residual (explicit non-goals at v1):** **no mTLS** (clients are not authenticated by certificate —
   the shared token admits them) and **no per-RPC authorization tiers** (any mesh member can call any
   RPC). The trust model is "token-admitted node = full mesh peer." Run the mesh on a private network /
-  service mesh; rotate the token + certs out of band. The distributed layers are **experimental /
-  localhost-proven** (see [`STATUS.md`](../STATUS.md)), not yet hardened for a hostile multi-tenant
-  network.
+  service mesh; rotate the token + certs out of band. The distributed layers are **experimental**:
+  proven in-process, over localhost gRPC, and on single-host container networks, but not hardened for
+  a hostile multi-tenant network or independently validated across real failure domains. The remaining acceptance
+  and security work is defined in the
+  [`roadmap`](../roadmap.md#security-hardening-beyond-the-v1-trust-model).
 
 ### 3. Backup write surface — authenticated, operator-named path (ADR-079)
 
@@ -110,8 +113,8 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
     limited to its data + backup volumes (the shipped image already runs as uid 10001 with only `/data`
     writable). Do not run the node as root.
   - **Deferred hardening (optional):** a config-driven allowlist / jail root for `dest` (reject paths
-    that escape a configured backup root). Not shipped because a hard jail would break the legitimate
-    operator-chosen-destination use case; tracked as a follow-on.
+    that escape a configured backup root). It is tracked under
+    [`Security hardening beyond the v1 trust model`](../roadmap.md#security-hardening-beyond-the-v1-trust-model).
 - **Threats addressed:** unauthorized backup (auth-gated), silent overwrite of an existing backup
   (refused), a torn backup corrupting the source (the source is read-only during the copy; ADR-079).
 

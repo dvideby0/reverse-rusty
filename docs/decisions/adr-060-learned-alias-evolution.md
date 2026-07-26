@@ -2,6 +2,13 @@
 
 > [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
+> **Current outcome:** this ADR records the first, single-token increment. ADR-061 subsequently
+> shipped the two-view multi-word matcher, ADR-076 made cluster routing aware of it, ADR-102 added
+> distributional discovery, and ADR-103 added feedback validation. Declared/manual multi-word aliases
+> can now be active; learned multi-word and distinct-token groups remain review candidates. See the
+> current
+> [`/_vocab/aliases` API](../reference/api/vocab.md#learned-alias-registry-adr-060061102103).
+
 - **Context.** Real deployments register hundreds of equivalences (abbreviation → canonical, variant
   spellings, expansions like `auto ≡ {autograph, autographed, signature, signed}`) and want them to
   evolve live. The engine already ships the *mechanism* — equivalence **expansion** (required → any-of,
@@ -101,7 +108,8 @@
   `vocab_apply_recompiles_existing_queries_without_restart`,
   `multiword_alias_candidate_is_recorded_but_not_activated`) + the at-scale FN-safety proof.
 
-- **Consequences.** Operators can now register, learn, review, and live-apply single-token aliases with
-  governance (provenance / confidence / status) and zero false negatives, building on the ADR-054
-  primitive. Multi-word aliases are captured as reviewable candidates, ready for the Phase-2 matcher.
-  The default path (empty registry) is byte-identical to before this ADR.
+- **Consequences.** This increment let operators register, learn, review, and live-apply single-token
+  aliases with governance (provenance / confidence / status) and zero false negatives, building on
+  the ADR-054 primitive. It initially retained multi-word aliases as review candidates; ADR-061 later
+  made declared/manual multi-word groups match-active. The default path (empty registry) remained
+  byte-identical.

@@ -5,13 +5,13 @@
 
 - **Context:** The quality gate was `engine/check.sh` (fmt + clippy + test + audit + deny), run by hand
   before pushing — CLAUDE.md called it "the local CI substitute." Three gaps had opened up: (1) nothing
-  *enforced* the gate, so an unrun `check.sh` could merge; (2) the pressure suite (`tests/stress.rs`) and
+  *enforced* the gate, so an unrun `check.sh` could merge; (2) the pressure suite (`tests/stress/`) and
   the benchmark regression baseline (`docs/performance/benchmark-results.txt`) were gitignored — the
   latter silently, via a blanket `*.txt` rule — so both were invisible to any automated runner and easy
   to let rot; (3) the "CI is a non-goal" framing no longer matched the intent to check every PR.
 - **Decision:** Add GitHub Actions CI (`.github/workflows/ci.yml`) that **runs `check.sh` itself** rather
   than re-listing the checks — one source of truth, so "green locally" and "green in CI" cannot diverge.
-  - **Commit what CI must see.** Un-gitignore `tests/stress.rs` (15 pressure tests + one `#[ignore]`d 10M
+  - **Commit what CI must see.** Un-gitignore the `tests/stress/` suite (15 pressure tests + one `#[ignore]`d 10M
     soak) and `benchmark-results.txt`; tighten `.gitignore` so only genuine runtime data (`data/`, loose
     `*.csv`/`*.jsonl`/`*.txt`) stays ignored. The stress suite is now part of `cargo test --release` and
     runs on every PR; the 10M soak stays `#[ignore]`d and runs only on demand (`workflow_dispatch` →

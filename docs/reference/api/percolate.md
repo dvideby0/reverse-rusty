@@ -228,11 +228,12 @@ postings or a long legacy duplicate-version scan. With bearer auth enabled,
 create/status/stream are read surfaces (unless
 `--auth-protect-reads` is set), while DELETE is protected.
 
-Jobs and stream buffers are in memory. Restart loses them; durable production delivery is an
-operator-selected Kafka/Pub/Sub/SQS/JetStream-style adapter implementing the server's keyed
-at-least-once publisher. The same key and payload are retried, so duplicates are safe. In cluster
-mode, ownership makes shard streams disjoint and every shard summary is validated before the
-terminal job completion. The coordinator mutation barrier serializes successful shard mutations
+Jobs and stream buffers are in memory. Restart loses them. The repository provides the
+`BrokerPublisher`/`publish_at_least_once` library seam for an external integration, but the shipped
+server has no Kafka, Pub/Sub, SQS, JetStream, or other durable broker adapter or broker-selection
+flag. An integration using that seam retries the same key and payload so consumers can deduplicate.
+In cluster mode, ownership makes shard streams disjoint and every shard summary is validated before
+the terminal job completion. The coordinator mutation barrier serializes successful shard mutations
 and repair re-drives across that exact execution view (including direct library callers), so a long
 or backpressured exhaustive job can delay cluster writes; size the dedicated quota and timeout
 accordingly. Mutations and repair re-drives acquire that barrier before any logical-id stripe, so
@@ -305,11 +306,12 @@ Optional request fields:
 | `size` | 1000 | Maximum number of hits to return (per slot in multi-doc mode) |
 | `from` | 0 | Offset into the result set for pagination |
 | `rank` | – | Optional ranking block (ADR-059) — order hits by a priority tag and/or request boosts before `from`/`size`. See [Ranking](#ranking-adr-059). |
-| `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class-C (broad) queries for this request (ADR-073 — previously `/_mpercolate`-only; on `/_search` the field was silently ignored) |
-| `include_source` | true | Include original query text in each hit |
+| `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class C and accepted class D for this request. Class H remains always visible |
+| `include_source` | `true` single-node; `false` cluster | Include original query text in each hit. An explicit `true` works for an in-process cluster; a remote/gRPC cluster returns 501 because its source-fetch wire is not implemented |
 
 `total` always reflects the full match count; `hits` is the paginated window. Set
-`include_source: false` to skip query text lookup for faster responses.
+`include_source: false` to skip query text lookup. Compatibility cluster endpoints default it to
+false so remote clusters remain usable without a source-fetch round trip.
 
 > **An explicit `timeout_ms` is also a compute budget (ADR-099/123).** On expiry the
 > request returns `408` as always, and — when the request set `timeout_ms`
@@ -396,10 +398,11 @@ For a stored quoted clause, `_explanation.required_phrases` or
 
 The dominant production read pattern is *"percolate, then narrow to one category."* Attach a tag filter
 to a percolate request to keep only the matches whose stored query carries the requested
-[metadata tags](documents.md#per-query-metadata-tags-adr-049). The filter is a **conjunction across keys** (AND) of
-**value sets** (OR within a key); it is applied in the hot-path verify stage and can only *remove*
-matches, never add or drop a wanted one. A filter value never seen at ingest matches nothing (the safe
-`terms` semantics). Filter values take the **same canonical scalar coercion as ingest** (ADR-073):
+[metadata tags](documents.md#per-query-metadata-tags-adr-049). The filter is a **conjunction across
+keys** (AND) of **value sets** (OR within a key). It intentionally narrows the exact Boolean-match
+set and is evaluated during verification; it never participates in semantic candidate retrieval.
+A filter value never seen at ingest matches nothing (the safe `terms` semantics). Filter values
+take the **same canonical scalar coercion as ingest** (ADR-073):
 strings, numbers, and bools are accepted everywhere a value is (`{"category": 7}` matches a tag
 ingested as `7` or `"7"`); a `null`, object, or nested array anywhere in a filter is a loud **400** —
 an unanswerable predicate is never silently dropped (which would *widen* the result set). Two
@@ -520,7 +523,7 @@ Semantics and bounds:
 - **`explain` is not supported here** (a named 400) — per-(document, winner) explanation
   compilation is antithetical to the throughput path; use `/v2/_search` for one document.
 - **`pit`/`cursor` are not supported here** (named 400s, ADR-113) — batch cursor pagination is a
-  deferred increment; page per title via `/v2/_search`.
+  [roadmap item](../../roadmap.md#api-and-operator-ergonomics); page per title via `/v2/_search`.
 - **Admission**: batch length ≤ min(`max_percolate_batch`, 10 000) and `size × documents ≤ 2^20`
   (the aggregate collector heap budget), both rejected as `rank_admission_rejected` before any
   matching.
@@ -530,6 +533,8 @@ Semantics and bounds:
 - **No partial results**: one absolute deadline covers routing, matching, merge, and enrichment —
   expiry is a whole-batch 408; any shard/enrichment failure fails the whole request (the same
   status mapping as `/v2/_search`).
+- **Auth boundary:** when a bearer token is configured, this POST currently requires it even with
+  `--auth-protect-reads=false`; unlike `/v2/_search`, it is not on the read-via-POST allowlist.
 
 ## `POST /_mpercolate` — Batch percolate (high throughput)
 
@@ -577,8 +582,8 @@ Optional request fields:
 
 | Field | Default | Description |
 |---|---|---|
-| `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class-C (broad) queries for this batch |
-| `include_source` | true | Include original query text in each hit |
+| `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class C and accepted class D for this batch. Class H remains always visible |
+| `include_source` | `true` single-node; `false` cluster | Include original query text in each hit. An explicit `true` works for an in-process cluster; a remote/gRPC cluster returns 501 |
 | `size` | 1000 | Maximum hits per document |
 | `from` | 0 | Per-document offset into each document's hits for pagination |
 | `rank` | – | Optional ranking block (ADR-059), applied per document — see [Ranking](#ranking-adr-059) |

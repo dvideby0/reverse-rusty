@@ -304,8 +304,8 @@ pub struct EngineMetrics {
 }
 
 /// Posting-length distribution of one candidate-index lane, computed on demand
-/// across every segment + the memtable (the Broad-Query Cost Program's
-/// observe-first telemetry — `docs/proposals/broad-cost-program.md` §5.0).
+/// across every segment + the memtable (ADR-105's observe-first telemetry; the
+/// real-corpus audit is tracked in `docs/roadmap.md`).
 /// Percentiles are nearest-rank over the per-signature posting lengths; all
 /// zeros when the lane holds no postings. Never computed on the match path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

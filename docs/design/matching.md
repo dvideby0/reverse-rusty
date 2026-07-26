@@ -9,71 +9,52 @@ classes, and explain tooling. Siblings:
 correctness contract this section must uphold.*
 
 > **Implementation status:** Signature optimizer, candidate index, exact matcher, broad-lane cost
-> classes (A/B/C/D), and explain tooling are fully implemented and tested. The broad lane's
+> classes (A/B/C/D/H), and explain tooling are implemented and tested. The broad/hot lanes'
 > **batch / columnar evaluation** (§4) is now implemented too — once-per-batch scans + bitmap-algebra
 > verification + a pure-anchor skip-verify fast path, exposed as `match_titles_batch` / `POST
 > /_mpercolate` (ADR-026). Near-duplicate queries are
 > clustered *implicitly* — they share signature anchors in the candidate index, so a single failed
 > anchor probe drops the whole cluster's candidates. An explicit query-family / shared-prefix-DAG
 > structure (subtree pruning) was evaluated and deliberately **not** pursued; see
-> [DECISIONS](../DECISIONS.md) ADR-019 for the reasoning. **Per-query metadata + filtered percolation
-> (§5.1–§5.3) are built (single-node) and thread end-to-end through the cluster**
-> ([DECISIONS](../DECISIONS.md) ADR-049/055), and **ranking + pagination (§5.4) are built single-node**
-> ([ADR-059](../DECISIONS.md)) **and through the cluster**
-> ([ADR-075](../DECISIONS.md): rank-at-shard, merged at the coordinator). See [STATUS](../STATUS.md).
+> [DECISIONS](../DECISIONS.md) ADR-019 for the reasoning. **Per-query metadata, filtered percolation,
+> ranking, and pagination (§5) are built end-to-end in standalone and cluster modes**
+> ([DECISIONS](../DECISIONS.md) ADR-049/055/059/075/107/108/110).
 
 **TL;DR (for agents)**
 - **Owns:** signature optimizer (`compile.rs`), candidate index (`index.rs`), exact matcher (`exact.rs`), explain (`explain.rs`)
 - **Key invariant:** Signatures built ONLY from required features / any-of groups, never from forbidden features (lossless cover contract)
 - **Hot path:** title signatures → probe index → union candidate IDs → common-mask gate (2× `u64` ops) → sorted-slice verification → emit matches
-- **Cost classes:** A (selective, realtime) / B (moderate) / C (broad → quarantine lane) / D (negation-only → reject, or opt-in always-candidate lane, ADR-068)
-- **Measured:** ~54 candidates/title, flat from 1M–5M queries; ≈710k titles/sec/core (full numbers: [performance/results.md](../performance/results.md))
-- **Gotchas:** Adaptive postings (inline ≤8 → Vec ≤256 → Roaring >256); broad lane is ~9× slower than selective path
+- **Placement classes:** A/B (default-visible main) / C (opt-in broad) / D (rejected by default; opt-in universal) / H (default-visible hot tier)
+- **Measurements:** the current pinned captures and regression invariants live only in [performance/results.md](../performance/results.md)
+- **Gotchas:** Adaptive in-memory postings (inline ≤8 → `Vec` ≤256 → Roaring >256); C/D visibility is request-controlled, H visibility is not
 
 ---
 
 ## 1. Signature-cover optimizer (the heart of the compiler)
 
-A **signature** is a small combination (1–3) of *required* features hashed to a `u64` signature key.
-For each query we must choose a set of signatures that (a) satisfies the lossless-cover contract (see
-[overview](README.md) §2) and (b) minimizes expected match-time cost.
+A **signature** is an arity-1 or arity-2 group of positive `FeatureId`s hashed to a `u64` key.
+`anchor_plan` is the single source of truth for choosing the lossless cover and its class;
+`build_signatures` only hashes that plan. The implementation uses deterministic frequency rules, not
+a learned weighted score:
 
-**Candidate signature generation.** From a query's required features `R` and required any-of groups
-`G1..Gk`, where each group is an OR of semantic members and one unquoted multi-token member is an AND
-of its normalized requirements:
+1. If the query has ordinary required features, sort them by query frequency. A non-top-64 rarest
+   feature becomes one arity-1 anchor (class A), unless an enabled θ threshold moves that
+   default-visible work to H. If the rarest feature is in the frozen top-64 mask, pair it with the
+   next-rarest required feature (class B). A lone top-64 required feature becomes class C.
+2. If there is no ordinary required feature, select the any-of proxy group whose **most frequent
+   member** is least frequent. Emit one arity-1 anchor for every member, so every satisfying branch
+   reaches the query. The worst member determines B, C, or H. Complete multi-feature members remain
+   in the exact predicate program; their proxy is necessary, never sufficient (ADR-119).
+3. A required phrase may supply a default-visible family of arity-1 candidate-only label proxies
+   (class B). Exact positioned graph matching still decides whether the phrase is present (ADR-120).
+4. A query with no positive requirement receives the empty universal broad signature (class D).
+   Ingest rejects D by default; `accept_class_d` permits it deliberately.
 
-- A valid signature must be **hittable by every matching title**. So a signature is any combination
-  that is a subset of `R` (always present). To incorporate an any-of group losslessly, choose one
-  feature requirement that must be present when each member matches and emit the resulting
-  *member-proxy family*. The complete member predicate remains in exact verification; a proxy is
-  never treated as sufficient. The cheapest correct scheme used by the engine:
-  - Build the anchor from the **rarest features of `R`** (1–3 of them).
-  - If `R` alone is empty or too common, we must cover via groups: emit one signature per element of
-    the rarest proxy group (so whichever semantic member the title satisfies, a signature fires) —
-    exactly the "extract a term from every OR branch" rule, applied to the single cheapest group.
-    Equivalence expansion widens the selected requirement to all equivalent alternatives without
-    flattening the member's other conjuncts (ADR-119).
-
-**Cost model.** For a candidate signature `s` we estimate expected candidates it contributes and its
-overheads using compile-time statistics:
-
-```
-score(s) =  w1 * E[candidates_retrieved(s)]      // ≈ posting length × title-hit-rate
-          + w2 * postings_memory(s)
-          + w3 * update_fanout(s)                 // how many signatures churn on update
-          + w4 * hot_key_risk(s)                  // p99 spike potential
-```
-
-We pick the **minimal lossless cover that minimizes total score** (greedy: take the lowest-score valid
-anchor; if any-of groups remain uncovered, extend with the cheapest covering set). Statistics tracked:
-per-feature query-frequency, per-signature query-frequency, observed per-signature title hit-rate, and
-candidate survival rate (how often a candidate from `s` survives exact match) — the last is fed back
-from runtime telemetry on compaction.
-
-**Why this beats single-term anchoring.** A single rare *term* can still be a hot key (popular player).
-A 2–3 feature *semantic* signature (`player:michael_jordan + year:1994 + grader_grade:psa10`) is far
-more selective, and the optimizer prices each candidate so it avoids the popular-player trap by adding a
-second feature when the first is hot.
+The frequency inputs are query-document frequencies in the shared dictionary. The top-64 mask is
+frozen after the initial compile pass; θ is an independent runtime configuration boundary that may
+move only default-visible A/B work to H. Runtime title-hit or candidate-survival feedback does **not**
+currently choose covers. Re-anchoring during compaction reruns these same rules with strict
+visibility guards.
 
 ---
 
@@ -83,26 +64,27 @@ second feature when the first is hot.
 signature_key (u64)  →  posting list of SegmentLocalQueryId (u32)
 ```
 
-Stored as an open-addressed hash table (signature_key → posting offset) plus a posting arena. Postings
-are **adaptive by cardinality** (the roaring lesson, specialized):
+The mutable in-memory index is a fast `u64 → Posting` hash map. Postings are append-only in increasing
+local-ID order and adapt at exact cardinality boundaries:
 
 | Cardinality | Representation | Rationale |
 |---|---|---|
 | 0–8 | inline tiny array in the bucket header | no heap, no pointer chase |
-| 9–4096 | sorted `u32` array (arena slice) | branch-predictable galloping/merge intersection |
-| medium | blocked sorted array (SIMD-friendly) | vectorized intersection |
-| large | roaring bitmap (`roaring` crate) | compressed, fast union |
-| huge | **not stored** — routed to broad lane | a signature this common is not selective |
+| 9–256 | `Vec<u32>` | compact sequential iteration |
+| >256 | `RoaringBitmap` | compressed sorted set and allocation-free iteration |
+
+Sealed mmap segments serialize postings into frozen index tables and posting blobs; that on-disk
+reader is a distinct representation, not the mutable map above. Main, broad, and hot lanes each use
+the same logical `signature → local IDs` contract.
 
 **Segment-local IDs.** Only `u32` `SegmentLocalQueryId` rides the hot path. The `u64`
-`GlobalLogicalQueryId` and `PhysicalVersionId` are looked up **once per confirmed match**, at the very
-end, via a per-segment `local → (logical, version)` table. This keeps hot-path working sets small and
-cache-resident.
+logical ID and per-row version metadata are read only after a candidate passes verification. This
+keeps candidate postings and most verifier columns compact.
 
-**Probing.** For a title we enumerate `sigs(T)` (bounded: combinations over the title's features up to
-the max signature arity, typically a few dozen), look each up, and **union** the postings into a
-candidate buffer (reused, allocation-free). Union, not intersection, because any single matching
-signature is sufficient — intersection would violate the cover contract.
+**Probing.** For a title the matcher emits the arity-1 keys needed by the active lanes and the
+top-64-keyed arity-2 pairs used by class B, probes each relevant per-segment index, and deduplicates
+local IDs in reusable scratch. The operation is a union, not an intersection, because any member of a
+lossless cover is sufficient to retrieve the query.
 
 ---
 
@@ -340,33 +322,29 @@ between shard reads.
 
 ## 5. Per-query metadata, filtered percolation, and ranking
 
-> **Status:** metadata + filtered percolation (§5.1–§5.3) are **built (single-node) + oracle-proven**
-> (2026-06-03, [DECISIONS](../DECISIONS.md) ADR-049, [STATUS](../STATUS.md) Tier 4), and now thread
-> **end-to-end through the cluster** (in-process + the experimental gRPC path) — one frozen `TagDict`
-> shared into every shard like the `Dict`, raw tags in the log + read-only `get_or_synthetic`
-> resolution, the filter resolved once at the coordinator + shipped as `TagId` groups
-> ([ADR-055](../DECISIONS.md), 2026-06-04); **compatibility ranking + pagination (§5.4) are built single-node**
-> ([ADR-059](../DECISIONS.md), 2026-06-04) **and through the cluster** ([ADR-075](../DECISIONS.md),
-> 2026-06-11 — rank-at-shard + compile-once-fan). Motivated by the reference
-> workload in [`../research/percolator-workload.md`](../research/percolator-workload.md), whose dominant
-> read pattern is "percolate, then narrow to one category." Code: `src/tagdict.rs` (tag interning),
+> **Status:** metadata, filtered percolation, compatibility ranking, bounded top-K ranking, pagination,
+> and exhaustive bounded delivery are implemented in standalone and cluster paths. One frozen
+> `TagDict` is shared into every shard; the coordinator resolves each filter/rank program once and
+> fans integer IDs to the shards. The design is motivated by the reference workload in
+> [`../research/percolator-workload.md`](../research/percolator-workload.md). Code:
+> `src/tagdict.rs` (tag interning),
 > `src/exact.rs` (`TagPredicate` + SoA tag column + verify-stage filter), `src/rank.rs` (the post-match
 > scorer — ADR-059/108), `src/segment/` (ingest/match threading + `EngineSnapshot::{rank,
-> try_match_title_top_k}`), `src/storage/segment.rs` + `src/wal.rs` (`.seg`/WAL v6 typed priority;
-> `.seg` v7 distributed ownership columns), `src/bin/server/`
+> try_match_title_top_k}`), `src/storage/segment.rs` + `src/wal.rs` (durable tag, priority, predicate,
+> and ownership columns; current version matrix:
+> [`rolling-upgrade.md`](../operations/rolling-upgrade.md)), `src/bin/server/`
 > (the REST filter + rank/pagination surface), `src/cluster/` (`coordinator/{lifecycle,ingest,matching}` +
 > `clog` + `shard` + the gated `remote`/`server` — ADR-055/109).
 
 Production percolators store **structured tags** alongside each query (a category, a status, secondary
-keys) and at match time **filter the percolated candidates by those tags** — and sometimes rank them.
-Reverse Rusty today returns a bare `Vec<u64>` of matched `logical_id`s with no tag awareness. This is
-the design for closing that gap **without touching the lossless-cover contract**.
+keys) and at match time **filter and optionally rank matches by those tags**. Reverse Rusty implements
+that model without touching the lossless-cover contract: tags never participate in candidate gating.
 
 ### 5.1 Metadata model — interned integer tags in the SoA
 
-A stored query may carry a small set of `key → value` tags. Each distinct `(key, value)` is **interned
-to a dense integer `TagId`** at compile time — the same move that turns feature strings into
-`FeatureId`s (`dict.rs`), so **no strings reach the match path**. The per-query tags become one more
+A stored query may carry a small set of `key → value` tags. Each distinct `(key, value)` resolves to
+an integer `TagId` at compile time (dense while the dictionary is mutable, deterministic synthetic
+after it is frozen) — the same move used for `FeatureId`s, so **no strings reach the match path**. The per-query tags become one more
 **column in the exact-match SoA** (`exact.rs`, §3): `tag_off: [u32]` / `tag_len: [u16]` into a sorted
 `tag_blob: [u32]`, exactly parallel to the `required_blob` layout. Tags are written on insert / update /
 bulk, persist in the `.seg` format, and survive reopen (see [`ingestion-and-updates.md`](ingestion-and-updates.md) §11).
@@ -390,7 +368,7 @@ ask for; it cannot drop a query the caller *did* want, so it introduces **no fal
 requested tag scope. An implementer must not "optimize" by letting a tag influence candidate retrieval —
 that would couple a caller-supplied filter to the cover proof.
 
-### 5.4 Ranking — an optional layer *over* the boolean-correct set (built single-node, ADR-059)
+### 5.4 Ranking — an optional layer *over* the boolean-correct set
 
 Matching stays boolean and complete; ranking is an **optional sort applied to the already-final result
 set**, never a change to which queries match. A query may carry a numeric **priority** (the value of a
@@ -433,11 +411,14 @@ rows. Exact shard totals are summed; global `eq` is returned only when every sha
 does not cross the threshold, otherwise the result is the request threshold with relation `gte`.
 
 Cluster `/v2/_search` then performs query-then-fetch: final winner IDs are grouped by owning logical
-position and only their current source is fetched. Missing source, placement-generation drift, a
+position and only their source is fetched. Missing source, placement-generation drift, a
 malformed/failing stream, deadline expiry, or enrichment-cap overflow invalidates the whole response.
 Explanations are compiled at the coordinator from fetched source under its authoritative normalizer and
-dictionary; explanation objects never cross the shard wire. This is deliberately a current-view
-contract, not PIT consistency. ADR-075 compatibility cluster ranking remains available and unchanged.
+dictionary; explanation objects never cross the shard wire. Without a PIT this is a current-view
+operation. Standalone and in-process cluster requests may pin matching, score, order, and totals with
+the `/v2/_pit` cursor flow; source/explain enrichment is deliberately current-view and fails typed if
+the winner disappeared after the PIT opened. Remote/gRPC coordinator assemblies reject PIT operations
+with `501 pit_unsupported`. ADR-075 compatibility cluster ranking remains current-view and unchanged.
 
 ### 5.5 Exhaustive bounded delivery (ADR-114)
 
@@ -479,23 +460,24 @@ nonzero partial-repair queue is refused, and the full sequential shard read hold
 coordinator mutation barrier so a successful concurrent re-placement cannot move between owners
 mid-stream. `resync` and live shard mutations hold the shared side.
 
-### 5.6 Alternatives (documented, deferred)
+### 5.6 Alternatives
 
 - **Post-match external filter** (return everything, look up each id's metadata afterward) — effectively
-  what callers do *today*, outside the engine. Rejected as the long-term design: it still verifies every
-  match and needs an external metadata store; 5.2 is strictly better once tags live in the SoA.
+  what callers did before ADR-049. Rejected as the long-term design: it still verifies every match
+  and needs an external metadata store; 5.2 is strictly better now that tags live in the SoA.
 - **Tag-partitioned segment skip** — for the *dominant* single-key filter (the `category` tag), index or
   route queries by that tag so a filtered probe skips whole segments (composing with the entity-anchor
   sharding in [`clustering-and-scaling.md`](clustering-and-scaling.md)). A real optimization, but it must
   be **filter-driven and fail-open** (skip only when the request's filter proves a segment irrelevant;
-  when unsure, probe) so it can never drop a wanted query. **Deferred** past the 5.2 baseline.
+  when unsure, probe) so it can never drop a wanted query. The full proposal and completion test live
+  in [`Tag-aware segment skipping`](../roadmap.md#tag-aware-segment-skipping).
 
 ---
 
 ## 6. Explain / debug tooling (always available)
 
 For any query: show parsed AST, compiled required/forbidden/any-of proxy groups, complete compound
-member predicates, chosen signatures with their cost scores, and cost class. For any (title, query)
+member predicates, chosen signatures, and cost class. For any (title, query)
 pair: show the title's extracted features, which signature(s) made the query a candidate (or why it
 was never a candidate), and the exact-match pass/fail with the specific failing predicate (missing
 required / present forbidden / unsatisfied any-of member). This is built in, not bolted on — it's the

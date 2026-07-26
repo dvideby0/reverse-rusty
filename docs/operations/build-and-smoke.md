@@ -1,13 +1,12 @@
 # Build & deploy smoke — the fresh-clone checklist
 
 The reproducible-from-zero verification recipe: from a clean checkout, prove the engine **builds**,
-**passes the gate**, and **deploys + serves** across every shipped topology. This is the Phase 0
-"fresh-clone build & deploy smoke" item — a checklist, not new engine code: each leg below is an
+**passes the gate**, and **deploys + serves** across every shipped topology. Each leg below is an
 existing script or gate, listed with the exact command and what it proves.
 
 The **supported-deployment contract** (the mode matrix, the guaranteed REST surface, the auth
 posture, and the consolidated v1 non-goals) is [`deployment-modes.md`](deployment-modes.md)
-(Tier 5 M0, ADR-098); the *operational* procedures (production bring-up, recovery, scaling) are the
+(ADR-098); the *operational* procedures (production bring-up, recovery, scaling) are the
 runbooks: [`cluster-deployment.md`](cluster-deployment.md) (Compose) and
 [`kubernetes-deployment.md`](kubernetes-deployment.md) (Helm). This page is the *acceptance* recipe
 that proves a clone is green before you follow them.
@@ -16,11 +15,11 @@ that proves a clone is green before you follow them.
 
 | Tool | Used by | Verified with |
 |---|---|---|
-| Rust toolchain (pinned) | build + gate | rustc/cargo **1.95.0** (from [`engine/rust-toolchain.toml`](../../engine/rust-toolchain.toml)) |
-| `cargo-audit`, `cargo-deny` | gate (advisories + license/ban policy) | `cargo-audit` 0.22.1, `cargo-deny` 0.19.8 |
-| Docker + Compose v2 | image + Compose/harness legs | Docker **29.5.2**, Compose **v5.1.4** |
+| Rust toolchain (pinned) | build + gate | [`engine/rust-toolchain.toml`](../../engine/rust-toolchain.toml) is authoritative; rustup installs it |
+| `cargo-audit`, `cargo-deny` | gate (advisories + license/ban policy) | current versions compatible with `engine/check.sh`; CI is the compatibility proof |
+| Docker + Compose v2 | image + Compose/harness legs | a current Docker engine and `docker compose` v2 |
 | `curl`, `jq`, `openssl` | smoke + harness scripts | system |
-| `helm` ≥ 3.16, `kubeconform` ≥ 0.6.7 | Helm static validation | helm 4.2.2, kubeconform 0.8.0 |
+| `helm` ≥ 3.16, `kubeconform` ≥ 0.6.7 | Helm static validation | the minimums enforced by CI/workflows |
 
 The gate and the Helm render are **daemon-independent** (no Docker needed); the image, Compose smoke,
 and harness need a running Docker daemon. The Compose/harness images build `linux/<host-arch>` from
@@ -28,8 +27,8 @@ source, so they run on both x86-64 and Apple-silicon hosts.
 
 ## The six legs
 
-Run from the repo root. Each leg is independent; a green result is noted from the **last verified**
-run (see the footer).
+Run from the repo root. Each leg is independent; CI/release automation is the current verification
+record.
 
 ### 1. Build + gate (daemon-independent)
 
@@ -41,10 +40,10 @@ cargo build --release
 ```
 
 Proves the lean + default + `distributed` builds compile, lints are clean, and **all suites pass**.
-`./check.sh` runs nine lanes: `rustfmt`, `clippy` (default / lean-core / distributed), `cargo test`
-(default + distributed — the cluster + gRPC oracles), `cargo audit`, `cargo deny --all-features`, and
-the `ref-matcher independence` check (ADR-087). ✅ **All checks passed.** (`check.sh` also prints a
-non-failing file-size advisory — informational, never blocks the gate.)
+`./check.sh` runs ten lanes: `rustfmt`; `clippy` for default, lean-core, and distributed builds;
+default and distributed tests; `cargo audit`; `cargo deny --all-features`; the ref-matcher
+independence check (ADR-087); and the ignored real-process crash-injection suite (ADR-088).
+It also prints a non-failing file-size advisory.
 
 ### 2. Local deploy smoke (daemon-independent) — the two local modes
 
@@ -56,9 +55,9 @@ For **single-node** and the **in-process cluster** (`--cluster --shards 3`), eac
 `--data-dir`: start → assert an unauthenticated write is **401** (the ADR-062 posture) → ingest
 over `PUT /_doc` + `POST /_bulk` → `_search`/`_mpercolate` (a match, a MUST_NOT suppression, an
 any-of match) → `_stats`/`_metrics` → `POST /_backup` → **SIGTERM-restart on the same data dir and
-re-assert** → **open the backup copy and re-assert** (restore = open, ADR-079). The Tier 5 **M1
-acceptance gate** (ADR-098): proves the documented deployable surface + restart-reopen for the two
-modes a `cargo build` user runs, with no containers. ✅ **PASS (both modes).**
+re-assert** → **open the backup copy and re-assert** (restore = open, ADR-079). This
+**acceptance gate** (ADR-098) proves the documented deployable surface + restart-reopen for the two
+modes a `cargo build` user runs, with no containers.
 
 ### 3. Build the node image
 
@@ -68,10 +67,10 @@ docker build -f deploy/Dockerfile -t reverse-rusty:latest .
 
 Proves the multi-stage image builds: the builder compiles `--features distributed` (server,
 shardserver, controlserver); the runtime carries the three binaries on `debian:trixie-slim` as a
-non-root user (uid 10001). ✅ **Image built.** (Legs 4 and 5 reuse the cached compile layers, so build
-this once.)
+non-root user (uid 10001). Legs 4 and 5 reuse the cached compile layers, so build
+this once.
 
-### 4. Production-compose smoke (the shipped K=3 / RF=1 remote topology)
+### 4. Compose smoke (the shipped K=3 / RF=1 remote topology)
 
 ```bash
 RR_IMAGE=reverse-rusty:latest deploy/cluster-smoke.sh
@@ -79,28 +78,32 @@ RR_IMAGE=reverse-rusty:latest deploy/cluster-smoke.sh
 
 Stands up [`compose.cluster.yml`](../../deploy/compose.cluster.yml) (3 durable shards + stateless
 coordinator + 3-node control plane, mesh TLS + tokens), waits for green, then does **one auth-gated
-ingest** and asserts the title percolates back to it — then tears down. Proves the *production* compose
-comes up healthy and serves a match end-to-end. ✅ **PASS** (`1 query, hits=[1]`).
+ingest** and asserts the title percolates back to it — then tears down. Proves the reference Compose
+comes up healthy and serves a match end-to-end.
 
-### 5. Multi-machine lifecycle harness (ADR-072)
+### 5. Container-network lifecycle harness (ADR-072)
 
 ```bash
 deploy/harness.sh                # builds from source; or: deploy/harness.sh --prebuilt <bindir>
 ```
 
-Drives [`compose.harness.yml`](../../deploy/compose.harness.yml) through six legs over the secured
+Drives [`compose.harness.yml`](../../deploy/compose.harness.yml) through the following legs over the secured
 mesh, asserting through REST that every event preserves the percolate baseline and a degraded cluster
-**fails loud** (a dead shard is a 502, never a silently truncated result). ✅ **All legs green:**
+**fails loud** (a dead shard is a 502, never a silently truncated result):
 
 | Leg | Proves |
 |---|---|
-| 0 — baseline | corpus loads; live write matchable (13 probes, 319 queries) |
-| 1 — kill a shard | degraded percolates fail loud (13/13 → 502); successes ≡ baseline |
+| 0 — baseline | corpus loads; live writes are matchable |
+| 1 — kill a shard | degraded percolates fail loud; successful replies equal the baseline |
 | 1b — restart node | durable self-restore + channel reconnect ≡ baseline |
 | 2 — rolling restart | every shard restarts and recovers ≡ baseline |
 | 3 — coordinator restart | stateless re-mint reconnects to authoritative shards ≡ baseline |
-| 4 — live handoff under load | 200 writes accepted during a position move, **zero false negatives** |
+| 3b — shard SIGKILL mid-write | every acknowledged in-flight write survives restart |
+| 4 — live handoff under load | writes accepted during a position move remain matchable |
 | 5 — control-plane restart | all three Raft managers resume from durable state |
+
+This is a multi-process, single-host container-network proof. It does not substitute for independent
+machines/failure domains.
 
 ### 6. Helm static validation (daemon-independent)
 
@@ -112,10 +115,9 @@ helm template rr deploy/helm/reverse-rusty -n rrns [VALUES] \
 
 Renders the chart across the CI value matrix (default, `shardCount=5`, `controlPlane.enabled=false`,
 `tls.enabled=false auth.enabled=false`, and the created-secrets variant) and validates every manifest
-against the real Kubernetes 1.29 schemas (`-strict` rejects unknown fields). ✅ **Green** — lint clean
-(only the cosmetic "icon recommended" INFO); all five renders valid (7 / 7 / 4 / 7 / 9 resources, 0
-invalid). A *real-cluster* apply (`deploy/k8s-smoke.sh` against a live cluster) is the Phase 0 item-4
-acceptance run and needs a real cluster + corpus — out of scope for this checklist.
+against Kubernetes 1.29 schemas (`-strict` rejects unknown fields). The release workflow additionally
+runs `deploy/k8s-smoke.sh` against the exact candidate image in a kind cluster before publishing it.
+An independent multi-machine Kubernetes failure/corpus exercise remains a roadmap item.
 
 ## What CI already enforces
 
@@ -123,7 +125,7 @@ acceptance run and needs a real cluster + corpus — out of scope for this check
 build** on each PR and push: the `gate` job runs `check.sh`, then the **local deploy smoke**
 (`local-smoke.sh --prebuilt`, the M1 gate — ADR-098), the pinned variance-tolerant `perfgate`
 (ADR-124), and the advisory deep benchmark sweeps; the `harness` job lints
-`compose.cluster.yml`, runs `harness.sh --prebuilt`, then runs the **production-compose smoke**
+`compose.cluster.yml`, runs `harness.sh --prebuilt`, then runs the **reference-compose smoke**
 (leg 4) on the same prebuilt image; and the `helm chart` job runs the lint + kubeconform matrix
 plus the **topology-parity** and **version-drift** tripwires (ADR-098). The exact 10M mixed-ops
 soak runs weekly and remains manually dispatchable, with its output retained as an artifact.
@@ -132,7 +134,7 @@ image (leg 3), re-runs the compose smoke against it, runs the **kind Helm smoke*
 (`k8s-smoke.sh`) against it, and only then publishes to GHCR — so a tagged image has passed every
 leg of this checklist by construction.
 
-## Findings from the verification run (2026-06-25)
+## Historical findings this automation now prevents
 
 - **`deploy/cluster-smoke.sh` used a non-numeric document id** (`PUT /_doc/smoke1`), which the REST
   router rejects with **400**: the `_doc/{id}` route extracts `Path<u64>` in **both** single-node and
@@ -145,8 +147,6 @@ leg of this checklist by construction.
   and had likewise never passed end-to-end — found while wiring it into the release gate, fixed the
   same way, and it now runs against every release candidate so it cannot rot again.
 
-## Last verified
-
-2026-06-25 · macOS (arm64) · Docker 29.5.2 · legs 1/3–6 green (five at the time); leg 2
-(`local-smoke.sh`) added + verified green 2026-07-02. Re-run this checklist on a toolchain
-or dependency bump, and after any change under `deploy/`.
+The current source of truth is the latest CI run for pull requests/pushes and the release workflow for
+candidate images. Re-run the local legs after toolchain, dependency, or `deploy/` changes when
+diagnosing a failure; do not treat an old workstation-version footer as compatibility evidence.

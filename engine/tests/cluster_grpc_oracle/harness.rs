@@ -158,7 +158,7 @@ pub(crate) fn empty_tag_dict() -> Arc<TagDict> {
     Arc::new(td)
 }
 
-// ---- per-query tags + filtered percolation (ADR-049/055), mirroring `tests/oracle.rs` ----
+// ---- per-query tags + filtered percolation (ADR-049/055), mirroring `tests/oracle/` ----
 pub(crate) const CATEGORIES: [&str; 6] = ["cards", "coins", "stamps", "comics", "toys", "art"];
 pub(crate) const STATUSES: [&str; 3] = ["active", "inactive", "archived"];
 

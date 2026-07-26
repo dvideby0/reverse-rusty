@@ -4,6 +4,11 @@
 
 **Status:** Accepted (2026-06-25)
 
+**Current outcome.** ADR-092 added unattended reconciliation, ADR-094 added RF&gt;1 group movement,
+and ADR-095 replaced whole-sweep serialization with conflict-free parallel move waves. The
+single-active-coordinator boundary remains: the control plane still lacks an atomic conditional
+`AssignShard` proposal.
+
 **Context.** ADR-086 shipped the *boot-time* half of "route by the committed shard→node map": a
 coordinator can resolve its topology from the durable quorum (`--route-by-assignments`,
 position-preserving, guarded) and fail over across control endpoints. It deliberately deferred the
