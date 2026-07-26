@@ -6,7 +6,8 @@
 //! - [`segment`] — the `.seg` segment file format (`write_segment` + the mmap-backed
 //!   `MmapSegment` read view, ADR-012)
 //! - [`dict`] — feature-dictionary (de)serialization (stored inside the manifests)
-//! - [`manifest`] — the engine `Manifest` + the coordinator `ClusterManifest`
+//! - [`manifest`] — the engine manifest codec plus the coordinator codec,
+//!   shared CRC-sealed atomic publisher, and format/recovery tests in submodules
 //! - [`sources`] — the per-query source-text store (`SourceStore`, ADR-020 Item 1)
 //! - [`backup`] — manifest-driven atomic directory snapshot (ADR-079); restore is
 //!   the existing `Engine::open` / `ClusterEngine::open`
