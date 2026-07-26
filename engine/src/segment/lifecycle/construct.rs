@@ -99,6 +99,7 @@ impl Engine {
             skipped_segments: 0,
             query_store,
             source_file_name: "sources.dat".to_string(),
+            source_commit_state: super::super::SourceCommitState::Ready,
             vocab_epoch: 0,
             owns_manifest: true,
         }
@@ -166,6 +167,7 @@ impl Engine {
             skipped_segments: 0,
             query_store,
             source_file_name: "sources.dat".to_string(),
+            source_commit_state: super::super::SourceCommitState::Ready,
             vocab_epoch: 0,
             owns_manifest: false,
         })

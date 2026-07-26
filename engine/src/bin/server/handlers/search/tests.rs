@@ -825,7 +825,10 @@ async fn v2_source_enrichment_is_fail_closed_and_can_be_disabled() {
             .expect("ranked insert");
         engine.flush();
     }
-    std::fs::remove_file(dir.join("sources.dat")).expect("remove source store");
+    let source_name = reverse_rusty::storage::read_manifest(&dir.join("manifest.bin"))
+        .expect("manifest")
+        .source_file_name;
+    std::fs::remove_file(dir.join(source_name)).expect("remove source store");
     let engine = Engine::open(Normalizer::default_vocab().expect("vocab"), config)
         .expect("source-less reopen");
     let state = state_with(engine, false);

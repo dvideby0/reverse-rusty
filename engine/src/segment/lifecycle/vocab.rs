@@ -718,12 +718,23 @@ impl Engine {
         }
         seg.build_filter();
 
-        // A recompile captures the WAL tail in the replacement segment and then
-        // advances/resets that WAL. Persist its source overlay first, while the
-        // old manifest + WAL are still authoritative, so a second restart never
-        // finds a committed exact row without its canonical source document.
-        self.save_query_sources();
-        let sources_persisted = self.config.data_dir.is_none() || self.persistence_healthy;
+        // Prepare the source snapshot while the old manifest + WAL remain
+        // authoritative, but DO NOT select it yet. Selecting it here would also
+        // advance the manifest WAL watermark before the replacement segment
+        // captures memtable inserts/deletes; a crash in that window could replay
+        // an insert while skipping its later acknowledged delete.
+        let (staged_sources, sources_persisted) = if self.owns_manifest {
+            match self.stage_query_sources(&[]) {
+                Ok(staged) => (staged, true),
+                Err(_) => (None, false),
+            }
+        } else {
+            self.save_query_sources();
+            (
+                None,
+                self.config.data_dir.is_none() || self.persistence_healthy,
+            )
+        };
 
         // Atomic swap: drop every (stale) base segment + the memtable and install
         // the one freshly-compiled segment, so no live query is left at an old
@@ -758,7 +769,16 @@ impl Engine {
         // negatives. The old manifest + WAL remain the restart authority
         // because the manifest commit is deliberately skipped; the unhealthy
         // flag tells operators that this coherent live state is not durable.
-        let committed = sources_persisted && persisted && self.save_manifest_if_persistent();
+        let committed = if sources_persisted && persisted {
+            if self.owns_manifest {
+                self.commit_staged_sources_and_manifest(staged_sources)
+            } else {
+                self.save_manifest_if_persistent()
+            }
+        } else {
+            self.discard_staged_sources(staged_sources);
+            false
+        };
         if committed {
             self.checkpoint_wal();
             self.reset_wal_if_safe();

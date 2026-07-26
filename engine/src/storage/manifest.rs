@@ -41,6 +41,11 @@ const MANIFEST_VERSION_HOT: u32 = 5;
 // a partial corpus. Layout is v5-compatible and always appends the recorded θ
 // (zero when no hot tier is present).
 const MANIFEST_VERSION_SOURCE_GENERATION: u32 = 6;
+// v7 (ADR-121): appends the basename of an immutable source sidecar. The sidecar
+// is fsync'd before the manifest rename, so this ONE commit point selects the
+// exact segment registry and its complete canonical-source corpus together.
+// Pre-v7 manifests keep selecting the legacy mutable `sources.dat`.
+const MANIFEST_VERSION_SOURCE_COMMIT: u32 = 7;
 
 /// Engine manifest — records the list of active segment files, dict state,
 /// and counters. Written atomically (tmp + rename) alongside segment files.
@@ -85,15 +90,21 @@ pub struct Manifest {
     /// WAL tail replays — so a delete against a base segment survives the flush-time
     /// WAL reset that previously dropped its only durable record.
     pub segment_tombstones: Vec<(String, Vec<u8>)>,
+    /// Immutable source-sidecar basename selected by this commit (ADR-121).
+    /// Pre-v7 manifests read back as the legacy `sources.dat`.
+    pub source_file_name: String,
 }
 
 pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
+    super::validate_sidecar_basename(&manifest.source_file_name)?;
     let tmp = path.with_extension("manifest.tmp");
     let mut f = std::fs::File::create(&tmp)?;
     f.write_all(&MANIFEST_MAGIC)?;
     write_u32(
         &mut f,
-        if manifest.source_generation_fence {
+        if manifest.source_file_name != "sources.dat" {
+            MANIFEST_VERSION_SOURCE_COMMIT
+        } else if manifest.source_generation_fence {
             MANIFEST_VERSION_SOURCE_GENERATION
         } else if manifest.hot_fence {
             MANIFEST_VERSION_HOT
@@ -131,8 +142,21 @@ pub fn write_manifest(manifest: &Manifest, path: &Path) -> io::Result<()> {
     }
     // v5 (ADR-105): the recorded θ — appended ONLY under the hot fence, so hot-free
     // manifests stay byte-identical v3/v4.
-    if manifest.hot_fence || manifest.source_generation_fence {
+    if manifest.hot_fence
+        || manifest.source_generation_fence
+        || manifest.source_file_name != "sources.dat"
+    {
         write_u32(&mut f, manifest.hot_anchor_theta)?;
+    }
+    // v7 (ADR-121): select the already-durable immutable source corpus in the
+    // same atomic document as the segment registry.
+    if manifest.source_file_name != "sources.dat" {
+        let bytes = manifest.source_file_name.as_bytes();
+        let len = u32::try_from(bytes.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "source filename is too long")
+        })?;
+        write_u32(&mut f, len)?;
+        f.write_all(bytes)?;
     }
     // CRC of everything written so far
     f.sync_all()?;
@@ -176,15 +200,16 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         ));
     }
     let version = read_u32_at(&data, 4)?;
-    // v1..=v6 are accepted; v2 appends `tag_dict_data` (ADR-049), v3 appends the WAL
+    // v1..=v7 are accepted; v2 appends `tag_dict_data` (ADR-049), v3 appends the WAL
     // watermark + per-segment dead-locals bitmaps (ADR-066), v4 is the class-D fence
-    // (ADR-068), and v5 appends the recorded θ under the hot fence (ADR-105) — each
-    // absent in earlier versions.
-    if !(1..=MANIFEST_VERSION_SOURCE_GENERATION).contains(&version) {
+    // (ADR-068), v5 appends the recorded θ under the hot fence (ADR-105), v6 is the
+    // source-generation rollback fence, and v7 appends the selected immutable source
+    // sidecar (ADR-121) — each absent in earlier versions.
+    if !(1..=MANIFEST_VERSION_SOURCE_COMMIT).contains(&version) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "unsupported manifest version {version} (expected 1..={MANIFEST_VERSION_SOURCE_GENERATION})"
+                "unsupported manifest version {version} (expected 1..={MANIFEST_VERSION_SOURCE_COMMIT})"
             ),
         ));
     }
@@ -271,11 +296,33 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     let hot_anchor_theta = if version >= MANIFEST_VERSION_HOT {
         let t = read_u32_at(&data, cursor)?;
         cursor += 4;
-        let _ = cursor;
         t
     } else {
         0
     };
+    let source_file_name = if version >= MANIFEST_VERSION_SOURCE_COMMIT {
+        let len = read_u32_at(&data, cursor)? as usize;
+        cursor += 4;
+        let end = cursor.checked_add(len).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid source filename length")
+        })?;
+        let name = std::str::from_utf8(content.get(cursor..end).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "truncated source filename")
+        })?)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+        .to_string();
+        cursor = end;
+        super::validate_sidecar_basename(&name)?;
+        name
+    } else {
+        "sources.dat".to_string()
+    };
+    if cursor != content.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected trailing manifest data",
+        ));
+    }
 
     Ok(Manifest {
         segment_files,
@@ -291,6 +338,7 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
         rejected_class_d,
         wal_seq_watermark,
         segment_tombstones,
+        source_file_name,
     })
 }
 
@@ -687,6 +735,7 @@ mod tests {
             rejected_class_d: 9,
             wal_seq_watermark: 42,
             segment_tombstones: vec![("seg_000001.seg".to_string(), vec![10, 20, 30])],
+            source_file_name: "sources.dat".to_string(),
         };
         write_manifest(&manifest, &path).expect("write");
         let got = read_manifest(&path).expect("read");
@@ -720,6 +769,7 @@ mod tests {
             rejected_class_d: 0,
             wal_seq_watermark: 0,
             segment_tombstones: Vec::new(),
+            source_file_name: "sources.dat".to_string(),
         };
         write_manifest(&manifest, &path).expect("write v6");
         let bytes = std::fs::read(&path).expect("read manifest");
@@ -730,6 +780,48 @@ mod tests {
         let got = read_manifest(&path).expect("read v6");
         assert!(got.source_generation_fence);
         assert!(!got.hot_fence);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_manifest_v7_selects_immutable_source_sidecar() {
+        let dir =
+            std::env::temp_dir().join(format!("rr_manifest_v7_source_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("manifest.bin");
+        let source_file_name = "sources_g00000000000000000007.dat".to_string();
+        let manifest = Manifest {
+            segment_files: vec!["seg_000001.seg".to_string()],
+            class_d_fence: false,
+            hot_fence: false,
+            source_generation_fence: true,
+            hot_anchor_theta: 0,
+            next_seg_id: 2,
+            dict_data: Vec::new(),
+            tag_dict_data: Vec::new(),
+            rejected_parse: 0,
+            rejected_class_d: 0,
+            wal_seq_watermark: 11,
+            segment_tombstones: Vec::new(),
+            source_file_name: source_file_name.clone(),
+        };
+        write_manifest(&manifest, &path).expect("write v7");
+        let bytes = std::fs::read(&path).expect("read manifest");
+        assert_eq!(
+            read_u32_at(&bytes, 4).expect("version"),
+            MANIFEST_VERSION_SOURCE_COMMIT
+        );
+        let got = read_manifest(&path).expect("read v7");
+        assert_eq!(got.source_file_name, source_file_name);
+
+        let mut unsafe_manifest = manifest;
+        unsafe_manifest.source_file_name = "../outside.dat".to_string();
+        assert_eq!(
+            write_manifest(&unsafe_manifest, &path)
+                .expect_err("source path traversal must fail")
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

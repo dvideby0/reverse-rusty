@@ -14,13 +14,13 @@ references, nothing else:
 
 | Mode | Files copied |
 |---|---|
-| **Single-node** | `manifest.bin` + the manifest's `segments/*.seg` + `sources.dat` + `wal.log` |
-| **Cluster** | `cluster_manifest.bin` + `cluster.log` + per-shard `shard_<i>/segments/*.seg` + `shard_<i>/sources.dat` |
+| **Single-node** | `manifest.bin` + the manifest's `segments/*.seg` + selected `sources_g*.dat` (legacy: `sources.dat`) + `wal.log` |
+| **Cluster** | `cluster_manifest.bin` + `cluster.log` + per-shard `shard_<i>/segments/*.seg` + each manifest-selected source sidecar |
 
 The frozen dict, vocabulary, and tag space are embedded **inside** the manifests, so they travel
 with the copy automatically. **Replica directories are not copied** — a cluster rebuilds replicas
-from the primaries on open. Orphan segment files (left by an earlier crashed compaction) are
-skipped.
+from the primaries on open. Orphan segment or source-generation files left by an interrupted
+pre-commit attempt are skipped.
 
 ## Why not just `cp -r` the data directory?
 

@@ -53,8 +53,17 @@ impl Engine {
         // losing acknowledged writes. The checkpoint is written *after* the manifest
         // (not before, as it once was), so a manifest failure can never strand a
         // checkpoint marker that would make recovery skip not-yet-referenced entries.
-        self.save_query_sources();
-        if persisted && self.save_manifest_if_persistent() {
+        let committed = if persisted {
+            if self.owns_manifest {
+                self.commit_sources_and_manifest()
+            } else {
+                self.save_query_sources();
+                self.persistence_healthy && self.save_manifest_if_persistent()
+            }
+        } else {
+            false
+        };
+        if committed {
             self.checkpoint_wal();
             self.reset_wal_if_safe();
         }
@@ -202,7 +211,7 @@ impl Engine {
         // the retired files. On a manifest failure the old files stay (still
         // referenced by the on-disk manifest) and the freshly resealed files become
         // orphans GC'd on reopen — fail closed, no resurrection.
-        if self.save_manifest_if_persistent() {
+        if self.commit_manifest_with_current_sources() {
             self.cleanup_segment_files(&old_files);
         }
     }
@@ -359,7 +368,7 @@ impl Engine {
             .segments
             .splice(lo..hi, std::iter::once(Arc::new(merged_base)))
             .collect();
-        if !self.save_manifest_if_persistent() {
+        if !self.commit_manifest_with_current_sources() {
             // Commit point failed — roll back to the pre-compaction state: restore
             // the originals (still durable on disk), drop the merged segment, and
             // delete the orphan merged file. The old files were never touched.

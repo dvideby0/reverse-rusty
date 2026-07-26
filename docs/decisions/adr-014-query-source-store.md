@@ -28,3 +28,6 @@
   keeping the original query index/blob independently addressable for the same lazy, bounded
   enrichment path. The generation is paired with the `.seg` v8 exact column so stale sidecars fail
   loud even when caller versions repeat.
+- **Amended by [ADR-121](adr-121-atomic-source-sidecar-commit.md):** standalone commits write
+  immutable generation-named source snapshots and let manifest v7 select the source corpus
+  atomically with its segment registry. `sources.dat` remains the pre-v7 compatibility name.

@@ -173,8 +173,8 @@ where
 
 /// Back up a single-node engine `data_dir` into `dest`.
 ///
-/// Copies the manifest-referenced segments, then `sources.dat`/`wal.log` (each if
-/// present), then `manifest.bin` last. Orphan `.seg` files are skipped. The caller
+/// Copies the manifest-referenced segments, then its selected source sidecar and
+/// `wal.log`, then `manifest.bin` last. Orphan segment/source files are skipped. The caller
 /// MUST hold the engine's write-path exclusion for the duration of this call so no
 /// concurrent compaction deletes a referenced segment mid-copy.
 pub fn copy_engine_dir(src: &Path, dest: &Path) -> Result<(), BackupError> {
@@ -192,7 +192,7 @@ fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
     // Manifest-referenced segments first (orphans on disk are skipped — they are
     // not in the list). A never-checkpointed engine has no manifest: its acked
     // writes live only in the WAL, copied below.
-    if has_manifest {
+    let manifest = if has_manifest {
         let manifest = read_manifest(&manifest_path)?;
         for name in &manifest.segment_files {
             copy_file_durable(
@@ -200,14 +200,32 @@ fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
                 &staging.join(SEGMENTS_DIR).join(name),
             )?;
         }
+        Some(manifest)
+    } else {
+        None
+    };
+    // The source sidecar selected by v7 is part of the commit and therefore
+    // mandatory. Legacy/no-manifest `sources.dat` remains optional.
+    let source_name = manifest
+        .as_ref()
+        .map_or(SOURCES, |manifest| manifest.source_file_name.as_str());
+    let source = src.join(source_name);
+    if source.exists() {
+        copy_file_durable(&source, &staging.join(source_name))?;
+    } else if source_name != SOURCES {
+        return Err(BackupError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "manifest-selected source sidecar is missing: {}",
+                source.display()
+            ),
+        )));
     }
-    // Aux files, present-iff. The WAL pairs with the manifest's wal_seq_watermark;
-    // both are copied at a consistent point because the caller holds the write lock.
-    for aux in [SOURCES, ENGINE_WAL] {
-        let s = src.join(aux);
-        if s.exists() {
-            copy_file_durable(&s, &staging.join(aux))?;
-        }
+    // The WAL pairs with the manifest's wal_seq_watermark; both are copied at a
+    // consistent point because the caller holds the write lock.
+    let wal = src.join(ENGINE_WAL);
+    if wal.exists() {
+        copy_file_durable(&wal, &staging.join(ENGINE_WAL))?;
     }
     // Manifest LAST (commit-point ordering).
     if has_manifest {
@@ -224,7 +242,7 @@ fn stage_engine_dir(src: &Path, staging: &Path) -> Result<(), BackupError> {
 /// `cluster.log`, then `cluster_manifest.bin` last. Replica directories are NOT
 /// copied — `ClusterEngine::open` rebuilds them from the primaries via peer
 /// recovery. The caller MUST `checkpoint()` first (so the source dir is consistent
-/// and every clean shard's `sources.dat` exists) and hold the cluster write lock
+/// and every clean shard's selected source sidecar exists) and hold the cluster write lock
 /// across both the checkpoint and this copy.
 pub fn copy_cluster_dir(src: &Path, dest: &Path) -> Result<(), BackupError> {
     staged_backup(
@@ -274,8 +292,8 @@ fn shard_dir_name(shard: usize) -> String {
 }
 
 /// Validate a single-node backup: the manifest (if present) parses, every segment it
-/// references opens + passes its CRC check, and the `sources.dat` store (if present)
-/// loads — i.e. everything `Engine::open` will read. A manifest-absent backup (a
+/// references opens + passes its CRC check, and its selected source store loads —
+/// i.e. everything `Engine::open` will read. A manifest-absent backup (a
 /// never-checkpointed engine whose state is WAL-only, or an empty engine) is
 /// structurally valid; the WAL itself is validated by `Engine::backup_to` before the
 /// copy (kept out of `storage` to avoid a `storage`→`wal` dependency).
@@ -284,8 +302,13 @@ pub fn verify_backup(dir: &Path) -> Result<(), BackupError> {
     if manifest_path.exists() {
         let manifest = read_manifest(&manifest_path)?;
         verify_segments(&dir.join(SEGMENTS_DIR), &manifest.segment_files)?;
+        verify_sources(
+            &dir.join(&manifest.source_file_name),
+            manifest.source_file_name != SOURCES,
+        )
+    } else {
+        verify_sources(&dir.join(SOURCES), false)
     }
-    verify_sources(&dir.join(SOURCES))
 }
 
 /// Validate a cluster backup: the cluster manifest parses and, for every shard, each
@@ -300,7 +323,7 @@ pub fn verify_cluster_backup(dir: &Path) -> Result<(), BackupError> {
     for (i, files) in manifest.segment_registry.iter().enumerate() {
         let shard = dir.join(shard_dir_name(i));
         verify_segments(&shard.join(SEGMENTS_DIR), files)?;
-        verify_sources(&shard.join(&manifest.source_files[i]))?;
+        verify_sources(&shard.join(&manifest.source_files[i]), false)?;
     }
     Ok(())
 }
@@ -320,13 +343,22 @@ fn verify_segments(seg_dir: &Path, files: &[String]) -> Result<(), BackupError> 
     Ok(())
 }
 
-/// Validate a `sources.dat` store (no-op if absent): `open` loads it via the same
-/// `load_query_sources`, so a corrupt copy must fail the backup, not the restore.
-fn verify_sources(path: &Path) -> Result<(), BackupError> {
+/// Validate a selected source store (optionally a legacy `sources.dat`): `open`
+/// loads it via the same `load_query_sources`, so a corrupt copy must fail the
+/// backup, not the restore.
+fn verify_sources(path: &Path, required: bool) -> Result<(), BackupError> {
     if path.exists() {
         load_query_sources(path).map_err(|e| {
             BackupError::Io(io::Error::new(e.kind(), format!("{}: {e}", path.display())))
         })?;
+    } else if required {
+        return Err(BackupError::Io(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "manifest-selected source sidecar is missing: {}",
+                path.display()
+            ),
+        )));
     }
     Ok(())
 }
@@ -360,6 +392,7 @@ mod tests {
             rejected_class_d: 0,
             wal_seq_watermark: 0,
             segment_tombstones: Vec::new(),
+            source_file_name: SOURCES.to_string(),
         }
     }
 
@@ -395,6 +428,35 @@ mod tests {
         verify_backup(&dest).unwrap();
         // No leftover staging dir.
         assert!(!staging_dir(&dest).exists());
+    }
+
+    #[test]
+    fn engine_backup_copies_only_manifest_selected_source_generation() {
+        let root = tmp_root("engine-selected-source");
+        let src = root.join("src");
+        std::fs::create_dir_all(src.join(SEGMENTS_DIR)).unwrap();
+        let selected = "sources_g00000000000000000003.dat";
+        let orphan = "sources_g00000000000000000002.dat";
+        write_valid_sources(&src.join(selected));
+        write_valid_sources(&src.join(orphan));
+        let mut manifest = empty_manifest(vec![]);
+        manifest.source_file_name = selected.to_string();
+        write_manifest(&manifest, &src.join(ENGINE_MANIFEST)).unwrap();
+
+        let dest = root.join("dest");
+        copy_engine_dir(&src, &dest).unwrap();
+        assert!(dest.join(selected).exists());
+        assert!(
+            !dest.join(orphan).exists(),
+            "unselected sidecar is an orphan"
+        );
+        verify_backup(&dest).unwrap();
+
+        std::fs::remove_file(dest.join(selected)).unwrap();
+        assert!(
+            verify_backup(&dest).is_err(),
+            "a v7-selected source sidecar is mandatory"
+        );
     }
 
     #[test]
