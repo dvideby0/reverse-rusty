@@ -72,7 +72,7 @@ pub use delivery::{
     DEFAULT_MATCH_CHUNK_SIZE, MAX_MATCH_CHUNK_SIZE,
 };
 pub use dict::FeatureId;
-pub use error::{NormalizerError, ParseError, ParseErrorKind, WriteError};
+pub use error::{NormalizerError, ParseError, ParseErrorKind, TombstoneError, WriteError};
 pub use events::{
     CompactionTrigger, DurabilityOp, EngineEvent, EngineMetrics, SegmentInfo, SegmentKind,
 };
@@ -92,7 +92,7 @@ pub use result::{
 };
 pub use segment::{
     AliasApplyReport, CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport,
-    InsertOutcome, MatchStats,
+    InsertOutcome, MatchStats, SegmentAddress,
 };
 pub use tagdict::{TagDict, TagId};
 pub use vocab::{

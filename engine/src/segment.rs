@@ -388,6 +388,70 @@ pub enum BaseSegment {
     Mmap(MmapSegment),
 }
 
+/// Process-local identity for one installed base-segment generation.
+///
+/// The payload is intentionally empty: pointer identity is the generation.
+/// [`SegmentAddress`] keeps an `Arc` to the generation it was resolved against,
+/// while the engine keeps one `Arc` per currently installed segment. Replacing a
+/// segment installs a fresh generation; ordinary liveness mutations keep it.
+pub(in crate::segment) struct SegmentGeneration;
+
+pub(in crate::segment) fn fresh_segment_generation() -> Arc<SegmentGeneration> {
+    Arc::new(SegmentGeneration)
+}
+
+pub(in crate::segment) fn fresh_segment_generations(count: usize) -> Vec<Arc<SegmentGeneration>> {
+    (0..count).map(|_| fresh_segment_generation()).collect()
+}
+
+/// An opaque, process-local address for a row in one base-segment generation.
+///
+/// Acquire this token with [`Engine::segment_address`] when the physical row is
+/// resolved, then pass it to [`Engine::tombstone_in`]. It cannot be reconstructed
+/// from a bare `(segment, local_id)` pair: compaction may reuse both numbers for a
+/// different query. Tokens do not survive engine reopen or replacement of their
+/// segment; either case returns
+/// [`TombstoneError::StaleAddress`](crate::error::TombstoneError::StaleAddress)
+/// before the WAL is touched.
+#[derive(Clone)]
+pub struct SegmentAddress {
+    pub(in crate::segment) generation: Arc<SegmentGeneration>,
+    pub(in crate::segment) segment: usize,
+    pub(in crate::segment) local_id: u32,
+    pub(in crate::segment) logical_id: u64,
+}
+
+impl SegmentAddress {
+    /// Segment ordinal when the token was resolved. The current ordinal may
+    /// differ if compaction moved an unchanged neighboring segment.
+    #[must_use]
+    pub fn segment_ordinal(&self) -> usize {
+        self.segment
+    }
+
+    /// Row-local id within the addressed segment generation.
+    #[must_use]
+    pub fn local_id(&self) -> u32 {
+        self.local_id
+    }
+
+    /// Stable logical query id captured when the token was resolved.
+    #[must_use]
+    pub fn logical_id(&self) -> u64 {
+        self.logical_id
+    }
+}
+
+impl std::fmt::Debug for SegmentAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SegmentAddress")
+            .field("segment", &self.segment)
+            .field("local_id", &self.local_id)
+            .field("logical_id", &self.logical_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Reusable per-thread scratch — keeps the hot path allocation-free in steady
 /// state. `seen` is now per-segment: `seen[seg_idx]` is that segment's epoch
 /// stamp array, sized to that segment's `len()`. Buffers are reused across calls.
@@ -741,6 +805,18 @@ pub struct Engine {
     /// segment is behind `Arc` so publishing a snapshot shares them by pointer
     /// instead of deep-copying every segment's SoA arrays (ADR-016 / P1-16).
     segments: Vec<Arc<BaseSegment>>,
+    /// Process-local identity paired positionally with `segments`. Replacements
+    /// receive fresh identities; unchanged segments retain theirs even if their
+    /// ordinal shifts. This is the generation fence behind `SegmentAddress`.
+    segment_generations: Vec<Arc<SegmentGeneration>>,
+    /// Segment generations in the exact order named by the latest successful
+    /// standalone manifest commit. Memory-only fallback segments are absent.
+    ///
+    /// A positional WAL frame must use an ordinal from this vector, never the
+    /// possibly-ahead live `segments` layout. The two differ after a failed
+    /// flush/recompile commit and can also differ when a later durable segment
+    /// follows an uncommitted memory fallback.
+    committed_segment_generations: Vec<Arc<SegmentGeneration>>,
     /// mutable hot delta — insert_live / tombstone land here. `Arc` + CoW: a
     /// write clones only the (bounded) memtable, never the base segments.
     memtable: Arc<Segment>,

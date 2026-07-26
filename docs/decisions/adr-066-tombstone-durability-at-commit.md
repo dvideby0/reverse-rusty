@@ -126,3 +126,8 @@
   level; `deleted_count` semantics are identical. Follow-on (deliberately out of scope): the degraded
   Memory-fallback segment path (persistence already unhealthy + WAL retained) keeps its historical
   positional behavior; the ADR-064 items continue on top of this fix.
+- **Amended by [ADR-122](adr-122-fail-closed-positional-tombstones.md):** the live
+  positional-delete entry point now accepts only a generation-bearing `SegmentAddress`, then
+  validates the still-installed generation, local bounds, logical identity, and liveness before
+  appending. Stale/dead tokens return a typed error and write no positional frame; recovery keeps
+  the idempotent behavior described above for already-persisted frames.

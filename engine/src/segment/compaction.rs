@@ -2,7 +2,7 @@
 //! the score-based merge selector, the explicit/policy compaction entry points,
 //! and the auto-flush trigger.
 
-use super::{BaseSegment, CompactionReport, Engine, Segment};
+use super::{fresh_segment_generation, BaseSegment, CompactionReport, Engine, Segment};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -153,10 +153,26 @@ impl Engine {
             return; // nothing tombstoned — fast common case
         }
         let mut new_segments = Vec::with_capacity(self.segments.len());
+        let mut new_generations = Vec::with_capacity(self.segment_generations.len());
         let mut old_files = Vec::new();
-        for arc in std::mem::take(&mut self.segments) {
+        // Retain the complete pre-reseal state until the manifest commit point.
+        // The Arc clones are O(segment count), not O(corpus), and let a failed
+        // commit restore the exact positional address space the durable manifest
+        // still names.
+        let rollback_segments = self.segments.clone();
+        let rollback_generations = self.segment_generations.clone();
+        let old_segments = std::mem::take(&mut self.segments);
+        let old_generations = std::mem::take(&mut self.segment_generations);
+        for (index, arc) in old_segments.into_iter().enumerate() {
+            // A generation-table mismatch is an internal invariant failure.
+            // Fail closed without dropping data: install a fresh generation so
+            // every previously-issued token rejects.
+            let generation = old_generations
+                .get(index)
+                .map_or_else(fresh_segment_generation, Arc::clone);
             if arc.alive_count() == arc.len() {
                 new_segments.push(arc); // already clean — keep as-is (no rewrite)
+                new_generations.push(generation);
                 continue;
             }
             let old_path = if let BaseSegment::Mmap(m) = arc.as_ref() {
@@ -182,6 +198,7 @@ impl Engine {
             match self.build_durable_base(clean) {
                 Ok((base, _path)) => {
                     new_segments.push(Arc::new(base));
+                    new_generations.push(fresh_segment_generation());
                     if let Some(p) = old_path {
                         old_files.push(p); // retire the original only after a durable reseal
                     }
@@ -202,17 +219,25 @@ impl Engine {
                         error: e.to_string(),
                     });
                     new_segments.push(arc); // original retained, file kept
+                    new_generations.push(generation);
                 }
             }
         }
         self.segments = new_segments;
+        self.segment_generations = new_generations;
         self.refresh_phrase_capability();
-        // Manifest is the commit point: only after it succeeds is it safe to delete
-        // the retired files. On a manifest failure the old files stay (still
-        // referenced by the on-disk manifest) and the freshly resealed files become
-        // orphans GC'd on reopen — fail closed, no resurrection.
+        // Manifest is the commit point: only after it succeeds is it safe to
+        // publish the new positional address space and delete the retired files.
+        // On failure, restore both vectors together; otherwise a shifted ordinal
+        // could make a later positional WAL frame disagree with the still-current
+        // durable manifest. Freshly resealed files remain unreferenced orphans and
+        // are GC'd on reopen.
         if self.commit_manifest_with_current_sources() {
             self.cleanup_segment_files(&old_files);
+        } else {
+            self.segments = rollback_segments;
+            self.segment_generations = rollback_generations;
+            self.refresh_phrase_capability();
         }
     }
 
@@ -368,6 +393,10 @@ impl Engine {
             .segments
             .splice(lo..hi, std::iter::once(Arc::new(merged_base)))
             .collect();
+        let old_generations: Vec<_> = self
+            .segment_generations
+            .splice(lo..hi, std::iter::once(fresh_segment_generation()))
+            .collect();
         if !self.commit_manifest_with_current_sources() {
             // Commit point failed — roll back to the pre-compaction state: restore
             // the originals (still durable on disk), drop the merged segment, and
@@ -375,6 +404,7 @@ impl Engine {
             // `save_manifest_if_persistent` already set persistence_healthy=false
             // and emitted a ManifestWrite failure.
             self.segments.splice(lo..=lo, old);
+            self.segment_generations.splice(lo..=lo, old_generations);
             if let Some(p) = merged_path {
                 self.best_effort_remove_segment(&p);
             }

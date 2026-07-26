@@ -4,7 +4,7 @@
 //! attach-an-explicit-file-list path, fail-loud). The construction builders live
 //! in [`construct`](super::construct).
 
-use crate::segment::{BaseSegment, Engine, Segment, SourceCommitState};
+use crate::segment::{fresh_segment_generations, BaseSegment, Engine, Segment, SourceCommitState};
 use std::sync::Arc;
 
 use crate::config::EngineConfig;
@@ -390,6 +390,16 @@ impl Engine {
             .iter()
             .filter(|segment| segment.has_phrase_predicates())
             .count();
+        let segment_generations = fresh_segment_generations(segments.len());
+        // A skipped committed segment would leave a hole in the manifest's
+        // positional address space while `segments` is dense. Reject new
+        // positional WAL frames in that degraded state instead of guessing at
+        // ordinals; a later successful manifest commit can publish a fresh map.
+        let committed_segment_generations = if skipped_segments == 0 {
+            segment_generations.clone()
+        } else {
+            Vec::new()
+        };
 
         let mut engine = Engine {
             config: Arc::new(config),
@@ -398,6 +408,8 @@ impl Engine {
             dict: Arc::new(dict),
             tag_dict: Arc::new(tag_dict),
             segments,
+            segment_generations,
+            committed_segment_generations,
             memtable: Arc::new(Segment::new()),
             live_phrase_segments,
             rejected_parse: manifest.rejected_parse,
@@ -723,6 +735,8 @@ impl Engine {
             .iter()
             .filter(|segment| segment.has_phrase_predicates())
             .count();
+        let segment_generations = fresh_segment_generations(segments.len());
+        let committed_segment_generations = segment_generations.clone();
         let engine = Engine {
             config: Arc::new(config),
             norm,
@@ -733,6 +747,8 @@ impl Engine {
             // later live-add / translog-replayed tags consistently. Empty ⇒ untagged cluster.
             tag_dict,
             segments,
+            segment_generations,
+            committed_segment_generations,
             memtable: Arc::new(Segment::new()),
             live_phrase_segments,
             rejected_parse: 0,

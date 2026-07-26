@@ -3,6 +3,7 @@
 
 use super::{
     AcceptedSource, Engine, IngestItemStatus, IngestReport, InsertOutcome, PlacedQuery, Segment,
+    SegmentAddress,
 };
 use std::sync::Arc;
 
@@ -777,20 +778,133 @@ impl Engine {
         Ok(())
     }
 
-    /// Tombstone a query in a specific base segment (for callers that track
-    /// (segment, local) addresses). `seg_idx` indexes `self.segments`.
+    /// Resolve a generation-bearing address for one live base-segment row.
     ///
-    /// Returns `Err` (without applying the tombstone) if the WAL append fails.
-    pub fn tombstone_in(&mut self, seg_idx: usize, local_id: u32) -> std::io::Result<()> {
+    /// `logical_id` is the caller's stable expected identity. A stale positional
+    /// pair that now names another row is rejected here instead of being minted
+    /// into a token for the wrong query.
+    ///
+    /// The token must be retained from the time the row is resolved; a bare
+    /// `(segment, local_id)` pair cannot safely be reconstructed after
+    /// compaction because both numbers may have been reused for another query.
+    pub fn segment_address(
+        &self,
+        seg_idx: usize,
+        local_id: u32,
+        logical_id: u64,
+    ) -> Result<SegmentAddress, crate::error::TombstoneError> {
+        let segment = self
+            .segments
+            .get(seg_idx)
+            .ok_or(crate::error::TombstoneError::SegmentNotFound { segment: seg_idx })?;
+        if local_id as usize >= segment.len() {
+            return Err(crate::error::TombstoneError::LocalNotFound {
+                segment: seg_idx,
+                local_id,
+            });
+        }
+        if !segment.is_alive(local_id) {
+            return Err(crate::error::TombstoneError::AlreadyDeleted {
+                segment: seg_idx,
+                local_id,
+            });
+        }
+        if segment.logical(local_id) != logical_id {
+            return Err(crate::error::TombstoneError::StaleAddress {
+                segment: seg_idx,
+                local_id,
+            });
+        }
+        let generation = self.segment_generations.get(seg_idx).ok_or(
+            crate::error::TombstoneError::StaleAddress {
+                segment: seg_idx,
+                local_id,
+            },
+        )?;
+        // A persistent standalone engine may be serving a coherent live
+        // fallback/recompile layout whose manifest commit failed. Such a
+        // generation has no replay-safe positional WAL ordinal, so fail at
+        // address resolution as well as rechecking in `tombstone_in`.
+        if self.owns_manifest
+            && self.config.data_dir.is_some()
+            && !self
+                .committed_segment_generations
+                .iter()
+                .any(|committed| Arc::ptr_eq(committed, generation))
+        {
+            return Err(crate::error::TombstoneError::StaleAddress {
+                segment: seg_idx,
+                local_id,
+            });
+        }
+        Ok(SegmentAddress {
+            generation: Arc::clone(generation),
+            segment: seg_idx,
+            local_id,
+            logical_id,
+        })
+    }
+
+    /// Tombstone the live row identified by a generation-bearing physical
+    /// address.
+    ///
+    /// Segment generation, row bounds, logical identity, and liveness are all
+    /// validated before the WAL is touched. A stale address consumes no WAL
+    /// sequence; callers must re-resolve the logical query after compaction.
+    /// Valid addresses preserve WAL-first ordering: an append failure leaves
+    /// the row alive.
+    pub fn tombstone_in(
+        &mut self,
+        address: &SegmentAddress,
+    ) -> Result<(), crate::error::TombstoneError> {
+        let stale = || crate::error::TombstoneError::StaleAddress {
+            segment: address.segment,
+            local_id: address.local_id,
+        };
+        let seg_idx = self
+            .segment_generations
+            .iter()
+            .position(|generation| Arc::ptr_eq(generation, &address.generation))
+            .ok_or_else(stale)?;
+        let segment = self.segments.get(seg_idx).ok_or_else(stale)?;
+        if address.local_id as usize >= segment.len()
+            || segment.logical(address.local_id) != address.logical_id
+        {
+            return Err(stale());
+        }
+        if !segment.is_alive(address.local_id) {
+            return Err(crate::error::TombstoneError::AlreadyDeleted {
+                segment: seg_idx,
+                local_id: address.local_id,
+            });
+        }
+        // Standalone WAL replay addresses the latest committed manifest list,
+        // which can lag the coherent live layout after a failed flush or vocab
+        // recompile. Resolve the generation in that durable list rather than
+        // writing its live-vector ordinal. In-memory/cluster engines have no
+        // standalone positional replay authority, so their current ordinal is
+        // sufficient for the process-local mutation.
+        let replay_seg_idx = if self.owns_manifest && self.config.data_dir.is_some() {
+            self.committed_segment_generations
+                .iter()
+                .position(|generation| Arc::ptr_eq(generation, &address.generation))
+                .ok_or_else(stale)?
+        } else {
+            seg_idx
+        };
+        let wal_seg_idx = u32::try_from(replay_seg_idx).map_err(|_| {
+            crate::error::TombstoneError::SegmentIndexOverflow {
+                segment: replay_seg_idx,
+            }
+        })?;
         if let Some(ref mut wal) = self.wal {
-            if let Err(e) = wal.append_tombstone(seg_idx as u32, local_id) {
+            if let Err(e) = wal.append_tombstone(wal_seg_idx, address.local_id) {
                 self.wal_healthy = false;
-                return Err(e);
+                return Err(crate::error::TombstoneError::Wal(e));
             }
         }
-        if let Some(seg) = self.segments.get_mut(seg_idx) {
-            Arc::make_mut(seg).tombstone(local_id);
-        }
+        let segment = self.segments.get_mut(seg_idx).ok_or_else(stale)?;
+        Arc::make_mut(segment).tombstone(address.local_id);
         self.refresh_phrase_capability();
         Ok(())
     }
