@@ -196,7 +196,8 @@ engine ≡ brute under the learned normalizer (oracle-proven, single-engine + cl
 is that a phrase-*form* query tightens to adjacency (re-tokenization) — negligible for genuine entities,
 and the feature is opt-in/reviewable/reversible. Phrases only; the **aliasing** safety rail (§5) is now
 built via expansion ([ADR-054](../decisions/adr-054-equivalence-expansion.md)), and the
-**compaction**-driven re-materialize (§6) remains future work.
+**compaction**-driven re-materialize (§6) is the roadmap's
+[`vocabulary consolidation`](../roadmap.md#vocabulary-consolidation-during-compaction) item.
 
 ---
 

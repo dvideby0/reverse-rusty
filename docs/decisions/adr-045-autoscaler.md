@@ -4,6 +4,10 @@
 
 
 - **Status:** Accepted.
+- **Current outcome:** the policy remains advisory for shard-count changes, but its distributed
+  driver is no longer map-only: membership drift uses data-moving rebalance/reconciliation
+  (ADR-090/092), and skew handoffs execute through the guarded handoff path. Automatic remote
+  shard-count resize remains roadmap work.
 - **Context:** The scaling *mechanisms* are built — `register_node`/`deregister_node`/`rebalance` (the HRW
   allocator, ADR-042) and the live data-moving handoff (`execute_handoff`, ADR-043/044) — but nothing
   *decided when* to drive them: they fired only from tests. §8's "auto-rebalance"/"auto-split" goals and the
@@ -42,4 +46,3 @@
 - **See also:** ADR-042 (the allocator `rebalance` it drives), ADR-043/044 (the handoff it will later
   *trigger* once load-driven moves are wired), ADR-027 (the content routing its rebalances must preserve),
   `src/cluster/autoscale.rs` + `src/cluster/coordinator/autoscale.rs`, `tests/cluster_autoscale_oracle.rs`.
-

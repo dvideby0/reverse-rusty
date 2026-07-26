@@ -20,9 +20,10 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    /// Import a Solr/Lucene synonym file into the registry and apply it live (ADR-060): safe
-    /// single-token groups auto-activate (FN-safe expansion), multi-word groups are recorded
-    /// as candidates. Classifies against the engine's CURRENT normalizer + dict, then reuses
+    /// Import a Solr/Lucene synonym file into the registry and apply it live (ADR-060/061):
+    /// expressible declared single-token and multi-word groups auto-activate through FN-safe
+    /// expansion; mixed/unexpressible groups remain candidates. Classifies against the engine's
+    /// CURRENT normalizer + dict, then reuses
     /// the [`set_vocab`](Self::set_vocab) + [`recompile_stale_segments`](Self::recompile_stale_segments)
     /// apply path — no restart, no full rebuild. The registry is merged into the engine's
     /// existing vocabulary (synonyms / phrases / equivalences / punctuation preserved).

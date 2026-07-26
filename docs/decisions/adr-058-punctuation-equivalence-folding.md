@@ -59,7 +59,8 @@
 - **Scope.** Single-engine and in-process cluster (the table rides in the shared `Normalizer` /
   `Vocab` like any other vocabulary). Shipping a punctuation table *cross-process* to a remote shard's
   normalizer is the same deferred item as cross-process normalizer/alias shipping (the distributed layers
-  use `default_vocab()` today, STATUS "Current limitations") — out of scope here. Reclassifying the
+  use `default_vocab()` today; see the roadmap's
+  [`feature-model work`](../roadmap.md#priority-4--feature-model-evolution-and-parity)) — out of scope here. Reclassifying the
   number-pipeline defaults (`.`/`#`/`/`) is allowed but an operator's responsibility: e.g. folding `.`
   would merge `9.5` → `95` and defeat half-grade detection; the defaults stay as they were precisely so
   the number logic is unaffected unless deliberately overridden.
@@ -81,7 +82,7 @@
   joined) to the single token `term:obrien`; folding merges only *within* a word (`foo - bar` stays two
   tokens); and a `Keep`→`Fold` override on `.` is exercised. `vocab.rs`: punctuation rules JSON
   round-trip and drive folding through `to_normalizer`, old JSON without the field is default behavior,
-  and `merge` carries rules first-wins. `tests/oracle.rs`:
+  and `merge` carries rules first-wins. `tests/oracle/`:
   `zero_false_negatives_with_punctuation_folding` — engine ≡ brute (zero FN/FP) under a folding normalizer
   over apostrophe/hyphen data, the joined-form query matches every punctuated variant, and the default
   normalizer is shown to miss it. Full `check.sh` green.

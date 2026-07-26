@@ -93,8 +93,9 @@
   - **Does not prove:** the wire. This is deliberate — the scale dimensions (dict, postings, SoA
     stores, placement distribution, manifest/segment counts, merge) are identical in-process and
     over gRPC, and the transport's own failure modes (framing, deadlines, dict shipping,
-    recovery) are separately proven by `tests/cluster_grpc_oracle` + the containerized
-    multi-machine harness (ADR-072, criterion 3) across real network boundaries. A 20M ingest
+    recovery) are separately proven by `tests/cluster_grpc_oracle` + the multi-process,
+    single-host container harness (ADR-072, criterion 3) across real container-network
+    boundaries. A 20M ingest
     over localhost tonic would measure protobuf throughput, not index scale. Multi-*machine* at
     scale remains future deployment evidence (Phase 0 item 4), and the **real-corpus audit
     remains criterion 12's open half**.

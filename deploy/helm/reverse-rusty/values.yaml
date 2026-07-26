@@ -25,10 +25,10 @@ imagePullSecrets: []
 shardCount: 3
 # FEWER PODS THAN SHARDS (co-location, ADR-093): a pod can host many positions keyed by
 # shard-id, so K positions run on N<K pods — expressed by REPEATING a shard endpoint in
-# the coordinator's --shard-endpoint list. This chart models 1:1 at v1 (shardCount pods =
-# positions); to co-locate, run fewer shard pods and give the coordinator extra repeated
-# --shard-endpoint args (positions-per-pod), with control --shards = the POSITION count.
-# Documented in the runbook; the default stays 1:1 so shardCount isn't a silent half-knob.
+# the coordinator's --shard-endpoint list. This chart models 1:1 (`shardCount` pods =
+# positions) and does not expose a separate position-count/topology value. Co-location therefore
+# needs custom manifests or chart changes that run fewer pods and pass repeated endpoint arguments,
+# with control `--shards` set to the logical position count.
 # RF>1 (a replica per shard position) is NOT modeled by this chart at v1 — it needs a
 # replica StatefulSet per position + the coordinator's --replication-factor. Documented
 # in the runbook; left at 1 here so the value isn't a silent no-op.
@@ -52,7 +52,7 @@ ports:
 metrics:
   enabled: true
 
-# PodDisruptionBudgets (roadmap Tier 5 M3): protect the rolling-upgrade invariants against node
+# PodDisruptionBudgets (ADR-098 operational hardening): protect rolling-upgrade invariants against node
 # drains — a voluntary eviction can never take a second shard while one is down, nor break the
 # 2-of-3 control quorum (maxUnavailable: 1 each). The coordinator gets a PDB only when
 # coordinator.replicas > 1 (on a single stateless replica a PDB would block drains for nothing).
@@ -70,7 +70,9 @@ controlPlane:
   wireToCoordinator: true
 
 coordinator:
-  replicas: 1 # stateless ⇒ safe to scale horizontally behind the Service
+  # Keep at 1. Stateless means restartable without a coordinator volume, not active-active:
+  # shard owner leases fence a second coordinator, and the chart has no REST-tier leader election.
+  replicas: 1
   # Broad (class-C) queries match by default when true; also a per-request flag in the
   # _search body, so leave off unless every request should include broad.
   includeBroad: false

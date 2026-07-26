@@ -4,9 +4,9 @@
 
 
 - **Status:** **Accepted (2026-06-10) — a program ADR.** Each numbered item below ships under its own
-  ADR/PR; this file records the audit that produced them and the acceptance bar. Tracked in
-  [`roadmap.md`](../roadmap.md) Tier 4 (the work package) + the polish backlog — **the roadmap copy is
-  the live tracker** (completion marks land there); this ADR records the decision-time scope.
+  ADR/PR; this file records the audit that produced them and the acceptance bar. Shipped outcomes
+  belong in [`CHANGELOG.md`](../CHANGELOG.md); [`roadmap.md`](../roadmap.md) contains only the
+  unfinished follow-ups.
 - **Context:** A deep **drop-in-replacement audit** (2026-06) against the reference percolator
   deployment documented in [`research/percolator-workload.md`](../research/percolator-workload.md) —
   this time a full semantic + operational gap analysis, not the earlier capability mapping. Method:

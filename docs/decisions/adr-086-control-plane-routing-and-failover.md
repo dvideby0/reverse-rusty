@@ -4,10 +4,15 @@
 
 **Status:** Accepted (2026-06-24)
 
+**Current outcome.** ADR-090/092 subsequently added data-moving reassignment and unattended
+reconciliation, and ADR-094–097 extended that path to replicated groups, parallel moves, orphan GC,
+and fingerprint-based copy skipping. A bare map-only `rebalance` is still not a safe data-movement
+operation; operators use the data-moving variants documented in the cluster runbook.
+
 **Context.** ADR-083 wired a deployed coordinator to the durable openraft quorum as a thin
 `RemoteControlPlane` client, making the cluster-state *document* durable + HA. Two pieces of the
-roadmap Tier-3 "control-plane wiring residue" remained (named in ADR-083's scope boundary, ADR-084's
-deferrals, and `STATUS.md` "Current limitations"):
+then-current roadmap's "control-plane wiring residue" remained (named in ADR-083's scope boundary and
+ADR-084's deferrals):
 
 1. **Routing was not driven by the committed shard→node assignments.** The coordinator read the
    committed `ClusterState` only to *validate* its ring params, then routed by its static

@@ -13,7 +13,7 @@ pub(crate) fn vocab() -> Normalizer {
 }
 
 /// Independent ground-truth matcher over extracted queries (copied structure from
-/// `tests/oracle.rs` — deliberately shares nothing with the engine or cluster).
+/// `tests/oracle/` — deliberately shares nothing with the engine or cluster).
 pub(crate) struct Brute {
     norm: Normalizer,
     dict: Dict,
@@ -145,7 +145,7 @@ impl Brute {
 }
 
 // ---- per-query tags + filtered percolation (ADR-049/055) ----
-// Mirrors the single-node `tests/oracle.rs` scheme so the cluster path is held to the same
+// Mirrors the single-node `tests/oracle/` scheme so the cluster path is held to the same
 // deterministic-tags + AND-across-keys/OR-within-a-key filter semantics.
 const CATEGORIES: [&str; 6] = ["cards", "coins", "stamps", "comics", "toys", "art"];
 const STATUSES: [&str; 3] = ["active", "inactive", "archived"];

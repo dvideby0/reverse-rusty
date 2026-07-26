@@ -8,15 +8,20 @@
   interning (`tagdict.rs`), the SoA tag column + verify-stage filter (`exact.rs`), `.seg` v3 + WAL v2
   persistence, the Engine/snapshot filtered match API, and the REST surface (ES `bool`/`terms`/`percolate`
   envelope + a native `filter` block, with ES-style sibling-tag ingest). Proven by the filtered
-  differential oracle (`tests/oracle.rs` — zero false negatives/positives + the "filtering only removes"
+  differential oracle (`tests/oracle/` — zero false negatives/positives + the "filtering only removes"
   monotonicity property), the batch≡scalar-under-filter matrix (`tests/broad_batch.rs`, incl. the
-  pure-anchor materialization path), and tagged `.seg`/WAL reopen (`tests/persistence.rs`). Decision point 4
+  pure-anchor materialization path), and tagged `.seg`/WAL reopen (`tests/persistence/`). Decision point 4
   (ranking + `/_mpercolate` `from` pagination) is **now also built single-node**
-  ([ADR-059](adr-059-percolate-ranking-pagination.md)); cluster ranking remains deferred. The single-node server is the drop-in
-  target and is complete; threading tags through the **cluster** (in-process coordinator + durable log +
-  the `distributed` gRPC wire-format) follows the experimental-path cadence. Originally accepted as a
+  ([ADR-059](adr-059-percolate-ranking-pagination.md)); cluster ranking was deferred at this increment.
+  The single-node server was the initial drop-in target; threading tags through the **cluster**
+  (in-process coordinator + durable log + the `distributed` gRPC wire-format) followed the
+  experimental-path cadence. Originally accepted as a
   design-only direction — the framing below preserved the correctness contract *by construction* through
   the build.
+- **Current outcome:** ADR-055 carried tags and filters through cluster placement, persistence, and
+  gRPC; ADR-059 added local ranking/pagination; ADR-075 added cluster ranking; and ADR-107–114 added
+  bounded ranked and exhaustive delivery contracts. The implementation-time deferrals below remain
+  useful history, not the current feature matrix.
 - **Context:** Reverse Rusty matches titles to stored queries and returns a bare set of matched
   `logical_id`s. Real percolator deployments — captured abstractly in
   [`research/percolator-workload.md`](../research/percolator-workload.md) — do more: each stored query
@@ -76,8 +81,8 @@
   pagination/ranking attach), ADR-046 (the feature dictionary whose interning is reused for tag ids).
   Design: [`design/matching.md`](../design/matching.md) §5,
   [`design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §11. Workload:
-  [`research/percolator-workload.md`](../research/percolator-workload.md). Roadmap:
-  [`STATUS.md`](../STATUS.md) Tier 4. Would-be code sites (when built): `src/dict.rs` (tag interning),
+  [`research/percolator-workload.md`](../research/percolator-workload.md). Shipped history:
+  [`CHANGELOG.md`](../CHANGELOG.md). Would-be code sites (when built): `src/dict.rs` (tag interning),
   `src/exact.rs` (the tag SoA column + verify-stage filter), `src/compile.rs` (carry tags through
   compile), `src/storage/segment` (the `.seg` tag section), `src/bin/server/` + `reference/api.md`
   (the filter/rank request surface).

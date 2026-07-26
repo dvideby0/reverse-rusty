@@ -9,11 +9,13 @@ against the Aurora-style disaggregated alternative. The hashing decision is reco
 [`../DECISIONS.md`](../DECISIONS.md) ADR-027; the storage-model decision (shared-nothing over a shared
 object store — i.e. no S3/cloud dependency) in **ADR-033**.
 
-> Status: **Cluster v1** = the in-process multi-shard core + durable local reopen (built, oracle-proven).
+> Status: **Cluster v1** = the in-process multi-shard core + durable local reopen + dynamic vocabulary
+> (built, oracle-proven).
 > The distributed multi-node layers (gRPC transport + dict shipping, replication + peer recovery, the
 > Raft/quorum control plane, the shard→node allocator, live handoff, autoscaler) are **built but
-> experimental** — oracle-proven in-process / on localhost, not yet hardened for real multi-machine
-> deployment (ADR-027 through ADR-045; roadmap Tier 3 — see [`../STATUS.md`](../STATUS.md)). Absorbing
+> experimental** — proven in-process, over localhost gRPC, and across single-host container networks;
+> independent multi-machine production evidence remains open. Real-cluster acceptance remains in the
+> [`roadmap`](../roadmap.md#real-kubernetes-failure-and-recovery-exercise). Absorbing
 > new vocabulary after the dict is frozen is the Cluster v1 item — see
 > [`dynamic-vocabulary.md`](dynamic-vocabulary.md) (→ ADR-046). This file is the prior-art backing those
 > decisions, per the "research first, implement second" ethos.
@@ -33,8 +35,9 @@ What we actually need:
   small K matter more than asymptotic scaling to thousands of nodes.
 - **Deterministic & reproducible.** The engine hashes with `util::fnv1a64`, which is stable across runs
   (so benchmarks and the differential oracle reproduce); the ring must inherit that.
-- **Range-splittable.** Auto-split (design §8.3) "splits a hot shard's hash *range* and re-materializes
-  the two halves online" — phrasing that presumes a contiguous-range (token) model.
+- **Range-splittable.** The original auto-split hypothesis would split a hot shard's hash range and
+  re-materialize the halves online, which favors a contiguous token model. That targeted online split
+  remains roadmap work; current resize rebuilds the in-process cluster under a fresh ring.
 
 | Variant | Arbitrary removal | Rebalance | Memory @ small K | Lookup | Range-split fit | Verdict |
 |---|---|---|---|---|---|---|
@@ -63,7 +66,8 @@ rather than re-hashing the feature-name token this survey assumed a per-shard-di
 
 ## 2. Content-routed percolation is a known-good pattern (content-based pub/sub)
 
-The design's central claim — route a title only to the ~2–5 shards that *could* match it, instead of
+The design's central claim — route a title only to the few shards that *could* match it in the target
+product-title workload, instead of
 scatter-gathering across all N — is the percolation dual of **content-based publish/subscribe routing**,
 a well-studied area whose techniques map onto ours almost one-to-one:
 
@@ -120,7 +124,7 @@ provably lossless** by deriving it from the same anchor feature the single-node 
 | Source | Borrowed | Not adopted (and why) |
 |---|---|---|
 | Ring + vnodes (Dynamo/Cassandra) | token-range placement, ~1/N rebalance, native range-split | name/IP-keyed routing — we key on the feature itself (the globally-stable `FeatureId`; ADR-027) |
-| Content-based pub/sub (Ferry et al.) | attribute-rendezvous placement; broadcast+prune two-layer | multi-attribute server-overlay routing trees — our title fan-out is tiny (~2–5) |
+| Content-based pub/sub (Ferry et al.) | attribute-rendezvous placement; broadcast+prune two-layer | multi-attribute server-overlay routing trees — captured product-title fan-out is small, though input-dependent |
 | ES percolator | route-by-stored-value to escape scatter-gather | manual routing value; no lossless guarantee |
 | Elasticsearch/Cassandra **shared-nothing** (design §4, ADR-033) | local segments + per-node WAL + replication + peer recovery + quorum control plane | — (this is the adopted model; see §5) |
 | Aurora "log is the database" | the disaggregated shared-storage shape | **rejected (ADR-033)** — we are shared-nothing (local WAL + replicas, no shared object store); see §5 |
@@ -155,11 +159,14 @@ hot path, and the on-prem default (ES's `fs` repository) is just a shared direct
 That is the model Reverse Rusty adopts (ADR-033). It is **self-contained** (fits the lean, std-only-core,
 no-cloud-dependency ethos), and our building blocks already match it: per-shard **local** segments
 (ADR-032) + a coordinator **WAL** (ADR-031), with the gRPC transport now **shipping the dict** so a data
-node starts empty (ADR-034). The Aurora school's upside — cheap replicas / fast failover because storage
+node starts empty (ADR-034). Replication, translog-tail recovery, the durable Raft topology plane,
+live handoff, reconciliation, and orphan GC are now built as the later ADRs record. The Aurora
+school's upside — cheap replicas / fast failover because storage
 is shared — is bought instead with **warm replicas + peer recovery** (a bounded one-time segment copy, or
 none at all for an already-warm standby); its downside — a distributed object-store dependency in the
-critical path — is exactly what we decline to take on. The remaining shared-nothing steps (per-shard
-replication, the Raft control plane) are in `clustering-and-scaling.md` §4/§10.
+critical path — is exactly what we decline to take on. The current architecture and its experimental
+deployment boundary are in [`../design/clustering-and-scaling.md`](../design/clustering-and-scaling.md)
+§4/§10.
 
 ---
 

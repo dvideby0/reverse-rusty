@@ -8,9 +8,10 @@
 //! the gate is strictly opt-in.
 //!
 //! The protected set is **default-deny**: every non-GET/HEAD request requires
-//! the token unless its path is one of the read-via-POST percolate endpoints
-//! (`/_search`, `/v2/_search`, `/_mpercolate`). A future mutating endpoint is therefore
-//! covered without anyone remembering to list it here.
+//! the token unless its path is one of the explicit read-via-mutation-method
+//! surfaces (compatibility/v2 search, exhaustive-job admission, or the PIT
+//! lifecycle). A future mutating endpoint is therefore covered without anyone
+//! remembering to list it here.
 
 use std::sync::Arc;
 

@@ -1,7 +1,7 @@
 //! Golden normalization cases — exact feature-*name* sets, authored by hand from
 //! the spec (docs/design/normalization.md §2–§4, docs/reference/dsl.md), NOT
 //! captured from `emit`. They exist because the differential oracle
-//! (tests/oracle.rs) runs THIS normalizer on both its engine and its brute-force
+//! (tests/oracle/) runs THIS normalizer on both its engine and its brute-force
 //! ground truth, and only ever under the EMPTY `default_vocab` — so a
 //! normalization-model bug is invisible there, and the entire vocab-driven path
 //! (phrases/synonyms/graders) is never exercised at all. These pins close that

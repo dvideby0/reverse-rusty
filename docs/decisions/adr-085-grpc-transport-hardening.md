@@ -6,7 +6,7 @@
 
 **Context.** The distributed multi-node layers are built and oracle-proven on localhost but
 explicitly **experimental — not hardened for real multi-machine deployment**
-([STATUS.md](../STATUS.md)). The single most impactful correctness gap in that layer was that the
+([threat model](../operations/threat-model.md)). The single most impactful correctness gap in that layer was that the
 gRPC **client set no connect timeout, no per-RPC deadline, and no keepalive**:
 
 - `configure_endpoint` (`src/cluster/security.rs`) built the channel with TLS only — no

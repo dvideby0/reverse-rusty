@@ -1,6 +1,6 @@
 # Deployment modes — the supported matrix
 
-The canonical "known-supported deployment" contract (roadmap Tier 5 M0, ADR-098): the four
+The canonical "known-supported deployment" contract (ADR-098): the four
 supported modes, the exact bring-up command for each, the REST surface they all guarantee, the
 auth posture, and — in one place — the **v1 non-goals** as named constraints. This page is the
 *contract*; the fresh-clone *acceptance recipe* that proves a checkout is green stays
@@ -16,7 +16,9 @@ pages ([`disaster-recovery.md`](disaster-recovery.md), [`rolling-upgrade.md`](ro
 > modes are smoke-gated per PR (the compose smoke + the lifecycle harness + the compose↔chart
 > topology-parity tripwire) and per release (`release.yml` runs both `cluster-smoke.sh` and the
 > kind `k8s-smoke.sh` against the exact candidate image before it is published). "Deployable feature complete" here is deliberately distinct from the scale
-> proof — the ≥20M-query soak stays open as Tier 3 criterion 12 (ADR-065).
+> proof — representative-corpus and real-cluster acceptance remain open under
+> [ADR-065](../decisions/adr-065-distributed-v1-graduation.md) and the
+> [roadmap](../roadmap.md#priority-1--real-world-acceptance-evidence).
 
 ## 1. The matrix
 
@@ -24,8 +26,8 @@ pages ([`disaster-recovery.md`](disaster-recovery.md), [`rolling-upgrade.md`](ro
 |---|---|---|---|---|
 | **Single-node** | `cd engine && cargo build --release` | `server --port 9200 --data-dir ./data` | WAL + segments; restart-reopen; `POST /_backup` → restore by `--data-dir` | [`local-smoke.sh`](../../deploy/local-smoke.sh) — **CI, every PR** |
 | **In-process cluster** | same binary | `server --cluster --shards K --data-dir ./data` | coordinator log + manifest + per-shard segments; checkpoint + reopen; `POST /_backup` | [`local-smoke.sh`](../../deploy/local-smoke.sh) — **CI, every PR** |
-| **Remote Compose** (K=3, RF=1) | `deploy/Dockerfile`, or pull `ghcr.io/<owner>/reverse-rusty:vX.Y.Z` (released images are smoke-gated, never `:latest` — ADR-098) | `deploy/gen-mesh-certs.sh` + env (`RR_CLUSTER_TOKEN`, `RR_AUTH_TOKEN`) + `docker compose -f deploy/compose.cluster.yml up -d` — full procedure: [runbook §2](cluster-deployment.md) | per-shard translog + segments on named volumes; durable Raft control plane | [`cluster-smoke.sh`](../../deploy/cluster-smoke.sh) + the 6-leg [`harness.sh`](../../deploy/harness.sh) — **harness in CI, every PR** |
-| **Remote Helm** (K=3, RF=1) | same image | Secrets (TLS + tokens) + `helm install rr deploy/helm/reverse-rusty` — full procedure: [runbook §3](kubernetes-deployment.md) | per-pod PVCs (shards + control); stateless coordinator Deployment | [`k8s-smoke.sh`](../../deploy/k8s-smoke.sh) (kind) + `helm lint`/`kubeconform` — **static validation in CI, every PR** |
+| **Remote Compose** (K=3, RF=1) | `deploy/Dockerfile`, or pull `ghcr.io/<owner>/reverse-rusty:vX.Y.Z` (released images are smoke-gated, never `:latest` — ADR-098) | `deploy/gen-mesh-certs.sh` + env (`RR_CLUSTER_TOKEN`, `RR_AUTH_TOKEN`) + `docker compose -f deploy/compose.cluster.yml up -d` — full procedure: [runbook §2](cluster-deployment.md) | per-shard translog + segments on named volumes; durable Raft control plane | [`cluster-smoke.sh`](../../deploy/cluster-smoke.sh) + the lifecycle [`harness.sh`](../../deploy/harness.sh) — **harness in CI, every PR** |
+| **Remote Helm** (K=3, RF=1) | same image | Secrets (TLS + tokens) + `helm install rr deploy/helm/reverse-rusty` — full procedure: [runbook §3](kubernetes-deployment.md) | per-pod PVCs (shards + control); stateless coordinator Deployment | `helm lint`/`kubeconform` in PR CI; [`k8s-smoke.sh`](../../deploy/k8s-smoke.sh) against the candidate image in the release gate |
 
 The two local modes need only the Rust toolchain, `curl`, and `jq`. The two remote modes are the
 same topology expressed twice (Compose for a single host, Helm for Kubernetes) — one image, three
@@ -41,7 +43,7 @@ GET/HEAD /_doc/{id}            (source read/existence check in local modes; remo
 POST /_bulk                    (NDJSON, ES-shaped)
 POST /_search                  (single-document percolation; `include_broad` per request)
 POST /_mpercolate              (batch percolation, ES _msearch-shaped responses[])
-GET  /_health   /_stats   /_metrics   (unauthenticated reads; Prometheus text on /_metrics)
+GET  /_health   /_stats   /_metrics   (open under default read policy; Prometheus text on /_metrics)
 + restart-reopen               (every acknowledged write survives an operational restart)
 ```
 
@@ -51,9 +53,10 @@ shipped **remote** topologies run a *stateless* coordinator (no `--data-dir`), w
 is a 400 by design — remote backup is the per-shard volume-snapshot procedure in
 [`backup-restore.md`](backup-restore.md) (the cross-shard barrier is a named constraint in §4).
 
-Per-mode extras (single-node `/_settings`, `/_vocab*`; cluster `/_cluster/*` ops, `/_cat/shards`)
-are in the API reference — [`../reference/api.md`](../reference/api.md). Endpoints that exist in
-only one mode return **501 with the supported alternative** in the other, never a silent no-op.
+Per-mode extras (single-node runtime settings; cluster `/_cluster/*` operations and
+`/_cat/shards`; local-mode vocabulary administration) are in the API reference —
+[`../reference/api.md`](../reference/api.md). Endpoints that exist in only one mode return **501
+with the supported alternative** in the other, never a silent no-op.
 
 **A micro-corpus classification note** (visible in any tiny demo, asserted in the smoke): cost
 classification is frequency-based, and a *bulk* batch finalizes the 64-bit common mask from its
@@ -64,8 +67,11 @@ any-of query can land in the quarantined broad lane (class C, served only with
 
 ## 3. Auth posture (ADR-062 / ADR-071)
 
-- **REST**: with `RR_AUTH_TOKEN` set, every mutating/admin endpoint requires the bearer
-  (default-deny on non-GET/HEAD except `/_search` and `/_mpercolate`); reads stay open. An
+- **REST**: with `RR_AUTH_TOKEN` set, every mutating/admin endpoint requires the bearer. The explicit
+  read-via-POST allowlist is `/_search`, `/v2/_search`, `/_mpercolate`,
+  `/_percolate/jobs`, and the `/v2/_pit` lifecycle; `/v2/_mpercolate` currently remains protected.
+  GET/HEAD reads stay open unless `--auth-protect-reads` is enabled (only `GET /_health` always
+  bypasses auth). An
   **empty** token refuses startup (never read as "off"); an **absent** token disables the gate —
   the server logs a loud warning if you bind a non-loopback interface that way. Default bind is
   loopback.
@@ -80,12 +86,12 @@ is where the trade-off and the follow-on path live.
 
 | Constraint | Operational meaning | Decided in |
 |---|---|---|
-| **RF>1 in the Helm chart** | the chart models RF=1; `replicationFactor` is documentation-only (the *engine's* replication is built — Compose can run RF=2 by hand, [runbook §5](cluster-deployment.md)) | [ADR-084](../decisions/adr-084-kubernetes-helm-health.md); roadmap M4 |
-| **Online / cross-process resize** | `/_cluster/resize` is in-process blue/green only; the remote topology changes shard count by redeploy | [ADR-078](../decisions/adr-078-cluster-resize.md) |
-| **Custom vocabulary on the remote topology** | vocab is deploy-time configuration for remote clusters (live `set_vocab` is an in-process capability) | [ADR-076](../decisions/adr-076-cluster-multiword-aliases-vocab-shipping.md) |
-| **Cross-shard backup barrier** | a remote (stateless-coordinator) cluster has per-shard-consistent backups, no global barrier; consistent whole-cluster backup requires quiescence | [ADR-079](../decisions/adr-079-backup-restore.md); [backup-restore.md](backup-restore.md) |
-| **Scale proof at target (≥20M)** | deployable ≠ scale-proven: the largest soak to date is 10M single-node; the multi-shard 20M+ proof + real-corpus audit stay open | [ADR-065](../decisions/adr-065-distributed-v1-graduation.md) criterion 12 |
-| **mTLS / per-RPC authz** | the mesh uses one shared token + server TLS; mutual TLS and per-RPC authorization are post-v1 | [ADR-071](../decisions/adr-071-grpc-tls-auth.md); [threat-model.md](threat-model.md) |
+| **RF>1 in the Helm chart** | the chart models RF=1; `replicationFactor` is documentation-only (the *engine's* replication is built — Compose can run RF=2 by hand, [runbook §5](cluster-deployment.md)) | [ADR-084](../decisions/adr-084-kubernetes-helm-health.md); [roadmap](../roadmap.md#kubernetes-operator-and-rf1-topology) |
+| **Online / cross-process resize** | `/_cluster/resize` is in-process blue/green only; the remote topology changes shard count by redeploy | [ADR-078](../decisions/adr-078-cluster-resize.md); [roadmap](../roadmap.md#automatic-and-remote-cluster-resize) |
+| **Custom vocabulary on the remote topology** | unsupported: shard servers run the stock normalizer and the wire ships only dictionaries, so `--vocab-file` and live vocabulary changes are refused; use an in-process cluster for custom vocabulary | [ADR-076](../decisions/adr-076-cluster-multiword-aliases-vocab-shipping.md) |
+| **Cross-shard backup barrier** | a remote (stateless-coordinator) cluster has per-shard-consistent backups, no global barrier; consistent whole-cluster backup requires quiescence | [ADR-079](../decisions/adr-079-backup-restore.md); [roadmap](../roadmap.md#backup-and-restore-as-a-cluster-service) |
+| **Representative-corpus and real-cluster proof** | the durable 20M-query K=8 soak shipped in ADR-104; a production corpus and real Kubernetes failure matrix remain open | [ADR-065](../decisions/adr-065-distributed-v1-graduation.md); [roadmap](../roadmap.md#priority-1--real-world-acceptance-evidence) |
+| **mTLS / per-RPC authz** | the mesh uses one shared token + server TLS; mutual TLS and per-RPC authorization are post-v1 | [ADR-071](../decisions/adr-071-grpc-tls-auth.md); [roadmap](../roadmap.md#security-hardening-beyond-the-v1-trust-model) |
 | **Power-loss durability by default** | `wal_sync_on_write` defaults **false**: an acked write survives a process crash (WAL replay), not necessarily power loss — flip the knob for fsync-per-write | [ADR-013](../decisions/adr-013-write-ahead-log.md); [ADR-088](../decisions/adr-088-crash-injection-harness.md) |
 
 ## 5. Choosing a mode

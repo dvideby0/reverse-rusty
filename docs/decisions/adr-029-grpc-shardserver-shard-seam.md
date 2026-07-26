@@ -46,7 +46,7 @@
      No generated code is checked in; it is regenerated from `proto/shard.proto` on every build.
   6. **No TLS** (plaintext localhost) this increment — avoids pulling `rustls`/`ring`/`openssl` into the
      `cargo deny` license surface; transport security + auth are a later step.
-- **Why correct:** `tests/cluster_grpc_oracle.rs` stands up K = 3 real `ShardServer`s on localhost,
+- **Why correct:** `tests/cluster_grpc_oracle/` stands up K = 3 real `ShardServer`s on localhost,
   assembles a `ClusterEngine` of `RemoteShard`s, loads the corpus over the `IngestExtracted` RPC, and
   asserts the gRPC-backed cluster returns EXACTLY the independent brute-force oracle's set AND the
   single-node engine's set, broad on and off — plus a live add → percolate → remove over the
@@ -93,6 +93,5 @@
 - **See also:** ADR-027 (the in-process core this extends), ADR-028 (the feature-gating seam `distributed`
   reuses), [`clustering-and-scaling.md`](../design/clustering-and-scaling.md) §10 (step 1),
   `engine/grpc/` (the proto sub-crate), `src/cluster/{shard,remote,server,proto}.rs`,
-  `src/bin/shardserver.rs`, `tests/cluster_grpc_oracle.rs`.
-
+  `src/bin/shardserver.rs`, `tests/cluster_grpc_oracle/`.
 

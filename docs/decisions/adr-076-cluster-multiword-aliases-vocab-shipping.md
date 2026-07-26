@@ -53,19 +53,21 @@
   - Building from a bare normalizer remains accepted with single-node-parity semantics
     (pinned by an oracle test) — the boundary is documented, not silent divergence.
 - **Decision (a) — REFUSED, documented: no live cross-process vocabulary shipping at v1.**
-  Remote-cluster vocabulary is **deploy-time configuration**. Prior art is decisive: ES
+  The shipped remote topology is **stock-vocabulary-only**. The decision-time phrase
+  “deploy-time configuration” means rebuilding into a topology that can apply the vocabulary;
+  the current `shardserver` has no vocab flag, and the remote coordinator refuses one rather than
+  diverging. Prior art is decisive: ES
   cannot change an analyzer on a live index — you reindex into a new index and swap an
   alias. Reverse Rusty's in-process cluster automates exactly that rebuild (`set_vocab`'s
-  blue/green re-mint + re-place); a remote cluster does it at the deployment level: update
-  the vocab file, redeploy shard nodes + coordinator, reload (blue/green at the cluster
-  level — the criterion-10 runbook documents the procedure). Supporting reasons:
+  blue/green re-mint + re-place). A future remote implementation would need an equivalent
+  cluster-level blue/green mechanism; none ships today. Supporting reasons:
   - A correct live remote rebuild is cluster-wide blue/green over gRPC: gather sources from
     remote shards (no RPC exists), re-place + re-ingest the corpus over the wire, ship the
     re-minted dict + normalizer to every node, and flip atomically against a propagation
     window — handoff-grade machinery per vocabulary change.
-  - It collides with the ADR-074 boundary: a tagged remote rebuild would need synthetic
-    `TagId`s on the wire, which is only sound behind the criterion-9 tag-dict fingerprint
-    handshake (not yet built).
+  - At decision time it also collided with the ADR-074 boundary: a tagged remote rebuild
+    needed the tag-dict fingerprint handshake. ADR-077 later closed that fingerprint gap, but
+    it did not add source gathering or normalizer shipping.
   - The **mesh refuses loudly today**: `set_vocab` keeps its non-local refusal, and the
     coordinator-mode server now **fails startup** when a remote assembly is given ANY
     vocab file (codex review broadened this from an equivalence-only check):

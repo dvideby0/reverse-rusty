@@ -44,10 +44,10 @@
     truncating the log, so a crash mid-checkpoint just replays an already-applied (idempotent) tail.
 - **Consequence:** An in-process cluster created with a `data_dir` survives a crash: `ClusterEngine::open`
   reconstructs byte-identical placement (zero false negatives) from manifest + base snapshot + replayed log,
-  proven by `tests/cluster_durability_oracle.rs` (rebuild ≡ pre-crash ≡ brute across K∈{1,3,8} × broad
+  proven by `tests/cluster_durability_oracle/` (rebuild ≡ pre-crash ≡ brute across K∈{1,3,8} × broad
   on/off, plus checkpoint-compaction, torn-tail recovery, append-fails-closed, the two-backend differential,
   fsync parity, and fail-loud guards on a missing/corrupt manifest). Dependency-free (lean core, **not**
-  behind `distributed`); the `NullClusterLog` path is byte-identical to pre-ADR-031, so `tests/cluster_oracle.rs`
+  behind `distributed`); the `NullClusterLog` path is byte-identical to pre-ADR-031, so `tests/cluster_oracle/`
   is unchanged. `LogPos` and `epoch` are **plumbed but not enforced** — both are needed now (replay cursor;
   checkpoint generation) and merely *shaped* like their Raft counterparts. **Deliberately deferred** (dead
   surface without Raft): per-entry epoch fencing, quorum / read-your-writes append modes, per-shard logs,
@@ -59,5 +59,4 @@
   on), ADR-030 (the dict-fingerprint check reused on `open`), ADR-013 (the engine WAL whose framing this
   copies), ADR-017 (the durable all-or-nothing ingest contract), ADR-021 (the `DurabilityFailure` event
   reused), `clustering-and-scaling.md` §10 step 3, `src/cluster/clog.rs`, `src/cluster/coordinator.rs`,
-  `src/storage.rs` (cluster manifest + snapshot), `tests/cluster_durability_oracle.rs`.
-
+  `src/storage.rs` (cluster manifest + snapshot), `tests/cluster_durability_oracle/`.

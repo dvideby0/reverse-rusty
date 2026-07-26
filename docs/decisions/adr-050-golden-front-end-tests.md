@@ -5,10 +5,10 @@
 
 - **Status:** **Built + passing (2026-06-03).** Spec-authored golden tests added in-module to `src/dsl.rs`
   (full-AST cases), `src/normalize.rs` (`mod golden`), and `src/compile.rs` (`mod golden`), plus a
-  vocab-rich oracle pass (`zero_false_negatives_with_populated_vocab`) in `tests/oracle.rs`. All run under
+  vocab-rich oracle pass (`zero_false_negatives_with_populated_vocab`) in `tests/oracle/`. All run under
   the default `cargo test --release` (the `--lib` tests need no `tests/` registration), so the gate
   (`check.sh`) covers them automatically.
-- **Context:** The differential oracle (`tests/oracle.rs`) is the load-bearing correctness test — it
+- **Context:** The differential oracle (`tests/oracle/`) is the load-bearing correctness test — it
   asserts the engine has zero false negatives/positives against a brute-force matcher over millions of
   (title, query) pairs ([`design/README.md`](../design/README.md) §2). Its independence is **partial**, and
   an external review correctly flagged it. The brute reference reimplements only **candidate retrieval +
@@ -57,5 +57,5 @@
   assert), ADR-008 (seeded determinism the oracle relies on), ADR-010 (the empty `default_vocab` that
   motivates the vocab-rich pass), ADR-046 (synthetic IDs — why the golden helpers use the *mutating*
   compile path so `Dict::name` round-trips), ADR-024 (the one-gate model the `--lib` tests slot into).
-  Tests: `src/dsl.rs`, `src/normalize.rs`, `src/compile.rs` (`mod golden`), `tests/oracle.rs`
+  Tests: `src/dsl.rs`, `src/normalize.rs`, `src/compile.rs` (`mod golden`), `tests/oracle/`
   (`zero_false_negatives_with_populated_vocab`). How-we-test: [`testing.md`](../testing.md).

@@ -2,8 +2,8 @@
 
 > [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted (2026-07-03)
 
-- **Context.** The Broad-Query Cost Program (its spec:
-  [`proposals/broad-cost-program.md`](../proposals/broad-cost-program.md); evidence: ADR-104 + the
+- **Context.** The Broad-Query Cost Program (remaining measurement-gated work:
+  [roadmap](../roadmap.md#priority-2--query-cost-and-memory-at-scale); evidence: ADR-104 + the
   [prior-art survey](../research/broad-scaling-prior-art.md)) diagnosed one corpus-independent
   defect: `is_hot` — membership in the **top-64-by-frequency** common mask — serves two masters.
   As the 64-bit verify-mask assignment it is correctly sized and must stay frozen (`req_mask`

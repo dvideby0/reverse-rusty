@@ -1,4 +1,5 @@
-# The multi-machine harness topology (ADR-072): a fully SECURED cluster (mesh TLS +
+# The historically named "multi-machine" harness topology (ADR-072): a fully SECURED,
+# multi-process cluster on one host (mesh TLS +
 # token, ADR-071) on an isolated bridge network — 3 durable shard nodes + a spare
 # pending node (the handoff target) + the REST coordinator (ADR-070) + a 3-node
 # control-plane quorum. Driven by deploy/harness.sh; not a production reference

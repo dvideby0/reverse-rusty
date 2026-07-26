@@ -2,6 +2,11 @@
 
 > [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
+> **Current outcome:** ADR-076 subsequently made cluster routing use the positive title view, so
+> in-process clusters can use multi-word aliases. Remote shard processes still receive dictionaries
+> but not normalizers, so remote custom vocabulary remains refused. ADR-102/103 later added
+> distributional candidates and feedback validation.
+
 - **Context.** [ADR-060](adr-060-learned-alias-evolution.md) (Phase 1) shipped the alias *governance*
   layer — the `AliasRegistry` records, classifies, and persists alias groups — but only **single-token**
   groups auto-activate and reach the matcher (through the unchanged ADR-054 equivalence expansion). A

@@ -10,7 +10,7 @@
   re-scanned for every title containing that hot feature, so candidates/title jump 54 → 684 and
   throughput collapses ~9× (710k → 78k titles/sec/core), p99 ~28× ([results.md](../performance/results.md)
   §1). Broad queries are only ~0.2% of the corpus but dominate match cost — the single biggest
-  remaining matching-performance lever ([STATUS](../STATUS.md) Tier 1). The resident-memory prerequisite
+  remaining matching-performance lever in the roadmap at the time. The resident-memory prerequisite
   (ADR-020) had already shipped.
 - **Decision:** Evaluate the broad lane **once per title-batch, columnar**, while the selective lane
   stays per-title (it is already fast and scale-flat). New module `segment/broad_batch.rs`, exposed as
@@ -45,8 +45,8 @@
   title and every setting — a pure performance change. Guarded by `tests/broad_batch.rs` (batch≡scalar
   across single/multi-segment, memtable, tombstones, any-of/forbidden, a `broad_batch_size` sweep incl.
   word/chunk boundaries, all three posting variants, `Inline`≡`Columnar`, and `materialize` on≡off),
-  an additive brute-force batch oracle in `tests/oracle.rs`, and a batch≡per-title-under-churn test in
-  `tests/stress.rs`.
+  an additive brute-force batch oracle in `tests/oracle/`, and a batch≡per-title-under-churn test in
+  `tests/stress/`.
 - **HTTP ergonomics — new `/_mpercolate`, `/_search` unchanged.** The plan originally proposed routing
   `/_search`'s `documents:[...]` arm through the batch path "transparently." It is **not** transparent:
   `/_search` returns documented per-slot `stats` (per-title candidate/posting counts), and the columnar
@@ -90,4 +90,3 @@
   ADR-020 (the resident-memory prerequisite), [matching.md](../design/matching.md) §4,
   [api.md](../reference/api.md) (`/_mpercolate`), `segment/broad_batch.rs`, `exact.rs`
   (`eval_batch_slices` / `is_pure_anchor`).
-

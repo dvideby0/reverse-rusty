@@ -93,8 +93,8 @@ pub struct ShardAssignment {
 }
 
 /// Monotonic committed version of the cluster-state document — the value a successful
-/// [`ControlPlane::propose`] returns, and openraft's commit index/term mirror later.
-/// New-typed (callers can't do arithmetic); `StateVersion(0)` = "genesis, nothing
+/// [`ControlPlane::propose`] returns. It is an application document version, not openraft's
+/// commit index or term. New-typed (callers can't do arithmetic); `StateVersion(0)` = "genesis, nothing
 /// committed beyond the initial document".
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub struct StateVersion(pub u64);
@@ -102,12 +102,12 @@ pub struct StateVersion(pub u64);
 /// The committed cluster-state document the control plane holds consensus over — the
 /// node-level analogue of what [`ClusterManifest`](crate::storage::ClusterManifest) is for
 /// *local* durability. Small and low-rate by construction (see the boundary invariant in
-/// the module docs). Self-contained + `serde`-serializable: it is the future Raft snapshot
+/// the module docs). Self-contained + `serde`-serializable: it is also the openraft snapshot
 /// payload, so it must hold no engine handles / `Arc<Dict>`.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ClusterState {
     /// APP-level term, bumped on every committed transition. Distinct from openraft's
-    /// term/`LogId` (later) AND from [`ClusterManifest::epoch`](crate::storage::ClusterManifest)
+    /// term/`LogId` AND from [`ClusterManifest::epoch`](crate::storage::ClusterManifest)
     /// (the local checkpoint generation).
     pub epoch: u64,
     /// Cluster membership (incl. data nodes + their addresses), kept sorted by id.
@@ -132,7 +132,7 @@ pub struct ClusterState {
 }
 
 /// One atomic transition the control plane commits — the [`ClusterMutation`](super::clog)
-/// analogue, and the openraft log-entry payload later. Coarse-grained + low-rate by
+/// analogue and the openraft log-entry payload. Coarse-grained + low-rate by
 /// construction (membership/placement/model changes, never query writes). Applying the
 /// ordered change stream reproduces the document deterministically (live ≡ replay).
 ///

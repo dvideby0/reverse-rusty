@@ -8,8 +8,9 @@ and self-tuning databases — actually do about the three problems [ADR-104](../
 [`prior-art.md`](prior-art.md) (which answers "how to gate selectively"; this doc answers "what to do
 when gating can't be selective"). Every claim below was verified against the primary paper, the
 production documentation, or — for Vespa — the shipped source code; measured numbers are quoted from
-those sources. Feeds a future roadmap program (deliberately **not** yet added to
-[`../roadmap.md`](../roadmap.md) — maintainer review first).*
+those sources. This research informed shipped hot-tier/body-dedup work (ADR-105/106); the remaining
+evidence-gated levers are now owned by
+[`Priority 2 — query cost and memory at scale`](../roadmap.md#priority-2--query-cost-and-memory-at-scale).*
 
 ## The problem in one paragraph, and the field's verdict up front
 

@@ -87,7 +87,7 @@ impl Engine {
     ///
     /// Correctness: the merged segment contains exactly the alive entries from
     /// all sources with their exact-match data and signature postings preserved.
-    /// The oracle test (`tests/oracle.rs`) verifies this end-to-end.
+    /// The oracle suite (`tests/oracle/`) verifies this end-to-end.
     pub fn compact(&mut self, max_segments: usize) -> Option<CompactionReport> {
         if self.segments.len() <= max_segments {
             return None;

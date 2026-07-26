@@ -7,11 +7,11 @@
   explicitly-deferred items from ADR-040/044/045). The in-process / RF=1 default path is **byte-identical**:
   the lease TTL defaults generous and reaps only a stalled lease (no live recovery is affected); the unfence
   RPC + drain-cap knobs and the autoscaler→handoff wiring are all behind `#[cfg(feature = "distributed")]`,
-  so the lean build and `tests/cluster_oracle.rs` + `tests/cluster_durability_oracle.rs` are untouched.
+  so the lean build and `tests/cluster_oracle/` + `tests/cluster_durability_oracle/` are untouched.
   Proven by `retention_lease_tests::*` + `ttl_reaps_a_stuck_lease_so_the_seal_reclaims_the_tail_and_emits`
   (`src/cluster/{shard.rs,replica/tests.rs}`, deterministic, lean core),
   `grpc_handoff_abort_unfences_source` + `grpc_autoscaler_tick_drives_handoff_resolution_and_preserves_matching`
-  (`tests/cluster_grpc_oracle.rs`, real wire), and `tick_emits_handoff_under_skew_without_perturbing_matching`
+  (`tests/cluster_grpc_oracle/`, real wire), and `tick_emits_handoff_under_skew_without_perturbing_matching`
   (`tests/cluster_autoscale_oracle.rs`).
 - **Context:** Three reliability gaps in the experimental distributed layers each left a cluster in a state
   needing **manual operator recovery** or left a control loop **open**:
@@ -93,4 +93,3 @@
   `drive_autoscaled_handoff`), `src/cluster/shard.rs` (`RetentionLeases` TTL + `seal_for_checkpoint_at` + the
   `LocalShard` event sink), `src/config.rs` (`retention_lease_ttl_secs`), `src/cluster/coordinator.rs`
   (`ClusterConfig` drain caps + the retained handle).
-

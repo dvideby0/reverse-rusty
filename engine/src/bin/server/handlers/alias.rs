@@ -3,8 +3,9 @@
 //! A thin HTTP layer over the engine's alias registry: review the governed candidates, import a
 //! Solr/Lucene synonym file, or learn candidates from the engine's own stored queries — each
 //! reusing the engine's `set_vocab` + `recompile_stale_segments` apply path (no restart) so a safe
-//! single-token alias takes effect immediately with zero false negatives. The matcher is unchanged;
-//! multi-word groups are recorded as review candidates only (Phase 2).
+//! active alias takes effect immediately with zero false negatives. ADR-061 supplies the
+//! multi-word matcher; declared multi-word groups may therefore activate, while learned
+//! multi-word guesses remain review candidates.
 
 use std::sync::Arc;
 
@@ -62,8 +63,9 @@ struct AliasApplyResponse {
 }
 
 /// POST /_vocab/aliases/import — import a Solr/Lucene synonym file into the registry and apply it
-/// live (ADR-060 item 3). Safe single-token groups auto-activate (FN-safe expansion); multi-word
-/// groups are recorded as review candidates. Recompiles in place — no restart.
+/// live (ADR-060 item 3). Expressible declared single-token and multi-word groups activate through
+/// FN-safe expansion; mixed/unexpressible groups remain review candidates. Recompiles in place —
+/// no restart.
 pub(crate) async fn import_aliases(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ImportAliasesRequest>,

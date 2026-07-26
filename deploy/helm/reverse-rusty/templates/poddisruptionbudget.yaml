@@ -1,5 +1,5 @@
 {{- if .Values.podDisruptionBudget.enabled }}
-# PodDisruptionBudgets (roadmap Tier 5 M3): protect the rolling-upgrade invariants against
+# PodDisruptionBudgets (ADR-098 operational hardening): protect the rolling-upgrade invariants against
 # node drains/evictions — a voluntary disruption can never take a second shard while one is
 # already down, nor break the 2-of-3 control quorum. Involuntary failures are the runbooks'
 # job (docs/operations/disaster-recovery.md); PDBs only gate *voluntary* evictions.
@@ -38,10 +38,10 @@ spec:
 {{- end }}
 {{- if gt (int .Values.coordinator.replicas) 1 }}
 ---
-# Only when the coordinator runs >1 replica: a PDB on a single-replica Deployment would
+# Only when an operator deliberately overrides the supported single-coordinator topology: a PDB on a single-replica Deployment would
 # block node drains outright (minAvailable) or protect nothing (maxUnavailable: 1 == all).
-# The single coordinator is stateless and restart-cheap by design (ADR-086) — let drains
-# move it.
+# The supported single coordinator is stateless and restart-cheap by design (ADR-086) — let
+# drains move it. Multiple live coordinators are not an active-active serving mode.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

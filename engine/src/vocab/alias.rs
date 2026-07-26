@@ -1,4 +1,4 @@
-//! Learned-alias governance — the [`AliasRegistry`] (ADR-060, Phase 1).
+//! Learned-alias governance — the [`AliasRegistry`] (ADR-060/061).
 //!
 //! A first-class registry of equivalence-alias *candidates* with provenance, a
 //! structural [`AliasKind`], a [`confidence`](AliasEntry::confidence) score, and a
@@ -8,11 +8,10 @@
 //! [`Vocab::effective_equivalence_groups`](crate::vocab::Vocab::effective_equivalence_groups));
 //! candidates are recorded for review and never affect matching.
 //!
-//! Phase 1 is **single-token only** + **no matcher change**: a single-token spelling /
-//! abbreviation variant auto-activates (FN-safe expansion), while multi-word groups (a
-//! token-graph problem deferred to Phase 2), learned multi-form category alternatives
-//! (`(psa, bgs, sgc)`), and mixed-`FeatureKind` groups are recorded as candidates,
-//! **never silently active**.
+//! Clear single-token spelling/abbreviation variants auto-activate through FN-safe expansion.
+//! ADR-061 also makes declared/manual multi-word groups expressible; learned multi-word or
+//! distinct-category alternatives remain review candidates, and mixed-`FeatureKind` groups
+//! never silently become match-active.
 //!
 //! Admin/build-time only — never on the match hot path. Serialized inside [`Vocab`], so
 //! the registry survives reopen and rides `PUT /_vocab` for free.
@@ -87,8 +86,8 @@ pub struct AliasEntry {
 
 impl AliasEntry {
     /// True if this entry is currently contributing an equivalence group to the matcher — an
-    /// `Active` single-token **or multi-word** kind (multi-word is expressible since the Phase-2
-    /// matcher, ADR-061). `MixedKind` still never reaches the matcher; the kind guard makes that
+    /// `Active` single-token **or multi-word** kind (multi-word is expressible through the
+    /// ADR-061 matcher). `MixedKind` still never reaches the matcher; the kind guard makes that
     /// structural (not just policy).
     #[must_use]
     pub fn is_active_for_matching(&self) -> bool {
@@ -241,8 +240,8 @@ impl AliasRegistry {
     /// (declared/manual over learned) re-classifies + may promote, and confidence takes the
     /// max — so importing a declared file over a learned candidate upgrades it deterministically.
     /// A **same-provenance** re-import re-classifies and adopts a now-active default (so a
-    /// persisted Phase-1 multi-word candidate activates when its synonym file is re-imported under
-    /// the Phase-2 policy) but never *downgrades* an existing status — a re-learn cannot undo a
+    /// persisted pre-ADR-061 multi-word candidate activates when its synonym file is re-imported
+    /// under the current policy) but never *downgrades* an existing status — a re-learn cannot undo a
     /// manual activation (codex R7).
     pub fn add_classified(
         &mut self,
@@ -330,9 +329,9 @@ impl AliasRegistry {
     }
 
     /// Import a Solr/Lucene synonym file (ADR-060 item 3) into the registry as
-    /// [`DeclaredFile`](AliasProvenance::DeclaredFile) groups. Operator intent ⇒ single-token
-    /// groups activate; multi-word groups are still recorded as candidates (Phase 2 can't
-    /// express them). Returns the number of newly-active groups.
+    /// [`DeclaredFile`](AliasProvenance::DeclaredFile) groups. Operator intent makes expressible
+    /// single-token and multi-word groups active; mixed/unexpressible groups remain candidates.
+    /// Returns the number of newly-active groups.
     pub fn import_solr(&mut self, text: &str, norm: &Normalizer, dict: &Dict) -> usize {
         let mut activated = 0;
         for forms in solr::parse_solr_synonyms(text) {
@@ -350,7 +349,7 @@ impl AliasRegistry {
     /// Promote a candidate to [`Active`](AliasStatus::Active). Refuses (returns `false`) a
     /// `MixedKind` group — the one kind the matcher still cannot express safely — so review can
     /// never activate something it would silently ignore. Multi-word groups are now accepted
-    /// (the Phase-2 matcher expresses them, ADR-061). `forms` are canonicalized before lookup.
+    /// (the ADR-061 matcher expresses them). `forms` are canonicalized before lookup.
     pub fn activate(&mut self, forms: &[String]) -> bool {
         let Some(forms) = Self::canonical_forms(forms) else {
             return false;

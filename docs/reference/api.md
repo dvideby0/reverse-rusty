@@ -28,7 +28,7 @@ Options:
 | `--vocab-file` | — | Load vocabulary from a JSON file at startup |
 | `--threads` | *(physical cores)* | Number of rayon worker threads |
 | `--max-concurrent-searches` | 0 *(unbounded)* | Max `/_search`+`/_mpercolate` requests occupying the match pool at once; excess queue within their own `timeout_ms` (ADR-099) |
-| `--max-ranked-enrichment-bytes` | 16777216 (16 MiB) | Maximum winner source bytes fetched by one local or cluster `/v2/_search`; overflow fails the whole response with `413 rank_enrichment_limit` (ADR-110) |
+| `--max-ranked-enrichment-bytes` | 16777216 (16 MiB) | Maximum winner source bytes fetched by one local or cluster `/v2/_search` or `/v2/_mpercolate`; overflow fails the whole response with `413 rank_enrichment_limit` (ADR-110/112) |
 | `--pit-default-keep-alive-secs` | 60 | Keep-alive for a `POST /v2/_pit` point-in-time when the request names none; renewed on every use (ADR-113) |
 | `--pit-max-keep-alive-secs` | 600 | Ceiling on a requested PIT keep-alive; over-ask is a 400 (ADR-113) |
 | `--max-open-pits` | 64 | Concurrently open PITs; a breach is `429 pit_limit_exceeded`, never an eviction (ADR-113) |
@@ -38,7 +38,7 @@ Options:
 | `--exhaustive-channel-depth` | 8 | Bounded frames buffered between an exhaustive worker and its stream consumer |
 | `--exhaustive-job-timeout-secs` | 300 | Maximum exhaustive admission-to-terminal lifetime (including worker scheduling); a request may ask for less |
 | `--max-retained-exhaustive-jobs` | 1024 | In-memory job records; oldest terminal records are pruned, while an all-active full registry rejects with 429 |
-| `--include-broad` | false | Include broad-lane (class C) queries in results |
+| `--include-broad` | false | Include opt-in broad-lane class C and accepted class D queries. Class H is always visible |
 | `--drain-timeout` | 30 | Graceful shutdown timeout in seconds |
 | `--log-format` | pretty | `pretty` for human-readable, `json` for structured |
 | `--slow-query-threshold-ms` | 1000 | Log searches exceeding this at `warn` level (0 disables) |
@@ -47,6 +47,7 @@ Options:
 | `--max-query-length` | 10240 | Maximum query string length in bytes (10 KiB) |
 | `--max-query-clauses` | 256 | Maximum clauses per query |
 | `--max-anyof-group-size` | 64 | Maximum members in an any-of group |
+| `--max-tags` | 65535 | Maximum metadata tags on one query; larger inputs are rejected rather than truncated |
 | `--retain-source` | true | Keep query source text resident; set `false` to store it on disk and fetch `_source`/explain lazily (large memory saving at scale — ADR-020) |
 | `--accept-class-d` | false | Store negation-only queries as broad-lane always-candidates instead of rejecting them (ADR-068) — needed at startup for a `--load-file` corpus containing such queries; also dynamic via `/_settings` |
 | `--wal-sync-on-write` | false | Fsync the WAL on every mutation before acknowledging it (SQLite FULL). When false, appends reach the OS page cache and fsync at the next flush checkpoint — survives a process crash but not power loss until checkpoint (RocksDB sync=false / SQLite NORMAL) |
@@ -90,12 +91,14 @@ curl -X PUT localhost:9200/_doc/1 -H "Authorization: Bearer $RR_AUTH_TOKEN" \
 
 With a token configured (`RR_AUTH_TOKEN` env var or `--auth-token`; the env var is preferred — flag
 values appear in process listings), **every non-GET/HEAD request requires
-`Authorization: Bearer <token>`** except the read-via-POST percolate endpoints (`POST /_search`,
-`POST /v2/_search`, `POST /_mpercolate`). That default-deny rule covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
-`_backup`, `_vocab` writes (including `/_vocab/learn*` and `/_vocab/aliases/*`), `_settings` writes — and any
-future mutating endpoint, which fails closed rather than open. Reads stay open unless
-`--auth-protect-reads` extends the gate to them too (stored queries are data worth protecting on an
-exposed port); only `GET /_health` is always open so liveness probes keep working.
+`Authorization: Bearer <token>`** except the explicit read-via-POST allowlist:
+`POST /_search`, `POST /v2/_search`, `POST /_mpercolate`, `POST /_percolate/jobs`, and the
+`POST`/`DELETE /v2/_pit` lifecycle. `POST /v2/_mpercolate` is **not** on that allowlist and currently
+requires the token. Exhaustive job inspection/streaming stays open through GET; cancelling a job with
+DELETE is protected. The default-deny rule also covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
+`_backup`, `_vocab` writes (including `/_vocab/learn*` and `/_vocab/aliases/*`), `_settings` writes,
+and any future mutating endpoint. `--auth-protect-reads` extends the gate to every read surface in the
+allowlist/GET/HEAD set; only `GET /_health` remains open for liveness probes.
 
 Failures return **401** with the standard error envelope (`"type": "security_exception"`) and an
 RFC 6750 `WWW-Authenticate: Bearer` challenge (`error="invalid_token"` when a wrong token was
@@ -112,9 +115,9 @@ filesystem-write on the host to anyone who can call it. It is in the default-den
 
 With **no token configured the server behaves exactly as before** (no auth — strictly opt-in). The
 transport is plain HTTP either way: a bearer token is only as private as the link it crosses, so on
-an untrusted network still front the server with a reverse proxy that terminates TLS. (TLS, and auth
-on the *gRPC* shard/control transports, are the tracked Tier-3 items — see
-[STATUS.md](../STATUS.md).)
+an untrusted network still front the server with a reverse proxy that terminates TLS. The *gRPC*
+shard/control transports have their own mesh TLS and bearer-token configuration; see the
+[`threat model`](../operations/threat-model.md).
 
 ---
 
@@ -157,13 +160,14 @@ Endpoints are grouped by concern — open the one you need:
   (`PUT`/`GET`/`HEAD`/`DELETE /_doc/{id}`), including durable metadata-tag read-back and ES/OS
   `_source` filtering.
 - **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`,
-  local/cluster bounded `POST /v2/_search`, `POST /_mpercolate`), including filtered
+  local/cluster bounded `POST /v2/_search`, `POST /_mpercolate`, and `POST /v2/_mpercolate`), including filtered
   percolation and exhaustive `result_mode=all` jobs with a terminally verified NDJSON stream.
 - **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`, `/_flush`, `/_compact`).
 - **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
 - **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias registry (`/_vocab/aliases*`, ADR-060).
 - **[Settings](api/settings.md)** — read + runtime-update engine settings (`GET`/`PUT /_settings`).
-- **[Backup & restore](../operations/backup-restore.md)** — snapshot durable state (`POST /_backup`); restore via `--data-dir` (ADR-079).
+- **[Backup & restore](../operations/backup-restore.md)** — snapshot a durable local engine or
+  in-process cluster (`POST /_backup`); remote clusters use quiesced node-volume snapshots (ADR-079).
 
 The full method/path matrix is below.
 
@@ -178,6 +182,7 @@ The full method/path matrix is below.
 | `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
 | `/v2/_search` | POST | Single-node or cluster, single-document exact bounded top-K + winner-only enrichment (ADR-107/108/110); accepts `pit`/`cursor` pages (ADR-113) |
 | `/v2/_pit` | POST/DELETE | Open / close a point-in-time snapshot for cursor pagination (in-process modes; remote assemblies 501 — ADR-113) |
+| `/v2/_mpercolate` | POST | Bounded top-K batch search; PIT/cursor pagination is rejected (ADR-112/113) |
 | `/_percolate/jobs` | POST | Start one exact exhaustive background match; returns 202 with status and stream URLs (ADR-114) |
 | `/_percolate/jobs/{id}` | GET/DELETE | Inspect a retained exhaustive job / request cooperative cancellation |
 | `/_percolate/jobs/{id}/stream` | GET | Claim the job's one bounded `application/x-ndjson` stream consumer |
@@ -185,7 +190,7 @@ The full method/path matrix is below.
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |
 | `/_flush` | POST | Flush memtable to immutable segment |
 | `/_compact` | POST | Force segment compaction |
-| `/_backup` | POST | Snapshot durable state to a server-side dir (body `{"dest":"..."}`); restore via `--data-dir` ([backup/restore](../operations/backup-restore.md), ADR-079) |
+| `/_backup` | POST | Snapshot a durable single engine or in-process cluster to a server-side dir (body `{"dest":"..."}`); a stateless remote coordinator returns 400 ([backup/restore](../operations/backup-restore.md), ADR-079) |
 | `/_stats` | GET | JSON metrics snapshot |
 | `/_cat/stats` | GET | Human-readable metrics |
 | `/_cat/segments` | GET | Per-segment LSM detail (text table or `?format=json`) |
@@ -265,7 +270,8 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   pre-existing ids refuses create-only writes rather than guessing absence. `refresh=false|true|wait_for`
   are accepted under the stronger publish-before-response model; unsupported write parameters fail
   with 400 instead of being ignored.
-- **Per-request `include_broad`** is honored on both `/_search` and `/_mpercolate`.
+- **Per-request `include_broad`** is honored on compatibility and v2 search/batch surfaces. It adds
+  class C and accepted D; class H remains default-visible.
 - **`rank` works (ADR-075)** — the same block as single-node, scored at the shards against the shared
   tag space and merged `(score desc, _id asc)` with `from`/`size` + `_score`. One cluster-specific
   boundary: a **post-freeze (live-added) `priority` tag scores 0** — priority reads the tag's value
@@ -289,21 +295,22 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   at assembly — restart the coordinator with the new flags), `/_cat/stats`, `/_cat/segments`.
 - **Vocabulary admin** (`PUT /_vocab`, `/_vocab/learn_and_apply`, `/_vocab/aliases/*`) maps onto the
   cluster blue/green rebuild (ADR-046); its one refusal — non-local (gRPC) shards — surfaces as a 400
-  with the engine's message (remote-cluster vocabulary is deploy-time configuration, ADR-076). A
+  with the engine's message. The current remote transport ships dictionaries but not normalizers, so
+  remote shard servers support only the stock vocabulary (ADR-076). A
   **tagged** cluster is not refused (tags carry through by stored `TagId`, ADR-074), and a
-  **multi-word alias activates** (P(T)-aware routing, ADR-076). At startup, `--vocab` on a fresh
+  **multi-word alias activates** (P(T)-aware routing, ADR-076). At startup, `--vocab-file` on a fresh
   in-process cluster fully activates (`build_with_vocab`); on an **empty** durable reopen whose
   manifest carries no vocabulary it activates through the rebuild funnel (a **populated** reopen
   keeps the committed state authoritative and warns — apply explicitly via `PUT /_vocab`); a
-  REMOTE assembly refuses ANY vocab file at startup (shard servers run the stock normalizer, so
+  REMOTE assembly refuses any `--vocab-file` at startup (shard servers run the stock normalizer, so
   even normalizer-level rules would silently diverge the feature space).
 
 Cluster-only endpoints:
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/_checkpoint` | POST | The cluster durability commit point (seal shards + commit the coordinator manifest + truncate the log, ADR-031/032); returns the new `epoch` |
-| `/_backup` | POST | Snapshot the cluster's durable state to a server-side dir (body `{"dest":"..."}`): checkpoint, then copy the coordinator manifest + per-shard segments + sources + the log. Restore via `--data-dir` ([backup/restore](../operations/backup-restore.md), ADR-079) |
+| `/_checkpoint` | POST | For a durable in-process cluster, seal shards + commit the coordinator manifest + truncate the log (ADR-031/032); on a stateless remote coordinator it is only a local maintenance boundary and does not flush remote nodes |
+| `/_backup` | POST | Snapshot a durable in-process cluster to a server-side dir: checkpoint, then copy the coordinator manifest + per-shard segments + sources + log. A stateless remote coordinator returns 400; use node-volume snapshots ([backup/restore](../operations/backup-restore.md), ADR-079) |
 | `/_cat/shards` | GET | Per-shard query counts + node assignments (text table or `?format=json`) |
 | `/_cluster/state` | GET | The committed control-plane document (membership + shard→node map + ring params, ADR-037) |
 | `/_cluster/nodes` | POST | Register a cluster member (`{"id": N, "addr": "...", "role": "data"\|"manager"}`) |

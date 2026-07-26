@@ -4,7 +4,7 @@
 
 
 - **Context:** Clustering was entirely design-only ([clustering-and-scaling.md](../design/clustering-and-scaling.md),
-  STATUS Tier 3). The design's own build path (§10) is explicitly incremental and front-loads the
+  then-current clustering roadmap). The design's own build path (§10) is explicitly incremental and front-loads the
   correctness-critical heart *before* any networking: step 1 (wrap the engine as a shard) + step 2
   (a coordinator with a consistent-hash ring + content routing over K shards **in one process**),
   validated by extending the differential oracle to a multi-shard harness. The novel, no-false-negative
@@ -52,7 +52,7 @@
   which `T` always probes. Each shard is a verbatim single-node engine, so its lossless cover + integer
   exact-verify finish the job; no shard boundary can drop a match. No false positives: every emitted id
   passed `exact.verify` (title-content-only) on some shard, and the union dedups. Guarded by
-  `tests/cluster_oracle.rs`: cluster ≡ single-node ≡ independent brute-force oracle, as sets, across
+  `tests/cluster_oracle/`: cluster ≡ single-node ≡ independent brute-force oracle, as sets, across
   K ∈ {1,3,8,16} × broad on/off, with every placement branch asserted present (`class_counts`) and
   fan-out asserted ≪ K.
 - **Alternatives considered:**
@@ -81,4 +81,4 @@
   the lane that gets replicated), ADR-006 (forbidden never gates — preserved in placement + routing),
   ADR-016 (the lock-free snapshot each shard reads), the lossless-cover contract
   ([design/README.md](../design/README.md) §2), `src/cluster/{ring,shard,coordinator}.rs`,
-  `src/compile.rs` (`anchor_plan`), `tests/cluster_oracle.rs`.
+  `src/compile.rs` (`anchor_plan`), `tests/cluster_oracle/`.

@@ -2,6 +2,10 @@
 
 > [Normalization & vocabulary decisions](areas/normalization-and-vocabulary.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
+> **Current outcome:** alias governance and multi-word matching later shipped in ADR-060/061, while
+> ADR-056 shipped compaction re-anchoring. The remote topology still does not ship normalizers and
+> therefore remains stock-vocabulary-only; that part of the original scope remains current.
+
 - **Context.** Two corpus learners existed but were never connected. The `learn` binary
   (`src/bin/learn.rs`) mines multi-token **entities** (e.g. `upper deck` → `upper_deck`) from query
   text via **NPMI collocation mining** (the word2vec/Mikolov phrase trick) — proven in the research
@@ -52,7 +56,8 @@
   implementation retrieves everything that matches under the current normalizer. This is the
   load-bearing distinction from **alias / equivalence learning** ([ADR-054](adr-054-equivalence-expansion.md)),
   which is applied by **expansion** and is therefore *fully monotonic* (it only ever adds matches).
-  Pinned by `tests/oracle.rs::corpus_phrase_induction_preserves_component_query_recall` (additive
+  Pinned by
+  `tests/oracle/corpus.rs::corpus_phrase_induction_preserves_component_query_recall` (additive
   recall preservation) and `::corpus_phrase_induction_tightens_phrase_query_to_adjacency` (the residual).
 
 - **Alternatives considered.** (1) *Fold NPMI into `learn_and_apply` on by default* — rejected: it
@@ -72,14 +77,15 @@
 
 - **Testing.** `corpus.rs` unit tests (induces a planted collocation → exact `PhraseEntry`; respects
   `min_count`/`tau`; dedup + determinism; empty corpus; bigram→trigram growth). A single-engine
-  differential (`tests/oracle.rs::zero_false_negatives_after_corpus_phrase_learn_and_apply`): build with
+  differential
+  (`tests/oracle/corpus.rs::zero_false_negatives_after_corpus_phrase_learn_and_apply`): build with
   the empty `default_vocab`, `learn_and_apply_with(corpus_phrases=true)`, then assert engine ≡ a brute
   carrying the engine's **own learned normalizer** — zero FN/FP. A cluster differential
-  (`tests/cluster_oracle.rs::learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives`):
+  (`tests/cluster_oracle/vocab_learning.rs::learn_and_apply_with_corpus_phrases_preserves_zero_false_negatives`):
   K∈{1,3,8}, induce a planted phrase, assert `percolate` ≡ the phrase-aware brute over the live set
   (re-placement under an induced feature preserved, zero FN). Composition guards in `vocab.rs` (default-off
   equals any-of alone; on adds the phrase). The recall-first additive behavior + the residual are pinned
-  by `tests/oracle.rs::corpus_phrase_induction_preserves_component_query_recall` and
+  by `tests/oracle/corpus.rs::corpus_phrase_induction_preserves_component_query_recall` and
   `::corpus_phrase_induction_tightens_phrase_query_to_adjacency`. The default-off existing oracles are
   byte-identical by construction.
 

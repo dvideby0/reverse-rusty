@@ -94,7 +94,7 @@ if [ "$fast" -eq 0 ]; then
     # trips it.
     run "ref-matcher independence" bash -c \
         '! cargo tree -q -p reverse-rusty-ref-matcher --edges normal --prefix none 2>/dev/null | grep -q "^reverse-rusty "'
-    # Crash-injection lane (ADR-088, Phase 0 item 3): spawn the `crashwriter` bin,
+    # Crash-injection lane (ADR-088): spawn the `crashwriter` bin,
     # SIGKILL it mid durable-op (WAL append / flush / compaction / backup / churn),
     # then diff the reopened engine against the front-end-independent oracle (zero
     # false negatives on every acked write). The scenarios are `#[ignore]`d (they

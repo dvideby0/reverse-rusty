@@ -2,7 +2,7 @@
 //!
 //! Classification is deliberately *structural* — it reads only the forms' token count, their
 //! `FeatureKind`s, and a narrow surface-string variant test. It never asks "are these
-//! semantically the same"; that is exactly the judgement Phase 1 defers to a human reviewer
+//! semantically the same"; that is exactly the judgement the governance layer defers to a reviewer
 //! for anything but a clear spelling variant.
 
 use serde::{Deserialize, Serialize};
@@ -25,7 +25,7 @@ pub enum AliasKind {
     /// when declared / manual; a candidate when learned.
     SingleTokenDistinct,
     /// At least one form spans multiple tokens — a token-graph (multi-word) alias. Expressed
-    /// by the **Phase-2** matcher (ADR-061: query-side collapse + title-side overlap superset +
+    /// by the ADR-061 matcher (query-side collapse + title-side overlap superset +
     /// the two-view verifier). Active when declared / manual (operator intent); a candidate when
     /// learned from an any-of disjunction.
     MultiWord,
@@ -40,7 +40,7 @@ pub enum AliasKind {
 /// Classify a group's [`AliasKind`] against the current normalizer + dict.
 ///
 /// Order matters: a multi-token form short-circuits to [`MultiWord`](AliasKind::MultiWord)
-/// (Phase 2 owns it); otherwise a >1 known-kind split is [`MixedKind`](AliasKind::MixedKind);
+/// (ADR-061 owns it); otherwise a >1 known-kind split is [`MixedKind`](AliasKind::MixedKind);
 /// otherwise the surface-string variant test decides
 /// [`SingleTokenVariant`](AliasKind::SingleTokenVariant) vs
 /// [`SingleTokenDistinct`](AliasKind::SingleTokenDistinct).
@@ -57,7 +57,7 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
         let cleaned_tokens = norm.clean_tokens(f).len();
         let feats = norm.compile_features_readonly(f, dict, &mut lc);
         if cleaned_tokens >= 2 {
-            // A genuine multi-word surface form (a token-graph case, Phase 2). Counted on the
+            // A genuine multi-word surface form (an ADR-061 token-graph case). Counted on the
             // CLEANED tokens so the boundary can't depend on which phrases happen to fold it
             // (importing `ud => upper deck` while `upper deck` is a declared phrase still classifies
             // multi-word) — but folding punctuation (`a-b` → `a b`) is honored, since that is how
@@ -108,7 +108,7 @@ pub(super) fn classify_kind(forms: &[String], norm: &Normalizer, dict: &Dict) ->
     }
 }
 
-/// The auto-activation policy (ADR-060). Conservative by construction: anything the Phase-1
+/// The auto-activation policy (ADR-060/061). Conservative by construction: anything the
 /// matcher cannot express, or any learned guess that is not a clear variant, defaults to a
 /// review candidate — never silently active.
 pub(super) fn default_status_for(kind: AliasKind, provenance: AliasProvenance) -> AliasStatus {

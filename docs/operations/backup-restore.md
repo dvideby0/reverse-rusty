@@ -3,9 +3,12 @@
 Operational procedure for backing up and restoring a Reverse Rusty deployment, single-node or
 cluster. Design rationale + the safety argument: [ADR-079](../decisions/adr-079-backup-restore.md).
 
-> **TL;DR** — `POST /_backup {"dest": "<server-side path>"}` writes a consistent, self-contained
-> snapshot to `dest`. Restore by pointing a fresh server/coordinator at the copy with `--data-dir`.
-> Reads keep serving during a backup; writes pause for the copy. `dest` must not already exist.
+> **TL;DR** — on a durable single engine or in-process cluster,
+> `POST /_backup {"dest": "<server-side path>"}` writes a consistent, self-contained snapshot to
+> `dest`. Restore by pointing a fresh server/coordinator at the copy with `--data-dir`. Reads keep
+> serving during a backup; writes pause for the copy. `dest` must not already exist. A remote
+> cluster has a stateless coordinator, so back up its shard/control volumes as a quiesced set
+> instead.
 
 ## What a backup contains
 
@@ -15,7 +18,7 @@ references, nothing else:
 | Mode | Files copied |
 |---|---|
 | **Single-node** | `manifest.bin` + the manifest's `segments/*.seg` + selected `sources_g*.dat` (legacy: `sources.dat`) + `wal.log` |
-| **Cluster** | `cluster_manifest.bin` + `cluster.log` + per-shard `shard_<i>/segments/*.seg` + each manifest-selected source sidecar |
+| **In-process cluster** | `cluster_manifest.bin` + `cluster.log` + per-shard `shard_<i>/segments/*.seg` + each manifest-selected source sidecar |
 
 The frozen dict, vocabulary, and tag space are embedded **inside** the manifests, so they travel
 with the copy automatically. **Replica directories are not copied** — a cluster rebuilds replicas
@@ -36,7 +39,7 @@ a crash mid-backup never leaves a half-written `dest`.
 ## Taking a backup (REST)
 
 ```sh
-# single-node or cluster coordinator — same call
+# durable single-node or in-process-cluster coordinator — same call
 curl -fsS -XPOST http://<host>:9200/_backup \
   -H 'content-type: application/json' \
   -H "authorization: Bearer $RR_AUTH_TOKEN" \   # if auth is enabled (ADR-062)
@@ -50,7 +53,9 @@ Notes:
 - `dest` must **not already exist** (a 400 otherwise) — never overwrite a prior backup in place.
 - An in-memory engine/cluster (no `--data-dir`) returns 400; a persistence-degraded engine returns
   503 (its on-disk state is known-incomplete — investigate before backing up).
-- The cluster call checkpoints first, so it doubles as a durability commit point.
+- The in-process-cluster call checkpoints first, so it doubles as a durability commit point.
+- A remote cluster's coordinator is stateless and returns 400. Use the per-volume procedure below;
+  the coordinator cannot create a cross-shard snapshot.
 
 ## Restoring
 
@@ -71,27 +76,37 @@ restored cluster rebuilds its replicas from the primaries on open.
 fresh `POST /_backup` already runs this before acknowledging; re-run it on archived copies to detect
 bit-rot before a real restore is needed.
 
-## Zero-write-stall backups (large deployments)
+## Filesystem snapshots and remote deployments
 
 The built-in `POST /_backup` pauses **writes** (not reads) for the duration of the file copy — a
 multi-second stall on a very large corpus. For a backup that never pauses writes, snapshot a
-checkpoint'd directory at the filesystem layer:
+checkpointed **local-mode** directory at the filesystem layer:
 
-1. `POST /_checkpoint` (cluster) or `POST /_flush` (single-node) to commit a consistent on-disk state.
+1. `POST /_checkpoint` (in-process cluster) or `POST /_flush` (single-node) to commit a consistent
+   on-disk state.
 2. Take an atomic copy-on-write snapshot of the `data_dir` volume (ZFS/LVM snapshot, AWS EBS
    snapshot, GCP disk snapshot, etc.) — instantaneous, no engine involvement.
 3. Copy the snapshot to backup storage at your leisure (the snapshot is frozen, immune to the live
    engine's later compactions).
 4. Restore = mount/copy the snapshot's contents into a `data_dir` and start an instance on it.
 
-This is the recommended production path where a write stall is unacceptable and CoW storage is
+This is the recommended operational path where a write stall is unacceptable and CoW storage is
 available.
+
+For a **remote** cluster, the coordinator has no `data_dir` and no cross-shard snapshot barrier.
+Pause ingest, wait for in-flight writes to finish, snapshot every shard and control-plane volume as
+one named set, then resume ingest. Each volume is individually crash-consistent; quiescing is what
+makes the set globally consistent. `POST /_checkpoint` on the stateless coordinator does not flush
+remote shards, and `POST /_backup` returns 400. Restore the complete volume set into the same logical
+topology; see [`disaster-recovery.md`](disaster-recovery.md).
 
 ## Scheduling
 
-`POST /_backup` is a single idempotent-per-`dest` call — drive it from cron/k8s-CronJob with a
-date-stamped `dest`, then prune old copies with your normal retention tooling. Each backup is
-fully self-contained (no dependency on prior backups), so pruning is just `rm -rf` of old dirs.
+For local durable modes, `POST /_backup` is a one-shot call to a fresh `dest`; retry with a new
+date-stamped destination because an existing path is deliberately refused. Drive it from
+cron/k8s-CronJob, then prune old copies with your normal retention tooling. Each backup is fully
+self-contained (no dependency on prior backups). Remote deployments schedule storage-provider
+snapshots of the quiesced volume set instead.
 
 ## Rehearsal — prove you can restore
 

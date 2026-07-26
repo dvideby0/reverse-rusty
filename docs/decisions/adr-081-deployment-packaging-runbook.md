@@ -4,6 +4,16 @@
 
 **Status:** Accepted (2026-06-20)
 
+**Current outcome.** The operator Compose topology and runbook remain shipped. The original
+control-wiring, Helm, class-D, and node-metrics deferrals below were subsequently closed by
+ADR-082/083/084/091 and ADR-080; they are retained as decision history, not current limitations.
+The current remote constraints are the lack of online shard-count resize, no custom-vocabulary
+shipping at all, and the absence of a coordinator-driven cross-shard backup barrier. References
+below to a “production” Compose file preserve the decision-time artifact name; they mean a
+deployable reference configuration, not production-proven distributed maturity. Current operations
+truth lives in [`deployment-modes.md`](../operations/deployment-modes.md) and
+[`cluster-deployment.md`](../operations/cluster-deployment.md).
+
 **Context.** ADR-065 criterion 10 — *"Dockerfile / compose for a K-shard + control-plane cluster; an
 operations doc (start/stop/scale/recover/back up), incl. the ADR-076 vocab-redeploy procedure."* The
 image and a compose topology already exist, but only as a **test** asset: [ADR-072](adr-072-multi-machine-harness.md)
@@ -57,7 +67,8 @@ ADR-078 resize, ADR-079 backup, ADR-080 broad lane):
   `StatefulSet` for a control plane the coordinator ignores (deferral a) would imply HA placement the v1
   cluster doesn't have. The shape, for when wiring lands: `StatefulSet`s for shards + control (stable DNS
   + per-pod PVC), a `Deployment` for the stateless coordinator, headless `Service`s for shard DNS,
-  `Secret`s for the token + certs. Tracked as a Tier-3 follow-on in [`roadmap.md`](../roadmap.md).
+  `Secret`s for the token + certs. The later Helm packaging and deployable gate shipped under
+  ADR-084/098; this paragraph preserves the original deferral.
 - **(c) Remote add-a-shard is a redeploy, not an online resize.** `POST /_cluster/resize` is the
   in-process blue/green rebuild (ADR-078); the remote topology scales by adding a shard service + endpoint
   + re-ingest. Cross-process/online resize is the ADR-078 follow-on.
@@ -67,17 +78,15 @@ ADR-078 resize, ADR-079 backup, ADR-080 broad lane):
   or changed vocabulary uses the in-process `--data-dir` cluster (`--vocab-file`), redeployed blue/green;
   the runbook documents this (and that remote custom vocab is unsupported in v1).
 
-The runbook also surfaces three honest v1 limitations of the remote/stateless path (none new — all are
-properties of the already-shipped distributed layers, found in the ADR-081 review): the stateless
-coordinator has **no cross-shard backup consistency barrier** (`POST /_backup`/`/_checkpoint` no-op
-without a `data_dir`), so a consistent remote backup quiesces writes then snapshots each shard's
-`--data-dir`; **class-D queries need the in-process `--data-dir` cluster** (`shardserver` exposes no
-`--accept-class-d`, so a class-D-accepting coordinator would acknowledge writes every shard drops —
-exposing the shard flag is a tracked follow-on); and `shardserver` is **gRPC-only with no HTTP
-`/_metrics`**, so shard liveness is watched via the coordinator's fail-loud `/_health`. The production
-compose also makes the **HTTP bearer token required** (the server rejects an empty `RR_AUTH_TOKEN`; the
-documented opt-out is to omit the env line on a trusted host) rather than injecting an empty value that
-would crash-loop the coordinator.
+At acceptance time the runbook also surfaced three limitations found in the ADR-081 review. One
+remains: the stateless coordinator has **no cross-shard backup consistency barrier**—`POST
+/_checkpoint` cannot seal remote nodes and `POST /_backup` returns 400 without a coordinator
+`data_dir`—so a consistent remote backup quiesces writes and snapshots every shard/control volume.
+The other two were later closed: ADR-080 made accepted class-D rows coordinator-gated and replicated
+to all shards, and ADR-091 added each shard/control node's plaintext metrics listener. The production
+compose also makes the **HTTP bearer token required** (the server rejects an empty
+`RR_AUTH_TOKEN`; the documented opt-out is to omit the env line on a trusted host) rather than
+injecting an empty value that would crash-loop the coordinator.
 
 **Why this is safe.** It adds **no code on any path** — pure deployment artifacts + documentation over
 surfaces that are already oracle-proven and harness-proven. The compose is the *same image, bins, and
@@ -96,6 +105,6 @@ available. A `docker compose config` lint is the CI-safe, daemon-independent gat
 full bring-up in CI is not added — the harness already proves the identical image + security + lifecycle.
 
 **See also:** ADR-072 (the shared image + the test harness this builds on), ADR-070 (the coordinator REST
-surface), ADR-071/062 (mesh TLS+token / HTTP bearer — the two audiences), ADR-076 (vocab is deploy-time),
+surface), ADR-071/062 (mesh TLS+token / HTTP bearer — the two audiences), ADR-076 (remote vocab refusal),
 ADR-078 (in-process resize), ADR-079 (backup, linked from the runbook), ADR-080 (the broad/class-D
 operator contract the runbook surfaces), ADR-065 criterion 10 (the requirement).

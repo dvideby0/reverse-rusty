@@ -5,11 +5,11 @@
 
 - **Status:** Accepted + **implemented** (distributed-layer hardening from an external review). The
   in-process / RF=1 default path is **byte-identical** (its `LocalShard` writes are infallible, so no
-  partial apply is ever recorded) — `tests/cluster_oracle.rs` + `tests/cluster_durability_oracle.rs` stay
+  partial apply is ever recorded) — `tests/cluster_oracle/` + `tests/cluster_durability_oracle/` stay
   green unchanged. Proven by `partial_apply_is_detected_then_resync_converges` +
   `resync_requeues_when_shard_still_failing` (`cluster/coordinator/tests.rs`, deterministic, lean core) and
   `grpc_partial_apply_is_detected_and_queued` + `remote_single_target_percolate_safe_from_tokio_worker`
-  (`tests/cluster_grpc_oracle.rs`, real wire).
+  (`tests/cluster_grpc_oracle/`, real wire).
 - **Context:** A selective (class-A / class-B-any-of) query is placed on **2+ shards**; the coordinator's
   `apply_add` fanned the inserts out in a loop with `?`, and `apply_remove` summed a `Result` iterator. With
   **remote** shards (the experimental `distributed` layer), shard A's insert can succeed and shard B's RPC
@@ -74,4 +74,3 @@
   `pending_repairs`), `src/cluster/coordinator.rs` (`PendingRepair`/`ResyncReport`/the queue field),
   `src/cluster/coordinator/autoscale.rs` (`tick`), `src/cluster/shard.rs` (`ShardError::PartiallyApplied`),
   `src/events.rs` (`DurabilityOp::ClusterPartialApply`), `src/cluster/remote.rs` (`block_on_in_context`).
-

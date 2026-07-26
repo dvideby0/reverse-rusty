@@ -1,6 +1,6 @@
 # Rolling upgrade
 
-The version-upgrade procedure for the two remote topologies (roadmap Tier 5 M3). One page because
+The version-upgrade procedure for the two remote topologies. One page because
 the procedure is ~80% mode-independent; the Compose and Helm legs differ only in the restart
 mechanics. Local modes (single-node / in-process cluster) upgrade by stopping the process and
 starting the new binary on the same `--data-dir` — the durable formats do the rest.
@@ -20,9 +20,9 @@ starting the new binary on the same `--data-dir` — the durable formats do the 
 - [ ] **Take a backup / snapshot set first** ([`backup-restore.md`](backup-restore.md)): for the
       remote topologies that means the **quiesce-writes → snapshot every `shardN-data` +
       `controlN-data` volume → resume** procedure ([runbook §7](cluster-deployment.md) — a
-      stateless coordinator's `POST /_checkpoint`/`/_backup` no-op, there is no cross-shard
-      barrier in v1). This is the rollback path if the new version writes a format the old one
-      refuses.
+      stateless coordinator's `POST /_checkpoint` cannot seal remote nodes and `POST /_backup`
+      returns 400 without a coordinator `data_dir`; there is no cross-shard barrier in v1).
+      This is the rollback path if the new version writes a format the old one refuses.
 - [ ] **Version sanity:** `deploy/check-versions.sh vX.Y.Z` asserts the tag matches the crate +
       chart `appVersion` you are deploying (the same tripwire the release pipeline runs).
 - [ ] Upgrade at **low write traffic** if you can — the windows below are smaller and the
@@ -34,8 +34,9 @@ Durable formats are **versioned and fail loud, never corrupt silently** — an i
 a refused open with a versioned error, and a refusal is always recoverable by restoring the
 pre-upgrade backup:
 
-- **Segments** (`.seg` v3–v10) and **manifests** (engine v3–v6, cluster v4–v7): newer minor
-  formats read older files back; an *older* binary refuses a *newer* file it cannot honor. The
+- **Segments** (reader v1–v10; current writes v3–v10) and **manifests** (standalone reader v1–v7,
+  current v7; cluster reader v6–v7, current v7): compatible newer readers open the documented
+  legacy range; an *older* binary refuses a *newer* file it cannot honor. The
   "fence" versions exist precisely to make a semantic change loud — e.g. a
   class-D-bearing segment is written v4 so a pre-ADR-068 binary refuses it rather than silently
   mis-serving; a hot-tier-bearing segment is written **v5** (its hot-index section would be
@@ -47,13 +48,12 @@ pre-upgrade backup:
   binary (ADR-105). ADR-108 adds `.seg` v6 priority columns. ADR-109 adds `.seg` v7 ownership
   columns and cluster-manifest v6. ADR-116 adds `.seg` v8 source-generation columns and the
   standalone engine-manifest v6 fence; older binaries must not skip those rows and serve a partial
-  corpus. ADR-119 adds `.seg` v9 compound-predicate columns only when a multi-feature any-of member
+  corpus. The current standalone manifest v7 atomically names the committed source sidecar.
+  ADR-119 adds `.seg` v9 compound-predicate columns only when a multi-feature any-of member
   needs them; the layout bump is the rollback fence for readers that would otherwise ignore the
   member's full predicate. ADR-120 adds `.seg` v10 only while a quoted token-graph predicate exists;
-  an older reader must refuse instead of flattening quoted adjacency. Standalone `.seg` v1–v10 remains
-  readable by the new binary, but clustered
-  manifests v1–v5 are intentionally rebuild-only because they cannot identify a unique emission
-  owner.
+  an older reader must refuse instead of flattening quoted adjacency. Cluster manifests v1–v5 are
+  intentionally rebuild-only because they cannot identify a unique emission owner.
 - **Compiler-semantics stamp (ADR-118/119/120/#123):** segment header bytes `12..16` are semantics 0 (legacy
   cross-clause lowering), 1 (maximal positive bare-term runs but proxy-only multi-token any-of
   members), 2 (complete member predicates but flattened quoted clauses), or 3 (quoted token-graph

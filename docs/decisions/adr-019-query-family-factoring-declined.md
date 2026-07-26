@@ -4,8 +4,8 @@
 
 
 - **Context:** The design carried an explicit **query-family / shared-prefix DAG** as a roadmap item
-  (formerly `matching.md` §5, listed in `STATUS.md` as "the next optimization to push selective
-  candidates below ~54"). The idea: near-duplicate product queries share a required-feature prefix
+  (formerly `matching.md` §5, listed in the roadmap at the time as "the next optimization to push
+  selective candidates below ~54"). The idea: near-duplicate product queries share a required-feature prefix
   (`1994 upper_deck series0001 michael_jordan` + per-leaf card term / grade / negatives); store the
   shared prefix once and, at match time, check it once — if the title lacks a shared feature, prune the
   whole subtree in one test instead of rejecting each leaf. This ADR records the decision **not** to
@@ -36,11 +36,10 @@
 - **Consequence:** No `src/family.rs`; `matching.md` §5 is removed; the "four moves vs generic
   percolators" thesis becomes **three** (semantic signatures, integer verification, broad-query
   quarantine). The roadmap redirects that energy to the actual bottlenecks — **broad-lane batch/columnar
-  evaluation** and **dictionary interning / tighter SoA** (`STATUS.md`). The decision is **reversible**:
+  evaluation** and **dictionary interning / tighter SoA**. The decision is **reversible**:
   implicit anchor-sharing is unchanged, so nothing precludes a future *bounded* L1 posting-prefix gate
   if real-data measurement ever justifies it — the entry point would be a measurement spike + L1, gated
   by an on/off differential and the existing oracle, never the full DAG.
 - **See also:** ADR-002 (integer verification / common-mask gate — why the verifier is already cheap),
   ADR-003 (broad-lane quarantine — the actual #1 opportunity), `research/prior-art.md` §6 (PRETTI /
   LIMIT+ / FreshJoin), `performance/results.md` §9 (bottleneck analysis).
-

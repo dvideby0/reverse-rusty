@@ -1,26 +1,28 @@
-//! Engine configuration — runtime-tunable knobs for compaction, flush, and merge scoring.
+//! Engine configuration for ingest limits, persistence, maintenance, matching
+//! scheduling, and result delivery.
 //!
 //! Design: docs/design/ingestion-and-updates.md §7 (compaction policy)
-//! Invariant: None of these settings affect the correctness contract;
-//!   they only govern when maintenance work triggers and how aggressive it is.
+//! Invariant: no setting may make an accepted, visible query disappear from the
+//! selected visibility scope. Some settings do affect admission or visibility
+//! policy (`accept_class_d`, tag/query limits, and the request's broad scope);
+//! scheduling and layout knobs must preserve the exact result set.
 //!
 //! Posting-level thresholds (INLINE_CAP, ROARING_THRESHOLD) remain compile-time
 //! constants in index.rs — they affect memory layout and are stable across
-//! production workloads. The knobs here are engine-level: flush cadence,
-//! compaction trigger policy, and merge-score tuning.
+//! production workloads. The fields here are engine-level and are exposed by
+//! the server's settings surface where the dynamic/static boundary permits it.
 
-/// The default hot-anchor frequency threshold θ of the Broad-Query Cost Program
-/// (`docs/proposals/broad-cost-program.md` §5.2): a feature whose query frequency
-/// is ≥ θ is a *hot anchor* for cost-classification purposes even when it holds
-/// no top-64 common-mask bit. Today this drives only the **observe-first**
-/// `would_be_hot` counter ([`SigPlan::would_be_hot`](crate::compile::SigPlan));
-/// the enforcing hot tier ships behind its own knob in the next increment.
+/// The default hot-anchor frequency threshold θ from ADR-105: a feature whose
+/// query frequency is ≥ θ is a *hot anchor* for cost-classification purposes
+/// even when it holds no top-64 common-mask bit. This drives the class-H hot
+/// tier and the **observe-first** `would_be_hot` counter
+/// ([`SigPlan::would_be_hot`](crate::compile::SigPlan)).
 ///
 /// 1024 is an absolute posting-length bound chosen with wide margin between the
 /// two measured populations at 20M queries: the selective path's max main
 /// posting (~104) and the mislabeled broad-intent postings (up to 43,533). It is
 /// deliberately NOT tied to the index's roaring tier boundary (256, `index.rs`);
-/// the real-corpus audit refines it later (spec §7.2).
+/// the real-corpus audit may refine it later (`docs/roadmap.md`).
 pub const DEFAULT_HOT_ANCHOR_THETA: u32 = 1024;
 
 /// Configuration for the Reverse Rusty [`Engine`](crate::segment::Engine).

@@ -1,391 +1,459 @@
-# Roadmap — what's next
+# Roadmap
 
-The prioritized roadmap: **open work only.** When an item ships it is **deleted from this file** —
-its ADR becomes the permanent record and [`STATUS.md`](STATUS.md) gets a one-line entry (the
-editing rule lives there). Tier numbers are stable — ADRs and PRs reference "Tier N" — so a
-completed tier keeps its heading and one line. Decision rationale → [`DECISIONS.md`](DECISIONS.md);
-component design → [`design/`](design/README.md).
+This is the canonical home for **unfinished work only**, ordered by expected leverage. Each item
+contains enough context to evaluate and start the work without opening a separate proposal. Research,
+ADRs, and design docs are linked where they provide evidence or constraints.
 
-Priority follows the bottleneck analysis ([`performance/results.md`](performance/results.md) §9):
-the selective path is far past the spec target with a flat ~54 candidates/title, so the leverage is
-in the broad lane, memory/footprint, and the durability + scale story — not in shaving the
-selective candidate count further. Phase 0 (the reality / adversarial audit) preceded all tier work
-and is complete except its one externally-blocked item. **The current top development priority is
-the [Broad-Query Cost Program](#the-broad-query-cost-program--current-top-development-priority)
-below.**
+When an item ships:
 
-## Phase 0 — Reality / adversarial audit — ✅ complete except item 4 (externally blocked)
+1. record the decision in an ADR when architecture or compatibility is affected;
+2. add the shipped outcome to [CHANGELOG.md](CHANGELOG.md);
+3. remove the item from this file rather than marking it complete.
 
-**This phase preceded all tier work and no longer gates anything.** The engine is oracle-proven, but
-the in-tree differential oracle *shares the front-end* (normalizer, parser, extractor, dict) with the
-engine, so a front-end bug is structurally invisible to it (the reference-free `tests/adversarial.rs`
-only partly covers this — ADR-063). This phase proved which parts are real — under an *independent*
-check and under real failure — before more was built on top. Items 1/2/3/5 shipped; **item 4 remains
-open, blocked on externally-supplied inputs (a real cluster + a real corpus) and does not block
-active development** — the current top priority is the
-[Broad-Query Cost Program](#the-broad-query-cost-program--current-top-development-priority) below.
+Current behavior belongs in [design](design/README.md), [reference](reference/api.md), and
+[operations](operations/deployment-modes.md). Decision history belongs in
+[the ADR hub](DECISIONS.md).
 
-1. **Fresh-clone build & deploy smoke — ✅ shipped
-   ([`operations/build-and-smoke.md`](operations/build-and-smoke.md)).** The reproducible-from-zero
-   checklist: `cargo build --release` + `./check.sh` (the full gate) + the Docker image + the
-   production-compose smoke (`deploy/cluster-smoke.sh`) + the multi-machine harness
-   (`deploy/harness.sh`, ADR-072) + Helm lint/kubeconform — every leg with the exact command and what
-   it proves (the Tier 5 M0 "deploy-truth" acceptance recipe). The run surfaced + fixed one real drift:
-   `cluster-smoke.sh` used a non-numeric `_doc/{id}` (the route extracts `Path<u64>` in both modes → a
-   400) and had never been run end-to-end. A *real-cluster* deploy proof stays item 4 (needs a real
-   cluster + corpus).
-2. **Independent correctness oracle — ✅ shipped ([ADR-087](decisions/adr-087-independent-correctness-oracle.md)).**
-   A std-only, zero-dependency reference matcher (`reverse-rusty-ref-matcher`) independently parses
-   and normalizes the spec into a direct grammar predicate tree, reusing neither engine code nor its
-   frequency/proxy/storage lowering (independence enforced by a `check.sh` `cargo tree` lane). The
-   engine is diffed against it (`tests/independent_oracle/`) over default/populated/alias corpora + a
-   hand-authored gotcha table + the env-gated `RR_ORACLE_CORPUS` real-corpus hook. Final sets require
-   zero FN/FP and the real stored candidate traversal is checked for recall only. The first review
-   also corrected multi-feature negated bare terms under compiler semantics 4. This closes both the
-   ADR-050/063 shared-**code** blind spot and the shared-**semantics** lowering gap exposed by
-   ADR-118/119/120 (issue #123).
-3. **Durability torture (crash injection) — ✅ shipped
-   ([ADR-088](decisions/adr-088-crash-injection-harness.md)).** A `crashwriter` lean-core bin + the
-   `tests/crash_injection/` suite spawn a real process, deliver a real external SIGKILL mid
-   durable-operation (WAL append / flush / compaction / backup / churn), reopen in-process, and diff
-   the recovered engine against the front-end-independent oracle (ADR-087) — zero false negatives on
-   every acked write, no resurrection/corruption. `#[ignore]`d behind a new `check.sh` crash lane
-   (`RR_CRASH_ITERS`); mutation-validated. The three originally-deferred legs are now **shipped** (ADR-088
-   follow-up): the **`upsert`** atomic-replace scenario (race-immune both-version construction), the
-   **`watermark`** multi-reopen `ensure_seq_after` scenario (proven non-redundant vs the single-reopen
-   churn), and the **cluster** kill-*mid-write* leg (`deploy/harness.sh` leg 3b: every 2xx-acked write
-   matchable after restart + `/_cluster/resync`). *Still deferred:* a cluster-coordinator (not shard)
-   mid-write kill, and a power-loss leg (SIGKILL cannot drop the page cache — the torn-tail/CRC
-   simulations keep that domain).
-4. **Deployment proof on real Kubernetes.** Deploy to a real cluster (not localhost Compose), ingest a
-   **real corpus**, then restart every pod type, delete a shard pod, fill the disk, rotate secrets, and
-   restore from backup — proving **no silent misses** at each step. This is the adversarial acceptance
-   run for Tier 5 M2 + Tier 3 criterion 12 (real corpus).
-5. **Security review — ✅ shipped ([ADR-089](decisions/adr-089-security-review.md)).** A
-   [threat-model doc](operations/threat-model.md) (the 4 trust boundaries, assets, adversary model,
-   controls mapped to code, the explicit v1 non-goals + operator checklist), a **container image scan**
-   (`deploy/scan-image.sh`, Trivy) with a triaged baseline (234 base-image CVEs, 2 CRITICAL / 14 HIGH —
-   all Debian-base, none reachable by the service; the app deps are `cargo audit`/`deny`-clean), and the
-   `_backup` client-`dest` path-traversal finding dispositioned (auth-gated + non-root operator
-   responsibility; an optional config jail deferred). Docs + tooling only; no code-level vuln found.
-   *Deferred:* a distroless/curl-free base, the `_backup` jail, mTLS + per-RPC authz (ADR-071 post-v1).
+## Priority 1 — real-world acceptance evidence
 
-## The Broad-Query Cost Program — current top development priority
+### Real-corpus correctness and throughput audit
 
-**Adopted 2026-07-03** after two independent external reviews (both converged on the same
-ranking). The program spec — problem, today's mechanics, the four design obligations
-(cost lane ≠ visibility lane · the agreement fence · compaction-only reorganization ·
-oracle-gated migration), lever designs, and the review outcome — is
-[`proposals/broad-cost-program.md`](proposals/broad-cost-program.md); the evidence base is
-[ADR-104](decisions/adr-104-cluster-scale-soak.md) (the measured 32× realtime-lane defect +
-the broad-volume decomposition) and
-[`research/broad-scaling-prior-art.md`](research/broad-scaling-prior-art.md). Each increment
-ships under its own ADR with the ADR-104 soak as the standing at-scale acceptance run.
+**Problem.** The engine has extensive synthetic, adversarial, independent-oracle, durability, and
+20M-query scale coverage, but the final distributed-v1 credibility gap is still a representative
+production corpus. Synthetic data proves invariants; it cannot establish the real distribution of
+query shapes, aliases, broad work, duplicate bodies, memory use, or throughput.
 
-1. **Increment 1 — two-axis placement + θ-reclassification + the always-visible hot tier —
-   ✅ built ([ADR-105](decisions/adr-105-hot-tier-two-axis-placement.md)); merges PAIRED with
-   increment 2's Stage A (below).** The observe-first telemetry + the lever-5a count-gate
-   shipped first (PR #107); the tier itself — `is_hot_anchor = top64 ∨ freq ≥ θ`, class H in a
-   third always-probed columnar-evaluated index, `.seg`/manifest v5 fences, ring placement,
-   margin-gated compaction migration — is built and oracle-proven (24 legs across 7 suites).
-   **The measurement recalibration (why the pairing):** the PR-A telemetry falsified the spec
-   §3.1 sizing — the synthetic 20M corpus's 32× is an identical-query concentration (~43.5k
-   byte-identical "psa 10" class-B pair queries sharing one 43,533-entry posting — the dedup
-   lever's case), and its genuine θ-population is `would_be_hot = 782`. Lever 5's
-   dense-posting promotion was re-scoped to a measurement-gated follow-up (the columnar pass
-   already amortizes posting iteration; ADR-105 §Deferred). **The combined recovery is MEASURED**
-   (capture log 2026-07-03): per-title selective 13,383 → 84,708 t/s/core, cand/title 6,616 →
-   53.75, θ=1024 moves exactly `would_be_hot` = 782 result-identically, hot-empty pinned free,
-   both 20M soaks green — dedup-driven on this corpus, exactly as the corrected reading
-   predicted; the hot tier is the standing defense for genuinely fat-anchored corpora
-   (ADR-106 §Measured).
-2. **Increment 2 — duplicate interning, Stage A — ✅ built
-   ([ADR-106](decisions/adr-106-canonical-body-dedup-stage-a.md)); merges paired with
-   increment 1.** Canonical-body groups share one posting entry per in-memory segment
-   (verified once, emitted per member under per-member aliveness/tags); flush expands (no
-   format change); compaction regroups cross-segment; the `bodies_total`/`dup_joined` counters
-   + the linear-counting global distinct-bodies sketch are the Stage B sizing instrument.
-   Recovered the measured 20M defect (ADR-106 §Measured); the durable-cluster path's candidate
-   volume is unchanged (mmap postings are expanded) — the Stage B gate's other half.
-3. **Increment 3 — duplicate interning, Stage B (format bump, gated on Stage A's numbers).**
-   Segment-format body→member indirection (one verify row + member ID list per distinct
-   compiled body — extends Stage A's in-memory groups to the mmap'd/persisted majority of a
-   durable corpus), member-level WAL/upsert/tag/rank semantics. Ships only if Stage A's sketch
-   measures a duplication rate on the REAL corpus that justifies the most expensive-to-un-ship
-   kind of change.
-4. **Increment 4 — pair-anchor escalation + residual factoring (gated on the real corpus +
-   increments 1–2).** Joint-frequency pair anchors for θ-hot multi-feature queries via
-   query-nominated count-min sketches, with the compile/match pairing predicate extended **on
-   both sides in lockstep** and persisted (the fence — the program's only match-side-agreement
-   risk); residual factoring inside posting lists (subtract probe-implied features, group by
-   residual shape, size-specialized kernels).
+**Direction.** Use the `RR_ORACLE_CORPUS` intake from
+[ADR-087](decisions/adr-087-independent-correctness-oracle.md) to run one reproducible audit:
 
-*The real-corpus sample (the ADR-087 `RR_ORACLE_CORPUS` intake) sizes increments 3–4 and
-closes ADR-065 criterion 12's open half — one sample serves both — but does **not** block
-increment 1.*
+- translate stored queries into the documented DSL and retain rejected-query reasons;
+- compare the engine with the independent matcher for exact semantics and candidate recall;
+- capture title throughput, candidate volume, lane work, shard fan-out, duplicate-body rate,
+  memory, durable bytes, and reopen time;
+- publish only aggregate evidence and a reproducible harness, not private corpus data.
 
-### Tier 0 — Cluster v1 acceptance gate — ✅ complete
+**Completion.** Zero candidate false negatives and zero final-set mismatches on the accepted corpus;
+an explained disposition for every rejected or unsupported query; and a dated performance capture in
+[`performance/`](performance/). The same evidence decides whether the two measurement-gated
+broad-query items below are worth their format and complexity costs.
 
-Dynamic vocabulary (ADR-046), the named cluster oracle gate ([`testing.md`](testing.md)),
-`clusterbench` fan-out invariants, and the v1/experimental reframe — all shipped; see
-[`STATUS.md`](STATUS.md).
+### Real Kubernetes failure and recovery exercise
 
-### Tier 1 — measured bottlenecks — ✅ complete
+**Problem.** Compose, localhost gRPC, crash injection, and the Helm smoke prove the packaged
+mechanics, but not the behavior of a real scheduler, persistent volumes, network policy, secret
+rotation, and node failure.
 
-Broad-lane batch/columnar evaluation (ADR-026) and resident-memory reduction (ADR-020) — shipped.
+**Direction.** Deploy the supported Helm topology from
+[`operations/deployment-modes.md`](operations/deployment-modes.md) to a real cluster, ingest the
+real-corpus audit set, and execute a documented fault matrix:
 
-### Tier 2 — feature-model quality & self-tuning
+- restart every process role and roll every image;
+- delete a shard pod and its node, then recover it according to the configured RF;
+- exhaust a data volume and verify writes fail closed;
+- rotate mesh and HTTP secrets;
+- take, verify, restore, and query a backup;
+- compare every successful probe with the pre-fault reference result set.
 
-Shipped: NPMI phrases (ADR-053), equivalence expansion (ADR-054), compaction re-anchoring
-(ADR-056), alias governance + multi-word activation (ADR-060/061), distributional alias
-discovery (ADR-102 — review-first candidates over the shipped seam), match-feedback alias
-validation (ADR-103 — the title→query stream as behavioral evidence, opt-in capture). Open:
+**Completion.** No silent misses, a measured RPO/RTO for each scenario, retained logs and metrics,
+and runbook corrections for every operator decision discovered during the exercise.
 
-- **The rest of the "improve" menu** ([`design/ingestion-and-updates.md`](design/ingestion-and-updates.md)
-  §7): candidate-survival telemetry, `recommended_shard_count`/`recommended_arity`, feature-ID
-  re-ranking for locality, re-running the corpus learner per range.
-- **Vocab consolidation on compaction** — background re-materialize of hashed terms / learned
-  synonyms into the dict (the ADR-046 deferral; distinct from ADR-056 re-anchoring).
+## Priority 2 — query cost and memory at scale
 
-### Tier 3 — scale & production maturity
+The shipped hot tier and in-memory body sharing are described by
+[ADR-105](decisions/adr-105-hot-tier-two-axis-placement.md) and
+[ADR-106](decisions/adr-106-canonical-body-dedup-stage-a.md). Any follow-up must preserve the
+two-axis placement rule: **cost movement must never change visibility**.
 
-- **Distributed v1 ([ADR-065](decisions/adr-065-distributed-v1-graduation.md)) — open criteria**
-  (1–11 shipped: ADR-070/071/072/074/075/076/077/078/079/080/081, + follow-ons ADR-082/083/084; see
-  [`STATUS.md`](STATUS.md)):
-  - **Criterion 12 — scale proof at target:** the **≥20M multi-shard load test is ✅ shipped**
-    ([ADR-104](decisions/adr-104-cluster-scale-soak.md) — a durable K=8 in-process cluster at 20M
-    stored queries ≡ the single-node engine over 50k titles, sentinels + mirrored mutations +
-    checkpoint/reopen, run on real hardware; numbers pinned in
-    [`performance/benchmark-results.txt`](performance/benchmark-results.txt)). **Still open: the
-    real-corpus FN/throughput audit** owed in [`STATUS.md`](STATUS.md) "Current limitations" —
-    blocked on a user-supplied corpus (the intake is ADR-087's `RR_ORACLE_CORPUS` hook).
-  - *Criterion 7 follow-ons (deferred, [ADR-078](decisions/adr-078-cluster-resize.md)):* always-on
-    autoscaler-driven resize (needs hysteresis to avoid thrash, since a resize is non-idempotent +
-    `O(corpus)`) + a cross-process / online resize (ship the re-keyed data to remote shards over the
-    live-handoff machinery; the v1 resize is in-process blue/green).
-  - *Live-handoff follow-on (the [ADR-086](decisions/adr-086-control-plane-routing-and-failover.md)
-    deferral — data-moving reassignment **shipped** in
-    [ADR-090](decisions/adr-090-data-moving-reassignment.md); the multi-shard-per-node foundation
-    **shipped** as [ADR-093](decisions/adr-093-multi-shard-per-node.md) Stages 1–3, making HRW
-    rebalancing collision-safe; and the unattended **assignment-watch → re-point controller** in
-    [ADR-092](decisions/adr-092-unattended-reconciler.md), rebased onto that foundation as Stage 4:
-    `reconcile` + the opt-in `--reconcile-interval-secs` loop converge the committed map to the
-    HRW-desired placement by moving data, automatically + idempotently + zero-FN — proven on the
-    packed K&gt;N multi-shard topology that was the original clobber bug — and the autoscaler's
-    membership-drift arm is now data-moving on a remote cluster too; **RF&gt;1 data-moving
-    reconciliation shipped** as [ADR-094](decisions/adr-094-replicated-group-reassignment.md) — a
-    replicated position's whole GROUP moves via `reassign_group_and_move`, closing the ADR-090 RF&gt;1
-    deferral; and **parallel multi-position moves shipped** as
-    [ADR-095](decisions/adr-095-parallel-multi-position-moves.md) — the busy-endpoint move ledger +
-    conflict-free waves, opt-in via `max_parallel_moves`/`--reconcile-max-parallel`, default
-    sequential byte-identical; **orphan-slot GC shipped** as
-    [ADR-096](decisions/adr-096-orphan-slot-gc.md) — `ListShards`/`DropShard` + the ledger-reserved
-    coordinator sweep, opt-in via `--reconcile-gc-orphans`/`POST /_cluster/gc`; and the
-    **content-fingerprint skip shipped** as
-    [ADR-097](decisions/adr-097-content-fingerprint-skip.md) — a provably-complete retained member
-    keeps its data, collapsing a pure promotion's fence window):* the remaining open work is the
-    last ADR-094 cost deferral — server-side staged recovery (shadow install, atomic promote) out
-    of the fence window, now valuable only for the rare genuinely-desynced member
-    (ADR-097 §Consequences). (k8s/Helm manifests + gRPC health/readiness probes shipped —
-    [ADR-084](decisions/adr-084-kubernetes-helm-health.md); ADR-082 closed the advertise-URL; the
-    `shardserver --accept-class-d` item was a phantom — remote shards force-accept class-D, the
-    coordinator is the sole gate.)
-- **Ranked percolation / distributed top-K follow-ups (the ADR-107..110 review residue,
-  [PR #111](https://github.com/dvideby0/reverse-rusty/pull/111))** — verified findings from the
-  dual review (multi-agent + codex), deliberately deferred; each is self-contained:
-  - **`LiveLogicalIds` enumeration RPC + connect-time directory seeding.** A coordinator attached
-    over gRPC to already-populated shard servers cannot enumerate the corpus, so its ADR-109
-    logical-id admission directory stays **unauthoritative** and `add_query` fails closed toward
-    `upsert_query` (the shipped interim guard). Close it properly: a per-shard enumeration RPC in
-    `shard.proto` over `Engine::live_logical_ids`, a `RemoteShard` impl (+ `HandoffShard`/
-    `ReplicatedShard` delegation), and the same collect–sort–dedup–`replace_logical_ids` seeding
-    `open` uses — keeping the fail-closed guard as the fallback when enumeration fails. Oracle
-    leg: reconnect a fresh coordinator to populated durable servers; an existing id must 409, a
-    new id must insert.
-  - **Per-logical-id write lock table.** The 256 striped mutexes serializing same-id cluster
-    writes are held across the WAL append (fsync) AND the full shard fan-out (sequential gRPC per
-    shard), so two unrelated ids colliding on a stripe serialize whole distributed writes and one
-    stalled shard is contagious. **Constraint (review-verified): narrowing the hold scope is
-    UNSAFE** — same-id ordering depends on holding through apply (a remove fanning deletes before
-    an add's inserts land diverges replay from live; two same-id upserts can interleave their
-    delete/insert passes). The fix is a per-id in-flight lock table (only true same-id writers
-    serialize, full hold scope preserved), keeping `logical_bulk_write_guards`' whole-directory
-    exclusivity for bulk load.
-  - **Ranked-path perf polish** (all review-confirmed, none load-bearing yet): move
-    `validate`/`validate_for_shard` onto `QueryPlacementRef` so the whole-corpus ownership sweep
-    at every durable open/resize/attach stops allocating one `Vec` per row; memoize the top-K
-    scorer's per-logical `rank_metadata_for_logical` walk inside `TopKCollector` (**constraint:**
-    ADR-108 requires scoring the newest live copy, so resolving at the emission site is
-    forbidden) + pool the collector/scratch in `percolate_top_k_owned` like the v2 handler's
-    thread-local; replace the coordinator merge's worst-case reserve + full sort with a bounded
-    S-way merge over the already-sorted shard runs; drop `fetch_one`'s per-shard O(K) clone of
-    the requested group. Baseline with `rankbench` before/after.
-- **Feature-model versioning + blue/green re-materialize** — frozen common-mask across minor
-  versions; a major model change replays the log into a parallel index, then an atomic epoch swap.
-- **Aspects-first ingestion** — use eBay structured item-specifics as features instead of relying
-  only on title parsing; higher feature quality, larger domain integration.
-- **Memory headroom at scale (the documented production changes)** — two items the bottleneck
-  analysis ([`performance/results.md`](performance/results.md) §9) still flags open: **dictionary
-  string interning** (the dict retains per-feature `String`s, inflating bytes/query — interning +
-  segment mmap is the named fix) and **memory-bandwidth mitigation** as the index leaves cache
-  (tighter SoA packing; sharding already buys cache residency). Gates an honest 100M memory
-  extrapolation; pairs with criterion 12's real-corpus audit.
+The broad-cost program also established boundaries that still apply to every item here:
+do not suppress correct member IDs to reduce output volume; do not add N-wide mutable counters to
+the title hot path; keep reorganization at immutable-segment build or compaction seams; and do not
+revive score-bound early termination without new profiling evidence that clears
+[ADR-115](decisions/adr-115-competitive-pruning-deferred.md).
 
-### Tier 4 — ES/OS percolator parity — small residue
+### Persist canonical-body indirection on disk
 
-The parity program is **complete** — tags + filtered percolation (ADR-049/055), punctuation
-folding (ADR-058), ranking (ADR-059/075), alias evolution (ADR-060/061), and the ADR-064 drop-in
-work package (ADR-067/068/069/073); workload mapping →
-[`research/percolator-workload.md`](research/percolator-workload.md). Open refinements, each
-behind a shipped seam:
+**Problem.** Stage A shares one posting entry for identical semantic bodies inside memory segments,
+but flush expands every member into the mmap format. A durable corpus therefore loses the sharing
+where most queries live.
 
-- **Component-conjunction alternative on alias activation** — keep the scattered-components
-  reading when a multi-word alias activates, via CNF distributivity (recall-only widening,
-  bounded; ADR-061 §semantics-of-activation).
-- **Additive punctuation fold** — emit the joined form AND the split components (à la Lucene's
-  `WordDelimiterGraphFilter`); pure recall gain behind the ADR-058 `PunctClass` seam.
-- **Columnar two-view broad lane** — the broad lane drops to the inline path while multi-word
-  aliases are active; a perf follow-on, not correctness (ADR-061).
+**Evidence gate.** Do not add a format indirection from synthetic results alone. First use the
+Stage-A `distinct_bodies_est`, `bodies_total`, and `dup_joined` telemetry on the real corpus. Proceed
+only if the durable-byte and posting-scan reduction is material after accounting for member lists,
+tags, priorities, and versions.
 
-### Tier 5 — deployability & operational maturity
+**Direction.**
 
-The engine + distributed layers are built and oracle-proven; this tier is the **named, documented
-deployable contract** distinct from the scale proof, plus the operational hardening above it
-(source: external deployability review, 2026-06-24; the review positioned M0–M2 as the highest-ROI
-next work, ahead of more algorithm work). M0–M2 all shipped as
-[ADR-098](decisions/adr-098-deployable-gate-and-release-pipeline.md) — the contract page is
-[`operations/deployment-modes.md`](operations/deployment-modes.md), the local smoke gates every PR,
-and `release.yml` publishes the smoke-gated GHCR image per `v*` tag.
+- add a versioned body record with one exact-verification row and a list of logical members;
+- preserve member-level aliveness, tags, priority, version, source, delete, and upsert semantics;
+- confirm semantic-body hash matches with exact equality so a collision can never false-share;
+- teach mmap reads, compaction, recovery, backup, metrics, and explain about the indirection;
+- keep legacy segments readable or fail loudly behind an explicit migration fence.
 
-- **M0 — deploy-truth — ✅ shipped ([ADR-098](decisions/adr-098-deployable-gate-and-release-pipeline.md)).**
-  [`operations/deployment-modes.md`](operations/deployment-modes.md) is the canonical
-  supported-deployment contract: the four-mode matrix (single-node · in-process cluster · remote
-  Compose · remote Helm) with exact bring-up commands, the guaranteed REST surface, the auth
-  posture, and the **v1 non-goals consolidated into one named-constraints table** (RF>1 in Helm,
-  online/remote resize, remote custom vocab, cross-shard backup barrier, scale proof, mTLS,
-  power-loss default — each with its deciding ADR). The runbooks' scattered copies now point there.
-- **M1 — Deployable Feature Complete: single-node + in-process cluster — ✅ shipped (ADR-098).**
-  [`deploy/local-smoke.sh`](../deploy/local-smoke.sh) runs both local modes end-to-end (start →
-  401-auth probe → `_doc`/`_bulk` ingest → `_search`/`_mpercolate` incl. a MUST_NOT suppression →
-  `_stats`/`_metrics` → `_backup` → SIGTERM-restart-reopen → restore-the-backup) **inside the
-  required `gate + benchmarks` CI job** — the M1 acceptance gate on every PR, no containers.
-- **M2 — Deployable Feature Complete: remote static cluster — ✅ shipped (ADR-098).**
-  [`release.yml`](../.github/workflows/release.yml): on a `v*` tag — version preflight (tag ==
-  crate == chart appVersion, `deploy/check-versions.sh`) → build → **smoke the exact candidate
-  image** (Compose `cluster-smoke.sh` + kind `k8s-smoke.sh`, now fixed + passing end-to-end, +
-  `deploy/check-topology-parity.sh`) → publish `ghcr.io/<owner>/reverse-rusty:{vX.Y.Z, X.Y.Z,
-  sha-<short>}` (**the image is the only published artifact; no `:latest`** — ADR-098);
-  `workflow_dispatch` = the no-publish rehearsal. Per-PR: the compose smoke rides the harness
-  job's image; the parity + version tripwires ride the helm-chart job. (Scale proof stays Tier 3
-  criterion 12, not a blocker here.)
-- **M3 — production hardening (safe with on-call ownership).** **Shard/control-local Prometheus
-  metrics shipped** ([ADR-091](decisions/adr-091-shard-control-metrics.md), closing ADR-084 deferral
-  b): per-node `/_metrics` on `shardserver`/`controlserver` (stored-query count, memory, compaction
-  backlog, cost-class; per-control Raft term/leader/log/membership) + a coordinator per-shard query
-  gauge — the autoscaling-signal prerequisite. **Per-shard latency histograms shipped**
-  ([ADR-100](decisions/adr-100-shard-rpc-latency-histogram.md)): native
-  `reverse_rusty_shard_rpc_duration_seconds{shard,method,le}` in the shard `/_metrics`, timed at the
-  gRPC handler boundary — p95/p99 via `histogram_quantile()`. **Per-shard broad-lane cost
-  counters shipped** ([ADR-101](decisions/adr-101-shard-broad-lane-cost-counters.md)): the
-  coordinator's `reverse_rusty_broad_*_total` names, `{shard}`-labeled in the shard `/_metrics`,
-  accumulated from each percolate's `MatchStats` at the handler boundary. **The M3 operational
-  docs shipped**: the [DR runbook](operations/disaster-recovery.md) (RPO/RTO model +
-  volume-loss / quorum-loss / whole-cluster flows), the
-  [rolling-upgrade procedure](operations/rolling-upgrade.md) (fence contract +
-  control→shards→coordinator order + Helm `updateStrategy`/PDBs), the
-  [sizing guide](operations/sizing.md), [alerting](operations/alerting.md) over a
-  shipped promtool-validated [`deploy/prometheus-alerts.yml`](../deploy/prometheus-alerts.yml),
-  and the backup-restore **Rehearsal** drill — **M3 is complete**.
-  **Cooperative cancellation / bounded concurrency shipped**
-  ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md),
-  [ADR-123](decisions/adr-123-bounded-in-segment-cancellation.md)): an explicit `timeout_ms`
-  now stops match work at boundaries and at fixed intervals inside dense segment loops (not
-  just the response), while `--max-concurrent-searches` bounds pool occupancy; the unarmed
-  sampler compiles away.
-- **M4 — commercial-service operations (API-driven, not runbook-driven).** The bar past "cloud
-  deployable": backups, scaling, restore, and rollout become controllers/APIs, not manual procedures.
-  Larger, later, and partly **in tension with the shared-nothing / no-object-store stance
-  ([ADR-033](decisions/adr-033-shared-nothing-storage.md))** — resolve that first.
-  - **Backup-as-a-service** — a `POST /_cluster/backup|restore` API + a coordinator-driven cross-shard
-    **consistency barrier** (the no-quiesce backup the v1 runbook lacks), scheduled backups, retention,
-    manifest + checksums, automated restore verification, stated RPO/RTO. *Object-storage (S3/GCS)
-    targets revisit ADR-033 — decide whether to relax shared-nothing for backup export only.*
-  - **Automated blue/green resize controller** — drive the existing manual blue/green path from
-    metrics + `recommended_shard_count` with hysteresis (green cluster → rehydrate → validate → cut
-    traffic → GC blue). True online/data-moving resize stays the deferred ADR-078/086 follow-on in
-    Tier 3.
-  - **Kubernetes Operator / CRD** (`ReverseRustyCluster`) — owns StatefulSets, backup schedules,
-    restore jobs, blue/green resizes, coordinator HPA, rollout safety: the lifecycle layer above Helm.
-  - **RF>1 Helm topology** — a replica StatefulSet per position + the coordinator's
-    `--replication-factor` (the engine's RF is built; the chart value is documentation-only today).
+**Completion.** Differential equality with sharing on and off across live writes, flush, compaction,
+reopen, WAL recovery, tags, ranking, and tombstoned leaders; measured durable and scan reduction on
+the real corpus; and a rollback-safe format ADR.
 
-### Evaluated & declined
+### Pair-anchor escalation and residual factoring
 
-- **Query-family / shared-prefix DAG** — optimizes a non-bottleneck at high format/rebuild cost;
-  see [ADR-019](decisions/adr-019-query-family-factoring-declined.md). Reversible.
+**Problem.** A multi-feature query can remain expensive when each feature is individually hot but
+their conjunction is selective. Single-feature frequency cannot identify that shape, and verifying
+every full body repeats work already proven by the posting probe.
 
----
+**Evidence gate.** Use the real-corpus audit to show that these queries contribute material
+postings or verification cost after the hot tier and body sharing. If they do not, leave the matcher
+simple.
 
-## Nice-to-have / operational polish backlog
+**Direction.**
 
-Low-priority polish and micro-optimizations — none are production blockers.
+- collect bounded joint-frequency evidence only for query-nominated feature pairs;
+- escalate qualifying queries to pair anchors when the conjunction is selective;
+- persist the classification evidence needed to reproduce the decision;
+- subtract probe-implied required features and group the remaining verification work by residual
+  shape for size-specialized kernels.
 
-**API / ops ergonomics**
-- **CORS headers** — browser-based tools can't hit the API; add `tower-http::CorsLayer`.
-- **Thread-pool introspection** (`/_cat/thread_pool` equivalent).
-- **Per-segment filter FP rate in `/_cat/segments`** (deferred from ADR-023) — needs
-  `SegmentFilter` to retain its inserted-key count and `MmapSegment` to expose block count, then a
-  `filter_fp_pct` column.
-- **`_cat` `?v`/`?h`/`?help` flags** — ES-style verbose/column-selection; listed for completeness.
-- **`took_ms` uses raw f64** (`0.003284000000000001`) — integer ms or round to 2 dp.
-- **No pre-warming** for mmap'd segments on cold start.
-- **No measured restart/reopen time** at ≥1M queries (ADR-064 item 7) — the design implies
-  sub-second-to-seconds; capture a number.
-- **Class-C ingest warnings / rewrite suggestions** — surface "this query landed in the broad
-  lane" at ingest with a rewrite hint (the ADR-026 follow-up).
+**Correctness constraints.**
 
-**Memory / hot-path micro-optimizations**
-- **`alive: Vec<bool>`** — 8× the memory of a bitvec.
-- **`seg_lens` Vec allocated on the match hot path** — could be a fixed-size array.
-- **WAL `append_insert` allocates a Vec per write** — pre-allocated write buffers.
-- **Byte-at-a-time CRC-32 for manifest writes** — table-based is ~10× faster.
-- **SIMD intersection** for medium/large (mostly broad-lane) roaring postings (the ADR-026
-  follow-up).
+- The compiler's pair-selection predicate and the title-side pair-generation predicate are an
+  **agreement fence** and must change together.
+- Pair escalation may change evaluation cost, never default or broad visibility.
+- Negative features remain unavailable to anchor selection.
+- Migration must be oracle-gated across old/new segments, compaction, replay, and cluster routing.
 
-**Test-infrastructure follow-ons (ADR-063 audit)**
-- **Extend the parse-union oracle's fuzz alphabet** with `#`/`/`/`pop` markers, 4-digit years, and
-  fused graders *inside phrase patterns* (needs the reference `emit_parse` to learn the
-  marker/year rules).
-- **A cross-seam integration harness** (recovery×vocab, adopt-on-fresh vs adopt-on-recovered,
-  `set_vocab` guard matrix) — ~22% of historical review-caught escapes were cross-seam; point
-  regression tests exist, the *combinations* don't.
-- **Occasional targeted `cargo-mutants` runs** on `normalize`/`compile`/`exact` after major
-  matcher changes (declined as a per-PR gate in ADR-063 for wall-clock cost).
-- **Messy variants of the cluster oracles** — thread `messify_dataset` through
-  `tests/cluster_oracle` + the durability oracle (the harnesses already take a `Dataset`).
+**Completion.** A format and compatibility ADR, mutation-validated differential coverage for the
+agreement fence, and a real-corpus reduction in scanned postings or verifier work.
 
-**Code hygiene (ADR-110 review residue)**
-- **Delete the dead legacy `Shard` read paths** — `percolate_filtered`/`percolate_filtered_ranked`
-  are `#[allow(dead_code)]` on the trait (the coordinator calls only the `_owned` variants),
-  leaving four per-type forwarding impls maintaining an unreachable parallel read path; tests
-  needing emit-all can pass an all-positions `OwnershipContext`.
-- **650-line splits from the ADR-110 branch** — `segment/seg.rs` (625→730), `cluster/handoff.rs`
-  (577→672). (`handlers/search/v2.rs` was split by the delivery unification, ADR-111 era.)
-- **Reuse the storage LE-read primitives in `server/durable.rs`** — `read_adopted_space`
-  hand-rolls the truncated-LE-read idiom three times; make `read_u32_at`/`read_u64_at`
-  `pub(crate)` and delete the copies.
+### Dense representation promotion in the batch evaluator
 
-**Robustness**
-- **Durable-ingest segment-write failures surface as `ingest_rollback`, not `segment_write`** —
-  emit `SegmentWrite`/`SegmentMmap` from inside `build_durable_base` for symmetric labeling (the
-  OS error is already visible; low priority).
-- ~~Cooperative cancellation on the match path~~ — **✅ shipped
-  ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md),
-  [ADR-123](decisions/adr-123-bounded-in-segment-cancellation.md))**: the monomorphized
-  boundary + bounded in-segment deadline seam (armed by an explicit `timeout_ms`) and the
-  `--max-concurrent-searches` semaphore; the unarmed matcher carries no sampler or clock work.
-- ~~Merge-blocking performance regression policy + scheduled large soak~~ — **✅ shipped
-  ([ADR-124](decisions/adr-124-variance-tolerant-performance-gate.md), issue #127)**: pinned-runner
-  1M-query `perfgate`, exact work-shape + 5% resource ceilings, median/MAD-banded p50/p95/p99 and
-  selective/columnar throughput with one timing-only retry, guarded five-report rebaseline, and a
-  weekly/manual 10M soak with 90-day artifacts. Deep noisy sweeps remain advisory.
+**Problem.** The broad and hot columnar passes can still spend time iterating postings that are
+dense relative to the active candidate set. Storage already promotes large lists to roaring
+bitmaps, but the batch evaluator does not independently choose the cheapest counting
+representation.
+
+**Direction.** Profile the real corpus after the hot tier and count gate, then select list,
+bitmap, or dense scratch representation from measured relative density. The choice is internal to
+evaluation and must not affect the candidate set. Treat the previously suggested 40% switch point
+as prior art, not a default.
+
+**Completion.** Scalar/columnar result equality, a stable density threshold across repeated
+captures, bounded scratch memory, and a demonstrated broad or hot batch improvement.
+
+### Tag-aware segment skipping
+
+**Problem.** Metadata filtering is the dominant percolator read pattern, but the engine still opens
+every candidate-bearing segment even when the request predicate cannot accept any tag row in that
+segment.
+
+**Direction.** Add immutable per-segment tag summaries or partitions that can prove a segment has no
+acceptable row. The optimization must be request-filter-driven and fail open: an absent, stale, or
+inconclusive summary probes the segment normally. Tags remain outside semantic signature generation,
+and negative query features remain unavailable.
+
+**Completion.** Filtered result equality with skipping enabled and disabled across writes,
+compaction, recovery, synthetic tag IDs, and cluster fan-out; a format-compatible persistence plan;
+and representative evidence that avoided segment work exceeds summary lookup cost.
+
+### Memory headroom for 100M-query deployments
+
+**Problem.** The shipped durable `retain_source=false` profile already leaves canonical source text
+in the mmap-backed source store and reads it lazily, reducing engine-accounted resident memory from
+roughly a little over 100 B/query to about 5–6 B/query in the current captures. Those measurements
+do not establish host RSS, source-read working set, page-cache pressure, or memory-bandwidth behavior
+at 100M queries, and the remaining dictionary, index, and verification columns may become the
+dominant resident cost.
+
+**Direction.** Measure the components separately, then address the parts that are material:
+
+- measure and operationalize the existing `retain_source=false` path under realistic
+  source/explain reads, including RSS, page-cache churn, and I/O latency, and decide whether it
+  should become the recommended large-corpus profile;
+- reduce source-store indexes or add a bounded source cache only if those measurements identify
+  source lookup as material;
+- pool immutable dictionary string bytes where allocation overhead is measurable;
+- tighten SoA fields and access order to reduce bytes touched per candidate.
+
+Potential techniques include pooled string storage, mmap-backed immutable dictionaries, and narrower
+columns where format bounds prove them safe. Aliveness is already bit-packed; do not count that as
+future savings. SIMD is useful only after a profile identifies a stable intersection kernel.
+
+**Completion.** A measured 100M memory model with component attribution, no regression to the
+allocation-free matching contract, and pressure tests showing that the new representation remains
+lossless through persistence and reopen.
+
+## Priority 3 — distributed lifecycle and ranked-path efficiency
+
+### Automatic and remote cluster resize
+
+**Problem.** In-process resize is a manual blue/green rebuild. The autoscaler can recommend a split
+but cannot safely execute repeated resizes, and a remote cluster cannot re-key data online.
+
+**Direction.**
+
+1. Add hysteresis, cooldown, idempotency keys, progress state, and abort recovery around the
+   existing in-process resize.
+2. Generalize the operation to a remote blue/green topology: create target slots, stream the
+   re-placed corpus, validate fingerprints and query counts, atomically switch committed routing,
+   then garbage-collect the old layout.
+3. If measured rebuild cost justifies the additional state machine, add a targeted online split:
+   build shadow children, drain the mutation tail, prove their fingerprints, and switch the affected
+   ring range atomically. Do not introduce dual routing as an unmeasured prerequisite.
+
+The controller must distinguish a recommendation from an accepted operation; corpus-size noise must
+not create resize thrash.
+
+**Completion.** Repeated grow/shrink operations converge under concurrent writes and injected
+failure, restart resumes or safely aborts an operation, and every acknowledged query remains
+matchable before and after the routing cutover.
+
+### Staged replica recovery outside the fence window
+
+**Problem.** A genuinely stale retained member is rebuilt while the replicated group is fenced.
+Fingerprint reuse collapses the common no-copy case, but a large divergent member still makes the
+write pause proportional to corpus copy time.
+
+**Direction.** Recover into a shadow slot before fencing, track its translog catch-up point, then
+fence only for the bounded final drain and atomic promotion. The live slot must remain untouched
+until the shadow proves complete.
+
+**Completion.** Recovery time outside the fence is unbounded but the fenced interval is bounded by
+tail catch-up; crash injection at every phase leaves either the old complete slot or the new complete
+slot routable, never a partial install.
+
+### Seed the remote logical-ID directory
+
+**Problem.** A fresh coordinator attached to populated remote shards cannot enumerate existing
+logical IDs. Its admission directory is therefore unauthoritative and must conservatively treat an
+add as an upsert.
+
+**Direction.** Add a bounded `LiveLogicalIds` shard RPC, delegate it through handoff and replica
+composites, collect/sort/deduplicate the IDs at connect time, and install the directory atomically.
+Enumeration failure must leave the current fail-closed behavior in place.
+
+**Completion.** A reattached coordinator rejects create-only writes for existing IDs, accepts new
+IDs, and reconstructs the same directory across primary failover and restart.
+
+### Replace striped cluster write locks with per-ID locks
+
+**Problem.** The fixed stripe table serializes unrelated logical IDs that hash to the same stripe.
+The lock must still cover WAL append and the complete shard fan-out because same-ID operations may
+not interleave.
+
+**Direction.** Use a bounded lifecycle-managed lock table keyed by logical ID. Preserve the full
+same-ID critical section and the whole-directory exclusion used by bulk load; reclaim idle entries
+without allowing two locks for the same active ID.
+
+**Completion.** Same-ID live ordering remains replay-equivalent under failure, unrelated IDs no
+longer serialize on hash collision, and the table stays bounded under high-cardinality churn.
+
+### Ranked-path allocation and merge cleanup
+
+**Problem.** The bounded ranked path still allocates during ownership validation, repeatedly scans
+rank metadata, fully sorts already-sorted shard runs, and clones request groups during fetch.
+
+**Direction.**
+
+- validate borrowed placement views instead of allocating one vector per row;
+- cache newest-live rank metadata inside the collector and reuse pooled scratch;
+- perform a bounded S-way merge over sorted shard runs;
+- remove per-shard O(K) clones from winner fetch.
+
+**Completion.** Preserve exact ordering, totals, ownership, and winner-source behavior while
+`rankbench` demonstrates lower allocation and coordinator CPU at fixed K.
+
+## Priority 4 — feature-model evolution and parity
+
+### Versioned feature models with blue/green re-materialization
+
+**Problem.** Minor runtime vocabulary changes are supported, but a major tokenizer, feature-kind,
+or common-mask change cannot safely reinterpret rows compiled under an older model.
+
+**Direction.** Give the complete feature model a durable version and fingerprint. Keep compatible
+minor changes within the existing epoch machinery; rebuild major changes into a parallel index from
+canonical sources, validate it against the independent oracle, then atomically swap the serving
+epoch.
+
+**Completion.** Mixed model versions fail loudly, rollback retains the previous complete index, and
+the blue/green swap is result-equivalent across crash and reopen.
+
+### Self-tuning cost and placement recommendations
+
+**Problem.** The engine exposes raw lane and candidate telemetry but does not turn it into stable,
+actionable recommendations.
+
+**Direction.** Add offline or background analysis for:
+
+- candidate-survival rates by anchor and query shape;
+- recommendations beyond the existing corpus-size shard-count helper, including measured fan-out,
+  posting cost, and anchor arity;
+- feature-ID re-ranking for locality during a model rebuild;
+- corpus learner reruns per range when data distributions diverge.
+
+Recommendations must be inspectable and opt-in. They may suggest a rebuild or compaction policy but
+must not silently change query visibility.
+
+**Completion.** Recommendations reproduce from a pinned capture, explain their evidence, remain
+stable under small workload perturbations, and have an explicit apply/rollback workflow.
+
+### Vocabulary consolidation during compaction
+
+**Problem.** Feature hashing and learned aliases keep post-freeze vocabulary lossless, but a mature
+corpus can accumulate synthetic IDs and stale vocabulary generations.
+
+**Direction.** During a controlled model rebuild, promote sufficiently stable hashed terms and
+reviewed aliases into a new dense dictionary, then recompile affected rows. This is distinct from
+re-anchoring: it changes the feature space and therefore requires a new model fingerprint.
+
+**Completion.** No false negatives across old/new generations, deterministic ID assignment,
+bounded migration memory, and measured benefit in dictionary locality or collision rate.
+
+### Aspects-first ingestion
+
+**Problem.** Marketplace item specifics often carry cleaner brand, model, size, and condition
+signals than title parsing, but the current feature model is title-centric.
+
+**Direction.** Define typed structured fields as additional positive and negative features, with
+one shared query/document normalization contract and explicit precedence when structured and title
+signals disagree. Keep source-specific strings out of the match hot path.
+
+**Completion.** A documented DSL/API mapping, zero-false-negative oracle coverage across title-only
+and aspects-aware modes, and real-corpus evidence that aspects reduce broad work or ambiguity.
+
+### Alias and punctuation recall refinements
+
+**Problem.** Several shipped seams still have optional recall, feature-quality, or performance
+refinements:
+
+- preserve the scattered-component reading when a multi-word alias activates;
+- emit both joined and split forms for selected punctuation folds;
+- propose high-confidence edit-distance-one aliases for rare misspellings;
+- type common card-number forms such as `#866` and `#BDC-85` as one selective feature;
+- keep multi-word aliases on the columnar broad path instead of falling back to scalar evaluation.
+
+**Direction.** Treat alias, punctuation, and typo changes as bounded additive expansions; keep typo
+activation review-first. Card-number typing must use the same query/title rule and preserve the
+generic form during migration. The columnar change is evaluation-only. Every knob defaults to
+current behavior.
+
+**Completion.** Independent-oracle and forbidden-feature matrices prove no false negatives; the
+columnar path is exactly equal to scalar matching; real examples justify the additional candidates.
+
+## Priority 5 — service automation and security
+
+### Backup and restore as a cluster service
+
+**Problem.** Backup is engine-driven but still an operator procedure. A remote cluster lacks one
+API-owned consistency barrier, schedules, retention, and continuous restore verification.
+
+**Direction.** Add coordinator-owned backup and restore jobs with:
+
+- a cross-shard consistency point and manifest;
+- per-shard checksums and resumable progress;
+- schedules, retention, and restore verification;
+- explicit RPO/RTO and cancellation semantics.
+
+Export to object storage requires an ADR that narrows or amends the shared-nothing decision in
+[ADR-033](decisions/adr-033-shared-nothing-storage.md); do not introduce it implicitly.
+
+**Completion.** A killed coordinator can resume or safely abandon a job, a restored cluster proves
+the same logical corpus, and operators no longer coordinate shard snapshots manually.
+
+### Kubernetes operator and RF>1 topology
+
+**Problem.** Helm installs static resources but does not own lifecycle state, backup schedules,
+blue/green resize, or replicated placement.
+
+**Direction.** Introduce a `ReverseRustyCluster` custom resource and controller only after the
+underlying APIs are stable. The operator should reconcile StatefulSets, placement, backups,
+restores, rollouts, and resize state. Extend the chart to express RF>1 without requiring operators
+to hand-build per-position replica groups.
+
+**Completion.** Reconciliation is idempotent across controller restart, status exposes actionable
+conditions, and end-to-end tests cover upgrade, backup, restore, resize, and whole-node loss.
+
+### Security hardening beyond the v1 trust model
+
+**Problem.** The current mesh uses server-authenticated TLS plus one shared token. Backup destinations
+are trusted operator input, and the runtime image favors operability over minimum attack surface.
+
+**Direction.** Evaluate mTLS node identity, per-RPC authorization, a configured backup destination
+jail, secret rotation without restart, and a smaller runtime image. Preserve the current simple
+trusted-network mode as an explicit deployment profile.
+
+**Completion.** The threat model and deployment contract define both profiles, credential rotation
+is exercised in the real-cluster drill, and security controls fail closed without breaking health
+or recovery traffic.
+
+## Later improvements
+
+These are valid but lower-leverage than the items above. Each entry states the problem, intended
+change, and acceptance boundary; promotion changes its priority, not its documentation home.
+
+### API and operator ergonomics
+
+- **CORS policy.** Browser tools cannot call the API across origins today. Add an explicit
+  configurable `CorsLayer`, default it to no cross-origin access, document credential handling, and
+  test preflight behavior with authentication enabled.
+- **Thread-pool introspection.** Search admission is bounded but operators cannot see queue
+  pressure directly. Expose active, queued, rejected, and completed work through fixed-cardinality
+  metrics and an operator endpoint, then verify the counters under saturation.
+- **Segment filter quality.** `/_cat/segments` reports filter bytes but not whether the bloom
+  allocation is effective. Retain inserted-key and block counts, expose an estimated false-positive
+  rate, and compare it with a sampled measured rate.
+- **Complete `_cat` controls.** Add `?v`, `?h`, and `?help` consistently across catalog endpoints,
+  with one shared column-selection parser and typed errors for unknown fields.
+- **Batch cursor pagination.** `/v2/_mpercolate` intentionally rejects PIT and cursor state today.
+  Add per-title continuation only if a real workload needs it, with bounded aggregate cursor state
+  and the same snapshot, ordering, and stale-cursor guarantees as `/v2/_search`.
+- **Read-auth policy consistency.** With `--auth-protect-reads=false`, the compatibility search
+  POSTs, `/v2/_search`, PIT lifecycle, and exhaustive-job creation are treated as reads, while
+  `POST /v2/_mpercolate` still requires the bearer token. Decide whether the v2 batch surface is a
+  protected operation or a read, then align the allowlist, reference, and both auth-mode tests.
+- **Stable duration formatting.** Raw floating-point `took_ms` values expose serialization noise.
+  Define bounded precision or an integer duration unit and pin the response contract.
+- **Cold-start prewarming.** An mmap reopen can shift first-query latency into page faults. Add an
+  opt-in byte/time-budgeted page-touch strategy and retain it only if measurements show useful
+  latency reduction without uncontrolled resident growth.
+- **Restart measurements.** The design extrapolates reopen behavior but the operator guide needs
+  evidence. Capture 1M, 20M, and real-corpus reopen times, add the dated results to
+  [`performance/`](performance/), and update sizing guidance from those captures.
+- **Broad-query ingest guidance.** Operators can observe an expensive lane only after cost
+  accumulates. Report the assigned lane at ingest and suggest a selective rewrite when semantics
+  permit, but never reject or silently rewrite a query.
+- **Opaque original-expression passthrough.** Drop-in users may compile a deliberately widened RR
+  translation but need their foreign precision matcher to re-read the untouched original expression.
+  Add an optional opaque source field that is persisted and returned without participating in RR
+  parsing, matching, ranking, or routing; keep the translated RR query as the compilation source.
+
+### Local memory and hot-path cleanup
+
+- **Reusable WAL encoding.** Pool serialization buffers across writes while preserving frame
+  atomicity and ensuring a failed append cannot leak bytes into the next frame.
+- **Faster manifest CRC.** Replace byte-at-a-time CRC with a table or hardware-assisted path,
+  retaining byte-identical checksums and malformed-manifest failures.
+- **Profile-gated SIMD.** Evaluate vectorized intersections only when representative profiles are
+  dominated by medium or large postings; keep the scalar path when setup cost wins.
+
+Each change must retain the allocation-free unarmed match path and include a before/after workload
+capture; microbenchmarks alone are not sufficient.
+
+### Test infrastructure
+
+- **Phrase-pattern fuzzing.** Expand the parse-union alphabet with punctuation markers, number
+  context, years, and fused graders after teaching the independent reference emitter the same
+  documented surface grammar.
+- **Cross-seam matrix.** Combine recovery, vocabulary adoption, rebuild, and remote attach in one
+  bounded matrix because point tests do not catch ordering failures between those seams.
+- **Targeted mutation testing.** Run mutation testing on normalization, compile, and exact-match
+  modules after major semantic changes; keep it out of the per-PR gate unless runtime becomes
+  predictable.
+- **Messy cluster oracles.** Thread deterministic messy-data generation through cluster and
+  durability oracles and require equality with their clean-data reference results.
+
+### Code and error-surface cleanup
+
+- **Remove legacy shard reads.** Delete the dead non-ownership-aware read methods after every test
+  and implementation uses the owned collector path; public result semantics must remain identical.
+- **Reuse storage readers.** Expose the existing checked little-endian helpers within the crate and
+  remove the adopted-space decoder's duplicate truncated-read logic.
+- **Precise durability labels.** Emit segment-write or segment-mmap operations at the failing
+  durable-ingest step instead of the broader ingest-rollback label, while preserving the original
+  typed error and rollback behavior.

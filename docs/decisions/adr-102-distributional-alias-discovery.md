@@ -5,6 +5,9 @@
 - **Status:** **Accepted (2026-07-02).** `POST /_vocab/aliases/discover[_and_record]` — PPMI-cosine
   context-similarity candidates over the stored queries, filed as review-only `Candidate`s under a
   new never-auto-active provenance.
+- **Current outcome:** ADR-103 shipped the match-feedback validation follow-on. Cluster-side source
+  gathering and title-corpus contexts remain unimplemented; cluster record/feedback endpoints fail
+  loudly where the required cross-shard evidence is unavailable.
 
 - **Context:** The Tier 2 roadmap item; technique 1 of
   [`research/corpus-feature-learning.md`](../research/corpus-feature-learning.md) §5. The shipped
@@ -127,6 +130,5 @@
   a candidate-only change takes the fast path (no epoch bump) while a synonym added with
   identical alias projections falls back to the full `set_vocab` path (epoch bumped).
 
-- **Deferred follow-ons.** Match-feedback validation of these candidates (ADR-103 — the sibling
-  item); a cluster-side gather (needs a cross-shard sources RPC); title-corpus contexts as an
-  additional signal.
+- **Follow-ons.** Match-feedback validation subsequently shipped in ADR-103. A cluster-side gather
+  (needs a cross-shard sources RPC) and title-corpus contexts remain open.

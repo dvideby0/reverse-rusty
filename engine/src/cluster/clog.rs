@@ -134,9 +134,9 @@ pub(crate) trait ClusterLog: Send + Sync {
     /// Drop every record at or before `up_to` (now captured by a base snapshot). The
     /// caller (coordinator) MUST have durably written the snapshot + manifest first —
     /// the manifest is the atomic commit point, so a crash before this truncation just
-    /// replays an already-captured (idempotent) tail. The epoch/checkpoint generation
-    /// lives in the coordinator manifest (the future Raft cluster-state document), not
-    /// in the log, so this byte-log stays a pure ordered store.
+    /// replays an already-captured (idempotent) tail. The local checkpoint generation
+    /// lives in the coordinator manifest, not in this log or the separate control-plane
+    /// document, so this byte-log stays a pure ordered store.
     fn checkpoint(&self, up_to: LogPos) -> Result<(), ShardError>;
 
     /// Test-only fault injection: make subsequent `append`s fail. Default no-op (e.g.

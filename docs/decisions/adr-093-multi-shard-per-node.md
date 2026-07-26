@@ -18,11 +18,14 @@ example. **Stage 4 (the reconciler) is built**: the parked
 [ADR-092](adr-092-unattended-reconciler.md) unattended controller landed on this foundation, its gRPC
 oracle extended to the packed K&gt;N topology that parked it (the reconciler itself converges a K=6/N=3
 packed map — no slot lost, zero-FN, epoch-invariant idempotence, restart routes zero-FN). The program
-is complete.
+is complete. ADR-095 later added conflict-free parallel move waves, ADR-096 added orphan-slot GC,
+and ADR-097 shortened retained-replica fence windows; those follow-ons are reflected in the current
+clustering design and operations docs.
 
 ## Context
 
-The distributed deployment today is **one shard per process**: a `ShardServer` wraps exactly one
+At the time this ADR was proposed, the distributed deployment was **one shard per process**: a
+`ShardServer` wrapped exactly one
 `Engine`, its `RecoverFrom` RPC **replaces** that engine's whole state, and its write-fence is a single
 per-server `AtomicU64`. The coordinator's `connect_remote`/`connect_replicated` hardcode
 `endpoints.len() == num_shards` — endpoint *i* is shard position *i*, 1:1.
@@ -42,7 +45,7 @@ data-moving rebalance — `rebalance_and_move` (ADR-090) and the unattended reco
 ([ADR-092](adr-092-unattended-reconciler.md), then parked pending this fix) — **silently overwrites data**: HRW packs several
 positions onto one node, but a one-shard `ShardServer` can only hold one, and the second `RecoverFrom`
 clobbers the first. And at RF=1 a node loss is unrecoverable (no replica), so the genuinely useful
-unattended scenarios (failover, rebalance) have no safe home today.
+unattended scenarios (failover, rebalance) had no safe home.
 
 **The fix is not to constrain those features — it is to make the deployment match the model the rest of
 the stack already assumes.** This is the Elasticsearch model: a node hosts many shards, each
@@ -71,7 +74,7 @@ unchanged.
 
 ### Per-node vs per-shard split (the core of the refactor)
 
-| State | Scope | Today | Multi-shard |
+| State | Scope | Before ADR-093 | Multi-shard |
 |---|---|---|---|
 | `norm`, `config`, `security`, `client_security`, `health_addr`, `data_dir` (root) | **per-node** | `ShardServer` fields | unchanged |
 | adopted `dict` / `tag_dict` (frozen) | **per-node, shared** | inside the one `ServerState` | a node-scope `ArcSwapOption<(Arc<Dict>, Arc<TagDict>)>`; every slot references the same `Arc`s |
@@ -171,7 +174,8 @@ fields stay (node-wide, carried on the recovery RPCs for content verification).
    `open_durable` restart re-attaches both slots; (b) a full HRW `rebalance_and_move` over a packed
    K=6/N=3 topology converges (no slot lost, fixpoint, zero-FN); (c) RF&gt;1 cross-replication (2 slots
    per node) survives a whole-node loss (read failover) + peer-recovers a position onto a fresh node.
-   Parallel multi-position moves stay a follow-on (`rebalance_and_move` is sequential).
+   Parallel multi-position moves remained a follow-on at this stage; ADR-095 later shipped
+   conflict-free move waves.
 4. **Rebase the reconciler ([ADR-092](adr-092-unattended-reconciler.md)) + the autoscaler** onto the
    now-safe foundation — the parked branch returns, correct, with the route-by-assignments gate (its P2)
    and no collision hazard (its P1, now structurally impossible). ✅ Landed with the packed-K&gt;N
@@ -180,12 +184,13 @@ fields stay (node-wide, carried on the recovery RPCs for content verification).
 
 ## Backward-compat / migration
 
-- **Wire:** the new `shard_id` fields default to 0 (proto3), so a mixed old/new mesh decodes; but the
-  distributed layer is **experimental / localhost-proven** (STATUS), so the supported story is "deploy a
-  matched coordinator + shardserver version," not rolling a mixed mesh.
+- **Wire:** the new `shard_id` fields default to 0 (proto3), so a mixed old/new mesh decodes; rolling
+  a mixed-version mesh is nevertheless unsupported. Deploy a matched coordinator and shardserver
+  version. Current distributed evidence covers in-process, localhost gRPC, and single-host container
+  networks, not an independently validated real multi-machine rollout.
 - **On-disk:** the `ShardServer` data layout moves from `data_dir/segments/…` to
-  `data_dir/shard_<id>/segments/…`. Because the distributed shard store holds no production data yet
-  (experimental), Stage 1 adopts the subdir layout directly (no in-place migration). The single-node
+  `data_dir/shard_<id>/segments/…`. Stage 1 adopted the subdirectory layout directly and did not
+  provide an in-place migration from the pre-ADR experimental layout. The single-node
   `Engine` on-disk format and the in-process cluster's durable layout are **untouched**.
 - **No control-plane / manifest format change** — the coordinator already speaks per-position.
 
@@ -194,34 +199,34 @@ fields stay (node-wide, carried on the recovery RPCs for content verification).
 - Extend `tests/cluster_grpc_oracle` (feature `distributed`): per-shard fence isolation (Stage 1);
   multiple slots per server ≡ single-node ≡ brute (Stage 2); relocate one co-located shard leaves the
   node's others intact + zero-FN, under a concurrent writer + across a resolve-only restart (Stage 3).
-- The existing single-node oracle (`tests/oracle.rs`) and the in-process cluster oracles are unaffected
+- The existing single-node oracle (`tests/oracle/`) and the in-process cluster oracles are unaffected
   (no front-end / placement change).
 - `check.sh` stays the gate; every stage is green before merge.
 
 ## Consequences
 
 - **Enables safe rebalancing + failover**, unblocking ADR-090's `rebalance_and_move`, the ADR-092
-  reconciler, RF&gt;1 in Helm, and the autoscaler's data-moving path — all of which are unsafe today
-  *because* of the one-shard limit.
+  reconciler, RF&gt;1 engine topology, and the autoscaler's data-moving path. The shipped Helm chart
+  still models RF=1; RF&gt;1 needs a custom topology or the roadmap operator work.
 - **Fewer nodes than shards** becomes a supported topology (cost: run K positions on N pods).
 - **Concentrated blast radius:** the allocator/control-plane/durable-coordinator layers — the parts that
   are hardest to change safely — need no change; the work is the transport + `ShardServer`, which is
   `distributed`-gated and oracle-fenced.
 - **Cost:** a multi-PR program (Stages 1–4) and a per-shard concurrency primitive in `ShardServer`. The
-  dict stays shared per node (no per-shard memory blowup). Per-node metrics/health become *aggregate over
-  the node's shards* (a follow-on to ADR-091's per-node `/_metrics`).
+  dict stays shared per node (no per-shard memory blowup). Per-node metrics now aggregate the node's
+  shard slots with per-shard labels.
 
-## Risks & open questions
+## Implementation choices and follow-ons
 
-- **Concurrency primitive for the shard map.** Prefer a std `RwLock<HashMap<ShardId, Arc<ShardSlot>>>`
-  (lean-dependency philosophy) over a new `dashmap` dependency; the read path clones the slot `Arc` and
-  drops the lock immediately, so the RPC never holds it. To confirm in Stage 1.
-- **Slot creation lifecycle.** `AdoptDict(shard_id)` (Stage 1) vs a dedicated `AddShard`/`RemoveShard`
-  (Stage 2/3) — and whether removal also GCs the on-disk `shard_<id>/`.
-- **Per-node observability.** ADR-091's `/_metrics` becomes per-node-aggregate-over-shards (+ optional
-  `{shard="…"}` labels) — a small follow-on, not a blocker.
-- **deploy topology.** Compose/Helm gain a "positions-per-pod" notion (Stage 2); v1 can keep 1:1 and
-  still benefit from the per-shard fence fix.
+- **Concurrency primitive.** The implementation uses
+  `RwLock<HashMap<ShardId, Arc<ShardSlot>>>`; reads clone the slot `Arc` and release the map lock
+  before an RPC operates on it.
+- **Slot lifecycle.** `AdoptDict` creates the first slot, `AddShard` creates later co-located slots,
+  and ADR-096's guarded `DropShard` plus boot-time trash sweep reclaims orphaned slot storage.
+- **Observability.** Node metrics aggregate every hosted slot and label per-shard series.
+- **Deployment topology.** The engine supports repeated endpoints for K positions on N&lt;K nodes.
+  The shipped Helm templates remain deliberately 1:1; co-location currently requires custom
+  coordinator arguments/manifests.
 
 ## Alternatives considered
 

@@ -41,8 +41,8 @@ fn multi_token_form_is_multiword_kind() {
 #[test]
 fn phrase_backed_multiword_form_stays_multiword() {
     // Even when the vocab has a phrase rule that folds "upper deck" into ONE feature, the raw
-    // surface form is still multi-word and must classify as MultiWord (a Phase-2 candidate) — the
-    // Phase-1 boundary can't depend on which phrases happen to exist (Codex review, ADR-060).
+    // surface form is still multi-word and must classify as MultiWord (a learned candidate) — the
+    // classifier boundary can't depend on which phrases happen to exist (Codex review, ADR-060).
     use crate::normalize::NormalizerBuilder;
     let mut b = NormalizerBuilder::new();
     b.add_phrase(

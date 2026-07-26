@@ -17,6 +17,11 @@ curl localhost:9200/_stats
   "rejected_parse": 0,
   "rejected_class_d": 0,
   "would_be_hot": 0,
+  "dedup": {
+    "bodies_total": 3,
+    "dup_joined": 0,
+    "distinct_bodies_est": 3
+  },
   "class_counts": {"a": 2, "b": 1, "c": 0, "d": 0, "h": 0},
   "postings": {
     "main":  {"count": 3, "p50": 1, "p95": 1, "p99": 1, "max": 1},
@@ -55,6 +60,28 @@ curl localhost:9200/_stats
 - **segment_holes** — fraction of tombstoned entries per segment (drives compaction decisions)
 - **memory** — breakdown of heap usage across the exact store, candidate index, and bloom filters
 
+This is the single-node shape. Cluster mode returns its coordinator-level shape instead:
+
+```json
+{
+  "mode": "cluster",
+  "shards": 8,
+  "replication_factor": 1,
+  "include_broad": false,
+  "durable": true,
+  "total_queries": 10342,
+  "shard_queries": [1301, 1279, 1290, 1287, 1304, 1288, 1296, 1297],
+  "class_counts": {"a": 9120, "b": 917, "c": 280, "d": 5, "h": 20},
+  "epoch": 4,
+  "pending_repairs": 0,
+  "has_tagged_queries": true
+}
+```
+
+`shard_queries` counts stored physical rows per logical position, so a query replicated or placed
+on multiple positions contributes to each holder. `pending_repairs > 0` means a partial cluster
+mutation is queued for `POST /_cluster/resync`.
+
 ## `GET /_cat/stats` — Engine metrics (human-readable)
 
 ```bash
@@ -69,6 +96,7 @@ class A/B/C/D/H  2 / 1 / 0 / 0 / 0
 rejected parse   0
 rejected classD  0
 would-be hot     0
+dedup            0 joined / 3 bodies (distinct est 3)
 postings main    3 sigs (p50 1 p95 1 p99 1 max 1)
 postings broad   0 sigs (p50 0 p95 0 p99 0 max 0)
 postings hot     0 sigs (p50 0 p95 0 p99 0 max 0)
@@ -78,6 +106,9 @@ broad lane       columnar (batch_size 256, materialize true, prefilter true, max
 segment  entries  holes
 0        3        0.00%
 ```
+
+`/_cat/stats` is single-node only. Cluster mode returns 501 with directions to `/_stats` or
+`/_cat/shards`.
 
 ## `GET /_cat/segments` — Per-segment LSM detail
 
@@ -120,6 +151,19 @@ curl 'localhost:9200/_cat/segments?format=json'
 ]
 ```
 
+`/_cat/segments` is single-node only. Cluster mode does not expose remote per-shard LSM internals;
+use `GET /_cat/shards` for position-level counts and assignments:
+
+```
+shard queries nodes
+    0    1301 1+2
+    1    1279 2+3
+```
+
+Pass `?format=json` for rows shaped as
+`{"shard":0,"queries":1301,"nodes":"1+2"}`. The first node is the primary and `+`-separated
+following nodes are replicas; `-` means no committed assignment is available.
+
 ## `GET /_health` — Health check
 
 ```bash
@@ -139,9 +183,13 @@ curl localhost:9200/_health
 
 | Status | Meaning |
 |---|---|
-| `green` | All systems healthy |
-| `yellow` | Some segments were skipped on load, or some are vocab-stale (data may be incomplete) |
-| `red` | WAL or persistence subsystem is unhealthy |
+| `green` | Single-node durability is healthy, or every cluster position answers with no queued repair |
+| `yellow` | Single-node load skipped/stale segments, or cluster partial applies are queued for resync |
+| `red` | Single-node WAL/persistence failure, or a cluster position cannot answer; cluster mode returns HTTP 503 |
+
+Cluster health uses a different, deliberately smaller payload:
+`{"status":"green","mode":"cluster","shards":8,"pending_repairs":0}`. A yellow or red response also
+includes `reason`.
 
 ## `GET /_metrics` — Prometheus metrics
 
@@ -154,6 +202,11 @@ compatible collectors — engine gauges, event counters, per-endpoint HTTP laten
 gauge, WAL size/pending gauges, cumulative flush/compaction-time counters, a
 `durability_failures_total{op}` counter (ADR-021), and — when bearer-token auth is enabled — an
 `auth_failures_total{reason="missing"|"invalid"}` counter for rejected requests (ADR-062).
+
+In cluster-coordinator mode this same route refreshes cluster-wide query, per-position, and gRPC
+transport series. A standalone `shardserver` or `controlserver` exposes its lean node metrics on the
+separate address configured with `--metrics-addr`; that is not the coordinator's REST
+`/_metrics` route.
 
 ADR-108 adds low-cardinality local bounded-ranking telemetry:
 `ranked_requests_total{outcome,scope}`, `rank_total_relation_total{relation}`,

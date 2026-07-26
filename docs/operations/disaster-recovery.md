@@ -1,6 +1,6 @@
 # Disaster recovery
 
-The DR runbook (roadmap Tier 5 M3): what you can lose, what each loss costs (RPO/RTO), and the
+This runbook explains what you can lose, what each loss costs (RPO/RTO), and the
 recovery flow for the failures the per-component tables don't cover — volume loss, control-quorum
 majority loss, and whole-cluster loss. Routine single-component failures (a pod restart, a rolling
 restart, a replica failover) are **not** re-documented here — they live in
@@ -123,9 +123,10 @@ cross-shard consistent. Snapshots taken at different times can disagree — a qu
 shard A's snapshot and shard B's exists in one restored shard and not the other (matching is
 per-query, so the effect is "that query is missing", not corruption). For a consistent **set**,
 quiesce writes (pause the ingest pipeline), snapshot every shard + control volume, then resume —
-the [runbook §7 procedure](cluster-deployment.md) (a stateless coordinator's `POST /_checkpoint`
-no-ops; each node's volume is crash-consistent on its own). If you must restore from a non-quiesced set, treat the window between the oldest and
-newest snapshot as lost and replay it from upstream.
+the [runbook §7 procedure](cluster-deployment.md) (a stateless coordinator's
+`POST /_checkpoint` cannot seal remote shards and `POST /_backup` returns 400; each node's volume
+is crash-consistent on its own). If you must restore from a non-quiesced set, treat the window
+between the oldest and newest snapshot as lost and replay it from upstream.
 
 ## 4. Post-recovery verification checklist
 

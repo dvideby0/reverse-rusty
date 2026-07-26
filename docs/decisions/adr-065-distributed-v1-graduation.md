@@ -4,16 +4,17 @@
 
 
 - **Status:** **Accepted (2026-06-10) — a program ADR.** Defines the milestone and its acceptance
-  checklist; each criterion ships under its own ADR/PR. Tracked in [`roadmap.md`](../roadmap.md) Tier 3 —
-  **the roadmap copy is the live tracker** (completion marks land there); this ADR records the
-  decision-time scope.
+  checklist; each criterion ships under its own ADR/PR. This ADR preserves the decision-time scope;
+  [`CHANGELOG.md`](../CHANGELOG.md) records shipped outcomes and [`roadmap.md`](../roadmap.md) owns
+  the remaining acceptance work.
 - **Context:** **Cluster v1** — the in-process multi-shard core + durable reopen + dynamic vocabulary —
-  is built and oracle-proven (Roadmap Tier 0, ADR-046). The **distributed multi-node layers**
+  is built and oracle-proven (ADR-046). The **distributed multi-node layers**
   (ADR-027, 029, 031–048: the gRPC transport + dict/tag-dict shipping, replication + no-quiesce peer
   recovery + translog/retention, the durable openraft control plane, the HRW allocator, live data-moving
-  handoff, the autoscaler, partial-apply repair) are **built and oracle-proven in-process / on localhost
-  but labeled experimental** — an honest label that is now the gating caveat in every status line, and
-  the next body of work. Decision: drive these layers to **Distributed v1**, defined as:
+  handoff, the autoscaler, partial-apply repair) are built and proven in-process, over localhost gRPC,
+  and through the multi-process single-host container harness. Independent multi-machine evidence
+  remains open, so the distributed deployment stays experimental. Decision: drive these layers to
+  **Distributed v1**, defined as:
 
   > *Feature-complete and hardened enough that every advertised feature can be exercised in a real
   > multi-machine deployment — **not yet production-proven** (that takes mileage, not engineering), but
@@ -56,14 +57,16 @@
       procedure; the cluster version must cover coordinator manifest + per-shard segments + logs).
   12. **Scale proof at target.** A multi-shard load test at **≥20M stored queries on real hardware**
       (the largest soak to date is 10M, single-node), plus the real-corpus false-negative / throughput
-      audit already owed in [`STATUS.md`](../STATUS.md) "Current limitations" — the two runs that turn
+      audit tracked in the
+      [`roadmap`](../roadmap.md#real-corpus-correctness-and-throughput-audit) — the two runs that turn
       the headline numbers from design-target evidence into deployment evidence.
 - **Explicitly out of scope for v1:** a "production-proven" claim (mileage, not engineering);
   QPS/compute-replica autoscaling (HPA territory — ADR-045 scope note stands); any object-store
   dependency (ADR-033 shared-nothing stands).
 - **Why this is safe:** every criterion is additive hardening or surface work over already-oracle-proven
-  mechanisms; each PR keeps the cluster oracle suite green, and the multi-machine harness (criterion 3)
-  exists precisely to catch the class of failure localhost structurally cannot.
+  mechanisms; each PR keeps the cluster oracle suite green, and the single-host container lifecycle
+  harness catches network-namespace and process-lifecycle failures localhost structurally cannot.
 - **See also:** ADR-027–048 (the layers being graduated), ADR-033 (the shared-nothing model), ADR-064
-  (the single-node drop-in-parity program), [`STATUS.md`](../STATUS.md) Current limitations (the labels
-  this milestone retires), [`roadmap.md`](../roadmap.md) Tier 3.
+  (the single-node drop-in-parity program), the roadmap's
+  [`real-corpus audit`](../roadmap.md#real-corpus-correctness-and-throughput-audit) and
+  [`real Kubernetes exercise`](../roadmap.md#real-kubernetes-failure-and-recovery-exercise).

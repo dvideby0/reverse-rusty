@@ -79,11 +79,13 @@ quarantine case. Real data validates the cost-class design.
 ### 3.4 Smaller, noted limitations
 - **Misspellings**: a real title says `MOSIAC` (Mosaic). A query for `mosaic` won't match `mosiac` —
   a recall miss, not a contract violation (our zero-FN guarantee is relative to supported semantics).
-  Optional future work: high-precision fuzzy/typo expansion (edit-distance ≤1 on rare tokens).
+  High-precision, review-first typo expansion is captured in the
+  [roadmap](../roadmap.md#alias-and-punctuation-recall-refinements).
 - **Hyphenated set names**: `E-X Century` → `e, x, century`; `All-Rookie` → `all, rookie`. The corpus
   learner recovers these as glued phrases; no normalizer rule needed.
 - **Card numbers** (`#866`, `#BDC-85`) are currently generic terms. They are highly selective and
-  could be modeled as a `card_number` field (a great anchor) — a cheap future win.
+  could be modeled as a `card_number` field (a great anchor); that refinement shares the same
+  [roadmap item](../roadmap.md#alias-and-punctuation-recall-refinements).
 - **Season years** `2025-26` → leading `year:2025` captured (the trailing `26` is harmless noise).
 
 ---
@@ -129,4 +131,4 @@ export CARGO_TARGET_DIR=/tmp/reverse-rusty-target
 cargo run --release --bin norm -- /path/to/titles.txt   # prints extracted features per title
 ```
 The sample of real titles used here is in the conversation; drop any set of titles into a file to
-re-test. Normalizer fixes are in `src/normalize.rs`; correctness is still guarded by `tests/oracle.rs`.
+re-test. Normalizer fixes are in `src/normalize.rs`; correctness is still guarded by `tests/oracle/`.

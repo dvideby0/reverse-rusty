@@ -8,7 +8,7 @@
 //! across shard counts {1, 3, 8}, broad on/off, live add/remove churn, and a checkpoint.
 //!
 //! The `Brute`, `vocab`, and `build_corpus` helpers are copied from
-//! `tests/cluster_oracle.rs` (the same deliberate "shares nothing with the engine"
+//! `tests/cluster_oracle/` (the same deliberate "shares nothing with the engine"
 //! oracle), so a compile/index/exact bug cannot hide by being present on both sides.
 //!
 //! Split into per-concern modules — the shared harness lives in `harness.rs`; each

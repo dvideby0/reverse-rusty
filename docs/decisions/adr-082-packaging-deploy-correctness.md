@@ -4,6 +4,10 @@
 
 **Status:** Accepted (2026-06-22)
 
+**Current outcome.** ADR-083 subsequently wired the coordinator to the control quorum, and ADR-086
+made committed assignments an optional routing source with control-endpoint failover. The
+advertise-URL and class-D decisions in this ADR remain part of that deployed path.
+
 **Context.** [ADR-081](adr-081-deployment-packaging-runbook.md) shipped the production packaging and
 recorded four deferrals. Two were deploy-time *correctness* gaps small enough to close directly — and
 verifying them against the code corrected one outright:

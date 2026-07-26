@@ -3,10 +3,10 @@
 *Scope: an abstract description of how production percolator deployments are **actually used** — the
 read/write patterns Reverse Rusty aims to serve. Distilled from a real deployment but stated in generic
 terms (stored queries + structured tags + filter predicates; no domain specifics). This is the reference
-workload behind the Tier-4 "percolator parity" roadmap ([`../STATUS.md`](../STATUS.md) Tier 4), the
-gap analysis in [`prior-art.md`](prior-art.md) §2, and the design in [`../design/matching.md`](../design/matching.md)
+workload behind the percolator-parity decisions, the gap analysis in
+[`prior-art.md`](prior-art.md) §2, and the design in [`../design/matching.md`](../design/matching.md)
 §5 / [`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §11 ([`../DECISIONS.md`](../DECISIONS.md)
-ADR-049). Companion to [`prior-art.md`](prior-art.md) §2, which surveys the percolator's internals; this
+ADR-049/055/064). Companion to [`prior-art.md`](prior-art.md) §2, which surveys the percolator's internals; this
 file describes how one is *operated*.*
 
 ## The shape
@@ -76,12 +76,12 @@ presentation-layer concern** that never needs to touch the matching core.
 | include / exclude / OR-group DSL | required / forbidden / any-of | ✅ have (translation contract verified — §Drop-in parity below) |
 | compile-time extract + match-time select | signature-cover optimizer | ✅ have |
 | over-match → app re-test (two stages) | integer-exact verifier ⇒ output is false-positive-free *under RR's semantics* | ✅ subsumes under RR semantics; fronting a **foreign** precision stage instead requires the superset contract — **verified** (ADR-064 PoC, §Drop-in parity) |
-| create / **update** / delete / bulk | memtable + tombstones + `/_bulk` per-item statuses (ADR-018) + per-query `version` | ◑ divergence — a REST re-`PUT` is *additive* (old copy matches until DELETE); atomic upsert = [ADR-064](../DECISIONS.md) item 1 |
-| **exclude-only (pure-negative) queries** | rejected at ingest (cost class D) | ❌ divergence — ES/OS rewrites them to *match-all-except* (`fixNegativeQueryIfNeeded`); opt-in always-candidate lane = [ADR-064](../DECISIONS.md) item 2 (interim: caller side-list) |
+| create / **update** / delete / bulk | atomic replace-by-id (`PUT`/upsert), create-only conflict, tombstoned old version, `_bulk` item statuses | ✅ built — ADR-067/117 |
+| **exclude-only (pure-negative) queries** | class D: rejected by default or stored with `accept_class_d` as an opt-in universal broad row | ✅ explicit ES-style match-all-except semantics when enabled — ADR-068/080 |
 | write visibility / read-your-writes | every write publishes a fresh snapshot before responding | ✅ **better** — immediate, no refresh interval |
 | **per-query structured tags** | interned `(key,value)` tags, SoA column | ✅ **built** — ADR-049 (single-node) + ADR-055 (cluster); scalar values coerce to canonical JSON text on ingest AND filter (numbers/bools, the ES keyword behavior), structured values fail loud ([ADR-073](../DECISIONS.md)) |
 | **filter candidates by tag** | ES `bool`/`terms` + native filter, pushed into verify | ✅ **built** — ADR-049/055. AND-across-keys / OR-within-a-key only (no cross-key OR / `must_not` — covered by two calls + client union) |
-| rank / boost / `_score` | additive request-boosts + priority tag, `(score desc, _id asc)` | ✅ **built single-node** — ADR-059. *Ordering* parity (e.g. boosted-status-first banding) reproduces; multiplicative score arithmetic does not (and is not needed by the workload) |
+| rank / boost / `_score` | additive request boosts + typed priority, `(score desc, _id asc)`, bounded top-K | ✅ built standalone and cluster — ADR-059/075/107/108/110. Multiplicative score arithmetic is intentionally outside this workload |
 | pagination (limit / offset) | `from`/`size` on `/_search` + `/_mpercolate`, untruncated `total` | ✅ **built** — ADR-059 |
 
 **Already aligned (or better).** Identity, the boolean DSL, the compile-time-extract / match-time-select
@@ -94,11 +94,11 @@ becomes **RR candidates ⊇ that stage's accepts**, which is exactly what the §
 establishes and the ADR-064 PoC verified empirically.
 
 **The dominant-read-pattern needs** — **per-query metadata**, **filtered percolation**, and **ranking +
-pagination** — are **built and oracle-proven** (ADR-049 single-node, ADR-055 through the cluster, ADR-059
-ranking/pagination single-node; specified in [`../design/matching.md`](../design/matching.md) §5 and
-[`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §11, tracked in
-[`../STATUS.md`](../STATUS.md) Tier 4). The remaining operational divergences form the
-[ADR-064](../DECISIONS.md) work package.
+pagination** — are **built and oracle-proven** in standalone and cluster paths (ADR-049/055/059/075/
+107/108/110; specified in
+[`../design/matching.md`](../design/matching.md) §5 and
+[`../design/ingestion-and-updates.md`](../design/ingestion-and-updates.md) §11). ADR-064 preserves
+the drop-in audit and translation contract that drove the follow-on parity decisions.
 
 ## Drop-in parity: the verified configuration + translation contract (ADR-064, 2026-06)
 
@@ -117,13 +117,16 @@ year-demotion so number typing is position-insensitive end to end. `.`→split i
 reference matcher tolerates trailing `.`/`,` on a token, so keeping `.` would turn `card.`-style title
 tokens into distinct features — a real FN; splitting makes decimals like `9.5` ≈ `{9, 5}` instead, an
 FP-only loosening the precision stage re-filters. Run with the **broad lane enabled** (`--include-broad`
-or per-request on `/_mpercolate`) — single-hot-term queries are class C and *silently unmatchable*
-otherwise — and raise `ParseLimits` to envelope the corpus (side-listing anything still rejected).
+or per-request `include_broad`) when class-C and accepted class-D rows belong in the requested scope.
+With broad disabled they are excluded by the documented visibility contract, not lost silently.
+Raise `ParseLimits` to envelope the corpus (side-listing anything still rejected).
 
 **Translation rules** (each preserves semantics or makes RR strictly *more* permissive — FP-only, which
 the precision stage re-filters):
-1. Bare terms and OR-groups translate 1:1; quoted phrases translate 1:1 but compile to a **bag of
-   required tokens** (no adjacency) — a recall superset of phrase semantics.
+1. Bare terms and OR-groups translate 1:1. For the conservative drop-in stage, render a foreign
+   quoted phrase as **unquoted required terms** to preserve the bag-of-terms recall superset. RR quotes
+   now enforce real analyzed adjacency/order (ADR-120); use them only when the foreign analyzer
+   contract has been proven compatible.
 2. **Drop all negations.** Single-token negations *look* 1:1 but have demonstrated FN edges (the
    reference matcher's end-of-string regex quirks, multi-feature negated tokens like `-9.5`, query-side
    diacritic asymmetry); forbidden clauses only ever *narrow*, and the precision stage re-applies every
@@ -140,8 +143,8 @@ the precision stage re-filters):
    rules 2 and 7 deliberately *drop* clauses from the stored text, so re-parsing `_source` yields the
    widened parse, not the original (the dropped negations/groups would silently vanish from the
    precision stage too — over-accepting). A consumer that keeps its own precision stage must therefore
-   resolve the **original** expression by id from its own source of truth, or use the opaque
-   original-expression passthrough once [ADR-064](../DECISIONS.md) item 7 lands. The round-trip
+   resolve the **original** expression by id from its own source of truth. RR stores/returns the
+   translated query source; a separate opaque original-expression passthrough is not built. The round-trip
    property (rendered text re-parses to the original) holds — and is property-testable — for every
    clause the translation *preserves*.
 6. A repeated-term occurrence-count requirement (a reference-matcher-only feature) survives by
@@ -155,8 +158,8 @@ the precision stage re-filters):
    excludes enforced in exact verification), the engine-native form of the interim client-side
    side list the PoC used.
 
-**Known residual FP classes** (all predicted, all re-filtered by a precision stage): phrase-as-bag
-adjacency loss, dropped negations, decimal splits under `.`→split, occurrence counts unenforced at
+**Known residual FP classes** (all predicted, all re-filtered by a precision stage): the deliberate
+unquoted phrase-as-bag translation, dropped negations, decimal splits under `.`→split, occurrence counts unenforced at
 stage one (deduped at compile; preserved in the text per rule 6), and the class-D always-candidates
 (rule 8).
 **Known residual FN classes: none.** The last one — the `pop` number-context position-sensitivity
@@ -167,5 +170,5 @@ parity configuration above.
 > pairs; it is not the full-corpus audit. Running RR against this workload's **real corpus at scale** (a
 > false-negative / false-positive / throughput pass over messy real titles — e.g. a shadow-read
 > comparison during a dual-write migration window) remains the open, highest-leverage validation step
-> flagged in [`../STATUS.md`](../STATUS.md) "Current limitations" — and is Distributed-v1 criterion 12
-> ([ADR-065](../DECISIONS.md)).
+> in the [`roadmap`](../roadmap.md#real-corpus-correctness-and-throughput-audit) and Distributed-v1
+> criterion 12 ([ADR-065](../DECISIONS.md)).

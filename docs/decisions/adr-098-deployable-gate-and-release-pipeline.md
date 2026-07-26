@@ -15,8 +15,8 @@
   deployment-shaped was folded into Distributed-v1 criterion 12 (the ≥20M scale proof, ADR-065) —
   there was no **"deployable feature complete" contract** distinct from "production-proven at
   scale" (the Tier 5 gap named by the 2026-06-24 deployability review). Concretely: the four
-  deployment modes and the v1 non-goals were documented but scattered (two runbooks + STATUS +
-  ADR-076/078/079); the two **local** modes — the ones a `cargo build` user actually runs — had
+  deployment modes and the v1 non-goals were documented but scattered (two runbooks + the old
+  project inventory + ADR-076/078/079); the two **local** modes — the ones a `cargo build` user actually runs — had
   **no smoke at all** (the Compose/Helm modes had scripts, two of them unwired); and there was
   **no versioned release**: no git tags, no image publishing, `:latest`-or-build-it-yourself only.
   The `k8s-smoke.sh` script had also never passed end-to-end (same latent `Path<u64>` id bug the

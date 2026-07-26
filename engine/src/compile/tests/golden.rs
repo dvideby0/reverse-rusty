@@ -1,7 +1,7 @@
 //! Golden extraction cases — exact required/forbidden/any-of feature-*name* sets,
 //! authored by hand from the spec (docs/design/matching.md §1 +
 //! docs/design/normalization.md §1), NOT captured from `extract`. The differential
-//! oracle (tests/oracle.rs) builds its ground-truth queries by calling THIS
+//! oracle (tests/oracle/) builds its ground-truth queries by calling THIS
 //! `extract`, so an extraction bug corrupts both sides equally and stays invisible
 //! there. These pins close that gap, and additionally assert the load-bearing
 //! "forbidden never anchors" invariant at the data level. See docs/DECISIONS.md ADR-050.

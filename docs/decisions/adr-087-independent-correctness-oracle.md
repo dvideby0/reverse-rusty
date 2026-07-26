@@ -40,7 +40,7 @@
   verification — for the **front end** it calls the engine's OWN `dsl::parse`, `compile::extract`, and
   `Normalizer` (`tests/oracle/harness.rs`). So a semantic bug in the parser, normalizer, or extractor
   corrupts both sides identically and the oracle stays green (the shared-front-end blind spot,
-  **ADR-050**; the reference-free `tests/adversarial.rs` only partly covers it). ADR-050 narrowed the
+  **ADR-050**; the reference-free `tests/adversarial/` only partly covers it). ADR-050 narrowed the
   gap with spec-authored golden tests, but golden tests are a finite set of point cases — they cannot
   differentially exercise the front end over millions of (title, query) pairs. The Phase 0 directive
   is precisely to prove which parts are real *under an independent check*; for the front end, that

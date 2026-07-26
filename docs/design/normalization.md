@@ -21,7 +21,9 @@ See the [overview](README.md) for the mental model and correctness contract.*
 
 ## 1. Query DSL
 
-Constrained on purpose — a smaller language means every query is gateable by construction.
+Constrained on purpose — the compiler can reduce every query to an integer predicate and can identify
+queries with no selective positive gate explicitly. A negation-only query is class D: rejected by
+default or stored deliberately in the opt-in universal broad lane.
 
 ```
 Grammar (EBNF-ish):
@@ -113,7 +115,7 @@ what makes the feature spaces line up. Pipeline, all over a reusable scratch buf
 3. **Alias / entity extraction (Aho-Corasick / daachorse):** one pass over the token stream emits
    multi-token entities with leftmost-longest semantics:
    - `upper deck` / `ud` → `brand:upper_deck`
-   - `michael jordan` / `mj`(only if safely disambiguated) → `player:michael_jordan`
+   - a configured `michael jordan` / `mj` alias → `player:michael_jordan`
    - `psa gem mt 10` / `psa 10` / `psa10` → `grader:psa` + `grade:10` + `grader_grade:psa10`
 4. **Pattern features:** regex-free scanners for `year` (19xx/20xx), `grade` (0–10, half-grades),
    `lot/bulk/count`, set numbers, autograph/signed flags, reprint/custom/proxy flags. Number typing
@@ -125,33 +127,37 @@ what makes the feature spaces line up. Pipeline, all over a reusable scratch buf
 5. **Dense feature IDs:** every feature → a `u32` from a global **feature dictionary** (§3). Strings die
    here; downstream is integers only.
 
-Output is a `TitleFeatureSet`: a sorted, deduped `&[u32]` of feature IDs plus typed entity slots
-(year, grader, grade, ...) packed into a fixed-size struct for slot checks. Reused across titles.
-When a snapshot contains at least one quoted predicate, the same pass additionally materializes
-sorted canonical/positive `PositionArc` buffers in the caller's reusable match scratch. Phrase-free
-snapshots do not build them and remain on the existing flat path. The positive graph is the union of
-canonical, force-additive, positioned raw-token, and overlapping-entity paths regardless of whether
-an alias is active; this prevents an ordinary collapse phrase from hiding a valid quoted path.
-Whitespace runs produce the same token positions as one space. Positive-graph labels feed a separate
-candidate-only probe buffer.
+`match_features` writes a sorted, deduplicated `Vec<FeatureId>` supplied by the caller.
+`match_features_dual` writes the canonical negative view `N(T)` and positive superset `P(T)` into two
+caller-owned reusable vectors; the exact matcher consumes those integer slices directly—there is no
+typed entity-slot result structure. When a snapshot contains a quoted predicate,
+`match_phrase_views` additionally materializes sorted canonical/positive `PositionArc` buffers in
+reusable match scratch. Phrase-free snapshots skip that work. The positive graph unions canonical,
+force-additive, positioned raw-token, and overlapping-entity paths, so a collapsed phrase cannot hide
+a valid quoted path. Whitespace runs produce the same positions as one space.
 
-**MJ disambiguation note.** Ambiguous aliases (`MJ`) only fire when corroborated (e.g. co-occurring
-`bulls`, a basketball set, or another Jordan-specific token), otherwise they are dropped. Dropping is
-safe for recall *of the alias* but we must ensure queries written as `MJ` are themselves normalized the
-same way at compile time — they are, because the normalizer is shared. Determinism is the invariant.
+Aliases are explicit semantic configuration. The normalizer does not infer contextual corroboration
+for an ambiguous short form such as `mj`; operators should activate such an alias only when that
+meaning is appropriate for the corpus.
 
 ---
 
 ## 3. Feature dictionary
 
-- `FeatureId(u32)` assigned densely, **ordered by global query-document frequency** (rarest = lowest
-  IDs is one option; we keep an explicit `freq[]` table rather than relying on ID order so we can
-  re-rank on compaction). Frequency drives anchor selection (see [`matching.md`](matching.md) §1).
-- Feature *kinds* are encoded in high bits or a side table: `Year`, `Brand`, `Player`, `CardTerm`,
-  `Grader`, `Grade`, `GraderGrade`, `Flag`, `Generic`. Kinds let the exact matcher do slot checks and
-  let the optimizer reason about selectivity per kind.
-- The dictionary is immutable per segment (compaction can re-rank); the hot delta uses an append-only
-  overlay so new features get IDs without rewriting segments.
+- One `Dict` belongs to an engine; a cluster shares one frozen dictionary across every shard so a
+  `FeatureId` has the same meaning everywhere. Segments persist/validate that feature space rather
+  than owning independent dictionaries.
+- Interned `FeatureId(u32)` values are dense in **first-seen order**, below the reserved synthetic-ID
+  range. Parallel `names`, `kinds`, `freq`, and `mask_bit` vectors carry metadata; kinds are not packed
+  into the ID and the exact matcher does not use typed entity slots.
+- `freq[]` is query-document frequency and drives `anchor_plan` independently of ID order. On
+  finalization the 64 highest-frequency interned features receive fixed common-mask bits. That mapping
+  must remain frozen because existing exact rows store those bits; compaction never reorders IDs or
+  re-ranks the mask.
+- Mutable compile paths may intern a newly seen feature. Read-only/frozen paths resolve an absent name
+  to a deterministic synthetic ID in the reserved high-bit range. Coordinator and shards therefore
+  agree on post-freeze vocabulary without mutating the shared dictionary (ADR-046); a synthetic hash
+  collision can over-retrieve but cannot cause a false negative.
 - **Equivalences (aliases).** The dict carries a transient `EquivMap` (member `FeatureId` → its group)
   consulted by the compile-time expansion pass (`Extracted::expand_equivalences`): a required feature in
   an equivalence group widens to an any-of over the group, so a query phrased with one surface form
@@ -212,11 +218,14 @@ features come from* rather than the matching core:
 - **Aspects-first ingestion.** The grade is often stated *without* the grader in the title; eBay returns
   such listings via structured item-specifics (aspects). The right *document* is the title **plus**
   eBay's `(field,value)` aspects (`grade=10, grader=psa, player=…, set=…`); the title normalizer becomes
-  the *fallback* path for free-text gaps. (Design-only; see [`../STATUS.md`](../STATUS.md).)
+  the *fallback* path for free-text gaps. This remains proposed; see
+  [`Aspects-first ingestion`](../roadmap.md#aspects-first-ingestion).
 - **Learned entity vocabulary.** The player/set/parallel vocabulary is unbounded and multi-word, so the
   hand-built vocab must be replaced by the corpus learner — see
   [`../research/corpus-feature-learning.md`](../research/corpus-feature-learning.md). As of ADR-010,
   `Normalizer::default_vocab()` builds an **empty** normalizer (no hard-coded card vocabulary); domain
   vocabulary is supplied at runtime via the `NormalizerBuilder` fluent API or the `Vocab` system
-  (learned from query any-of groups, ADR-015). The NPMI corpus learner (`src/bin/learn.rs`) remains a
-  separate analysis binary, not yet wired in as a runtime vocabulary source.
+  (learned from query any-of groups, ADR-015). The NPMI corpus learner is wired into that runtime
+  source through `CorpusLearnConfig` / `learn_vocab_from_corpus` (ADR-053); per-range reruns remain
+  part of the roadmap's
+  [`self-tuning recommendations`](../roadmap.md#self-tuning-cost-and-placement-recommendations).

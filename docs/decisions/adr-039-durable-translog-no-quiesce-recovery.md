@@ -61,7 +61,7 @@
 - **Consequence:** A coordinator can bring a fresh node up from a live peer WITHOUT quiescing the source's
   writes, and a durable data node self-recovers after its own crash. The default in-memory / RF=1 / in-process
   paths are byte-identical, so every prior oracle is unchanged and green — the acceptance signal. Proven by:
-  `tests/cluster_grpc_oracle.rs::grpc_peer_recovery_without_quiescing` (a fresh node recovers segments at `P`,
+  `tests/cluster_grpc_oracle/recovery.rs::grpc_peer_recovery_without_quiescing` (a fresh node recovers segments at `P`,
   writes land after `P`, the translog tail catches them up, recovered ≡ live source ≡ brute oracle over the
   final live set — zero false negatives across the wire); `replica.rs::peer_recover_replays_tail_without_quiescing`
   (the in-process analogue) and `::durable_shard_self_restarts_from_translog` (§6); plus `translog.rs` unit tests
@@ -74,5 +74,4 @@
   transport + DSL-on-wire + dict shipping the `FetchTranslog` wire reuses), ADR-037/038 (the control plane — the
   cluster-state doc, explicitly NOT the query mutations this log carries), ADR-033 (shared-nothing — local
   segments + per-node durable log, no object store), `src/cluster/{translog,shard,replica,server,remote,coordinator}.rs`,
-  `engine/grpc/proto/shard.proto` (`FetchTranslog`/`TranslogEntry`), `tests/cluster_grpc_oracle.rs`.
-
+  `engine/grpc/proto/shard.proto` (`FetchTranslog`/`TranslogEntry`), `tests/cluster_grpc_oracle/`.

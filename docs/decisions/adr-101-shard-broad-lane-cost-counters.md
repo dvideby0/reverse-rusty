@@ -2,6 +2,10 @@
 
 > [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
+> **Current outcome:** ADR-112 later added the shard-side ranked batch stream anticipated below.
+> Current counter availability and labels are documented in
+> [`reference/api/observability.md`](../reference/api/observability.md).
+
 - **Status:** **Done (2026-07-02).** `reverse_rusty_broad_{candidates,postings_scanned,queries_evaluated,batches}_total{shard}`
   — four native Prometheus counter families in the shard node's `/_metrics` exposition.
 
@@ -81,5 +85,5 @@
     ADR-091/100 declined); the counter family + the RPC histogram already separate "how much
     broad work" from "how slow".
 
-- **Deferred follow-ons.** A shard-side batch-percolate RPC (would light up
-  `queries_evaluated`/`batches`); the ADR-100 deferrals stand unchanged.
+- **Follow-on outcome.** ADR-112 later added the shard-side ranked batch stream and its columnar
+  execution. The remaining ADR-100 timing deferrals stand unchanged.

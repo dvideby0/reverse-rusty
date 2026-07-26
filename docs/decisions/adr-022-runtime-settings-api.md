@@ -48,8 +48,7 @@
   exposing them via `/_settings` needs an atomic/lock around those fields (they're currently set once at
   startup); (3) a config **file** loader (elasticsearch.yml-style) layered under the CLI flags.
 - **See also:** ADR-016 (lock-free snapshot reads — this puts the config there too), the vocab snapshot
-  fix (same `Arc`-in-snapshot pattern), `config.rs` (`EngineConfig` + `validate`), `STATUS.md` (the
-  feature-gating and ops-ergonomics backlog this sits alongside), ADR-025 (the follow-up that actually
-  wired the three query-complexity limits into the parser — they were classified *dynamic* here before
-  they were enforced anywhere).
-
+  fix (same `Arc`-in-snapshot pattern), `config.rs` (`EngineConfig` + `validate`), the roadmap's
+  [`API and operator ergonomics`](../roadmap.md#api-and-operator-ergonomics), ADR-025 (the follow-up
+  that actually wired the three query-complexity limits into the parser — they were classified
+  *dynamic* here before they were enforced anywhere).

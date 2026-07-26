@@ -40,13 +40,11 @@
 //! backend's under the same logical script — the differential asserts the converged
 //! voters/nodes/assignments/model, not a literal epoch match.
 //!
-//! ## Scope (ADR-038)
-//! The log store here is **in-memory** — sufficient to prove consensus convergence; a durable
-//! CRC-framed store (reusing `storage::crc32` + `durable_rename`) is the deferred follow-on. The
-//! cross-process gRPC `ControlService` + a tonic [`RaftNetwork`](openraft::network::RaftNetwork) are step 5b-2 (a
-//! sibling module); the [`in_process_cluster`] builder here uses a direct-dispatch
-//! [`RaftNetwork`](openraft::network::RaftNetwork) over a registry
-//! of in-process [`Raft`] handles, which proves the backend end-to-end with no sockets.
+//! ## Storage and transport
+//! [`in_process_cluster`] deliberately uses the in-memory log and a direct-dispatch
+//! [`RaftNetwork`](openraft::network::RaftNetwork) for the single-process oracle. Deployed manager
+//! nodes use the sibling gRPC `ControlService` plus tonic network and, when given a data directory,
+//! the ADR-041 CRC-framed durable log, vote, committed-state, and snapshot stores.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;

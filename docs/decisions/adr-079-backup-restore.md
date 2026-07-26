@@ -45,7 +45,7 @@ snapshot; restore is the existing `open()` pointed at the (relocated) copy.
   dir the manifest is copied **last** (the engine's own "build durable, then commit" discipline).
   A pre-existing `dest` is refused.
 - **Copy, never regenerate, the manifests.** A byte-for-byte file copy preserves the manifest
-  version word — including the v4 class-D rollback fence (ADR-068) — and carries the embedded
+  version word — including the class-D fence and every later semantic/layout fence — and carries the embedded
   dict / vocab / tag-dict blobs verbatim, so the restore sees identical placement, the same loud
   fence, and the same tag space with no special-casing. Orphan `.seg` files (left by an earlier
   crashed compaction) are skipped — only manifest-referenced files are copied.
@@ -62,7 +62,8 @@ snapshot; restore is the existing `open()` pointed at the (relocated) copy.
 correct and simple, but it pauses *writes* (not reads) for the copy duration — fine for the common
 case, a multi-second write-stall on a very large corpus. For a zero-write-stall production backup
 the runbook documents the **FS-snapshot-of-a-checkpoint'd-dir** procedure: `POST /_checkpoint` (or
-`POST /_cluster/checkpoint`), take an atomic COW filesystem / cloud-volume snapshot (instant), then
+`POST /_flush` for a standalone engine), take an atomic COW filesystem / cloud-volume snapshot
+(instant), then
 copy the snapshot offline — the engine's only job there is the consistent on-disk state `checkpoint`
 already produces. A true **online backup that allows concurrent writes** (reusing the retention-lease
 + translog-tail machinery peer recovery already uses, ADR-039/040) is the documented follow-on.

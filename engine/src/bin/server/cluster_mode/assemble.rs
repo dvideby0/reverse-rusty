@@ -105,8 +105,8 @@ pub(super) fn assemble_cluster(
     // extracting queries and routing under a normalizer the shards' title side does
     // not run — cross-process query/title normalizer divergence, silent cross-form
     // false negatives (codex review broadened this from the equivalence-only check).
-    // ADR-076 records the refusal: vocabulary on a remote cluster is deploy-time
-    // configuration, and v1 ships no mechanism to deploy one.
+    // ADR-076 records the refusal. This build ships no mechanism to install or update a
+    // normalizer/vocabulary consistently across remote shard processes.
     if vocab.is_some() {
         return Err(ShardError::Config(
             "a --vocab-file cannot apply to a REMOTE cluster (ADR-076): remote shard \

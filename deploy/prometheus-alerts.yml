@@ -1,6 +1,6 @@
-# Reverse Rusty — example Prometheus alerting rules (roadmap Tier 5 M3).
+# Reverse Rusty — shipped example Prometheus alerting rules.
 #
-# The starting rule set for a production deployment; every alert is explained — meaning,
+# The starting rule set for an operator deployment; every alert is explained — meaning,
 # threshold rationale, and what to do — in docs/operations/alerting.md (the `runbook`
 # annotation deep-links the matching section). Expressions live HERE only; the doc quotes a
 # rule by name, so tune thresholds in one place.
@@ -86,7 +86,7 @@ groups:
         labels:
           severity: page
         annotations:
-          summary: "Control node {{ $labels.shard }} sees no Raft leader for 1m"
+          summary: "Control target {{ $labels.instance }} sees no Raft leader for 1m"
           runbook: docs/operations/alerting.md#rrcontrolnoleader
 
       - alert: RRControlLeaderCountWrong
@@ -105,7 +105,7 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "Raft term advanced {{ $value }} times in 10m on {{ $labels.shard }} (election churn)"
+          summary: "Raft term advanced {{ $value }} times in 10m on {{ $labels.instance }} (election churn)"
           runbook: docs/operations/alerting.md#rrcontroltermchurn
 
       - alert: RRControlApplyLag
@@ -115,7 +115,7 @@ groups:
         labels:
           severity: warn
         annotations:
-          summary: "Control node {{ $labels.shard }} apply lag > 100 entries for 5m"
+          summary: "Control target {{ $labels.instance }} apply lag > 100 entries for 5m"
           runbook: docs/operations/alerting.md#rrcontrolapplylag
 
   - name: reverse-rusty-coordinator
