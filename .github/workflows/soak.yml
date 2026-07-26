@@ -1,0 +1,67 @@
+name: Scheduled 10M soak
+
+on:
+  # GitHub warns that schedules at the top of the hour are more likely to be
+  # delayed or dropped under load. Monday 03:37 UTC is intentionally off-hour.
+  schedule:
+    - cron: "37 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-10m-soak
+  cancel-in-progress: false
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/engine/target
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  soak:
+    name: 10M mixed-operations soak
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install pinned toolchain
+        working-directory: engine
+        run: rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          shared-key: scheduled-soak
+
+      - name: Capture runner contract
+        run: |
+          mkdir -p soak-output
+          {
+            uname -a
+            lscpu
+            free -h
+            rustc --version --verbose
+            cargo --version --verbose
+          } > soak-output/runner.txt
+
+      - name: Run exact seeded 10M soak
+        working-directory: engine
+        run: |
+          set -o pipefail
+          /usr/bin/time -v -o ../soak-output/resources.txt \
+            cargo test --release --test stress \
+              soak::ten_million_queries_mixed_ops -- \
+              --ignored --nocapture --exact \
+            2>&1 | tee ../soak-output/soak.log
+
+      - name: Upload soak evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ten-million-soak-${{ github.run_id }}-${{ github.run_attempt }}
+          path: soak-output/
+          if-no-files-found: error
+          retention-days: 90

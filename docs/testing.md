@@ -1,19 +1,20 @@
 # Testing, benchmarks & CI
 
 How Reverse Rusty is verified — the suites, the pressure/soak tests, the benchmarks, the local git
-hooks, and the GitHub Actions pipeline. There is **one gate**, [`engine/check.sh`](../engine/check.sh);
-everything here is either that gate or a layer around it. Why it's shaped this way →
-[`DECISIONS.md`](DECISIONS.md) ADR-024.
+hooks, and the GitHub Actions pipeline. There is **one code/correctness/security gate**,
+[`engine/check.sh`](../engine/check.sh), plus ADR-124's hardware-scoped performance blocker inside
+the same required CI job. Why they are separated → [`DECISIONS.md`](DECISIONS.md) ADR-024/124.
 
 ## TL;DR
 
 - **Before you push:** run [`engine/check.sh`](../engine/check.sh) — or install the hooks once with
   [`./setup-hooks.sh`](../setup-hooks.sh) and they run it for you.
-- **CI runs the same `check.sh`** on every PR and push to `main`, plus the benchmarks. Green locally
-  ⇒ green PR.
+- **CI runs the same `check.sh`** on every PR and push to `main`, then the pinned-runner
+  performance contract. Green locally predicts the code gate; only the contract runner can issue
+  the timing verdict.
 - Test *counts* are never hand-maintained here — run `cargo test --release` for the live number.
 
-## The one gate: `check.sh`
+## The code gate: `check.sh`
 
 ```
 cd engine && export CARGO_TARGET_DIR=/tmp/reverse-rusty-target   # or just ./engine/check.sh from the root
@@ -152,7 +153,10 @@ cargo test --release --test stress -- --nocapture                          # the
 cargo test --release --test stress ten_million_queries_mixed_ops -- --ignored --nocapture   # the soak
 ```
 
-In CI the soak runs only on a manual `workflow_dispatch` with `run_soak = true`.
+CI runs the exact target weekly (Monday 03:37 UTC) in
+[`soak.yml`](../.github/workflows/soak.yml), with runner metadata, full output, and
+`/usr/bin/time -v` retained for 90 days. It remains manually runnable from that workflow; the
+backward-compatible `CI → run_soak = true` dispatch remains too.
 
 [`tests/cluster_soak/`](../engine/tests/cluster_soak/) holds the **cluster scale soak** (ADR-104) —
 `twenty_million_multi_shard_soak`, the ≥20M multi-shard proof described in the suite table above. It
@@ -207,18 +211,45 @@ stays green) — all verified RED during development.
 
 ## Benchmarks
 
-Plain seeded binaries (not `criterion`), reproducible via a fixed seed (`0x00C0FFEE`):
+Plain seeded binaries (not `criterion`), reproducible via fixed seeds:
 `bench` (build/match throughput + cost-class split + memory), `segbench` (read-amplification vs
-segment count), `snapbench` (snapshot-publish cost). **Commands, arguments, the machine-independent
-invariants (the regression gate), and the dated capture log all live in one place —
+segment count), `snapbench` (snapshot-publish cost), and `clusterbench` (routing fan-out).
+**Commands, arguments, the broader machine-independent invariants, and the dated capture log live
+in one place —
 [`performance/benchmark-results.txt`](performance/benchmark-results.txt); narrative analysis in
 [`performance/results.md`](performance/results.md).** Don't restate numbers anywhere else.
 
-The regression gate is a **manual** comparison: the *structural* invariants (candidates/title, filter
-skip %, cost-class split, false-neg/pos = 0) are fixed by the data + algorithm and must reproduce on
-any machine; *throughput* is hardware-dependent and is only ever compared against a prior run on the
-same machine. CI runs the benchmarks and uploads their output as an artifact for review but **never
-fails on them** (runner variance would false-alarm) — see ADR-024.
+ADR-124 adds a deliberately smaller automated contract in `perfgate`:
+
+- runner: public standard `ubuntu-24.04` x64 (4 vCPU / 16 GiB), release+LTO,
+  `RAYON_NUM_THREADS=4`;
+- workload: 1M queries / 20k titles / 5% broad / seed `0x00C0FFEE`;
+- exact structure: classes, dictionary, posting shape, candidate sum/p95/p99/max, match sum;
+- resources: persistent `retain_source=false` resident bytes and logical durable bytes may grow at
+  most 5%; durable file count is exact;
+- timing: seven p50/p95/p99 rounds plus nine selective and columnar throughput windows. The
+  reference band is `max(30% of the six-run median, 3 × historical MAD)`; a timing-only breach
+  retries the whole timing window once. Structure/resources never retry.
+
+The reviewed baseline is
+[`performance/perf-baseline.json`](performance/perf-baseline.json). Every PR uploads its
+`perf-current.json`. Deep `bench`/`segbench`/`snapbench`/`clusterbench` sweeps remain advisory
+because they include signals too noisy or expensive to block a merge.
+
+An intentional rebaseline requires at least five distinct CI reports and a reason; the command
+refuses local/mixed contracts and never selects a retry over a first attempt:
+
+```bash
+cd engine
+RR_PERF_ACCEPT_REBASELINE=1 cargo run --release --bin perfgate -- \
+  rebaseline ../docs/performance/perf-baseline.json \
+  "why the reviewed performance shape changed" \
+  /path/to/run-{1,2,3,4,5}/perf-current.json
+git diff -- ../docs/performance/perf-baseline.json   # review before commit
+```
+
+Outside the pinned runner, `perfgate capture /tmp/perf-current.json` is diagnostic only; `check`
+fails loud on the runner mismatch rather than making a cross-machine timing claim.
 
 ## Local workflow: git hooks
 
@@ -233,7 +264,7 @@ Bypass in an emergency with `git commit --no-verify` / `git push --no-verify`; C
 ## CI: GitHub Actions
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every PR, on push to `main`, and on
-manual dispatch. One job on `ubuntu-latest`:
+manual dispatch. The required job runs on pinned `ubuntu-24.04`:
 
 1. Toolchain from [`engine/rust-toolchain.toml`](../engine/rust-toolchain.toml) (rustup auto-installs
    the pinned rustc + `rustfmt`/`clippy`).
@@ -244,10 +275,18 @@ manual dispatch. One job on `ubuntu-latest`:
    modes (single-node + in-process cluster) end-to-end over the release bin — ingest, search,
    SIGTERM-restart-reopen, restore-from-backup. A deployment gate over the built artifact, like the
    harness; `check.sh` stays the engine-gate SSOT.
-6. Benchmarks — run-and-print, `continue-on-error`, output uploaded as the `benchmark-output` artifact.
-7. The 10M soak — only when dispatched with `run_soak = true`.
+6. **`perfgate check`** — the merge-blocking ADR-124 performance/resource contract; current JSON
+   uploaded in the `benchmark-output` artifact.
+7. Deep benchmarks — run-and-print, `continue-on-error`, diagnostic output uploaded with the gate
+   report.
+8. The 10M soak — only when this compatibility workflow is dispatched with `run_soak = true`.
 
 In-progress runs are cancelled when a newer commit lands on the same ref.
+
+[`soak.yml`](../.github/workflows/soak.yml) independently schedules the same exact 10M target
+weekly and supports manual dispatch. Schedule delay does not affect correctness; its evidence
+artifact is retained for 90 days. The 20M cluster soak remains local/manual because its recorded
+~16 GiB peak would consume the whole standard runner.
 
 The `helm chart` job additionally runs the compose↔chart **topology-parity** and **version-drift**
 tripwires (`deploy/check-topology-parity.sh`, `deploy/check-versions.sh` — ADR-098). A `v*` tag

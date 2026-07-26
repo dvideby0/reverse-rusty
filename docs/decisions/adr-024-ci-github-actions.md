@@ -21,6 +21,13 @@
     failing the build. Throughput is hardware-dependent (the runner is not the reference machine), and the
     machine-independent *structural* invariants stay a **manual** comparison against `benchmark-results.txt`
     — a deliberate choice over a brittle numeric assert that would false-alarm on runner variance.
+    **ADR-124 amendment (2026-07-25):** this remains true for the deep exploratory sweeps, but no
+    longer for the dedicated `perfgate` subset. That subset pins the runner/workload, collects repeated
+    windows, compares against a reviewed multi-run median/MAD baseline, retries timing noise once, and
+    gates deterministic structure/resources without retry. The old all-or-nothing choice between "brittle
+    absolute timer" and "nothing blocks" is therefore superseded. The exact 10M mixed-ops soak now also
+    runs on a weekly off-peak schedule as well as by manual dispatch, with logs and resource output retained
+    for 90 days; it remains observational rather than merge-blocking.
   - **Reproducibility + local fast-fail.** Pin the toolchain in `engine/rust-toolchain.toml`; cache builds
     with `Swatinem/rust-cache`; install `cargo-audit`/`cargo-deny` as prebuilt binaries. Locally, committed
     git hooks (activated once via `./setup-hooks.sh`) run the fast gate (fmt + clippy, `check.sh --fast`)
@@ -32,6 +39,9 @@
   local entry point, but it is now also the script CI runs — not a stand-in for the absence of CI. Cost:
   PR runs pay the release+LTO compile (mitigated by caching) and the full suite including stress (a few
   minutes); accepted in exchange for the coverage.
+- **ADR-124 consequence:** `check.sh` remains the one code/correctness/security gate and local entry
+  point. The hardware-scoped performance contract is an additional blocker inside the already-required
+  `gate + benchmarks` job; a non-contract local machine may capture diagnostics but cannot claim the CI
+  timing verdict.
 - **See also:** [`testing.md`](../testing.md) (the how-we-test guide), ADR-008 (seeded determinism — why the
   benchmarks reproduce), `engine/check.sh`, `.github/workflows/ci.yml`, `engine/rust-toolchain.toml`.
-

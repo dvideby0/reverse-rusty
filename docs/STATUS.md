@@ -319,7 +319,9 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
 
 Headline figures only. Full tables, p99s, and the 100M extrapolation are the canonical record in
 [`performance/results.md`](performance/results.md); the machine-independent regression invariants
-live in [`performance/benchmark-results.txt`](performance/benchmark-results.txt).
+live in [`performance/benchmark-results.txt`](performance/benchmark-results.txt), and ADR-124's
+reviewed merge-blocking subset lives in
+[`performance/perf-baseline.json`](performance/perf-baseline.json).
 
 - Selective path **~158k–710k titles/sec/core** (1M–5M queries; ~256 B/query), **~3.8× on 4 threads**.
 - Flat **~54 candidates/title**, independent of corpus size.
@@ -327,6 +329,9 @@ live in [`performance/benchmark-results.txt`](performance/benchmark-results.txt)
 - LSM read-amplification stays bounded as segments grow (1→8) — table in
   [`performance/results.md`](performance/results.md) §7.
 - **Resident memory:** ~148 → **~4.5 B/query** with `retain_source=false` (ADR-020).
+- **Performance regressions now block CI** (ADR-124): the pinned 1M/20k workload gates exact work
+  shape, +5% persistent resident/durable growth, p50/p95/p99, and selective/columnar throughput
+  through repeated median/MAD windows; the 10M mixed-ops soak runs weekly with retained evidence.
 - **20M-query multi-shard scale soak** (K=8, in-process, durable — ADR-104): cluster ≡
   single-node over 50k titles (0 mismatches, pre- and post-mutation), 0 sentinel misses / ghosts,
   checkpoint → reopen byte-identical; fan-out avg ~3.2, p99 5, max 7 of 8 — the bounded-fan-out +

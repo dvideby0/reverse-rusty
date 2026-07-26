@@ -384,3 +384,8 @@ Low-priority polish and micro-optimizations — none are production blockers.
   [ADR-123](decisions/adr-123-bounded-in-segment-cancellation.md))**: the monomorphized
   boundary + bounded in-segment deadline seam (armed by an explicit `timeout_ms`) and the
   `--max-concurrent-searches` semaphore; the unarmed matcher carries no sampler or clock work.
+- ~~Merge-blocking performance regression policy + scheduled large soak~~ — **✅ shipped
+  ([ADR-124](decisions/adr-124-variance-tolerant-performance-gate.md), issue #127)**: pinned-runner
+  1M-query `perfgate`, exact work-shape + 5% resource ceilings, median/MAD-banded p50/p95/p99 and
+  selective/columnar throughput with one timing-only retry, guarded five-report rebaseline, and a
+  weekly/manual 10M soak with 90-day artifacts. Deep noisy sweeps remain advisory.
