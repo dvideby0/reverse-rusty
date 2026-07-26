@@ -741,10 +741,10 @@ impl MmapSegment {
 
         // arity-1 signatures
         for &f in probe_feats {
-            deadline.check_work()?;
             if collector.should_stop() {
                 return Ok(());
             }
+            deadline.check_work()?;
             let key = crate::util::sig_key(&[f]);
             stats.probes_attempted += 1;
             if has_filter && !self.may_contain(key) {
@@ -766,16 +766,16 @@ impl MmapSegment {
         }
         // arity-2 signatures
         for &h in feats {
-            deadline.check_work()?;
             if collector.should_stop() {
                 return Ok(());
             }
+            deadline.check_work()?;
             if crate::compile::is_hot(dict, h) {
                 for &o in feats {
-                    deadline.check_work()?;
                     if collector.should_stop() {
                         return Ok(());
                     }
+                    deadline.check_work()?;
                     if o != h {
                         let (a, b) = if h < o { (h, o) } else { (o, h) };
                         let key = crate::util::sig_key(&[a, b]);
@@ -805,10 +805,10 @@ impl MmapSegment {
         // the segment holds no hot entries.
         if lanes.include_hot && self.has_hot_entries() {
             for &f in feats {
-                deadline.check_work()?;
                 if collector.should_stop() {
                     return Ok(());
                 }
+                deadline.check_work()?;
                 let key = crate::util::sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if has_filter && !self.may_contain(key) {
@@ -832,10 +832,10 @@ impl MmapSegment {
         // broad lane
         if lanes.include_broad {
             for &f in feats {
-                deadline.check_work()?;
                 if collector.should_stop() {
                     return Ok(());
                 }
+                deadline.check_work()?;
                 let key = crate::util::sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if has_filter && !self.may_contain(key) {
@@ -918,10 +918,10 @@ impl MmapSegment {
                 Lane::Main => {}
             }
             for &local in posting {
-                deadline.check_work()?;
                 if collector.should_stop() {
                     break;
                 }
+                deadline.check_work()?;
                 if seen[local as usize] == epoch {
                     continue;
                 }

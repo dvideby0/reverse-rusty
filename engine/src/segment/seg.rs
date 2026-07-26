@@ -483,10 +483,10 @@ impl Segment {
 
         // arity-1 signatures (one per feature)
         for &f in probe_feats {
-            deadline.check_work()?;
             if collector.should_stop() {
                 return Ok(());
             }
+            deadline.check_work()?;
             let key = sig_key(&[f]);
             stats.probes_attempted += 1;
             if let Some(flt) = filter {
@@ -514,16 +514,16 @@ impl Segment {
         // title side of the class-B pair predicate, and extending it is lever 3's
         // fenced change, not the hot tier's (ADR-105).
         for &h in feats {
-            deadline.check_work()?;
             if collector.should_stop() {
                 return Ok(());
             }
+            deadline.check_work()?;
             if is_hot(dict, h) {
                 for &o in feats {
-                    deadline.check_work()?;
                     if collector.should_stop() {
                         return Ok(());
                     }
+                    deadline.check_work()?;
                     if o != h {
                         let (a, b) = if h < o { (h, o) } else { (o, h) };
                         let key = sig_key(&[a, b]);
@@ -559,10 +559,10 @@ impl Segment {
         // title, the structural zero-overhead answer for hot-free corpora.
         if lanes.include_hot && self.has_hot_entries() {
             for &f in feats {
-                deadline.check_work()?;
                 if collector.should_stop() {
                     return Ok(());
                 }
+                deadline.check_work()?;
                 let key = sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if let Some(flt) = filter {
@@ -589,10 +589,10 @@ impl Segment {
         // broad lane (arity-1 anchors), measured separately
         if lanes.include_broad {
             for &f in feats {
-                deadline.check_work()?;
                 if collector.should_stop() {
                     return Ok(());
                 }
+                deadline.check_work()?;
                 let key = sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if let Some(flt) = filter {
@@ -678,11 +678,11 @@ impl Segment {
             }
             let mut cancelled = None;
             posting.for_each_while(|local| {
-                if let Err(error) = deadline.check_work() {
-                    cancelled = Some(error);
+                if collector.should_stop() {
                     return false;
                 }
-                if collector.should_stop() {
+                if let Err(error) = deadline.check_work() {
+                    cancelled = Some(error);
                     return false;
                 }
                 // dedup across signatures with an epoch stamp (O(1), no alloc)
@@ -734,6 +734,9 @@ impl Segment {
                         }
                     }
                     for &member in members {
+                        if collector.should_stop() {
+                            return false;
+                        }
                         if let Err(error) = deadline.check_work() {
                             cancelled = Some(error);
                             return false;
@@ -767,11 +770,11 @@ impl Segment {
                     // reaches the post-emission poll below. Poll before every
                     // member's filters so those groups remain cooperatively
                     // cancellable even when none of their members emits.
-                    if let Err(error) = deadline.check_work() {
-                        cancelled = Some(error);
+                    if collector.should_stop() {
                         return false;
                     }
-                    if collector.should_stop() {
+                    if let Err(error) = deadline.check_work() {
+                        cancelled = Some(error);
                         return false;
                     }
                     if self.alive[m as usize]

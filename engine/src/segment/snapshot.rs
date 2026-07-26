@@ -1874,6 +1874,7 @@ mod exhaustive_dedup_tests {
 #[cfg(test)]
 mod bounded_deadline_tests {
     use super::*;
+    use crate::collect::MatchSink;
     use crate::ownership::EmissionPolicy;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1905,6 +1906,80 @@ mod bounded_deadline_tests {
             self.0.fetch_add(1, Ordering::Relaxed);
             true
         }
+    }
+
+    #[derive(Default)]
+    struct StopAfterFirstMatch {
+        matches: usize,
+        stopped: bool,
+    }
+
+    impl MatchSink for StopAfterFirstMatch {
+        fn on_match(&mut self, _logical_id: u64) {
+            self.matches += 1;
+            self.stopped = true;
+        }
+
+        fn should_stop(&mut self) -> bool {
+            self.stopped
+        }
+    }
+
+    #[test]
+    fn collector_failure_precedes_a_simultaneous_deadline_poll() {
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine
+            .try_insert_live("anchorw", 1, 1)
+            .expect("insert matching row");
+        let snapshot = engine.snapshot();
+        let mut title_scratch = MatchScratch::new();
+        snapshot.norm.match_features(
+            "anchorw",
+            &snapshot.dict,
+            &mut title_scratch.lc,
+            &mut title_scratch.norm,
+            &mut title_scratch.feats,
+        );
+        let title = crate::exact::TitleView::single(0, &title_scratch.feats);
+        let mut seen = vec![0; snapshot.memtable.len()];
+        let mut collector = StopAfterFirstMatch::default();
+        let pred = TagPredicate::empty();
+        let mut stats = MatchStats::default();
+        let checks = AtomicUsize::new(0);
+        let mut deadline = DeadlinePoll::new(CancelOnCheck {
+            checks: &checks,
+            cancel_at: 1,
+        });
+        // The anchor probe and its posting consume two work units. The next
+        // loop edge is therefore both the first deadline sample and the first
+        // chance to observe the collector's already-recorded failure.
+        deadline.remaining = 3;
+
+        let result = snapshot.memtable.match_collect(
+            &title,
+            &snapshot.dict,
+            1,
+            &mut seen,
+            &mut collector,
+            crate::segment::ProbeLanes {
+                include_broad: false,
+                include_hot: true,
+            },
+            &pred,
+            &mut stats,
+            crate::ownership::EmitAll,
+            &mut deadline,
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(collector.matches, 1);
+        assert!(collector.stopped);
+        assert_eq!(
+            checks.load(Ordering::Relaxed),
+            0,
+            "an already-recorded collector failure must win before the clock poll"
+        );
     }
 
     #[test]

@@ -43,7 +43,8 @@
   The durable capture is in `docs/performance/benchmark-results.txt`.
 - **Testing.** Counter-driven unit tests avoid wall-clock races: one pins the exact 256-work cadence
   and boundary reset; one cancels inside a 4,096-member scalar body group, proves traversal stopped
-  early, and proves the output was cleared; one does the same through the columnar batch kernel.
+  early, and proves the output was cleared; one does the same through the columnar batch kernel;
+  and one pins that an already-recorded collector/sink failure wins over a coincident deadline poll.
   ADR-099's armed-unexpired equivalence, expired-at-entry, parallel/batch all-or-nothing, and
   self-calibrating stress tests remain unchanged. The ignored benchmark asserts cancellation is
   materially faster than full traversal.

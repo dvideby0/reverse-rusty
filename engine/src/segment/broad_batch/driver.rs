@@ -920,12 +920,25 @@ mod bounded_deadline_tests {
     #[test]
     fn counter_deadline_stops_inside_one_columnar_body_group() {
         let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
-        for logical in 0..4_096 {
-            engine
-                .try_insert_live("anchorw", logical, 1)
-                .expect("insert duplicate body");
-        }
+        let queries = (0..4_096)
+            .map(|logical| (logical, "anchorw".to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(engine.build_from_queries(&queries).ingested, queries.len());
         let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.class_counts()[2],
+            queries.len() as u64,
+            "the finalized high-frequency anchor must put every row in class C"
+        );
+        assert_eq!(snapshot.segments.len(), 1);
+        assert!(snapshot.memtable.is_empty());
+        assert!(
+            matches!(
+                snapshot.segments[0].as_ref(),
+                BaseSegment::Memory(segment) if segment.has_dup_groups()
+            ),
+            "the columnar regression needs one shared-body broad base segment"
+        );
         let pred = TagPredicate::empty();
         let view = MatchView {
             norm: &snapshot.norm,
@@ -966,6 +979,10 @@ mod bounded_deadline_tests {
 
         assert_eq!(result, Err(MatchCancelled));
         assert_eq!(checks.load(Ordering::Relaxed), 3);
+        assert!(
+            stats.broad_candidates > 0,
+            "cancellation must happen after the columnar broad kernel reaches the body group"
+        );
         assert!(outs[0].is_empty());
         assert_eq!(emissions[0], 0);
     }
