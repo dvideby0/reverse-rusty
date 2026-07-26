@@ -47,6 +47,37 @@ fn better(candidate: HeapHit, worst: HeapHit) -> bool {
     )
 }
 
+/// Scoring policy behind the bounded collectors. The plain policy ignores the
+/// poll hook entirely; the polling policy may stop an unbounded metadata walk
+/// and returns `None` only when that hook fired.
+pub(crate) trait TopKScorer {
+    fn score(&mut self, logical_id: u64, should_stop: &mut dyn FnMut() -> bool) -> Option<i64>;
+}
+
+pub(crate) struct PlainScorer<F>(F);
+
+impl<F> TopKScorer for PlainScorer<F>
+where
+    F: FnMut(u64) -> i64,
+{
+    #[inline]
+    fn score(&mut self, logical_id: u64, _should_stop: &mut dyn FnMut() -> bool) -> Option<i64> {
+        Some((self.0)(logical_id))
+    }
+}
+
+pub(crate) struct PollingScorer<F>(F);
+
+impl<F> TopKScorer for PollingScorer<F>
+where
+    F: FnMut(u64, &mut dyn FnMut() -> bool) -> Option<i64>,
+{
+    #[inline]
+    fn score(&mut self, logical_id: u64, should_stop: &mut dyn FnMut() -> bool) -> Option<i64> {
+        (self.0)(logical_id, should_stop)
+    }
+}
+
 /// Scorer-free bounded top-K state: the preallocated K-heap, its membership
 /// set, the thresholded unique-total tracker, and the collection counters.
 pub(crate) struct TopKState {
@@ -84,7 +115,12 @@ impl TopKState {
     /// bound. The scorer is borrowed per call so one scorer can serve many
     /// states (the batch composition) without duplicating this rule.
     #[inline]
-    pub(crate) fn observe(&mut self, logical_id: u64, scorer: &mut impl FnMut(u64) -> i64) {
+    pub(crate) fn observe(
+        &mut self,
+        logical_id: u64,
+        scorer: &mut impl TopKScorer,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) {
         self.emissions = self.emissions.saturating_add(1);
         self.totals.observe(logical_id);
         if self.k == 0 || self.heap_ids.contains(&logical_id) {
@@ -92,10 +128,10 @@ impl TopKState {
         }
 
         self.evaluations = self.evaluations.saturating_add(1);
-        let hit = HeapHit {
-            logical_id,
-            score: scorer(logical_id),
+        let Some(score) = scorer.score(logical_id, should_stop) else {
+            return;
         };
+        let hit = HeapHit { logical_id, score };
         // Strictly-after gate: the boundary row itself is excluded, so a page
         // whose last row becomes the next boundary yields no dup and no gap.
         // (`evaluations` legitimately counts boundary-skipped rows — the
@@ -171,7 +207,7 @@ pub(crate) struct TopKCollector<F> {
     scorer: F,
 }
 
-impl<F> TopKCollector<F>
+impl<F> TopKCollector<PlainScorer<F>>
 where
     F: FnMut(u64) -> i64,
 {
@@ -183,10 +219,29 @@ where
     ) -> Self {
         Self {
             state: TopKState::new(k, total_threshold, after),
-            scorer,
+            scorer: PlainScorer(scorer),
         }
     }
+}
 
+impl<F> TopKCollector<PollingScorer<F>>
+where
+    F: FnMut(u64, &mut dyn FnMut() -> bool) -> Option<i64>,
+{
+    pub(crate) fn new_polling(
+        k: usize,
+        total_threshold: usize,
+        after: Option<(i64, u64)>,
+        scorer: F,
+    ) -> Self {
+        Self {
+            state: TopKState::new(k, total_threshold, after),
+            scorer: PollingScorer(scorer),
+        }
+    }
+}
+
+impl<F> TopKCollector<F> {
     pub(crate) fn winners(&self) -> &[(u64, i64)] {
         self.state.winners()
     }
@@ -202,17 +257,29 @@ where
 
 impl<F> MatchSink for TopKCollector<F>
 where
-    F: FnMut(u64) -> i64,
+    F: TopKScorer,
 {
     #[inline]
     fn on_match(&mut self, logical_id: u64) {
-        self.state.observe(logical_id, &mut self.scorer);
+        self.state
+            .observe(logical_id, &mut self.scorer, &mut || false);
+    }
+
+    #[inline]
+    fn on_match_at_with_poll(
+        &mut self,
+        logical_id: u64,
+        _local_id: u32,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) {
+        self.state
+            .observe(logical_id, &mut self.scorer, should_stop);
     }
 }
 
 impl<F> MatchCollector for TopKCollector<F>
 where
-    F: FnMut(u64) -> i64,
+    F: TopKScorer,
 {
     fn reset(&mut self) {
         self.state.reset();
@@ -235,7 +302,7 @@ pub(crate) struct BatchTopKCollector<F> {
     scorer: F,
 }
 
-impl<F> BatchTopKCollector<F>
+impl<F> BatchTopKCollector<PlainScorer<F>>
 where
     F: FnMut(u64) -> i64,
 {
@@ -247,10 +314,26 @@ where
             slots: (0..titles)
                 .map(|_| TopKState::new(k, total_threshold, None))
                 .collect(),
-            scorer,
+            scorer: PlainScorer(scorer),
         }
     }
+}
 
+impl<F> BatchTopKCollector<PollingScorer<F>>
+where
+    F: FnMut(u64, &mut dyn FnMut() -> bool) -> Option<i64>,
+{
+    pub(crate) fn new_polling(titles: usize, k: usize, total_threshold: usize, scorer: F) -> Self {
+        Self {
+            slots: (0..titles)
+                .map(|_| TopKState::new(k, total_threshold, None))
+                .collect(),
+            scorer: PollingScorer(scorer),
+        }
+    }
+}
+
+impl<F> BatchTopKCollector<F> {
     /// Finalize every slot (sorting its winners) — call before reading
     /// per-title results; [`BatchMatchCollector::finish`] does this as part of
     /// producing the aggregate summary.
@@ -265,17 +348,27 @@ where
 
 impl<F> BatchMatchSink for BatchTopKCollector<F>
 where
-    F: FnMut(u64) -> i64,
+    F: TopKScorer,
 {
     #[inline]
     fn on_match(&mut self, title_index: usize, logical_id: u64) {
-        self.slots[title_index].observe(logical_id, &mut self.scorer);
+        self.slots[title_index].observe(logical_id, &mut self.scorer, &mut || false);
+    }
+
+    #[inline]
+    fn on_match_with_poll(
+        &mut self,
+        title_index: usize,
+        logical_id: u64,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) {
+        self.slots[title_index].observe(logical_id, &mut self.scorer, should_stop);
     }
 }
 
 impl<F> BatchMatchCollector for BatchTopKCollector<F>
 where
-    F: FnMut(u64) -> i64,
+    F: TopKScorer,
 {
     /// Aggregate summary across slots: the total value is the saturating sum
     /// of per-title totals, exact only while EVERY slot's total is exact —

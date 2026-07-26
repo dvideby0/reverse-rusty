@@ -2,7 +2,9 @@
 //! in-memory (`Memory`) or file-backed (`Mmap`). Type definition lives in the
 //! `segment` module root.
 
-use super::{BaseSegment, MatchStats, Segment};
+use super::{
+    infallible, BaseSegment, DeadlineCheck, DeadlinePoll, MatchStats, NoDeadline, Segment,
+};
 use crate::collect::{MatchSink, VecSink};
 use crate::dict::Dict;
 
@@ -176,7 +178,8 @@ impl BaseSegment {
     ) {
         let mut ignored_emissions = 0;
         let mut collector = VecSink::new(out, &mut ignored_emissions);
-        self.match_collect(
+        let mut deadline = DeadlinePoll::new(NoDeadline);
+        infallible(self.match_collect(
             view,
             dict,
             epoch,
@@ -186,11 +189,16 @@ impl BaseSegment {
             pred,
             stats,
             crate::ownership::EmitAll,
-        );
+            &mut deadline,
+        ));
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::segment) fn match_collect<C: MatchSink, P: crate::ownership::EmissionPolicy>(
+    pub(in crate::segment) fn match_collect<
+        C: MatchSink,
+        P: crate::ownership::EmissionPolicy,
+        D: DeadlineCheck,
+    >(
         &self,
         view: &crate::exact::TitleView,
         dict: &Dict,
@@ -201,18 +209,15 @@ impl BaseSegment {
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
         emission: P,
-    ) {
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled> {
         match self {
-            BaseSegment::Memory(s) => {
-                s.match_collect(
-                    view, dict, epoch, seen, collector, lanes, pred, stats, emission,
-                );
-            }
-            BaseSegment::Mmap(s) => {
-                s.match_collect(
-                    view, dict, epoch, seen, collector, lanes, pred, stats, emission,
-                );
-            }
+            BaseSegment::Memory(s) => s.match_collect(
+                view, dict, epoch, seen, collector, lanes, pred, stats, emission, deadline,
+            ),
+            BaseSegment::Mmap(s) => s.match_collect(
+                view, dict, epoch, seen, collector, lanes, pred, stats, emission, deadline,
+            ),
         }
     }
 

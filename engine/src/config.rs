@@ -290,17 +290,18 @@ pub struct EngineConfig {
     /// Default: `true`
     pub dedup_bodies: bool,
 
-    /// Cooperative match cancellation (ADR-099): when a search request sets an
-    /// EXPLICIT `timeout_ms`, the match work re-checks the deadline at coarse
-    /// (per-segment / per-title) boundaries and abandons itself once expired —
-    /// instead of burning the rayon pool to completion after the client already
-    /// got its 408. Never changes any result: a non-expired armed search is
+    /// Cooperative match cancellation (ADR-099/123): when a search request sets
+    /// an EXPLICIT `timeout_ms`, match work re-checks the deadline at title/segment
+    /// boundaries and after bounded runs through dense segment-owned loops, then
+    /// abandons itself once expired — instead of burning the rayon pool to
+    /// completion after the client already got its 408. Never changes any result:
+    /// a non-expired armed search is
     /// byte-identical, and a cancelled one returns the same 408 the response
     /// deadline produced before this knob existed. The kill-switch is dynamic
     /// (`PUT /_settings`) so cancellation can be disabled without a restart.
     /// Requests without an explicit `timeout_ms` are never armed (the implicit
     /// 30 s response deadline stays response-only) — the default path carries
-    /// zero deadline reads.
+    /// zero deadline reads or sampler work.
     ///
     /// Default: `true`
     pub cooperative_cancel: bool,

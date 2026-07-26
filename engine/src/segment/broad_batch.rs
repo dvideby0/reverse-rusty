@@ -43,4 +43,4 @@ mod ranked;
 pub(in crate::segment) use driver::{
     batch_results, batch_results_with_stats, batch_stats, try_batch_results_with_stats,
 };
-pub(in crate::segment) use ranked::try_batch_top_k;
+pub(in crate::segment) use ranked::{batch_top_k, try_batch_top_k};

@@ -198,8 +198,9 @@ impl Default for BatchMatchOptions {
 /// return shape of the `match_titles_batch_with_stats*` family.
 pub type BatchResultsWithStats = (Vec<(usize, Vec<u64>)>, MatchStats);
 
-/// Typed cancellation (ADR-099): a cooperative deadline expired at a segment/title
-/// boundary and the match was abandoned. On this error NO partial results escape —
+/// Typed cancellation (ADR-099/123): a cooperative deadline expired at a
+/// title/segment boundary or at a bounded in-segment work poll and the match
+/// was abandoned. On this error NO partial results escape —
 /// every cancelled path clears its output buffer before returning, so a cancelled
 /// match can never masquerade as a successful empty/short result (the zero-FN /
 /// fail-loud posture). Only the `try_*` matchers armed with an explicit deadline can
@@ -215,14 +216,15 @@ impl std::fmt::Display for MatchCancelled {
 
 impl std::error::Error for MatchCancelled {}
 
-/// The compile-time deadline seam (ADR-099). The match bodies are generic over this,
-/// so the unarmed monomorph ([`NoDeadline`], whose error is [`Infallible`]) compiles
-/// to literally no check — the byte-identical-default claim is structural, not
-/// empirical — while the armed monomorph ([`DeadlineAt`]) reads the clock at COARSE
-/// boundaries only (per segment / per title, never per candidate; the hot-path
-/// invariant). This is bounded staleness, not preemption: worst case, a cancelled
-/// match runs one segment's work past its deadline before observing it.
-pub(in crate::segment) trait DeadlineCheck: Copy {
+/// The compile-time deadline seam (ADR-099/123). Match bodies are generic over
+/// this, so the unarmed monomorph ([`NoDeadline`], whose error is
+/// [`Infallible`]) compiles to literally no check. Armed work uses
+/// [`DeadlinePoll`] to sample the clock after a bounded number of posting,
+/// candidate, anchor, or body-group operations.
+pub(crate) trait DeadlineCheck: Copy {
+    /// Compile-time switch used by [`DeadlinePoll`]. `false` removes both its
+    /// counter mutation and clock branch from the unarmed monomorph.
+    const ARMED: bool;
     type Cancelled: Send;
     fn check(self) -> Result<(), Self::Cancelled>;
 }
@@ -230,9 +232,10 @@ pub(in crate::segment) trait DeadlineCheck: Copy {
 /// The unarmed deadline: `check` is `Ok(())` with an uninhabited error, so the
 /// compiler erases both the check and every `Err` arm from this monomorph.
 #[derive(Clone, Copy)]
-pub(in crate::segment) struct NoDeadline;
+pub(crate) struct NoDeadline;
 
 impl DeadlineCheck for NoDeadline {
+    const ARMED: bool = false;
     type Cancelled = std::convert::Infallible;
     #[inline]
     fn check(self) -> Result<(), Self::Cancelled> {
@@ -245,6 +248,7 @@ impl DeadlineCheck for NoDeadline {
 pub(in crate::segment) struct DeadlineAt(pub(in crate::segment) std::time::Instant);
 
 impl DeadlineCheck for DeadlineAt {
+    const ARMED: bool = true;
     type Cancelled = MatchCancelled;
     #[inline]
     fn check(self) -> Result<(), Self::Cancelled> {
@@ -256,10 +260,171 @@ impl DeadlineCheck for DeadlineAt {
     }
 }
 
+/// Number of bounded work units between armed clock reads.
+///
+/// Lucene applies the same sampling pattern to expensive iterators (rather than
+/// reading the clock for every document). 256 is small enough to bound the
+/// measured dense-segment overshoot while amortizing `Instant::now()` across
+/// meaningful work. The unarmed monomorph does not execute the counter at all.
+pub(crate) const DEADLINE_WORK_INTERVAL: u16 = 256;
+
+/// Request-local bounded sampler shared by every expensive loop in one match.
+///
+/// A work unit is one posting entry, candidate, anchor/probe, bitmap emission,
+/// or canonical-body member. Parser ceilings already bound the integer program
+/// inside one exact verification; this sampler bounds the unbounded
+/// segment-owned collections around it.
+pub(crate) struct DeadlinePoll<D: DeadlineCheck> {
+    deadline: D,
+    remaining: u16,
+}
+
+impl<D: DeadlineCheck> DeadlinePoll<D> {
+    #[inline]
+    pub(crate) fn new(deadline: D) -> Self {
+        Self {
+            deadline,
+            remaining: DEADLINE_WORK_INTERVAL,
+        }
+    }
+
+    /// Check at an existing title/segment boundary and restart the work budget.
+    #[inline]
+    pub(crate) fn check_now(&mut self) -> Result<(), D::Cancelled> {
+        if D::ARMED {
+            self.remaining = DEADLINE_WORK_INTERVAL;
+            return self.deadline.check();
+        }
+        Ok(())
+    }
+
+    /// Record one in-segment work unit, sampling the deadline every fixed
+    /// interval. `D::ARMED == false` is a compile-time constant, so LLVM erases
+    /// this entire body for ordinary matching.
+    #[inline]
+    pub(crate) fn check_work(&mut self) -> Result<(), D::Cancelled> {
+        if D::ARMED {
+            self.remaining -= 1;
+            if self.remaining == 0 {
+                self.remaining = DEADLINE_WORK_INTERVAL;
+                return self.deadline.check();
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Deliver one scalar match while lending collectors the active request-local
+/// sampler for any unbounded post-verification work. A collector that does not
+/// override the poll-aware callback never invokes the closure, preserving the
+/// ordinary collector's machine shape.
+#[inline]
+pub(crate) fn collect_match_at<C: crate::collect::MatchSink, D: DeadlineCheck>(
+    collector: &mut C,
+    logical_id: u64,
+    local_id: u32,
+    deadline: &mut DeadlinePoll<D>,
+) -> Result<(), D::Cancelled> {
+    let mut cancelled = None;
+    collector.on_match_at_with_poll(logical_id, local_id, &mut || {
+        if cancelled.is_some() {
+            return true;
+        }
+        match deadline.check_work() {
+            Ok(()) => false,
+            Err(error) => {
+                cancelled = Some(error);
+                true
+            }
+        }
+    });
+    match cancelled {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Indexed batch counterpart to [`collect_match_at`].
+#[inline]
+pub(crate) fn collect_batch_match<C: crate::collect::BatchMatchSink, D: DeadlineCheck>(
+    collector: &mut C,
+    title_index: usize,
+    logical_id: u64,
+    deadline: &mut DeadlinePoll<D>,
+) -> Result<(), D::Cancelled> {
+    let mut cancelled = None;
+    collector.on_match_with_poll(title_index, logical_id, &mut || {
+        if cancelled.is_some() {
+            return true;
+        }
+        match deadline.check_work() {
+            Ok(()) => false,
+            Err(error) => {
+                cancelled = Some(error);
+                true
+            }
+        }
+    });
+    match cancelled {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod deadline_poll_tests {
+    use super::*;
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy)]
+    struct CountChecks<'a>(&'a AtomicUsize);
+
+    impl DeadlineCheck for CountChecks<'_> {
+        const ARMED: bool = true;
+        type Cancelled = Infallible;
+
+        fn check(self) -> Result<(), Self::Cancelled> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn armed_work_sampler_checks_at_the_exact_interval() {
+        let checks = AtomicUsize::new(0);
+        let mut poll = DeadlinePoll::new(CountChecks(&checks));
+
+        for _ in 0..DEADLINE_WORK_INTERVAL - 1 {
+            assert!(poll.check_work().is_ok());
+        }
+        assert_eq!(checks.load(Ordering::Relaxed), 0);
+
+        assert!(poll.check_work().is_ok());
+        assert_eq!(checks.load(Ordering::Relaxed), 1);
+
+        for _ in 0..DEADLINE_WORK_INTERVAL {
+            assert!(poll.check_work().is_ok());
+        }
+        assert_eq!(checks.load(Ordering::Relaxed), 2);
+
+        assert!(poll.check_now().is_ok());
+        assert_eq!(checks.load(Ordering::Relaxed), 3);
+        for _ in 0..DEADLINE_WORK_INTERVAL - 1 {
+            assert!(poll.check_work().is_ok());
+        }
+        assert_eq!(
+            checks.load(Ordering::Relaxed),
+            3,
+            "a boundary check must restart the bounded work interval"
+        );
+    }
+}
+
 /// Unwrap a result whose error is uninhabited — the no-`unwrap()`-compliant way to
 /// consume the [`NoDeadline`] monomorphs behind the existing infallible signatures.
 #[inline]
-pub(in crate::segment) fn infallible<T>(r: Result<T, std::convert::Infallible>) -> T {
+pub(crate) fn infallible<T>(r: Result<T, std::convert::Infallible>) -> T {
     match r {
         Ok(v) => v,
         Err(never) => match never {},

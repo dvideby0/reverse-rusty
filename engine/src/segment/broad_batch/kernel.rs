@@ -11,21 +11,27 @@
 use crate::collect::BatchMatchSink;
 use crate::dict::FeatureId;
 use crate::ownership::BatchEmissionPolicy;
-use crate::segment::{MatchStats, Segment};
+use crate::segment::{DeadlineCheck, DeadlinePoll, MatchStats, Segment};
 use crate::storage::MmapSegment;
 use crate::util::{sig_key, FastMap};
 
 /// Walk the set bits of a title bitmap, calling `f(title_index)` for each.
 #[inline]
-fn for_each_set_bit(bits: &[u64], mut f: impl FnMut(usize)) {
+fn for_each_set_bit<D: DeadlineCheck>(
+    bits: &[u64],
+    deadline: &mut DeadlinePoll<D>,
+    mut f: impl FnMut(usize, &mut DeadlinePoll<D>) -> Result<(), D::Cancelled>,
+) -> Result<(), D::Cancelled> {
     for (wi, &word) in bits.iter().enumerate() {
         let mut w = word;
         while w != 0 {
+            deadline.check_work()?;
             let b = w.trailing_zeros() as usize;
-            f((wi << 6) + b);
+            f((wi << 6) + b, deadline)?;
             w &= w - 1;
         }
     }
+    Ok(())
 }
 
 /// Which columnar lane [`eval_one_segment`] is evaluating: the opt-in broad
@@ -50,7 +56,8 @@ pub(in crate::segment) enum Lane {
 pub(in crate::segment) trait BroadBackend {
     /// Probe `lane`'s index for `key` (after the anchor-filter check), appending
     /// reachable local IDs to `cands` (epoch-deduped via `seen`).
-    fn reach(
+    #[allow(clippy::too_many_arguments)]
+    fn reach<D: DeadlineCheck>(
         &self,
         lane: Lane,
         key: u64,
@@ -58,7 +65,8 @@ pub(in crate::segment) trait BroadBackend {
         seen: &mut [u32],
         cands: &mut Vec<u32>,
         stats: &mut MatchStats,
-    );
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled>;
     fn alive(&self, local: u32) -> bool;
     /// Whether this segment holds any shared body groups (dedup Stage A) — the
     /// per-segment gate for the group-aware candidate/emission handling below.
@@ -133,7 +141,7 @@ fn lookup<'a>(
 
 impl BroadBackend for &Segment {
     #[inline]
-    fn reach(
+    fn reach<D: DeadlineCheck>(
         &self,
         lane: Lane,
         key: u64,
@@ -141,12 +149,13 @@ impl BroadBackend for &Segment {
         seen: &mut [u32],
         cands: &mut Vec<u32>,
         stats: &mut MatchStats,
-    ) {
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled> {
         stats.probes_attempted += 1;
         if let Some(flt) = &self.filter {
             if !flt.may_contain(key) {
                 stats.probes_skipped += 1;
-                return;
+                return Ok(());
             }
         }
         let index = match lane {
@@ -159,13 +168,23 @@ impl BroadBackend for &Segment {
                 Lane::Broad => stats.broad_postings_scanned += posting.len() as u32,
                 Lane::Hot => stats.hot_postings_scanned += posting.len() as u32,
             }
-            posting.for_each(|local| {
+            let mut cancelled = None;
+            posting.for_each_while(|local| {
+                if let Err(error) = deadline.check_work() {
+                    cancelled = Some(error);
+                    return false;
+                }
                 if seen[local as usize] != epoch {
                     seen[local as usize] = epoch;
                     cands.push(local);
                 }
+                true
             });
+            if let Some(error) = cancelled {
+                return Err(error);
+            }
         }
+        Ok(())
     }
     #[inline]
     fn alive(&self, local: u32) -> bool {
@@ -237,7 +256,7 @@ impl BroadBackend for &Segment {
 
 impl BroadBackend for &MmapSegment {
     #[inline]
-    fn reach(
+    fn reach<D: DeadlineCheck>(
         &self,
         lane: Lane,
         key: u64,
@@ -245,10 +264,11 @@ impl BroadBackend for &MmapSegment {
         seen: &mut [u32],
         cands: &mut Vec<u32>,
         stats: &mut MatchStats,
-    ) {
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled> {
         match lane {
-            Lane::Broad => self.broad_reach(key, epoch, seen, cands, stats),
-            Lane::Hot => self.hot_reach(key, epoch, seen, cands, stats),
+            Lane::Broad => self.broad_reach(key, epoch, seen, cands, stats, deadline),
+            Lane::Hot => self.hot_reach(key, epoch, seen, cands, stats, deadline),
         }
     }
     #[inline]
@@ -327,7 +347,8 @@ impl BroadBackend for &MmapSegment {
 /// emits exactly the pre-dedup single-id path (the alive/tag gates then repeat
 /// checks the caller already made — same values, no behavior change).
 #[inline]
-fn emit_from_bits<B: BroadBackend, S: BatchMatchSink, P: BatchEmissionPolicy>(
+#[allow(clippy::too_many_arguments)]
+fn emit_from_bits<B: BroadBackend, S: BatchMatchSink, P: BatchEmissionPolicy, D: DeadlineCheck>(
     backend: &B,
     grouped: bool,
     local: u32,
@@ -335,31 +356,37 @@ fn emit_from_bits<B: BroadBackend, S: BatchMatchSink, P: BatchEmissionPolicy>(
     bits: &[u64],
     collector: &mut S,
     policy: P,
-) {
+    deadline: &mut DeadlinePoll<D>,
+) -> Result<(), D::Cancelled> {
+    deadline.check_work()?;
     if backend.alive(local) && backend.passes_tags(local, pred) {
         let logical = backend.logical_id(local);
         let placement = backend.placement(local);
-        for_each_set_bit(bits, |ti| {
+        for_each_set_bit(bits, deadline, |ti, deadline| {
             if policy.should_emit(ti, placement) {
-                collector.on_match(ti, logical);
+                crate::segment::collect_batch_match(collector, ti, logical, deadline)?;
             }
-        });
+            Ok(())
+        })?;
     }
     if grouped {
         for &m in backend.members_of(local) {
+            deadline.check_work()?;
             if backend.alive(m) && backend.passes_tags(m, pred) {
                 let logical = backend.logical_id(m);
                 // Per-member placement: ownership is per row, and a member's
                 // placement is its own identity even inside a shared body.
                 let placement = backend.placement(m);
-                for_each_set_bit(bits, |ti| {
+                for_each_set_bit(bits, deadline, |ti, deadline| {
                     if policy.should_emit(ti, placement) {
-                        collector.on_match(ti, logical);
+                        crate::segment::collect_batch_match(collector, ti, logical, deadline)?;
                     }
-                });
+                    Ok(())
+                })?;
             }
         }
     }
+    Ok(())
 }
 
 /// Whether a posting's canonical body still has at least one live identity.
@@ -372,13 +399,24 @@ fn emit_from_bits<B: BroadBackend, S: BatchMatchSink, P: BatchEmissionPolicy>(
 /// the engine's live-phrase capability has correctly returned to the columnar
 /// path.
 #[inline]
-fn body_group_has_live_row<B: BroadBackend>(backend: &B, grouped: bool, local: u32) -> bool {
-    backend.alive(local)
-        || (grouped
-            && backend
-                .members_of(local)
-                .iter()
-                .any(|&member| backend.alive(member)))
+fn body_group_has_live_row<B: BroadBackend, D: DeadlineCheck>(
+    backend: &B,
+    grouped: bool,
+    local: u32,
+    deadline: &mut DeadlinePoll<D>,
+) -> Result<bool, D::Cancelled> {
+    if backend.alive(local) {
+        return Ok(true);
+    }
+    if grouped {
+        for &member in backend.members_of(local) {
+            deadline.check_work()?;
+            if backend.alive(member) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Evaluate one columnar lane (broad or hot) of one segment against the whole
@@ -395,6 +433,7 @@ pub(in crate::segment) fn eval_one_segment<
     B: BroadBackend,
     S: BatchMatchSink,
     P: BatchEmissionPolicy,
+    D: DeadlineCheck,
 >(
     backend: B,
     lane: Lane,
@@ -418,7 +457,8 @@ pub(in crate::segment) fn eval_one_segment<
     pred: &crate::exact::TagPredicate,
     stats: &mut MatchStats,
     policy: P,
-) {
+    deadline: &mut DeadlinePoll<D>,
+) -> Result<(), D::Cancelled> {
     cands.clear();
     non_pure.clear();
     // Dedup Stage A: on a group-bearing segment a posting entry is a group
@@ -454,11 +494,13 @@ pub(in crate::segment) fn eval_one_segment<
             seen,
             cands,
             stats,
-        );
+            deadline,
+        )?;
         for &local in &cands[before..] {
+            deadline.check_work()?;
             stats.unique_candidates += 1;
             stats.broad_candidates += 1;
-            if !body_group_has_live_row(&backend, grouped, local) {
+            if !body_group_has_live_row(&backend, grouped, local, deadline)? {
                 continue; // fully tombstoned body group — no identity can emit
             }
             if prefilter && !backend.can_match_batch(local, batch_mask_union, feat_row) {
@@ -471,9 +513,10 @@ pub(in crate::segment) fn eval_one_segment<
 
     // Reachability + vacuous-accept emit, one probe per distinct batch feature.
     for &f in distinct {
+        deadline.check_work()?;
         let key = sig_key(&[f]);
         let before = cands.len();
-        backend.reach(lane, key, epoch, seen, cands, stats);
+        backend.reach(lane, key, epoch, seen, cands, stats, deadline)?;
         if cands.len() == before {
             continue;
         }
@@ -485,12 +528,13 @@ pub(in crate::segment) fn eval_one_segment<
         };
         let fbits = &feat_bits[r as usize * words..r as usize * words + words];
         for &local in &cands[before..] {
+            deadline.check_work()?;
             stats.unique_candidates += 1;
             match lane {
                 Lane::Broad => stats.broad_candidates += 1,
                 Lane::Hot => stats.hot_candidates += 1,
             }
-            if !body_group_has_live_row(&backend, grouped, local) {
+            if !body_group_has_live_row(&backend, grouped, local, deadline)? {
                 continue; // fully tombstoned body group — no identity can emit
             }
             // Vacuous-accept fast path: emit straight from the anchor bitmap. When
@@ -504,7 +548,9 @@ pub(in crate::segment) fn eval_one_segment<
             // body — the vacuous property holds for each — so emission fans out
             // per alive, tag-passing member.
             if materialize && backend.vacuous_accept(lane, local, f) {
-                emit_from_bits(&backend, grouped, local, pred, fbits, collector, policy);
+                emit_from_bits(
+                    &backend, grouped, local, pred, fbits, collector, policy, deadline,
+                )?;
             } else {
                 // Count-gate pre-reject (lever 5a) before queueing full bitmap
                 // verification. A vacuous-accept candidate never reaches this check
@@ -528,6 +574,7 @@ pub(in crate::segment) fn eval_one_segment<
     // stays per-member, ADR-049) — and alive/tag gating moves to the per-member
     // emit.
     for &local in non_pure.iter() {
+        deadline.check_work()?;
         match lane {
             Lane::Broad => stats.broad_queries_evaluated += 1,
             Lane::Hot => stats.hot_queries_evaluated += 1,
@@ -549,7 +596,9 @@ pub(in crate::segment) fn eval_one_segment<
                 evaluated.is_ok(),
                 "positioned predicate reached the positionless columnar kernel"
             );
-            emit_from_bits(&backend, grouped, local, pred, acc, collector, policy);
+            emit_from_bits(
+                &backend, grouped, local, pred, acc, collector, policy, deadline,
+            )?;
         } else {
             let evaluated = backend.eval_into(
                 local,
@@ -569,11 +618,13 @@ pub(in crate::segment) fn eval_one_segment<
             );
             let logical = backend.logical_id(local);
             let placement = backend.placement(local);
-            for_each_set_bit(acc, |ti| {
+            for_each_set_bit(acc, deadline, |ti, deadline| {
                 if policy.should_emit(ti, placement) {
-                    collector.on_match(ti, logical);
+                    crate::segment::collect_batch_match(collector, ti, logical, deadline)?;
                 }
-            });
+                Ok(())
+            })?;
         }
     }
+    Ok(())
 }

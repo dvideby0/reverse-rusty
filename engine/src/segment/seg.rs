@@ -3,7 +3,10 @@
 //! the `segment` module root; the compaction merges live in the sibling
 //! [`merge`](super::merge) submodule.
 
-use super::{AddedCompiled, CompileKnobs, MatchStats, ProbeLanes, Segment};
+use super::{
+    infallible, AddedCompiled, CompileKnobs, DeadlineCheck, DeadlinePoll, MatchStats, NoDeadline,
+    ProbeLanes, Segment,
+};
 use crate::collect::{MatchSink, VecSink};
 use crate::compile::{build_signatures, is_hot, CostClass, Extracted};
 use crate::dict::Dict;
@@ -427,7 +430,8 @@ impl Segment {
     ) {
         let mut ignored_emissions = 0;
         let mut collector = VecSink::new(out, &mut ignored_emissions);
-        self.match_collect(
+        let mut deadline = DeadlinePoll::new(NoDeadline);
+        infallible(self.match_collect(
             view,
             dict,
             epoch,
@@ -437,7 +441,8 @@ impl Segment {
             pred,
             stats,
             crate::ownership::EmitAll,
-        );
+            &mut deadline,
+        ));
     }
 
     /// Probe this segment for one title and emit matched LOGICAL ids.
@@ -448,7 +453,11 @@ impl Segment {
     /// present are skipped without touching the candidate index, cutting read
     /// amplification across multiple segments.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn match_collect<C: MatchSink, P: crate::ownership::EmissionPolicy>(
+    pub(crate) fn match_collect<
+        C: MatchSink,
+        P: crate::ownership::EmissionPolicy,
+        D: DeadlineCheck,
+    >(
         &self,
         view: &crate::exact::TitleView,
         dict: &Dict,
@@ -459,7 +468,8 @@ impl Segment {
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
         emission: P,
-    ) {
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled> {
         let filter = self.filter.as_ref();
         // Graph-only phrase proxies are arity-1 MAIN signatures. Keep them out
         // of the pair/hot/broad loops: those lanes are planned exclusively from
@@ -468,14 +478,15 @@ impl Segment {
         let probe_feats = view.probe;
         let feats = view.pos;
         if collector.should_stop() {
-            return;
+            return Ok(());
         }
 
         // arity-1 signatures (one per feature)
         for &f in probe_feats {
             if collector.should_stop() {
-                return;
+                return Ok(());
             }
+            deadline.check_work()?;
             let key = sig_key(&[f]);
             stats.probes_attempted += 1;
             if let Some(flt) = filter {
@@ -495,7 +506,8 @@ impl Segment {
                 stats,
                 ProbeLane::Main,
                 emission,
-            );
+                deadline,
+            )?;
         }
         // arity-2 signatures: {hot feature} x {every other feature}. Deliberately
         // keyed to the FROZEN top-64 mask (`is_hot`), never θ — this loop is the
@@ -503,13 +515,15 @@ impl Segment {
         // fenced change, not the hot tier's (ADR-105).
         for &h in feats {
             if collector.should_stop() {
-                return;
+                return Ok(());
             }
+            deadline.check_work()?;
             if is_hot(dict, h) {
                 for &o in feats {
                     if collector.should_stop() {
-                        return;
+                        return Ok(());
                     }
+                    deadline.check_work()?;
                     if o != h {
                         let (a, b) = if h < o { (h, o) } else { (o, h) };
                         let key = sig_key(&[a, b]);
@@ -531,7 +545,8 @@ impl Segment {
                             stats,
                             ProbeLane::Main,
                             emission,
-                        );
+                            deadline,
+                        )?;
                     }
                 }
             }
@@ -545,8 +560,9 @@ impl Segment {
         if lanes.include_hot && self.has_hot_entries() {
             for &f in feats {
                 if collector.should_stop() {
-                    return;
+                    return Ok(());
                 }
+                deadline.check_work()?;
                 let key = sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if let Some(flt) = filter {
@@ -566,15 +582,17 @@ impl Segment {
                     stats,
                     ProbeLane::Hot,
                     emission,
-                );
+                    deadline,
+                )?;
             }
         }
         // broad lane (arity-1 anchors), measured separately
         if lanes.include_broad {
             for &f in feats {
                 if collector.should_stop() {
-                    return;
+                    return Ok(());
                 }
+                deadline.check_work()?;
                 let key = sig_key(&[f]);
                 stats.probes_attempted += 1;
                 if let Some(flt) = filter {
@@ -594,15 +612,17 @@ impl Segment {
                     stats,
                     ProbeLane::Broad,
                     emission,
-                );
+                    deadline,
+                )?;
             }
             // Universal signature: class-D always-candidates (ADR-068). Probed
             // unconditionally — the accept knob gates ingest, never visibility, so a
             // stored entry stays reachable however the knob is later toggled. With no
             // class-D entries this is one filter (or hash) miss per segment.
             if collector.should_stop() {
-                return;
+                return Ok(());
             }
+            deadline.check_work()?;
             let key = crate::util::universal_sig();
             stats.probes_attempted += 1;
             let skip = filter.is_some_and(|flt| !flt.may_contain(key));
@@ -620,14 +640,16 @@ impl Segment {
                     stats,
                     ProbeLane::Broad,
                     emission,
-                );
+                    deadline,
+                )?;
             }
         }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn probe<C: MatchSink, P: crate::ownership::EmissionPolicy>(
+    fn probe<C: MatchSink, P: crate::ownership::EmissionPolicy, D: DeadlineCheck>(
         &self,
         key: u64,
         index: &CandidateIndex,
@@ -639,7 +661,8 @@ impl Segment {
         stats: &mut MatchStats,
         lane: ProbeLane,
         emission: P,
-    ) {
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled> {
         // Dedup Stage A: on a segment with shared body groups, a posting entry is
         // a group LEADER — verified once per body, emitted per alive/tag-passing
         // member. Dup-free segments (incl. every mmap-attached one) take the
@@ -653,8 +676,13 @@ impl Segment {
                 ProbeLane::Hot => stats.hot_postings_scanned += posting.len() as u32,
                 ProbeLane::Main => {}
             }
+            let mut cancelled = None;
             posting.for_each_while(|local| {
                 if collector.should_stop() {
+                    return false;
+                }
+                if let Err(error) = deadline.check_work() {
+                    cancelled = Some(error);
                     return false;
                 }
                 // dedup across signatures with an epoch stamp (O(1), no alloc)
@@ -682,7 +710,15 @@ impl Segment {
                     if self.exact.verify(local, view, pred)
                         && emission.should_emit(self.exact.placement(local))
                     {
-                        collector.on_match_at(self.exact.logical(local), local);
+                        if let Err(error) = crate::segment::collect_match_at(
+                            collector,
+                            self.exact.logical(local),
+                            local,
+                            deadline,
+                        ) {
+                            cancelled = Some(error);
+                            return false;
+                        }
                     }
                     return !collector.should_stop();
                 }
@@ -706,6 +742,13 @@ impl Segment {
                         }
                     }
                     for &member in members {
+                        if collector.should_stop() {
+                            return false;
+                        }
+                        if let Err(error) = deadline.check_work() {
+                            cancelled = Some(error);
+                            return false;
+                        }
                         if self.alive[member as usize] {
                             collector.on_candidate(self.exact.logical(member));
                             if collector.should_stop() {
@@ -724,7 +767,15 @@ impl Segment {
                     && pred.matches(self.exact.tags_of(local))
                     && emission.should_emit(self.exact.placement(local))
                 {
-                    collector.on_match_at(self.exact.logical(local), local);
+                    if let Err(error) = crate::segment::collect_match_at(
+                        collector,
+                        self.exact.logical(local),
+                        local,
+                        deadline,
+                    ) {
+                        cancelled = Some(error);
+                        return false;
+                    }
                     if collector.should_stop() {
                         return false;
                     }
@@ -738,11 +789,23 @@ impl Segment {
                     if collector.should_stop() {
                         return false;
                     }
+                    if let Err(error) = deadline.check_work() {
+                        cancelled = Some(error);
+                        return false;
+                    }
                     if self.alive[m as usize]
                         && pred.matches(self.exact.tags_of(m))
                         && emission.should_emit(self.exact.placement(m))
                     {
-                        collector.on_match_at(self.exact.logical(m), m);
+                        if let Err(error) = crate::segment::collect_match_at(
+                            collector,
+                            self.exact.logical(m),
+                            m,
+                            deadline,
+                        ) {
+                            cancelled = Some(error);
+                            return false;
+                        }
                         if collector.should_stop() {
                             return false;
                         }
@@ -750,7 +813,11 @@ impl Segment {
                 }
                 true
             });
+            if let Some(error) = cancelled {
+                return Err(error);
+            }
         }
+        Ok(())
     }
 
     /// Number of alive (non-tombstoned) entries in this segment (O(1)).

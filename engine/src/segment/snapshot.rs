@@ -3,11 +3,11 @@
 //! batch matchers). Type definitions live in the `segment` module root.
 
 use super::{
-    infallible, BaseSegment, BatchMatchOptions, DeadlineAt, DeadlineCheck, EngineSnapshot,
-    MatchCancelled, MatchScratch, MatchStats, NoDeadline, Segment,
+    infallible, BaseSegment, BatchMatchOptions, DeadlineAt, DeadlineCheck, DeadlinePoll,
+    EngineSnapshot, MatchCancelled, MatchScratch, MatchStats, NoDeadline, Segment,
 };
 use crate::collect::{
-    AllCollector, CandidateHitCollector, ChunkCollector, MatchCollector, TopKCollector,
+    AllCollector, CandidateHitCollector, ChunkCollector, MatchCollector, TopKCollector, TopKScorer,
 };
 use crate::compile::CostClass;
 use crate::config::EngineConfig;
@@ -405,10 +405,12 @@ impl MatchView<'_> {
             return Ok(MatchStats::default());
         }
 
+        let mut deadline = DeadlinePoll::new(dl);
+
         // Cooperative-deadline entry check (ADR-099): a match that spent its whole
         // budget queued on the rayon pool dies here, before doing any work. The
         // unarmed monomorph compiles this away.
-        dl.check()?;
+        deadline.check_now()?;
 
         // 1) normalize -> the title feature view(s) (ADR-061). The default (no active multi-word
         // alias) takes the **single-view fast path** — one feature set, one mask, no second copy —
@@ -497,17 +499,18 @@ impl MatchView<'_> {
         let mut stats = MatchStats::default();
 
         // 3) probe every base segment, each with its own seen buffer. The cooperative
-        // deadline is re-checked at each SEGMENT boundary (coarse — never per candidate,
-        // the hot-path invariant); on expiry we fall through to the shared buffer-restore
-        // epilogue and return Err with the output cleared (ADR-099).
+        // deadline is re-checked at each SEGMENT boundary and every bounded run of
+        // posting/candidate/body-group work inside it (ADR-123). On expiry we
+        // fall through to the shared buffer-restore epilogue and return Err with
+        // the output cleared.
         let mut cancelled = None;
         for (i, base) in segments.iter().enumerate() {
-            if let Err(c) = dl.check() {
+            if let Err(c) = deadline.check_now() {
                 cancelled = Some(c);
                 break;
             }
             collector.begin_source(i);
-            base.match_collect(
+            if let Err(c) = base.match_collect(
                 &view,
                 self.dict,
                 epoch,
@@ -522,17 +525,21 @@ impl MatchView<'_> {
                 self.pred,
                 &mut stats,
                 emission,
-            );
+                &mut deadline,
+            ) {
+                cancelled = Some(c);
+                break;
+            }
             if collector.should_stop() {
                 break;
             }
         }
         if cancelled.is_none() && !collector.should_stop() {
-            if let Err(c) = dl.check() {
+            if let Err(c) = deadline.check_now() {
                 cancelled = Some(c);
             } else {
                 collector.begin_source(n_base);
-                self.memtable.match_collect(
+                if let Err(c) = self.memtable.match_collect(
                     &view,
                     self.dict,
                     epoch,
@@ -545,7 +552,10 @@ impl MatchView<'_> {
                     self.pred,
                     &mut stats,
                     emission,
-                );
+                    &mut deadline,
+                ) {
+                    cancelled = Some(c);
+                }
             }
         }
 
@@ -995,10 +1005,10 @@ impl EngineSnapshot {
 
     /// [`match_title_filtered`](Self::match_title_filtered) with an optional cooperative
     /// deadline (ADR-099). `None` delegates to the unarmed path (byte-identical);
-    /// `Some(d)` re-checks the clock at entry and at each segment boundary, and once
-    /// `Instant::now() >= d` abandons the match with [`MatchCancelled`] — `out` is
-    /// cleared, so no partial result escapes. Cancellation is bounded staleness, not
-    /// preemption: at most one segment's work runs past the deadline.
+    /// `Some(d)` re-checks the clock at entry, at each segment boundary, and
+    /// after bounded runs of in-segment work. Once `Instant::now() >= d` it
+    /// abandons the match with [`MatchCancelled`] — `out` is cleared, so no
+    /// partial result escapes. Cancellation remains cooperative, not preemptive.
     pub fn try_match_title_filtered(
         &self,
         title: &str,
@@ -1324,6 +1334,33 @@ impl EngineSnapshot {
         }
     }
 
+    /// Poll-aware scorer for armed bounded-ranking requests. It lends the
+    /// matcher's request-local deadline sampler to the newest-live metadata
+    /// walk, so one logical id with many tombstoned physical versions cannot
+    /// become an uninterruptible region.
+    pub(in crate::segment) fn program_scorer_with_poll<'a>(
+        &'a self,
+        program: &'a crate::rank::CompiledRankProgram,
+    ) -> impl Fn(u64, &mut dyn FnMut() -> bool) -> Option<i64> + Sync + 'a {
+        move |logical_id, should_stop| {
+            let mut stopped = should_stop();
+            if stopped {
+                return None;
+            }
+            let metadata = self.rank_metadata_for_logical_with_poll(logical_id, &mut || {
+                stopped = should_stop();
+                stopped
+            });
+            if stopped {
+                None
+            } else {
+                Some(metadata.map_or(0, |(values, tags)| {
+                    crate::rank::score_program(values, tags, program)
+                }))
+            }
+        }
+    }
+
     /// Bounded local ranked percolation over the scalar matcher. Collection is
     /// `O(K + total-threshold)` and every score resolves newest-live metadata.
     pub fn try_match_title_top_k(
@@ -1395,12 +1432,57 @@ impl EngineSnapshot {
         }
         let threshold =
             usize::try_from(options.track_total_hits_up_to).unwrap_or(crate::result::MAX_TOP_K);
-        let mut collector = TopKCollector::new(
-            options.size,
-            threshold,
-            options.search_after,
-            self.program_scorer(program),
-        );
+        if let Some(at) = deadline {
+            let mut collector = TopKCollector::new_polling(
+                options.size,
+                threshold,
+                options.search_after,
+                self.program_scorer_with_poll(program),
+            );
+            self.collect_top_k_with_policy(
+                title,
+                options,
+                pred,
+                scratch,
+                emission,
+                &mut collector,
+                DeadlineAt(at),
+            )
+            .map_err(crate::rank::RankedMatchError::Cancelled)
+        } else {
+            let mut collector = TopKCollector::new(
+                options.size,
+                threshold,
+                options.search_after,
+                self.program_scorer(program),
+            );
+            Ok(infallible(self.collect_top_k_with_policy(
+                title,
+                options,
+                pred,
+                scratch,
+                emission,
+                &mut collector,
+                NoDeadline,
+            )))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_top_k_with_policy<
+        D: DeadlineCheck,
+        S: TopKScorer,
+        P: crate::ownership::EmissionPolicy,
+    >(
+        &self,
+        title: &str,
+        options: crate::result::TopKOptions,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        emission: P,
+        collector: &mut TopKCollector<S>,
+        deadline: D,
+    ) -> Result<crate::rank::RankedMatch, D::Cancelled> {
         let view = MatchView {
             norm: &self.norm,
             dict: &self.dict,
@@ -1410,26 +1492,8 @@ impl EngineSnapshot {
             pred,
         };
         let include_broad = options.query_scope == crate::result::QueryScope::WithBroad;
-        let mut stats = match deadline {
-            Some(at) => view
-                .match_title_collect(
-                    title,
-                    scratch,
-                    &mut collector,
-                    include_broad,
-                    DeadlineAt(at),
-                    emission,
-                )
-                .map_err(crate::rank::RankedMatchError::Cancelled)?,
-            None => infallible(view.match_title_collect(
-                title,
-                scratch,
-                &mut collector,
-                include_broad,
-                NoDeadline,
-                emission,
-            )),
-        };
+        let mut stats =
+            view.match_title_collect(title, scratch, collector, include_broad, deadline, emission)?;
         let total_hits = collector.total_hits();
         stats.matches = u32::try_from(total_hits.value).unwrap_or(u32::MAX);
         let hits = collector
@@ -1499,8 +1563,9 @@ impl EngineSnapshot {
     }
 
     /// [`match_titles_par_filtered`](Self::match_titles_par_filtered) with an optional
-    /// cooperative deadline (ADR-099). `None` delegates unarmed (byte-identical). Armed,
-    /// every in-flight title self-checks per segment and the `Result` collect
+    /// cooperative deadline (ADR-099/123). `None` delegates unarmed (byte-identical).
+    /// Armed, every in-flight title self-checks per segment and at bounded
+    /// intervals inside segment traversal, and the `Result` collect
     /// short-circuits the batch: the FIRST cancellation abandons the whole request —
     /// per-title results are all-or-nothing, never a partially-filled batch.
     pub fn try_match_titles_par_filtered(
@@ -1652,10 +1717,11 @@ impl EngineSnapshot {
     }
 
     /// [`match_titles_batch_with_stats_filtered`](Self::match_titles_batch_with_stats_filtered)
-    /// with an optional cooperative deadline (ADR-099). `None` delegates unarmed
-    /// (byte-identical). Armed, each chunk checks per title (Phase 0) and per segment
-    /// block (the columnar broad pass), and the first cancellation abandons the whole
-    /// batch — never a partially-filled `responses[]`.
+    /// with an optional cooperative deadline (ADR-099/123). `None` delegates
+    /// unarmed (byte-identical). Armed, each chunk checks per title (Phase 0),
+    /// per segment block, and at bounded intervals inside the columnar kernels;
+    /// the first cancellation abandons the whole batch — never a
+    /// partially-filled `responses[]`.
     pub fn try_match_titles_batch_with_stats_filtered(
         &self,
         titles: &[impl AsRef<str> + Sync],
@@ -1856,5 +1922,237 @@ mod exhaustive_dedup_tests {
             polls, 17,
             "the walk must stop at the cancellation poll, not scan all copies"
         );
+    }
+}
+
+#[cfg(test)]
+mod bounded_deadline_tests {
+    use super::*;
+    use crate::collect::MatchSink;
+    use crate::ownership::EmissionPolicy;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy)]
+    struct CancelOnCheck<'a> {
+        checks: &'a AtomicUsize,
+        cancel_at: usize,
+    }
+
+    impl DeadlineCheck for CancelOnCheck<'_> {
+        const ARMED: bool = true;
+        type Cancelled = MatchCancelled;
+
+        fn check(self) -> Result<(), Self::Cancelled> {
+            let current = self.checks.fetch_add(1, Ordering::Relaxed) + 1;
+            if current >= self.cancel_at {
+                Err(MatchCancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    struct CountEmissions<'a>(&'a AtomicUsize);
+
+    impl EmissionPolicy for CountEmissions<'_> {
+        fn should_emit(self, _placement: crate::ownership::QueryPlacementRef<'_>) -> bool {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct StopAfterFirstMatch {
+        matches: usize,
+        stopped: bool,
+    }
+
+    impl MatchSink for StopAfterFirstMatch {
+        fn on_match(&mut self, _logical_id: u64) {
+            self.matches += 1;
+            self.stopped = true;
+        }
+
+        fn should_stop(&mut self) -> bool {
+            self.stopped
+        }
+    }
+
+    #[test]
+    fn collector_failure_precedes_a_simultaneous_deadline_poll() {
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine
+            .try_insert_live("anchorw", 1, 1)
+            .expect("insert matching row");
+        let snapshot = engine.snapshot();
+        let mut title_scratch = MatchScratch::new();
+        snapshot.norm.match_features(
+            "anchorw",
+            &snapshot.dict,
+            &mut title_scratch.lc,
+            &mut title_scratch.norm,
+            &mut title_scratch.feats,
+        );
+        let title = crate::exact::TitleView::single(0, &title_scratch.feats);
+        let mut seen = vec![0; snapshot.memtable.len()];
+        let mut collector = StopAfterFirstMatch::default();
+        let pred = TagPredicate::empty();
+        let mut stats = MatchStats::default();
+        let checks = AtomicUsize::new(0);
+        let mut deadline = DeadlinePoll::new(CancelOnCheck {
+            checks: &checks,
+            cancel_at: 1,
+        });
+        // The anchor probe and its posting consume two work units. The next
+        // loop edge is therefore both the first deadline sample and the first
+        // chance to observe the collector's already-recorded failure.
+        deadline.remaining = 3;
+
+        let result = snapshot.memtable.match_collect(
+            &title,
+            &snapshot.dict,
+            1,
+            &mut seen,
+            &mut collector,
+            crate::segment::ProbeLanes {
+                include_broad: false,
+                include_hot: true,
+            },
+            &pred,
+            &mut stats,
+            crate::ownership::EmitAll,
+            &mut deadline,
+        );
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(collector.matches, 1);
+        assert!(collector.stopped);
+        assert_eq!(
+            checks.load(Ordering::Relaxed),
+            0,
+            "an already-recorded collector failure must win before the clock poll"
+        );
+    }
+
+    #[test]
+    fn counter_deadline_stops_inside_one_body_group_and_clears_results() {
+        const ROWS: u64 = 4_096;
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        for logical in 0..ROWS {
+            engine
+                .try_insert_live("anchorw", logical, 1)
+                .expect("insert duplicate body");
+        }
+        let snapshot = engine.snapshot();
+        assert!(snapshot.segments.is_empty());
+        assert!(snapshot.memtable.has_dup_groups());
+
+        let pred = TagPredicate::empty();
+        let view = MatchView {
+            norm: &snapshot.norm,
+            dict: &snapshot.dict,
+            segments: &snapshot.segments,
+            memtable: &snapshot.memtable,
+            has_phrase_predicates: snapshot.has_phrase_predicates,
+            pred: &pred,
+        };
+        let checks = AtomicUsize::new(0);
+        let emissions = AtomicUsize::new(0);
+        let mut scratch = MatchScratch::new();
+        let mut out = Vec::new();
+        let result = view.match_title_with_policy(
+            "anchorw",
+            &mut scratch,
+            &mut out,
+            true,
+            CancelOnCheck {
+                checks: &checks,
+                // Entry + memtable boundary pass; the first in-segment sample
+                // cancels deterministically without consulting wall time.
+                cancel_at: 3,
+            },
+            CountEmissions(&emissions),
+        );
+
+        assert_eq!(result, Err(MatchCancelled));
+        assert_eq!(checks.load(Ordering::Relaxed), 3);
+        assert!(
+            emissions.load(Ordering::Relaxed) < ROWS as usize,
+            "the sampler must stop within the group instead of finishing the segment"
+        );
+        assert!(
+            out.is_empty(),
+            "the lowest-level abort must clear every pre-cancellation emission"
+        );
+    }
+
+    #[test]
+    fn ranked_scalar_metadata_walk_uses_the_active_sampler_and_aborts() {
+        const LEGACY_COPIES: u32 = 2_048;
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine
+            .try_insert_live("zzrankneedle", 7, 0)
+            .expect("live matching copy");
+        for version in 1..=LEGACY_COPIES {
+            let query = format!("zzlegacyterm{version}");
+            let crate::segment::InsertOutcome::Inserted(local) = engine
+                .try_insert_live(&query, 7, version)
+                .expect("newer legacy copy")
+            else {
+                panic!("selective test query was unexpectedly rejected");
+            };
+            engine.tombstone(local).expect("tombstone legacy copy");
+        }
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.memtable.locals_for_logical(7).len(),
+            LEGACY_COPIES as usize + 1
+        );
+        assert!(
+            !snapshot.memtable.has_dup_groups(),
+            "unique legacy bodies keep cancellation inside rank metadata, not body emission"
+        );
+
+        let program = snapshot
+            .compile_rank_program(&crate::rank::RankProgramSpec::default())
+            .expect("rank program");
+        let pred = TagPredicate::empty();
+        let view = MatchView {
+            norm: &snapshot.norm,
+            dict: &snapshot.dict,
+            segments: &snapshot.segments,
+            memtable: &snapshot.memtable,
+            has_phrase_predicates: snapshot.has_phrase_predicates,
+            pred: &pred,
+        };
+        let checks = AtomicUsize::new(0);
+        let mut collector =
+            TopKCollector::new_polling(10, 100, None, snapshot.program_scorer_with_poll(&program));
+        let mut scratch = MatchScratch::new();
+        let result = view.match_title_collect(
+            "zzrankneedle",
+            &mut scratch,
+            &mut collector,
+            false,
+            CancelOnCheck {
+                checks: &checks,
+                // Entry + memtable boundary pass. The next fixed-interval
+                // sample must fire inside newest-live rank metadata.
+                cancel_at: 3,
+            },
+            crate::ownership::EmitAll,
+        );
+
+        assert_eq!(result, Err(MatchCancelled));
+        assert_eq!(checks.load(Ordering::Relaxed), 3);
+        assert!(
+            collector.winners().is_empty(),
+            "a cancelled rank metadata walk must not leak a partial winner"
+        );
+        assert_eq!(collector.total_hits().value, 0);
     }
 }

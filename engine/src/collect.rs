@@ -14,7 +14,7 @@ mod chunk;
 mod top_k;
 
 pub(crate) use chunk::ChunkCollector;
-pub(crate) use top_k::{BatchTopKCollector, TopKCollector};
+pub(crate) use top_k::{BatchTopKCollector, TopKCollector, TopKScorer};
 
 /// Summary returned when a collector finalizes one exact matching pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -55,6 +55,20 @@ pub(crate) trait MatchSink {
     #[inline]
     fn on_match_at(&mut self, logical_id: u64, _local_id: u32) {
         self.on_match(logical_id);
+    }
+
+    /// Poll-aware counterpart used by collectors whose post-verification work
+    /// can itself traverse an unbounded structure (currently bounded ranking's
+    /// newest-live metadata lookup). Ordinary collectors keep the default, so
+    /// the callback is never invoked in their monomorphized path.
+    #[inline]
+    fn on_match_at_with_poll(
+        &mut self,
+        logical_id: u64,
+        local_id: u32,
+        _should_stop: &mut dyn FnMut() -> bool,
+    ) {
+        self.on_match_at(logical_id, local_id);
     }
 
     /// Identify which base segment (oldest-first) or memtable is about to emit.
@@ -191,6 +205,17 @@ impl MatchSink for VecSink<'_> {
 /// Indexed collector seam for the columnar bitmap path.
 pub(crate) trait BatchMatchSink {
     fn on_match(&mut self, title_index: usize, logical_id: u64);
+
+    /// Indexed counterpart to [`MatchSink::on_match_at_with_poll`].
+    #[inline]
+    fn on_match_with_poll(
+        &mut self,
+        title_index: usize,
+        logical_id: u64,
+        _should_stop: &mut dyn FnMut() -> bool,
+    ) {
+        self.on_match(title_index, logical_id);
+    }
 }
 
 /// Lifecycle implemented by a complete batch collector — the indexed analogue
