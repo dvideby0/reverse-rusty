@@ -179,7 +179,8 @@ pub enum TombstoneError {
     /// The segment index is no longer present (or never existed).
     SegmentNotFound { segment: usize },
     /// The segment generation captured by the address is no longer installed,
-    /// or its row identity no longer matches.
+    /// its row identity no longer matches, or it is not part of the latest
+    /// manifest-committed positional WAL address space.
     StaleAddress { segment: usize, local_id: u32 },
     /// The segment exists, but the local id is outside its row range.
     LocalNotFound { segment: usize, local_id: u32 },

@@ -39,6 +39,14 @@ fn no_compaction_cfg(dir: &Path) -> EngineConfig {
     }
 }
 
+fn next_segment_temp_path(dir: &Path) -> std::path::PathBuf {
+    let manifest =
+        reverse_rusty::storage::read_manifest(&dir.join("manifest.bin")).expect("read manifest");
+    dir.join("segments")
+        .join(format!("seg_{:06}.seg", manifest.next_seg_id))
+        .with_extension("seg.tmp")
+}
+
 /// Bug 1, isolated: with every compaction trigger disabled, a base-segment delete
 /// must still survive flush (which checkpoints + resets the WAL) and reopen. Before
 /// ADR-066 the deleted query resurrected here.
@@ -206,6 +214,126 @@ fn valid_positional_tombstone_replays_from_the_wal_tail() {
     );
     for i in [1, 3, 4, 5] {
         assert!(match_ids(&eng, &title_for(i)).contains(&i), "q{i} intact");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn failed_flush_rejects_the_uncommitted_generation_but_keeps_old_addresses_safe() {
+    let dir = test_dir("tomb_failed_flush_generation");
+    {
+        let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
+        eng.build_from_queries(&distinct_queries(1..=1));
+        let committed = eng
+            .segment_address(0, 0, 1)
+            .expect("resolve committed q1 address");
+
+        eng.try_insert_live("player2 unique2", 2, 1)
+            .expect("WAL-backed q2 insert");
+        // Force the flush to install a coherent Memory fallback that is served
+        // live but absent from the still-current manifest.
+        let segment_tmp = next_segment_temp_path(&dir);
+        std::fs::create_dir(&segment_tmp).expect("block segment temp file");
+        eng.flush();
+        assert!(!eng.persistence_healthy());
+        assert!(match_ids(&eng, &title_for(2)).contains(&2));
+
+        let wal_before = eng.metrics();
+        assert!(matches!(
+            eng.segment_address(1, 0, 2),
+            Err(reverse_rusty::TombstoneError::StaleAddress {
+                segment: 1,
+                local_id: 0
+            })
+        ));
+        let wal_after_rejection = eng.metrics();
+        assert_eq!(
+            wal_after_rejection.wal_pending_entries,
+            wal_before.wal_pending_entries
+        );
+        assert_eq!(
+            wal_after_rejection.wal_size_bytes,
+            wal_before.wal_size_bytes
+        );
+        assert!(
+            match_ids(&eng, &title_for(2)).contains(&2),
+            "the rejected fallback address must leave q2 live"
+        );
+
+        // The older committed segment remains safe even while the live vector
+        // has an uncommitted suffix: its generation resolves to manifest ordinal
+        // zero rather than trusting the live vector wholesale.
+        eng.tombstone_in(&committed)
+            .expect("committed generation retains a replay-safe ordinal");
+        assert!(!match_ids(&eng, &title_for(1)).contains(&1));
+        std::fs::remove_dir(&segment_tmp).expect("remove segment blocker");
+    }
+
+    let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
+    assert!(
+        !match_ids(&eng, &title_for(1)).contains(&1),
+        "accepted tombstone against the committed generation must replay"
+    );
+    assert!(
+        match_ids(&eng, &title_for(2)).contains(&2),
+        "the rejected fallback tombstone must not resurrect or erase q2"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn failed_recompile_rejects_both_replaced_and_never_committed_generations() {
+    let dir = test_dir("tomb_failed_recompile_generation");
+    {
+        let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
+        eng.build_from_queries(&distinct_queries(1..=2));
+        let replaced = eng
+            .segment_address(0, 0, 1)
+            .expect("resolve pre-recompile q1 address");
+
+        // The replacement segment writes successfully, but blocking the
+        // manifest commit leaves it live-only while the old segment registry
+        // remains the restart authority.
+        let manifest_tmp = dir.join("manifest.manifest.tmp");
+        std::fs::create_dir(&manifest_tmp).expect("block manifest temp file");
+        eng.set_vocab(reverse_rusty::Vocab::default())
+            .expect("install rebuild vocabulary");
+        assert_eq!(eng.recompile_stale_segments(), 2);
+        assert!(!eng.persistence_healthy());
+        for i in 1..=2 {
+            assert!(match_ids(&eng, &title_for(i)).contains(&i), "q{i} live");
+        }
+
+        let wal_before = eng.metrics();
+        assert!(matches!(
+            eng.tombstone_in(&replaced),
+            Err(reverse_rusty::TombstoneError::StaleAddress {
+                segment: 0,
+                local_id: 0
+            })
+        ));
+        assert!(matches!(
+            eng.segment_address(0, 0, 1),
+            Err(reverse_rusty::TombstoneError::StaleAddress {
+                segment: 0,
+                local_id: 0
+            })
+        ));
+        let wal_after = eng.metrics();
+        assert_eq!(
+            wal_after.wal_pending_entries,
+            wal_before.wal_pending_entries
+        );
+        assert_eq!(wal_after.wal_size_bytes, wal_before.wal_size_bytes);
+        std::fs::remove_dir(&manifest_tmp).expect("remove manifest blocker");
+    }
+
+    let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
+    for i in 1..=2 {
+        assert!(
+            match_ids(&eng, &title_for(i)).contains(&i),
+            "neither rejected address may delete q{i} after restart"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

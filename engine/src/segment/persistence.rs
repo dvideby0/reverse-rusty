@@ -371,6 +371,17 @@ impl Engine {
                 return false;
             }
         }
+        // Publish the exact generation order the manifest reader will reconstruct.
+        // Memory fallbacks are deliberately absent from `segment_files`; filtering
+        // them here keeps later positional WAL ordinals aligned even if the live
+        // vector contains an uncommitted fallback before a durable segment.
+        self.committed_segment_generations = self
+            .segments
+            .iter()
+            .zip(&self.segment_generations)
+            .filter(|(segment, _)| matches!(segment.as_ref(), BaseSegment::Mmap(_)))
+            .map(|(_, generation)| Arc::clone(generation))
+            .collect();
         true
     }
 

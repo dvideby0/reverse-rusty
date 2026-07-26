@@ -821,6 +821,22 @@ impl Engine {
                 local_id,
             },
         )?;
+        // A persistent standalone engine may be serving a coherent live
+        // fallback/recompile layout whose manifest commit failed. Such a
+        // generation has no replay-safe positional WAL ordinal, so fail at
+        // address resolution as well as rechecking in `tombstone_in`.
+        if self.owns_manifest
+            && self.config.data_dir.is_some()
+            && !self
+                .committed_segment_generations
+                .iter()
+                .any(|committed| Arc::ptr_eq(committed, generation))
+        {
+            return Err(crate::error::TombstoneError::StaleAddress {
+                segment: seg_idx,
+                local_id,
+            });
+        }
         Ok(SegmentAddress {
             generation: Arc::clone(generation),
             segment: seg_idx,
@@ -850,7 +866,7 @@ impl Engine {
             .iter()
             .position(|generation| Arc::ptr_eq(generation, &address.generation))
             .ok_or_else(stale)?;
-        let segment = self.segments.get_mut(seg_idx).ok_or_else(stale)?;
+        let segment = self.segments.get(seg_idx).ok_or_else(stale)?;
         if address.local_id as usize >= segment.len()
             || segment.logical(address.local_id) != address.logical_id
         {
@@ -862,14 +878,32 @@ impl Engine {
                 local_id: address.local_id,
             });
         }
-        let wal_seg_idx = u32::try_from(seg_idx)
-            .map_err(|_| crate::error::TombstoneError::SegmentIndexOverflow { segment: seg_idx })?;
+        // Standalone WAL replay addresses the latest committed manifest list,
+        // which can lag the coherent live layout after a failed flush or vocab
+        // recompile. Resolve the generation in that durable list rather than
+        // writing its live-vector ordinal. In-memory/cluster engines have no
+        // standalone positional replay authority, so their current ordinal is
+        // sufficient for the process-local mutation.
+        let replay_seg_idx = if self.owns_manifest && self.config.data_dir.is_some() {
+            self.committed_segment_generations
+                .iter()
+                .position(|generation| Arc::ptr_eq(generation, &address.generation))
+                .ok_or_else(stale)?
+        } else {
+            seg_idx
+        };
+        let wal_seg_idx = u32::try_from(replay_seg_idx).map_err(|_| {
+            crate::error::TombstoneError::SegmentIndexOverflow {
+                segment: replay_seg_idx,
+            }
+        })?;
         if let Some(ref mut wal) = self.wal {
             if let Err(e) = wal.append_tombstone(wal_seg_idx, address.local_id) {
                 self.wal_healthy = false;
                 return Err(crate::error::TombstoneError::Wal(e));
             }
         }
+        let segment = self.segments.get_mut(seg_idx).ok_or_else(stale)?;
         Arc::make_mut(segment).tombstone(address.local_id);
         self.refresh_phrase_capability();
         Ok(())

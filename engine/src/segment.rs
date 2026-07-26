@@ -809,6 +809,14 @@ pub struct Engine {
     /// receive fresh identities; unchanged segments retain theirs even if their
     /// ordinal shifts. This is the generation fence behind `SegmentAddress`.
     segment_generations: Vec<Arc<SegmentGeneration>>,
+    /// Segment generations in the exact order named by the latest successful
+    /// standalone manifest commit. Memory-only fallback segments are absent.
+    ///
+    /// A positional WAL frame must use an ordinal from this vector, never the
+    /// possibly-ahead live `segments` layout. The two differ after a failed
+    /// flush/recompile commit and can also differ when a later durable segment
+    /// follows an uncommitted memory fallback.
+    committed_segment_generations: Vec<Arc<SegmentGeneration>>,
     /// mutable hot delta — insert_live / tombstone land here. `Arc` + CoW: a
     /// write clones only the (bounded) memtable, never the base segments.
     memtable: Arc<Segment>,
