@@ -1,5 +1,7 @@
 # ADR-096: Orphan-slot GC — `ListShards`/`DropShard` + the coordinator sweep
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-07-02)
 
 **Context.** Serve-then-drop (ADR-090) deliberately never tears the old owner down: after a

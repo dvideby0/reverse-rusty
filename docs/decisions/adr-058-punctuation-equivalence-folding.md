@@ -1,6 +1,6 @@
 # ADR-058: Configurable punctuation-equivalence folding in byte-cleaning
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Normalization & vocabulary decisions](areas/normalization-and-vocabulary.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** The shared normalizer's byte-cleaning pass (`normalize::Normalizer::clean_into`) had three
   hardcoded behaviors for non-alphanumeric characters: `.` was kept in place (so half-grades like `9.5`

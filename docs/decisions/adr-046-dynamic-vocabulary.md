@@ -1,6 +1,6 @@
 # ADR-046: Dynamic vocabulary (Cluster v1) — feature-hashing for new tokens + runtime normalizer learning for aliases
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Normalization & vocabulary decisions](areas/normalization-and-vocabulary.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted + **implemented** (approach chosen by the dynamic-vocabulary research spike).

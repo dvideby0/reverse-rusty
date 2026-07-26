@@ -1,6 +1,6 @@
 # ADR-053: NPMI corpus phrase induction as a runtime vocab source
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Normalization & vocabulary decisions](areas/normalization-and-vocabulary.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** Two corpus learners existed but were never connected. The `learn` binary
   (`src/bin/learn.rs`) mines multi-token **entities** (e.g. `upper deck` → `upper_deck`) from query

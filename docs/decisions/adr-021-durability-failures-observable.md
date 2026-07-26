@@ -1,6 +1,6 @@
 # ADR-021: Durability failures are observable events, not stderr writes
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Engine, errors, dependencies & ops decisions](areas/engine-quality-and-operations.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** The engine emits structured lifecycle events through an optional observer

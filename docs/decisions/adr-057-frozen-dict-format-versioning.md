@@ -1,6 +1,6 @@
 # ADR-057: Version + harden the frozen-space serializations (feature dict + tag dict)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** Every on-disk binary format in the engine is self-describing with a `magic + version`
   header — the segment file (`.seg` v3, ADR-012), the engine manifest (`PMAN` v2) and cluster manifest

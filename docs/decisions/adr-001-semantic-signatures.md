@@ -1,6 +1,6 @@
 # ADR-001: Semantic signatures over term-level gating
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Matching & verification decisions](areas/matching-and-verification.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Generic percolators (Lucene Monitor, ES/OS) gate on raw terms extracted from

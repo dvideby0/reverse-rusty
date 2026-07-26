@@ -1,5 +1,7 @@
 # ADR-085: gRPC mesh-transport hardening — timeouts, keepalive, bounded read-retry, RPC metrics
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-24)
 
 **Context.** The distributed multi-node layers are built and oracle-proven on localhost but
@@ -47,7 +49,7 @@ byte-identical on the in-process path.
     (50ms→1s cap). **Writes never
     retry** — `ingest`/`insert`/`delete` are non-idempotent (a retry could double-apply); they fail
     loud and converge via the coordinator's durable log + `resync` partial-apply repair
-    ([ADR-047](adr-047-partial-apply-repair.md)).
+    ([ADR-047](adr-047-remote-partial-apply-resync.md)).
   - **Long-running / streaming RPCs** (`FetchTranslog`, `RecoverFrom`) opt out of the per-call
     deadline (a real recovery is legitimately slow) and rely on connect-timeout + keepalive to notice
     a dead peer.

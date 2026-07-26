@@ -1,5 +1,7 @@
 # ADR-077: Tag-dict fingerprint in the recovery handshakes
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-11)
 
 **Context.** ADR-065 criterion 9 — the deferred ADR-055 hardening. The cluster's

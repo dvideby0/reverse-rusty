@@ -1,6 +1,6 @@
 # ADR-035: Per-shard replication + peer recovery — the `ReplicatedShard` composite (clustering step 4, in-process)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — replication & control plane decisions](areas/clustering-replication-and-control-plane.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

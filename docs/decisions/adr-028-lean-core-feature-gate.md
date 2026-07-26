@@ -1,6 +1,6 @@
 # ADR-028: Feature-gate the server/observability stack behind a default-on `server` feature (lean core)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Engine, errors, dependencies & ops decisions](areas/engine-quality-and-operations.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** The library crate unconditionally compiled the full HTTP/observability stack

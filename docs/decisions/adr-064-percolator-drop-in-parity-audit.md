@@ -1,6 +1,6 @@
 # ADR-064: Drop-in percolator parity — audit findings and work package
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** **Accepted (2026-06-10) — a program ADR.** Each numbered item below ships under its own

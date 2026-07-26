@@ -1,6 +1,6 @@
 # ADR-063: Adversarial test hardening — messy corpora, reference-free properties, and boundary pins
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** **Built + passing (2026-06-09).** A messy-mode layer on the generator (`src/gen.rs`:

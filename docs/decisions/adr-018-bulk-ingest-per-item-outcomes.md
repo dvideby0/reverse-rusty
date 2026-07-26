@@ -1,6 +1,6 @@
 # ADR-018: Bulk ingest reports per-item outcomes (ES-style)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** `POST /_bulk` reported only an aggregate `IngestReport` (counts of ingested / parse-

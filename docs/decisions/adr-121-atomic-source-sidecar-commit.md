@@ -1,6 +1,6 @@
 # ADR-121: Atomic manifest-selected source-sidecar commits
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** Canonical query source is deliberately outside the match-optimized `.seg` files
   (ADR-014). Standalone bulk ingest therefore had two durable publications: it wrote and selected the

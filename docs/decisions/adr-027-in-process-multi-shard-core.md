@@ -1,6 +1,6 @@
 # ADR-027: In-process multi-shard core — shared frozen dict, feature-anchor ring, designated replicated lane
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Clustering — core & transport decisions](areas/clustering-core-and-transport.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Clustering was entirely design-only ([clustering-and-scaling.md](../design/clustering-and-scaling.md),

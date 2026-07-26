@@ -1,6 +1,6 @@
 # ADR-050: The differential oracle's front end is verified by spec-authored golden tests, not a second extractor
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Engine, errors, dependencies & ops decisions](areas/engine-quality-and-operations.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** **Built + passing (2026-06-03).** Spec-authored golden tests added in-module to `src/dsl.rs`

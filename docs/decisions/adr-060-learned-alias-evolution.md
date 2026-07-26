@@ -1,6 +1,6 @@
 # ADR-060: Learned-alias evolution — Phase 1 (safe single-token activation)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** Real deployments register hundreds of equivalences (abbreviation → canonical, variant
   spellings, expansions like `auto ≡ {autograph, autographed, signature, signed}`) and want them to

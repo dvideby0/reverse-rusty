@@ -1,6 +1,6 @@
 # ADR-116: Get-document source read-back and the `sources.dat` metadata footer
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** `GET /_doc/{id}` returned only the query DSL. Metadata accepted by `PUT` was
   write-only over REST, the response omitted the familiar ES/OS `_index` and `_version` fields,

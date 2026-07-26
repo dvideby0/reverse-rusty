@@ -1,6 +1,6 @@
 # ADR-015: Runtime vocabulary learning from query any-of groups
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Normalization & vocabulary decisions](areas/normalization-and-vocabulary.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** ADR-010 made the normalizer domain-agnostic via `NormalizerBuilder`, but

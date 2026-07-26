@@ -1,5 +1,7 @@
 # ADR-093: Multi-shard-per-node (a node hosts many shards)
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-30) — design of record (direction decided); implementation is staged
 (Stages 1–4 below). **Stage 1 (foundation) is built** (2026-06-30, branch `feat/multi-shard-stage1`):
 proto `shard_id`, a shard-keyed `ShardServer` slot map, and per-shard fence/recovery/`shard_<id>/`

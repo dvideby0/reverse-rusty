@@ -1,5 +1,7 @@
 # ADR-109: Deterministic distributed emission ownership
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 - **Status:** Accepted
 - **Date:** 2026-07-16
 

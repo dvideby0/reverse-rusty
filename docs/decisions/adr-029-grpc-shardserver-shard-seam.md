@@ -1,6 +1,6 @@
 # ADR-029: gRPC `ShardServer` + the local↔remote `trait Shard` seam (clustering step 1, networking)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Clustering — core & transport decisions](areas/clustering-core-and-transport.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** ADR-027 built clustering steps 1–2 in-process and explicitly deferred step 1's *networking*

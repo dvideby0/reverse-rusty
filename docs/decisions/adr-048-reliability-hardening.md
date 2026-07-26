@@ -1,6 +1,6 @@
 # ADR-048: Reliability hardening — auto-unfence-on-abort, translog-lease TTL, autoscaler-driven handoff
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — elasticity & repair decisions](areas/clustering-elasticity-and-repair.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted + **implemented** (distributed-layer reliability hardening — closes three

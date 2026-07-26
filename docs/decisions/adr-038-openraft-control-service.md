@@ -1,6 +1,6 @@
 # ADR-038: openraft backend behind the `ControlPlane` seam + gRPC `ControlService` (clustering step 5b)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — replication & control plane decisions](areas/clustering-replication-and-control-plane.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted (increment 5b — the real consensus backend; the durable-query-log quiesce fix is 5c,

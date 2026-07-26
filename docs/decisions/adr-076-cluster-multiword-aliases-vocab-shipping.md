@@ -1,6 +1,6 @@
 # ADR-076: Multi-word aliases on a cluster (P(T)-aware routing) + the vocab-shipping decision
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted (2026-06-11). Closes [ADR-065](adr-065-distributed-v1-graduation.md)

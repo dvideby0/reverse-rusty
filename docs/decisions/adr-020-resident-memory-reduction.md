@@ -1,6 +1,6 @@
 # ADR-020: Production-scale resident-memory reduction (lazy source store + flat logical-index columns)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** Once the exact-match SoA and candidate index are mmap'd (ADR-012), they are paged from

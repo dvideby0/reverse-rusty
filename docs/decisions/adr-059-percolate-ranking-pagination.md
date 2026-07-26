@@ -1,6 +1,6 @@
 # ADR-059: Percolate ranking + pagination (ADR-049 decision point 4, single-node)
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** [ADR-049](adr-049-percolator-parity-tags.md) carved percolator parity into four decision
   points and built the high-value three (per-query metadata tags, filtered percolation pushed into

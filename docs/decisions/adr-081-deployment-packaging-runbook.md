@@ -1,5 +1,7 @@
 # ADR-081: Deployment packaging + operations runbook
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-20)
 
 **Context.** ADR-065 criterion 10 — *"Dockerfile / compose for a K-shard + control-plane cluster; an

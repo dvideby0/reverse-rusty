@@ -1,6 +1,6 @@
 # ADR-011: Cache-line blocked bloom over binary fuse / u64-blocked bloom
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Matching & verification decisions](areas/matching-and-verification.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** The multi-segment LSM layout requires each incoming title to probe every segment.

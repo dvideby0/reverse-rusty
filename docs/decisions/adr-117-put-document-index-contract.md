@@ -1,6 +1,6 @@
 # ADR-117: PUT document index contract — create-only, strict controls, honest response metadata
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** `PUT /_doc/{id}` already had the most important Elasticsearch/OpenSearch behavior:
   an atomic replace-by-id with 201 `created` / 200 `updated` (ADR-067 locally, ADR-070 in a

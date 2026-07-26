@@ -1,6 +1,6 @@
 # ADR-055: Threading per-query tags + filtered percolation through the cluster
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** **Built + oracle-proven (2026-06-04)** — end-to-end through the in-process multi-shard

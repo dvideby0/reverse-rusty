@@ -1,6 +1,6 @@
 # ADR-098: Deployable Feature Complete — deployment matrix, local smoke gate, versioned release pipeline (Tier 5 M0–M2)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 - **Status:** **Done (2026-07-02).** M0 + M1 shipped first (PR #96):
   [`operations/deployment-modes.md`](../operations/deployment-modes.md) +

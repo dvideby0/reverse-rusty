@@ -1,5 +1,7 @@
 # ADR-079: Backup/restore — the engine-driven consistent snapshot
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-19)
 
 **Context.** ADR-065 criterion 11 — a *documented + tested* backup/restore for both the

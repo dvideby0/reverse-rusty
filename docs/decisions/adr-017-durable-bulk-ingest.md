@@ -1,6 +1,6 @@
 # ADR-017: Durable bulk ingest — segment file is the artifact, manifest is the commit point
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Ingestion, storage & durability decisions](areas/ingestion-storage-and-durability.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 
 - **Context:** `bulk_ingest` / `build_from_queries` compile a batch directly into a fresh base

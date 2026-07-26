@@ -1,6 +1,6 @@
 # ADR-118: Clause-boundary compiler semantics + durable migration
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** Query extraction jointly normalizes consecutive positive bare terms so configured
   multi-word entities are recognized on the query side just as they are in titles. The implementation

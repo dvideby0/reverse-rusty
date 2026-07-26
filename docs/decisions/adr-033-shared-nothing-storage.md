@@ -1,6 +1,6 @@
 # ADR-033: Shared-nothing cluster storage — supersede the Aurora-disaggregated / object-store framing
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — core & transport decisions](areas/clustering-core-and-transport.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.

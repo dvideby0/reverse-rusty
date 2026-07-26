@@ -1,6 +1,6 @@
 # ADR-049: Per-query metadata, filtered percolation, and optional ranking (percolator parity)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Percolator parity decisions](areas/percolator-parity.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** **Built (single-node) + oracle-proven (2026-06-03)** — the lead item (decision points 1–3:

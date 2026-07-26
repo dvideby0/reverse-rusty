@@ -1,5 +1,7 @@
 # ADR-092: Unattended re-point reconciler (`reconcile` + `--reconcile-interval-secs`)
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-30); **landed 2026-07-01 as [ADR-093](adr-093-multi-shard-per-node.md)
 Stage 4.** The original build was parked by a review finding (its P1): HRW packs several positions onto
 one node, and the pre-093 one-shard-per-process `ShardServer`'s `RecoverFrom` REPLACED the whole node

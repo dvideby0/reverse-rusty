@@ -1,6 +1,6 @@
 # ADR-100: Per-shard RPC latency histograms in the lean `/_metrics` (Tier 5 M3 residual)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
 
 - **Status:** **Done (2026-07-02).** `reverse_rusty_shard_rpc_duration_seconds` — a native
   Prometheus histogram family in the shard node's `/_metrics` exposition, per

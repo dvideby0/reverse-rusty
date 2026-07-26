@@ -1,5 +1,7 @@
 # ADR-080: Replicate-broad-to-all + the cluster class-D always-candidate lane
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-20)
 
 **Context.** ADR-065 criterion 8 — *"either replicate [broad queries] to all nodes or record the ADR

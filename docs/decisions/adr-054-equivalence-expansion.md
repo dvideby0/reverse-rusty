@@ -1,6 +1,6 @@
 # ADR-054: Equivalence (alias) learning via expansion, not collapse
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted
+> [Normalization & vocabulary decisions](areas/normalization-and-vocabulary.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted
 
 - **Context.** Surface-form variation is the dominant threat to recall in this engine's domain —
   eBay titles spell the same entity many ways (`UD`/`Upper Deck`/`upperdeck`, `rc`/`rookie`,

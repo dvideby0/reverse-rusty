@@ -1,6 +1,6 @@
 # ADR-105: The always-visible hot tier — frequency-threshold cost reclassification under two-axis placement
 
-> [Back to the decisions index](../DECISIONS.md) · **Status:** Accepted (2026-07-03)
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md) · **Status:** Accepted (2026-07-03)
 
 - **Context.** The Broad-Query Cost Program (its spec:
   [`proposals/broad-cost-program.md`](../proposals/broad-cost-program.md); evidence: ADR-104 + the

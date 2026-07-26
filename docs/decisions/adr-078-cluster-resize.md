@@ -1,5 +1,7 @@
 # ADR-078: Cluster resize — the auto-split mechanism
 
+> [Distributed v1 — the ADR-065 graduation program decisions](areas/distributed-v1-graduation.md) · [Decision hub](../DECISIONS.md)
+
 **Status:** Accepted (2026-06-11)
 
 **Context.** ADR-065 criterion 7 — *"the ring's `num_shards` stops being fixed at

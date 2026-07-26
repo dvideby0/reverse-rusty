@@ -1,6 +1,6 @@
 # ADR-034: Cross-process dict shipping over gRPC (the first shared-nothing multi-node step)
 
-> [Back to the decisions index](../DECISIONS.md)
+> [Clustering — core & transport decisions](areas/clustering-core-and-transport.md) · [Decision hub](../DECISIONS.md)
 
 
 - **Status:** Accepted.
