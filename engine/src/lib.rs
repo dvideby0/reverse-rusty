@@ -92,7 +92,7 @@ pub use result::{
 };
 pub use segment::{
     AliasApplyReport, CompactionReport, Engine, EngineSnapshot, IngestItemStatus, IngestReport,
-    InsertOutcome, MatchStats,
+    InsertOutcome, MatchStats, SegmentAddress,
 };
 pub use tagdict::{TagDict, TagId};
 pub use vocab::{

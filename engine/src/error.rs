@@ -168,15 +168,19 @@ impl std::error::Error for WriteError {
 /// A rejected physical-address tombstone.
 ///
 /// [`Engine::tombstone_in`](crate::segment::Engine::tombstone_in) is an expert
-/// API for callers that hold a `(segment, local_id)` address. Compaction can
-/// invalidate such addresses, so the live path validates the complete target
-/// before writing a positional WAL frame. A stale address is never reported as
-/// success and never consumes a WAL sequence; callers should re-resolve the
-/// logical query instead of retrying the same physical address.
+/// API for callers that hold a generation-bearing
+/// [`SegmentAddress`](crate::segment::SegmentAddress). Compaction can invalidate
+/// that address, so the live path validates the complete target before writing
+/// a positional WAL frame. A stale address is never reported as success and
+/// never consumes a WAL sequence; callers should re-resolve the logical query
+/// instead of retrying the same physical address.
 #[derive(Debug)]
 pub enum TombstoneError {
     /// The segment index is no longer present (or never existed).
     SegmentNotFound { segment: usize },
+    /// The segment generation captured by the address is no longer installed,
+    /// or its row identity no longer matches.
+    StaleAddress { segment: usize, local_id: u32 },
     /// The segment exists, but the local id is outside its row range.
     LocalNotFound { segment: usize, local_id: u32 },
     /// The physical row exists but was already tombstoned.
@@ -194,6 +198,12 @@ impl fmt::Display for TombstoneError {
         match self {
             TombstoneError::SegmentNotFound { segment } => {
                 write!(f, "segment {segment} does not exist")
+            }
+            TombstoneError::StaleAddress { segment, local_id } => {
+                write!(
+                    f,
+                    "segment address ({segment}, {local_id}) is no longer current"
+                )
             }
             TombstoneError::LocalNotFound { segment, local_id } => {
                 write!(f, "local id {local_id} does not exist in segment {segment}")
@@ -217,6 +227,7 @@ impl std::error::Error for TombstoneError {
         match self {
             TombstoneError::Wal(e) => Some(e),
             TombstoneError::SegmentNotFound { .. }
+            | TombstoneError::StaleAddress { .. }
             | TombstoneError::LocalNotFound { .. }
             | TombstoneError::AlreadyDeleted { .. }
             | TombstoneError::SegmentIndexOverflow { .. } => None,

@@ -2,7 +2,10 @@
 //! to disk (mmap'd back), the all-or-nothing commit point (ADR-017), WAL
 //! checkpoint/reset, and manifest + query-source persistence.
 
-use super::{AcceptedSource, BaseSegment, Engine, IngestReport, Segment, SourceCommitState};
+use super::{
+    fresh_segment_generation, AcceptedSource, BaseSegment, Engine, IngestReport, Segment,
+    SourceCommitState,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -47,6 +50,7 @@ impl Engine {
     pub(in crate::segment) fn seal_and_push(&mut self, seg: Segment) -> bool {
         let (base, persisted) = self.make_base_segment(seg);
         self.segments.push(Arc::new(base));
+        self.segment_generations.push(fresh_segment_generation());
         self.refresh_phrase_capability();
         persisted
     }
@@ -171,6 +175,7 @@ impl Engine {
             }
         };
         self.segments.push(Arc::new(base));
+        self.segment_generations.push(fresh_segment_generation());
         self.refresh_phrase_capability();
 
         // The manifest write is the atomic commit point. It names both already-
@@ -179,6 +184,7 @@ impl Engine {
         let staged_publishes_lazy = staged_sources.is_some() && self.query_store.is_lazy();
         if !self.commit_staged_sources_and_manifest(staged_sources) {
             self.segments.pop();
+            self.segment_generations.pop();
             self.refresh_phrase_capability();
             if let Some(p) = seg_path {
                 self.best_effort_remove_segment(&p);

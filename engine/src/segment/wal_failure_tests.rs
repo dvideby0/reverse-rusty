@@ -130,13 +130,13 @@ fn stale_positional_tombstones_are_typed_and_never_reach_the_wal() {
     let initial = wal_state(&eng);
 
     assert!(matches!(
-        eng.tombstone_in(7, 0),
+        eng.segment_address(7, 0, 1),
         Err(crate::error::TombstoneError::SegmentNotFound { segment: 7 })
     ));
     assert_eq!(wal_state(&eng), initial, "invalid segment must not append");
 
     assert!(matches!(
-        eng.tombstone_in(0, 99),
+        eng.segment_address(0, 99, 1),
         Err(crate::error::TombstoneError::LocalNotFound {
             segment: 0,
             local_id: 99
@@ -144,7 +144,24 @@ fn stale_positional_tombstones_are_typed_and_never_reach_the_wal() {
     ));
     assert_eq!(wal_state(&eng), initial, "invalid local id must not append");
 
-    eng.tombstone_in(0, 0).expect("valid positional tombstone");
+    assert!(matches!(
+        eng.segment_address(0, 0, 2),
+        Err(crate::error::TombstoneError::StaleAddress {
+            segment: 0,
+            local_id: 0
+        })
+    ));
+    assert_eq!(
+        wal_state(&eng),
+        initial,
+        "mismatched logical identity must not append"
+    );
+
+    let address = eng
+        .segment_address(0, 0, 1)
+        .expect("resolve valid positional address");
+    eng.tombstone_in(&address)
+        .expect("valid positional tombstone");
     let after_valid = wal_state(&eng);
     assert_eq!(after_valid.0, initial.0 + 1);
     assert_eq!(after_valid.1, initial.1 + 1);
@@ -152,7 +169,7 @@ fn stale_positional_tombstones_are_typed_and_never_reach_the_wal() {
     assert!(!eng.segments[0].is_alive(0));
 
     assert!(matches!(
-        eng.tombstone_in(0, 0),
+        eng.tombstone_in(&address),
         Err(crate::error::TombstoneError::AlreadyDeleted {
             segment: 0,
             local_id: 0
@@ -177,9 +194,12 @@ fn positional_tombstone_wal_failure_leaves_the_valid_row_alive() {
         .as_mut()
         .expect("durable engine has a WAL")
         .break_writes_for_test();
+    let address = eng
+        .segment_address(0, 0, 1)
+        .expect("resolve valid positional address");
 
     assert!(matches!(
-        eng.tombstone_in(0, 0),
+        eng.tombstone_in(&address),
         Err(crate::error::TombstoneError::Wal(_))
     ));
     assert!(

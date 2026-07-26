@@ -3,6 +3,7 @@
 
 use super::{
     AcceptedSource, Engine, IngestItemStatus, IngestReport, InsertOutcome, PlacedQuery, Segment,
+    SegmentAddress,
 };
 use std::sync::Arc;
 
@@ -777,23 +778,24 @@ impl Engine {
         Ok(())
     }
 
-    /// Tombstone a query in a specific base segment (for callers that track
-    /// (segment, local) addresses). `seg_idx` indexes `self.segments`.
+    /// Resolve a generation-bearing address for one live base-segment row.
     ///
-    /// The complete address and its liveness are validated before the WAL is
-    /// touched. A stale address returns a typed
-    /// [`TombstoneError`](crate::error::TombstoneError) and consumes no WAL
-    /// sequence; callers must re-resolve the logical query after compaction.
-    /// Valid addresses preserve WAL-first ordering: an append failure leaves
-    /// the row alive.
-    pub fn tombstone_in(
-        &mut self,
+    /// `logical_id` is the caller's stable expected identity. A stale positional
+    /// pair that now names another row is rejected here instead of being minted
+    /// into a token for the wrong query.
+    ///
+    /// The token must be retained from the time the row is resolved; a bare
+    /// `(segment, local_id)` pair cannot safely be reconstructed after
+    /// compaction because both numbers may have been reused for another query.
+    pub fn segment_address(
+        &self,
         seg_idx: usize,
         local_id: u32,
-    ) -> Result<(), crate::error::TombstoneError> {
+        logical_id: u64,
+    ) -> Result<SegmentAddress, crate::error::TombstoneError> {
         let segment = self
             .segments
-            .get_mut(seg_idx)
+            .get(seg_idx)
             .ok_or(crate::error::TombstoneError::SegmentNotFound { segment: seg_idx })?;
         if local_id as usize >= segment.len() {
             return Err(crate::error::TombstoneError::LocalNotFound {
@@ -807,15 +809,68 @@ impl Engine {
                 local_id,
             });
         }
+        if segment.logical(local_id) != logical_id {
+            return Err(crate::error::TombstoneError::StaleAddress {
+                segment: seg_idx,
+                local_id,
+            });
+        }
+        let generation = self.segment_generations.get(seg_idx).ok_or(
+            crate::error::TombstoneError::StaleAddress {
+                segment: seg_idx,
+                local_id,
+            },
+        )?;
+        Ok(SegmentAddress {
+            generation: Arc::clone(generation),
+            segment: seg_idx,
+            local_id,
+            logical_id,
+        })
+    }
+
+    /// Tombstone the live row identified by a generation-bearing physical
+    /// address.
+    ///
+    /// Segment generation, row bounds, logical identity, and liveness are all
+    /// validated before the WAL is touched. A stale address consumes no WAL
+    /// sequence; callers must re-resolve the logical query after compaction.
+    /// Valid addresses preserve WAL-first ordering: an append failure leaves
+    /// the row alive.
+    pub fn tombstone_in(
+        &mut self,
+        address: &SegmentAddress,
+    ) -> Result<(), crate::error::TombstoneError> {
+        let stale = || crate::error::TombstoneError::StaleAddress {
+            segment: address.segment,
+            local_id: address.local_id,
+        };
+        let seg_idx = self
+            .segment_generations
+            .iter()
+            .position(|generation| Arc::ptr_eq(generation, &address.generation))
+            .ok_or_else(stale)?;
+        let segment = self.segments.get_mut(seg_idx).ok_or_else(stale)?;
+        if address.local_id as usize >= segment.len()
+            || segment.logical(address.local_id) != address.logical_id
+        {
+            return Err(stale());
+        }
+        if !segment.is_alive(address.local_id) {
+            return Err(crate::error::TombstoneError::AlreadyDeleted {
+                segment: seg_idx,
+                local_id: address.local_id,
+            });
+        }
         let wal_seg_idx = u32::try_from(seg_idx)
             .map_err(|_| crate::error::TombstoneError::SegmentIndexOverflow { segment: seg_idx })?;
         if let Some(ref mut wal) = self.wal {
-            if let Err(e) = wal.append_tombstone(wal_seg_idx, local_id) {
+            if let Err(e) = wal.append_tombstone(wal_seg_idx, address.local_id) {
                 self.wal_healthy = false;
                 return Err(crate::error::TombstoneError::Wal(e));
             }
         }
-        Arc::make_mut(segment).tombstone(local_id);
+        Arc::make_mut(segment).tombstone(address.local_id);
         self.refresh_phrase_capability();
         Ok(())
     }

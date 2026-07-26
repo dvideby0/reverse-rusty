@@ -167,7 +167,8 @@ fn tombstone_originals(eng: &mut Engine, build_batch: &[(u64, String)], updated:
                 continue;
             }
             if updated.contains(logical) {
-                eng.tombstone_in(0, local).unwrap();
+                let address = eng.segment_address(0, local, *logical).unwrap();
+                eng.tombstone_in(&address).unwrap();
             }
             local += 1;
         }

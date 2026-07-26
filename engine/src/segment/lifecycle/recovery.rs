@@ -4,7 +4,7 @@
 //! attach-an-explicit-file-list path, fail-loud). The construction builders live
 //! in [`construct`](super::construct).
 
-use crate::segment::{BaseSegment, Engine, Segment, SourceCommitState};
+use crate::segment::{fresh_segment_generations, BaseSegment, Engine, Segment, SourceCommitState};
 use std::sync::Arc;
 
 use crate::config::EngineConfig;
@@ -390,6 +390,7 @@ impl Engine {
             .iter()
             .filter(|segment| segment.has_phrase_predicates())
             .count();
+        let segment_generations = fresh_segment_generations(segments.len());
 
         let mut engine = Engine {
             config: Arc::new(config),
@@ -398,6 +399,7 @@ impl Engine {
             dict: Arc::new(dict),
             tag_dict: Arc::new(tag_dict),
             segments,
+            segment_generations,
             memtable: Arc::new(Segment::new()),
             live_phrase_segments,
             rejected_parse: manifest.rejected_parse,
@@ -723,6 +725,7 @@ impl Engine {
             .iter()
             .filter(|segment| segment.has_phrase_predicates())
             .count();
+        let segment_generations = fresh_segment_generations(segments.len());
         let engine = Engine {
             config: Arc::new(config),
             norm,
@@ -733,6 +736,7 @@ impl Engine {
             // later live-add / translog-replayed tags consistently. Empty ⇒ untagged cluster.
             tag_dict,
             segments,
+            segment_generations,
             memtable: Arc::new(Segment::new()),
             live_phrase_segments,
             rejected_parse: 0,

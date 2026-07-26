@@ -741,6 +741,7 @@ impl Engine {
         // epoch. Old segment files are GC'd after the manifest commit.
         let old_files = self.collect_mmap_paths();
         self.segments.clear();
+        self.segment_generations.clear();
         let mut fresh_mem = Segment::new();
         fresh_mem.vocab_epoch = self.vocab_epoch;
         self.memtable = Arc::new(fresh_mem);

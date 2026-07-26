@@ -162,7 +162,8 @@ fn positional_tombstone_then_compaction_crash_skips_stale_frame() {
         eng.build_from_queries(&distinct_queries(1..=10));
         eng.bulk_ingest(&distinct_queries(11..=20));
         // Locals are issued in insertion order, so q1 is (seg 0, local 0).
-        eng.tombstone_in(0, 0).expect("positional tombstone");
+        let address = eng.segment_address(0, 0, 1).expect("resolve q1 address");
+        eng.tombstone_in(&address).expect("positional tombstone");
         assert!(!match_ids(&eng, &title_for(1)).contains(&1), "q1 gone live");
         eng.compact_all().expect("compaction ran");
         // crash with the stale positional frame still in the WAL
@@ -190,7 +191,9 @@ fn valid_positional_tombstone_replays_from_the_wal_tail() {
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
         eng.build_from_queries(&distinct_queries(1..=5));
-        eng.tombstone_in(0, 1).expect("valid positional tombstone");
+        let address = eng.segment_address(0, 1, 2).expect("resolve q2 address");
+        eng.tombstone_in(&address)
+            .expect("valid positional tombstone");
         assert!(!match_ids(&eng, &title_for(2)).contains(&2));
         // Crash/drop without another manifest commit: the positional WAL frame
         // is the only durable record of this delete.
@@ -208,37 +211,80 @@ fn valid_positional_tombstone_replays_from_the_wal_tail() {
 }
 
 #[test]
-fn compaction_invalidates_removed_segment_addresses_without_deleting_a_survivor() {
+fn compaction_rejects_a_reused_in_range_address_without_deleting_its_new_row() {
     let dir = test_dir("tomb_stale_after_compaction");
     {
         let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
-        eng.build_from_queries(&distinct_queries(1..=5));
-        eng.bulk_ingest(&distinct_queries(6..=10));
-        // This address is valid before compaction.
-        eng.tombstone_in(1, 4).expect("delete q10");
+        eng.build_from_queries(&distinct_queries(1..=3));
+        // Hold q2's original (segment 0, local 1) address, then create a hole
+        // before it and a second segment. Compaction densifies q2 to local 0,
+        // leaving the same bare (0, 1) numbers naming q3.
+        let held = eng.segment_address(0, 1, 2).expect("resolve q2 address");
+        assert_eq!(held.logical_id(), 2);
+        assert_eq!(eng.delete_by_logical_id(1).expect("delete q1"), 1);
+        eng.bulk_ingest(&distinct_queries(4..=4));
         eng.compact_all().expect("compaction ran");
 
-        // The old second segment no longer exists. Reject the stale physical
-        // address before WAL append instead of reporting a durable no-op.
+        let wal_before = eng.metrics();
         assert!(matches!(
-            eng.tombstone_in(1, 0),
-            Err(reverse_rusty::TombstoneError::SegmentNotFound { segment: 1 })
+            eng.tombstone_in(&held),
+            Err(reverse_rusty::TombstoneError::StaleAddress {
+                segment: 0,
+                local_id: 1
+            })
         ));
-        for i in 1..=9 {
+        let wal_after = eng.metrics();
+        assert_eq!(
+            wal_after.wal_pending_entries,
+            wal_before.wal_pending_entries
+        );
+        assert_eq!(wal_after.wal_size_bytes, wal_before.wal_size_bytes);
+        for i in 2..=4 {
             assert!(match_ids(&eng, &title_for(i)).contains(&i), "q{i} intact");
         }
-        // Crash with the pre-compaction positional frame still present; the
-        // manifest watermark skips it, and the rejected stale call added none.
+        assert!(!match_ids(&eng, &title_for(1)).contains(&1));
+        // Crash after rejection: no positional frame exists to target q3 on
+        // replay either.
     }
 
     let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
-    for i in 1..=9 {
+    for i in 2..=4 {
         assert!(
             match_ids(&eng, &title_for(i)).contains(&i),
             "q{i} must survive stale-address rejection and reopen"
         );
     }
-    assert!(!match_ids(&eng, &title_for(10)).contains(&10));
+    assert!(!match_ids(&eng, &title_for(1)).contains(&1));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn address_tracks_an_unchanged_segment_when_compaction_shifts_its_ordinal() {
+    let dir = test_dir("tomb_address_ordinal_shift");
+    {
+        let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
+        eng.build_from_queries(&distinct_queries(1..=1));
+        eng.bulk_ingest(&distinct_queries(2..=2));
+        eng.bulk_ingest(&distinct_queries(3..=3));
+        let held = eng.segment_address(2, 0, 3).expect("resolve q3 address");
+
+        eng.compact_range(0, 2).expect("compact first two segments");
+        // q3's segment is unchanged but moved from ordinal 2 to ordinal 1.
+        // Generation lookup must find the current WAL address rather than
+        // rejecting a still-valid token or writing its obsolete ordinal.
+        eng.tombstone_in(&held)
+            .expect("unchanged segment generation remains current");
+        assert!(!match_ids(&eng, &title_for(3)).contains(&3));
+        for i in 1..=2 {
+            assert!(match_ids(&eng, &title_for(i)).contains(&i), "q{i} intact");
+        }
+    }
+
+    let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
+    assert!(!match_ids(&eng, &title_for(3)).contains(&3));
+    for i in 1..=2 {
+        assert!(match_ids(&eng, &title_for(i)).contains(&i), "q{i} intact");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -322,7 +368,8 @@ fn deletes_after_reopen_with_reset_wal_survive_second_crash() {
         let mut eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen 1");
         assert!(eng.delete_by_logical_id(2).expect("delete q2") >= 1);
         // q3 sits at (seg 0, local 2): locals are issued in insertion order.
-        eng.tombstone_in(0, 2).expect("positional tombstone");
+        let address = eng.segment_address(0, 2, 3).expect("resolve q3 address");
+        eng.tombstone_in(&address).expect("positional tombstone");
         assert!(!match_ids(&eng, &title_for(3)).contains(&3), "q3 gone live");
         // crash
     }
