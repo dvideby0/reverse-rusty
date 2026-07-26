@@ -45,6 +45,8 @@ HOW TO RUN
   cargo run --release --bin clusterbench -- 100000 5000 8 0.05  # CLUSTER fan-out + candidate structure
   cargo run --release --bin rankbench -- 20000 500 8 275775489  # local/distributed bounded top-K + fetch
   cargo run --release --bin learn -- 500000 50 0.30         # NPMI corpus learner (see appendix)
+  cargo test --release --test stress cancellation::large_segment_overshoot_benchmark \
+      -- --ignored --nocapture                               # ADR-123 bounded cancellation evidence
 
   bench args:        <num_queries> <num_titles> <broad_frac> <skew> <seed> [reps]
   segbench args:     <num_queries> <num_titles> <broad_frac> <seed>
@@ -152,6 +154,20 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-07-25] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64. ADR-123 BOUNDED
+              IN-SEGMENT CANCELLATION. Release build; one segment with 300k
+              canonical-body members + 300k distinct negative bodies under one
+              positive anchor; rejecting tag predicate removes result allocation.
+  BEFORE (ADR-099 segment-boundary checks):
+    full traversal 3.537292 ms; budget 100 µs; cancelled 3.3735 ms;
+    overshoot 3.2735 ms (the dense segment ran essentially to completion)
+  AFTER (256-work armed sampler):
+    full traversal 3.9585 ms; budget 100 µs; cancelled 100.5 µs;
+    overshoot 0.5 µs (~6,500x less overshoot)
+  The single full-traversal timings are indicative, not a throughput comparison.
+  The no-unarmed-cost claim is structural (`NoDeadline::ARMED=false` monomorph);
+  the benchmark gates only that cancelled time is < one quarter of full traversal.
+
 [2026-07-16] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64. ADR-110 DISTRIBUTED
               TOP-K + QUERY-THEN-FETCH. rankbench 20000 500 8 275775489, release.
               Full table: ranked-percolation-baseline.txt. Timings are indicative;

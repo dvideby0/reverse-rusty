@@ -2,9 +2,9 @@
 
 > [Back to the decisions index](../DECISIONS.md)
 
-- **Status:** **Done (2026-07-02).** The ADR-052 deferral ("cooperative cancellation on the match
-  path — weigh a coarse per-segment deadline check against simply bounding concurrency"), closed
-  with **both**, as one combined design.
+- **Status:** **Done (2026-07-02; bounded-polling amendment ADR-123 on 2026-07-25).** The ADR-052
+  deferral ("cooperative cancellation on the match path — weigh a coarse per-segment deadline
+  check against simply bounding concurrency"), closed with **both**, as one combined design.
 
 - **Context:** `timeout_ms` on `/_search` / `/_mpercolate` was a **response deadline only**:
   `tokio::time::timeout` raced the `spawn_blocking` future, so on expiry the client got its 408
@@ -23,11 +23,13 @@
      `match_batch_chunk` are generic over it; the **unarmed monomorph's error type is
      `Infallible`**, so the compiler erases every check and every `Err` arm — the
      byte-identical-default claim is **structural, not empirical** (and the bench INVARIANTS
-     reproduce). Checks sit at COARSE boundaries only — entry (a match that spent its whole
-     budget queued dies before doing any work), each base-segment probe, the memtable probe, each
-     Phase-0 title, each columnar segment block — never per candidate (the hot-path invariant).
-     This is **bounded staleness, not preemption**: worst case, one segment's work runs past the
-     deadline. `exact.rs`, `BatchMatchOptions`, `trait Shard`, and `ClusterEngine` are untouched.
+     reproduce). The original checks sat at coarse boundaries — entry (a match that spent its
+     whole budget queued dies before doing any work), each base-segment probe, the memtable probe,
+     each Phase-0 title, and each columnar segment block. ADR-123 retains those checks and adds a
+     compile-time-erased sampler every 256 armed posting/candidate/body-group/bitmap work units,
+     bounding the one-expensive-segment case without putting clock reads on ordinary matching.
+     This remains **bounded staleness, not preemption**. `exact.rs`, `BatchMatchOptions`,
+     `trait Shard`, and `ClusterEngine` remain untouched.
   2. **Typed, partial-proof cancellation.** Armed matchers return
      `Result<_, MatchCancelled>`; every cancelled path **clears its output buffer before
      returning**, and the par/batch collects short-circuit the whole request — a cancelled match
@@ -78,6 +80,8 @@
     broad-heavy corpus (600k queries, 80% broad, inline strategy; uncancelled ≈ 0.5–0.6 s), a
     deadline of `T_full/20` errs in ≪ `T_full/4` (measured ~30 ms vs ~540 ms) on both the batch
     and the parallel paths — machine speed cannot flake it, only cancellation failing to cancel.
+    ADR-123 adds the ignored one-segment overshoot benchmark plus counter-driven scalar/columnar
+    tests; see that ADR for the 3.2735 ms → 0.5 µs overshoot capture.
   - Handler tests (both modes): an explicit `timeout_ms: 0` **408s and records the cancellation
     counter** (deterministic — the deadline is expired before the closure's first check); no
     explicit `timeout_ms` ⇒ never armed, counter stays 0, serving unchanged; **one permit +

@@ -311,13 +311,15 @@ Optional request fields:
 `total` always reflects the full match count; `hits` is the paginated window. Set
 `include_source: false` to skip query text lookup for faster responses.
 
-> **An explicit `timeout_ms` is also a compute budget (ADR-099).** On expiry the
+> **An explicit `timeout_ms` is also a compute budget (ADR-099/123).** On expiry the
 > request returns `408` as always, and — when the request set `timeout_ms`
 > explicitly — the dispatched match work now **cancels itself cooperatively** at
-> coarse (per-segment / per-title) boundaries instead of burning the Rayon pool to
-> completion. Results are never partial: a cancelled match returns nothing (the same
+> per-title/segment boundaries and at a fixed interval through dense posting,
+> candidate, and canonical-body loops instead of burning the Rayon pool to completion.
+> Results are never partial: a cancelled match returns nothing (the same
 > 408), never a truncated union. Requests that omit `timeout_ms` keep the implicit
-> 30 s **response** deadline only (the unarmed hot path carries zero deadline reads);
+> 30 s **response** deadline only (the unarmed sampler compiles away and the hot path
+> carries zero deadline reads);
 > the kill-switch is the dynamic `cooperative_cancel` setting. To bound *how many*
 > searches occupy the pool at once, start the server with
 > `--max-concurrent-searches N` (excess requests queue within their own timeout).

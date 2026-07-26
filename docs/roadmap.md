@@ -297,9 +297,11 @@ and `release.yml` publishes the smoke-gated GHCR image per `v*` tag.
   shipped promtool-validated [`deploy/prometheus-alerts.yml`](../deploy/prometheus-alerts.yml),
   and the backup-restore **Rehearsal** drill — **M3 is complete**.
   **Cooperative cancellation / bounded concurrency shipped**
-  ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md)): an explicit
-  `timeout_ms` now stops the match work at coarse boundaries (not just the response), and
-  `--max-concurrent-searches` bounds pool occupancy — both defaults byte-identical.
+  ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md),
+  [ADR-123](decisions/adr-123-bounded-in-segment-cancellation.md)): an explicit `timeout_ms`
+  now stops match work at boundaries and at fixed intervals inside dense segment loops (not
+  just the response), while `--max-concurrent-searches` bounds pool occupancy; the unarmed
+  sampler compiles away.
 - **M4 — commercial-service operations (API-driven, not runbook-driven).** The bar past "cloud
   deployable": backups, scaling, restore, and rollout become controllers/APIs, not manual procedures.
   Larger, later, and partly **in tension with the shared-nothing / no-object-store stance
@@ -378,6 +380,7 @@ Low-priority polish and micro-optimizations — none are production blockers.
   emit `SegmentWrite`/`SegmentMmap` from inside `build_durable_base` for symmetric labeling (the
   OS error is already visible; low priority).
 - ~~Cooperative cancellation on the match path~~ — **✅ shipped
-  ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md))**: the
-  monomorphized coarse-boundary deadline seam (armed by an explicit `timeout_ms`) + the
-  `--max-concurrent-searches` semaphore, both defaults byte-identical.
+  ([ADR-099](decisions/adr-099-cooperative-cancellation-bounded-concurrency.md),
+  [ADR-123](decisions/adr-123-bounded-in-segment-cancellation.md))**: the monomorphized
+  boundary + bounded in-segment deadline seam (armed by an explicit `timeout_ms`) and the
+  `--max-concurrent-searches` semaphore; the unarmed matcher carries no sampler or clock work.

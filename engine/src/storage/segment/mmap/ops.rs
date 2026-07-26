@@ -26,7 +26,7 @@ use crate::collect::{MatchSink, VecSink};
 use crate::compile::CostClass;
 use crate::dict::FeatureId;
 use crate::index::CandidateIndex;
-use crate::segment::{MatchStats, Segment};
+use crate::segment::{infallible, DeadlineCheck, DeadlinePoll, MatchStats, NoDeadline, Segment};
 
 impl MmapSegment {
     /// Fixed typed rank values. Segment v6 replaces this compatibility default
@@ -498,18 +498,19 @@ impl MmapSegment {
     /// of `match_into` (filter gate + probe) so the columnar path skips the same
     /// probes the per-title path would.
     #[inline]
-    pub(crate) fn broad_reach(
+    pub(crate) fn broad_reach<D: DeadlineCheck>(
         &self,
         key: u64,
         epoch: u32,
         seen: &mut [u32],
         cands: &mut Vec<u32>,
         stats: &mut MatchStats,
-    ) {
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled> {
         stats.probes_attempted += 1;
         if self.filter_num_blocks > 0 && !self.may_contain(key) {
             stats.probes_skipped += 1;
-            return;
+            return Ok(());
         }
         if let Some(posting) =
             frozen_probe(key, self.broad_slots(), self.broad_blob(), self.broad_mask)
@@ -517,40 +518,45 @@ impl MmapSegment {
             stats.postings_scanned += posting.len() as u32;
             stats.broad_postings_scanned += posting.len() as u32;
             for &local in posting {
+                deadline.check_work()?;
                 if seen[local as usize] != epoch {
                     seen[local as usize] = epoch;
                     cands.push(local);
                 }
             }
         }
+        Ok(())
     }
 
     /// The hot-tier twin of [`broad_reach`](Self::broad_reach) (class H,
     /// ADR-105): probe the hot index for `key`, appending reachable locals to
     /// `cands` (epoch-deduped), counting into the hot-lane meters.
-    pub(crate) fn hot_reach(
+    pub(crate) fn hot_reach<D: DeadlineCheck>(
         &self,
         key: u64,
         epoch: u32,
         seen: &mut [u32],
         cands: &mut Vec<u32>,
         stats: &mut MatchStats,
-    ) {
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled> {
         stats.probes_attempted += 1;
         if self.filter_num_blocks > 0 && !self.may_contain(key) {
             stats.probes_skipped += 1;
-            return;
+            return Ok(());
         }
         if let Some(posting) = frozen_probe(key, self.hot_slots(), self.hot_blob(), self.hot_mask) {
             stats.postings_scanned += posting.len() as u32;
             stats.hot_postings_scanned += posting.len() as u32;
             for &local in posting {
+                deadline.check_work()?;
                 if seen[local as usize] != epoch {
                     seen[local as usize] = epoch;
                     cands.push(local);
                 }
             }
         }
+        Ok(())
     }
 
     /// Liveness for one local ID (mmap tombstone overlay).
@@ -691,7 +697,8 @@ impl MmapSegment {
     ) {
         let mut ignored_emissions = 0;
         let mut collector = VecSink::new(out, &mut ignored_emissions);
-        self.match_collect(
+        let mut deadline = DeadlinePoll::new(NoDeadline);
+        infallible(self.match_collect(
             view,
             dict,
             epoch,
@@ -701,11 +708,16 @@ impl MmapSegment {
             pred,
             stats,
             crate::ownership::EmitAll,
-        );
+            &mut deadline,
+        ));
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn match_collect<C: MatchSink, P: crate::ownership::EmissionPolicy>(
+    pub(crate) fn match_collect<
+        C: MatchSink,
+        P: crate::ownership::EmissionPolicy,
+        D: DeadlineCheck,
+    >(
         &self,
         view: &crate::exact::TitleView,
         dict: &crate::dict::Dict,
@@ -716,20 +728,22 @@ impl MmapSegment {
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
         emission: P,
-    ) {
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled> {
         let has_filter = self.filter_num_blocks > 0;
         // Graph-only phrase proxies are arity-1 MAIN signatures. The pair,
         // hot, and broad lanes are planned only from flat positive semantics.
         let probe_feats = view.probe;
         let feats = view.pos;
         if collector.should_stop() {
-            return;
+            return Ok(());
         }
 
         // arity-1 signatures
         for &f in probe_feats {
+            deadline.check_work()?;
             if collector.should_stop() {
-                return;
+                return Ok(());
             }
             let key = crate::util::sig_key(&[f]);
             stats.probes_attempted += 1;
@@ -747,17 +761,20 @@ impl MmapSegment {
                 pred,
                 stats,
                 emission,
-            );
+                deadline,
+            )?;
         }
         // arity-2 signatures
         for &h in feats {
+            deadline.check_work()?;
             if collector.should_stop() {
-                return;
+                return Ok(());
             }
             if crate::compile::is_hot(dict, h) {
                 for &o in feats {
+                    deadline.check_work()?;
                     if collector.should_stop() {
-                        return;
+                        return Ok(());
                     }
                     if o != h {
                         let (a, b) = if h < o { (h, o) } else { (o, h) };
@@ -777,7 +794,8 @@ impl MmapSegment {
                             pred,
                             stats,
                             emission,
-                        );
+                            deadline,
+                        )?;
                     }
                 }
             }
@@ -787,8 +805,9 @@ impl MmapSegment {
         // the segment holds no hot entries.
         if lanes.include_hot && self.has_hot_entries() {
             for &f in feats {
+                deadline.check_work()?;
                 if collector.should_stop() {
-                    return;
+                    return Ok(());
                 }
                 let key = crate::util::sig_key(&[f]);
                 stats.probes_attempted += 1;
@@ -806,14 +825,16 @@ impl MmapSegment {
                     pred,
                     stats,
                     emission,
-                );
+                    deadline,
+                )?;
             }
         }
         // broad lane
         if lanes.include_broad {
             for &f in feats {
+                deadline.check_work()?;
                 if collector.should_stop() {
-                    return;
+                    return Ok(());
                 }
                 let key = crate::util::sig_key(&[f]);
                 stats.probes_attempted += 1;
@@ -831,15 +852,17 @@ impl MmapSegment {
                     pred,
                     stats,
                     emission,
-                );
+                    deadline,
+                )?;
             }
             // Universal signature: class-D always-candidates (ADR-068). Probed
             // unconditionally (the accept knob gates ingest, never visibility);
             // with no class-D entries this is one filter miss. Mirrors
             // `Segment::match_into` exactly.
             if collector.should_stop() {
-                return;
+                return Ok(());
             }
+            deadline.check_work()?;
             let key = crate::util::universal_sig();
             stats.probes_attempted += 1;
             if has_filter && !self.may_contain(key) {
@@ -855,14 +878,16 @@ impl MmapSegment {
                     pred,
                     stats,
                     emission,
-                );
+                    deadline,
+                )?;
             }
         }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
     #[inline]
-    fn probe_index<C: MatchSink, P: crate::ownership::EmissionPolicy>(
+    fn probe_index<C: MatchSink, P: crate::ownership::EmissionPolicy, D: DeadlineCheck>(
         &self,
         key: u64,
         lane: Lane,
@@ -873,7 +898,8 @@ impl MmapSegment {
         pred: &crate::exact::TagPredicate,
         stats: &mut MatchStats,
         emission: P,
-    ) {
+        deadline: &mut DeadlinePoll<D>,
+    ) -> Result<(), D::Cancelled> {
         let (slots, blob, mask) = match lane {
             Lane::Main => (self.main_slots(), self.main_blob(), self.main_mask),
             Lane::Broad => (self.broad_slots(), self.broad_blob(), self.broad_mask),
@@ -892,6 +918,7 @@ impl MmapSegment {
                 Lane::Main => {}
             }
             for &local in posting {
+                deadline.check_work()?;
                 if collector.should_stop() {
                     break;
                 }
@@ -920,6 +947,7 @@ impl MmapSegment {
                 }
             }
         }
+        Ok(())
     }
 
     /// Reconstruct an in-memory Segment from this mmap'd segment. Used by

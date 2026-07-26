@@ -16,7 +16,7 @@ use crate::ownership::{BatchEmissionPolicy, EmitAll};
 use crate::segment::snapshot::MatchView;
 use crate::segment::{
     infallible, BaseSegment, BatchMatchOptions, BroadStrategy, DeadlineAt, DeadlineCheck,
-    MatchCancelled, MatchScratch, MatchStats, NoDeadline,
+    DeadlinePoll, MatchCancelled, MatchScratch, MatchStats, NoDeadline,
 };
 use crate::util::{fast_map, FastMap};
 use rayon::prelude::*;
@@ -130,10 +130,10 @@ impl<C: BatchMatchSink> MatchSink for IndexedTitleSink<'_, C> {
 /// once over the chunk (columnar), emitted into the chunk's indexed collector
 /// (the compatibility path's per-title `outs`, or the ADR-112 per-title
 /// bounded top-K slots) under the per-title emission `policy`.
-/// Errs only under an armed cooperative deadline ([`DeadlineAt`], ADR-099) — checked at
-/// each Phase-0 title boundary and each Phase-1/2 segment block, never per candidate.
-/// On Err the collector is aborted (no partial escape); the unarmed monomorph
-/// ([`NoDeadline`]) compiles the checks away.
+/// Errs only under an armed cooperative deadline ([`DeadlineAt`], ADR-099/123) —
+/// checked at title/segment boundaries plus every bounded run of columnar
+/// posting/candidate/group work. On Err the collector is aborted (no partial
+/// escape); the unarmed monomorph ([`NoDeadline`]) compiles the sampler away.
 #[allow(clippy::too_many_arguments)] // mirrors the scratch-threading style of eval_one_segment
 pub(super) fn match_batch_chunk<
     D: DeadlineCheck,
@@ -154,6 +154,7 @@ pub(super) fn match_batch_chunk<
     if b == 0 {
         return Ok(());
     }
+    let mut deadline = DeadlinePoll::new(dl);
     let words = b.div_ceil(64);
     // ADR-061: the columnar kernel is single-view, so while multi-word aliases are
     // active we route the broad lane through the two-view *inline* path (`match_into`) — the
@@ -200,7 +201,7 @@ pub(super) fn match_batch_chunk<
     for (ti, title) in titles.iter().enumerate() {
         // Cooperative-deadline title boundary (ADR-099): abort the collector
         // before abandoning so nothing partial can be read.
-        if let Err(c) = dl.check() {
+        if let Err(c) = deadline.check_now() {
             collector.abort();
             return Err(c);
         }
@@ -303,13 +304,14 @@ pub(super) fn match_batch_chunk<
             include_broad: inline_broad,
             include_hot: hot_inline,
         };
+        let mut cancelled = None;
         {
             let mut sink = IndexedTitleSink {
                 collector: &mut *collector,
                 title_index: ti,
             };
             for (i, base) in view.segments.iter().enumerate() {
-                base.match_collect(
+                if let Err(c) = base.match_collect(
                     &tview,
                     view.dict,
                     epoch,
@@ -319,19 +321,44 @@ pub(super) fn match_batch_chunk<
                     view.pred,
                     stats,
                     policy.title_policy(ti),
-                );
+                    &mut deadline,
+                ) {
+                    cancelled = Some(c);
+                    break;
+                }
             }
-            view.memtable.match_collect(
-                &tview,
-                view.dict,
-                epoch,
-                &mut ms.seen[n_base],
-                &mut sink,
-                lanes,
-                view.pred,
-                stats,
-                policy.title_policy(ti),
-            );
+            if cancelled.is_none() {
+                if let Err(c) = view.memtable.match_collect(
+                    &tview,
+                    view.dict,
+                    epoch,
+                    &mut ms.seen[n_base],
+                    &mut sink,
+                    lanes,
+                    view.pred,
+                    stats,
+                    policy.title_policy(ti),
+                    &mut deadline,
+                ) {
+                    cancelled = Some(c);
+                }
+            }
+        }
+        if let Some(c) = cancelled {
+            // As in the scalar path, restore every reusable title buffer before
+            // abandoning the chunk. Rayon may already have scheduled another
+            // chunk on this worker even though Result collection will fail.
+            ms.feats = feats;
+            if dual {
+                ms.feats_pos = feats_pos;
+            }
+            if positioned {
+                ms.probe_feats = probe_feats;
+                ms.phrase_arcs = phrase_arcs;
+                ms.phrase_arcs_pos = phrase_arcs_pos;
+            }
+            collector.abort();
+            return Err(c);
         }
 
         // The columnar kernel is single-view; it only runs when no multi-word alias is
@@ -401,13 +428,13 @@ pub(super) fn match_batch_chunk<
 
     for (si, base) in view.segments.iter().enumerate() {
         // Cooperative-deadline segment boundary in the columnar pass (ADR-099).
-        if let Err(c) = dl.check() {
+        if let Err(c) = deadline.check_now() {
             collector.abort();
             return Err(c);
         }
         if columnar {
             let epoch = next_epoch(broad_epoch, broad_seen);
-            eval_base_lane(
+            if let Err(c) = eval_base_lane(
                 base.as_ref(),
                 Lane::Broad,
                 distinct,
@@ -430,11 +457,15 @@ pub(super) fn match_batch_chunk<
                 view.pred,
                 stats,
                 policy,
-            );
+                &mut deadline,
+            ) {
+                collector.abort();
+                return Err(c);
+            }
         }
         if hot_columnar && base.has_hot_entries() {
             let epoch = next_epoch(broad_epoch, broad_seen);
-            eval_base_lane(
+            if let Err(c) = eval_base_lane(
                 base.as_ref(),
                 Lane::Hot,
                 distinct,
@@ -457,18 +488,22 @@ pub(super) fn match_batch_chunk<
                 view.pred,
                 stats,
                 policy,
-            );
+                &mut deadline,
+            ) {
+                collector.abort();
+                return Err(c);
+            }
         }
     }
     // memtable last (its broad_seen buffer is at index n_base)
     {
-        if let Err(c) = dl.check() {
+        if let Err(c) = deadline.check_now() {
             collector.abort();
             return Err(c);
         }
         if columnar {
             let epoch = next_epoch(broad_epoch, broad_seen);
-            eval_one_segment(
+            if let Err(c) = eval_one_segment(
                 view.memtable,
                 Lane::Broad,
                 distinct,
@@ -491,11 +526,15 @@ pub(super) fn match_batch_chunk<
                 view.pred,
                 stats,
                 policy,
-            );
+                &mut deadline,
+            ) {
+                collector.abort();
+                return Err(c);
+            }
         }
         if hot_columnar && view.memtable.has_hot_entries() {
             let epoch = next_epoch(broad_epoch, broad_seen);
-            eval_one_segment(
+            if let Err(c) = eval_one_segment(
                 view.memtable,
                 Lane::Hot,
                 distinct,
@@ -518,7 +557,11 @@ pub(super) fn match_batch_chunk<
                 view.pred,
                 stats,
                 policy,
-            );
+                &mut deadline,
+            ) {
+                collector.abort();
+                return Err(c);
+            }
         }
     }
 
@@ -555,7 +598,7 @@ fn next_epoch(broad_epoch: &mut u32, broad_seen: &mut [Vec<u32>]) -> u32 {
 /// Dispatch one columnar-lane evaluation over a [`BaseSegment`]'s two backings —
 /// collapses the Memory/Mmap duplication at the two lane-call sites above.
 #[allow(clippy::too_many_arguments)]
-fn eval_base_lane<S: BatchMatchSink, P: BatchEmissionPolicy>(
+fn eval_base_lane<S: BatchMatchSink, P: BatchEmissionPolicy, D: DeadlineCheck>(
     base: &BaseSegment,
     lane: Lane,
     distinct: &[FeatureId],
@@ -578,7 +621,8 @@ fn eval_base_lane<S: BatchMatchSink, P: BatchEmissionPolicy>(
     pred: &crate::exact::TagPredicate,
     stats: &mut MatchStats,
     policy: P,
-) {
+    deadline: &mut DeadlinePoll<D>,
+) -> Result<(), D::Cancelled> {
     match base {
         BaseSegment::Memory(s) => eval_one_segment(
             s,
@@ -603,6 +647,7 @@ fn eval_base_lane<S: BatchMatchSink, P: BatchEmissionPolicy>(
             pred,
             stats,
             policy,
+            deadline,
         ),
         BaseSegment::Mmap(m) => eval_one_segment(
             m,
@@ -627,6 +672,7 @@ fn eval_base_lane<S: BatchMatchSink, P: BatchEmissionPolicy>(
             pred,
             stats,
             policy,
+            deadline,
         ),
     }
 }
@@ -731,12 +777,13 @@ pub(in crate::segment) fn batch_results_with_stats(
     (all, stats)
 }
 
-/// [`batch_results_with_stats`] with an optional cooperative deadline (ADR-099).
-/// `None` delegates to the unarmed path (byte-identical). Armed, each chunk's
-/// [`match_batch_chunk`] checks per title + per segment block, and the `Result`
-/// collect short-circuits: the FIRST cancelled chunk abandons the whole batch (rayon
-/// stops scheduling remaining chunks best-effort; in-flight chunks self-cancel at
-/// their next boundary). All-or-nothing — never a partially-filled result set.
+/// [`batch_results_with_stats`] with an optional cooperative deadline
+/// (ADR-099/123). `None` delegates to the unarmed path (byte-identical). Armed,
+/// each chunk's [`match_batch_chunk`] checks per title/segment block and within
+/// bounded runs of columnar work; the `Result` collect short-circuits: the FIRST
+/// cancelled chunk abandons the whole batch (rayon stops scheduling remaining
+/// chunks best-effort; in-flight chunks self-cancel at their next poll).
+/// All-or-nothing — never a partially-filled result set.
 pub(in crate::segment) fn try_batch_results_with_stats(
     view: &MatchView,
     titles: &[impl AsRef<str> + Sync],
@@ -840,4 +887,86 @@ pub(in crate::segment) fn batch_stats(
             },
         )
         .reduce(MatchStats::default, add_stats)
+}
+
+#[cfg(test)]
+mod bounded_deadline_tests {
+    use super::*;
+    use crate::exact::TagPredicate;
+    use crate::normalize::Normalizer;
+    use crate::segment::{Engine, MatchCancelled};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Clone, Copy)]
+    struct CancelOnCheck<'a> {
+        checks: &'a AtomicUsize,
+        cancel_at: usize,
+    }
+
+    impl DeadlineCheck for CancelOnCheck<'_> {
+        const ARMED: bool = true;
+        type Cancelled = MatchCancelled;
+
+        fn check(self) -> Result<(), Self::Cancelled> {
+            let current = self.checks.fetch_add(1, Ordering::Relaxed) + 1;
+            if current >= self.cancel_at {
+                Err(MatchCancelled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn counter_deadline_stops_inside_one_columnar_body_group() {
+        let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        for logical in 0..4_096 {
+            engine
+                .try_insert_live("anchorw", logical, 1)
+                .expect("insert duplicate body");
+        }
+        let snapshot = engine.snapshot();
+        let pred = TagPredicate::empty();
+        let view = MatchView {
+            norm: &snapshot.norm,
+            dict: &snapshot.dict,
+            segments: &snapshot.segments,
+            memtable: &snapshot.memtable,
+            has_phrase_predicates: snapshot.has_phrase_predicates,
+            pred: &pred,
+        };
+        let mut match_scratch = MatchScratch::new();
+        let mut broad_scratch = BroadBatchScratch::new();
+        let mut outs = vec![Vec::new()];
+        let mut emissions = vec![0];
+        let mut collector = AllBatchCollector::new(&mut outs, &mut emissions);
+        let mut stats = MatchStats::default();
+        let checks = AtomicUsize::new(0);
+
+        let result = match_batch_chunk(
+            &view,
+            &["anchorw"],
+            BatchMatchOptions {
+                include_broad: true,
+                broad_strategy: BroadStrategy::Columnar,
+                ..BatchMatchOptions::default()
+            },
+            &mut match_scratch,
+            &mut broad_scratch,
+            &mut collector,
+            &mut stats,
+            CancelOnCheck {
+                checks: &checks,
+                // Phase-0 title + columnar memtable boundary pass; the first
+                // sampled body-group interval cancels.
+                cancel_at: 3,
+            },
+            EmitAll,
+        );
+
+        assert_eq!(result, Err(MatchCancelled));
+        assert_eq!(checks.load(Ordering::Relaxed), 3);
+        assert!(outs[0].is_empty());
+        assert_eq!(emissions[0], 0);
+    }
 }

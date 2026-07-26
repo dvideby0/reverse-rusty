@@ -144,8 +144,9 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   default-deny on mutations (ADR-062); **cluster
   coordinator mode** `--cluster`, in-process or remote, cluster-atomic upsert (ADR-070);
   **cooperative match cancellation + bounded search concurrency** — an explicit `timeout_ms`
-  stops the work at coarse boundaries, `--max-concurrent-searches` bounds pool occupancy, both
-  defaults byte-identical (ADR-099); local and cluster v2 winner enrichment share
+  stops work at title/segment boundaries and at bounded intervals inside dense segment loops,
+  `--max-concurrent-searches` bounds pool occupancy, and the unarmed sampler compiles away
+  (ADR-099/123); local and cluster v2 winner enrichment share
   `--max-ranked-enrichment-bytes` (16 MiB default, ADR-110); exhaustive jobs have their own
   worker pool, non-queuing concurrency quota, bounded channel, timeout, and retained-record cap;
   shard nodes separately bound direct `PercolateAll` workers before spawn and reject caller

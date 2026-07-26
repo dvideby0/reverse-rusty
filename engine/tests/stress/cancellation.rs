@@ -11,6 +11,65 @@ use crate::harness::*;
 use reverse_rusty::exact::TagPredicate;
 use std::time::Duration;
 
+/// Manual before/after evidence for cancellation *inside* one deliberately
+/// pathological segment. Half the rows share one canonical body (one enormous
+/// body group); half have distinct negative clauses but the same positive
+/// anchor (one enormous posting). The tag predicate rejects every row so the
+/// measurement isolates traversal instead of result allocation/sorting.
+///
+/// Run with:
+/// `cargo test --release --test stress cancellation::large_segment_overshoot_benchmark -- --ignored --nocapture`
+#[test]
+#[ignore = "manual cancellation-latency benchmark"]
+fn large_segment_overshoot_benchmark() {
+    const EACH: u64 = 300_000;
+    let mut queries = Vec::with_capacity((EACH * 2) as usize);
+    for id in 0..EACH {
+        queries.push((id, "anchorw".to_string()));
+    }
+    for id in 0..EACH {
+        queries.push((EACH + id, format!("anchorw -blocked{id}")));
+    }
+
+    let mut eng = Engine::new(make_norm());
+    let report = eng.build_from_queries(&queries);
+    assert_eq!(report.ingested as u64, EACH * 2);
+    let snap = eng.snapshot();
+    let pred = TagPredicate::new(vec![vec![0]]);
+    let mut scratch = MatchScratch::new();
+    let mut out = Vec::new();
+
+    let started = Instant::now();
+    let stats = snap.match_title_filtered("anchorw", &mut scratch, &mut out, true, &pred);
+    let full = started.elapsed();
+    assert!(out.is_empty());
+    assert_eq!(stats.matches, 0);
+
+    let budget = std::cmp::max(Duration::from_micros(100), full / 50);
+    let started = Instant::now();
+    let cancelled = snap.try_match_title_filtered(
+        "anchorw",
+        &mut scratch,
+        &mut out,
+        true,
+        &pred,
+        Some(Instant::now() + budget),
+    );
+    let elapsed = started.elapsed();
+    assert!(cancelled.is_err());
+    assert!(out.is_empty(), "cancelled traversal leaked partial results");
+    assert!(
+        elapsed < full / 4,
+        "bounded polling did not materially reduce one-segment overshoot: \
+         full={full:?}, budget={budget:?}, cancelled={elapsed:?}"
+    );
+    eprintln!(
+        "large-segment cancellation: full={full:?}, budget={budget:?}, \
+         cancelled={elapsed:?}, overshoot={:?}",
+        elapsed.saturating_sub(budget)
+    );
+}
+
 #[test]
 fn armed_deadline_actually_stops_broad_batch_work() {
     eprintln!("\n=== COOPERATIVE CANCELLATION (batch, inline broad) ===");
