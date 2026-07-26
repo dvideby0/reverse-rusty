@@ -184,6 +184,64 @@ fn positional_tombstone_then_compaction_crash_skips_stale_frame() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn valid_positional_tombstone_replays_from_the_wal_tail() {
+    let dir = test_dir("tomb_positional_replay");
+    {
+        let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
+        eng.build_from_queries(&distinct_queries(1..=5));
+        eng.tombstone_in(0, 1).expect("valid positional tombstone");
+        assert!(!match_ids(&eng, &title_for(2)).contains(&2));
+        // Crash/drop without another manifest commit: the positional WAL frame
+        // is the only durable record of this delete.
+    }
+
+    let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
+    assert!(
+        !match_ids(&eng, &title_for(2)).contains(&2),
+        "a validated WAL-first positional tombstone must replay"
+    );
+    for i in [1, 3, 4, 5] {
+        assert!(match_ids(&eng, &title_for(i)).contains(&i), "q{i} intact");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn compaction_invalidates_removed_segment_addresses_without_deleting_a_survivor() {
+    let dir = test_dir("tomb_stale_after_compaction");
+    {
+        let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
+        eng.build_from_queries(&distinct_queries(1..=5));
+        eng.bulk_ingest(&distinct_queries(6..=10));
+        // This address is valid before compaction.
+        eng.tombstone_in(1, 4).expect("delete q10");
+        eng.compact_all().expect("compaction ran");
+
+        // The old second segment no longer exists. Reject the stale physical
+        // address before WAL append instead of reporting a durable no-op.
+        assert!(matches!(
+            eng.tombstone_in(1, 0),
+            Err(reverse_rusty::TombstoneError::SegmentNotFound { segment: 1 })
+        ));
+        for i in 1..=9 {
+            assert!(match_ids(&eng, &title_for(i)).contains(&i), "q{i} intact");
+        }
+        // Crash with the pre-compaction positional frame still present; the
+        // manifest watermark skips it, and the rejected stale call added none.
+    }
+
+    let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
+    for i in 1..=9 {
+        assert!(
+            match_ids(&eng, &title_for(i)).contains(&i),
+            "q{i} must survive stale-address rejection and reopen"
+        );
+    }
+    assert!(!match_ids(&eng, &title_for(10)).contains(&10));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Replay order: delete(X) → manifest commit (bulk ingest bakes the delete) →
 /// re-insert(X) → crash. The delete frame sorts at/below the commit's watermark and
 /// is skipped (its tombstones are baked); the later insert frame replays and

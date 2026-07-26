@@ -72,7 +72,7 @@ pub use delivery::{
     DEFAULT_MATCH_CHUNK_SIZE, MAX_MATCH_CHUNK_SIZE,
 };
 pub use dict::FeatureId;
-pub use error::{NormalizerError, ParseError, ParseErrorKind, WriteError};
+pub use error::{NormalizerError, ParseError, ParseErrorKind, TombstoneError, WriteError};
 pub use events::{
     CompactionTrigger, DurabilityOp, EngineEvent, EngineMetrics, SegmentInfo, SegmentKind,
 };

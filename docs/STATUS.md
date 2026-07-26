@@ -117,7 +117,8 @@ Everything `distributed`-gated is off by default; the lean / in-process path is 
   columns + lazy on-disk source store → resident ~4.5 B/query (ADR-020, ADR-014).
 - **WAL** (v6) — CRC-framed, crash recovery, configurable fsync (ADR-013/108); address-free logical
   deletes + per-segment dead-locals bitmaps make tombstones durable at the commit point (ADR-066);
-  atomic upsert `PUT` (ADR-067); class-D op codes (ADR-068).
+  live positional deletes reject stale/dead addresses before WAL append (ADR-122); atomic upsert
+  `PUT` (ADR-067); class-D op codes (ADR-068).
 - **Durable bulk ingest** — segment = artifact, manifest = commit (ADR-017); per-item outcomes
   (ADR-018).
 - **Fail-closed flush / compaction / reseal / recompile** — build the replacement durable before

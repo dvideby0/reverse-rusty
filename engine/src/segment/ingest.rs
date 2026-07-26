@@ -780,17 +780,42 @@ impl Engine {
     /// Tombstone a query in a specific base segment (for callers that track
     /// (segment, local) addresses). `seg_idx` indexes `self.segments`.
     ///
-    /// Returns `Err` (without applying the tombstone) if the WAL append fails.
-    pub fn tombstone_in(&mut self, seg_idx: usize, local_id: u32) -> std::io::Result<()> {
+    /// The complete address and its liveness are validated before the WAL is
+    /// touched. A stale address returns a typed
+    /// [`TombstoneError`](crate::error::TombstoneError) and consumes no WAL
+    /// sequence; callers must re-resolve the logical query after compaction.
+    /// Valid addresses preserve WAL-first ordering: an append failure leaves
+    /// the row alive.
+    pub fn tombstone_in(
+        &mut self,
+        seg_idx: usize,
+        local_id: u32,
+    ) -> Result<(), crate::error::TombstoneError> {
+        let segment = self
+            .segments
+            .get_mut(seg_idx)
+            .ok_or(crate::error::TombstoneError::SegmentNotFound { segment: seg_idx })?;
+        if local_id as usize >= segment.len() {
+            return Err(crate::error::TombstoneError::LocalNotFound {
+                segment: seg_idx,
+                local_id,
+            });
+        }
+        if !segment.is_alive(local_id) {
+            return Err(crate::error::TombstoneError::AlreadyDeleted {
+                segment: seg_idx,
+                local_id,
+            });
+        }
+        let wal_seg_idx = u32::try_from(seg_idx)
+            .map_err(|_| crate::error::TombstoneError::SegmentIndexOverflow { segment: seg_idx })?;
         if let Some(ref mut wal) = self.wal {
-            if let Err(e) = wal.append_tombstone(seg_idx as u32, local_id) {
+            if let Err(e) = wal.append_tombstone(wal_seg_idx, local_id) {
                 self.wal_healthy = false;
-                return Err(e);
+                return Err(crate::error::TombstoneError::Wal(e));
             }
         }
-        if let Some(seg) = self.segments.get_mut(seg_idx) {
-            Arc::make_mut(seg).tombstone(local_id);
-        }
+        Arc::make_mut(segment).tombstone(local_id);
         self.refresh_phrase_capability();
         Ok(())
     }

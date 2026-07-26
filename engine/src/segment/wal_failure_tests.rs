@@ -113,6 +113,82 @@ fn wal_delete_failure_is_rejected_not_acknowledged() {
     );
 }
 
+fn wal_state(eng: &Engine) -> (u64, u64, u64) {
+    eng.wal.as_ref().map_or((0, 0, 0), |wal| {
+        (wal.last_seq(), wal.pending_entries(), wal.size_bytes())
+    })
+}
+
+#[test]
+fn stale_positional_tombstones_are_typed_and_never_reach_the_wal() {
+    let mut eng = engine_with_wal("stale_positional");
+    assert_eq!(
+        eng.build_from_queries(&[(1, "michael jordan".to_string())])
+            .ingested,
+        1
+    );
+    let initial = wal_state(&eng);
+
+    assert!(matches!(
+        eng.tombstone_in(7, 0),
+        Err(crate::error::TombstoneError::SegmentNotFound { segment: 7 })
+    ));
+    assert_eq!(wal_state(&eng), initial, "invalid segment must not append");
+
+    assert!(matches!(
+        eng.tombstone_in(0, 99),
+        Err(crate::error::TombstoneError::LocalNotFound {
+            segment: 0,
+            local_id: 99
+        })
+    ));
+    assert_eq!(wal_state(&eng), initial, "invalid local id must not append");
+
+    eng.tombstone_in(0, 0).expect("valid positional tombstone");
+    let after_valid = wal_state(&eng);
+    assert_eq!(after_valid.0, initial.0 + 1);
+    assert_eq!(after_valid.1, initial.1 + 1);
+    assert!(after_valid.2 > initial.2);
+    assert!(!eng.segments[0].is_alive(0));
+
+    assert!(matches!(
+        eng.tombstone_in(0, 0),
+        Err(crate::error::TombstoneError::AlreadyDeleted {
+            segment: 0,
+            local_id: 0
+        })
+    ));
+    assert_eq!(
+        wal_state(&eng),
+        after_valid,
+        "already-dead address must not append a second frame"
+    );
+}
+
+#[test]
+fn positional_tombstone_wal_failure_leaves_the_valid_row_alive() {
+    let mut eng = engine_with_wal("positional_wal_fail");
+    assert_eq!(
+        eng.build_from_queries(&[(1, "michael jordan".to_string())])
+            .ingested,
+        1
+    );
+    eng.wal
+        .as_mut()
+        .expect("durable engine has a WAL")
+        .break_writes_for_test();
+
+    assert!(matches!(
+        eng.tombstone_in(0, 0),
+        Err(crate::error::TombstoneError::Wal(_))
+    ));
+    assert!(
+        eng.segments[0].is_alive(0),
+        "WAL-first ordering must reject rather than apply"
+    );
+    assert!(!eng.wal_healthy);
+}
+
 // A malformed query is a Parse error that never touches the WAL, so it is
 // distinct from a durability failure and leaves the WAL healthy.
 #[test]

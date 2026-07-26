@@ -164,3 +164,62 @@ impl std::error::Error for WriteError {
         }
     }
 }
+
+/// A rejected physical-address tombstone.
+///
+/// [`Engine::tombstone_in`](crate::segment::Engine::tombstone_in) is an expert
+/// API for callers that hold a `(segment, local_id)` address. Compaction can
+/// invalidate such addresses, so the live path validates the complete target
+/// before writing a positional WAL frame. A stale address is never reported as
+/// success and never consumes a WAL sequence; callers should re-resolve the
+/// logical query instead of retrying the same physical address.
+#[derive(Debug)]
+pub enum TombstoneError {
+    /// The segment index is no longer present (or never existed).
+    SegmentNotFound { segment: usize },
+    /// The segment exists, but the local id is outside its row range.
+    LocalNotFound { segment: usize, local_id: u32 },
+    /// The physical row exists but was already tombstoned.
+    AlreadyDeleted { segment: usize, local_id: u32 },
+    /// The in-memory segment exists but its index cannot be represented by the
+    /// positional WAL format.
+    SegmentIndexOverflow { segment: usize },
+    /// The validated mutation could not be durably recorded, so it was not
+    /// applied.
+    Wal(std::io::Error),
+}
+
+impl fmt::Display for TombstoneError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TombstoneError::SegmentNotFound { segment } => {
+                write!(f, "segment {segment} does not exist")
+            }
+            TombstoneError::LocalNotFound { segment, local_id } => {
+                write!(f, "local id {local_id} does not exist in segment {segment}")
+            }
+            TombstoneError::AlreadyDeleted { segment, local_id } => {
+                write!(
+                    f,
+                    "local id {local_id} in segment {segment} is already deleted"
+                )
+            }
+            TombstoneError::SegmentIndexOverflow { segment } => {
+                write!(f, "segment index {segment} cannot be encoded in the WAL")
+            }
+            TombstoneError::Wal(e) => write!(f, "write-ahead log error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for TombstoneError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            TombstoneError::Wal(e) => Some(e),
+            TombstoneError::SegmentNotFound { .. }
+            | TombstoneError::LocalNotFound { .. }
+            | TombstoneError::AlreadyDeleted { .. }
+            | TombstoneError::SegmentIndexOverflow { .. } => None,
+        }
+    }
+}
