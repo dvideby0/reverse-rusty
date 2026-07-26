@@ -124,6 +124,17 @@ impl<C: BatchMatchSink> MatchSink for IndexedTitleSink<'_, C> {
     fn on_match(&mut self, logical_id: u64) {
         self.collector.on_match(self.title_index, logical_id);
     }
+
+    #[inline]
+    fn on_match_at_with_poll(
+        &mut self,
+        logical_id: u64,
+        _local_id: u32,
+        should_stop: &mut dyn FnMut() -> bool,
+    ) {
+        self.collector
+            .on_match_with_poll(self.title_index, logical_id, should_stop);
+    }
 }
 
 /// Match one chunk of titles: selective lane per title (unchanged), broad lane
@@ -892,6 +903,7 @@ pub(in crate::segment) fn batch_stats(
 #[cfg(test)]
 mod bounded_deadline_tests {
     use super::*;
+    use crate::collect::BatchTopKCollector;
     use crate::exact::TagPredicate;
     use crate::normalize::Normalizer;
     use crate::segment::{Engine, MatchCancelled};
@@ -985,5 +997,82 @@ mod bounded_deadline_tests {
         );
         assert!(outs[0].is_empty());
         assert_eq!(emissions[0], 0);
+    }
+
+    #[test]
+    fn ranked_columnar_metadata_walk_uses_the_active_sampler_and_aborts() {
+        const LEGACY_COPIES: u32 = 2_048;
+        let mut engine = Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        let mut queries = vec![(7, "anchorw".to_string())];
+        queries
+            .extend((100..1_100).map(|logical| (logical, format!("anchorw fillerterm{logical}"))));
+        assert_eq!(engine.build_from_queries(&queries).ingested, queries.len());
+        for version in 1..=LEGACY_COPIES {
+            let query = format!("zzcolumnarlegacy{version}");
+            let crate::segment::InsertOutcome::Inserted(local) = engine
+                .try_insert_live(&query, 7, version)
+                .expect("newer legacy copy")
+            else {
+                panic!("selective test query was unexpectedly rejected");
+            };
+            engine.tombstone(local).expect("tombstone legacy copy");
+        }
+        let snapshot = engine.snapshot();
+        assert!(
+            snapshot.class_counts()[2] > 0,
+            "the matching anchor must reach the columnar class-C lane"
+        );
+        assert_eq!(
+            snapshot.memtable.locals_for_logical(7).len(),
+            LEGACY_COPIES as usize
+        );
+
+        let program = snapshot
+            .compile_rank_program(&crate::rank::RankProgramSpec::default())
+            .expect("rank program");
+        let pred = TagPredicate::empty();
+        let view = MatchView {
+            norm: &snapshot.norm,
+            dict: &snapshot.dict,
+            segments: &snapshot.segments,
+            memtable: &snapshot.memtable,
+            has_phrase_predicates: snapshot.has_phrase_predicates,
+            pred: &pred,
+        };
+        let scorer = snapshot.program_scorer_with_poll(&program);
+        let mut collector = BatchTopKCollector::new_polling(1, 10, 100, &scorer);
+        let mut match_scratch = MatchScratch::new();
+        let mut broad_scratch = BroadBatchScratch::new();
+        let mut stats = MatchStats::default();
+        let checks = AtomicUsize::new(0);
+        let result = match_batch_chunk(
+            &view,
+            &["anchorw"],
+            BatchMatchOptions {
+                include_broad: true,
+                broad_strategy: BroadStrategy::Columnar,
+                ..BatchMatchOptions::default()
+            },
+            &mut match_scratch,
+            &mut broad_scratch,
+            &mut collector,
+            &mut stats,
+            CancelOnCheck {
+                checks: &checks,
+                // Phase-0 title + columnar base boundary pass. The next
+                // sample must fire in the rank metadata callback.
+                cancel_at: 3,
+            },
+            EmitAll,
+        );
+
+        assert_eq!(result, Err(MatchCancelled));
+        assert_eq!(checks.load(Ordering::Relaxed), 3);
+        assert!(
+            stats.broad_candidates > 0,
+            "the regression must cancel after columnar candidate emission starts"
+        );
+        assert!(collector.slots()[0].winners().is_empty());
+        assert_eq!(collector.slots()[0].total_hits().value, 0);
     }
 }

@@ -710,7 +710,15 @@ impl Segment {
                     if self.exact.verify(local, view, pred)
                         && emission.should_emit(self.exact.placement(local))
                     {
-                        collector.on_match_at(self.exact.logical(local), local);
+                        if let Err(error) = crate::segment::collect_match_at(
+                            collector,
+                            self.exact.logical(local),
+                            local,
+                            deadline,
+                        ) {
+                            cancelled = Some(error);
+                            return false;
+                        }
                     }
                     return !collector.should_stop();
                 }
@@ -759,7 +767,15 @@ impl Segment {
                     && pred.matches(self.exact.tags_of(local))
                     && emission.should_emit(self.exact.placement(local))
                 {
-                    collector.on_match_at(self.exact.logical(local), local);
+                    if let Err(error) = crate::segment::collect_match_at(
+                        collector,
+                        self.exact.logical(local),
+                        local,
+                        deadline,
+                    ) {
+                        cancelled = Some(error);
+                        return false;
+                    }
                     if collector.should_stop() {
                         return false;
                     }
@@ -781,7 +797,15 @@ impl Segment {
                         && pred.matches(self.exact.tags_of(m))
                         && emission.should_emit(self.exact.placement(m))
                     {
-                        collector.on_match_at(self.exact.logical(m), m);
+                        if let Err(error) = crate::segment::collect_match_at(
+                            collector,
+                            self.exact.logical(m),
+                            m,
+                            deadline,
+                        ) {
+                            cancelled = Some(error);
+                            return false;
+                        }
                         if collector.should_stop() {
                             return false;
                         }

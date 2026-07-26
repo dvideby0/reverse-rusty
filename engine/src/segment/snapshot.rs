@@ -7,7 +7,7 @@ use super::{
     EngineSnapshot, MatchCancelled, MatchScratch, MatchStats, NoDeadline, Segment,
 };
 use crate::collect::{
-    AllCollector, CandidateHitCollector, ChunkCollector, MatchCollector, TopKCollector,
+    AllCollector, CandidateHitCollector, ChunkCollector, MatchCollector, TopKCollector, TopKScorer,
 };
 use crate::compile::CostClass;
 use crate::config::EngineConfig;
@@ -1334,6 +1334,33 @@ impl EngineSnapshot {
         }
     }
 
+    /// Poll-aware scorer for armed bounded-ranking requests. It lends the
+    /// matcher's request-local deadline sampler to the newest-live metadata
+    /// walk, so one logical id with many tombstoned physical versions cannot
+    /// become an uninterruptible region.
+    pub(in crate::segment) fn program_scorer_with_poll<'a>(
+        &'a self,
+        program: &'a crate::rank::CompiledRankProgram,
+    ) -> impl Fn(u64, &mut dyn FnMut() -> bool) -> Option<i64> + Sync + 'a {
+        move |logical_id, should_stop| {
+            let mut stopped = should_stop();
+            if stopped {
+                return None;
+            }
+            let metadata = self.rank_metadata_for_logical_with_poll(logical_id, &mut || {
+                stopped = should_stop();
+                stopped
+            });
+            if stopped {
+                None
+            } else {
+                Some(metadata.map_or(0, |(values, tags)| {
+                    crate::rank::score_program(values, tags, program)
+                }))
+            }
+        }
+    }
+
     /// Bounded local ranked percolation over the scalar matcher. Collection is
     /// `O(K + total-threshold)` and every score resolves newest-live metadata.
     pub fn try_match_title_top_k(
@@ -1405,12 +1432,57 @@ impl EngineSnapshot {
         }
         let threshold =
             usize::try_from(options.track_total_hits_up_to).unwrap_or(crate::result::MAX_TOP_K);
-        let mut collector = TopKCollector::new(
-            options.size,
-            threshold,
-            options.search_after,
-            self.program_scorer(program),
-        );
+        if let Some(at) = deadline {
+            let mut collector = TopKCollector::new_polling(
+                options.size,
+                threshold,
+                options.search_after,
+                self.program_scorer_with_poll(program),
+            );
+            self.collect_top_k_with_policy(
+                title,
+                options,
+                pred,
+                scratch,
+                emission,
+                &mut collector,
+                DeadlineAt(at),
+            )
+            .map_err(crate::rank::RankedMatchError::Cancelled)
+        } else {
+            let mut collector = TopKCollector::new(
+                options.size,
+                threshold,
+                options.search_after,
+                self.program_scorer(program),
+            );
+            Ok(infallible(self.collect_top_k_with_policy(
+                title,
+                options,
+                pred,
+                scratch,
+                emission,
+                &mut collector,
+                NoDeadline,
+            )))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_top_k_with_policy<
+        D: DeadlineCheck,
+        S: TopKScorer,
+        P: crate::ownership::EmissionPolicy,
+    >(
+        &self,
+        title: &str,
+        options: crate::result::TopKOptions,
+        pred: &TagPredicate,
+        scratch: &mut MatchScratch,
+        emission: P,
+        collector: &mut TopKCollector<S>,
+        deadline: D,
+    ) -> Result<crate::rank::RankedMatch, D::Cancelled> {
         let view = MatchView {
             norm: &self.norm,
             dict: &self.dict,
@@ -1420,26 +1492,8 @@ impl EngineSnapshot {
             pred,
         };
         let include_broad = options.query_scope == crate::result::QueryScope::WithBroad;
-        let mut stats = match deadline {
-            Some(at) => view
-                .match_title_collect(
-                    title,
-                    scratch,
-                    &mut collector,
-                    include_broad,
-                    DeadlineAt(at),
-                    emission,
-                )
-                .map_err(crate::rank::RankedMatchError::Cancelled)?,
-            None => infallible(view.match_title_collect(
-                title,
-                scratch,
-                &mut collector,
-                include_broad,
-                NoDeadline,
-                emission,
-            )),
-        };
+        let mut stats =
+            view.match_title_collect(title, scratch, collector, include_broad, deadline, emission)?;
         let total_hits = collector.total_hits();
         stats.matches = u32::try_from(total_hits.value).unwrap_or(u32::MAX);
         let hits = collector
@@ -2033,5 +2087,72 @@ mod bounded_deadline_tests {
             out.is_empty(),
             "the lowest-level abort must clear every pre-cancellation emission"
         );
+    }
+
+    #[test]
+    fn ranked_scalar_metadata_walk_uses_the_active_sampler_and_aborts() {
+        const LEGACY_COPIES: u32 = 2_048;
+        let mut engine =
+            crate::segment::Engine::new(Normalizer::default_vocab().expect("normalizer"));
+        engine
+            .try_insert_live("zzrankneedle", 7, 0)
+            .expect("live matching copy");
+        for version in 1..=LEGACY_COPIES {
+            let query = format!("zzlegacyterm{version}");
+            let crate::segment::InsertOutcome::Inserted(local) = engine
+                .try_insert_live(&query, 7, version)
+                .expect("newer legacy copy")
+            else {
+                panic!("selective test query was unexpectedly rejected");
+            };
+            engine.tombstone(local).expect("tombstone legacy copy");
+        }
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot.memtable.locals_for_logical(7).len(),
+            LEGACY_COPIES as usize + 1
+        );
+        assert!(
+            !snapshot.memtable.has_dup_groups(),
+            "unique legacy bodies keep cancellation inside rank metadata, not body emission"
+        );
+
+        let program = snapshot
+            .compile_rank_program(&crate::rank::RankProgramSpec::default())
+            .expect("rank program");
+        let pred = TagPredicate::empty();
+        let view = MatchView {
+            norm: &snapshot.norm,
+            dict: &snapshot.dict,
+            segments: &snapshot.segments,
+            memtable: &snapshot.memtable,
+            has_phrase_predicates: snapshot.has_phrase_predicates,
+            pred: &pred,
+        };
+        let checks = AtomicUsize::new(0);
+        let mut collector =
+            TopKCollector::new_polling(10, 100, None, snapshot.program_scorer_with_poll(&program));
+        let mut scratch = MatchScratch::new();
+        let result = view.match_title_collect(
+            "zzrankneedle",
+            &mut scratch,
+            &mut collector,
+            false,
+            CancelOnCheck {
+                checks: &checks,
+                // Entry + memtable boundary pass. The next fixed-interval
+                // sample must fire inside newest-live rank metadata.
+                cancel_at: 3,
+            },
+            crate::ownership::EmitAll,
+        );
+
+        assert_eq!(result, Err(MatchCancelled));
+        assert_eq!(checks.load(Ordering::Relaxed), 3);
+        assert!(
+            collector.winners().is_empty(),
+            "a cancelled rank metadata walk must not leak a partial winner"
+        );
+        assert_eq!(collector.total_hits().value, 0);
     }
 }

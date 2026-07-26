@@ -20,7 +20,7 @@ use crate::result::{
     MAX_RANKED_BATCH_HEAP_ROWS, MAX_RANKED_BATCH_TITLES, MAX_TOP_K,
 };
 
-use super::broad_batch::try_batch_top_k;
+use super::broad_batch::{batch_top_k, try_batch_top_k};
 use super::snapshot::MatchView;
 use super::{BatchMatchOptions, EngineSnapshot};
 
@@ -134,7 +134,6 @@ impl EngineSnapshot {
             ));
         }
         let threshold = usize::try_from(options.track_total_hits_up_to).unwrap_or(MAX_TOP_K);
-        let scorer = self.program_scorer(program);
         let view = MatchView {
             norm: &self.norm,
             dict: &self.dict,
@@ -145,17 +144,31 @@ impl EngineSnapshot {
         };
         let mut opts = batch_opts;
         opts.include_broad = options.query_scope == QueryScope::WithBroad;
-        let (slots, stats) = try_batch_top_k(
-            &view,
-            titles,
-            opts,
-            options.size,
-            threshold,
-            &scorer,
-            policy_for,
-            deadline,
-        )
-        .map_err(RankedMatchError::Cancelled)?;
+        let (slots, stats) = if let Some(at) = deadline {
+            let scorer = self.program_scorer_with_poll(program);
+            try_batch_top_k(
+                &view,
+                titles,
+                opts,
+                options.size,
+                threshold,
+                &scorer,
+                policy_for,
+                at,
+            )
+            .map_err(RankedMatchError::Cancelled)?
+        } else {
+            let scorer = self.program_scorer(program);
+            batch_top_k(
+                &view,
+                titles,
+                opts,
+                options.size,
+                threshold,
+                &scorer,
+                policy_for,
+            )
+        };
         Ok(BatchRankedMatch {
             titles: slots
                 .into_iter()

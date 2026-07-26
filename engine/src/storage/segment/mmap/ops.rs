@@ -943,7 +943,12 @@ impl MmapSegment {
                 }
                 // Tag filter (ADR-049) — applied post-candidate inside verify.
                 if self.verify(local, view, pred) && emission.should_emit(self.placement(local)) {
-                    collector.on_match_at(self.logical(local), local);
+                    crate::segment::collect_match_at(
+                        collector,
+                        self.logical(local),
+                        local,
+                        deadline,
+                    )?;
                 }
             }
         }

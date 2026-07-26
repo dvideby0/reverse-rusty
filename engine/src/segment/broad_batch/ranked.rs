@@ -8,13 +8,14 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use super::driver::{match_batch_chunk, BroadBatchScratch};
-use crate::collect::BatchTopKCollector;
+use crate::collect::{BatchTopKCollector, TopKScorer};
 use crate::ownership::BatchEmissionPolicy;
 use crate::rank::RankStats;
 use crate::result::TotalHits;
 use crate::segment::snapshot::MatchView;
 use crate::segment::{
-    infallible, BatchMatchOptions, DeadlineAt, MatchCancelled, MatchScratch, MatchStats, NoDeadline,
+    infallible, BatchMatchOptions, DeadlineAt, DeadlineCheck, MatchCancelled, MatchScratch,
+    MatchStats, NoDeadline,
 };
 
 /// One title's harvested bounded result: sorted `(logical_id, score)` winners,
@@ -49,6 +50,32 @@ fn ranked_chunk_len(configured: usize, total_threshold: usize) -> usize {
 /// policy over the SAME base the chunk's titles were sliced from — the
 /// index-alignment rule that keeps per-title ownership from crossing titles.
 #[allow(clippy::too_many_arguments)]
+pub(in crate::segment) fn batch_top_k<P, F, T>(
+    view: &MatchView,
+    titles: &[T],
+    opts: BatchMatchOptions,
+    k: usize,
+    total_threshold: usize,
+    scorer: &F,
+    policy_for: &(impl Fn(usize, usize) -> P + Sync),
+) -> (Vec<RankedSlot>, MatchStats)
+where
+    P: BatchEmissionPolicy,
+    F: Fn(u64) -> i64 + Sync,
+    T: AsRef<str> + Sync,
+{
+    infallible(run_batch_top_k(
+        view,
+        titles,
+        opts,
+        total_threshold,
+        policy_for,
+        NoDeadline,
+        &|len| BatchTopKCollector::new(len, k, total_threshold, scorer),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(in crate::segment) fn try_batch_top_k<P, F, T>(
     view: &MatchView,
     titles: &[T],
@@ -57,41 +84,41 @@ pub(in crate::segment) fn try_batch_top_k<P, F, T>(
     total_threshold: usize,
     scorer: &F,
     policy_for: &(impl Fn(usize, usize) -> P + Sync),
-    deadline: Option<Instant>,
+    deadline: Instant,
 ) -> Result<(Vec<RankedSlot>, MatchStats), MatchCancelled>
 where
     P: BatchEmissionPolicy,
-    F: Fn(u64) -> i64 + Sync,
+    F: Fn(u64, &mut dyn FnMut() -> bool) -> Option<i64> + Sync,
+    T: AsRef<str> + Sync,
+{
+    run_batch_top_k(
+        view,
+        titles,
+        opts,
+        total_threshold,
+        policy_for,
+        DeadlineAt(deadline),
+        &|len| BatchTopKCollector::new_polling(len, k, total_threshold, scorer),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_batch_top_k<P, S, D, T>(
+    view: &MatchView,
+    titles: &[T],
+    opts: BatchMatchOptions,
+    total_threshold: usize,
+    policy_for: &(impl Fn(usize, usize) -> P + Sync),
+    deadline: D,
+    make_collector: &(impl Fn(usize) -> BatchTopKCollector<S> + Sync),
+) -> Result<(Vec<RankedSlot>, MatchStats), D::Cancelled>
+where
+    P: BatchEmissionPolicy,
+    S: TopKScorer,
+    D: DeadlineCheck + Sync,
     T: AsRef<str> + Sync,
 {
     let chunk = ranked_chunk_len(opts.broad_batch_size, total_threshold);
-    let Some(d) = deadline else {
-        let per_chunk: Vec<(Vec<RankedSlot>, MatchStats)> = titles
-            .par_chunks(chunk)
-            .enumerate()
-            .map_init(
-                || (MatchScratch::new(), BroadBatchScratch::new()),
-                |(ms, bs), (ci, ct)| {
-                    let mut st = MatchStats::default();
-                    let mut collector =
-                        BatchTopKCollector::new(ct.len(), k, total_threshold, scorer);
-                    infallible(match_batch_chunk(
-                        view,
-                        ct,
-                        opts,
-                        ms,
-                        bs,
-                        &mut collector,
-                        &mut st,
-                        NoDeadline,
-                        policy_for(ci * chunk, ct.len()),
-                    ));
-                    (harvest(&collector, &mut st), st)
-                },
-            )
-            .collect();
-        return Ok(merge_chunks(titles.len(), per_chunk));
-    };
     let per_chunk: Vec<(Vec<RankedSlot>, MatchStats)> = titles
         .par_chunks(chunk)
         .enumerate()
@@ -99,7 +126,7 @@ where
             || (MatchScratch::new(), BroadBatchScratch::new()),
             |(ms, bs), (ci, ct)| {
                 let mut st = MatchStats::default();
-                let mut collector = BatchTopKCollector::new(ct.len(), k, total_threshold, scorer);
+                let mut collector = make_collector(ct.len());
                 match_batch_chunk(
                     view,
                     ct,
@@ -108,23 +135,20 @@ where
                     bs,
                     &mut collector,
                     &mut st,
-                    DeadlineAt(d),
+                    deadline,
                     policy_for(ci * chunk, ct.len()),
                 )?;
                 Ok((harvest(&collector, &mut st), st))
             },
         )
-        .collect::<Result<Vec<_>, MatchCancelled>>()?;
+        .collect::<Result<Vec<_>, D::Cancelled>>()?;
     Ok(merge_chunks(titles.len(), per_chunk))
 }
 
 /// Read the finalized slots (the chunk body already ran `finish`, sorting each
 /// slot's winners) and fold the per-title totals into `stats.matches` — the
 /// batch analogue of the scalar `stats.matches = total_hits.value`.
-fn harvest<F: FnMut(u64) -> i64>(
-    collector: &BatchTopKCollector<F>,
-    st: &mut MatchStats,
-) -> Vec<RankedSlot> {
+fn harvest<F>(collector: &BatchTopKCollector<F>, st: &mut MatchStats) -> Vec<RankedSlot> {
     collector
         .slots()
         .iter()

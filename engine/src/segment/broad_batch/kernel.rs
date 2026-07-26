@@ -20,14 +20,14 @@ use crate::util::{sig_key, FastMap};
 fn for_each_set_bit<D: DeadlineCheck>(
     bits: &[u64],
     deadline: &mut DeadlinePoll<D>,
-    mut f: impl FnMut(usize),
+    mut f: impl FnMut(usize, &mut DeadlinePoll<D>) -> Result<(), D::Cancelled>,
 ) -> Result<(), D::Cancelled> {
     for (wi, &word) in bits.iter().enumerate() {
         let mut w = word;
         while w != 0 {
             deadline.check_work()?;
             let b = w.trailing_zeros() as usize;
-            f((wi << 6) + b);
+            f((wi << 6) + b, deadline)?;
             w &= w - 1;
         }
     }
@@ -362,10 +362,11 @@ fn emit_from_bits<B: BroadBackend, S: BatchMatchSink, P: BatchEmissionPolicy, D:
     if backend.alive(local) && backend.passes_tags(local, pred) {
         let logical = backend.logical_id(local);
         let placement = backend.placement(local);
-        for_each_set_bit(bits, deadline, |ti| {
+        for_each_set_bit(bits, deadline, |ti, deadline| {
             if policy.should_emit(ti, placement) {
-                collector.on_match(ti, logical);
+                crate::segment::collect_batch_match(collector, ti, logical, deadline)?;
             }
+            Ok(())
         })?;
     }
     if grouped {
@@ -376,10 +377,11 @@ fn emit_from_bits<B: BroadBackend, S: BatchMatchSink, P: BatchEmissionPolicy, D:
                 // Per-member placement: ownership is per row, and a member's
                 // placement is its own identity even inside a shared body.
                 let placement = backend.placement(m);
-                for_each_set_bit(bits, deadline, |ti| {
+                for_each_set_bit(bits, deadline, |ti, deadline| {
                     if policy.should_emit(ti, placement) {
-                        collector.on_match(ti, logical);
+                        crate::segment::collect_batch_match(collector, ti, logical, deadline)?;
                     }
+                    Ok(())
                 })?;
             }
         }
@@ -616,10 +618,11 @@ pub(in crate::segment) fn eval_one_segment<
             );
             let logical = backend.logical_id(local);
             let placement = backend.placement(local);
-            for_each_set_bit(acc, deadline, |ti| {
+            for_each_set_bit(acc, deadline, |ti, deadline| {
                 if policy.should_emit(ti, placement) {
-                    collector.on_match(ti, logical);
+                    crate::segment::collect_batch_match(collector, ti, logical, deadline)?;
                 }
+                Ok(())
             })?;
         }
     }

@@ -314,6 +314,63 @@ impl<D: DeadlineCheck> DeadlinePoll<D> {
     }
 }
 
+/// Deliver one scalar match while lending collectors the active request-local
+/// sampler for any unbounded post-verification work. A collector that does not
+/// override the poll-aware callback never invokes the closure, preserving the
+/// ordinary collector's machine shape.
+#[inline]
+pub(crate) fn collect_match_at<C: crate::collect::MatchSink, D: DeadlineCheck>(
+    collector: &mut C,
+    logical_id: u64,
+    local_id: u32,
+    deadline: &mut DeadlinePoll<D>,
+) -> Result<(), D::Cancelled> {
+    let mut cancelled = None;
+    collector.on_match_at_with_poll(logical_id, local_id, &mut || {
+        if cancelled.is_some() {
+            return true;
+        }
+        match deadline.check_work() {
+            Ok(()) => false,
+            Err(error) => {
+                cancelled = Some(error);
+                true
+            }
+        }
+    });
+    match cancelled {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Indexed batch counterpart to [`collect_match_at`].
+#[inline]
+pub(crate) fn collect_batch_match<C: crate::collect::BatchMatchSink, D: DeadlineCheck>(
+    collector: &mut C,
+    title_index: usize,
+    logical_id: u64,
+    deadline: &mut DeadlinePoll<D>,
+) -> Result<(), D::Cancelled> {
+    let mut cancelled = None;
+    collector.on_match_with_poll(title_index, logical_id, &mut || {
+        if cancelled.is_some() {
+            return true;
+        }
+        match deadline.check_work() {
+            Ok(()) => false,
+            Err(error) => {
+                cancelled = Some(error);
+                true
+            }
+        }
+    });
+    match cancelled {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod deadline_poll_tests {
     use super::*;
