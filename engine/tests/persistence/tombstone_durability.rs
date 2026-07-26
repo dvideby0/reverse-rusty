@@ -288,6 +288,39 @@ fn address_tracks_an_unchanged_segment_when_compaction_shifts_its_ordinal() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn failed_reseal_restores_the_manifest_address_space_before_later_wal_appends() {
+    let dir = test_dir("tomb_failed_reseal_address");
+    {
+        let mut eng = Engine::with_config(make_norm(), no_compaction_cfg(&dir));
+        eng.build_from_queries(&distinct_queries(1..=1));
+        eng.bulk_ingest(&distinct_queries(2..=2));
+        let held = eng.segment_address(1, 0, 2).expect("resolve q2 address");
+        assert_eq!(eng.delete_by_logical_id(1).expect("delete q1"), 1);
+
+        // Reseal would drop the now-empty first segment and shift q2 from
+        // ordinal 1 to 0. Block the manifest temp file so that new layout cannot
+        // commit; the live segment + generation vectors must both roll back.
+        let manifest_tmp = dir.join("manifest.manifest.tmp");
+        std::fs::create_dir(&manifest_tmp).expect("block manifest temp file");
+        eng.reseal_tombstoned_segments();
+        assert!(!eng.persistence_healthy());
+
+        eng.tombstone_in(&held)
+            .expect("rolled-back token must log the durable ordinal");
+        assert!(!match_ids(&eng, &title_for(2)).contains(&2));
+        std::fs::remove_dir(&manifest_tmp).expect("remove manifest blocker");
+    }
+
+    let eng = Engine::open(make_norm(), no_compaction_cfg(&dir)).expect("reopen");
+    assert!(!match_ids(&eng, &title_for(1)).contains(&1));
+    assert!(
+        !match_ids(&eng, &title_for(2)).contains(&2),
+        "the accepted post-failure positional delete must replay against q2"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Replay order: delete(X) → manifest commit (bulk ingest bakes the delete) →
 /// re-insert(X) → crash. The delete frame sorts at/below the commit's watermark and
 /// is skipped (its tombstones are baked); the later insert frame replays and

@@ -17,7 +17,9 @@
   expected logical id so even a previously-held positional pair is checked before a token can be
   minted. The opaque token carries the installed segment generation, local id, and logical identity;
   it cannot be reconstructed from the two positional numbers. Segment replacement installs a fresh
-  generation, while an unchanged segment keeps its generation even if its ordinal shifts.
+  generation, while an unchanged segment keeps its generation even if its ordinal shifts. A reseal
+  publishes its replacement segments and generations only with the manifest commit; commit failure
+  restores both vectors so subsequent positional WAL frames still address the durable layout.
   `tombstone_in(&address)` validates the still-installed generation, local-id bounds, logical
   identity, and liveness before touching the WAL. Rejections return the public typed
   `TombstoneError` (`StaleAddress`, `SegmentNotFound`, `LocalNotFound`, `AlreadyDeleted`, or the
@@ -33,7 +35,8 @@
   WAL-tail replay and the adversarial compaction case where a held pair stays in-range but is reused
   for a different survivor; the generation rejects it without WAL movement, live or after reopen.
   A neighboring-range merge also pins that a token for an unchanged segment follows its new ordinal
-  and logs the current WAL address. ADR-066's existing compaction/crash regression continues to
-  prove that historical positional frames cannot misfire.
+  and logs the current WAL address. An injected reseal-manifest failure pins rollback to the old
+  ordinal map before a later accepted delete and restart. ADR-066's existing compaction/crash
+  regression continues to prove that historical positional frames cannot misfire.
 - **See also:** ADR-005 (typed errors), ADR-013 (WAL-first writes), ADR-066 (tombstone durability and
   positional-frame recovery watermark).

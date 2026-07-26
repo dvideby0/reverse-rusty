@@ -155,6 +155,12 @@ impl Engine {
         let mut new_segments = Vec::with_capacity(self.segments.len());
         let mut new_generations = Vec::with_capacity(self.segment_generations.len());
         let mut old_files = Vec::new();
+        // Retain the complete pre-reseal state until the manifest commit point.
+        // The Arc clones are O(segment count), not O(corpus), and let a failed
+        // commit restore the exact positional address space the durable manifest
+        // still names.
+        let rollback_segments = self.segments.clone();
+        let rollback_generations = self.segment_generations.clone();
         let old_segments = std::mem::take(&mut self.segments);
         let old_generations = std::mem::take(&mut self.segment_generations);
         for (index, arc) in old_segments.into_iter().enumerate() {
@@ -220,12 +226,18 @@ impl Engine {
         self.segments = new_segments;
         self.segment_generations = new_generations;
         self.refresh_phrase_capability();
-        // Manifest is the commit point: only after it succeeds is it safe to delete
-        // the retired files. On a manifest failure the old files stay (still
-        // referenced by the on-disk manifest) and the freshly resealed files become
-        // orphans GC'd on reopen — fail closed, no resurrection.
+        // Manifest is the commit point: only after it succeeds is it safe to
+        // publish the new positional address space and delete the retired files.
+        // On failure, restore both vectors together; otherwise a shifted ordinal
+        // could make a later positional WAL frame disagree with the still-current
+        // durable manifest. Freshly resealed files remain unreferenced orphans and
+        // are GC'd on reopen.
         if self.commit_manifest_with_current_sources() {
             self.cleanup_segment_files(&old_files);
+        } else {
+            self.segments = rollback_segments;
+            self.segment_generations = rollback_generations;
+            self.refresh_phrase_capability();
         }
     }
 
