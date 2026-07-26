@@ -1,9 +1,9 @@
 name: CI
 
-# Runs the exact same gate as engine/check.sh (fmt + clippy + test + audit +
-# deny) on every PR and on pushes to main, then runs the benchmarks for
-# informational output. check.sh is the single source of truth for what "green"
-# means — this workflow just runs it in the cloud so nothing merges unchecked.
+# Runs the exact same code gate as engine/check.sh (fmt + clippy + test + audit
+# + deny) on every PR and push to main, then runs ADR-124's reviewed performance
+# contract on a pinned runner. The legacy deep benchmarks remain exploratory;
+# perfgate is the small variance-aware subset that is safe to make blocking.
 on:
   push:
     branches: [main]
@@ -34,7 +34,10 @@ env:
 jobs:
   gate:
     name: gate + benchmarks
-    runs-on: ubuntu-latest
+    # ADR-124 runner contract: public standard x64 = 4 vCPU / 16 GiB. Do not
+    # float this to `ubuntu-latest`; changing the label requires an intentional
+    # five-run rebaseline.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
@@ -72,10 +75,25 @@ jobs:
       - name: Local deploy smoke (single-node + in-process cluster)
         run: ./deploy/local-smoke.sh --prebuilt engine/target/release
 
-      # Benchmarks are run-and-print only: throughput is machine-dependent, so CI
-      # captures the numbers for review but never fails on them. The structural
-      # regression gate stays a manual comparison (docs/performance/benchmark-results.txt).
-      - name: Benchmarks (informational)
+      # The merge-blocking performance subset: fixed seed/workload, exact
+      # structural checks, 5% memory + durable-footprint ceilings, and timing
+      # medians compared to six reviewed runner samples with max(30%, 3*MAD)
+      # bands. A timing-only failure repeats the complete timing window once;
+      # deterministic/resource failures never retry.
+      - name: Performance regression gate
+        working-directory: engine
+        env:
+          RAYON_NUM_THREADS: 4
+          RR_PERF_RUNNER_CONTRACT: github-hosted-ubuntu-24.04-x64-public-standard
+        run: |
+          mkdir -p ../bench-output
+          cargo run --release --bin perfgate -- check \
+            ../docs/performance/perf-baseline.json \
+            ../bench-output/perf-current.json
+
+      # Deep diagnostic sweeps are deliberately non-blocking: they include
+      # noisier/machine-specific signals outside ADR-124's reviewed contract.
+      - name: Deep benchmarks (informational)
         continue-on-error: true
         working-directory: engine
         run: |
@@ -96,12 +114,17 @@ jobs:
           name: benchmark-output
           path: bench-output/
           if-no-files-found: ignore
+          retention-days: 30
 
-      # The 10M soak is too heavy for every PR; run it on demand only.
+      # Backward-compatible manual trigger. The same exact 10M target also runs
+      # weekly in soak.yml, with its logs/resource capture retained for 90 days.
       - name: Soak (10M queries, on-demand)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_soak }}
         working-directory: engine
-        run: cargo test --release --test stress -- --ignored --nocapture
+        run: >
+          cargo test --release --test stress
+          soak::ten_million_queries_mixed_ops --
+          --ignored --nocapture --exact
 
   # The multi-machine harness (ADR-072, Distributed-v1 criterion 3): a fully secured
   # containerized cluster (3 durable shard nodes + handoff target + REST coordinator +

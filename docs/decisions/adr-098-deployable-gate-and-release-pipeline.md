@@ -37,7 +37,8 @@
      incl. a MUST_NOT suppression and an any-of match → `_stats`/`_metrics` → `_backup` →
      **SIGTERM-restart-reopen and re-assert** → **open the backup copy and re-assert**), no
      containers, `curl`+`jq` only. It runs **inside the existing required `gate + benchmarks` CI
-     job** (after `check.sh`, before the informational benchmarks) — a hard gate on every PR with
+     job** (after `check.sh`, before ADR-124's performance gate and the informational deep
+     benchmarks) — a hard gate on every PR with
      zero branch-protection changes, reusing the hot release build. A separate job was rejected:
      not required-by-protection, cold cache. `check.sh` stays the *engine*-gate SSOT; this is a
      *deployment* gate over the built artifact, the harness-job precedent.

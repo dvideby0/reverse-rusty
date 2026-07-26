@@ -121,12 +121,14 @@ acceptance run and needs a real cluster + corpus — out of scope for this check
 
 [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) now runs **every leg but the image
 build** on each PR and push: the `gate` job runs `check.sh`, then the **local deploy smoke**
-(`local-smoke.sh --prebuilt`, the M1 gate — ADR-098), then benchmarks (the 10M soak is on-demand
-via `run_soak`); the `harness` job lints `compose.cluster.yml`, runs `harness.sh --prebuilt`, then
-runs the **production-compose smoke** (leg 4) on the same prebuilt image; and the `helm chart` job
-runs the lint + kubeconform matrix plus the **topology-parity** and **version-drift** tripwires
-(ADR-098). Releases add the rest: [`release.yml`](../../.github/workflows/release.yml) builds the
-candidate image (leg 3), re-runs the compose smoke against it, runs the **kind Helm smoke**
+(`local-smoke.sh --prebuilt`, the M1 gate — ADR-098), the pinned variance-tolerant `perfgate`
+(ADR-124), and the advisory deep benchmark sweeps; the `harness` job lints
+`compose.cluster.yml`, runs `harness.sh --prebuilt`, then runs the **production-compose smoke**
+(leg 4) on the same prebuilt image; and the `helm chart` job runs the lint + kubeconform matrix
+plus the **topology-parity** and **version-drift** tripwires (ADR-098). The exact 10M mixed-ops
+soak runs weekly and remains manually dispatchable, with its output retained as an artifact.
+Releases add the rest: [`release.yml`](../../.github/workflows/release.yml) builds the candidate
+image (leg 3), re-runs the compose smoke against it, runs the **kind Helm smoke**
 (`k8s-smoke.sh`) against it, and only then publishes to GHCR — so a tagged image has passed every
 leg of this checklist by construction.
 

@@ -5,7 +5,7 @@ PURPOSE
   The reference for running Reverse Rusty's benchmarks and judging the result. It answers three
   questions for whoever runs them next:
     1. WHAT to run (commands, args, runtime budget) ................ "How to run"
-    2. WHAT must hold regardless of hardware (the regression gate) . "Invariants"
+    2. WHAT blocks CI vs what remains a manual invariant ............ "ADR-124 gate" / "Invariants"
     3. WHAT the numbers were last time, and on what machine ........ "Capture log"
 
   Read INVARIANTS first. Those numbers are fixed by the data + the algorithm, NOT the CPU, so
@@ -16,9 +16,9 @@ PURPOSE
 
   Numbers here are distilled. Full console output of a run is ephemeral (e.g. /tmp at capture
   time); record the distilled result in the capture log below — append, don't overwrite. This
-  file is the durable, version-controlled record. CI (GitHub Actions) also runs the benchmarks on
-  every PR and uploads the raw console output as an artifact, but does NOT gate on them: throughput
-  is machine-dependent, so the invariants below stay a manual comparison (see DECISIONS ADR-024).
+  file is the durable, version-controlled record. CI (GitHub Actions) runs ADR-124's narrow
+  `perfgate` contract as a hard blocker and uploads `perf-current.json`; the broader benchmark
+  sweeps remain advisory. See `perf-baseline.json` for the reviewed machine-readable reference.
 
 --------------------------------------------------------------------------------------------
 HOW TO RUN
@@ -28,7 +28,7 @@ HOW TO RUN
 
   # ---- correctness (the contract; fast) ----
   cargo test --release --test oracle                  # differential oracle: false_neg/pos = 0
-  cargo test --release --test stress                  # 15 pressure tests (churn, par==seq, ghosts)
+  cargo test --release --test stress                  # pressure tests (churn, par==seq, ghosts)
   cargo test --release --test stress \
       ten_million_queries_mixed_ops -- --ignored --nocapture   # 10M-scale soak (needs ~4+ GiB)
   cargo test --release --test cluster_soak \
@@ -47,8 +47,10 @@ HOW TO RUN
   cargo run --release --bin learn -- 500000 50 0.30         # NPMI corpus learner (see appendix)
   cargo test --release --test stress cancellation::large_segment_overshoot_benchmark \
       -- --ignored --nocapture                               # ADR-123 bounded cancellation evidence
+  RAYON_NUM_THREADS=4 cargo run --release --bin perfgate -- \
+      capture /tmp/perf-current.json                         # diagnostic off-runner capture
 
-  bench args:        <num_queries> <num_titles> <broad_frac> <skew> <seed> [reps]
+  bench args:        <num_queries> <num_titles> <broad_frac> <skew> [seed] [reps] [hot_theta] [dedup]
   segbench args:     <num_queries> <num_titles> <broad_frac> <seed>
   snapbench args:    <num_queries> <iters>
   clusterbench args: <num_queries> <num_titles> <num_shards> <broad_frac> <seed>
@@ -57,7 +59,31 @@ HOW TO RUN
   bench memory passes (they build the corpus to disk twice — a few minutes) and the 10M soak.
 
 --------------------------------------------------------------------------------------------
-INVARIANTS — the regression gate (machine-INDEPENDENT; must reproduce)
+ADR-124 AUTOMATED GATE — merge-blocking on pinned ubuntu-24.04 x64 / 4 vCPU
+--------------------------------------------------------------------------------------------
+  WORKLOAD: 1,000,000 queries; 20,000 titles; broad=0.05; skew=2.0; family=8;
+    seed=0x00C0FFEE; release+LTO; RAYON_NUM_THREADS=4.
+
+  NEVER-RETRY INVARIANTS:
+    stored/classes/dict/main-posting/candidate/match shape must equal `perf-baseline.json`;
+    persistent retain_source=false resident bytes <= reference +5%;
+    logical durable bytes <= reference +5%; durable file count exact.
+
+  VARIANCE-AWARE TIMING:
+    seven complete latency rounds -> median p50/p95/p99;
+    nine 100k-title windows -> median selective scalar and columnar broad throughput;
+    reference = median/MAD across >=5 reviewed CI runs;
+    allowed delta = max(30% of reference median, 3 * reference MAD);
+    timing-only breach repeats one complete timing window and must breach twice to fail.
+
+  REBASELINE:
+    at least five distinct `perf-current.json` CI artifacts + a non-empty reason;
+    `RR_PERF_ACCEPT_REBASELINE=1 perfgate rebaseline ...`;
+    mixed contracts/deterministic disagreement/duplicate runs are refused; first attempts only.
+    Review the JSON diff. CI never updates its own baseline.
+
+--------------------------------------------------------------------------------------------
+BROADER INVARIANTS — machine-INDEPENDENT; manual outside the automated subset
 --------------------------------------------------------------------------------------------
   Last verified 2026-05-30 (Apple M4 Max, 16-core) AND 2026-05-27 (aarch64, 4-core): identical.
 
@@ -154,6 +180,27 @@ MACHINE-DEPENDENT — record the machine; compare only same-machine over time
 --------------------------------------------------------------------------------------------
 CAPTURE LOG  (newest first — append a block per run; lead with the machine)
 --------------------------------------------------------------------------------------------
+[2026-07-26] ADR-124 MERGE-BLOCKING PERFORMANCE CONTRACT. Runner pinned to GitHub-hosted
+              public-standard ubuntu-24.04 x64, 4 vCPU / 16 GiB, Rayon=4. Timing history from
+              six successful post-compiler-semantics CI runs: 30177502753, 30178825241,
+              30180903052, 30183304894, 30183912729, 30186149569.
+  WORKLOAD: 1M queries / 20k titles / broad=0.05 / skew=2.0 / seed=0x00C0FFEE.
+  EXACT STRUCTURE:
+    classes A/B/C/D/H = 995660 / 2116 / 2224 / 0 / 0; dict=34309;
+    main max posting=88, postings>1024=0;
+    candidate sum=1,073,407 (53.67035/title), p95=95, p99=111, max=143;
+    match sum=6,610,573.
+  RESOURCES (seed/format-fixed, logical file lengths):
+    persistent retain_source=false resident=5,926,332 B (5.93 B/query);
+    durable=237,808,740 B (237.81 B/query), 4 files; both byte totals gate at +5%.
+  TIMING HISTORY (reference median / MAD):
+    p50=4,693 / 200 ns; p95=45,275 / 1,958 ns; p99=61,570 / 1,653 ns;
+    selective=196,073 / 15,850 titles/s; columnar=302,554 / 7,077 titles/s.
+    Bounds use max(30%, 3*MAD); one complete timing-only retry, deterministic/resource no retry.
+  LOCAL CROSS-CHECK (Apple M4 Max, arm64, 4 Rayon threads; diagnostic, NOT in timing history):
+    p50/p95/p99=2,458/18,000/27,750 ns; selective=394,462 t/s; columnar=865,096 t/s;
+    exact structure/resources above reproduced.
+
 [2026-07-25] Apple M4 Max, 16-core (12P+4E), 48 GiB, arm64. ADR-123 BOUNDED
               IN-SEGMENT CANCELLATION. Release build; one segment with 300k
               canonical-body members + 300k distinct negative bodies under one

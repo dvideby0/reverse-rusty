@@ -1,0 +1,403 @@
+use super::measure::{measure_static_report, measure_timing};
+use super::{
+    median, print_failures, runner_contract, timing_histories, workload_contract, write_json,
+    Baseline, BaselineReference, Distribution, GatePolicy, Report, ResourceMetrics, TimingAttempt,
+    TimingHistory, RAYON_THREADS, RUNNER_CONTRACT_ID, SCHEMA_VERSION,
+};
+use std::collections::BTreeSet;
+use std::error::Error;
+use std::fs;
+use std::io;
+use std::path::Path;
+
+pub(super) fn check(baseline_path: &Path, report_path: &Path) -> Result<(), Box<dyn Error>> {
+    let baseline: Baseline = serde_json::from_slice(&fs::read(baseline_path)?)?;
+    validate_baseline_contract(&baseline)?;
+
+    let (mut report, engine, titles) = measure_static_report()?;
+    let static_failures = compare_static(&report, &baseline);
+    if !static_failures.is_empty() {
+        write_json(report_path, &report)?;
+        print_failures("deterministic/resource", &static_failures);
+        return Err(io::Error::other("performance gate failed without a timing retry").into());
+    }
+
+    let first = measure_timing(&engine, &titles)?;
+    let first_failures = compare_timing(&first, &baseline);
+    report.timing_attempts.push(first);
+
+    if first_failures.is_empty() {
+        write_json(report_path, &report)?;
+        super::print_report_summary(&report);
+        println!("performance gate: PASS");
+        return Ok(());
+    }
+
+    print_failures("timing attempt 1", &first_failures);
+    if !baseline.policy.retry_timing_failures_once {
+        write_json(report_path, &report)?;
+        return Err(io::Error::other("performance timing gate failed").into());
+    }
+
+    println!("timing-only failure: repeating the complete timing window once");
+    let second = measure_timing(&engine, &titles)?;
+    let second_failures = compare_timing(&second, &baseline);
+    report.timing_attempts.push(second);
+    write_json(report_path, &report)?;
+
+    if second_failures.is_empty() {
+        super::print_report_summary(&report);
+        println!("performance gate: PASS on timing retry");
+        Ok(())
+    } else {
+        print_failures("timing attempt 2", &second_failures);
+        Err(io::Error::other("performance timing gate failed twice").into())
+    }
+}
+
+fn validate_baseline_contract(baseline: &Baseline) -> Result<(), Box<dyn Error>> {
+    validate_baseline_definition(baseline)?;
+    let runner = runner_contract();
+    if baseline.runner != runner {
+        return Err(io::Error::other(format!(
+            "runner contract mismatch: expected {:?}, observed {:?}",
+            baseline.runner, runner
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_baseline_definition(baseline: &Baseline) -> Result<(), Box<dyn Error>> {
+    if baseline.schema_version != SCHEMA_VERSION {
+        return Err(io::Error::other(format!(
+            "baseline schema {} != supported schema {SCHEMA_VERSION}",
+            baseline.schema_version
+        ))
+        .into());
+    }
+    if baseline.runner.id != RUNNER_CONTRACT_ID || baseline.runner.rayon_threads != RAYON_THREADS {
+        return Err(io::Error::other(format!(
+            "baseline runner must be {RUNNER_CONTRACT_ID} with {RAYON_THREADS} Rayon threads"
+        ))
+        .into());
+    }
+    let workload = workload_contract();
+    if baseline.workload != workload {
+        return Err(io::Error::other(format!(
+            "workload contract mismatch: expected {:?}, binary has {:?}",
+            baseline.workload, workload
+        ))
+        .into());
+    }
+    if baseline.reference.source_run_ids.len() < 5 {
+        return Err(
+            io::Error::other("baseline must retain at least five reviewed CI source runs").into(),
+        );
+    }
+    for (name, samples) in timing_histories(&baseline.reference.timing) {
+        if samples.len() != baseline.reference.source_run_ids.len() {
+            return Err(io::Error::other(format!(
+                "{name} has {} samples for {} source runs",
+                samples.len(),
+                baseline.reference.source_run_ids.len()
+            ))
+            .into());
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn rebaseline(
+    baseline_path: &Path,
+    reason: &str,
+    report_paths: &[String],
+) -> Result<(), Box<dyn Error>> {
+    if std::env::var("RR_PERF_ACCEPT_REBASELINE").as_deref() != Ok("1") {
+        return Err(io::Error::other(
+            "refusing to rewrite the reviewed baseline without RR_PERF_ACCEPT_REBASELINE=1",
+        )
+        .into());
+    }
+    if reason.trim().is_empty() {
+        return Err(io::Error::other("rebaseline reason must not be empty").into());
+    }
+    if report_paths.len() < 5 {
+        return Err(io::Error::other(
+            "an intentional rebaseline requires at least five independent CI reports",
+        )
+        .into());
+    }
+
+    let mut baseline: Baseline = serde_json::from_slice(&fs::read(baseline_path)?)?;
+    validate_baseline_definition(&baseline)?;
+    let reports = report_paths
+        .iter()
+        .map(|path| {
+            serde_json::from_slice::<Report>(&fs::read(path)?)
+                .map_err(|error| -> Box<dyn Error> { Box::new(error) })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let first = reports
+        .first()
+        .ok_or_else(|| io::Error::other("missing rebaseline report"))?;
+    let mut source_runs = Vec::with_capacity(reports.len());
+    let mut unique_runs = BTreeSet::new();
+    let mut resident = Vec::with_capacity(reports.len());
+    let mut durable = Vec::with_capacity(reports.len());
+    let mut timing = TimingHistory {
+        latency_p50_ns: Vec::with_capacity(reports.len()),
+        latency_p95_ns: Vec::with_capacity(reports.len()),
+        latency_p99_ns: Vec::with_capacity(reports.len()),
+        selective_titles_per_sec: Vec::with_capacity(reports.len()),
+        columnar_titles_per_sec: Vec::with_capacity(reports.len()),
+    };
+
+    for report in &reports {
+        if report.schema_version != SCHEMA_VERSION
+            || report.runner != baseline.runner
+            || report.workload != baseline.workload
+        {
+            return Err(io::Error::other(format!(
+                "report contract differs from the reviewed baseline: {:?}",
+                report.github_run_id
+            ))
+            .into());
+        }
+        if report.structure != first.structure
+            || report.resources.durable_files != first.resources.durable_files
+        {
+            return Err(io::Error::other(format!(
+                "deterministic report fields disagree across source runs: {:?}",
+                report.github_run_id
+            ))
+            .into());
+        }
+        let run_id = report
+            .github_run_id
+            .as_ref()
+            .ok_or_else(|| io::Error::other("rebaseline reports must come from GitHub Actions"))?;
+        if !unique_runs.insert(run_id.clone()) {
+            return Err(io::Error::other(format!("duplicate source run {run_id}")).into());
+        }
+        let attempt = report.timing_attempts.first().ok_or_else(|| {
+            io::Error::other(format!("source run {run_id} has no timing attempt"))
+        })?;
+
+        source_runs.push(run_id.clone());
+        resident.push(report.resources.resident_bytes);
+        durable.push(report.resources.durable_bytes);
+        timing.latency_p50_ns.push(attempt.latency_p50_ns.median);
+        timing.latency_p95_ns.push(attempt.latency_p95_ns.median);
+        timing.latency_p99_ns.push(attempt.latency_p99_ns.median);
+        timing
+            .selective_titles_per_sec
+            .push(attempt.selective_titles_per_sec.median);
+        timing
+            .columnar_titles_per_sec
+            .push(attempt.columnar_titles_per_sec.median);
+    }
+
+    baseline.reference = BaselineReference {
+        source_run_ids: source_runs,
+        structure: first.structure.clone(),
+        resources: ResourceMetrics {
+            resident_bytes: median(&resident),
+            durable_bytes: median(&durable),
+            durable_files: first.resources.durable_files,
+        },
+        timing,
+    };
+    baseline.rebaseline_reason = reason.trim().to_string();
+    validate_baseline_definition(&baseline)?;
+    write_json(baseline_path, &baseline)?;
+    println!(
+        "rewrote {} from {} independent CI reports; review and commit the JSON diff",
+        baseline_path.display(),
+        reports.len()
+    );
+    Ok(())
+}
+
+fn compare_static(report: &Report, baseline: &Baseline) -> Vec<String> {
+    let mut failures = Vec::new();
+    if report.structure != baseline.reference.structure {
+        failures.push(format!(
+            "seed-fixed structure changed\n  expected: {:?}\n  observed: {:?}",
+            baseline.reference.structure, report.structure
+        ));
+    }
+    let resource_basis_points = baseline.policy.resource_material_regression_basis_points;
+    compare_upper_resource(
+        "resident bytes",
+        report.resources.resident_bytes,
+        baseline.reference.resources.resident_bytes,
+        resource_basis_points,
+        &mut failures,
+    );
+    compare_upper_resource(
+        "durable logical bytes",
+        report.resources.durable_bytes,
+        baseline.reference.resources.durable_bytes,
+        resource_basis_points,
+        &mut failures,
+    );
+    if report.resources.durable_files != baseline.reference.resources.durable_files {
+        failures.push(format!(
+            "durable file count changed: expected {}, observed {}",
+            baseline.reference.resources.durable_files, report.resources.durable_files
+        ));
+    }
+    failures
+}
+
+fn compare_upper_resource(
+    name: &str,
+    current: u64,
+    reference: u64,
+    basis_points: u32,
+    failures: &mut Vec<String>,
+) {
+    let allowance = basis_point_allowance(reference, basis_points);
+    let limit = reference.saturating_add(allowance);
+    println!("{name}: current={current} reference={reference} upper_limit={limit}");
+    if current > limit {
+        failures.push(format!(
+            "{name} regressed materially: {current} > {limit} (reference {reference})"
+        ));
+    }
+}
+
+fn compare_timing(attempt: &TimingAttempt, baseline: &Baseline) -> Vec<String> {
+    let mut failures = Vec::new();
+    compare_latency(
+        "latency p50",
+        &attempt.latency_p50_ns,
+        &baseline.reference.timing.latency_p50_ns,
+        &baseline.policy,
+        &mut failures,
+    );
+    compare_latency(
+        "latency p95",
+        &attempt.latency_p95_ns,
+        &baseline.reference.timing.latency_p95_ns,
+        &baseline.policy,
+        &mut failures,
+    );
+    compare_latency(
+        "latency p99",
+        &attempt.latency_p99_ns,
+        &baseline.reference.timing.latency_p99_ns,
+        &baseline.policy,
+        &mut failures,
+    );
+    compare_throughput(
+        "selective throughput",
+        &attempt.selective_titles_per_sec,
+        &baseline.reference.timing.selective_titles_per_sec,
+        &baseline.policy,
+        &mut failures,
+    );
+    compare_throughput(
+        "columnar throughput",
+        &attempt.columnar_titles_per_sec,
+        &baseline.reference.timing.columnar_titles_per_sec,
+        &baseline.policy,
+        &mut failures,
+    );
+    failures
+}
+
+fn compare_latency(
+    name: &str,
+    current: &Distribution,
+    history: &[u64],
+    policy: &GatePolicy,
+    failures: &mut Vec<String>,
+) {
+    let reference = distribution_unchecked(history);
+    let allowance = timing_allowance(&reference, policy);
+    let limit = reference.median.saturating_add(allowance);
+    println!(
+        "{name}: current_median={} current_mad={} reference_median={} reference_mad={} upper_limit={}",
+        current.median, current.mad, reference.median, reference.mad, limit
+    );
+    if current.median > limit {
+        failures.push(format!(
+            "{name} regressed materially: {} > {limit}",
+            current.median
+        ));
+    }
+}
+
+fn compare_throughput(
+    name: &str,
+    current: &Distribution,
+    history: &[u64],
+    policy: &GatePolicy,
+    failures: &mut Vec<String>,
+) {
+    let reference = distribution_unchecked(history);
+    let allowance = timing_allowance(&reference, policy);
+    let limit = reference.median.saturating_sub(allowance);
+    println!(
+        "{name}: current_median={} current_mad={} reference_median={} reference_mad={} lower_limit={}",
+        current.median, current.mad, reference.median, reference.mad, limit
+    );
+    if current.median < limit {
+        failures.push(format!(
+            "{name} regressed materially: {} < {limit}",
+            current.median
+        ));
+    }
+}
+
+fn timing_allowance(reference: &Distribution, policy: &GatePolicy) -> u64 {
+    basis_point_allowance(
+        reference.median,
+        policy.timing_material_regression_basis_points,
+    )
+    .max(
+        reference
+            .mad
+            .saturating_mul(u64::from(policy.timing_mad_multiplier)),
+    )
+}
+
+fn basis_point_allowance(value: u64, basis_points: u32) -> u64 {
+    let numerator = u128::from(value)
+        .saturating_mul(u128::from(basis_points))
+        .saturating_add(9_999);
+    u64::try_from(numerator / 10_000).unwrap_or(u64::MAX)
+}
+
+fn distribution_unchecked(samples: &[u64]) -> Distribution {
+    Distribution::from_samples(samples.to_vec())
+        .expect("baseline validation rejects empty timing histories")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timing_allowance_takes_material_or_noise_band_whichever_is_larger() {
+        let policy = GatePolicy {
+            timing_material_regression_basis_points: 3_000,
+            timing_mad_multiplier: 3,
+            resource_material_regression_basis_points: 500,
+            retry_timing_failures_once: true,
+        };
+        let quiet = Distribution::from_samples(vec![100; 5]).expect("quiet");
+        assert_eq!(timing_allowance(&quiet, &policy), 30);
+
+        let noisy = Distribution::from_samples(vec![50, 75, 100, 125, 150]).expect("noisy");
+        assert_eq!(timing_allowance(&noisy, &policy), 75);
+    }
+
+    #[test]
+    fn resource_limit_rounds_up() {
+        assert_eq!(basis_point_allowance(101, 500), 6);
+    }
+}
