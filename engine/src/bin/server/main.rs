@@ -456,7 +456,10 @@ async fn main() {
             "/_stats",
             any(stats).layer(DefaultBodyLimit::max(STATS_BODY_LIMIT)),
         )
-        .route("/_cat/stats", get(cat_stats))
+        .route(
+            "/_cat/stats",
+            any(cat_stats).layer(DefaultBodyLimit::max(STATS_BODY_LIMIT)),
+        )
         .route("/_cat/segments", get(cat_segments))
         .route("/_health", get(health))
         .route("/_metrics", get(prometheus_metrics))

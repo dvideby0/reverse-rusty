@@ -1,8 +1,8 @@
-use super::stats;
+use super::{cat_stats, stats};
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 use arc_swap::ArcSwap;
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::DefaultBodyLimit;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::routing::any;
@@ -69,16 +69,20 @@ fn router(state: &Arc<AppState>, body_limit: usize) -> Router {
             "/_stats",
             any(stats).layer(DefaultBodyLimit::max(body_limit)),
         )
+        .route(
+            "/_cat/stats",
+            any(cat_stats).layer(DefaultBodyLimit::max(body_limit)),
+        )
         .with_state(Arc::clone(state))
 }
 
-async fn send(
+async fn send_raw(
     state: &Arc<AppState>,
     body_limit: usize,
     method: Method,
     uri: &str,
     body: impl Into<Body>,
-) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
+) -> (StatusCode, axum::http::HeaderMap, Bytes) {
     let response = router(state, body_limit)
         .oneshot(
             Request::builder()
@@ -94,6 +98,17 @@ async fn send(
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("response body");
+    (status, headers, bytes)
+}
+
+async fn send(
+    state: &Arc<AppState>,
+    body_limit: usize,
+    method: Method,
+    uri: &str,
+    body: impl Into<Body>,
+) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
+    let (status, headers, bytes) = send_raw(state, body_limit, method, uri, body).await;
     let body = serde_json::from_slice(&bytes).expect("JSON response");
     (status, headers, body)
 }
@@ -265,6 +280,241 @@ async fn waiting_for_stats_admission_is_async_and_cancellable() {
     .await
     .expect("the runtime must remain responsive");
 
+    pending.abort();
+    let _ = pending.await;
+    drop(held);
+    tokio::task::yield_now().await;
+    assert_eq!(state.stats_permits.available_permits(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cat_stats_is_truthful_complete_and_uncacheable() {
+    let state = state_with_tombstone();
+    let (status, headers, bytes) = send_raw(
+        &state,
+        super::STATS_BODY_LIMIT,
+        Method::GET,
+        "/_cat/stats",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "text/plain; charset=utf-8"
+    );
+    let text = std::str::from_utf8(&bytes).expect("UTF-8 CAT table");
+    let rows: std::collections::HashMap<&str, &str> = text
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some((fields.next()?, fields.next()?))
+        })
+        .collect();
+    assert_eq!(rows["mode"], "standalone");
+    assert_eq!(rows["queries.physical"], "2");
+    assert_eq!(rows["queries.live"], "1");
+    assert_eq!(rows["queries.tombstoned"], "1");
+    assert!(rows["took_ms"].parse::<f64>().is_ok());
+    assert_eq!(rows["translog.operations"], "0");
+    assert_eq!(rows["translog.size_in_bytes"], "0");
+
+    let memory_components: usize = [
+        "memory.exact_bytes",
+        "memory.index_bytes",
+        "memory.filter_bytes",
+        "memory.dict_bytes",
+        "memory.query_store_bytes",
+        "memory.logical_index_bytes",
+        "memory.alive_bytes",
+    ]
+    .into_iter()
+    .map(|field| rows[field].parse::<usize>().expect("memory bytes"))
+    .sum();
+    assert_eq!(
+        rows["memory.total_resident_bytes"]
+            .parse::<usize>()
+            .expect("total resident bytes"),
+        memory_components
+    );
+    assert_eq!(
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["cat_stats", "200"])
+            .get(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cat_stats_honors_common_cat_controls() {
+    let state = state_with_tombstone();
+
+    let (status, _, bytes) = send_raw(
+        &state,
+        super::STATS_BODY_LIMIT,
+        Method::GET,
+        "/_cat/stats?v&h=m",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let text = std::str::from_utf8(&bytes).expect("UTF-8 CAT table");
+    assert_eq!(text.lines().next(), Some("metric"));
+    assert!(text.lines().any(|line| line == "queries.live"));
+    assert!(
+        text.lines().all(|line| !line.contains(' ')),
+        "one selected column must render alone: {text}"
+    );
+
+    let (status, _, bytes) = send_raw(
+        &state,
+        super::STATS_BODY_LIMIT,
+        Method::GET,
+        "/_cat/stats?h=met*",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let text = std::str::from_utf8(&bytes).expect("UTF-8 CAT table");
+    assert!(text.lines().any(|line| line == "queries.live"));
+    assert!(
+        text.lines().all(|line| !line.contains(' ')),
+        "wildcard-selected metric column must render alone: {text}"
+    );
+
+    let (status, headers, body) = send(
+        &state,
+        super::STATS_BODY_LIMIT,
+        Method::GET,
+        "/_cat/stats?format=json&h=metric,value&s=metric:desc",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        headers.get(header::CONTENT_TYPE).unwrap(),
+        "application/json"
+    );
+    let rows = body.as_array().expect("JSON CAT rows");
+    assert_eq!(rows[0]["metric"], "would_be_hot");
+    assert!(rows.iter().all(|row| {
+        row.get("metric").is_some()
+            && row.get("value").is_some()
+            && row.as_object().is_some_and(|object| object.len() == 2)
+    }));
+
+    let (status, _, bytes) = send_raw(
+        &state,
+        super::STATS_BODY_LIMIT,
+        Method::GET,
+        "/_cat/stats?format=json&h=value,metric&s=metric",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = std::str::from_utf8(&bytes).expect("UTF-8 JSON");
+    assert!(
+        json.starts_with(r#"[{"value":"10000","metric":"batch.max"}"#),
+        "JSON must preserve the requested h order: {json}"
+    );
+
+    let held = Arc::clone(&state.stats_permits)
+        .acquire_owned()
+        .await
+        .expect("hold stats slot");
+    let help = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        send_raw(
+            &state,
+            super::STATS_BODY_LIMIT,
+            Method::GET,
+            "/_cat/stats?help",
+            Body::empty(),
+        ),
+    )
+    .await
+    .expect("help must not wait for stats admission");
+    assert_eq!(help.0, StatusCode::OK);
+    let help = std::str::from_utf8(&help.2).expect("UTF-8 help");
+    assert!(help.contains("metric"));
+    assert!(help.contains("statistic name"));
+    drop(held);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cat_stats_transport_and_controls_fail_loud() {
+    let state = state_with_tombstone();
+    for uri in [
+        "/_cat/stats?unknown=true",
+        "/_cat/stats?format=yaml",
+        "/_cat/stats?v=maybe",
+        "/_cat/stats?h=no_such_column",
+        "/_cat/stats?s=no_such_column",
+        "/_cat/stats?help&h=metric",
+        "/_cat/stats?help&v",
+    ] {
+        let (status, headers, body) = send(
+            &state,
+            super::STATS_BODY_LIMIT,
+            Method::GET,
+            uri,
+            Body::empty(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["error"]["type"], "validation_error", "{uri}: {body}");
+        assert_eq!(headers.get(header::CACHE_CONTROL).unwrap(), "no-store");
+    }
+
+    let (status, _, body) = send(
+        &state,
+        super::STATS_BODY_LIMIT,
+        Method::GET,
+        "/_cat/stats",
+        "not empty",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, headers, body) = send(
+        &state,
+        super::STATS_BODY_LIMIT,
+        Method::POST,
+        "/_cat/stats",
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{body}");
+    assert_eq!(headers.get(header::ALLOW).unwrap(), "GET");
+
+    let (status, _, body) = send(&state, 4, Method::GET, "/_cat/stats", "12345").await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["error"]["type"], "payload_too_large");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cat_stats_shares_cancellable_stats_admission() {
+    let state = state_with_tombstone();
+    let held = Arc::clone(&state.stats_permits)
+        .acquire_owned()
+        .await
+        .expect("hold stats slot");
+    let app = router(&state, super::STATS_BODY_LIMIT);
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/_cat/stats")
+        .body(Body::empty())
+        .expect("request");
+    let pending = tokio::spawn(async move { app.oneshot(request).await });
+
+    tokio::task::yield_now().await;
+    assert!(
+        !pending.is_finished(),
+        "CAT request should wait for admission"
+    );
     pending.abort();
     let _ = pending.await;
     drop(held);

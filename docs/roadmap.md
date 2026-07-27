@@ -398,8 +398,10 @@ change, and acceptance boundary; promotion changes its priority, not its documen
 - **Segment filter quality.** `/_cat/segments` reports filter bytes but not whether the bloom
   allocation is effective. Retain inserted-key and block counts, expose an estimated false-positive
   rate, and compare it with a sampled measured rate.
-- **Complete `_cat` controls.** Add `?v`, `?h`, and `?help` consistently across catalog endpoints,
-  with one shared column-selection parser and typed errors for unknown fields.
+- **Complete remaining `_cat` controls.** `/_cat/stats` now has strict `format`, `v`, `h`, `help`,
+  and `s` controls (ADR-141). Factor the table parser/renderer into one shared component and apply
+  it consistently to `/_cat/segments` and cluster `/_cat/shards`, with typed errors for unknown
+  fields.
 - **Batch cursor pagination.** `/v2/_mpercolate` intentionally rejects PIT and cursor state today.
   Add per-title continuation only if a real workload needs it, with bounded aggregate cursor state
   and the same snapshot, ordering, and stale-cursor guarantees as `/v2/_search`.
