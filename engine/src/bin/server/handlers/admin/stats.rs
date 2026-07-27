@@ -1,5 +1,9 @@
 //! Strict native `GET /_stats` transport and bounded collection.
 
+mod cat;
+
+pub(crate) use cat::cat_stats;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -137,8 +141,8 @@ struct TranslogStats {
     size_in_bytes: u64,
 }
 
-/// Stats is a native operational snapshot despite sharing an ES/OpenSearch path.
-/// Unsupported index-stat controls fail loudly instead of being ignored.
+/// Both stats surfaces are native despite using ES/OpenSearch-familiar paths.
+/// Unsupported controls fail loudly, and both share this small body ceiling.
 pub(crate) const STATS_BODY_LIMIT: usize = 64 * 1024;
 
 /// GET /_stats — JSON metrics snapshot.

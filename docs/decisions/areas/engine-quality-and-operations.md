@@ -17,6 +17,7 @@ Cross-cutting APIs, typed failures, dependency boundaries, observability, testin
 | [050](../adr-050-golden-front-end-tests.md) | Golden front-end tests | Pins parser, normalizer, and extractor behavior that a shared-front-end oracle cannot independently catch. | Accepted |
 | [052](../adr-052-external-review-hardening.md) | External-review hardening | Collects parser, signature, request-limit, storage-bound, timeout, and bind-default fixes. | Accepted |
 | [140](../adr-140-stats-api-contract.md) | Stats REST API contract | Makes native stats strict, truthful about physical rows, and bounded off async workers. | Accepted |
+| [141](../adr-141-cat-stats-api-contract.md) | CAT stats API contract | Gives native stats a strict bounded table with familiar CAT controls. | Accepted |
 
 ---
 

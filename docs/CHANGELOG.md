@@ -80,6 +80,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   and resident-memory/WAL projections, familiar timing and shard metadata, single-slot blocking
   collection, fail-loud cluster aggregation, and one shard-count fan-out instead of two
   ([ADR-140](decisions/adr-140-stats-api-contract.md)).
+- Reworked native `GET /_cat/stats` into a truthful `metric` / `value` table with strict
+  text/JSON, header, column, help, and sort controls; shared its corpus-wide collection admission
+  with `/_stats` and moved the scan off async workers
+  ([ADR-141](decisions/adr-141-cat-stats-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
