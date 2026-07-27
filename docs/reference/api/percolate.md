@@ -105,17 +105,44 @@ The optional rank program supports only `priority_field="priority"` plus additiv
 Unknown rank fields return `unsupported_rank_field`. `result_mode="all"` or `"terminated"`,
 `allow_partial_results=true`, `from`, `documents`, and `query` return explicit 400s.
 
-## `POST /v2/_pit`, `DELETE /v2/_pit` — Point-in-time cursor pagination (ADR-113)
+## `POST /v2/_pit`, `DELETE /v2/_pit` — Point-in-time cursor pagination (ADR-113/129)
 
 Deep pagination over `/v2/_search` without deep `from`: open a PIT, page with `search_after`
 cursors over ONE frozen view, never mixing generations.
 
-```
-POST /v2/_pit {"keep_alive_s": 60}      -> {"pit_id": "<opaque token>"}
+```text
+POST /v2/_pit?keep_alive=1m             -> open response (below)
 POST /v2/_search {..., "pit": {"id": "<pit_id>"}}          -> page 1 + "next_cursor"
 POST /v2/_search {..., "cursor": "<next_cursor>"}          -> page N (resend the same request)
 DELETE /v2/_pit {"pit_id": "<pit_id>"}  -> {"closed": true|false}
 ```
+
+PIT creation accepts the ES/OpenSearch `keep_alive` time value or the native `keep_alive_s`
+seconds control, in either the query string or JSON body. An alias pair or one effective control
+in both locations is a 400. Time values are non-negative integers followed by `nanos`, `micros`,
+`ms`, `s`, `m`, `h`, or `d`. A truly empty body is valid and uses the configured default;
+otherwise the body must be JSON. Native `allow_partial_results`, Elasticsearch
+`allow_partial_search_results`, and OpenSearch `allow_partial_pit_creation` are equivalent:
+`false` is accepted and `true` is a named 400 because a successful PIT always pins every required
+logical shard. Unknown body/query controls, malformed values, or unsupported index/routing controls
+are 400s. Malformed JSON is a structured 400; a non-JSON body is 415 and an oversized body is 413.
+
+A successful open returns one additive response compatible with both identity spellings:
+
+```json
+{
+  "id": "<opaque token>",
+  "pit_id": "<same opaque token>",
+  "creation_time": 1785123456789,
+  "_shards": {"total": 3, "successful": 3, "skipped": 0, "failed": 0}
+}
+```
+
+Elasticsearch callers use `id`; OpenSearch and existing Reverse Rusty callers use `pit_id`.
+`creation_time` is Unix epoch milliseconds. `_shards` counts logical positions, not physical
+replicas: local mode reports one, while a successful in-process cluster open reports every pinned
+position. Reverse Rusty retains the unscoped `/v2/_pit` path because it exposes one stored-query
+corpus, not caller-selected indices.
 
 A PIT pins the engine snapshot (single-node) or every shard position's snapshot (in-process
 cluster) for a renew-on-use keep-alive: default `--pit-default-keep-alive-secs` (60), ceiling
@@ -141,7 +168,8 @@ mode — any placement change (`resize`, vocabulary rebuild) or a primary failov
 primary-only, never silently failed over). Structurally garbled tokens are 400s. A remote/gRPC
 coordinator assembly refuses PIT entirely with **501 `pit_unsupported`** (wire PIT is a later
 increment; page via an in-process cluster or single-node mode). Both endpoints ride the open
-search auth allowlist.
+search auth allowlist. ADR-129 changes only PIT creation; the close request/response remains the
+ADR-113 native contract pending its separate audit.
 
 ## `POST /_percolate/jobs` — Exact exhaustive delivery (ADR-114)
 

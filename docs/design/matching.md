@@ -435,6 +435,12 @@ at the request fence and fails typed if the winner is no longer live. Remote/gRP
 assemblies reject PIT operations with `501 pit_unsupported`. ADR-075 compatibility cluster ranking
 remains current-view and unchanged.
 
+PIT creation validates its strict native/Elasticsearch/OpenSearch control aliases before pinning.
+A successful local open reports one pinned logical shard; an in-process coordinator response reports
+every position from the same all-or-nothing mutation-barrier fan and exposes the identical signed
+token under both `id` and `pit_id` (ADR-129). These HTTP aliases do not change registry, snapshot,
+placement, or cursor semantics.
+
 `POST /v2/_mpercolate` applies the same bounded collector to every title through the columnar batch
 kernel and returns request-ordered exact top-K slots under one aggregate heap admission, deadline,
 and winner-source credit (ADR-112). Source-enriched cluster batches use the same short

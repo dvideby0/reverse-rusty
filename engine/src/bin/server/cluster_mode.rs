@@ -367,7 +367,8 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         .route("/v2/_mpercolate", post(cluster_v2_mpercolate_route))
         .route(
             "/v2/_pit",
-            post(crate::handlers::cluster_open_pit).delete(crate::handlers::cluster_close_pit),
+            post(crate::handlers::cluster_open_pit_route)
+                .delete(crate::handlers::cluster_close_pit),
         )
         .route("/_percolate/jobs", post(cluster_create_job))
         .route(

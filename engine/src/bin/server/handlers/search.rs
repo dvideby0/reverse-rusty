@@ -36,7 +36,9 @@ pub(crate) use v2::{
 pub(crate) use resolve::{resolve_percolate, resolve_percolate_strict};
 // The `rank` block + its lowering are shared with the coordinator-mode handlers too
 // (ADR-075), so both modes parse the identical ranking request shape.
-pub(crate) use controls::{resolve_search_controls, SearchControlInput, SearchParams};
+pub(crate) use controls::{
+    parse_named_time_value, resolve_search_controls, SearchControlInput, SearchParams,
+};
 pub(crate) use rank::{to_rank_spec, RankBody};
 
 #[derive(Deserialize)]

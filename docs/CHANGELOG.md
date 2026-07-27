@@ -32,6 +32,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   ES/OS control aliases and batch timing/status fields, structured extractor failures, and
   mutation-fenced cluster union enrichment
   ([ADR-128](decisions/adr-128-v2-mpercolate-api-contract.md)).
+- Hardened `POST /v2/_pit` with strict body/query controls, ES/OpenSearch keep-alive and
+  fail-loud partial-creation aliases, structured extractor failures, and a dual-dialect response
+  carrying both token names, creation time, and truthful shard counts
+  ([ADR-129](decisions/adr-129-v2-open-pit-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

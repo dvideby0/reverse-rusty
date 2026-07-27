@@ -90,8 +90,22 @@ async fn cluster_v2_pit_pages_concatenate_and_stale_after_resize() {
     .expect("tagged cluster");
     let state = state_from_cluster(cluster);
 
-    let (status, opened) = send(&state, req("POST", "/v2/_pit", &serde_json::json!({}))).await;
+    let (status, opened) = send(
+        &state,
+        req(
+            "POST",
+            "/v2/_pit?keep_alive=1m&allow_partial_pit_creation=false",
+            &serde_json::json!({}),
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(opened["id"], opened["pit_id"]);
+    assert!(opened["creation_time"].is_u64());
+    assert_eq!(
+        opened["_shards"],
+        serde_json::json!({"total": 3, "successful": 3, "skipped": 0, "failed": 0})
+    );
     let pit = opened["pit_id"].as_str().expect("pit token").to_string();
 
     let body = |extra: serde_json::Value| {

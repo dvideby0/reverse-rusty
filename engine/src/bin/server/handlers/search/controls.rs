@@ -52,7 +52,7 @@ fn one_location<T>(body: Option<T>, query: Option<T>, name: &str) -> Result<Opti
     }
 }
 
-pub(super) fn parse_time_value(raw: &str) -> Result<Duration, String> {
+pub(crate) fn parse_named_time_value(control: &str, raw: &str) -> Result<Duration, String> {
     const UNITS: [(&str, u64); 7] = [
         ("nanos", 1),
         ("micros", 1_000),
@@ -66,19 +66,23 @@ pub(super) fn parse_time_value(raw: &str) -> Result<Duration, String> {
         if let Some(number) = raw.strip_suffix(suffix) {
             let value = number.parse::<u64>().map_err(|_| {
                 format!(
-                    "`timeout` must be a non-negative integer followed by \
+                    "`{control}` must be a non-negative integer followed by \
                      nanos, micros, ms, s, m, h, or d (got `{raw}`)"
                 )
             })?;
             let total = value
                 .checked_mul(nanos)
-                .ok_or_else(|| "`timeout` is too large".to_string())?;
+                .ok_or_else(|| format!("`{control}` is too large"))?;
             return Ok(Duration::from_nanos(total));
         }
     }
     Err(format!(
-        "`timeout` must include a unit: nanos, micros, ms, s, m, h, or d (got `{raw}`)"
+        "`{control}` must include a unit: nanos, micros, ms, s, m, h, or d (got `{raw}`)"
     ))
+}
+
+pub(crate) fn parse_time_value(raw: &str) -> Result<Duration, String> {
+    parse_named_time_value("timeout", raw)
 }
 
 pub(crate) fn resolve_search_controls(
@@ -136,6 +140,9 @@ mod tests {
             parse_time_value("250ms").expect("milliseconds"),
             Duration::from_millis(250)
         );
+        assert!(parse_named_time_value("keep_alive", "soon")
+            .expect_err("invalid keep alive")
+            .contains("`keep_alive`"));
         assert!(parse_time_value("30").is_err());
         assert!(parse_time_value("18446744073709551615d").is_err());
 
