@@ -273,9 +273,9 @@ Behavior deltas from single-node mode (all deliberate, none silent):
 - **`DELETE /_doc/{id}` is a log-first all-position remove** — successful and missing responses
   match the single-node contract and report one logical deletion rather than physical placement
   copies. `refresh=false|true|wait_for` are accepted under immediate visibility; every other control
-  fails before mutation. A remote partial apply returns 200 `"result": "partial"` because the
-  delete is already durably logged and queued; do not repeat it—`POST /_cluster/resync` converges
-  the pending targets (ADR-125).
+  fails before mutation. A remote partial apply returns retryable 503 `"result": "partial"` with
+  the applied and pending positions. Repeat the idempotent DELETE, or use `POST /_cluster/resync`
+  while the same coordinator still owns its in-memory repair queue (ADR-125).
 - **Per-request `include_broad`** is honored on compatibility and v2 search/batch surfaces. It adds
   class C and accepted D; class H remains default-visible.
 - **`rank` works (ADR-075)** — the same block as single-node, scored at the shards against the shared

@@ -250,9 +250,10 @@ source and is neither incremented nor retained as a concurrency token. `_shards`
 `_primary_term` are also absent because Reverse Rusty has no equivalent REST-visible acknowledgement
 or optimistic-concurrency state.
 
-Deletes are log-first. A standalone WAL failure rejects with **503** `durability_unavailable` and
-does not apply the tombstone. Coordinator errors use the typed shard error status. A remote
-multi-shard delete that is durably logged but only partly applied returns **200** with
-`"result": "partial"` and an error string naming the applied and pending shards. Do **not** repeat
-the DELETE: the coordinator already owns the mutation, and `POST /_cluster/resync` (or coordinator
-log replay after reopen) converges the pending targets.
+Deletes are log-first at each durable data owner. A standalone WAL failure rejects with **503**
+`durability_unavailable` and does not apply the tombstone. Coordinator errors use the typed shard
+error status. A remote multi-shard delete that only partly applies returns **503** with
+`"result": "partial"` and an error string naming the applied and pending shards. Retry the
+idempotent DELETE to drive every position again. While the same coordinator remains running,
+`POST /_cluster/resync` can instead converge its in-memory repair queue; a stateless remote
+coordinator restart does not preserve that queue.

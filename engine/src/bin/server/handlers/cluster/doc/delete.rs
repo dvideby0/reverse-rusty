@@ -55,9 +55,9 @@ pub(crate) async fn cluster_delete_doc(
     response
 }
 
-/// Keep the response status, body, and metrics classification on one seam. In
-/// particular, `PartiallyApplied` is a durably-owned 200 outcome whose repair
-/// path is `/_cluster/resync`, not a retryable generic error.
+/// Keep the response status, body, and metrics classification on one seam. A
+/// partial DELETE is retryable because the operation is idempotent and a remote
+/// coordinator's repair queue does not survive its restart.
 fn render_delete_result(id: u64, result: Result<usize, ShardError>) -> (StatusCode, Response) {
     match result {
         Ok(n) if n > 0 => {
@@ -105,17 +105,18 @@ fn render_delete_result(id: u64, result: Result<usize, ShardError>) -> (StatusCo
                 "delete partially applied; queued for repair"
             );
             (
-                StatusCode::OK,
+                StatusCode::SERVICE_UNAVAILABLE,
                 (
-                    StatusCode::OK,
+                    StatusCode::SERVICE_UNAVAILABLE,
                     Json(DeleteDocResponse {
                         _index: QUERY_INDEX,
                         _id: id,
                         result: "partial",
                         deleted_count: None,
                         error: Some(format!(
-                            "applied on shards {applied:?}, pending on {failed:?}; durably \
-                             logged — POST /_cluster/resync (or reopen) converges it"
+                            "applied on shards {applied:?}, pending on {failed:?}; retry this \
+                             idempotent DELETE, or POST /_cluster/resync while this coordinator \
+                             remains running"
                         )),
                     }),
                 )
@@ -135,7 +136,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn partial_delete_is_an_explicit_non_retryable_result() {
+    async fn partial_delete_is_an_explicit_retryable_failure() {
         let (status, response) = render_delete_result(
             7,
             Err(ShardError::PartiallyApplied {
@@ -145,8 +146,8 @@ mod tests {
                 detail: "fault injected".into(),
             }),
         );
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("response body");
@@ -155,9 +156,9 @@ mod tests {
         assert_eq!(body["_id"], 7);
         assert_eq!(body["result"], "partial");
         assert!(body.get("deleted_count").is_none());
-        assert!(body["error"]
-            .as_str()
-            .expect("repair guidance")
-            .contains("/_cluster/resync"));
+        let guidance = body["error"].as_str().expect("repair guidance");
+        assert!(guidance.contains("retry this idempotent DELETE"));
+        assert!(guidance.contains("/_cluster/resync"));
+        assert!(!guidance.contains("reopen"));
     }
 }

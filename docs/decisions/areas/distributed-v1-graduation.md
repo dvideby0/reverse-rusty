@@ -58,7 +58,7 @@ that followed the ADR-065 graduation program.
 | [120](../adr-120-quoted-phrase-token-graph-semantics.md) | Quoted-phrase token graphs | Implements analyzed token-graph adjacency for required and forbidden phrases. | Accepted |
 | [123](../adr-123-bounded-in-segment-cancellation.md) | Bounded in-segment cancellation | Bounds cancellation latency inside long segment scans. | Accepted |
 | [124](../adr-124-variance-tolerant-performance-gate.md) | Variance-tolerant performance gate | Uses variance-aware regression gating with scheduled soak coverage. | Done |
-| [125](../adr-125-delete-document-contract.md) | DELETE document contract | Defines strict refresh parsing, honest delete metadata, logical counts, and partial repair. | Accepted |
+| [125](../adr-125-delete-document-contract.md) | DELETE document contract | Defines strict refresh parsing, honest metadata, logical counts, and retryable partial repair. | Accepted |
 
 ---
 
