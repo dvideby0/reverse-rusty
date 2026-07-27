@@ -184,7 +184,8 @@ The full method/path matrix is below.
 | `/v2/_pit` | POST/DELETE | Strict ES/OS-familiar point-in-time open/close for cursor pagination (in-process modes; remote assemblies 501 — ADR-113/129/130) |
 | `/v2/_mpercolate` | POST | Strict shared-options bounded top-K batch; ES/OS control aliases, whole-request exactness, and no PIT/cursor pagination (ADR-112/113/128) |
 | `/_percolate/jobs` | POST | Strict exact exhaustive job creation with native/ES/OS controls, optional idempotency key, and familiar async status fields (ADR-114/131) |
-| `/_percolate/jobs/{id}` | GET/DELETE | Inspect a retained exhaustive job / request cooperative cancellation |
+| `/_percolate/jobs/{id}` | GET | Strict retained status with native and ES/OS-familiar fields plus bounded wait polling (ADR-114/132) |
+| `/_percolate/jobs/{id}` | DELETE | Request cooperative cancellation |
 | `/_percolate/jobs/{id}/stream` | GET | Claim the job's one bounded `application/x-ndjson` stream consumer |
 | `/_mpercolate` | POST | Batch percolate (high throughput; columnar broad lane; `responses[]` envelope) |
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |

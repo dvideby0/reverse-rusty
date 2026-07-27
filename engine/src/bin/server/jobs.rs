@@ -97,6 +97,7 @@ pub(crate) struct JobRecord {
     created_unix_ms: u64,
     sequence: u64,
     state: Mutex<JobState>,
+    phase: tokio::sync::watch::Sender<JobPhase>,
     cancel: Arc<AtomicBool>,
     completion: CompletionState,
     receiver: Mutex<Option<tokio::sync::mpsc::Receiver<JobFrame>>>,

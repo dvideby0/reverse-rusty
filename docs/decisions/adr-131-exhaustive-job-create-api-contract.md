@@ -13,6 +13,9 @@
   ([Elasticsearch](https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-async-search-submit),
   [OpenSearch](https://docs.opensearch.org/latest/search-plugins/async/index/)).
 
+  ADR-132 later defines the strict retained-status response and polling controls; this decision
+  continues to own creation only.
+
 - **Decision — strict minimal creation.** One JSON `document` remains required. Because the route
   itself means exhaustive delivery, omitted `result_mode` defaults to `all`; every other value gets
   named 400 `unsupported_result_mode`. The HTTP NDJSON sink is the default, while explicit

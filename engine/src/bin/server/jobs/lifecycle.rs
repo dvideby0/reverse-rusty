@@ -168,6 +168,7 @@ impl ExhaustiveJobs {
         let cancel = Arc::new(AtomicBool::new(false));
         let completion = CompletionState::new(Arc::clone(&cancel));
         completion.set_deadline(deadline);
+        let (phase, _) = tokio::sync::watch::channel(JobPhase::Running);
         let record = Arc::new(JobRecord {
             id: id.clone(),
             event_id: event_id.clone(),
@@ -182,6 +183,7 @@ impl ExhaustiveJobs {
                 summary: None,
                 failure: None,
             }),
+            phase,
             cancel,
             completion,
             receiver: Mutex::new(Some(rx)),
@@ -345,6 +347,7 @@ impl ExhaustiveJobs {
         // visible under that same lock, so no admission can observe the
         // impossible combination "permit available, retained job running".
         let _registry = self.registry.lock();
+        let mut published = false;
         {
             let mut state = record.state.lock();
             if !state.phase.terminal() {
@@ -364,7 +367,11 @@ impl ExhaustiveJobs {
                     .exhaustive_jobs_total
                     .with_label_values(&[phase.label()])
                     .inc();
+                published = true;
             }
+        }
+        if published {
+            record.phase.send_replace(phase);
         }
         // Explicitly drop while `_registry` is still held; relying on local
         // drop order here would reopen the admission race this lock closes.

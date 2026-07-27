@@ -456,7 +456,7 @@ and deduplicated union winner fetch, so every delivered source belongs to the ma
 version. The fence is acquired before entering Rayon; source-free batches remain concurrent
 (ADR-128).
 
-### 5.5 Exhaustive bounded delivery (ADR-114/131)
+### 5.5 Exhaustive bounded delivery (ADR-114/131/132)
 
 `result_mode=all` uses the same post-verification collector seam without materializing the full
 answer. `ChunkCollector` retains one fixed-capacity `Vec<ExhaustiveMatch>`; a synchronous
@@ -484,6 +484,14 @@ idempotent retry contract. The 202 response preserves native job fields and adds
 `id`/running/partial/start-time projections. A route-local pre-deserialization cap bounds control
 request memory independently of the server's bulk-ingest allowance (ADR-131). None of these HTTP
 projections changes exact completion or stream ownership.
+
+Retained status preserves the native lifecycle and exact-summary fields while adding familiar
+identity, running/partial, timing, and structured-error projections. A strict
+`wait_for_completion_timeout` query can wait on terminal publication up to the configured job
+maximum; it does not claim the stream, and a record cannot become `completed` until the concurrent
+single consumer dequeues completion. Status holds the accepted record across count-based pruning,
+uses `no-store`, and rejects `keep_alive` because the registry has no client-selected time expiry
+(ADR-132).
 
 The compatibility collector historically sorts/deduplicates its complete `Vec<u64>`, because
 library callers can leave multiple live physical rows for one logical id. Exhaustive delivery

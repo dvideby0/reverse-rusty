@@ -87,6 +87,10 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 axum::extract::DefaultBodyLimit::max(crate::handlers::EXHAUSTIVE_JOB_BODY_LIMIT),
             ),
         )
+        .route(
+            "/_percolate/jobs/{id}",
+            get(crate::handlers::cluster_get_job),
+        )
         .route("/_mpercolate", post(cluster_mpercolate))
         .route("/_bulk", post(cluster_bulk))
         .route("/_flush", post(cluster_flush))
