@@ -42,5 +42,15 @@ async fn cluster_exhaustive_creation_matches_the_local_http_contract() {
         status_body["created_unix_ms"]
     );
 
-    state.exhaustive_jobs.cancel(id);
+    let (status, delete_body) = send(
+        &state,
+        req_empty("DELETE", &format!("/_percolate/jobs/{id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{delete_body}");
+    assert_eq!(delete_body["acknowledged"], true);
+    assert_eq!(delete_body["deleted"], false);
+    assert_eq!(delete_body["id"], delete_body["job_id"]);
+    assert_eq!(delete_body["job_id"], id);
+    assert_eq!(delete_body["state"], "running");
 }

@@ -8,7 +8,8 @@
 > **Later HTTP contract:** ADR-131 makes creation strict, defaults route-implied fields, adds
 > native/ES/OpenSearch control aliases and familiar status projections, and leaves this delivery
 > protocol unchanged. ADR-132 makes retained status strict, waitable, and familiar without claiming
-> or weakening the terminally attested stream.
+> or weakening the terminally attested stream. ADR-133 makes DELETE strict and acknowledged:
+> running work is cancelled cooperatively, while terminal retained results are actually removed.
 
 ## Context
 

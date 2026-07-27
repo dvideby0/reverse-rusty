@@ -370,11 +370,36 @@ The checksum includes score presence as a separate domain, so an absent score ca
 valid signed score value.
 The optional best-effort `failure` frame is diagnostic only—the status endpoint is authoritative.
 
-`DELETE /_percolate/jobs/{id}` requests cooperative cancellation. Poll until the state becomes
-`cancelled` or another terminal state; a running status in the immediate DELETE response means the
-worker has not reached its next bounded poll yet. Cancellation is checked even when the match has
-not emitted a chunk, while waiting for the cluster write barrier, and inside large candidate
-postings or a long legacy duplicate-version scan. With bearer auth enabled,
+`DELETE /_percolate/jobs/{id}` accepts no query parameters. For a running job it requests
+cooperative cancellation and returns the prior native status snapshot plus `id == job_id`,
+`acknowledged: true`, and `deleted: false`:
+
+```json
+{
+  "acknowledged": true,
+  "deleted": false,
+  "id": "7ae2...",
+  "job_id": "7ae2...",
+  "event_id": "catalog-refresh-42",
+  "state": "running",
+  "query_scope": "standard",
+  "snapshot_generation": 987654321012345678,
+  "created_unix_ms": 1785148000123
+}
+```
+
+Poll GET until the state becomes `cancelled` or another terminal state; a running state in the
+immediate DELETE response means the worker has not reached its next bounded poll yet. DELETE that
+terminal record again to atomically remove its retained job and event-id entries. The terminal
+response preserves its final native fields and returns `acknowledged: true`, `deleted: true`;
+subsequent status, stream, and DELETE calls return `404 job_not_found`. Releasing the event entry
+allows a later POST to reuse that event id for a new request. Successful responses are
+`Cache-Control: no-store`; unknown or malformed query fields return the structured 400 envelope
+(ADR-133).
+
+Cancellation is checked even when the match has not emitted a chunk, while waiting for the cluster
+write barrier, and inside large candidate postings or a long legacy duplicate-version scan. With
+bearer auth enabled,
 create/status/stream are read surfaces (unless
 `--auth-protect-reads` is set), while DELETE is protected.
 

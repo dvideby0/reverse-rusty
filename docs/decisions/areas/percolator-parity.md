@@ -25,6 +25,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 | [130](../adr-130-v2-close-pit-api-contract.md) | V2 close-PIT API contract | Makes PIT close strict, batch-capable, atomically validated, and truthful across dialects. | Accepted |
 | [131](../adr-131-exhaustive-job-create-api-contract.md) | Exhaustive-job create API contract | Makes creation strict, bounded, ergonomically defaulted, and familiar without weakening exact delivery. | Accepted |
 | [132](../adr-132-exhaustive-job-status-api-contract.md) | Exhaustive-job status API contract | Makes retained status strict, bounded-waitable, cache-safe, and familiar without claiming the result stream. | Accepted |
+| [133](../adr-133-exhaustive-job-delete-api-contract.md) | Exhaustive-job delete API contract | Cancels running work and atomically removes terminal retained results under a strict acknowledged contract. | Accepted |
 
 ---
 
