@@ -18,7 +18,7 @@ use axum::extract::{
 };
 use axum::http::{header, Method, Response, StatusCode};
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
@@ -50,6 +50,91 @@ pub(crate) struct CreateJobResponse {
     status_url: String,
     stream_url: String,
     reused: bool,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GetJobParams {
+    wait_for_completion_timeout: Option<String>,
+    keep_alive: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct GetJobResponse {
+    id: String,
+    job_id: String,
+    event_id: String,
+    state: crate::jobs::JobPhase,
+    is_running: bool,
+    is_partial: bool,
+    query_scope: reverse_rusty::QueryScope,
+    snapshot_generation: u64,
+    start_time_in_millis: u64,
+    created_unix_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion_time_in_millis: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_unix_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exact_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunk_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checksum: Option<reverse_rusty::DeliveryChecksum>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<GetJobError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GetJobError {
+    #[serde(rename = "type")]
+    error_type: &'static str,
+    reason: String,
+}
+
+impl From<JobView> for GetJobResponse {
+    fn from(job: JobView) -> Self {
+        let is_running = job.state == crate::jobs::JobPhase::Running;
+        let is_partial = job.state != crate::jobs::JobPhase::Completed;
+        let error = match job.state {
+            crate::jobs::JobPhase::Failed => Some(GetJobError {
+                error_type: "exhaustive_job_failed",
+                reason: job
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "exhaustive job failed".to_string()),
+            }),
+            crate::jobs::JobPhase::Cancelled => Some(GetJobError {
+                error_type: "exhaustive_job_cancelled",
+                reason: job
+                    .failure
+                    .clone()
+                    .unwrap_or_else(|| "exhaustive job was cancelled".to_string()),
+            }),
+            crate::jobs::JobPhase::Running | crate::jobs::JobPhase::Completed => None,
+        };
+        Self {
+            id: job.job_id.clone(),
+            job_id: job.job_id,
+            event_id: job.event_id,
+            state: job.state,
+            is_running,
+            is_partial,
+            query_scope: job.query_scope,
+            snapshot_generation: job.snapshot_generation,
+            start_time_in_millis: job.created_unix_ms,
+            created_unix_ms: job.created_unix_ms,
+            completion_time_in_millis: job.completed_unix_ms,
+            completed_unix_ms: job.completed_unix_ms,
+            exact_total: job.exact_total,
+            chunk_count: job.chunk_count,
+            checksum: job.checksum,
+            error,
+            failure: job.failure,
+        }
+    }
 }
 
 fn start_response(outcome: crate::jobs::StartOutcome) -> (StatusCode, Json<CreateJobResponse>) {
@@ -297,28 +382,73 @@ fn lock_cluster_writes<'a>(
     }
 }
 
-fn status(jobs: &ExhaustiveJobs, id: &str) -> Result<Json<JobView>, (StatusCode, Json<ApiError>)> {
-    jobs.status(id).map(Json).ok_or_else(|| {
-        ApiError::response(
-            StatusCode::NOT_FOUND,
-            "job_not_found",
-            format!("exhaustive job {id} is not retained"),
-        )
-    })
+type GetJobReply = (
+    [(axum::http::HeaderName, &'static str); 1],
+    Json<GetJobResponse>,
+);
+
+fn status_wait(
+    jobs: &ExhaustiveJobs,
+    params: GetJobParams,
+) -> Result<Duration, (StatusCode, Json<ApiError>)> {
+    if params.keep_alive.is_some() {
+        return Err(validation(
+            "`keep_alive` is not supported: exhaustive-job status is retained in memory until \
+             bounded count-based registry pruning, not a client-selected expiration",
+        ));
+    }
+    let Some(raw) = params.wait_for_completion_timeout else {
+        return Ok(Duration::ZERO);
+    };
+    let wait = super::search::parse_named_time_value("wait_for_completion_timeout", &raw)
+        .map_err(validation)?;
+    if !wait.is_zero() && jobs.bounded_timeout(Some(wait)).is_err() {
+        return Err(validation(
+            "`wait_for_completion_timeout` must not exceed the configured exhaustive-job maximum",
+        ));
+    }
+    Ok(wait)
+}
+
+async fn status(
+    jobs: &ExhaustiveJobs,
+    id: &str,
+    params: GetJobParams,
+) -> Result<GetJobReply, (StatusCode, Json<ApiError>)> {
+    let wait = status_wait(jobs, params)?;
+    jobs.wait_status(id, wait)
+        .await
+        .map(|job| {
+            (
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(GetJobResponse::from(job)),
+            )
+        })
+        .ok_or_else(|| {
+            ApiError::response(
+                StatusCode::NOT_FOUND,
+                "job_not_found",
+                format!("exhaustive job {id} is not retained"),
+            )
+        })
 }
 
 pub(crate) async fn get_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<JobView>, (StatusCode, Json<ApiError>)> {
-    status(&state.exhaustive_jobs, &id)
+    params: Result<Query<GetJobParams>, QueryRejection>,
+) -> Result<GetJobReply, (StatusCode, Json<ApiError>)> {
+    let Query(params) = params.map_err(|error| query_rejection(&error))?;
+    status(&state.exhaustive_jobs, &id, params).await
 }
 
 pub(crate) async fn cluster_get_job(
     State(state): State<Arc<ClusterAppState>>,
     Path(id): Path<String>,
-) -> Result<Json<JobView>, (StatusCode, Json<ApiError>)> {
-    status(&state.exhaustive_jobs, &id)
+    params: Result<Query<GetJobParams>, QueryRejection>,
+) -> Result<GetJobReply, (StatusCode, Json<ApiError>)> {
+    let Query(params) = params.map_err(|error| query_rejection(&error))?;
+    status(&state.exhaustive_jobs, &id, params).await
 }
 
 fn stream(jobs: &ExhaustiveJobs, id: &str) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {

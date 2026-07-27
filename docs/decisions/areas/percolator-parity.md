@@ -24,6 +24,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 | [129](../adr-129-v2-open-pit-api-contract.md) | V2 open-PIT API contract | Makes PIT creation strict and returns one truthful Elasticsearch/OpenSearch response superset. | Accepted |
 | [130](../adr-130-v2-close-pit-api-contract.md) | V2 close-PIT API contract | Makes PIT close strict, batch-capable, atomically validated, and truthful across dialects. | Accepted |
 | [131](../adr-131-exhaustive-job-create-api-contract.md) | Exhaustive-job create API contract | Makes creation strict, bounded, ergonomically defaulted, and familiar without weakening exact delivery. | Accepted |
+| [132](../adr-132-exhaustive-job-status-api-contract.md) | Exhaustive-job status API contract | Makes retained status strict, bounded-waitable, cache-safe, and familiar without claiming the result stream. | Accepted |
 
 ---
 

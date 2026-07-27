@@ -32,12 +32,40 @@ impl ExhaustiveJobs {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn status(&self, id: &str) -> Option<JobView> {
         self.registry
             .lock()
             .jobs
             .get(id)
             .map(|record| record.view())
+    }
+
+    /// Return immediately for a terminal record or wait at most `timeout` for
+    /// the retained record's one terminal publication. The record is cloned
+    /// before waiting, so count-based registry pruning cannot turn an accepted
+    /// status poll into a spurious not-found response.
+    pub(crate) async fn wait_status(
+        &self,
+        id: &str,
+        timeout: std::time::Duration,
+    ) -> Option<JobView> {
+        let record = self.registry.lock().jobs.get(id).cloned()?;
+        let mut phase = record.phase.subscribe();
+        let deadline = tokio::time::Instant::now().checked_add(timeout);
+        loop {
+            let view = record.view();
+            if view.state.terminal() || timeout.is_zero() {
+                return Some(view);
+            }
+            let Some(deadline) = deadline else {
+                return Some(view);
+            };
+            match tokio::time::timeout_at(deadline, phase.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => return Some(record.view()),
+            }
+        }
     }
 
     pub(crate) fn take_stream(

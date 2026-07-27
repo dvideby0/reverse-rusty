@@ -301,9 +301,43 @@ the prior process's member idempotency keys.
 
 ### Status, stream, and cancellation
 
-`GET /_percolate/jobs/{id}` returns `running`, `completed`, `failed`, or `cancelled`, plus creation
-and completion timestamps. Only a completed job has `exact_total`, `chunk_count`, and `checksum`;
-failed/cancelled jobs instead carry `failure`.
+`GET /_percolate/jobs/{id}` returns one strict, no-store status response. It preserves native
+`job_id`, `event_id`, lowercase `state`, `query_scope`, `snapshot_generation`,
+`created_unix_ms`, and terminal `completed_unix_ms`, and adds familiar `id == job_id`,
+`is_running`, `is_partial`, `start_time_in_millis`, and terminal
+`completion_time_in_millis`. A running response is partial. Only a successfully completed job is
+non-partial and carries `exact_total`, `chunk_count`, and `checksum`; failed/cancelled jobs instead
+carry native `failure` plus a structured `error`.
+
+```json
+{
+  "id": "7ae2...",
+  "job_id": "7ae2...",
+  "event_id": "catalog-refresh-42",
+  "state": "completed",
+  "is_running": false,
+  "is_partial": false,
+  "query_scope": "standard",
+  "snapshot_generation": 987654321012345678,
+  "start_time_in_millis": 1785148000123,
+  "created_unix_ms": 1785148000123,
+  "completion_time_in_millis": 1785148000456,
+  "completed_unix_ms": 1785148000456,
+  "exact_total": 2,
+  "chunk_count": 1,
+  "checksum": {"xor": 1190750903085048104, "sum": 8313222029812487130}
+}
+```
+
+The optional `wait_for_completion_timeout=<integer><unit>` query (`nanos`, `micros`, `ms`, `s`,
+`m`, `h`, or `d`) waits for terminal status up to the configured exhaustive-job maximum; omission
+or `0s` returns immediately. It never claims the stream. A job whose terminal frame has no
+concurrent consumer therefore remains `running` until the wait expires. `keep_alive` returns 400
+because status retention is in memory and count-bounded, not client-selected time retention.
+Unknown, duplicate, malformed, and over-limit query controls return the standard structured 400
+envelope. No `expiration_time_in_millis` or `completion_status` is emitted because neither has a
+truthful native value (ADR-132).
+
 `completed` is published only after the stream dequeues its terminal completion frame, not when
 the worker merely places those bytes in the bounded queue. If a claimed response is dropped while
 that frame is still queued, the job becomes `failed` with no summary; the retained event may not

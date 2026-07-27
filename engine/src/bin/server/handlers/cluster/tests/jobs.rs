@@ -23,7 +23,24 @@ async fn cluster_exhaustive_creation_matches_the_local_http_contract() {
     assert!(body["start_time_in_millis"].is_u64());
     assert_eq!(body["event_id"].as_str().map(str::len), Some(36));
 
-    state
-        .exhaustive_jobs
-        .cancel(body["job_id"].as_str().expect("job id"));
+    let id = body["job_id"].as_str().expect("job id");
+    let (status, status_body) = send(
+        &state,
+        req_empty(
+            "GET",
+            &format!("/_percolate/jobs/{id}?wait_for_completion_timeout=0s"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{status_body}");
+    assert_eq!(status_body["id"], status_body["job_id"]);
+    assert_eq!(status_body["state"], "running");
+    assert_eq!(status_body["is_running"], true);
+    assert_eq!(status_body["is_partial"], true);
+    assert_eq!(
+        status_body["start_time_in_millis"],
+        status_body["created_unix_ms"]
+    );
+
+    state.exhaustive_jobs.cancel(id);
 }

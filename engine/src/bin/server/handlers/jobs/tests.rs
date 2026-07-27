@@ -11,6 +11,7 @@ use reverse_rusty::Normalizer;
 use tower::ServiceExt;
 
 mod create_route;
+mod status_route;
 
 struct CancelWhileWaiting {
     checks: usize,

@@ -44,6 +44,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   native and ES/OpenSearch execution-control aliases, fail-loud unsupported async controls, and
   familiar async identity/status fields without weakening exact terminal delivery
   ([ADR-131](decisions/adr-131-exhaustive-job-create-api-contract.md)).
+- Hardened `GET /_percolate/jobs/{id}` with strict bounded async waiting, fail-loud retention
+  controls, no-store caching, and native plus familiar status/timing/error fields while preserving
+  terminal stream attestation
+  ([ADR-132](decisions/adr-132-exhaustive-job-status-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
