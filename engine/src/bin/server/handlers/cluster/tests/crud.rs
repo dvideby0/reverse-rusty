@@ -108,6 +108,75 @@ async fn put_search_delete_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_doc_matches_single_node_contract_and_rejects_controls_before_mutation() {
+    let state = test_state(&seed());
+    for (id, refresh) in [(80, "false"), (81, "true"), (82, "wait_for")] {
+        let (status, _) = send(
+            &state,
+            req(
+                "PUT",
+                &format!("/_doc/{id}"),
+                &serde_json::json!({"query":format!("zzdelete{id}"), "version": 7}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        let (status, body) = send(
+            &state,
+            req_empty("DELETE", &format!("/_doc/{id}?refresh={refresh}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["_index"], "queries");
+        assert_eq!(body["_id"], id);
+        assert_eq!(body["result"], "deleted");
+        assert_eq!(body["deleted_count"], 1);
+        assert!(body.get("_version").is_none());
+        assert!(body.get("_shards").is_none());
+
+        let (status, _) = send(&state, req_empty("GET", &format!("/_doc/{id}"))).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "every refresh policy must publish before response"
+        );
+    }
+
+    let (status, missing) = send(&state, req_empty("DELETE", "/_doc/80")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(missing["_index"], "queries");
+    assert_eq!(missing["result"], "not_found");
+    assert!(missing.get("deleted_count").is_none());
+
+    let (status, _) = send(
+        &state,
+        req(
+            "PUT",
+            "/_doc/90",
+            &serde_json::json!({"query":"wayne gretzky"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    for suffix in [
+        "refresh=immediate",
+        "routing=custom",
+        "version=1",
+        "refresh=true&refresh=false",
+    ] {
+        let (status, body) = send(&state, req_empty("DELETE", &format!("/_doc/90?{suffix}"))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["error"]["type"], "illegal_argument_exception");
+        assert_eq!(
+            send(&state, req_empty("GET", "/_doc/90")).await.0,
+            StatusCode::OK,
+            "invalid controls must not delete the live query"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn put_doc_create_only_and_query_parameter_contract_match_single_node() {
     let state = test_state(&seed());
     let first = send(

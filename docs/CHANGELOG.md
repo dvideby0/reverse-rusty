@@ -9,7 +9,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
-## 2026-07-26 — Documentation and module boundaries
+## 2026-07-26 — Documentation, module boundaries, and API parity
 
 - Replaced the monolithic ADR index with an area hub, nine compact catalogs, and one canonical
   page per ADR.
@@ -19,6 +19,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
   to short outcome statements.
 - Reframed project tracking: this changelog owns shipped history, while the roadmap owns unfinished
   work and its full proposal text.
+- Aligned document deletion with the ES/OpenSearch shape and refresh controls, made logical delete
+  counts placement-independent, and exposed the existing remote partial-repair contract accurately
+  ([ADR-125](decisions/adr-125-delete-document-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

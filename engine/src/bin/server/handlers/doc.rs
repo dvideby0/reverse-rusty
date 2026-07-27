@@ -47,7 +47,7 @@ pub(crate) struct PutDocParams {
     /// Reverse Rusty publishes every accepted mutation before replying, so all
     /// three ES/OS refresh policies share the same (stronger) immediate-visibility
     /// behavior. Keeping the typed field makes invalid values fail loudly.
-    refresh: Option<PutRefreshPolicy>,
+    refresh: Option<RefreshPolicy>,
     #[serde(default)]
     op_type: PutDocOpType,
 }
@@ -66,7 +66,7 @@ impl PutDocParams {
 }
 
 #[derive(Deserialize, Clone, Copy)]
-enum PutRefreshPolicy {
+enum RefreshPolicy {
     #[serde(rename = "false")]
     Deferred,
     #[serde(rename = "true")]
@@ -275,13 +275,28 @@ fn source_pattern_matches(pattern: &str, value: &str) -> bool {
 
 // -- DELETE /_doc/{id}
 #[derive(Serialize)]
-struct DeleteDocResponse {
-    _id: u64,
-    result: &'static str,
+pub(crate) struct DeleteDocResponse {
+    pub(crate) _index: &'static str,
+    pub(crate) _id: u64,
+    pub(crate) result: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    deleted_count: Option<u64>,
+    pub(crate) deleted_count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteDocParams {
+    /// As with PUT, every completed delete is published before the response.
+    /// All three ES/OS policies therefore receive immediate visibility.
+    refresh: Option<RefreshPolicy>,
+}
+
+impl DeleteDocParams {
+    pub(crate) fn acknowledge_refresh_policy(&self) {
+        let _ = self.refresh;
+    }
 }
 
 // -- POST /_bulk
