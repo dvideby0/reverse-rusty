@@ -25,6 +25,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Hardened compatibility `GET`/`POST /_search` with strict native/ES request parsing, supported
   ES/OS controls and response identity, snapshot-generation-safe enrichment, and complete
   multi-document profile semantics ([ADR-126](decisions/adr-126-search-api-contract.md)).
+- Hardened exact bounded `POST /v2/_search` with strict request parsing, honest ES/OS control
+  aliases and timing fields, structured extractor failures, and mutation-fenced cluster winner
+  enrichment ([ADR-127](decisions/adr-127-v2-search-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

@@ -19,6 +19,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 | [069](../adr-069-parity-number-context-words.md) | Configurable number context | Makes context-sensitive number typing configurable, including the position-insensitive parity mode. | Accepted |
 | [073](../adr-073-rest-parity-hardening.md) | REST parity hardening | Makes tag coercion explicit, wires live flush thresholds, and exposes per-request broad scope. | Accepted |
 | [126](../adr-126-search-api-contract.md) | Search API contract | Makes compatibility search strict, generation-consistent, and ES/OS-shaped where semantics align. | Accepted |
+| [127](../adr-127-v2-search-api-contract.md) | V2 search API contract | Makes exact bounded search strict, ES/OS-familiar, and mutation-consistent through winner enrichment. | Accepted |
 
 ---
 

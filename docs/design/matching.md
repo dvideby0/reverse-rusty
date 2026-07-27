@@ -424,11 +424,16 @@ Cluster `/v2/_search` then performs query-then-fetch: final winner IDs are group
 position and only their source is fetched. Missing source, placement-generation drift, a
 malformed/failing stream, deadline expiry, or enrichment-cap overflow invalidates the whole response.
 Explanations are compiled at the coordinator from fetched source under its authoritative normalizer and
-dictionary; explanation objects never cross the shard wire. Without a PIT this is a current-view
-operation. Standalone and in-process cluster requests may pin matching, score, order, and totals with
-the `/v2/_pit` cursor flow; source/explain enrichment is deliberately current-view and fails typed if
-the winner disappeared after the PIT opened. Remote/gRPC coordinator assemblies reject PIT operations
-with `501 pit_unsupported`. ADR-075 compatibility cluster ranking remains current-view and unchanged.
+dictionary; explanation objects never cross the shard wire. Any cluster request needing source for
+`_source` or explanation holds a short `ClusterReadView` across bounded matching, winner fetch, and
+assembly. It acquires that mutation fence before entering the coordinator Rayon pool, so direct or
+REST same-ID writes cannot interleave the two phases and blocked fence acquisition cannot consume a
+shared worker. Source-free ranked requests remain fully concurrent. Without a PIT this is a
+current-view operation. Standalone and in-process cluster requests may pin matching, score, order,
+and totals with the `/v2/_pit` cursor flow; source/explain enrichment is deliberately current-view
+at the request fence and fails typed if the winner is no longer live. Remote/gRPC coordinator
+assemblies reject PIT operations with `501 pit_unsupported`. ADR-075 compatibility cluster ranking
+remains current-view and unchanged.
 
 ### 5.5 Exhaustive bounded delivery (ADR-114)
 

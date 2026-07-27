@@ -65,7 +65,10 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
             "/_search",
             get(cluster_search_route).post(cluster_search_route),
         )
-        .route("/v2/_search", post(crate::handlers::cluster_v2_search))
+        .route(
+            "/v2/_search",
+            post(crate::handlers::cluster_v2_search_route),
+        )
         .route(
             "/v2/_pit",
             post(crate::handlers::cluster_open_pit).delete(crate::handlers::cluster_close_pit),

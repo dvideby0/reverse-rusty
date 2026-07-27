@@ -1,5 +1,35 @@
 use super::*;
 
+async fn routed_v2_search(
+    state: &Arc<AppState>,
+    path: &str,
+    body: serde_json::Value,
+) -> (axum::http::StatusCode, serde_json::Value) {
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::post;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    let response = Router::new()
+        .route("/v2/_search", post(super::super::v2::v2_search_route))
+        .with_state(Arc::clone(state))
+        .oneshot(
+            Request::post(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let body = serde_json::from_slice(&bytes).expect("JSON response");
+    (status, body)
+}
+
 #[tokio::test]
 async fn v2_defaults_rank_by_priority_and_enrich_winners_only() {
     let state = state_with(ranked_engine(), false);
@@ -18,6 +48,9 @@ async fn v2_defaults_rank_by_priority_and_enrich_winners_only() {
         json["_shards"],
         serde_json::json!({"total":1,"successful":1,"failed":0})
     );
+    assert!(json["took"].is_u64(), "{json}");
+    assert_eq!(json["timed_out"], false);
+    assert!(json["took_ms"].is_f64(), "{json}");
     assert_eq!(
         json["hits"]["total"],
         serde_json::json!({"value":3,"relation":"eq"})
@@ -25,6 +58,191 @@ async fn v2_defaults_rank_by_priority_and_enrich_winners_only() {
     assert_eq!(json["hits"]["hits"][0]["_id"], 2);
     assert_eq!(json["hits"]["hits"][0]["_score"], 50);
     assert!(json["hits"]["hits"][0]["_source"]["query"].is_string());
+}
+
+#[tokio::test]
+async fn v2_route_supports_es_controls_and_rejects_ambiguous_or_unknown_input() {
+    let state = state_with(ranked_engine(), false);
+    let (status, json) = routed_v2_search(
+        &state,
+        "/v2/_search?size=1&_source=false&explain=true&timeout=1s&track_total_hits=1",
+        serde_json::json!({"document": {"title": "topps chrome"}}),
+    )
+    .await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{json}");
+    assert_eq!(json["hits"]["hits"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        json["hits"]["total"],
+        serde_json::json!({"value": 1, "relation": "gte"})
+    );
+    assert!(json["hits"]["hits"][0].get("_source").is_none(), "{json}");
+    assert!(
+        json["hits"]["hits"][0]["_explanation"].is_object(),
+        "{json}"
+    );
+
+    for (label, path, body) in [
+        (
+            "unknown query parameter",
+            "/v2/_search?preference=local",
+            serde_json::json!({"document": {"title": "topps chrome"}}),
+        ),
+        (
+            "duplicate size",
+            "/v2/_search?size=1",
+            serde_json::json!({"document": {"title": "topps chrome"}, "size": 2}),
+        ),
+        (
+            "duplicate source alias",
+            "/v2/_search",
+            serde_json::json!({
+                "document": {"title": "topps chrome"},
+                "include_source": true,
+                "_source": false
+            }),
+        ),
+        (
+            "duplicate timeout alias",
+            "/v2/_search",
+            serde_json::json!({
+                "document": {"title": "topps chrome"},
+                "timeout_ms": 1,
+                "timeout": "1s"
+            }),
+        ),
+        (
+            "boolean total alias",
+            "/v2/_search",
+            serde_json::json!({
+                "document": {"title": "topps chrome"},
+                "track_total_hits": true
+            }),
+        ),
+        (
+            "unknown top-level field",
+            "/v2/_search",
+            serde_json::json!({
+                "document": {"title": "topps chrome"},
+                "preference": "local"
+            }),
+        ),
+        (
+            "unknown document field",
+            "/v2/_search",
+            serde_json::json!({
+                "document": {"title": "topps chrome", "sku": "ABC-1"}
+            }),
+        ),
+        (
+            "unknown rank field",
+            "/v2/_search",
+            serde_json::json!({
+                "document": {"title": "topps chrome"},
+                "rank": {"priority_field": "priority", "mode": "sum"}
+            }),
+        ),
+        (
+            "unknown boost field",
+            "/v2/_search",
+            serde_json::json!({
+                "document": {"title": "topps chrome"},
+                "rank": {
+                    "boosts": [{
+                        "key": "tenant",
+                        "value": "acme",
+                        "boost": 1,
+                        "weight": 1
+                    }]
+                }
+            }),
+        ),
+        (
+            "unknown pit field",
+            "/v2/_search",
+            serde_json::json!({
+                "document": {"title": "topps chrome"},
+                "pit": {"id": "opaque", "keep_alive": "1m"}
+            }),
+        ),
+    ] {
+        let (status, json) = routed_v2_search(&state, path, body).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::BAD_REQUEST,
+            "{label}: {json}"
+        );
+        assert_eq!(json["status"], 400, "{label}: {json}");
+        assert_eq!(json["error"]["type"], "validation_error", "{label}: {json}");
+    }
+}
+
+#[tokio::test]
+async fn v2_route_preserves_content_type_and_body_limit_statuses() {
+    use axum::body::Body;
+    use axum::extract::DefaultBodyLimit;
+    use axum::http::Request;
+    use axum::routing::post;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    let state = state_with(ranked_engine(), false);
+    let body = serde_json::json!({"document": {"title": "topps chrome"}});
+    let app = Router::new()
+        .route("/v2/_search", post(super::super::v2::v2_search_route))
+        .with_state(Arc::clone(&state));
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v2/_search")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE
+    );
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON response");
+    assert_eq!(json["status"], 415, "{json}");
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v2/_search")
+                .header("content-type", "application/json")
+                .body(Body::from("{"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON response");
+    assert_eq!(json["status"], 400, "{json}");
+    assert_eq!(json["error"]["type"], "validation_error", "{json}");
+
+    let response = app
+        .layer(DefaultBodyLimit::max(16))
+        .oneshot(
+            Request::post("/v2/_search")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON response");
+    assert_eq!(json["status"], 413, "{json}");
 }
 
 #[tokio::test]

@@ -41,6 +41,9 @@ async fn cluster_v2_search_is_exact_enriched_and_reports_routed_positions() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json["took"].is_u64(), "{json}");
+    assert_eq!(json["timed_out"], false);
+    assert!(json["took_ms"].is_f64(), "{json}");
     assert_eq!(json["complete"], true);
     assert_eq!(
         json["hits"]["total"],
@@ -59,6 +62,59 @@ async fn cluster_v2_search_is_exact_enriched_and_reports_routed_positions() {
     assert!((1..=3).contains(&routed));
     assert_eq!(json["_shards"]["successful"], routed);
     assert_eq!(json["_shards"]["failed"], 0);
+}
+
+#[tokio::test]
+async fn cluster_v2_search_supports_shared_url_controls_and_strict_errors() {
+    let state = test_state(&[
+        (3, "topps chrome".to_string()),
+        (1, "topps chrome".to_string()),
+        (2, "topps chrome".to_string()),
+    ]);
+    let (status, json) = send(
+        &state,
+        req(
+            "POST",
+            "/v2/_search?size=1&_source=false&timeout=1s&track_total_hits=1",
+            &serde_json::json!({"document": {"title": "topps chrome"}}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["hits"]["hits"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        json["hits"]["total"],
+        serde_json::json!({"value": 1, "relation": "gte"})
+    );
+    assert!(json["hits"]["hits"][0].get("_source").is_none(), "{json}");
+
+    for (label, path, request) in [
+        (
+            "unknown query parameter",
+            "/v2/_search?preference=local",
+            serde_json::json!({"document": {"title": "topps chrome"}}),
+        ),
+        (
+            "duplicate size",
+            "/v2/_search?size=1",
+            serde_json::json!({
+                "document": {"title": "topps chrome"},
+                "size": 2
+            }),
+        ),
+        (
+            "unknown document field",
+            "/v2/_search",
+            serde_json::json!({
+                "document": {"title": "topps chrome", "sku": "ABC-1"}
+            }),
+        ),
+    ] {
+        let (status, json) = send(&state, req("POST", path, &request)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {json}");
+        assert_eq!(json["status"], 400, "{label}: {json}");
+        assert_eq!(json["error"]["type"], "validation_error", "{label}: {json}");
+    }
 }
 
 #[tokio::test]
