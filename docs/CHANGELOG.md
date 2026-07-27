@@ -48,6 +48,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
   controls, no-store caching, and native plus familiar status/timing/error fields while preserving
   terminal stream attestation
   ([ADR-132](decisions/adr-132-exhaustive-job-status-api-contract.md)).
+- Hardened `DELETE /_percolate/jobs/{id}` with strict input, a native/ES-compatible acknowledged
+  response, cooperative running cancellation, and atomic terminal record plus event-id removal
+  ([ADR-133](decisions/adr-133-exhaustive-job-delete-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

@@ -456,7 +456,7 @@ and deduplicated union winner fetch, so every delivered source belongs to the ma
 version. The fence is acquired before entering Rayon; source-free batches remain concurrent
 (ADR-128).
 
-### 5.5 Exhaustive bounded delivery (ADR-114/131/132)
+### 5.5 Exhaustive bounded delivery (ADR-114/131/132/133)
 
 `result_mode=all` uses the same post-verification collector seam without materializing the full
 answer. `ChunkCollector` retains one fixed-capacity `Vec<ExhaustiveMatch>`; a synchronous
@@ -492,6 +492,13 @@ maximum; it does not claim the stream, and a record cannot become `completed` un
 single consumer dequeues completion. Status holds the accepted record across count-based pruning,
 uses `no-store`, and rejects `keep_alive` because the registry has no client-selected time expiry
 (ADR-132).
+
+DELETE uses the same terminal distinction as familiar async-search cleanup. A running record
+receives cooperative cancellation and stays pollable until terminal publication; a subsequent
+DELETE atomically removes that terminal job from both retained indexes and releases its event id.
+The response preserves the native status snapshot while adding `acknowledged`, `deleted`, and the
+familiar `id` alias. Cancellation remains linearized by the exact-delivery terminal gate, and no
+active worker or stream record is removed early (ADR-133).
 
 The compatibility collector historically sorts/deduplicates its complete `Vec<u64>`, because
 library callers can leave multiple live physical rows for one logical id. Exhaustive delivery

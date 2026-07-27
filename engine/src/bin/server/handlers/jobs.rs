@@ -23,7 +23,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 use crate::dto::ApiError;
-use crate::jobs::{ExhaustiveJobs, JobView, StartError, StreamError};
+use crate::jobs::{DeleteOutcome, ExhaustiveJobs, JobView, StartError, StreamError};
 use crate::state::{AppState, ClusterAppState};
 #[cfg(test)]
 use request::DocumentBody;
@@ -59,6 +59,10 @@ pub(crate) struct GetJobParams {
     keep_alive: Option<String>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeleteJobParams {}
+
 #[derive(Serialize)]
 pub(crate) struct GetJobResponse {
     id: String,
@@ -92,6 +96,26 @@ struct GetJobError {
     #[serde(rename = "type")]
     error_type: &'static str,
     reason: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct DeleteJobResponse {
+    acknowledged: bool,
+    deleted: bool,
+    id: String,
+    #[serde(flatten)]
+    job: JobView,
+}
+
+impl From<DeleteOutcome> for DeleteJobResponse {
+    fn from(outcome: DeleteOutcome) -> Self {
+        Self {
+            acknowledged: true,
+            deleted: outcome.deleted,
+            id: outcome.job.job_id.clone(),
+            job: outcome.job,
+        }
+    }
 }
 
 impl From<JobView> for GetJobResponse {
@@ -511,26 +535,42 @@ fn reject_non_get_stream_method(method: &Method) -> Result<(), (StatusCode, Json
     }
 }
 
-fn cancel(jobs: &ExhaustiveJobs, id: &str) -> Result<Json<JobView>, (StatusCode, Json<ApiError>)> {
-    jobs.cancel(id).map(Json).ok_or_else(|| {
-        ApiError::response(
-            StatusCode::NOT_FOUND,
-            "job_not_found",
-            format!("exhaustive job {id} is not retained"),
-        )
-    })
+type DeleteJobReply = (
+    [(axum::http::HeaderName, &'static str); 1],
+    Json<DeleteJobResponse>,
+);
+
+fn delete(jobs: &ExhaustiveJobs, id: &str) -> Result<DeleteJobReply, (StatusCode, Json<ApiError>)> {
+    jobs.delete(id)
+        .map(|outcome| {
+            (
+                [(header::CACHE_CONTROL, "no-store")],
+                Json(DeleteJobResponse::from(outcome)),
+            )
+        })
+        .ok_or_else(|| {
+            ApiError::response(
+                StatusCode::NOT_FOUND,
+                "job_not_found",
+                format!("exhaustive job {id} is not retained"),
+            )
+        })
 }
 
 pub(crate) async fn cancel_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Json<JobView>, (StatusCode, Json<ApiError>)> {
-    cancel(&state.exhaustive_jobs, &id)
+    params: Result<Query<DeleteJobParams>, QueryRejection>,
+) -> Result<DeleteJobReply, (StatusCode, Json<ApiError>)> {
+    let Query(_) = params.map_err(|error| query_rejection(&error))?;
+    delete(&state.exhaustive_jobs, &id)
 }
 
 pub(crate) async fn cluster_cancel_job(
     State(state): State<Arc<ClusterAppState>>,
     Path(id): Path<String>,
-) -> Result<Json<JobView>, (StatusCode, Json<ApiError>)> {
-    cancel(&state.exhaustive_jobs, &id)
+    params: Result<Query<DeleteJobParams>, QueryRejection>,
+) -> Result<DeleteJobReply, (StatusCode, Json<ApiError>)> {
+    let Query(_) = params.map_err(|error| query_rejection(&error))?;
+    delete(&state.exhaustive_jobs, &id)
 }

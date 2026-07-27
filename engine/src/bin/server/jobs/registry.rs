@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use super::stream::JobFrame;
-use super::{ExhaustiveJobs, JobRecord, JobView, Registry, StartError, StreamError};
+use super::{DeleteOutcome, ExhaustiveJobs, JobRecord, JobView, Registry, StartError, StreamError};
 
 impl ExhaustiveJobs {
     pub(super) fn prune_for_capacity(&self, registry: &mut Registry) -> Result<(), StartError> {
@@ -87,12 +87,43 @@ impl ExhaustiveJobs {
         receiver
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel(&self, id: &str) -> Option<JobView> {
         let record = self.registry.lock().jobs.get(id).cloned()?;
         if !record.state.lock().phase.terminal() {
             record.completion.request_cancel();
         }
         Some(record.view())
+    }
+
+    /// Cancel a running job or delete a terminal retained result.
+    ///
+    /// Terminal removal and event-id release are one registry-serialized
+    /// transition, so a concurrent admission cannot reuse the event id while
+    /// the old job is still addressable. A running record remains retained
+    /// while cooperative cancellation is published and can be polled until it
+    /// reaches a terminal phase; a later DELETE removes it.
+    pub(crate) fn delete(&self, id: &str) -> Option<DeleteOutcome> {
+        let mut registry = self.registry.lock();
+        let record = registry.jobs.get(id).cloned()?;
+        let job = record.view();
+        if !job.state.terminal() {
+            record.completion.request_cancel();
+            return Some(DeleteOutcome {
+                job,
+                deleted: false,
+            });
+        }
+
+        registry.jobs.remove(id);
+        if registry.by_event.get(&record.event_id) == Some(&record.id) {
+            registry.by_event.remove(&record.event_id);
+        }
+        self.prom
+            .exhaustive_jobs
+            .with_label_values(&[job.state.label()])
+            .dec();
+        Some(DeleteOutcome { job, deleted: true })
     }
 
     /// Request cooperative cancellation of every retained running job. Shutdown

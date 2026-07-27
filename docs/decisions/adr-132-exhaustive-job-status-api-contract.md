@@ -43,3 +43,7 @@
   and the standard 404 envelope. Coordinator routing proves the same status shape and wait control.
   Existing exhaustive lifecycle tests continue to prove terminal linearization, disconnect
   failure, deadline/cancellation arbitration, bounded delivery, and exact completion.
+
+- **Later deletion contract.** ADR-133 keeps a DELETE-requested running job retained and pollable
+  through this status surface, then lets a later DELETE atomically remove the terminal record and
+  release its event id.

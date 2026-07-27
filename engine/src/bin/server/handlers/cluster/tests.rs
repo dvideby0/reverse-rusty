@@ -89,7 +89,7 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         )
         .route(
             "/_percolate/jobs/{id}",
-            get(crate::handlers::cluster_get_job),
+            get(crate::handlers::cluster_get_job).delete(crate::handlers::cluster_cancel_job),
         )
         .route("/_mpercolate", post(cluster_mpercolate))
         .route("/_bulk", post(cluster_bulk))

@@ -151,6 +151,11 @@ pub(crate) struct StartOutcome {
     pub(crate) reused: bool,
 }
 
+pub(crate) struct DeleteOutcome {
+    pub(crate) job: JobView,
+    pub(crate) deleted: bool,
+}
+
 #[derive(Debug)]
 pub(crate) enum StreamError {
     NotFound,
