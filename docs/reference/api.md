@@ -196,7 +196,7 @@ The full method/path matrix is below.
 | `/_compact` | POST | Strict native force-all compaction with timing, shard result, and detailed merge report (ADR-138) |
 | `/_forcemerge` | POST | ES/OS-familiar policy/force-all alias with strict supported controls (ADR-138) |
 | `/_backup` | POST | Strict native, synchronous snapshot of a durable single engine or in-process cluster to a fresh server-side dir (body `{"dest":"..."}`); one backup is admitted per server and excess calls wait asynchronously; a stateless remote coordinator returns 400 ([backup/restore](../operations/backup-restore.md), ADR-079/139) |
-| `/_stats` | GET | JSON metrics snapshot |
+| `/_stats` | GET | Strict native, no-store JSON metrics snapshot with timing, truthful physical/live counts, familiar shard/WAL projections, and bounded blocking execution (ADR-140) |
 | `/_cat/stats` | GET | Human-readable metrics |
 | `/_cat/segments` | GET | Per-segment LSM detail (text table or `?format=json`) |
 | `/_health` | GET | Health check (green/yellow/red) |
@@ -341,6 +341,9 @@ Cluster-only endpoints:
 | `/_cluster/reconcile` | POST | One unattended-style reconcile pass (ADR-092): converge the committed shard→node map to the HRW-desired placement by MOVING data, **continuing past per-position failures** (the controller semantics). Idempotent — a converged map moves nothing. An optional `{"max_parallel": N}` body runs up to N conflict-free moves concurrently (ADR-095; empty body = sequential). Returns `{acknowledged, converged, reconciled[], skipped[], uncommitted[], failed[]}` (`acknowledged` is true only when fully converged). The one-shot manual trigger of what the opt-in `--reconcile-interval-secs` loop runs periodically. Requires a `--features distributed` build (else 501) |
 | `/_cluster/gc` | POST | One orphan-slot GC sweep (ADR-096): reclaim the fenced, unrouted slots data-moving reassignment strands on their old nodes (slot map + `shard_<id>/` disk). The keep-set is the committed map PLUS live routing (a flip-without-commit source/target is never dropped); unassigned positions are fail-safe skipped; a restarted (unfenced) orphan is fence-armed first. Idempotent; per-slot failures recorded + the sweep continues. Returns `{acknowledged, dropped[], kept_live_routed[], skipped_unassigned[], failed[], skipped_nodes[]}`. The one-shot trigger of the opt-in `--reconcile-gc-orphans` loop epilogue. Requires a `--features distributed` build (else 501) |
 
-`GET /_stats` in cluster mode reports `{shards, replication_factor, total_queries, shard_queries[],
-class_counts, epoch, pending_repairs, has_tagged_queries, durable}`; `GET /_health` is green/yellow
-(repairs queued)/red (a shard probe failed).
+`GET /_stats` in cluster mode reports timing and `_shards` plus
+`{shards, replication_factor, total_queries, shard_queries[], class_counts, epoch,
+pending_repairs, has_tagged_queries, durable}`. Counts are the primary physical-row view (including
+tombstones and content-driven multi-position copies), not distinct live logical IDs; a missing
+position fails the whole response (ADR-140). `GET /_health` is green/yellow (repairs queued)/red
+(a shard probe failed).

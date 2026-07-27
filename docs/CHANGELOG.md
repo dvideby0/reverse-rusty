@@ -76,6 +76,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   survives disconnects with independently supervised outcomes, unique staging, and fail-closed
   atomic no-clobber promotion that refuses dangling or raced destination entries
   ([ADR-139](decisions/adr-139-backup-api-contract.md)).
+- Hardened native `GET /_stats` with a strict no-store transport, truthful physical/live/tombstone
+  and resident-memory/WAL projections, familiar timing and shard metadata, single-slot blocking
+  collection, fail-loud cluster aggregation, and one shard-count fan-out instead of two
+  ([ADR-140](decisions/adr-140-stats-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

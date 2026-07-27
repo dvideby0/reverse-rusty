@@ -35,7 +35,9 @@ use tracing::{error, info, instrument};
 
 use crate::dto::ApiVersion;
 use crate::handlers::admin::{
-    acquire_flush, validate_flush_method, validate_flush_request, FlushParams, FlushResponse,
+    acquire_flush, finish_stats_response, stats_rejection, validate_flush_method,
+    validate_flush_request, validate_stats_method, validate_stats_request, FlushParams,
+    FlushResponse, StatsShards,
 };
 use crate::handlers::backup::{
     acquire_backup_permit, backup_error_response, backup_rejection, validate_backup_method,
@@ -76,6 +78,10 @@ pub(crate) async fn cluster_root(State(state): State<Arc<ClusterAppState>>) -> i
 
 #[derive(Serialize)]
 struct ClusterStatsResponse {
+    took: u64,
+    took_ms: f64,
+    #[serde(rename = "_shards")]
+    shard_result: StatsShards,
     mode: &'static str,
     shards: usize,
     replication_factor: usize,
@@ -94,6 +100,13 @@ struct ClusterStatsResponse {
     has_tagged_queries: bool,
 }
 
+impl ClusterStatsResponse {
+    fn set_took(&mut self, took_ms: f64) {
+        self.took = took_ms.floor() as u64;
+        self.took_ms = took_ms;
+    }
+}
+
 #[derive(Serialize)]
 struct ClassCounts {
     a: u64,
@@ -106,38 +119,91 @@ struct ClassCounts {
 
 /// GET /_stats — cluster-wide counts.
 #[instrument(skip_all)]
-pub(crate) async fn cluster_stats(State(state): State<Arc<ClusterAppState>>) -> Response {
-    let cluster = state.cluster.read();
-    let (total, per_shard, cc) = match (
-        cluster.num_queries(),
-        cluster.shard_query_counts(),
-        cluster.class_counts(),
-    ) {
-        (Ok(t), Ok(p), Ok(c)) => (t, p, c),
-        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
-            return shard_error_response("stats unavailable", &e)
-        }
+pub(crate) async fn cluster_stats(
+    State(state): State<Arc<ClusterAppState>>,
+    method: Method,
+    raw_query: RawQuery,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["stats"])
+        .start_timer();
+    let started = Instant::now();
+    if let Err(response) = validate_stats_method(&state.prom, &method) {
+        return *response;
+    }
+    if let Err(response) = validate_stats_request(&state.prom, raw_query, body) {
+        return *response;
+    }
+    let Ok(permit) = Arc::clone(&state.stats_permits).acquire_owned().await else {
+        return stats_rejection(
+            &state.prom,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stats_unavailable",
+            "stats admission is closed",
+        );
     };
-    Json(ClusterStatsResponse {
-        mode: "cluster",
-        shards: cluster.num_shards(),
-        replication_factor: cluster.replication_factor(),
-        include_broad: state.include_broad,
-        durable: cluster.is_durable(),
-        total_queries: total,
-        shard_queries: per_shard,
-        class_counts: ClassCounts {
-            a: cc[0],
-            b: cc[1],
-            c: cc[2],
-            d: cc[3],
-            h: cc[4],
-        },
-        epoch: cluster.epoch(),
-        pending_repairs: cluster.pending_repairs(),
-        has_tagged_queries: cluster.has_tagged_queries(),
-    })
-    .into_response()
+    let worker_state = Arc::clone(&state);
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let cluster = worker_state.cluster.read();
+        // One count pass is enough: the aggregate is the sum of the returned
+        // per-position rows. The old path called every shard twice.
+        let per_shard = cluster.shard_query_counts()?;
+        let total = per_shard
+            .iter()
+            .copied()
+            .fold(0usize, usize::saturating_add);
+        let cc = cluster.class_counts()?;
+        let shards = cluster.num_shards();
+        Ok::<_, reverse_rusty::cluster::ShardError>(ClusterStatsResponse {
+            took: 0,
+            took_ms: 0.0,
+            shard_result: StatsShards {
+                total: shards,
+                successful: shards,
+                failed: 0,
+            },
+            mode: "cluster",
+            shards,
+            replication_factor: cluster.replication_factor(),
+            include_broad: worker_state.include_broad,
+            durable: cluster.is_durable(),
+            total_queries: total,
+            shard_queries: per_shard,
+            class_counts: ClassCounts {
+                a: cc[0],
+                b: cc[1],
+                c: cc[2],
+                d: cc[3],
+                h: cc[4],
+            },
+            epoch: cluster.epoch(),
+            pending_repairs: cluster.pending_repairs(),
+            has_tagged_queries: cluster.has_tagged_queries(),
+        })
+    });
+    match worker.await {
+        Ok(Ok(mut stats)) => {
+            stats.set_took(started.elapsed().as_secs_f64() * 1000.0);
+            finish_stats_response(&state.prom, Json(stats).into_response())
+        }
+        Ok(Err(error)) => finish_stats_response(
+            &state.prom,
+            shard_error_response("stats unavailable", &error),
+        ),
+        Err(join_error) => {
+            error!(error = %join_error, "cluster stats worker failed");
+            stats_rejection(
+                &state.prom,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stats_unavailable",
+                "cluster stats worker failed",
+            )
+        }
+    }
 }
 
 /// GET /_cat/shards — per-shard text table (`?format=json` for the JSON shape).

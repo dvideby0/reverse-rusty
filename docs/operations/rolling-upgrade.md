@@ -208,7 +208,8 @@ What the chart guarantees while that runs:
 
 - [ ] `/_health` green; every shard `reverse_rusty_shard_ready 1`; control `/_metrics` reports
       exactly one leader ([`alerting.md`](alerting.md) has the expressions).
-- [ ] `GET /_stats` count unchanged from preflight.
+- [ ] `GET /_stats` snapshot unchanged from preflight: standalone `live_queries`, or the
+      cluster's physical `total_queries` + `shard_queries[]` under the same placement (ADR-140).
 - [ ] The golden-titles probe matches its recorded output
       ([`backup-restore.md` rehearsal](backup-restore.md#rehearsal--prove-you-can-restore)).
 - [ ] A sentinel write round-trips (`PUT /_doc` → `_search` → `DELETE`).

@@ -136,7 +136,7 @@ query, an always-candidate is returned only when the request includes the broad 
 | Check | Endpoint | Meaning |
 |---|---|---|
 | Liveness/readiness | `GET /_health` | `green` = all shards reachable; `red`/`503` = a shard is unreachable (the cluster fails loud, never silently truncates). |
-| Corpus + segments | `GET /_stats` | `total_queries`, per-shard counts. |
+| Corpus + segments | `GET /_stats` | Physical `total_queries` and per-position `shard_queries[]` (includes tombstones and content-driven copies; ADR-140). |
 | Per-shard view | `GET /_cat/shards` | shard → state. |
 
 `GET /_health` is the only endpoint that never requires the bearer token, so container/orchestrator

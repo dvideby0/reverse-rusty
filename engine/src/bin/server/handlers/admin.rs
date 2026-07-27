@@ -4,11 +4,16 @@
 
 mod compact;
 mod flush;
+mod stats;
 
 pub(crate) use compact::{compact_route, force_merge_route};
 pub(crate) use flush::{
     acquire_flush, flush_route, validate_flush_method, validate_flush_request, FlushParams,
     FlushResponse,
+};
+pub(crate) use stats::{
+    finish_stats_response, stats, stats_rejection, validate_stats_method, validate_stats_request,
+    StatsShards, STATS_BODY_LIMIT,
 };
 
 use std::sync::Arc;
@@ -27,88 +32,6 @@ use reverse_rusty::events::SegmentInfo;
 
 use crate::dto::ApiVersion;
 use crate::state::AppState;
-
-// -- GET /_stats
-#[derive(Serialize)]
-struct EngineStatsResponse {
-    total_queries: usize,
-    base_segments: usize,
-    memtable_entries: usize,
-    dict_features: usize,
-    rejected_parse: u64,
-    rejected_class_d: u64,
-    /// Observe-first hot-tier telemetry (Broad-Query Cost Program): accepted
-    /// compiles since process start that would reclassify to the hot tier under
-    /// the default hot-anchor threshold.
-    would_be_hot: u64,
-    /// Canonical-body dedup telemetry (Stage A): accepted compiles, how many
-    /// joined an existing per-segment body group, and a linear-counting
-    /// estimate of DISTINCT bodies seen (global — the cross-segment potential).
-    dedup: DedupStats,
-    class_counts: ClassCounts,
-    /// Posting-length percentiles per candidate-index lane (nearest-rank; a fat
-    /// main `max` against a modest `p99` is the top-64 rank-cliff fingerprint).
-    postings: PostingLanes,
-    segment_sizes: Vec<usize>,
-    segment_holes: Vec<f64>,
-    memory: MemoryStats,
-}
-
-#[derive(Serialize)]
-struct DedupStats {
-    bodies_total: u64,
-    dup_joined: u64,
-    distinct_bodies_est: u64,
-}
-
-#[derive(Serialize)]
-struct ClassCounts {
-    a: u64,
-    b: u64,
-    c: u64,
-    d: u64,
-    /// The hot tier (class H, ADR-105) — θ-hot-anchored, always-visible,
-    /// columnar-evaluated. 0 while `hot_anchor_threshold` is off.
-    h: u64,
-}
-
-#[derive(Serialize)]
-struct PostingLanes {
-    main: PostingLaneStats,
-    broad: PostingLaneStats,
-    hot: PostingLaneStats,
-}
-
-#[derive(Serialize)]
-struct PostingLaneStats {
-    count: usize,
-    p50: u32,
-    p95: u32,
-    p99: u32,
-    max: u32,
-}
-
-impl From<reverse_rusty::events::PostingStats> for PostingLaneStats {
-    fn from(s: reverse_rusty::events::PostingStats) -> Self {
-        Self {
-            count: s.count,
-            p50: s.p50,
-            p95: s.p95,
-            p99: s.p99,
-            max: s.max,
-        }
-    }
-}
-
-#[derive(Serialize)]
-// Field names are the serialized JSON keys (public API); the shared `_bytes`
-// suffix is the contract, not an accident — don't rename it away.
-#[allow(clippy::struct_field_names)]
-struct MemoryStats {
-    exact_bytes: usize,
-    index_bytes: usize,
-    filter_bytes: usize,
-}
 
 // -- GET /_cat/segments
 /// Query string for the `_cat` endpoints. `?format=json` switches the default
@@ -171,47 +94,6 @@ struct RootResponse {
     cluster_uuid: &'static str,
     version: ApiVersion,
     tagline: &'static str,
-}
-
-/// GET /_stats — JSON metrics snapshot.
-pub(crate) async fn stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let snap = state.snapshot.load();
-    let m = snap.metrics();
-    let cc = snap.class_counts();
-    let lanes = snap.lane_posting_stats();
-    Json(EngineStatsResponse {
-        total_queries: m.total_queries,
-        base_segments: m.base_segments,
-        memtable_entries: m.memtable_entries,
-        dict_features: m.dict_features,
-        rejected_parse: m.rejected_parse,
-        rejected_class_d: m.rejected_class_d,
-        would_be_hot: m.would_be_hot,
-        dedup: DedupStats {
-            bodies_total: m.bodies_total,
-            dup_joined: m.dup_joined,
-            distinct_bodies_est: m.distinct_bodies_est,
-        },
-        class_counts: ClassCounts {
-            a: cc[0],
-            b: cc[1],
-            c: cc[2],
-            d: cc[3],
-            h: cc[4],
-        },
-        postings: PostingLanes {
-            main: lanes.main.into(),
-            broad: lanes.broad.into(),
-            hot: lanes.hot.into(),
-        },
-        segment_sizes: m.segment_sizes,
-        segment_holes: m.segment_holes,
-        memory: MemoryStats {
-            exact_bytes: m.exact_bytes,
-            index_bytes: m.index_bytes,
-            filter_bytes: m.filter_bytes,
-        },
-    })
 }
 
 /// GET /_cat/stats — human-readable metrics.

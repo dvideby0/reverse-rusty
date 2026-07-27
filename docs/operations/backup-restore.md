@@ -159,8 +159,10 @@ storage/topology change:
    restored volumes (remote; [`disaster-recovery.md` §3.3](disaster-recovery.md)). **Start the
    clock here.**
 4. **Verify content, not just liveness:**
-   - `GET :9201/_stats` — the query count equals the count you recorded when the backup was
-     taken (record it next to the backup; the smoke does exactly this).
+   - `GET :9201/_stats` — standalone `live_queries`, or cluster physical `total_queries` +
+     `shard_queries[]` under the same placement, equals the snapshot recorded with the backup
+     (the smoke does this). Cluster physical counts are not distinct logical-document counts
+     (ADR-140).
    - **Golden-titles probe:** keep a small file of representative titles WITH their expected
      matched ids (regenerate it whenever the corpus changes materially); percolate each against
      the restored instance and diff:
