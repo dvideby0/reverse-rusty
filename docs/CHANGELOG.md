@@ -40,6 +40,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   pre-decode body bounds, all-token pre-validation, structured extractor failures, and a truthful
   response carrying aggregate, per-PIT, and logical-context release results
   ([ADR-130](decisions/adr-130-v2-close-pit-api-contract.md)).
+- Hardened `POST /_percolate/jobs` with strict bounded input, optional server-generated identity,
+  native and ES/OpenSearch execution-control aliases, fail-loud unsupported async controls, and
+  familiar async identity/status fields without weakening exact terminal delivery
+  ([ADR-131](decisions/adr-131-exhaustive-job-create-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

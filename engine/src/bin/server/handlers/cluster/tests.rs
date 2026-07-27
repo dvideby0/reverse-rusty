@@ -81,6 +81,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                     crate::handlers::PIT_BODY_LIMIT,
                 )),
         )
+        .route(
+            "/_percolate/jobs",
+            post(crate::handlers::cluster_create_job_route).layer(
+                axum::extract::DefaultBodyLimit::max(crate::handlers::EXHAUSTIVE_JOB_BODY_LIMIT),
+            ),
+        )
         .route("/_mpercolate", post(cluster_mpercolate))
         .route("/_bulk", post(cluster_bulk))
         .route("/_flush", post(cluster_flush))
@@ -153,6 +159,7 @@ fn seed() -> Vec<(u64, String)> {
 
 mod admin;
 mod crud;
+mod jobs;
 mod pit;
 mod ranked;
 mod v2;

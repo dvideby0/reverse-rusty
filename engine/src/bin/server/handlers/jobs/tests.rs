@@ -10,6 +10,8 @@ use reverse_rusty::segment::Engine;
 use reverse_rusty::Normalizer;
 use tower::ServiceExt;
 
+mod create_route;
+
 struct CancelWhileWaiting {
     checks: usize,
 }
@@ -151,8 +153,12 @@ async fn stream_ends_in_exact_completion_and_post_is_idempotent() {
         .await
         .expect("idempotent replay");
     assert!(reused.reused);
+    assert_eq!(reused.id, reused.job_id);
     assert_eq!(reused.job_id, created.job_id);
     assert_eq!(reused.snapshot_generation, created.snapshot_generation);
+    assert!(!reused.is_running);
+    assert!(!reused.is_partial);
+    assert_eq!(reused.start_time_in_millis, created.start_time_in_millis);
 }
 
 #[tokio::test]

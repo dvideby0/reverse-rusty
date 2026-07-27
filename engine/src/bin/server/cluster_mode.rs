@@ -35,17 +35,18 @@ use crate::auth::AuthConfig;
 use crate::cli::Cli;
 use crate::handlers::{
     cluster_backup, cluster_bulk, cluster_cancel_job, cluster_cat_segments, cluster_cat_shards,
-    cluster_cat_stats, cluster_checkpoint, cluster_compact, cluster_create_job, cluster_delete_doc,
-    cluster_deregister_node, cluster_discover_aliases, cluster_discover_and_record_aliases,
-    cluster_flush, cluster_gc, cluster_get_alias_feedback, cluster_get_aliases, cluster_get_doc,
-    cluster_get_job, cluster_get_job_stream, cluster_get_settings, cluster_get_vocab,
-    cluster_handoff, cluster_health, cluster_import_aliases, cluster_learn_aliases,
-    cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_metrics, cluster_mpercolate,
-    cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
+    cluster_cat_stats, cluster_checkpoint, cluster_compact, cluster_create_job_route,
+    cluster_delete_doc, cluster_deregister_node, cluster_discover_aliases,
+    cluster_discover_and_record_aliases, cluster_flush, cluster_gc, cluster_get_alias_feedback,
+    cluster_get_aliases, cluster_get_doc, cluster_get_job, cluster_get_job_stream,
+    cluster_get_settings, cluster_get_vocab, cluster_handoff, cluster_health,
+    cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
+    cluster_learn_vocab, cluster_metrics, cluster_mpercolate, cluster_put_doc,
+    cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
     cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
     cluster_v2_mpercolate_route, cluster_v2_search_route, cluster_validate_and_apply_feedback,
-    PIT_BODY_LIMIT,
+    EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -372,7 +373,10 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
                 .delete(crate::handlers::cluster_close_pit_route)
                 .layer(DefaultBodyLimit::max(PIT_BODY_LIMIT)),
         )
-        .route("/_percolate/jobs", post(cluster_create_job))
+        .route(
+            "/_percolate/jobs",
+            post(cluster_create_job_route).layer(DefaultBodyLimit::max(EXHAUSTIVE_JOB_BODY_LIMIT)),
+        )
         .route(
             "/_percolate/jobs/{id}",
             get(cluster_get_job).delete(cluster_cancel_job),

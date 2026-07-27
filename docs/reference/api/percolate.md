@@ -202,10 +202,18 @@ coordinator assembly refuses PIT entirely with **501 `pit_unsupported`** (wire P
 increment; page via an in-process cluster or single-node mode). Both endpoints ride the open
 search auth allowlist.
 
-## `POST /_percolate/jobs` — Exact exhaustive delivery (ADR-114)
+## `POST /_percolate/jobs` — Exact exhaustive delivery (ADR-114/131)
 
 An exhaustive result can be arbitrarily large, so `result_mode="all"` is a background job with
-bounded provisional chunks and a required terminal completion record:
+bounded provisional chunks and a required terminal completion record. The minimal request is:
+
+```json
+{
+  "document": {"title": "1996 Skybox Premium Michael Jordan PSA 10"}
+}
+```
+
+The full native shape remains available:
 
 ```json
 {
@@ -224,22 +232,40 @@ bounded provisional chunks and a required terminal completion record:
 }
 ```
 
-`result_mode="all"`, one `document`, and `sink.type="grpc_stream"` are explicit requirements.
-The HTTP reference consumer may instead name `"ndjson_stream"`. `query_scope` defaults to
-`"standard"`; `rank` and `filter` are optional; `allow_partial_results=true` is always rejected.
-The requested timeout must be positive and no greater than
-`--exhaustive-job-timeout-secs`. In remote mode, every shard independently rejects a remaining
-budget above its server-owned `--max-exhaustive-stream-secs` ceiling (default 300 seconds), before
-claiming a node worker permit. Set that shard ceiling at least as high as the coordinator job
-ceiling.
+One `document` is required. `result_mode` defaults to `"all"` and no other value is supported;
+`sink` defaults to the HTTP `"ndjson_stream"` and may explicitly name `"ndjson_stream"` or the
+historic `"grpc_stream"` alias. `query_scope` defaults to `"standard"`; `rank` and `filter` are
+optional. The JSON request schema and its typed nested objects are strict: unknown fields,
+duplicate schema controls, explicit nulls, malformed JSON, and wrong types are structured 400
+errors. Missing/wrong JSON content type is 415, and the endpoint rejects a body larger than 1 MiB
+with 413 before JSON deserialization.
+
+The execution deadline can be supplied in the body or query string as native `timeout_ms` or as
+ES/OpenSearch-style `timeout`, but aliases and locations are mutually exclusive. `timeout` is a
+non-negative integer followed by `nanos`, `micros`, `ms`, `s`, `m`, `h`, or `d`; the effective job
+timeout must be positive and no greater than `--exhaustive-job-timeout-secs`. Native
+`allow_partial_results` and Elasticsearch `allow_partial_search_results` are likewise
+body-or-query aliases: false or omission is accepted, while true is rejected because exhaustive
+delivery cannot certify a partial set.
+
+Async-search controls `wait_for_completion_timeout`, `keep_alive`, and `keep_on_completion` are
+recognized only to return a clear 400. Jobs always return immediately, and their in-memory status
+is retained by a bounded record-count policy rather than a caller-selected duration. In remote
+mode, every shard independently rejects a remaining budget above its server-owned
+`--max-exhaustive-stream-secs` ceiling (default 300 seconds), before claiming a node worker permit.
+Set that shard ceiling at least as high as the coordinator job ceiling.
 
 A successful admission returns `202 Accepted`:
 
 ```json
 {
+  "id": "7fcaa575-beb7-4c6f-a27c-9be901aa7d86",
   "job_id": "7fcaa575-beb7-4c6f-a27c-9be901aa7d86",
   "event_id": "listing-123/version-7",
   "state": "running",
+  "is_running": true,
+  "is_partial": true,
+  "start_time_in_millis": 1785096000123,
   "snapshot_generation": 987654321012345678,
   "status_url": "/_percolate/jobs/7fcaa575-beb7-4c6f-a27c-9be901aa7d86",
   "stream_url": "/_percolate/jobs/7fcaa575-beb7-4c6f-a27c-9be901aa7d86/stream",
@@ -247,16 +273,25 @@ A successful admission returns `202 Accepted`:
 }
 ```
 
-`event_id` is the POST idempotency key while the record is retained. Repeating the same effective
-request returns the same job/generation with `reused=true`; defaults and unordered collections are
-canonicalized first. For example, omitted versus explicit `query_scope: "standard"`, default
-priority/default timeout, reordered filter values or effective boosts, and the accepted
-`grpc_stream`/`ndjson_stream` spellings are equivalent. Reusing that event id for different
-execution semantics returns `409 event_id_conflict`. Canonicalization uses stable raw tag
-key/value groups and a last-write-wins boost map, so interning a previously unknown tag after the
-first request does not change a retained event's identity. Distinct boost pairs that resolve to
-the same synthetic tag id are rejected as ambiguous with 400. Exhaustive execution uses a
-dedicated worker pool and non-queuing permit: no permit is `503 exhaustive_capacity`; a registry
+`id` is the ES/OpenSearch-familiar alias of native `job_id`. `state` retains the native lowercase
+enum. `is_running` is true only in `running`; `is_partial` is true until and unless the completion
+frame commits the exact result, including for failed/cancelled jobs. `start_time_in_millis` is Unix
+epoch milliseconds. There is no `expiration_time_in_millis`: execution timeout is not retained
+result expiry.
+
+`event_id` is optional. When supplied, it must contain 1–512 bytes and is the POST idempotency key
+while the record is retained. Repeating the same effective request returns the same job/generation
+with `reused=true`; defaults and unordered collections are canonicalized first. When omitted, the
+server generates and returns one; a retry made before receiving that generated value starts a
+different job, so clients that need retry safety should supply their own stable key. For example,
+omitted versus explicit
+`query_scope: "standard"`, default priority/default timeout, reordered filter values or effective
+boosts, and the accepted `grpc_stream`/`ndjson_stream` spellings are equivalent. Reusing an event
+id for different execution semantics returns `409 event_id_conflict`. Canonicalization uses stable
+raw tag key/value groups and a last-write-wins boost map, so interning a previously unknown tag
+after the first request does not change a retained event's identity. Distinct boost pairs that
+resolve to the same synthetic tag id are rejected as ambiguous with 400. Exhaustive execution uses
+a dedicated worker pool and non-queuing permit: no permit is `503 exhaustive_capacity`; a registry
 full of active jobs is `429 exhaustive_registry_full`.
 Rejected admission never evicts retained history: the server claims an execution permit before it
 prunes a terminal record to make room for the admitted replacement.
