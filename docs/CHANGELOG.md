@@ -63,6 +63,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   replace-or-create/create-only semantics, source-version and response metadata preservation, and a
   safe fresh-corpus immutable-segment fast path
   ([ADR-136](decisions/adr-136-bulk-api-contract.md)).
+- Hardened `GET`/`POST /_flush` with strict body-free controls, exact non-waiting admission,
+  ES/OpenSearch shard results, shared standalone/coordinator metrics, and fail-loud local-shard
+  durability
+  ([ADR-137](decisions/adr-137-flush-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

@@ -108,6 +108,13 @@ pub(crate) fn requires_auth(method: &Method, path: &str, protect_reads: bool) ->
     if protect_reads {
         return path != "/_health";
     }
+    // ES/OpenSearch expose flush through GET as well as POST. It is still a
+    // mutating maintenance operation, so the compatibility verb must not ride
+    // the ordinary unauthenticated-read allowance. Protect HEAD too in case the
+    // router derives it from the GET handler.
+    if path == "/_flush" && (*method == Method::GET || *method == Method::HEAD) {
+        return true;
+    }
     if method == Method::GET || method == Method::HEAD {
         return false;
     }
@@ -218,6 +225,8 @@ mod tests {
             (Method::PUT, "/_doc/1"),
             (Method::DELETE, "/_doc/1"),
             (Method::POST, "/_bulk"),
+            (Method::GET, "/_flush"),
+            (Method::HEAD, "/_flush"),
             (Method::POST, "/_flush"),
             (Method::POST, "/_compact"),
             (Method::POST, "/_backup"),
@@ -353,6 +362,7 @@ mod tests {
         let prom = PrometheusMetrics::new();
         Arc::new(AppState {
             engine: parking_lot::Mutex::new(eng),
+            flush_serial: parking_lot::Mutex::new(()),
             snapshot: arc_swap::ArcSwap::new(snap),
             pool,
             search_permits: None,
@@ -380,7 +390,7 @@ mod tests {
                 get(|| async { "read" }).put(|| async { "ok" }),
             )
             .route("/_search", post(|| async { "read" }))
-            .route("/_flush", post(|| async { "ok" }))
+            .route("/_flush", get(|| async { "ok" }).post(|| async { "ok" }))
             .route("/_health", get(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
                 Arc::clone(state),
@@ -415,6 +425,10 @@ mod tests {
             status(&state, req("POST", "/_flush", None)).await,
             StatusCode::OK
         );
+        assert_eq!(
+            status(&state, req("GET", "/_flush", None)).await,
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -447,6 +461,13 @@ mod tests {
         assert_eq!(v["status"], 401);
         assert_eq!(v["error"]["type"], "security_exception");
 
+        // GET is an ES/OpenSearch compatibility verb for this mutating API and
+        // must not bypass the write/admin gate.
+        assert_eq!(
+            status(&state, req("GET", "/_flush", None)).await,
+            StatusCode::UNAUTHORIZED
+        );
+
         // Wrong token → 401, challenge flags invalid_token.
         let resp = router(&state)
             .oneshot(req("PUT", "/_doc/1", Some("wrong")))
@@ -464,6 +485,10 @@ mod tests {
         // Right token → through to the handler. Reads stay open without one.
         assert_eq!(
             status(&state, req("PUT", "/_doc/1", Some("s3cr3t"))).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status(&state, req("GET", "/_flush", Some("s3cr3t"))).await,
             StatusCode::OK
         );
         assert_eq!(
@@ -486,7 +511,7 @@ mod tests {
                 .auth_failures_total
                 .with_label_values(&["missing"])
                 .get(),
-            1
+            2
         );
         assert_eq!(
             state

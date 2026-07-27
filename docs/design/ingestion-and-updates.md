@@ -208,6 +208,10 @@ but a general multi-generation feature model with blue/green serving is still pr
 - **Immediate after success:** the standalone durable path appends its WAL record before applying;
   cluster writes append the coordinator log before shard apply. A successful public operation
   publishes the updated snapshot before returning, so a later read through that process sees it.
+- **Explicit flush:** strict `GET`/`POST /_flush` seals the standalone memtable or fans the same
+  maintenance boundary across cluster shard positions and publishes the resulting snapshots
+  (ADR-137). It does not replace the cluster checkpoint: `POST /_checkpoint` remains the operation
+  that reseals tombstones, commits the coordinator manifest, and advances cluster mutation tails.
 - **Primary-authoritative replication:** `ReplicatedShard` applies to the primary, then fans the
   mutation to replicas. Replica failures mark those copies out of sync but do not turn the successful
   primary write into a quorum failure. There is no optional quorum-ack read-your-writes mode.

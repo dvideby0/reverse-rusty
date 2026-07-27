@@ -433,11 +433,20 @@ impl Shard for LocalShard {
     fn flush(&self) -> Result<(), ShardError> {
         let mut eng = self.lock();
         eng.flush();
+        let persistence_healthy = eng.persistence_healthy();
         Self::publish(&eng, &self.snapshot);
         // NOTE: a bare flush seals the memtable into a segment but does NOT trim the translog
         // — a `Remove` against a base segment is only baked by `reseal_tombstoned_segments`,
         // so only `seal_for_checkpoint` (flush + reseal) may advance the checkpoint and trim.
-        Ok(())
+        if persistence_healthy {
+            Ok(())
+        } else {
+            Err(ShardError::Log(
+                "flush could not durably persist the shard segment; the translog remains \
+                 authoritative and the in-memory fallback stays readable"
+                    .into(),
+            ))
+        }
     }
 
     fn seal_for_checkpoint(&self) -> Result<LogPos, ShardError> {

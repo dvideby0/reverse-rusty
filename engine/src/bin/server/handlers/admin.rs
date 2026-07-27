@@ -2,6 +2,13 @@
 //! the API root, and the Prometheus exposition. These project engine introspection
 //! ([`reverse_rusty::events`] metrics + per-segment info) into the REST surface.
 
+mod flush;
+
+pub(crate) use flush::{
+    acquire_flush, flush_route, validate_flush_method, validate_flush_request, FlushParams,
+    FlushResponse,
+};
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,15 +26,6 @@ use reverse_rusty::events::SegmentInfo;
 
 use crate::dto::ApiVersion;
 use crate::state::AppState;
-
-// -- POST /_flush
-#[derive(Serialize)]
-struct FlushResponse {
-    took_ms: f64,
-    acknowledged: bool,
-    total_queries: usize,
-    base_segments: usize,
-}
 
 // -- POST /_compact
 #[derive(Serialize)]
@@ -200,60 +198,6 @@ struct RootResponse {
     cluster_uuid: &'static str,
     version: ApiVersion,
     tagline: &'static str,
-}
-
-/// POST /_flush
-#[instrument(skip_all)]
-pub(crate) async fn flush(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let start = Instant::now();
-    let (metrics, persistence_healthy) = {
-        let mut engine = state.engine.lock();
-        engine.flush();
-        (engine.metrics(), engine.persistence_healthy)
-    };
-    state.publish_snapshot();
-    // Fail closed (ADR-051): when a flush can't durably persist its segment the
-    // engine retains the data in the WAL (so a restart recovers it), but durability
-    // is degraded and we must not acknowledge the flush as durable. Mirror the
-    // `/_bulk` 503 contract so a client never reads `acknowledged: true` for a write
-    // that isn't on disk.
-    let (status, code) = if persistence_healthy {
-        (StatusCode::OK, "200")
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "503")
-    };
-    if persistence_healthy {
-        info!(
-            total_queries = metrics.total_queries,
-            base_segments = metrics.base_segments,
-            "flush complete"
-        );
-    } else {
-        error!(
-            total_queries = metrics.total_queries,
-            base_segments = metrics.base_segments,
-            "flush could not be durably persisted; data retained in WAL, persistence degraded"
-        );
-    }
-    state
-        .prom
-        .http_requests_total
-        .with_label_values(&["flush", code])
-        .inc();
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["flush"])
-        .observe(start.elapsed().as_secs_f64());
-    (
-        status,
-        Json(FlushResponse {
-            took_ms: start.elapsed().as_secs_f64() * 1000.0,
-            acknowledged: persistence_healthy,
-            total_queries: metrics.total_queries,
-            base_segments: metrics.base_segments,
-        }),
-    )
 }
 
 /// POST /_compact
@@ -621,3 +565,6 @@ mod root_tests;
 
 #[cfg(test)]
 mod cat_segments_tests;
+
+#[cfg(test)]
+mod flush_tests;

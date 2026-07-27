@@ -283,6 +283,7 @@ mod tests {
         let prom = PrometheusMetrics::new();
         Arc::new(AppState {
             engine: parking_lot::Mutex::new(eng),
+            flush_serial: parking_lot::Mutex::new(()),
             snapshot: arc_swap::ArcSwap::new(snap),
             pool,
             search_permits: None,

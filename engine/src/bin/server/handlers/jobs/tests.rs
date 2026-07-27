@@ -60,6 +60,7 @@ fn state(query_count: u64, channel_depth: usize) -> Arc<AppState> {
     .expect("jobs");
     Arc::new(AppState {
         engine: Mutex::new(engine),
+        flush_serial: Mutex::new(()),
         snapshot: ArcSwap::new(snapshot),
         pool: rayon::ThreadPoolBuilder::new()
             .num_threads(1)

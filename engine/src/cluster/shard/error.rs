@@ -1,6 +1,8 @@
 /// An error from cluster construction or a shard operation. In-process
-/// ([`LocalShard`]) *operations* are infallible and never produce this; a `RemoteShard`
-/// produces [`ShardError::Remote`] on gRPC transport or status failure, and
+/// ([`LocalShard`]) data mutations are infallible after their durable translog
+/// append, while maintenance operations can return [`ShardError::Log`] when a
+/// segment/checkpoint write degrades; a `RemoteShard` produces
+/// [`ShardError::Remote`] on gRPC transport or status failure, and
 /// [`ShardError::DictMismatch`] when a server's frozen dict diverges from the
 /// coordinator's (the connect-time fingerprint handshake). Cluster *construction* (the
 /// `ClusterEngine` builders and `HashRing::new`) produces [`ShardError::Config`] on an
