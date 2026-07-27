@@ -435,6 +435,14 @@ at the request fence and fails typed if the winner is no longer live. Remote/gRP
 assemblies reject PIT operations with `501 pit_unsupported`. ADR-075 compatibility cluster ranking
 remains current-view and unchanged.
 
+`POST /v2/_mpercolate` applies the same bounded collector to every title through the columnar batch
+kernel and returns request-ordered exact top-K slots under one aggregate heap admission, deadline,
+and winner-source credit (ADR-112). Source-enriched cluster batches use the same short
+`ClusterReadView` principle as scalar v2 search: the view spans the one-call-per-shard batch match
+and deduplicated union winner fetch, so every delivered source belongs to the matched same-ID
+version. The fence is acquired before entering Rayon; source-free batches remain concurrent
+(ADR-128).
+
 ### 5.5 Exhaustive bounded delivery (ADR-114)
 
 `result_mode=all` uses the same post-verification collector seam without materializing the full

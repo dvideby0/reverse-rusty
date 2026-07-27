@@ -44,7 +44,7 @@ use crate::handlers::{
     cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
     cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
-    cluster_v2_mpercolate, cluster_v2_search_route, cluster_validate_and_apply_feedback,
+    cluster_v2_mpercolate_route, cluster_v2_search_route, cluster_validate_and_apply_feedback,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -364,7 +364,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             get(cluster_search_route).post(cluster_search_route),
         )
         .route("/v2/_search", post(cluster_v2_search_route))
-        .route("/v2/_mpercolate", post(cluster_v2_mpercolate))
+        .route("/v2/_mpercolate", post(cluster_v2_mpercolate_route))
         .route(
             "/v2/_pit",
             post(crate::handlers::cluster_open_pit).delete(crate::handlers::cluster_close_pit),

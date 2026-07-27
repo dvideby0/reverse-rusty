@@ -1,3 +1,5 @@
+use super::super::super::controls::parse_time_value;
+use super::super::one_alias;
 use super::{
     record_outcome, resolve_percolate, validation, ApiError, DeliveryError, Duration, HitSource,
     Instant, Json, PrepareFailure, PreparedBatch, RankProgramBody, RankedHitBody, SlotDelivered,
@@ -5,21 +7,31 @@ use super::{
 };
 
 pub(super) fn prepare_batch(body: V2MPercolateBody) -> Result<PreparedBatch, PrepareFailure> {
-    if body.explain.is_some() {
+    if body.explain == Some(true) {
         return Err(PrepareFailure::Validation(validation(
-            "explain is not supported on /v2/_mpercolate; use /v2/_search per document",
+            "explain=true is not supported on /v2/_mpercolate; use /v2/_search per document",
+        )));
+    }
+    let allow_partial_results = one_alias(
+        body.allow_partial_results,
+        body.allow_partial_search_results,
+        "allow_partial_results` and `allow_partial_search_results",
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    if allow_partial_results == Some(true) {
+        return Err(PrepareFailure::Validation(validation(
+            "partial results are not supported for exact top_k",
         )));
     }
     if body.page_from.is_some()
         || body.cursor.is_some()
         || body.pit.is_some()
-        || body.allow_partial_results.is_some()
         || body.document.is_some()
         || body.query.is_some()
     {
         return Err(PrepareFailure::Validation(validation(
-            "v2 batch percolate accepts `documents`; from, cursor, pit, allow_partial_results, \
-             document and query are not supported — page per title via /v2/_search",
+            "v2 batch percolate accepts `documents`; from, cursor, pit, document and query are not \
+             supported — page per title via /v2/_search",
         )));
     }
     if body.result_mode.unwrap_or_default() != reverse_rusty::ResultMode::TopK {
@@ -51,11 +63,34 @@ pub(super) fn prepare_batch(body: V2MPercolateBody) -> Result<PreparedBatch, Pre
         .collect();
     let (titles, _, filter) = resolve_percolate(None, Some(documents), body.filter, None)
         .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let track_total_hits_up_to = one_alias(
+        body.track_total_hits_up_to,
+        body.track_total_hits,
+        "track_total_hits_up_to` and `track_total_hits",
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?;
+    let include_source = one_alias(
+        body.include_source,
+        body.source,
+        "include_source` and `_source",
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?
+    .unwrap_or(true);
+    let timeout = one_alias(
+        body.timeout_ms.map(Duration::from_millis),
+        body.timeout
+            .as_deref()
+            .map(parse_time_value)
+            .transpose()
+            .map_err(|reason| PrepareFailure::Validation(validation(reason)))?,
+        "timeout_ms` and `timeout",
+    )
+    .map_err(|reason| PrepareFailure::Validation(validation(reason)))?
+    .unwrap_or(Duration::from_secs(30));
     let options = reverse_rusty::TopKOptions {
         search_after: None,
         size: body.size.unwrap_or(reverse_rusty::DEFAULT_TOP_K),
-        track_total_hits_up_to: body
-            .track_total_hits_up_to
+        track_total_hits_up_to: track_total_hits_up_to
             .unwrap_or(reverse_rusty::DEFAULT_TRACK_TOTAL_HITS_UP_TO),
         query_scope: body.query_scope.unwrap_or_default(),
     };
@@ -95,8 +130,8 @@ pub(super) fn prepare_batch(body: V2MPercolateBody) -> Result<PreparedBatch, Pre
             .rank
             .map(RankProgramBody::into_spec)
             .unwrap_or_default(),
-        include_source: body.include_source.unwrap_or(true),
-        timeout: Duration::from_millis(body.timeout_ms.unwrap_or(30_000)),
+        include_source,
+        timeout,
     })
 }
 

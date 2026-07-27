@@ -29,9 +29,9 @@ mod delivery;
 mod mpercolate;
 mod page;
 
+pub(crate) use mpercolate::{cluster_v2_mpercolate_route, v2_mpercolate_route};
 #[cfg(test)]
-pub(crate) use mpercolate::V2MPercolateBody;
-pub(crate) use mpercolate::{cluster_v2_mpercolate, v2_mpercolate};
+pub(crate) use mpercolate::{v2_mpercolate, V2MPercolateBody};
 
 thread_local! {
     static RANKED_SCRATCH: RefCell<reverse_rusty::segment::MatchScratch> =

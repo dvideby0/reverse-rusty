@@ -70,6 +70,10 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
             post(crate::handlers::cluster_v2_search_route),
         )
         .route(
+            "/v2/_mpercolate",
+            post(crate::handlers::cluster_v2_mpercolate_route),
+        )
+        .route(
             "/v2/_pit",
             post(crate::handlers::cluster_open_pit).delete(crate::handlers::cluster_close_pit),
         )

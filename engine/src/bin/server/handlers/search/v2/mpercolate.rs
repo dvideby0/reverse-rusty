@@ -12,7 +12,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::{
+        rejection::{JsonRejection, QueryRejection},
+        Query, State,
+    },
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
@@ -36,10 +43,15 @@ use super::{
 pub(crate) struct V2BatchDoc {
     title: String,
     #[serde(flatten)]
-    extra: std::collections::HashMap<String, serde_json::Value>,
+    extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct V2MPercolateParams {}
+
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct V2MPercolateBody {
     documents: Option<Vec<V2BatchDoc>>,
     filter: Option<serde_json::Value>,
@@ -47,30 +59,43 @@ pub(crate) struct V2MPercolateBody {
     query_scope: Option<reverse_rusty::QueryScope>,
     size: Option<usize>,
     track_total_hits_up_to: Option<u64>,
+    /// ES/OS numeric threshold alias for `track_total_hits_up_to`.
+    track_total_hits: Option<u64>,
     rank: Option<RankProgramBody>,
     include_source: Option<bool>,
+    /// ES/OS spelling for `include_source`.
+    #[serde(rename = "_source")]
+    source: Option<bool>,
     timeout_ms: Option<u64>,
+    /// ES/OS time value (`250ms`, `2s`, ...), equivalent to `timeout_ms`.
+    timeout: Option<String>,
     // Named unsupported shapes produce a stable 400 rather than being ignored.
-    explain: Option<serde_json::Value>,
+    explain: Option<bool>,
     #[serde(rename = "from")]
     page_from: Option<serde_json::Value>,
     cursor: Option<serde_json::Value>,
     /// ADR-113: PIT paging is single-title; the batch surface names the reject
     /// (previously an unknown `pit` key was silently ignored).
     pit: Option<serde_json::Value>,
-    allow_partial_results: Option<serde_json::Value>,
+    allow_partial_results: Option<bool>,
+    /// ES/OS multi-search spelling for the same fail-closed control.
+    allow_partial_search_results: Option<bool>,
     document: Option<serde_json::Value>,
     query: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
 struct V2SlotResponse {
+    timed_out: bool,
+    status: u16,
     _shards: Shards,
     hits: RankedHitsBody,
 }
 
 #[derive(Serialize)]
 pub(crate) struct V2MPercolateResponse {
+    /// ES/OS-compatible whole-millisecond batch duration.
+    took: u64,
     took_ms: f64,
     complete: bool,
     query_scope: reverse_rusty::QueryScope,
@@ -120,6 +145,7 @@ async fn drive_batch<S, E, F>(
     options: reverse_rusty::TopKOptions,
     timeout: Duration,
     deadline: Instant,
+    install_pool: bool,
     work: F,
 ) -> Result<Json<V2MPercolateResponse>, (StatusCode, Json<ApiError>)>
 where
@@ -127,7 +153,7 @@ where
     E: super::delivery::RankedBackendError + std::fmt::Display + Send + 'static,
     F: FnOnce() -> Result<BatchDelivered, DeliveryError<E>> + Send + 'static,
 {
-    let delivered = match run_bounded(&state, deadline, true, work).await {
+    let delivered = match run_bounded(&state, deadline, install_pool, work).await {
         Ok(Ok(Ok(result))) => result,
         Ok(Ok(Err(error))) => {
             return Err(failure_response(
@@ -195,6 +221,7 @@ where
         prom.slow_queries_total.inc();
     }
     Ok(Json(V2MPercolateResponse {
+        took: took_ms.floor() as u64,
         took_ms,
         complete: true,
         query_scope: options.query_scope,
@@ -202,6 +229,8 @@ where
             .slots
             .into_iter()
             .map(|slot| V2SlotResponse {
+                timed_out: false,
+                status: StatusCode::OK.as_u16(),
                 _shards: Shards {
                     total: slot.routed_shards,
                     successful: slot.routed_shards,
@@ -216,12 +245,85 @@ where
     }))
 }
 
+type Reject = (StatusCode, Json<ApiError>);
+
+fn request_rejection<S: RankedSearchCtx>(
+    state: &S,
+    status: StatusCode,
+    error_type: &'static str,
+    reason: String,
+) -> Reject {
+    state
+        .prom()
+        .http_requests_total
+        .with_label_values(&["v2_mpercolate", status.as_str()])
+        .inc();
+    record_outcome(
+        state.prom(),
+        "validation",
+        reverse_rusty::QueryScope::default(),
+    );
+    ApiError::response(status, error_type, reason)
+}
+
+fn body_rejection<S: RankedSearchCtx>(state: &S, error: &JsonRejection) -> Reject {
+    let status = error.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE || status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+        let error_type = if status == StatusCode::PAYLOAD_TOO_LARGE {
+            "payload_too_large"
+        } else {
+            "unsupported_media_type"
+        };
+        return request_rejection(
+            state,
+            status,
+            error_type,
+            format!("invalid v2 mpercolate body: {error}"),
+        );
+    }
+    request_rejection(
+        state,
+        StatusCode::BAD_REQUEST,
+        "validation_error",
+        format!("invalid v2 mpercolate body: {error}"),
+    )
+}
+
+fn query_rejection<S: RankedSearchCtx>(state: &S, error: &QueryRejection) -> Reject {
+    request_rejection(
+        state,
+        StatusCode::BAD_REQUEST,
+        "validation_error",
+        format!("invalid v2 mpercolate query parameters: {error}"),
+    )
+}
+
+/// Strict HTTP extractor boundary for local `POST /v2/_mpercolate`.
+#[instrument(skip_all)]
+pub(crate) async fn v2_mpercolate_route(
+    State(state): State<Arc<AppState>>,
+    params: Result<Query<V2MPercolateParams>, QueryRejection>,
+    body: Result<Json<V2MPercolateBody>, JsonRejection>,
+) -> Result<Json<V2MPercolateResponse>, Reject> {
+    let Query(_) = params.map_err(|error| query_rejection(&*state, &error))?;
+    let Json(body) = body.map_err(|error| body_rejection(&*state, &error))?;
+    v2_mpercolate_inner(state, body).await
+}
+
 /// Multi-document, local-only, exact bounded top-K per slot.
+#[cfg(test)]
 #[instrument(skip_all)]
 pub(crate) async fn v2_mpercolate(
     State(state): State<Arc<AppState>>,
     Json(body): Json<V2MPercolateBody>,
 ) -> Result<Json<V2MPercolateResponse>, (StatusCode, Json<ApiError>)> {
+    v2_mpercolate_inner(state, body).await
+}
+
+async fn v2_mpercolate_inner(
+    state: Arc<AppState>,
+    body: V2MPercolateBody,
+) -> Result<Json<V2MPercolateResponse>, Reject> {
     let started = Instant::now();
     let requested_scope = body.query_scope.unwrap_or_default();
     let prepared = match prepare_batch(body) {
@@ -258,7 +360,7 @@ pub(crate) async fn v2_mpercolate(
     let predicate = snap.compile_tag_predicate(&filter);
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         record_outcome(&state.prom, "validation", options.query_scope);
-        return Err(validation("timeout_ms is too large"));
+        return Err(validation("timeout is too large"));
     };
     let enrichment_limit = state.max_ranked_enrichment_bytes;
     let work = move || {
@@ -275,16 +377,27 @@ pub(crate) async fn v2_mpercolate(
             },
         )
     };
-    drive_batch(state, started, options, timeout, deadline, work).await
+    drive_batch(state, started, options, timeout, deadline, true, work).await
+}
+
+/// Strict HTTP extractor boundary for coordinator `POST /v2/_mpercolate`.
+#[instrument(skip_all)]
+pub(crate) async fn cluster_v2_mpercolate_route(
+    State(state): State<Arc<ClusterAppState>>,
+    params: Result<Query<V2MPercolateParams>, QueryRejection>,
+    body: Result<Json<V2MPercolateBody>, JsonRejection>,
+) -> Result<Json<V2MPercolateResponse>, Reject> {
+    let Query(_) = params.map_err(|error| query_rejection(&*state, &error))?;
+    let Json(body) = body.map_err(|error| body_rejection(&*state, &error))?;
+    cluster_v2_mpercolate_inner(state, body).await
 }
 
 /// Coordinator-mode exact bounded batch: one call per involved shard, union
 /// winner fetch, no partial response.
-#[instrument(skip_all)]
-pub(crate) async fn cluster_v2_mpercolate(
-    State(state): State<Arc<ClusterAppState>>,
-    Json(body): Json<V2MPercolateBody>,
-) -> Result<Json<V2MPercolateResponse>, (StatusCode, Json<ApiError>)> {
+async fn cluster_v2_mpercolate_inner(
+    state: Arc<ClusterAppState>,
+    body: V2MPercolateBody,
+) -> Result<Json<V2MPercolateResponse>, Reject> {
     let started = Instant::now();
     let requested_scope = body.query_scope.unwrap_or_default();
     let prepared = match prepare_batch(body) {
@@ -317,28 +430,45 @@ pub(crate) async fn cluster_v2_mpercolate(
     admit_batch_len(&state.prom, options.query_scope, titles.len(), max_batch)?;
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         record_outcome(&state.prom, "validation", options.query_scope);
-        return Err(validation("timeout_ms is too large"));
+        return Err(validation("timeout is too large"));
     };
     let enrichment_limit = state.max_ranked_enrichment_bytes;
     let cluster_state = Arc::clone(&state);
+    let mutation_fenced = include_source;
     let work = move || {
-        // The cluster read lock is taken INSIDE the blocking closure (never
-        // across an await) and held for fan + fetch + assembly.
-        let cluster = cluster_state.cluster.read();
-        cluster_batch_delivery(
-            &cluster,
-            &program,
-            &filter,
-            &BatchSpec {
-                titles: &titles,
-                options,
-                include_source,
-                enrichment_limit,
-                deadline,
-            },
-        )
+        let spec = BatchSpec {
+            titles: &titles,
+            options,
+            include_source,
+            enrichment_limit,
+            deadline,
+        };
+        if mutation_fenced {
+            // As on `/v2/_search`, source-enriched requests acquire both
+            // mutation fences before entering Rayon so matching and the union
+            // winner fetch cannot observe different same-ID versions.
+            let _write_guard = cluster_state.write_serial.lock();
+            let cluster = cluster_state.cluster.read();
+            let stable_view = cluster.consistent_read_view();
+            cluster_state
+                .pool
+                .install(|| cluster_batch_delivery(&stable_view, &program, &filter, &spec))
+        } else {
+            // Source-free bounded batches retain the fully concurrent path.
+            let cluster = cluster_state.cluster.read();
+            cluster_batch_delivery(&*cluster, &program, &filter, &spec)
+        }
     };
-    drive_batch(state, started, options, timeout, deadline, work).await
+    drive_batch(
+        state,
+        started,
+        options,
+        timeout,
+        deadline,
+        !mutation_fenced,
+        work,
+    )
+    .await
 }
 
 mod delivery;

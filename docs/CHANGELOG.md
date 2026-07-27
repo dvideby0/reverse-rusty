@@ -28,6 +28,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Hardened exact bounded `POST /v2/_search` with strict request parsing, honest ES/OS control
   aliases and timing fields, structured extractor failures, and mutation-fenced cluster winner
   enrichment ([ADR-127](decisions/adr-127-v2-search-api-contract.md)).
+- Hardened exact bounded `POST /v2/_mpercolate` with a strict shared-options envelope, truthful
+  ES/OS control aliases and batch timing/status fields, structured extractor failures, and
+  mutation-fenced cluster union enrichment
+  ([ADR-128](decisions/adr-128-v2-mpercolate-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

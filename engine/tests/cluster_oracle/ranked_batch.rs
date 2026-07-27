@@ -10,6 +10,8 @@ use reverse_rusty::segment::{Engine, MatchScratch};
 use reverse_rusty::{
     QueryScope, RankProgramSpec, TopKAdmissionError, TopKOptions, MAX_RANKED_BATCH_TITLES,
 };
+use std::sync::mpsc;
+use std::time::Duration;
 
 fn ranked_tags(queries: &[(u64, String)]) -> Vec<Vec<(String, String)>> {
     queries
@@ -289,4 +291,70 @@ fn batch_admission_rejects_before_fanning() {
         }
         Err(other) => panic!("unexpected admission outcome: {other:?}"),
     }
+}
+
+/// Batch matching and the later deduplicated union source fetch must share one
+/// mutation-frozen view. Otherwise a same-ID replacement could splice its new
+/// query text onto an old matching slot.
+#[test]
+fn consistent_read_view_fences_batch_match_and_union_source_fetch() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![(5u64, "1994 topps".to_string())];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster");
+    let program = cluster
+        .compile_rank_program(&RankProgramSpec::default())
+        .expect("rank program");
+    let view = cluster.consistent_read_view();
+    let titles = vec![
+        "1994 topps card".to_string(),
+        "another 1994 topps listing".to_string(),
+    ];
+    let ranked = view
+        .try_percolate_filtered_top_k_batch(&titles, &[], TopKOptions::default(), &program, None)
+        .expect("old-view ranked batch");
+    assert_eq!(ranked.titles.len(), 2);
+    assert!(ranked
+        .titles
+        .iter()
+        .all(|title| { title.hits.len() == 1 && title.hits[0].logical_id == 5 }));
+
+    let (write_started_tx, write_started_rx) = mpsc::sync_channel(0);
+    let (write_done_tx, write_done_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let write = scope.spawn(|| {
+            write_started_tx.send(()).expect("signal writer");
+            let result = cluster.upsert_query(5, "1995 fleer", 2);
+            write_done_tx.send(()).expect("signal completion");
+            result
+        });
+        write_started_rx.recv().expect("writer started");
+        assert!(
+            write_done_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "direct upsert crossed the ranked batch read view"
+        );
+        assert_eq!(
+            view.fetch_ranked_sources_batch_bounded(&ranked, 1_024, None)
+                .expect("old-view batch winner sources"),
+            vec![
+                vec!["1994 topps".to_string()],
+                vec!["1994 topps".to_string()]
+            ]
+        );
+        drop(view);
+        write.join().expect("writer thread").expect("upsert");
+    });
+
+    assert_eq!(
+        cluster.get_source(5).expect("new source").as_deref(),
+        Some("1995 fleer")
+    );
+    assert!(!cluster
+        .percolate("1994 topps card")
+        .expect("new-view match")
+        .contains(&5));
 }
