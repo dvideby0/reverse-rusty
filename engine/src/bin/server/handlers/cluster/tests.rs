@@ -39,6 +39,9 @@ fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
         cluster: RwLock::new(cluster),
         write_serial: Mutex::new(()),
         flush_serial: Mutex::new(()),
+        backup_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_BACKUPS,
+        )),
         pool,
         search_permits: None,
         ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),

@@ -19,7 +19,8 @@
 //! ## Atomicity of the backup itself
 //! Everything is staged into a unique sibling
 //! `<dest>.backup.tmp.<pid>.<sequence>` directory, fsync'd, and promoted with an
-//! atomic no-clobber rename where the platform supports it. A crash mid-backup
+//! atomic no-clobber rename. Platforms or filesystems without that primitive
+//! fail closed instead of using a racy check-then-rename. A crash mid-backup
 //! leaves only its uniquely-owned staging dir, never a half-populated `dest`.
 //! Within the staging dir the manifest is written LAST, mirroring the engine's
 //! own "build durable, then commit" discipline, so the staged tree is internally
@@ -171,10 +172,10 @@ fn reserve_staging_dir(dest: &Path) -> Result<PathBuf, BackupError> {
 }
 
 /// Rename a directory without replacing an entry that appeared at `dest` after
-/// request validation. Linux/Android and Apple platforms provide an atomic
-/// no-replace flag. The portability fallback repeats the symlink-aware check
-/// immediately before `std::fs::rename`; supported production platforms never
-/// have that check/rename race.
+/// request validation. Linux/Android, Apple, and Redox platforms expose an
+/// atomic no-replace flag. If that call or target platform cannot provide the
+/// primitive, fail closed rather than weakening the no-clobber contract with a
+/// check-then-rename race.
 fn rename_noreplace(staging: &Path, dest: &Path) -> io::Result<()> {
     #[cfg(any(
         target_os = "android",
@@ -188,26 +189,26 @@ fn rename_noreplace(staging: &Path, dest: &Path) -> io::Result<()> {
     ))]
     {
         use rustix::fs::{renameat_with, RenameFlags, CWD};
-        use rustix::io::Errno;
-
-        match renameat_with(CWD, staging, CWD, dest, RenameFlags::NOREPLACE) {
-            Ok(()) => return Ok(()),
-            Err(Errno::NOSYS | Errno::INVAL | Errno::NOTSUP) => {}
-            Err(error) => return Err(error.into()),
-        }
+        renameat_with(CWD, staging, CWD, dest, RenameFlags::NOREPLACE).map_err(Into::into)
     }
 
-    match std::fs::symlink_metadata(dest) {
-        Ok(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("backup destination already exists: {}", dest.display()),
-            ))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos",
+        target_os = "redox",
+    )))]
+    {
+        let _ = (staging, dest);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic no-replace rename is unavailable on this platform",
+        ))
     }
-    std::fs::rename(staging, dest)
 }
 
 /// Atomically commit a fully-staged directory to `dest` without clobbering a

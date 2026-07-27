@@ -29,6 +29,9 @@ use crate::metrics::PrometheusMetrics;
 
 /// Static winner-enrichment budget shared by local and coordinator v2 search.
 pub(crate) const DEFAULT_MAX_RANKED_ENRICHMENT_BYTES: usize = 16 * 1024 * 1024;
+/// Backups serialize behind the engine/cluster writer lock, so admitting more
+/// than one blocking worker would only create a detached blocking-pool queue.
+pub(crate) const MAX_CONCURRENT_BACKUPS: usize = 1;
 
 pub(crate) struct AppState {
     pub(crate) engine: Mutex<Engine>,
@@ -36,6 +39,10 @@ pub(crate) struct AppState {
     /// `wait_if_ongoing=false` can reject only a competing flush, matching the
     /// ES/OpenSearch control instead of conflating it with any writer.
     pub(crate) flush_serial: Mutex<()>,
+    /// One admitted backup at a time. The owned permit moves into the blocking
+    /// closure so a disconnected request cannot release admission while its
+    /// backup is still waiting on or holding the engine writer lock.
+    pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) snapshot: ArcSwap<EngineSnapshot>,
     pub(crate) pool: rayon::ThreadPool,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
@@ -104,6 +111,8 @@ pub(crate) struct ClusterAppState {
     /// Explicit-flush admission, separate from the general write serializer for
     /// the same `wait_if_ongoing` reason as [`AppState::flush_serial`].
     pub(crate) flush_serial: Mutex<()>,
+    /// Coordinator analogue of [`AppState::backup_permits`].
+    pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pool: rayon::ThreadPool,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
     /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,

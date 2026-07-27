@@ -336,6 +336,9 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         cluster: RwLock::new(cluster),
         write_serial: Mutex::new(()),
         flush_serial: Mutex::new(()),
+        backup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_BACKUPS,
+        )),
         pool,
         search_permits: (cli.max_concurrent_searches > 0)
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),

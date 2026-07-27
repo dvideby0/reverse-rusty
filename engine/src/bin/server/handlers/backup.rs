@@ -45,6 +45,11 @@ pub(crate) struct PreparedBackup {
     pub(crate) path: PathBuf,
 }
 
+enum BackupExecutionError {
+    AdmissionClosed,
+    Worker(tokio::task::JoinError),
+}
+
 #[derive(Serialize)]
 pub(crate) struct BackupResponse {
     took: u64,
@@ -184,22 +189,36 @@ pub(crate) fn validate_backup_request(
     })
 }
 
+/// Wait for the single backup-admission slot before creating a blocking worker.
+/// The caller must move the returned permit into that worker so cancellation of
+/// the HTTP future cannot admit another backup while detached work continues.
+pub(crate) async fn acquire_backup_permit(
+    permits: &Arc<tokio::sync::Semaphore>,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ()> {
+    Arc::clone(permits).acquire_owned().await.map_err(|_| ())
+}
+
 async fn execute_backup(
     state: Arc<AppState>,
     dest: PathBuf,
-) -> Result<Result<(), BackupError>, tokio::task::JoinError> {
+) -> Result<Result<(), BackupError>, BackupExecutionError> {
+    let permit = acquire_backup_permit(&state.backup_permits)
+        .await
+        .map_err(|()| BackupExecutionError::AdmissionClosed)?;
     tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let mut engine = state.engine.lock();
         engine.backup_to(&dest)
     })
     .await
+    .map_err(BackupExecutionError::Worker)
 }
 
 #[cfg(test)]
-pub(super) async fn execute_backup_for_test(
+async fn execute_backup_for_test(
     state: Arc<AppState>,
     dest: PathBuf,
-) -> Result<Result<(), BackupError>, tokio::task::JoinError> {
+) -> Result<Result<(), BackupError>, BackupExecutionError> {
     execute_backup(state, dest).await
 }
 
@@ -229,7 +248,16 @@ pub(crate) async fn backup_route(
     };
     let result = match execute_backup(Arc::clone(&state), prepared.path).await {
         Ok(result) => result,
-        Err(join_error) => {
+        Err(BackupExecutionError::AdmissionClosed) => {
+            error!("backup admission unexpectedly closed");
+            return backup_rejection(
+                &state.prom,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "backup admission unavailable",
+            );
+        }
+        Err(BackupExecutionError::Worker(join_error)) => {
             error!(error = %join_error, "backup worker failed");
             return backup_rejection(
                 &state.prom,

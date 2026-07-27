@@ -101,8 +101,10 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
 - `POST /_backup {"dest": "<path>"}` snapshots the durable state to a **server-side** directory. It is
   **gated by the default-deny auth** (a non-GET mutation), staged into a uniquely-owned sibling
   `<dest>.backup.tmp.<pid>.<sequence>`, and atomically promoted with no-clobber semantics on the
-  shipped Linux platform. It **refuses any pre-existing destination entry** (including a dangling
-  symlink) and verifies every segment before commit (`storage/backup.rs`).
+  shipped Linux platform. Atomic promotion fails closed when the primitive is unavailable. It
+  **refuses any pre-existing destination entry** (including a dangling symlink), verifies every
+  segment before commit, and admits only one blocking backup worker per server; that admission
+  remains held if the client disconnects (`storage/backup.rs`, `bin/server/handlers/backup.rs`).
 - **Finding — no path normalization.** The handler converts the client-supplied `dest` string straight
   to a `PathBuf` (`bin/server/handlers/backup.rs`) with no canonicalization or jail. An authenticated
   caller can therefore write a backup tree anywhere the **service account** can write (uid 10001 in the
@@ -117,7 +119,8 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
     that escape a configured backup root). It is tracked under
     [`Security hardening beyond the v1 trust model`](../roadmap.md#security-hardening-beyond-the-v1-trust-model).
 - **Threats addressed:** unauthorized backup (auth-gated), silent overwrite or staging-tree
-  collision between competing backups (refused/isolated), a torn backup corrupting the source (the
+  collision between competing backups (refused/isolated), blocking-pool exhaustion through
+  detached backup queues (single-slot admission), and a torn backup corrupting the source (the
   source is read-only during the copy; ADR-079/139).
 
 ### 4. Process ↔ host (the container)

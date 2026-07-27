@@ -195,7 +195,7 @@ The full method/path matrix is below.
 | `/_flush` | GET/POST | Strictly flush memtables with ES/OS `force`, `wait_if_ongoing`, timing, and shard results (ADR-137) |
 | `/_compact` | POST | Strict native force-all compaction with timing, shard result, and detailed merge report (ADR-138) |
 | `/_forcemerge` | POST | ES/OS-familiar policy/force-all alias with strict supported controls (ADR-138) |
-| `/_backup` | POST | Strict native, synchronous snapshot of a durable single engine or in-process cluster to a fresh server-side dir (body `{"dest":"..."}`); a stateless remote coordinator returns 400 ([backup/restore](../operations/backup-restore.md), ADR-079/139) |
+| `/_backup` | POST | Strict native, synchronous snapshot of a durable single engine or in-process cluster to a fresh server-side dir (body `{"dest":"..."}`); one backup is admitted per server and excess calls wait asynchronously; a stateless remote coordinator returns 400 ([backup/restore](../operations/backup-restore.md), ADR-079/139) |
 | `/_stats` | GET | JSON metrics snapshot |
 | `/_cat/stats` | GET | Human-readable metrics |
 | `/_cat/segments` | GET | Per-segment LSM detail (text table or `?format=json`) |

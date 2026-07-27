@@ -38,23 +38,27 @@
 - **Decision — execution.** Copy and verification run in `spawn_blocking`, including the
   in-process cluster's checkpoint. The blocking closure owns the same standalone engine mutex or
   cluster writer-serialization plus read-lock scope required by ADR-079, so no mutation can retire
-  a selected file between manifest read and copy. Reads continue from published snapshots. Once
-  admitted, disconnecting the HTTP future does not cancel the blocking backup; this avoids an
-  HTTP cancellation seam inside filesystem commit.
+  a selected file between manifest read and copy. Reads continue from published snapshots. Each
+  server has one backup-admission permit, acquired before spawning and moved into the blocking
+  closure. Excess calls wait asynchronously and disappear cleanly if cancelled while waiting.
+  Once admitted, disconnecting the HTTP future neither cancels the backup nor releases admission
+  early; this avoids both an HTTP cancellation seam inside filesystem commit and an unbounded
+  detached blocking-worker queue.
 
 - **Decision — destination and staging ownership.** Every operation atomically reserves a unique
   sibling `<dest>.backup.tmp.<pid>.<sequence>` directory. It never removes or writes another
   process's staging tree. Destination preflight uses `symlink_metadata`, so a dangling symlink is
   occupied. On Linux/Android and Apple platforms, final promotion uses the OS no-replace rename
-  flag; an entry that appears after preflight yields `DestExists` and remains untouched. Other
-  platforms retain a symlink-aware check immediately before the standard rename. A failed
-  pre-commit attempt removes only its own staging tree; a process crash can leave that uniquely
-  named tree for operator cleanup but never a half-populated final destination.
+  flag; an entry that appears after preflight yields `DestExists` and remains untouched. If the
+  platform, kernel, or target filesystem cannot provide atomic no-replace rename, promotion fails
+  closed rather than falling back to a check-then-standard-rename race. A failed pre-commit attempt
+  removes only its own staging tree; a process crash can leave that uniquely named tree for
+  operator cleanup but never a half-populated final destination.
 
 - **Safety and proof.** The manifest/WAL/checkpoint selection, verification, restore path, and write
   exclusion from ADR-079 are unchanged, so match-set and recovery equivalence remain owned by the
   persistence and cluster durability oracles. New storage tests pin dangling-symlink refusal,
   no-clobber final promotion, unique staging reservations, and failure cleanup. New standalone and
   coordinator route tests pin strict validation, body bounds, stable precondition errors, common
-  timing fields, cluster epoch reporting, verified output, and runtime responsiveness plus
-  completion after a dropped admitted request.
+  timing fields, cluster epoch reporting, verified output, runtime responsiveness, bounded
+  pre-spawn admission, and completion after a dropped admitted request.

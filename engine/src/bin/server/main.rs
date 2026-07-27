@@ -397,6 +397,9 @@ async fn main() {
     let state = Arc::new(AppState {
         engine: Mutex::new(engine),
         flush_serial: Mutex::new(()),
+        backup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_BACKUPS,
+        )),
         snapshot: ArcSwap::new(initial_snapshot),
         pool,
         search_permits: (cli.max_concurrent_searches > 0)

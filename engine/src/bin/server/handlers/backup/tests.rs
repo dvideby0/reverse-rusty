@@ -26,6 +26,9 @@ fn state_with_engine(engine: Engine) -> Arc<AppState> {
     Arc::new(AppState {
         engine: Mutex::new(engine),
         flush_serial: Mutex::new(()),
+        backup_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_BACKUPS,
+        )),
         snapshot: ArcSwap::new(snapshot),
         pool,
         search_permits: None,
@@ -243,18 +246,42 @@ async fn dropped_request_does_not_cancel_admitted_backup_or_block_timers() {
             .is_err(),
         "the async timer must run while the blocking worker waits for the writer"
     );
+    assert_eq!(
+        state.backup_permits.available_permits(),
+        0,
+        "the detached blocking worker must own backup admission"
+    );
+
+    let queued_dest = root.join("queued-backup");
+    let mut queued = Box::pin(execute_backup_for_test(
+        Arc::clone(&state),
+        queued_dest.clone(),
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), queued.as_mut())
+            .await
+            .is_err(),
+        "a second backup waits asynchronously instead of entering the blocking pool"
+    );
+    drop(queued);
+    assert!(
+        !queued_dest.exists(),
+        "cancelling a request still waiting for admission must not launch its backup"
+    );
+
     drop(admitted);
     release_tx.send(()).expect("release engine");
     holder.join().expect("lock holder");
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while !dest.exists() {
+        while !dest.exists() || state.backup_permits.available_permits() != 1 {
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("detached admitted backup completes");
+    .expect("detached admitted backup completes and releases admission");
     storage::verify_backup(&dest).expect("detached backup verifies");
+    assert!(!queued_dest.exists());
 
     drop(state);
     std::fs::remove_dir_all(root).expect("cleanup");

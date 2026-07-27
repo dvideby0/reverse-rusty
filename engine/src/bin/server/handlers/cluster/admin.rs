@@ -38,7 +38,8 @@ use crate::handlers::admin::{
     acquire_flush, validate_flush_method, validate_flush_request, FlushParams, FlushResponse,
 };
 use crate::handlers::backup::{
-    backup_rejection, validate_backup_method, validate_backup_request, BackupResponse,
+    acquire_backup_permit, backup_rejection, validate_backup_method, validate_backup_request,
+    BackupResponse,
 };
 use crate::state::ClusterAppState;
 
@@ -408,9 +409,19 @@ pub(crate) async fn cluster_backup(
         Ok(prepared) => prepared,
         Err(response) => return *response,
     };
+    let Ok(permit) = acquire_backup_permit(&state.backup_permits).await else {
+        error!("cluster backup admission unexpectedly closed");
+        return backup_rejection(
+            &state.prom,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "backup admission unavailable",
+        );
+    };
     let work_state = Arc::clone(&state);
     let dest = prepared.path;
     let result = match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         let _writer = work_state.write_serial.lock();
         let cluster = work_state.cluster.read();
         cluster.backup_to(&dest).map(|()| cluster.epoch())

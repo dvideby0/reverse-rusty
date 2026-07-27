@@ -61,6 +61,9 @@ fn state(query_count: u64, channel_depth: usize) -> Arc<AppState> {
     Arc::new(AppState {
         engine: Mutex::new(engine),
         flush_serial: Mutex::new(()),
+        backup_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_BACKUPS,
+        )),
         snapshot: ArcSwap::new(snapshot),
         pool: rayon::ThreadPoolBuilder::new()
             .num_threads(1)
