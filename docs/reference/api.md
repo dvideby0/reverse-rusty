@@ -189,7 +189,7 @@ The full method/path matrix is below.
 | `/_percolate/jobs/{id}/stream` | GET | Strictly claim one native, bounded, terminally attested `application/x-ndjson` consumer (ADR-114/134) |
 | `/_mpercolate` | POST | Strict full-result batch percolate with a native JSON shared-options request, ES/OS-familiar controls/status fields, fail-closed slots, and standalone columnar broad-lane amortization (ADR-135) |
 | `/_bulk` | POST | Strict NDJSON `index`/`create` batch with ordered per-item outcomes and a fresh-corpus segment fast path (ADR-136) |
-| `/_flush` | POST | Flush memtable to immutable segment |
+| `/_flush` | GET/POST | Strictly flush memtables with ES/OS `force`, `wait_if_ongoing`, timing, and shard results (ADR-137) |
 | `/_compact` | POST | Force segment compaction |
 | `/_backup` | POST | Snapshot a durable single engine or in-process cluster to a server-side dir (body `{"dest":"..."}`); a stateless remote coordinator returns 400 ([backup/restore](../operations/backup-restore.md), ADR-079) |
 | `/_stats` | GET | JSON metrics snapshot |

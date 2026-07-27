@@ -22,6 +22,7 @@ mod backup;
 mod checkpoint;
 mod class_d;
 mod core;
+mod flush;
 mod hot;
 mod ranked;
 mod replication;

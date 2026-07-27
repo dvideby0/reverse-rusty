@@ -20,8 +20,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::State,
-    http::StatusCode,
+    body::Bytes,
+    extract::{
+        rejection::{BytesRejection, QueryRejection},
+        Query, State,
+    },
+    http::{Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -30,9 +34,12 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, info, instrument};
 
 use crate::dto::ApiVersion;
+use crate::handlers::admin::{
+    acquire_flush, validate_flush_method, validate_flush_request, FlushParams, FlushResponse,
+};
 use crate::state::ClusterAppState;
 
-use super::{not_in_cluster_mode, shard_error_response};
+use super::{not_in_cluster_mode, shard_error_response, shard_error_status};
 
 #[derive(Serialize)]
 struct ClusterRootResponse {
@@ -282,20 +289,61 @@ pub(crate) async fn cluster_metrics(State(state): State<Arc<ClusterAppState>>) -
         .into_response()
 }
 
-/// POST /_flush — seal every shard's memtable into an immutable segment.
+/// GET/POST `/_flush` — seal every shard's memtable into an immutable segment.
 #[instrument(skip_all)]
-pub(crate) async fn cluster_flush(State(state): State<Arc<ClusterAppState>>) -> Response {
-    let result = {
+pub(crate) async fn cluster_flush_route(
+    State(state): State<Arc<ClusterAppState>>,
+    method: Method,
+    params: Result<Query<FlushParams>, QueryRejection>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["flush"])
+        .start_timer();
+    let started = Instant::now();
+    if let Err(response) = validate_flush_method(&state.prom, &method) {
+        return *response;
+    }
+    let params = match validate_flush_request(&state.prom, params, body) {
+        Ok(params) => params,
+        Err(response) => return *response,
+    };
+    let force = params.force_requested();
+    let _flush = match acquire_flush(&state.flush_serial, params, &state.prom) {
+        Ok(guard) => guard,
+        Err(response) => return *response,
+    };
+    let (shards, result) = {
         let _w = state.write_serial.lock();
         let cluster = state.cluster.read();
-        cluster.flush()
+        (cluster.num_shards(), cluster.flush())
     };
     match result {
         Ok(()) => {
-            info!("cluster flush complete");
-            Json(serde_json::json!({"acknowledged": true})).into_response()
+            let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
+            info!(force, shards, took_ms, "cluster flush complete");
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["flush", "200"])
+                .inc();
+            Json(FlushResponse::new(
+                took_ms, true, shards, shards, None, None,
+            ))
+            .into_response()
         }
-        Err(e) => shard_error_response("flush failed", &e),
+        Err(e) => {
+            let status = shard_error_status(&e);
+            error!(force, error = %e, "cluster flush failed");
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["flush", status.as_str()])
+                .inc();
+            shard_error_response("flush failed", &e)
+        }
     }
 }
 

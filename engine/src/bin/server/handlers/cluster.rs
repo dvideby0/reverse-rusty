@@ -33,7 +33,7 @@ mod tests;
 
 pub(crate) use admin::{
     cluster_backup, cluster_cat_segments, cluster_cat_shards, cluster_cat_stats,
-    cluster_checkpoint, cluster_compact, cluster_deregister_node, cluster_flush, cluster_gc,
+    cluster_checkpoint, cluster_compact, cluster_deregister_node, cluster_flush_route, cluster_gc,
     cluster_handoff, cluster_health, cluster_metrics, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync, cluster_root,
     cluster_state, cluster_stats,

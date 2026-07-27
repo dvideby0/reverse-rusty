@@ -32,6 +32,10 @@ pub(crate) const DEFAULT_MAX_RANKED_ENRICHMENT_BYTES: usize = 16 * 1024 * 1024;
 
 pub(crate) struct AppState {
     pub(crate) engine: Mutex<Engine>,
+    /// Serializes explicit flush requests separately from ordinary writes so
+    /// `wait_if_ongoing=false` can reject only a competing flush, matching the
+    /// ES/OpenSearch control instead of conflating it with any writer.
+    pub(crate) flush_serial: Mutex<()>,
     pub(crate) snapshot: ArcSwap<EngineSnapshot>,
     pub(crate) pool: rayon::ThreadPool,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
@@ -97,6 +101,9 @@ pub(crate) struct ClusterAppState {
     /// Serializes mutating requests (the `Mutex<Engine>` analogue), so concurrent
     /// bulk batches don't interleave their per-item apply order. Reads never take it.
     pub(crate) write_serial: Mutex<()>,
+    /// Explicit-flush admission, separate from the general write serializer for
+    /// the same `wait_if_ongoing` reason as [`AppState::flush_serial`].
+    pub(crate) flush_serial: Mutex<()>,
     pub(crate) pool: rayon::ThreadPool,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
     /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,

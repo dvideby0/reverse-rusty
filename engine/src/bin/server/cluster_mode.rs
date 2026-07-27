@@ -37,7 +37,7 @@ use crate::handlers::{
     cluster_backup, cluster_bulk_route, cluster_cancel_job, cluster_cat_segments,
     cluster_cat_shards, cluster_cat_stats, cluster_checkpoint, cluster_compact,
     cluster_create_job_route, cluster_delete_doc, cluster_deregister_node,
-    cluster_discover_aliases, cluster_discover_and_record_aliases, cluster_flush, cluster_gc,
+    cluster_discover_aliases, cluster_discover_and_record_aliases, cluster_flush_route, cluster_gc,
     cluster_get_alias_feedback, cluster_get_aliases, cluster_get_doc, cluster_get_job,
     cluster_get_job_stream, cluster_get_settings, cluster_get_vocab, cluster_handoff,
     cluster_health, cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
@@ -335,6 +335,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
     let state = Arc::new(ClusterAppState {
         cluster: RwLock::new(cluster),
         write_serial: Mutex::new(()),
+        flush_serial: Mutex::new(()),
         pool,
         search_permits: (cli.max_concurrent_searches > 0)
             .then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(cli.max_concurrent_searches))),
@@ -384,7 +385,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         .route("/_percolate/jobs/{id}/stream", any(cluster_get_job_stream))
         .route("/_mpercolate", post(cluster_mpercolate_route))
         .route("/_bulk", post(cluster_bulk_route))
-        .route("/_flush", post(cluster_flush))
+        .route("/_flush", any(cluster_flush_route))
         .route("/_checkpoint", post(cluster_checkpoint))
         .route("/_backup", post(cluster_backup))
         .route("/_compact", post(cluster_compact))

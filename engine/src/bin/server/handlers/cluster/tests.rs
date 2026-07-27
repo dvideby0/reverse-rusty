@@ -38,6 +38,7 @@ fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
     Arc::new(ClusterAppState {
         cluster: RwLock::new(cluster),
         write_serial: Mutex::new(()),
+        flush_serial: Mutex::new(()),
         pool,
         search_permits: None,
         ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
@@ -97,7 +98,7 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         )
         .route("/_mpercolate", post(cluster_mpercolate_route))
         .route("/_bulk", post(cluster_bulk_route))
-        .route("/_flush", post(cluster_flush))
+        .route("/_flush", any(cluster_flush_route))
         .route("/_checkpoint", post(cluster_checkpoint))
         .route("/_compact", post(cluster_compact))
         .route("/_stats", get(cluster_stats))
@@ -168,6 +169,7 @@ fn seed() -> Vec<(u64, String)> {
 mod admin;
 mod bulk;
 mod crud;
+mod flush;
 mod jobs;
 mod pit;
 mod ranked;
