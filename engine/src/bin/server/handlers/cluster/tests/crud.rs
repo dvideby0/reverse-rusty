@@ -340,13 +340,15 @@ async fn rejections_are_loud_not_silent() {
         .expect("reason")
         .contains("explain"));
 
-    // /_compact + PUT /_settings → 501 with the alternative named.
-    let (status, body) = send(&state, req_empty("POST", "/_compact")).await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-    assert!(body["error"]["reason"]
-        .as_str()
-        .expect("reason")
-        .contains("_checkpoint"));
+    // Compaction aliases + PUT /_settings → 501 with the alternative named.
+    for uri in ["/_compact", "/_forcemerge"] {
+        let (status, body) = send(&state, req_empty("POST", uri)).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+        assert!(body["error"]["reason"]
+            .as_str()
+            .expect("reason")
+            .contains("_checkpoint"));
+    }
     let (status, _) = send(
         &state,
         req("PUT", "/_settings", &serde_json::json!({"max_segments": 4})),

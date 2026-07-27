@@ -96,9 +96,10 @@ values appear in process listings), **every non-GET/HEAD request requires
 `POST`/`DELETE /v2/_pit` lifecycle. `POST /v2/_mpercolate` is **not** on that allowlist and currently
 requires the token. Exhaustive job inspection/streaming stays open through GET; cancelling a job with
 DELETE is protected. The default-deny rule also covers `_doc` writes, `_bulk`, `_flush`, `_compact`,
-`_backup`, `_vocab` writes (including `/_vocab/learn*` and `/_vocab/aliases/*`), `_settings` writes,
-and any future mutating endpoint. `--auth-protect-reads` extends the gate to every read surface in the
-allowlist/GET/HEAD set; only `GET /_health` remains open for liveness probes.
+`_forcemerge`, `_backup`, `_vocab` writes (including `/_vocab/learn*` and
+`/_vocab/aliases/*`), `_settings` writes, and any future mutating endpoint. `--auth-protect-reads`
+extends the gate to every read surface in the allowlist/GET/HEAD set; only `GET /_health` remains open
+for liveness probes.
 
 Failures return **401** with the standard error envelope (`"type": "security_exception"`) and an
 RFC 6750 `WWW-Authenticate: Bearer` challenge (`error="invalid_token"` when a wrong token was
@@ -162,7 +163,8 @@ Endpoints are grouped by concern — open the one you need:
 - **[Percolate](api/percolate.md)** — match titles against stored queries (`GET`/`POST /_search`,
   local/cluster bounded `POST /v2/_search`, `POST /_mpercolate`, and `POST /v2/_mpercolate`), including filtered
   percolation and exhaustive `result_mode=all` jobs with a terminally verified NDJSON stream.
-- **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`, `/_flush`, `/_compact`).
+- **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`,
+  `/_flush`, native `/_compact`, and ES/OS `/_forcemerge`).
 - **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
 - **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias registry (`/_vocab/aliases*`, ADR-060).
 - **[Settings](api/settings.md)** — read + runtime-update engine settings (`GET`/`PUT /_settings`).
@@ -190,7 +192,8 @@ The full method/path matrix is below.
 | `/_mpercolate` | POST | Strict full-result batch percolate with a native JSON shared-options request, ES/OS-familiar controls/status fields, fail-closed slots, and standalone columnar broad-lane amortization (ADR-135) |
 | `/_bulk` | POST | Strict NDJSON `index`/`create` batch with ordered per-item outcomes and a fresh-corpus segment fast path (ADR-136) |
 | `/_flush` | GET/POST | Strictly flush memtables with ES/OS `force`, `wait_if_ongoing`, timing, and shard results (ADR-137) |
-| `/_compact` | POST | Force segment compaction |
+| `/_compact` | POST | Strict native force-all compaction with timing, shard result, and detailed merge report (ADR-138) |
+| `/_forcemerge` | POST | ES/OS-familiar policy/force-all alias with strict supported controls (ADR-138) |
 | `/_backup` | POST | Snapshot a durable single engine or in-process cluster to a server-side dir (body `{"dest":"..."}`); a stateless remote coordinator returns 400 ([backup/restore](../operations/backup-restore.md), ADR-079) |
 | `/_stats` | GET | JSON metrics snapshot |
 | `/_cat/stats` | GET | Human-readable metrics |
@@ -303,9 +306,10 @@ Behavior deltas from single-node mode (all deliberate, none silent):
 - **`GET /_settings` works in cluster mode** — it returns the live cluster + per-shard configuration
   (`mode`, `shards`, `replication_factor`, `include_broad`, `durable`, and the assembled `per_shard`
   `EngineConfig`). Only **`PUT /_settings`** is 501 in cluster mode (see below).
-- **Single-node-only surfaces answer 501 naming the alternative:** `/_compact` (per-shard policy;
-  use `POST /_checkpoint` for the durability commit), `PUT /_settings` (cluster settings are fixed
-  at assembly — restart the coordinator with the new flags), `/_cat/stats`, `/_cat/segments`.
+- **Single-node-only surfaces answer 501 naming the alternative:** `/_compact` / `/_forcemerge`
+  (per-shard policy; use `POST /_checkpoint` for the durability commit), `PUT /_settings` (cluster
+  settings are fixed at assembly — restart the coordinator with the new flags), `/_cat/stats`,
+  `/_cat/segments`.
 - **Vocabulary admin** (`PUT /_vocab`, `/_vocab/learn_and_apply`, `/_vocab/aliases/*`) maps onto the
   cluster blue/green rebuild (ADR-046); its one refusal — non-local (gRPC) shards — surfaces as a 400
   with the engine's message. The current remote transport ships dictionaries but not normalizers, so

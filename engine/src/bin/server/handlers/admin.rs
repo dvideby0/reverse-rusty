@@ -2,15 +2,16 @@
 //! the API root, and the Prometheus exposition. These project engine introspection
 //! ([`reverse_rusty::events`] metrics + per-segment info) into the REST surface.
 
+mod compact;
 mod flush;
 
+pub(crate) use compact::{compact_route, force_merge_route};
 pub(crate) use flush::{
     acquire_flush, flush_route, validate_flush_method, validate_flush_request, FlushParams,
     FlushResponse,
 };
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use axum::{
     extract::{Query, State},
@@ -20,40 +21,12 @@ use axum::{
 };
 use prometheus::{Encoder, TextEncoder};
 use serde::{Deserialize, Serialize};
-use tracing::{error, info, instrument};
+use tracing::error;
 
 use reverse_rusty::events::SegmentInfo;
 
 use crate::dto::ApiVersion;
 use crate::state::AppState;
-
-// -- POST /_compact
-#[derive(Serialize)]
-struct CompactResponse {
-    took_ms: f64,
-    acknowledged: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    segments_merged: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    entries_before: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    entries_after: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tombstones_reclaimed: Option<usize>,
-    /// Queries re-anchored during the merge (ADR-056); present (and >0) only when
-    /// `compaction_reanchor` is enabled and drift actually moved a query.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reanchored: Option<usize>,
-    /// Hot-tier lane moves main→hot during the merge (ADR-105); present only
-    /// when the migration ran.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hot_promoted: Option<usize>,
-    /// Hot-tier lane moves hot→main (past the θ/2 margin gate) during the merge.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    hot_demoted: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<&'static str>,
-}
 
 // -- GET /_stats
 #[derive(Serialize)]
@@ -198,98 +171,6 @@ struct RootResponse {
     cluster_uuid: &'static str,
     version: ApiVersion,
     tagline: &'static str,
-}
-
-/// POST /_compact
-#[instrument(skip_all)]
-pub(crate) async fn compact(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let start = Instant::now();
-    let (report, persistence_healthy) = {
-        let mut engine = state.engine.lock();
-        let report = engine.maybe_compact();
-        (report, engine.persistence_healthy)
-    };
-    state.publish_snapshot();
-    let took_ms = start.elapsed().as_secs_f64() * 1000.0;
-    // Fail closed (ADR-051): a compaction that can't durably commit is rolled back
-    // — the source segments stay intact, so no data is lost — but durability is
-    // degraded and we must not acknowledge it as durable. This also catches a
-    // sticky failure latched by an earlier op. 503 mirrors the `/_bulk` contract.
-    let (status, code, resp) = if !persistence_healthy {
-        error!("compaction not durably acknowledged; merge rolled back, persistence degraded");
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "503",
-            CompactResponse {
-                took_ms,
-                acknowledged: false,
-                segments_merged: None,
-                entries_before: None,
-                entries_after: None,
-                tombstones_reclaimed: None,
-                reanchored: None,
-                hot_promoted: None,
-                hot_demoted: None,
-                message: Some("persistence degraded; compaction not durably acknowledged"),
-            },
-        )
-    } else if let Some(r) = report {
-        info!(
-            segments_merged = r.segments_merged,
-            entries_before = r.entries_before,
-            entries_after = r.entries_after,
-            tombstones_reclaimed = r.tombstones_reclaimed,
-            reanchored = r.reanchored,
-            hot_promoted = r.hot_promoted,
-            hot_demoted = r.hot_demoted,
-            "compaction complete"
-        );
-        (
-            StatusCode::OK,
-            "200",
-            CompactResponse {
-                took_ms,
-                acknowledged: true,
-                segments_merged: Some(r.segments_merged),
-                entries_before: Some(r.entries_before),
-                entries_after: Some(r.entries_after),
-                tombstones_reclaimed: Some(r.tombstones_reclaimed),
-                reanchored: Some(r.reanchored),
-                hot_promoted: Some(r.hot_promoted),
-                hot_demoted: Some(r.hot_demoted),
-                message: None,
-            },
-        )
-    } else {
-        info!("compaction skipped: not needed");
-        (
-            StatusCode::OK,
-            "200",
-            CompactResponse {
-                took_ms,
-                acknowledged: true,
-                segments_merged: None,
-                entries_before: None,
-                entries_after: None,
-                tombstones_reclaimed: None,
-                reanchored: None,
-                hot_promoted: None,
-                hot_demoted: None,
-                message: Some("no compaction needed"),
-            },
-        )
-    };
-    state
-        .prom
-        .http_requests_total
-        .with_label_values(&["compact", code])
-        .inc();
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["compact"])
-        .observe(start.elapsed().as_secs_f64());
-    (status, Json(resp))
 }
 
 /// GET /_stats — JSON metrics snapshot.
@@ -568,3 +449,6 @@ mod cat_segments_tests;
 
 #[cfg(test)]
 mod flush_tests;
+
+#[cfg(test)]
+mod compact_tests;

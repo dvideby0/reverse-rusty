@@ -23,6 +23,7 @@ Write paths, segments, WAL and source persistence, compaction, recovery, and dur
 | [122](../adr-122-fail-closed-positional-tombstones.md) | Fail-closed positional tombstones | Uses generation-bearing addresses so stale or dead positional deletes reject before WAL append. | Accepted |
 | [136](../adr-136-bulk-api-contract.md) | Bulk REST API contract | Makes NDJSON strict, aligns index/create semantics, and preserves the fresh-corpus segment fast path. | Accepted |
 | [137](../adr-137-flush-api-contract.md) | Flush REST API contract | Adds strict familiar controls and shard results while surfacing local shard durability failures. | Accepted |
+| [138](../adr-138-compaction-api-contract.md) | Compaction REST API contract | Makes native force-all truthful and adds a strict force-merge compatibility subset. | Accepted |
 
 ---
 

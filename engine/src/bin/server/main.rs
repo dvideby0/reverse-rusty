@@ -10,6 +10,7 @@
 //!   POST /_bulk              NDJSON bulk ingest ({action}\n{source}\n...)
 //!   GET/POST /_flush         Flush memtable to immutable segment
 //!   POST /_compact           Force compaction
+//!   POST /_forcemerge        ES/OpenSearch-familiar force merge
 //!   POST /_backup            Snapshot durable state to a dir (body: {"dest":"..."})
 //!   GET  /_stats             JSON metrics snapshot
 //!   GET  /_cat/stats         Human-readable metrics
@@ -75,13 +76,14 @@ use reverse_rusty::segment::Engine;
 
 use cli::Cli;
 use handlers::{
-    api_root, backup, bulk_route, cancel_job, cat_segments, cat_stats, close_pit_route, compact,
-    create_job_route, delete_doc, discover_aliases, discover_and_record_aliases, flush_route,
-    get_alias_feedback, get_aliases, get_doc, get_job, get_job_stream, get_settings, get_vocab,
-    health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
-    mpercolate_route, open_pit_route, prometheus_metrics, put_doc, put_settings, put_vocab,
-    reset_alias_feedback, search_route, stats, v2_mpercolate_route, v2_search_route,
-    validate_and_apply_feedback, EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT,
+    api_root, backup, bulk_route, cancel_job, cat_segments, cat_stats, close_pit_route,
+    compact_route, create_job_route, delete_doc, discover_aliases, discover_and_record_aliases,
+    flush_route, force_merge_route, get_alias_feedback, get_aliases, get_doc, get_job,
+    get_job_stream, get_settings, get_vocab, health, import_aliases, learn_and_apply_aliases,
+    learn_and_apply_vocab, learn_vocab, mpercolate_route, open_pit_route, prometheus_metrics,
+    put_doc, put_settings, put_vocab, reset_alias_feedback, search_route, stats,
+    v2_mpercolate_route, v2_search_route, validate_and_apply_feedback, EXHAUSTIVE_JOB_BODY_LIMIT,
+    PIT_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -438,7 +440,8 @@ async fn main() {
         .route("/_mpercolate", post(mpercolate_route))
         .route("/_bulk", post(bulk_route))
         .route("/_flush", any(flush_route))
-        .route("/_compact", post(compact))
+        .route("/_compact", any(compact_route))
+        .route("/_forcemerge", any(force_merge_route))
         .route("/_backup", post(backup))
         .route("/_stats", get(stats))
         .route("/_cat/stats", get(cat_stats))
@@ -485,7 +488,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/HEAD/PUT/DELETE /_doc/{id}, GET/POST /_search, POST /_mpercolate, POST /_bulk, GET/POST /_flush, POST /_compact, POST /_backup, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record, GET /_vocab/aliases/feedback, POST /_vocab/aliases/feedback/reset, POST /_vocab/aliases/validate_and_apply",
+        endpoints = "GET /, GET/HEAD/PUT/DELETE /_doc/{id}, GET/POST /_search, POST /_mpercolate, POST /_bulk, GET/POST /_flush, POST /_compact, POST /_forcemerge, POST /_backup, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record, GET /_vocab/aliases/feedback, POST /_vocab/aliases/feedback/reset, POST /_vocab/aliases/validate_and_apply",
         "server listening"
     );
 

@@ -16,7 +16,7 @@ use clap::Parser;
 pub(crate) struct Cli {
     /// IP address to bind. Defaults to `127.0.0.1` (loopback), so the server is NOT
     /// reachable beyond the local host unless you opt in. The REST API exposes
-    /// mutating/admin endpoints (`_doc`, `_bulk`, `_flush`, `_compact`, `_vocab`,
+    /// mutating/admin endpoints (`_doc`, `_bulk`, `_flush`, `_compact`, `_forcemerge`, `_vocab`,
     /// `_settings`); to listen on `0.0.0.0` safely, gate them with a bearer token
     /// (`--auth-token`/`RR_AUTH_TOKEN`, ADR-062) or front the server with an
     /// authenticating reverse proxy (see docs/reference/api.md). Matches the
@@ -25,7 +25,7 @@ pub(crate) struct Cli {
     pub(crate) host: std::net::IpAddr,
 
     /// Bearer token required on mutating/admin endpoints (ADR-062). When set,
-    /// `_doc` writes, `_bulk`, `_flush`, `_compact`, `_vocab` writes, and
+    /// `_doc` writes, `_bulk`, `_flush`, `_compact`, `_forcemerge`, `_vocab` writes, and
     /// `_settings` writes demand `Authorization: Bearer <token>`; reads stay
     /// open. Prefer the `RR_AUTH_TOKEN` environment variable in production —
     /// a flag value is visible in process listings. Unset ⇒ no auth (the

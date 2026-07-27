@@ -389,6 +389,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         .route("/_checkpoint", post(cluster_checkpoint))
         .route("/_backup", post(cluster_backup))
         .route("/_compact", post(cluster_compact))
+        .route("/_forcemerge", post(cluster_compact))
         .route("/_stats", get(cluster_stats))
         .route("/_cat/shards", get(cluster_cat_shards))
         .route("/_cat/stats", get(cluster_cat_stats))

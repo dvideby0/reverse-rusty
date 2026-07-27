@@ -101,6 +101,7 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         .route("/_flush", any(cluster_flush_route))
         .route("/_checkpoint", post(cluster_checkpoint))
         .route("/_compact", post(cluster_compact))
+        .route("/_forcemerge", post(cluster_compact))
         .route("/_stats", get(cluster_stats))
         .route("/_cat/shards", get(cluster_cat_shards))
         .route("/_health", get(cluster_health))

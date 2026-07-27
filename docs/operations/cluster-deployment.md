@@ -72,7 +72,7 @@ Two independent secrets gate two different audiences — set both:
 | Variable | Audience | Gates | Decision |
 |---|---|---|---|
 | `RR_CLUSTER_TOKEN` | the node **mesh** (gRPC) | every coordinator↔shard / control RPC | ADR-071 |
-| `RR_AUTH_TOKEN` | the **REST** client | mutating/admin HTTP endpoints (`_doc`, `_bulk`, `_flush`, `_compact`, `_vocab`, `_settings`, `_backup`) | ADR-062 |
+| `RR_AUTH_TOKEN` | the **REST** client | mutating/admin HTTP endpoints (`_doc`, `_bulk`, `_flush`, `_compact`, `_forcemerge`, `_vocab`, `_settings`, `_backup`) | ADR-062 |
 
 Both are read from the **environment** (never passed as flags, which leak in process listings).
 Generate strong values: `openssl rand -hex 32`. Mesh TLS + token are **opt-in** — enable both on any
