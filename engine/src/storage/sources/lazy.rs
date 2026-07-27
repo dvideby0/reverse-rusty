@@ -110,6 +110,27 @@ impl LazyBase {
         Ok(Some(query.to_owned()))
     }
 
+    /// Read one source only when its internal generation matches the exact row
+    /// held by the caller's snapshot. This touches the fixed-size metadata
+    /// directory but never decodes tags.
+    pub(super) fn get_bounded_at_generation(
+        &self,
+        logical: u64,
+        expected_generation: u64,
+        max_bytes: usize,
+    ) -> Result<Option<String>, usize> {
+        let Some(record) = self.find(logical) else {
+            return Ok(None);
+        };
+        if record.source_generation != expected_generation {
+            return Ok(None);
+        }
+        if record.query.len() > max_bytes {
+            return Err(record.query.len());
+        }
+        Ok(Some(record.query.to_owned()))
+    }
+
     pub(super) fn get_document(&self, logical: u64) -> Option<StoredSource> {
         let record = self.find(logical)?;
         let tags = match record.encoded_tags {

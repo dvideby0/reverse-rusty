@@ -18,6 +18,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 | [068](../adr-068-class-d-always-candidate-lane.md) | Class-D always-candidate lane | Optionally accepts negation-only queries under a universal broad signature with exact negative verification. | Accepted |
 | [069](../adr-069-parity-number-context-words.md) | Configurable number context | Makes context-sensitive number typing configurable, including the position-insensitive parity mode. | Accepted |
 | [073](../adr-073-rest-parity-hardening.md) | REST parity hardening | Makes tag coercion explicit, wires live flush thresholds, and exposes per-request broad scope. | Accepted |
+| [126](../adr-126-search-api-contract.md) | Search API contract | Makes compatibility search strict, generation-consistent, and ES/OS-shaped where semantics align. | Accepted |
 
 ---
 

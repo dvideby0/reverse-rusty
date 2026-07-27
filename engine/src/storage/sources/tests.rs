@@ -37,6 +37,50 @@ fn bounded_lazy_lookup_checks_mmap_length_before_clone() {
 }
 
 #[test]
+fn generation_attested_lookup_rejects_resident_base_and_overlay_mismatches() {
+    let resident = SourceStore::new_resident();
+    resident.insert_document_with_generation(7, "resident".to_string(), 1, 20, &[]);
+    assert_eq!(
+        resident
+            .get_bounded_at_generation(7, 20, usize::MAX)
+            .expect("matching generation"),
+        Some("resident".to_string())
+    );
+    assert_eq!(
+        resident
+            .get_bounded_at_generation(7, 19, usize::MAX)
+            .expect("mismatch"),
+        None
+    );
+
+    let path = std::env::temp_dir().join(format!(
+        "reverse-rusty-generation-sources-{}-{}.dat",
+        std::process::id(),
+        NEXT_PATH.fetch_add(1, Ordering::Relaxed)
+    ));
+    resident.write_to(&path).expect("write lazy base");
+    let lazy = SourceStore::open(&path, false).expect("open lazy base");
+    assert_eq!(
+        lazy.get_bounded_at_generation(7, 20, usize::MAX)
+            .expect("base generation"),
+        Some("resident".to_string())
+    );
+    lazy.insert_document_with_generation(7, "overlay".to_string(), 2, 21, &[]);
+    assert_eq!(
+        lazy.get_bounded_at_generation(7, 20, usize::MAX)
+            .expect("stale snapshot"),
+        None,
+        "a newer overlay must shadow rather than leak into the old generation"
+    );
+    assert_eq!(
+        lazy.get_bounded_at_generation(7, 21, usize::MAX)
+            .expect("overlay generation"),
+        Some("overlay".to_string())
+    );
+    std::fs::remove_file(path).expect("remove test sources");
+}
+
+#[test]
 fn bounded_lazy_lookup_does_not_touch_document_metadata() {
     let path = std::env::temp_dir().join(format!(
         "reverse-rusty-query-only-sources-{}-{}.dat",

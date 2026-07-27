@@ -1,6 +1,147 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_get_search_shares_strict_compatibility_controls() {
+    let state = test_state(&seed());
+    let document = serde_json::json!({
+        "query": {
+            "percolate": {
+                "field": "query",
+                "document": {"title": "1994 topps"}
+            }
+        }
+    });
+    let (status, body) = send(
+        &state,
+        req(
+            "GET",
+            "/_search?_source=true&size=1&profile=true&timeout=1s",
+            &document,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["timed_out"], false);
+    assert!(body["took"].is_u64(), "{body}");
+    assert!(body["took_ms"].is_f64(), "{body}");
+    assert_eq!(body["hits"]["hits"][0]["_index"], "queries");
+    assert_eq!(body["hits"]["hits"][0]["_source"]["query"], "1994 topps");
+    assert!(body["profile"].is_object(), "{body}");
+
+    let (status, body) = send(
+        &state,
+        req(
+            "POST",
+            "/_search",
+            &serde_json::json!({
+                "documents": [
+                    {"title": "1994 topps"},
+                    {"title": "1995 fleer"}
+                ],
+                "include_source": true,
+                "size": 1
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["hits"]["hits"][0]["_source"].is_object(), "{body}");
+    assert!(
+        body["slots"]
+            .as_array()
+            .expect("slots")
+            .iter()
+            .all(|slot| slot["hits"][0]["_source"].is_object()),
+        "{body}"
+    );
+
+    for (label, path, request) in [
+        (
+            "unknown query parameter",
+            "/_search?preference=local",
+            document.clone(),
+        ),
+        (
+            "duplicate size",
+            "/_search?size=1",
+            serde_json::json!({"document": {"title": "1994 topps"}, "size": 2}),
+        ),
+        (
+            "unsupported explain",
+            "/_search?explain=true",
+            serde_json::json!({"document": {"title": "1994 topps"}}),
+        ),
+    ] {
+        let (status, body) = send(&state, req("POST", path, &request)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {body}");
+        assert_eq!(body["error"]["type"], "validation_error", "{label}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn cluster_search_preserves_content_type_and_body_limit_statuses() {
+    use axum::extract::DefaultBodyLimit;
+
+    let state = test_state(&seed());
+    let body = serde_json::json!({"document": {"title": "1994 topps"}});
+    let request = Request::post("/_search")
+        .body(Body::from(body.to_string()))
+        .expect("request");
+    let (status, json) = send(&state, request).await;
+    assert_eq!(status, StatusCode::UNSUPPORTED_MEDIA_TYPE, "{json}");
+    assert_eq!(json["status"], 415, "{json}");
+
+    let response = router(&state)
+        .layer(DefaultBodyLimit::max(16))
+        .oneshot(req("POST", "/_search", &body))
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON response");
+    assert_eq!(json["status"], 413, "{json}");
+}
+
+#[tokio::test]
+async fn cluster_search_enforces_multi_document_admission_before_matching() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        per_shard: reverse_rusty::EngineConfig {
+            max_percolate_batch: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let cluster = ClusterEngine::build(Normalizer::default_vocab().expect("vocab"), &cfg, &seed())
+        .expect("cluster");
+    let state = state_from_cluster(cluster);
+    let (status, body) = send(
+        &state,
+        req(
+            "POST",
+            "/_search",
+            &serde_json::json!({
+                "documents": [
+                    {"title": "1994 topps"},
+                    {"title": "1995 fleer"}
+                ]
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["type"], "validation_error", "{body}");
+    assert!(
+        body["error"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("max_percolate_batch")),
+        "{body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ranked_search_orders_by_score() {
     // Cluster `rank` (ADR-075): boosts resolve against the shared tag space (synthetic
     // ids included — boost matching is id-equality), hits come back `(score desc, _id
@@ -188,7 +329,7 @@ async fn mpercolate_returns_per_document_responses() {
                 {"title": "1994 topps"},
                 {"title": "1995 fleer ultra"},
                 {"title": "nothing here"}
-            ]}),
+            ], "include_source": true}),
         ),
     )
     .await;
@@ -198,4 +339,12 @@ async fn mpercolate_returns_per_document_responses() {
     assert_eq!(responses[0]["hits"]["total"], 1);
     assert_eq!(responses[1]["hits"]["total"], 1);
     assert_eq!(responses[2]["hits"]["total"], 0);
+    assert_eq!(
+        responses[0]["hits"]["hits"][0]["_source"]["query"],
+        "1994 topps"
+    );
+    assert_eq!(
+        responses[1]["hits"]["hits"][0]["_source"]["query"],
+        "1995 fleer"
+    );
 }

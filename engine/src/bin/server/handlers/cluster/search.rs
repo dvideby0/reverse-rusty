@@ -1,4 +1,4 @@
-//! Cluster-mode percolate handlers (ADR-070): `POST /_search` + `POST /_mpercolate`
+//! Cluster-mode percolate handlers (ADR-070): `GET|POST /_search` + `POST /_mpercolate`
 //! over [`ClusterEngine::percolate_filtered_with_stats`] — the routing + merge the
 //! cluster oracles prove ≡ single-node ≡ brute. Resolves the same native + ES
 //! envelopes (shared [`resolve_percolate`]) and the same `rank` block (shared
@@ -10,37 +10,53 @@
 //! A request feature the cluster cannot honor yet (`explain`) is a 400, never
 //! silently ignored.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::{
+        rejection::{JsonRejection, QueryRejection},
+        Query, State,
+    },
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, warn};
 
-use reverse_rusty::cluster::{ClusterEngine, ShardError};
+use reverse_rusty::cluster::{ClusterReadView, ShardError};
 use reverse_rusty::segment::MatchStats;
 
 use crate::dto::{ApiError, HitSource};
-use crate::handlers::search::{resolve_percolate, to_rank_spec, DocBody, RankBody};
+use crate::handlers::doc::QUERY_INDEX;
+use crate::handlers::search::{
+    resolve_percolate, resolve_percolate_strict, resolve_search_controls, to_rank_spec,
+    CompatibilityDocBody, DocBody, RankBody, SearchControlInput, SearchParams,
+};
 use crate::state::ClusterAppState;
 
 /// A request filter resolved for the cluster percolate calls.
 type FilterSpec = Vec<(String, Vec<String>)>;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ClusterSearchBody {
-    document: Option<DocBody>,
-    documents: Option<Vec<DocBody>>,
+    document: Option<CompatibilityDocBody>,
+    documents: Option<Vec<CompatibilityDocBody>>,
     filter: Option<serde_json::Value>,
     query: Option<serde_json::Value>,
     /// Per-request broad-lane override (falls back to the server default).
     include_broad: Option<bool>,
     timeout_ms: Option<u64>,
+    timeout: Option<String>,
     size: Option<usize>,
     from: Option<usize>,
     /// Include each hit's stored query source (default false in cluster mode — it
     /// costs a per-hit source probe; explicit `true` on a remote cluster is a 501).
     include_source: Option<bool>,
+    #[serde(rename = "_source")]
+    source: Option<bool>,
     /// Optional ranking (ADR-059/075): order hits by a numeric priority tag and/or
     /// additive request boosts, scored at the shards against the shared tag space.
     /// Absent ⇒ hits keep merged engine order — byte-identical to the pre-rank path.
@@ -53,6 +69,8 @@ pub(crate) struct ClusterSearchBody {
 
 #[derive(Serialize)]
 pub(crate) struct ClusterSearchResponse {
+    took: u64,
+    timed_out: bool,
     took_ms: f64,
     hits: ClusterHits,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -69,6 +87,7 @@ struct ClusterHits {
 
 #[derive(Serialize)]
 struct ClusterHitItem {
+    _index: &'static str,
     _id: u64,
     /// Ranking score (ADR-075) — present only when the request supplied a `rank`
     /// block; omitted (so the response is byte-identical) on the unranked path.
@@ -86,26 +105,37 @@ struct ClusterSlotHit {
     stats: StatsResponse,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 struct StatsResponse {
-    unique_candidates: u32,
-    broad_candidates: u32,
-    postings_scanned: u32,
-    matches: u32,
-    probes_attempted: u32,
-    probes_skipped: u32,
+    unique_candidates: u64,
+    broad_candidates: u64,
+    postings_scanned: u64,
+    matches: u64,
+    probes_attempted: u64,
+    probes_skipped: u64,
 }
 
 impl From<MatchStats> for StatsResponse {
     fn from(s: MatchStats) -> Self {
         Self {
-            unique_candidates: s.unique_candidates,
-            broad_candidates: s.broad_candidates,
-            postings_scanned: s.postings_scanned,
-            matches: s.matches,
-            probes_attempted: s.probes_attempted,
-            probes_skipped: s.probes_skipped,
+            unique_candidates: u64::from(s.unique_candidates),
+            broad_candidates: u64::from(s.broad_candidates),
+            postings_scanned: u64::from(s.postings_scanned),
+            matches: u64::from(s.matches),
+            probes_attempted: u64::from(s.probes_attempted),
+            probes_skipped: u64::from(s.probes_skipped),
         }
+    }
+}
+
+impl StatsResponse {
+    fn merge(&mut self, stats: MatchStats) {
+        self.unique_candidates += u64::from(stats.unique_candidates);
+        self.broad_candidates += u64::from(stats.broad_candidates);
+        self.postings_scanned += u64::from(stats.postings_scanned);
+        self.matches += u64::from(stats.matches);
+        self.probes_attempted += u64::from(stats.probes_attempted);
+        self.probes_skipped += u64::from(stats.probes_skipped);
     }
 }
 
@@ -135,22 +165,26 @@ fn order_and_page(rows: &ScoredIds, ranked: bool, from: usize, size: usize) -> S
 }
 
 /// Materialize hit items for already-ordered, already-paged rows, optionally
-/// attaching `_source` via the cluster's source probe. `Err` only when sources were
-/// explicitly requested but this cluster cannot serve them (remote shards, v1).
+/// attaching `_source` cloned under the same mutation fence as matching.
 fn attach_hits(
-    state: &ClusterAppState,
     rows: &[(u64, Option<i64>)],
     include_source: bool,
+    sources: Option<&HashMap<u64, String>>,
 ) -> Result<Vec<ClusterHitItem>, ShardError> {
-    let cluster = state.cluster.read();
     rows.iter()
         .map(|&(id, score)| {
             let source = if include_source {
-                cluster.get_source(id)?.map(|query| HitSource { query })
+                Some(HitSource {
+                    query: sources
+                        .and_then(|source| source.get(&id))
+                        .cloned()
+                        .ok_or(ShardError::SourceUnavailable(id))?,
+                })
             } else {
                 None
             };
             Ok(ClusterHitItem {
+                _index: QUERY_INDEX,
                 _id: id,
                 _score: score,
                 _source: source,
@@ -181,46 +215,107 @@ fn reject_unsupported(
     ))
 }
 
-/// POST /_search — percolate one or more titles against the cluster.
+fn validation(state: &ClusterAppState, message: impl Into<String>) -> Reject {
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["search", "400"])
+        .inc();
+    ApiError::response(StatusCode::BAD_REQUEST, "validation_error", message)
+}
+
+fn body_rejection(state: &ClusterAppState, error: &JsonRejection) -> Reject {
+    let status = error.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE || status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["search", status.as_str()])
+            .inc();
+        let error_type = if status == StatusCode::PAYLOAD_TOO_LARGE {
+            "payload_too_large"
+        } else {
+            "unsupported_media_type"
+        };
+        return ApiError::response(status, error_type, format!("invalid search body: {error}"));
+    }
+    validation(state, format!("invalid search body: {error}"))
+}
+
+/// Route extractor for `GET|POST /_search`.
 #[instrument(skip_all)]
-pub(crate) async fn cluster_search(
+pub(crate) async fn cluster_search_route(
     State(state): State<Arc<ClusterAppState>>,
-    Json(body): Json<ClusterSearchBody>,
+    params: Result<Query<SearchParams>, QueryRejection>,
+    body: Result<Json<ClusterSearchBody>, JsonRejection>,
+) -> Result<Json<ClusterSearchResponse>, Reject> {
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["search"])
+        .start_timer();
+    let Query(params) = params
+        .map_err(|error| validation(&state, format!("invalid search query parameters: {error}")))?;
+    let Json(body) = body.map_err(|error| body_rejection(&state, &error))?;
+    cluster_search_inner(state, body, params).await
+}
+
+/// GET|POST /_search — percolate one or more titles against the cluster.
+async fn cluster_search_inner(
+    state: Arc<ClusterAppState>,
+    body: ClusterSearchBody,
+    params: SearchParams,
 ) -> Result<Json<ClusterSearchResponse>, Reject> {
     let start = Instant::now();
-    reject_unsupported(&state, "search", body.explain.unwrap_or(false))?;
+    let controls = resolve_search_controls(
+        SearchControlInput {
+            from: body.from,
+            size: body.size,
+            explain: body.explain,
+            profile: body.profile,
+            source: body.source,
+            include_source: body.include_source,
+            timeout: body.timeout,
+            timeout_ms: body.timeout_ms,
+        },
+        params,
+        false,
+    )
+    .map_err(|message| validation(&state, message))?;
+    reject_unsupported(&state, "search", controls.features.explain)?;
 
     let include_broad = body.include_broad.unwrap_or(state.include_broad);
-    let include_source = body.include_source.unwrap_or(false);
-    let include_profile = body.profile.unwrap_or(false);
-    let timeout = tokio::time::Duration::from_millis(body.timeout_ms.unwrap_or(30_000));
-    let page_size = body.size.unwrap_or(1000);
-    let page_from = body.from.unwrap_or(0);
+    let include_source = controls.features.include_source;
+    let include_profile = controls.features.profile;
+    let timeout = controls.timeout;
+    let page_size = controls.size;
+    let page_from = controls.from;
     let rank_spec = to_rank_spec(body.rank);
     let ranked = rank_spec.is_some();
 
+    let document = body.document.map(Into::into);
+    let documents = body
+        .documents
+        .map(|documents| documents.into_iter().map(Into::into).collect());
     let (titles, single, filter_spec) =
-        match resolve_percolate(body.document, body.documents, body.filter, body.query) {
+        match resolve_percolate_strict(document, documents, body.filter, body.query) {
             Ok(t) => t,
-            Err(msg) => {
-                state
-                    .prom
-                    .http_requests_total
-                    .with_label_values(&["search", "400"])
-                    .inc();
-                return Err(ApiError::response(
-                    StatusCode::BAD_REQUEST,
-                    "validation_error",
-                    msg,
-                ));
-            }
+            Err(msg) => return Err(validation(&state, msg)),
         };
 
     // ADR-099: arm cooperative (per-title) cancellation only for an EXPLICIT
-    // timeout_ms. Lock-free here — the dynamic kill-switch is resolved INSIDE the
+    // timeout/timeout_ms. Lock-free here — the dynamic kill-switch is resolved INSIDE the
     // blocking task (under the timeout race), so a held cluster write lock (e.g. a
     // vocab rebuild) can never stall this async handler past its own deadline (codex).
-    let deadline = body.timeout_ms.is_some().then(|| start + timeout);
+    let deadline = if controls.explicit_timeout {
+        Some(
+            start
+                .checked_add(timeout)
+                .ok_or_else(|| validation(&state, "`timeout` is too large"))?,
+        )
+    } else {
+        None
+    };
     let results = percolate_blocking(
         &state,
         titles,
@@ -230,31 +325,31 @@ pub(crate) async fn cluster_search(
         timeout,
         deadline,
         "search",
+        include_source.then_some(SourceFetch {
+            shape: SourceShape::Search { single },
+            ranked,
+            from: page_from,
+            size: page_size,
+        }),
     )
     .await?;
-
-    let slow_ms = state.slow_query_threshold_ms;
-    let took = start.elapsed();
-    if slow_ms > 0 && took.as_millis() as u64 >= slow_ms {
-        warn!(
-            took_ms = took.as_millis() as u64,
-            titles = results.len(),
-            "slow cluster search"
-        );
-    }
+    let sources = results.sources;
+    let results = results.results;
 
     let attach = |rows: &ScoredIds| {
         attach_hits(
-            &state,
             &order_and_page(rows, ranked, page_from, page_size),
             include_source,
+            sources.as_ref(),
         )
     };
     let response = if single {
         let (rows, stats) = &results[0];
         let hits = attach(rows).map_err(|e| source_unavailable(&state, "search", &e))?;
         ClusterSearchResponse {
-            took_ms: took.as_secs_f64() * 1000.0,
+            took: 0,
+            timed_out: false,
+            took_ms: 0.0,
             hits: ClusterHits {
                 total: rows.len(),
                 hits,
@@ -264,7 +359,7 @@ pub(crate) async fn cluster_search(
         }
     } else {
         let mut slots = Vec::with_capacity(results.len());
-        let mut merged = MatchStats::default();
+        let mut merged = StatsResponse::default();
         let mut all: ScoredIds = Vec::new();
         for (slot, (rows, stats)) in results.iter().enumerate() {
             let hits = attach(rows).map_err(|e| source_unavailable(&state, "search", &e))?;
@@ -283,26 +378,36 @@ pub(crate) async fn cluster_search(
         all.dedup_by_key(|&mut (id, _)| id);
         let hits = attach(&all).map_err(|e| source_unavailable(&state, "search", &e))?;
         ClusterSearchResponse {
-            took_ms: took.as_secs_f64() * 1000.0,
+            took: 0,
+            timed_out: false,
+            took_ms: 0.0,
             hits: ClusterHits {
                 total: all.len(),
                 hits,
             },
             slots: Some(slots),
-            profile: include_profile.then(|| StatsResponse::from(merged)),
+            profile: include_profile.then_some(merged),
         }
     };
+
+    let mut response = response;
+    let took = start.elapsed();
+    response.took = took.as_millis() as u64;
+    response.took_ms = took.as_secs_f64() * 1000.0;
+    let slow_ms = state.slow_query_threshold_ms;
+    if slow_ms > 0 && took.as_millis() as u64 >= slow_ms {
+        warn!(
+            took_ms = took.as_millis() as u64,
+            titles = results.len(),
+            "slow cluster search"
+        );
+    }
 
     state
         .prom
         .http_requests_total
         .with_label_values(&["search", "200"])
         .inc();
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["search"])
-        .observe(start.elapsed().as_secs_f64());
     Ok(Json(response))
 }
 
@@ -366,26 +471,6 @@ pub(crate) async fn cluster_mpercolate(
             }
         };
 
-    let max_batch = {
-        let cluster = state.cluster.read();
-        cluster.per_shard_config().max_percolate_batch
-    };
-    if titles.len() > max_batch {
-        state
-            .prom
-            .http_requests_total
-            .with_label_values(&["mpercolate", "400"])
-            .inc();
-        return Err(ApiError::response(
-            StatusCode::BAD_REQUEST,
-            "validation_error",
-            format!(
-                "batch of {} exceeds max_percolate_batch {max_batch}",
-                titles.len()
-            ),
-        ));
-    }
-
     // ADR-099: see cluster_search above (lock-free; the kill-switch resolves in the
     // blocking task).
     let deadline = body.timeout_ms.is_some().then(|| start + timeout);
@@ -398,16 +483,24 @@ pub(crate) async fn cluster_mpercolate(
         timeout,
         deadline,
         "mpercolate",
+        include_source.then_some(SourceFetch {
+            shape: SourceShape::PerSlot,
+            ranked,
+            from: page_from,
+            size: page_size,
+        }),
     )
     .await?;
+    let sources = results.sources;
+    let results = results.results;
 
     let mut responses = Vec::with_capacity(results.len());
     for (rows, _stats) in &results {
         // Per-slot rank + `from`/`size`, the single-node `/_mpercolate` semantics.
         let hits = attach_hits(
-            &state,
             &order_and_page(rows, ranked, page_from, page_size),
             include_source,
+            sources.as_ref(),
         )
         .map_err(|e| source_unavailable(&state, "mpercolate", &e))?;
         responses.push(ClusterPercolateItem {
@@ -446,8 +539,56 @@ pub(crate) async fn cluster_mpercolate(
 /// failure is never masked by a concurrent cancellation because each title maps to
 /// its own variant and `Shard` short-circuits identically either way).
 enum PercFail {
+    Validation(String),
     Shard(ShardError),
+    Source(ShardError),
     Cancelled,
+}
+
+#[derive(Clone, Copy)]
+enum SourceShape {
+    Search { single: bool },
+    PerSlot,
+}
+
+#[derive(Clone, Copy)]
+struct SourceFetch {
+    shape: SourceShape,
+    ranked: bool,
+    from: usize,
+    size: usize,
+}
+
+struct PercolateRun {
+    results: Vec<(ScoredIds, MatchStats)>,
+    sources: Option<HashMap<u64, String>>,
+}
+
+fn source_ids(results: &[(ScoredIds, MatchStats)], fetch: SourceFetch) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for (rows, _) in results {
+        ids.extend(
+            order_and_page(rows, fetch.ranked, fetch.from, fetch.size)
+                .into_iter()
+                .map(|(id, _)| id),
+        );
+    }
+    if matches!(fetch.shape, SourceShape::Search { single: false }) {
+        let mut union: ScoredIds = results
+            .iter()
+            .flat_map(|(rows, _)| rows.iter().copied())
+            .collect();
+        union.sort_unstable_by_key(|&(id, _)| id);
+        union.dedup_by_key(|&mut (id, _)| id);
+        ids.extend(
+            order_and_page(&union, fetch.ranked, fetch.from, fetch.size)
+                .into_iter()
+                .map(|(id, _)| id),
+        );
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 #[allow(clippy::too_many_arguments)] // the request knobs of two endpoints funnel here
@@ -460,7 +601,8 @@ async fn percolate_blocking(
     timeout: tokio::time::Duration,
     requested_deadline: Option<Instant>,
     endpoint: &'static str,
-) -> Result<Vec<(ScoredIds, MatchStats)>, Reject> {
+    source_fetch: Option<SourceFetch>,
+) -> Result<PercolateRun, Reject> {
     let state_inner = Arc::clone(state);
     let fut = async {
         // ADR-099: the permit wait sits inside the timeout race; the permit rides the
@@ -472,61 +614,129 @@ async fn percolate_blocking(
         .await;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            state_inner.pool.install(|| {
-                use rayon::prelude::*;
-                // Resolve the dynamic kill-switch HERE — on a rayon thread, inside the
-                // timeout race — so a held cluster write lock stalls only this blocking
-                // task (which the client can time out on), never the async handler.
-                let deadline = requested_deadline.filter(|_| {
-                    state_inner
-                        .cluster
-                        .read()
-                        .per_shard_config()
-                        .cooperative_cancel
-                });
-                // The read guard is taken PER TITLE, not hoisted over the batch: the
-                // RwLock is fair, so one long-held batch guard would let a queued vocab
-                // writer stall every subsequent read for the whole batch duration
-                // (review finding). Each title still evaluates under one consistent
-                // engine view; a concurrent vocab rebuild may split a batch across
-                // vocab epochs — the same visibility a single-node client gets when a
-                // PUT /_vocab lands between two requests.
-                let one = |cluster: &ClusterEngine,
-                           t: &str|
-                 -> Result<(ScoredIds, MatchStats), ShardError> {
-                    if let Some(spec) = &rank {
-                        let (rows, st) =
-                            cluster.percolate_filtered_ranked(t, &filter, include_broad, spec)?;
-                        Ok((rows.into_iter().map(|(id, s)| (id, Some(s))).collect(), st))
-                    } else {
-                        let (ids, st) =
-                            cluster.percolate_filtered_with_stats(t, &filter, include_broad)?;
-                        Ok((ids.into_iter().map(|id| (id, None)).collect(), st))
-                    }
-                };
-                let r = titles
-                    .par_iter()
-                    .map(|t| {
-                        // Cooperative TITLE boundary (ADR-099): expired work stops
-                        // between titles instead of running the batch to completion.
-                        // (Within one title, the in-shard match is bounded by the
-                        // per-RPC deadline on a remote cluster — the stated ADR-099
-                        // deferral for shard-side cancellation.)
-                        if deadline.is_some_and(|d| Instant::now() >= d) {
-                            return Err(PercFail::Cancelled);
+            // Admission and the dynamic cancellation knob are read on this blocking
+            // thread so a queued cluster writer remains inside the request timeout.
+            let (max_batch, cooperative_cancel) = {
+                let cluster = state_inner.cluster.read();
+                let config = cluster.per_shard_config();
+                (config.max_percolate_batch, config.cooperative_cancel)
+            };
+            if titles.len() > max_batch {
+                return Err(PercFail::Validation(format!(
+                    "batch of {} documents exceeds max_percolate_batch ({max_batch})",
+                    titles.len()
+                )));
+            }
+
+            let run_pool = |stable_view: Option<&ClusterReadView<'_>>| {
+                state_inner.pool.install(|| {
+                    use rayon::prelude::*;
+                    let deadline = requested_deadline.filter(|_| cooperative_cancel);
+                    // Without source enrichment the read guard is taken PER TITLE: the
+                    // RwLock is fair, so a queued vocabulary writer cannot stall every
+                    // subsequent read for the whole batch. Source requests use the
+                    // core mutation-frozen view through match and source cloning.
+                    let one = |t: &str| -> Result<(ScoredIds, MatchStats), ShardError> {
+                        match (stable_view, rank.as_ref()) {
+                            (Some(view), Some(spec)) => {
+                                let (rows, stats) = view.percolate_filtered_ranked(
+                                    t,
+                                    &filter,
+                                    include_broad,
+                                    spec,
+                                )?;
+                                Ok((
+                                    rows.into_iter()
+                                        .map(|(id, score)| (id, Some(score)))
+                                        .collect(),
+                                    stats,
+                                ))
+                            }
+                            (Some(view), None) => {
+                                let (ids, stats) =
+                                    view.percolate_filtered_with_stats(t, &filter, include_broad)?;
+                                Ok((ids.into_iter().map(|id| (id, None)).collect(), stats))
+                            }
+                            (None, Some(spec)) => {
+                                let cluster = state_inner.cluster.read();
+                                let (rows, stats) = cluster.percolate_filtered_ranked(
+                                    t,
+                                    &filter,
+                                    include_broad,
+                                    spec,
+                                )?;
+                                Ok((
+                                    rows.into_iter()
+                                        .map(|(id, score)| (id, Some(score)))
+                                        .collect(),
+                                    stats,
+                                ))
+                            }
+                            (None, None) => {
+                                let cluster = state_inner.cluster.read();
+                                let (ids, stats) = cluster.percolate_filtered_with_stats(
+                                    t,
+                                    &filter,
+                                    include_broad,
+                                )?;
+                                Ok((ids.into_iter().map(|id| (id, None)).collect(), stats))
+                            }
                         }
-                        one(&state_inner.cluster.read(), t).map_err(PercFail::Shard)
-                    })
-                    .collect::<Result<Vec<_>, PercFail>>();
-                if matches!(r, Err(PercFail::Cancelled)) {
-                    state_inner
-                        .prom
-                        .match_cancellations_total
-                        .with_label_values(&[endpoint])
-                        .inc();
-                }
-                r
-            })
+                    };
+                    let run = (|| {
+                        let results = titles
+                            .par_iter()
+                            .map(|t| {
+                                // Cooperative TITLE boundary (ADR-099): expired work stops
+                                // between titles instead of running the batch to completion.
+                                if deadline.is_some_and(|d| Instant::now() >= d) {
+                                    return Err(PercFail::Cancelled);
+                                }
+                                one(t).map_err(PercFail::Shard)
+                            })
+                            .collect::<Result<Vec<_>, PercFail>>()?;
+                        let sources = match (source_fetch, stable_view) {
+                            (Some(fetch), Some(view)) => {
+                                let mut sources = HashMap::new();
+                                for id in source_ids(&results, fetch) {
+                                    if deadline.is_some_and(|d| Instant::now() >= d) {
+                                        return Err(PercFail::Cancelled);
+                                    }
+                                    let source =
+                                        view.get_source(id).map_err(PercFail::Source)?.ok_or(
+                                            PercFail::Source(ShardError::SourceUnavailable(id)),
+                                        )?;
+                                    sources.insert(id, source);
+                                }
+                                Some(sources)
+                            }
+                            _ => None,
+                        };
+                        Ok(PercolateRun { results, sources })
+                    })();
+                    if matches!(run, Err(PercFail::Cancelled)) {
+                        state_inner
+                            .prom
+                            .match_cancellations_total
+                            .with_label_values(&[endpoint])
+                            .inc();
+                    }
+                    run
+                })
+            };
+
+            if source_fetch.is_some() {
+                // Source waiters must not occupy the shared Rayon pool. Acquire
+                // both the HTTP write funnel and the core mutation-frozen view on
+                // this blocking thread before entering the pool. The core fence
+                // also covers direct `ClusterEngine` mutations.
+                let _write_guard = state_inner.write_serial.lock();
+                let cluster = state_inner.cluster.read();
+                let stable_view = cluster.consistent_read_view();
+                run_pool(Some(&stable_view))
+            } else {
+                run_pool(None)
+            }
         })
         .await
     };
@@ -546,6 +756,18 @@ async fn percolate_blocking(
                 format!("percolate timed out after {}ms", timeout.as_millis()),
             ))
         }
+        Ok(Ok(Err(PercFail::Validation(message)))) => {
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&[endpoint, "400"])
+                .inc();
+            Err(ApiError::response(
+                StatusCode::BAD_REQUEST,
+                "validation_error",
+                message,
+            ))
+        }
         Ok(Ok(Err(PercFail::Shard(e)))) => {
             // A failed shard probe fails the percolate rather than shrinking the
             // union (the zero-false-negative posture) — surface it.
@@ -560,6 +782,7 @@ async fn percolate_blocking(
                 format!("a shard probe failed; result withheld rather than truncated: {e}"),
             ))
         }
+        Ok(Ok(Err(PercFail::Source(e)))) => Err(source_unavailable(state, endpoint, &e)),
         Ok(Err(e)) => {
             tracing::error!(error = %e, "cluster percolate task panicked");
             state
@@ -588,9 +811,17 @@ async fn percolate_blocking(
     }
 }
 
-/// The explicit-`include_source`-on-a-remote-cluster rejection (a clear 501, never a
-/// silently source-less hit).
+/// Classify requested-source failures: a remote cluster without source transport
+/// is 501; a confirmed in-process hit whose source is absent is a fail-closed 502.
 fn source_unavailable(state: &ClusterAppState, endpoint: &'static str, e: &ShardError) -> Reject {
+    if matches!(e, ShardError::SourceUnavailable(_)) {
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&[endpoint, "502"])
+            .inc();
+        return ApiError::response(StatusCode::BAD_GATEWAY, "source_unavailable", e.to_string());
+    }
     state
         .prom
         .http_requests_total

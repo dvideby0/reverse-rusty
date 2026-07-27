@@ -1,4 +1,4 @@
-//! `POST /_search` — the rich, per-title percolate path: single- or multi-document,
+//! `GET|POST /_search` — the rich, per-title percolate path: single- or multi-document,
 //! with optional explain, per-slot stats, ranking (ADR-059) and `from`/`size`
 //! pagination. Owns the `/_search` request/response DTOs; the batch throughput path
 //! lives in [`super::mpercolate`].
@@ -7,28 +7,38 @@ use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{
+    extract::{
+        rejection::{JsonRejection, QueryRejection},
+        Query, State,
+    },
+    http::StatusCode,
+    Json,
+};
 use serde::{Deserialize, Serialize};
 use tracing::{info, instrument, warn};
 
 use reverse_rusty::segment::{MatchScratch, MatchStats};
 
 use crate::dto::{ApiError, HitSource};
+use crate::handlers::doc::QUERY_INDEX;
 use crate::state::AppState;
 
+use super::controls::{resolve_search_controls, SearchControlInput, SearchParams};
 use super::rank::{order_and_page, to_rank_spec, RankBody};
-use super::resolve::resolve_percolate;
-use super::{DocBody, SearchHitItem, SearchHits};
+use super::resolve::resolve_percolate_strict;
+use super::{CompatibilityDocBody, DocBody, SearchHitItem, SearchHits};
 
 thread_local! {
     static SCRATCH: RefCell<MatchScratch> = RefCell::new(MatchScratch::new());
 }
 
-// -- POST /_search
+// -- GET|POST /_search
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct SearchBody {
-    document: Option<DocBody>,
-    documents: Option<Vec<DocBody>>,
+    document: Option<CompatibilityDocBody>,
+    documents: Option<Vec<CompatibilityDocBody>>,
     /// Native tag filter (ADR-049): an object `{key: value|[values]}` narrowing the
     /// percolated candidates. Conjunction across keys, OR within a key's values.
     filter: Option<serde_json::Value>,
@@ -43,6 +53,8 @@ pub(crate) struct SearchBody {
     include_broad: Option<bool>,
     /// Optional per-request timeout in milliseconds (default: 30000).
     timeout_ms: Option<u64>,
+    /// ES/OS time-value timeout (`250ms`, `2s`, ...), equivalent to `timeout_ms`.
+    timeout: Option<String>,
     /// Maximum number of hits to return (default: 1000).
     size: Option<usize>,
     /// Offset into the result set for pagination (default: 0).
@@ -53,6 +65,9 @@ pub(crate) struct SearchBody {
     rank: Option<RankBody>,
     /// Include original query text in each hit (default: true).
     include_source: Option<bool>,
+    /// ES/OS spelling for `include_source`.
+    #[serde(rename = "_source")]
+    source: Option<bool>,
     /// Include per-hit explain detail showing why each query matched (default: false).
     explain: Option<bool>,
     /// Include match profile (candidate/posting stats) in the response (default: false).
@@ -61,12 +76,105 @@ pub(crate) struct SearchBody {
 
 #[derive(Serialize)]
 pub(crate) struct SearchResponse {
+    /// ES/OS-compatible whole-millisecond duration.
+    took: u64,
+    timed_out: bool,
+    /// Reverse Rusty's higher-precision duration extension.
     took_ms: f64,
     pub(super) hits: SearchHits,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) slots: Option<Vec<SlotHit>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     profile: Option<StatsResponse>,
+}
+
+type Reject = (StatusCode, Json<ApiError>);
+
+fn validation(state: &AppState, message: impl Into<String>) -> Reject {
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["search", "400"])
+        .inc();
+    ApiError::response(StatusCode::BAD_REQUEST, "validation_error", message)
+}
+
+fn body_rejection(state: &AppState, error: &JsonRejection) -> Reject {
+    let status = error.status();
+    if status == StatusCode::PAYLOAD_TOO_LARGE || status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+        state
+            .prom
+            .http_requests_total
+            .with_label_values(&["search", status.as_str()])
+            .inc();
+        let error_type = if status == StatusCode::PAYLOAD_TOO_LARGE {
+            "payload_too_large"
+        } else {
+            "unsupported_media_type"
+        };
+        return ApiError::response(status, error_type, format!("invalid search body: {error}"));
+    }
+    validation(state, format!("invalid search body: {error}"))
+}
+
+fn materialize_hit(
+    snap: &reverse_rusty::EngineSnapshot,
+    id: u64,
+    score: Option<i64>,
+    include_source: bool,
+    explain_title: Option<&str>,
+) -> Result<SearchHitItem, (&'static str, String)> {
+    let source_text = if include_source || explain_title.is_some() {
+        Some(snap.get_query_source(id).ok_or_else(|| {
+            (
+                "source_unavailable",
+                format!(
+                    "query {id} matched but its stored source is unavailable; repair or \
+                     restore sources.dat"
+                ),
+            )
+        })?)
+    } else {
+        None
+    };
+    let explanation = match explain_title {
+        Some(title) => {
+            let source = source_text.as_deref().ok_or_else(|| {
+                (
+                    "source_unavailable",
+                    format!("query {id} matched but its stored source is unavailable"),
+                )
+            })?;
+            Some(snap.explain_source(id, source, title).ok_or_else(|| {
+                (
+                    "explanation_unavailable",
+                    format!("query {id} matched but its explanation is unavailable"),
+                )
+            })?)
+        }
+        None => None,
+    };
+    let source = if include_source {
+        source_text.map(|query| HitSource { query })
+    } else {
+        None
+    };
+    Ok(SearchHitItem {
+        _index: QUERY_INDEX,
+        _id: id,
+        _score: score,
+        _source: source,
+        _explanation: explanation,
+    })
+}
+
+fn enrichment_error(state: &AppState, error: (&'static str, String)) -> Reject {
+    state
+        .prom
+        .http_requests_total
+        .with_label_values(&["search", "500"])
+        .inc();
+    ApiError::response(StatusCode::INTERNAL_SERVER_ERROR, error.0, error.1)
 }
 
 #[derive(Serialize)]
@@ -77,66 +185,134 @@ pub(super) struct SlotHit {
     stats: StatsResponse,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 struct StatsResponse {
-    unique_candidates: u32,
+    unique_candidates: u64,
     /// Broad-lane subset of `unique_candidates` — how much of the work came from
     /// quarantined broad (class-C) queries (0 unless `include_broad`).
-    broad_candidates: u32,
-    postings_scanned: u32,
-    matches: u32,
-    probes_attempted: u32,
-    probes_skipped: u32,
+    broad_candidates: u64,
+    postings_scanned: u64,
+    matches: u64,
+    probes_attempted: u64,
+    probes_skipped: u64,
 }
 
 impl From<MatchStats> for StatsResponse {
     fn from(s: MatchStats) -> Self {
         Self {
-            unique_candidates: s.unique_candidates,
-            broad_candidates: s.broad_candidates,
-            postings_scanned: s.postings_scanned,
-            matches: s.matches,
-            probes_attempted: s.probes_attempted,
-            probes_skipped: s.probes_skipped,
+            unique_candidates: u64::from(s.unique_candidates),
+            broad_candidates: u64::from(s.broad_candidates),
+            postings_scanned: u64::from(s.postings_scanned),
+            matches: u64::from(s.matches),
+            probes_attempted: u64::from(s.probes_attempted),
+            probes_skipped: u64::from(s.probes_skipped),
         }
     }
 }
 
-/// POST /_search — percolate one or more titles.
+impl StatsResponse {
+    fn merge(&mut self, stats: MatchStats) {
+        self.unique_candidates += u64::from(stats.unique_candidates);
+        self.broad_candidates += u64::from(stats.broad_candidates);
+        self.postings_scanned += u64::from(stats.postings_scanned);
+        self.matches += u64::from(stats.matches);
+        self.probes_attempted += u64::from(stats.probes_attempted);
+        self.probes_skipped += u64::from(stats.probes_skipped);
+    }
+}
+
+/// Route extractor for `GET|POST /_search`. Capturing extractor rejections makes
+/// syntax/data failures the documented JSON 400 while preserving transport-level
+/// 413/415 statuses instead of returning Axum's plain-text defaults.
 #[instrument(skip_all)]
+pub(crate) async fn search_route(
+    State(state): State<Arc<AppState>>,
+    params: Result<Query<SearchParams>, QueryRejection>,
+    body: Result<Json<SearchBody>, JsonRejection>,
+) -> Result<Json<SearchResponse>, Reject> {
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["search"])
+        .start_timer();
+    let Query(params) = params
+        .map_err(|error| validation(&state, format!("invalid search query parameters: {error}")))?;
+    let Json(body) = body.map_err(|error| body_rejection(&state, &error))?;
+    search_inner(state, body, params).await
+}
+
+/// Direct entry used by handler tests.
+#[cfg(test)]
 pub(crate) async fn search(
     State(state): State<Arc<AppState>>,
     Json(body): Json<SearchBody>,
-) -> Result<Json<SearchResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SearchResponse>, Reject> {
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["search"])
+        .start_timer();
+    search_inner(state, body, SearchParams::default()).await
+}
+
+/// GET|POST /_search — percolate one or more titles.
+async fn search_inner(
+    state: Arc<AppState>,
+    body: SearchBody,
+    params: SearchParams,
+) -> Result<Json<SearchResponse>, Reject> {
     let start = Instant::now();
+    let controls = resolve_search_controls(
+        SearchControlInput {
+            from: body.from,
+            size: body.size,
+            explain: body.explain,
+            profile: body.profile,
+            source: body.source,
+            include_source: body.include_source,
+            timeout: body.timeout,
+            timeout_ms: body.timeout_ms,
+        },
+        params,
+        true,
+    )
+    .map_err(|message| validation(&state, message))?;
     let include_broad = body.include_broad.unwrap_or(state.include_broad);
-    let include_source = body.include_source.unwrap_or(true);
-    let include_explain = body.explain.unwrap_or(false);
-    let include_profile = body.profile.unwrap_or(false);
-    let timeout = tokio::time::Duration::from_millis(body.timeout_ms.unwrap_or(30_000));
-    let page_size = body.size.unwrap_or(1000);
-    let page_from = body.from.unwrap_or(0);
+    let include_source = controls.features.include_source;
+    let include_explain = controls.features.explain;
+    let include_profile = controls.features.profile;
+    let timeout = controls.timeout;
+    let page_size = controls.size;
+    let page_from = controls.from;
+    let requested_deadline = if controls.explicit_timeout {
+        Some(
+            start
+                .checked_add(timeout)
+                .ok_or_else(|| validation(&state, "`timeout` is too large"))?,
+        )
+    } else {
+        None
+    };
     let rank_raw = to_rank_spec(body.rank);
 
     // Resolve documents + tag filter from EITHER the native shape (document/documents +
     // filter) or the ES bool/terms percolate envelope (query). A malformed/unsupported
     // request is a 400 (an unsupported query node never silently widens the result set).
+    let document = body.document.map(Into::into);
+    let documents = body
+        .documents
+        .map(|documents| documents.into_iter().map(Into::into).collect());
     let (titles, single, filter_spec) =
-        match resolve_percolate(body.document, body.documents, body.filter, body.query) {
+        match resolve_percolate_strict(document, documents, body.filter, body.query) {
             Ok(t) => t,
-            Err(msg) => {
-                state
-                    .prom
-                    .http_requests_total
-                    .with_label_values(&["search", "400"])
-                    .inc();
-                return Err(ApiError::response(
-                    StatusCode::BAD_REQUEST,
-                    "validation_error",
-                    msg,
-                ));
-            }
+            Err(msg) => return Err(validation(&state, msg)),
         };
+    if include_explain && !single {
+        return Err(validation(
+            &state,
+            "`explain:true` is supported only with a single `document`; use one request per title",
+        ));
+    }
     let (eff_document, eff_documents) = if single {
         let title = titles.into_iter().next().unwrap_or_default();
         (Some(DocBody { title }), None)
@@ -157,12 +333,12 @@ pub(crate) async fn search(
             let prom = state.prom.clone();
             let snap = Arc::clone(&state.snapshot.load());
             let pred = snap.compile_tag_predicate(&filter_spec);
+            let worker_snap = Arc::clone(&snap);
             let state_inner = Arc::clone(&state);
-            // ADR-099: arm cooperative cancellation only for an EXPLICIT timeout_ms
+            // ADR-099: arm cooperative cancellation only for an explicit timeout
             // (the implicit 30s default stays a response deadline — zero deadline
             // reads on the unarmed hot path), gated by the dynamic kill-switch.
-            let deadline = (body.timeout_ms.is_some() && snap.config().cooperative_cancel)
-                .then(|| start + timeout);
+            let deadline = requested_deadline.filter(|_| snap.config().cooperative_cancel);
 
             let search_fut = async {
                 // The permit wait sits INSIDE the timeout race below, and the permit
@@ -178,7 +354,7 @@ pub(crate) async fn search(
                         SCRATCH.with(|cell| {
                             let mut scratch = cell.borrow_mut();
                             let mut out = Vec::new();
-                            let r = snap
+                            let r = worker_snap
                                 .try_match_title_filtered(
                                     &title,
                                     &mut scratch,
@@ -199,7 +375,7 @@ pub(crate) async fn search(
                             }
                             // Match-feedback capture (ADR-103): opt-in, post-match, off the
                             // engine's match path (this is the handler's blocking thread).
-                            if snap.config().alias_feedback_capture {
+                            if worker_snap.config().alias_feedback_capture {
                                 if let Ok((ids, _)) = &r {
                                     let toks = reverse_rusty::corpus::tokenize(&title);
                                     state_inner.feedback.lock().observe(&toks, ids);
@@ -230,7 +406,7 @@ pub(crate) async fn search(
                     ));
                 }
                 Ok(Err(e)) => {
-                    eprintln!("search task panicked: {e}");
+                    tracing::error!(error = %e, "search task panicked");
                     state
                         .prom
                         .http_requests_total
@@ -260,9 +436,7 @@ pub(crate) async fn search(
                 .observe(f64::from(stats.unique_candidates));
             prom.match_results_per_title.observe(ids.len() as f64);
 
-            let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             let total = ids.len();
-            let snap = state.snapshot.load();
             let cspec = rank_raw
                 .as_ref()
                 .map(|r| snap.compile_rank_spec(r))
@@ -270,22 +444,17 @@ pub(crate) async fn search(
             let hits = order_and_page(&snap, &ids, cspec.as_ref(), page_from, page_size)
                 .into_iter()
                 .map(|(id, score)| {
-                    let source = if include_source {
-                        snap.get_query_source(id).map(|q| HitSource { query: q })
-                    } else {
-                        None
-                    };
-                    let explanation = title_for_explain
-                        .as_deref()
-                        .and_then(|t| snap.explain_hit(id, t));
-                    SearchHitItem {
-                        _id: id,
-                        _score: score,
-                        _source: source,
-                        _explanation: explanation,
-                    }
+                    materialize_hit(
+                        &snap,
+                        id,
+                        score,
+                        include_source,
+                        title_for_explain.as_deref(),
+                    )
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| enrichment_error(&state, error))?;
+            let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             info!(
                 titles = 1,
                 matches = total,
@@ -293,6 +462,8 @@ pub(crate) async fn search(
                 "search complete"
             );
             SearchResponse {
+                took: took_ms.floor() as u64,
+                timed_out: false,
                 took_ms,
                 hits: SearchHits { total, hits },
                 slots: None,
@@ -309,6 +480,7 @@ pub(crate) async fn search(
             let num_docs = docs.len();
             let prom = state.prom.clone();
             let snap = Arc::clone(&state.snapshot.load());
+            let worker_snap = Arc::clone(&snap);
             // Bound per-request fan-out exactly as `/_mpercolate` does (ADR-052): a
             // multi-doc `/_search` is otherwise limited only by the HTTP body-size cap,
             // so one large body could schedule millions of parallel matches. Reject an
@@ -332,8 +504,7 @@ pub(crate) async fn search(
             let pred = snap.compile_tag_predicate(&filter_spec);
             let state_inner = Arc::clone(&state);
             // ADR-099: see the single-document arm.
-            let deadline = (body.timeout_ms.is_some() && snap.config().cooperative_cancel)
-                .then(|| start + timeout);
+            let deadline = requested_deadline.filter(|_| snap.config().cooperative_cancel);
 
             let search_fut = async {
                 let permit = crate::state::acquire_search_permit(
@@ -344,7 +515,7 @@ pub(crate) async fn search(
                 tokio::task::spawn_blocking(move || {
                     let _permit = permit;
                     state_inner.pool.install(|| {
-                        let r = snap.try_match_titles_par_filtered(
+                        let r = worker_snap.try_match_titles_par_filtered(
                             &titles,
                             include_broad,
                             &pred,
@@ -358,7 +529,7 @@ pub(crate) async fn search(
                                 .inc();
                         }
                         // Match-feedback capture (ADR-103): opt-in, post-match.
-                        if snap.config().alias_feedback_capture {
+                        if worker_snap.config().alias_feedback_capture {
                             if let Ok(results) = &r {
                                 let mut fb = state_inner.feedback.lock();
                                 for (idx, ids, _stats) in results {
@@ -388,7 +559,7 @@ pub(crate) async fn search(
                     ));
                 }
                 Ok(Err(e)) => {
-                    eprintln!("search task panicked: {e}");
+                    tracing::error!(error = %e, "search task panicked");
                     state
                         .prom
                         .http_requests_total
@@ -414,44 +585,32 @@ pub(crate) async fn search(
                 }
             };
 
-            let took_ms = start.elapsed().as_secs_f64() * 1000.0;
             let mut all_ids = Vec::new();
-            let mut slot_data: Vec<(usize, Vec<u64>, StatsResponse)> = Vec::new();
+            let mut slot_data: Vec<(usize, Vec<u64>, MatchStats)> = Vec::new();
+            let mut merged_stats = StatsResponse::default();
             for (slot, ids, stats) in results {
                 prom.match_candidates_per_title
                     .observe(f64::from(stats.unique_candidates));
                 prom.match_results_per_title.observe(ids.len() as f64);
 
                 all_ids.extend_from_slice(&ids);
-                slot_data.push((slot, ids, stats.into()));
+                merged_stats.merge(stats);
+                slot_data.push((slot, ids, stats));
             }
             all_ids.sort_unstable();
             all_ids.dedup();
 
             let total = all_ids.len();
-            let snap = state.snapshot.load();
             let cspec = rank_raw
                 .as_ref()
                 .map(|r| snap.compile_rank_spec(r))
                 .filter(|c| !c.is_noop());
-            let make_hit = |id: u64, score: Option<i64>| {
-                let source = if include_source {
-                    snap.get_query_source(id).map(|q| HitSource { query: q })
-                } else {
-                    None
-                };
-                SearchHitItem {
-                    _id: id,
-                    _score: score,
-                    _source: source,
-                    _explanation: None,
-                }
-            };
             let hits: Vec<_> =
                 order_and_page(&snap, &all_ids, cspec.as_ref(), page_from, page_size)
                     .into_iter()
-                    .map(|(id, score)| make_hit(id, score))
-                    .collect();
+                    .map(|(id, score)| materialize_hit(&snap, id, score, include_source, None))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| enrichment_error(&state, error))?;
             // Per-slot hits get the same rank + `from`/`size` treatment (ADR-059 closes
             // the ADR-052 #3 tail): `total` still reports the untruncated per-slot count.
             let slots: Vec<_> = slot_data
@@ -461,16 +620,20 @@ pub(crate) async fn search(
                     let slot_hits =
                         order_and_page(&snap, &ids, cspec.as_ref(), page_from, page_size)
                             .into_iter()
-                            .map(|(id, score)| make_hit(id, score))
-                            .collect();
-                    SlotHit {
+                            .map(|(id, score)| {
+                                materialize_hit(&snap, id, score, include_source, None)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                    Ok(SlotHit {
                         slot,
                         total: slot_total,
                         hits: slot_hits,
-                        stats,
-                    }
+                        stats: stats.into(),
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, (&'static str, String)>>()
+                .map_err(|error| enrichment_error(&state, error))?;
+            let took_ms = start.elapsed().as_secs_f64() * 1000.0;
 
             info!(
                 titles = num_docs,
@@ -479,10 +642,12 @@ pub(crate) async fn search(
                 "search complete"
             );
             SearchResponse {
+                took: took_ms.floor() as u64,
+                timed_out: false,
                 took_ms,
                 hits: SearchHits { total, hits },
                 slots: Some(slots),
-                profile: None,
+                profile: include_profile.then_some(merged_stats),
             }
         }
 
@@ -517,10 +682,27 @@ pub(crate) async fn search(
         .http_requests_total
         .with_label_values(&["search", "200"])
         .inc();
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["search"])
-        .observe(start.elapsed().as_secs_f64());
     Ok(Json(response))
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    #[test]
+    fn profile_totals_accumulate_beyond_u32() {
+        let one = MatchStats {
+            unique_candidates: u32::MAX,
+            postings_scanned: u32::MAX,
+            matches: u32::MAX,
+            ..MatchStats::default()
+        };
+        let mut total = StatsResponse::default();
+        total.merge(one);
+        total.merge(one);
+
+        assert_eq!(total.unique_candidates, u64::from(u32::MAX) * 2);
+        assert_eq!(total.postings_scanned, u64::from(u32::MAX) * 2);
+        assert_eq!(total.matches, u64::from(u32::MAX) * 2);
+    }
 }

@@ -391,6 +391,16 @@ string, which only an interned tag has); boosts fire for both (id-equality). ADR
 `rank_fields.priority` instead stores/reconstructs a signed integer row value, including after tag-dict
 freeze. Ranking remains a presentation-surface concern, not a matching-core one.
 
+Compatibility `GET|POST /_search` also keeps matching, ranking, and hit enrichment on one published
+snapshot. The source store is structurally shared across cheap snapshots, so a concurrent same-id
+replacement can advance its source generation after an older reader matched. Source fetch compares
+that generation atomically under the store read guard with the exact row generation captured by the
+snapshot. A mismatch fails the requested enrichment instead of pairing a newer query source or
+explanation with an older Boolean result. Compatibility cluster requests that explicitly ask for
+sources take the exclusive `ClusterReadView` side of the core mutation barrier through matching and
+cloning the paged sources. That fence covers direct library mutations as well as REST writes; the
+default source-free cluster path remains fully concurrent (ADR-126).
+
 **Bounded local + distributed ranking (ADR-107/108/110).** `ExactStore` also carries one fixed signed
 `i64` priority column. `RankProgramSpec` compiles the priority field and tag boosts to an integer-only
 `CompiledRankProgram`; addition saturates. `EngineSnapshot::try_match_title_top_k` connects the

@@ -117,7 +117,7 @@ async fn numeric_tag_ingest_meets_numeric_filter() {
     let ids = search_ids(
         &state,
         serde_json::json!({"query": {"bool": {
-            "must": {"percolate": {"document": title}},
+            "must": {"percolate": {"field": "query", "document": title}},
             "filter": [{"terms": {"category": [7]}}],
         }}}),
     )
@@ -164,14 +164,14 @@ async fn unanswerable_filter_values_are_400_not_silently_dropped() {
         (
             "ES terms null element",
             serde_json::json!({"query": {"bool": {
-                "must": {"percolate": {"document": title}},
+                "must": {"percolate": {"field": "query", "document": title}},
                 "filter": [{"terms": {"category": ["a", null]}}],
             }}}),
         ),
         (
             "ES term null",
             serde_json::json!({"query": {"bool": {
-                "must": {"percolate": {"document": title}},
+                "must": {"percolate": {"field": "query", "document": title}},
                 "filter": [{"term": {"category": null}}],
             }}}),
         ),
@@ -180,7 +180,7 @@ async fn unanswerable_filter_values_are_400_not_silently_dropped() {
         (
             "ES clause with both terms and term",
             serde_json::json!({"query": {"bool": {
-                "must": {"percolate": {"document": title}},
+                "must": {"percolate": {"field": "query", "document": title}},
                 "filter": [{"terms": {"a": ["x"]}, "term": {"b": "y"}}],
             }}}),
         ),
@@ -188,14 +188,151 @@ async fn unanswerable_filter_values_are_400_not_silently_dropped() {
         (
             "ES empty terms clause",
             serde_json::json!({"query": {"bool": {
-                "must": {"percolate": {"document": title}},
+                "must": {"percolate": {"field": "query", "document": title}},
                 "filter": [{"terms": {}}],
+            }}}),
+        ),
+        (
+            "mixed native and ES shapes",
+            serde_json::json!({
+                "document": title,
+                "query": {"percolate": {
+                    "field": "query",
+                    "document": title
+                }}
+            }),
+        ),
+        (
+            "native document and documents",
+            serde_json::json!({
+                "document": title,
+                "documents": [title]
+            }),
+        ),
+        (
+            "missing percolate field",
+            serde_json::json!({"query": {"percolate": {"document": title}}}),
+        ),
+        (
+            "wrong percolate field",
+            serde_json::json!({"query": {"percolate": {
+                "field": "stored_query",
+                "document": title
+            }}}),
+        ),
+        (
+            "unsupported percolate option",
+            serde_json::json!({"query": {"percolate": {
+                "field": "query",
+                "document": title,
+                "name": "ignored-before"
+            }}}),
+        ),
+        (
+            "top-level query sibling",
+            serde_json::json!({"query": {
+                "percolate": {"field": "query", "document": title},
+                "match_all": {}
+            }}),
+        ),
+        (
+            "unsupported bool sibling",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"field": "query", "document": title}},
+                "should": [{"match_all": {}}]
+            }}}),
+        ),
+        (
+            "must sibling",
+            serde_json::json!({"query": {"bool": {
+                "must": {
+                    "percolate": {"field": "query", "document": title},
+                    "match_all": {}
+                }
+            }}}),
+        ),
+        (
+            "percolate document and documents",
+            serde_json::json!({"query": {"percolate": {
+                "field": "query",
+                "document": title,
+                "documents": [title]
+            }}}),
+        ),
+        (
+            "terms scalar",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"field": "query", "document": title}},
+                "filter": {"terms": {"category": "one"}}
+            }}}),
+        ),
+        (
+            "term with multiple fields",
+            serde_json::json!({"query": {"bool": {
+                "must": {"percolate": {"field": "query", "document": title}},
+                "filter": {"term": {"a": "one", "b": "two"}}
             }}}),
         ),
     ] {
         let err = search_ids(&state, body).await.expect_err(label);
         assert_eq!(err, axum::http::StatusCode::BAD_REQUEST, "{label}");
     }
+}
+
+#[tokio::test]
+async fn search_enrichment_never_splices_a_newer_source_onto_an_older_match() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let mut engine = Engine::new(Normalizer::default_vocab().expect("vocab"));
+    engine
+        .try_insert_live("topps chrome", 7, 1)
+        .expect("insert");
+    let mut state = state_with(engine, false);
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+    let held = Arc::clone(&semaphore)
+        .acquire_owned()
+        .await
+        .expect("held permit");
+    Arc::get_mut(&mut state)
+        .expect("sole state owner")
+        .search_permits = Some(semaphore);
+
+    let request: SearchBody = serde_json::from_value(serde_json::json!({
+        "document": {"title": "2020 topps chrome"}
+    }))
+    .expect("body");
+    let task_state = Arc::clone(&state);
+    let mut search_future = Box::pin(search(State(task_state), Json(request)));
+
+    // One manual poll runs synchronously through snapshot capture and stops at
+    // the held search permit. This makes the replacement race deterministic.
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    assert!(matches!(
+        search_future.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    {
+        let mut engine = state.engine.lock();
+        engine
+            .try_upsert_live("michael jordan", 7, 2)
+            .expect("replace query");
+        state.snapshot.store(Arc::new(engine.snapshot()));
+    }
+    drop(held);
+
+    let error = search_future
+        .await
+        .err()
+        .expect("the old snapshot's source generation is no longer available");
+    assert_eq!(error.0, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    let json = serde_json::to_value(error.1 .0).expect("serialize error");
+    assert_eq!(json["error"]["type"], "source_unavailable");
+    assert!(
+        !json.to_string().contains("michael jordan"),
+        "the replacement source must never be attached to the older match"
+    );
 }
 
 // ---- cooperative cancellation + bounded concurrency (ADR-099) ----------------

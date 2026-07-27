@@ -68,7 +68,7 @@ pub use coordinator::{
     recommended_shard_count, resolve_topology, route_topology, seed_position_preserving,
     AddOutcome, ClusterBatchRankedMatch, ClusterConfig, ClusterEngine, ClusterExhaustiveMatch,
     ClusterPitError, ClusterRankedError, ClusterRankedHit, ClusterRankedMatch, ClusterRankedTitle,
-    ResyncReport, ShardEndpoints,
+    ClusterReadView, ResyncReport, ShardEndpoints,
 };
 pub use ring::{HashRing, DEFAULT_VNODES};
 pub use shard::ShardError;

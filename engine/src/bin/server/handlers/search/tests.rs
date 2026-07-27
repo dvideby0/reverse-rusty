@@ -5,7 +5,7 @@
 //! `/_search`. The library already proves batch == scalar (tests/broad_batch);
 //! this proves the HTTP layer threads results through in order and unchanged.
 use super::mpercolate::{mpercolate, MPercolateBody};
-use super::percolate::{search, SearchBody};
+use super::percolate::{search, search_route, SearchBody};
 use super::v2::{v2_mpercolate, v2_search, V2MPercolateBody, V2SearchBody};
 use super::DocBody;
 use crate::metrics::PrometheusMetrics;

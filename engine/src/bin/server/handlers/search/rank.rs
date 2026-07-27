@@ -13,6 +13,7 @@ use reverse_rusty::{ranked_order, CompiledRankSpec, EngineSnapshot, RankSpec};
 /// and/or additive request boosts. Ranking runs AFTER matching, on the final id
 /// set — it only reorders + paginates, never changes which queries match.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RankBody {
     /// Tag key whose numeric value is a query's base priority (e.g. `"priority"`).
     priority_key: Option<String>,
@@ -22,6 +23,7 @@ pub(crate) struct RankBody {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BoostBody {
     key: String,
     value: String,

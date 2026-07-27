@@ -1,10 +1,10 @@
-//! Percolate read handlers: `POST /_search` (the rich, per-title path with explain
+//! Percolate read handlers: `GET|POST /_search` (the rich, per-title path with explain
 //! and per-slot stats) and `POST /_mpercolate` (the batch throughput path, columnar
 //! broad lane amortized per title-batch — ADR-026). Owns the request-resolution
 //! helpers that normalize both the native and ES percolate envelopes (ADR-049 filters).
 //!
 //! Submodule map:
-//! - [`percolate`] — the `POST /_search` handler + its request/response DTOs.
+//! - [`percolate`] — the `GET|POST /_search` handler + its request/response DTOs.
 //! - [`mpercolate`] — the `POST /_mpercolate` batch handler + its DTOs.
 //! - [`resolve`] — request resolution: native + ES percolate envelopes → `(titles, single, FilterSpec)`.
 //! - [`rank`] — the `rank` block + `order_and_page` (post-match reorder + `from`/`size`, ADR-059).
@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dto::HitSource;
 
+mod controls;
 mod mpercolate;
 mod percolate;
 mod rank;
@@ -26,18 +27,36 @@ mod pit_tests;
 mod tests;
 
 pub(crate) use mpercolate::mpercolate;
-pub(crate) use percolate::search;
+pub(crate) use percolate::search_route;
 pub(crate) use v2::{cluster_v2_mpercolate, cluster_v2_search, v2_mpercolate, v2_search};
 // The request-resolution helper is shared with the coordinator-mode handlers
 // (ADR-070), so both modes parse the identical native + ES envelopes.
-pub(crate) use resolve::resolve_percolate;
+pub(crate) use resolve::{resolve_percolate, resolve_percolate_strict};
 // The `rank` block + its lowering are shared with the coordinator-mode handlers too
 // (ADR-075), so both modes parse the identical ranking request shape.
+pub(crate) use controls::{resolve_search_controls, SearchControlInput, SearchParams};
 pub(crate) use rank::{to_rank_spec, RankBody};
 
 #[derive(Deserialize)]
 pub(crate) struct DocBody {
     pub(crate) title: String,
+}
+
+/// Strict native document accepted only by compatibility `GET|POST /_search`.
+/// Other percolate surfaces keep their established permissive product-document
+/// parsing instead of inheriting ADR-126's compatibility-boundary change.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CompatibilityDocBody {
+    pub(crate) title: String,
+}
+
+impl From<CompatibilityDocBody> for DocBody {
+    fn from(document: CompatibilityDocBody) -> Self {
+        Self {
+            title: document.title,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -48,6 +67,7 @@ struct SearchHits {
 
 #[derive(Serialize)]
 struct SearchHitItem {
+    _index: &'static str,
     _id: u64,
     /// Ranking score (ADR-059) — present only when the request supplied a `rank`
     /// block; omitted (so the response is byte-identical) on the unranked path.

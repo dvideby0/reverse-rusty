@@ -224,6 +224,57 @@ fn exhaustive_blocks_successful_replacement_until_the_stream_finishes() {
     assert_eq!(cluster.percolate(&title).expect("new view"), vec![5]);
 }
 
+/// Compatibility source enrichment needs the same core fence as exhaustive
+/// delivery: a direct library mutation must not replace a source between the
+/// match and source-read phases of one request.
+#[test]
+fn consistent_read_view_blocks_direct_replacement_until_source_is_read() {
+    let cfg = ClusterConfig {
+        num_shards: 3,
+        ..Default::default()
+    };
+    let seed = vec![(5u64, "1994 topps".to_string())];
+    let cluster = ClusterEngine::build(vocab(), &cfg, &seed).expect("cluster");
+    let view = cluster.consistent_read_view();
+    let (ids, _) = view
+        .percolate_filtered_with_stats("1994 topps card", &[], false)
+        .expect("old-view match");
+    assert_eq!(ids, vec![5]);
+
+    let (write_started_tx, write_started_rx) = mpsc::sync_channel(0);
+    let (write_done_tx, write_done_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let write = scope.spawn(|| {
+            write_started_tx.send(()).expect("signal writer");
+            let result = cluster.upsert_query(5, "1995 fleer", 2);
+            write_done_tx.send(()).expect("signal completion");
+            result
+        });
+        write_started_rx.recv().expect("writer started");
+        assert!(
+            write_done_rx
+                .recv_timeout(Duration::from_millis(50))
+                .is_err(),
+            "direct upsert crossed the consistent read view"
+        );
+        assert_eq!(
+            view.get_source(5).expect("old-view source").as_deref(),
+            Some("1994 topps")
+        );
+        drop(view);
+        write.join().expect("writer thread").expect("upsert");
+    });
+
+    assert_eq!(
+        cluster.get_source(5).expect("new source").as_deref(),
+        Some("1995 fleer")
+    );
+    assert!(!cluster
+        .percolate("1994 topps card")
+        .expect("new-view match")
+        .contains(&5));
+}
+
 /// A partially-applied re-placement can leave the old body live at its prior
 /// owner while the new body is already live at a different owner. Both rows
 /// legitimately pass ADR-109 ownership for a title containing both bodies, so
