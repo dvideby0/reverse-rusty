@@ -178,7 +178,7 @@ The full method/path matrix is below.
 | `/` | GET/HEAD | Product, version, and cluster info |
 | `/_doc/{id}` | GET/HEAD | Retrieve a stored query / bodyless existence check |
 | `/_doc/{id}` | PUT | Register or atomically replace/create-only a query (`op_type=index|create`; strict `refresh`; ES/OS response metadata, ADR-117) |
-| `/_doc/{id}` | DELETE | Remove a stored query |
+| `/_doc/{id}` | DELETE | Remove a stored query (strict `refresh`; ES/OS identity metadata; logical delete count; explicit partial-repair contract, ADR-125) |
 | `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
 | `/v2/_search` | POST | Single-node or cluster, single-document exact bounded top-K + winner-only enrichment (ADR-107/108/110); accepts `pit`/`cursor` pages (ADR-113) |
 | `/v2/_pit` | POST/DELETE | Open / close a point-in-time snapshot for cursor pagination (in-process modes; remote assemblies 501 — ADR-113) |
@@ -270,6 +270,12 @@ Behavior deltas from single-node mode (all deliberate, none silent):
   pre-existing ids refuses create-only writes rather than guessing absence. `refresh=false|true|wait_for`
   are accepted under the stronger publish-before-response model; unsupported write parameters fail
   with 400 instead of being ignored.
+- **`DELETE /_doc/{id}` is a log-first all-position remove** — successful and missing responses
+  match the single-node contract and report one logical deletion rather than physical placement
+  copies. `refresh=false|true|wait_for` are accepted under immediate visibility; every other control
+  fails before mutation. A remote partial apply returns retryable 503 `"result": "partial"` with
+  the applied and pending positions. Repeat the idempotent DELETE, or use `POST /_cluster/resync`
+  while the same coordinator still owns its in-memory repair queue (ADR-125).
 - **Per-request `include_broad`** is honored on compatibility and v2 search/batch surfaces. It adds
   class C and accepted D; class H remains default-visible.
 - **`rank` works (ADR-075)** — the same block as single-node, scored at the shards against the shared

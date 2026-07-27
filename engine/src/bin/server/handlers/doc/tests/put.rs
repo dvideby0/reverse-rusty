@@ -130,9 +130,13 @@ async fn delete_after_reput_reports_one_copy() {
     do_put(&state, 7, "michael jordan").await;
     do_put(&state, 7, "lebron james").await;
 
-    let resp = delete_doc(State(Arc::clone(&state)), Path(7))
-        .await
-        .into_response();
+    let resp = delete_doc(
+        State(Arc::clone(&state)),
+        Path(7),
+        Ok(Query(super::DeleteDocParams::default())),
+    )
+    .await
+    .into_response();
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await

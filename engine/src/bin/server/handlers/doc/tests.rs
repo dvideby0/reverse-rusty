@@ -1,9 +1,7 @@
-//! Handler-level tests for the `PUT /_doc/{id}` atomic upsert (ADR-067): the ES
-//! 201-created / 200-updated status split, replace-by-id visible through the
-//! published snapshot, and DELETE reporting one live copy after a re-PUT (the
-//! ADR-064 audit observed `deleted_count: 2` on the pre-fix additive path).
+//! Handler-level document API tests: ES/OS-shaped GET/HEAD/PUT/DELETE contracts,
+//! atomic replace-by-id visibility, strict controls, and source metadata.
 
-use super::{delete_doc, get_doc, put_doc};
+use super::{delete_doc, get_doc, put_doc, DeleteDocParams};
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 use axum::body::Body;
@@ -128,6 +126,7 @@ fn tags_of(body: &serde_json::Value) -> Result<Vec<(String, String)>, String> {
     super::extract_ingest_tags(obj)
 }
 
+mod delete;
 mod get;
 mod parsing;
 mod put;

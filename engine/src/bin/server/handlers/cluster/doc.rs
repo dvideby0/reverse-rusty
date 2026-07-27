@@ -21,22 +21,12 @@ use reverse_rusty::cluster::{AddOutcome, ShardError};
 
 use crate::dto::ApiError;
 use crate::handlers::doc::{
-    extract_bulk_id, extract_ranked_ingest, GetDocParams, GetDocResponse, PutDocBody, PutDocParams,
-    PutDocResponse, CLASS_D_REJECT_MSG, QUERY_INDEX,
+    extract_bulk_id, extract_ranked_ingest, DeleteDocParams, DeleteDocResponse, GetDocParams,
+    GetDocResponse, PutDocBody, PutDocParams, PutDocResponse, CLASS_D_REJECT_MSG, QUERY_INDEX,
 };
 use crate::state::ClusterAppState;
 
 use super::{shard_error_response, shard_error_status};
-
-#[derive(Serialize)]
-struct ClusterDeleteDocResponse {
-    _id: u64,
-    result: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    deleted_count: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
 
 #[derive(Serialize)]
 struct ClusterBulkResponse {
