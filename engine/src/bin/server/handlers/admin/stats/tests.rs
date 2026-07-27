@@ -439,6 +439,10 @@ async fn cat_stats_honors_common_cat_controls() {
     .expect("help must not wait for stats admission");
     assert_eq!(help.0, StatusCode::OK);
     let help = std::str::from_utf8(&help.2).expect("UTF-8 help");
+    assert!(
+        help.starts_with("metric   | m        | native Reverse Rusty statistic name\n"),
+        "shared rendering must preserve CAT stats help alignment: {help}"
+    );
     assert!(help.contains("metric"));
     assert!(help.contains("statistic name"));
     drop(held);

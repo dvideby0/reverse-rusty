@@ -198,7 +198,7 @@ The full method/path matrix is below.
 | `/_backup` | POST | Strict native, synchronous snapshot of a durable single engine or in-process cluster to a fresh server-side dir (body `{"dest":"..."}`); one backup is admitted per server and excess calls wait asynchronously; a stateless remote coordinator returns 400 ([backup/restore](../operations/backup-restore.md), ADR-079/139) |
 | `/_stats` | GET | Strict native, no-store JSON metrics snapshot with timing, truthful physical/live counts, familiar shard/WAL projections, and bounded blocking execution (ADR-140) |
 | `/_cat/stats` | GET | Strict native standalone `metric` / `value` stats table with ES/OS-familiar `format`, `v`, `h`, `help`, and `s` controls; shares bounded collection with `/_stats` (ADR-141) |
-| `/_cat/segments` | GET | Per-segment LSM detail (text table or `?format=json`) |
+| `/_cat/segments` | GET | Strict native per-segment LSM table with ES/OS-familiar `format`, `v`, `h`, `help`, `s`, and `bytes` controls (ADR-142) |
 | `/_health` | GET | Health check (green/yellow/red) |
 | `/_metrics` | GET | Prometheus text exposition format |
 | `/_vocab` | GET | Current vocabulary as JSON |

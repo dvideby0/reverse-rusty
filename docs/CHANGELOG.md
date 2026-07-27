@@ -9,7 +9,7 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Unfinished ideas and priorities → [roadmap](roadmap.md)
 - Exact performance captures → [performance results](performance/results.md)
 
-## 2026-07-26 — Documentation, module boundaries, and API parity
+## 2026-07-26 to 2026-07-27 — Documentation, module boundaries, and API parity
 
 - Replaced the monolithic ADR index with an area hub, nine compact catalogs, and one canonical
   page per ADR.
@@ -84,6 +84,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   text/JSON, header, column, help, and sort controls; shared its corpus-wide collection admission
   with `/_stats` and moved the scan off async workers
   ([ADR-141](decisions/adr-141-cat-stats-api-contract.md)).
+- Hardened native `GET /_cat/segments` with strict bodyless transport, no-store responses, shared
+  CAT header/column/help/sort rendering, numeric byte-unit controls, consistent string-valued JSON,
+  and honest LSM fields plus exact ES/OpenSearch aliases
+  ([ADR-142](decisions/adr-142-cat-segments-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

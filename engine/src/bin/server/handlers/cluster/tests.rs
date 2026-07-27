@@ -121,6 +121,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
             )),
         )
         .route("/_cat/shards", get(cluster_cat_shards))
+        .route(
+            "/_cat/segments",
+            any(cluster_cat_segments).layer(axum::extract::DefaultBodyLimit::max(
+                crate::handlers::CAT_SEGMENTS_BODY_LIMIT,
+            )),
+        )
         .route("/_health", get(cluster_health))
         .route("/_metrics", get(cluster_metrics))
         .route("/_vocab", get(cluster_get_vocab).put(cluster_put_vocab))
