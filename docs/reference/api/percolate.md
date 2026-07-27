@@ -348,9 +348,18 @@ delivery wins, a later cancellation is a no-op. Any other earlier invalidation i
 for example, DELETE cannot relabel an already-dropped completion frame from `not consumed` to
 `cancelled`.
 
-`GET /_percolate/jobs/{id}/stream` claims the job's one
-`application/x-ndjson` consumer. A second claim returns `409 stream_already_claimed`; `HEAD` is
-rejected with 405 and never consumes the claim. Frames are:
+`GET /_percolate/jobs/{id}/stream` is a native, single-consumer result protocol rather than an
+Elasticsearch/OpenSearch retained async-search response. Those systems return one JSON result and
+have no truthful equivalent for provisional chunks committed by a terminal checksum; their
+retention and wait controls therefore belong neither on this route nor in its response (ADR-134).
+
+The route accepts no query parameters. A non-empty query string—including malformed encoding—is
+rejected with structured 400 validation before the stream is claimed. Every non-GET method is
+rejected first with 405 and `Allow: GET`; notably, even a `HEAD` probe with an invalid query cannot
+consume the claim. An unknown id returns `404 job_not_found`; a second GET returns
+`409 stream_already_claimed`. A successful GET has already claimed the one consumer and returns `200`,
+`Content-Type: application/x-ndjson`, and `Cache-Control: no-store`. Every frame is one UTF-8 JSON
+object terminated by `\n`:
 
 ```json
 {"type":"match_chunk","job_id":"...","sequence":0,"members":[
@@ -366,6 +375,8 @@ rank program. Its idempotency key is derived from
 guarantee: a consumer deduplicates by key, verifies the exact total/checksum, and commits **only**
 after `completion`. A stream may end after provisional chunks because of cancellation, deadline,
 disconnect, shard/protocol failure, or server restart; none of those cases emits completion.
+Dropping a claimed response drops the receiver; if completion has not been dequeued, status becomes
+`failed` and exposes no exact summary.
 The checksum includes score presence as a separate domain, so an absent score cannot attest as any
 valid signed score value.
 The optional best-effort `failure` frame is diagnostic only—the status endpoint is authoritative.

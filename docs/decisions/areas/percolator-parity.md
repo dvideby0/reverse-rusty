@@ -26,6 +26,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 | [131](../adr-131-exhaustive-job-create-api-contract.md) | Exhaustive-job create API contract | Makes creation strict, bounded, ergonomically defaulted, and familiar without weakening exact delivery. | Accepted |
 | [132](../adr-132-exhaustive-job-status-api-contract.md) | Exhaustive-job status API contract | Makes retained status strict, bounded-waitable, cache-safe, and familiar without claiming the result stream. | Accepted |
 | [133](../adr-133-exhaustive-job-delete-api-contract.md) | Exhaustive-job delete API contract | Cancels running work and atomically removes terminal retained results under a strict acknowledged contract. | Accepted |
+| [134](../adr-134-exhaustive-job-stream-api-contract.md) | Exhaustive-job stream API contract | Makes the single-consumer NDJSON route strict, cache-safe, and explicitly native. | Accepted |
 
 ---
 

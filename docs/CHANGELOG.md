@@ -51,6 +51,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Hardened `DELETE /_percolate/jobs/{id}` with strict input, a native/ES-compatible acknowledged
   response, cooperative running cancellation, and atomic terminal record plus event-id removal
   ([ADR-133](decisions/adr-133-exhaustive-job-delete-api-contract.md)).
+- Hardened `GET /_percolate/jobs/{id}/stream` with strict query-free single-consumer semantics,
+  cache-safe newline-delimited responses, pre-claim HEAD rejection, and standalone/coordinator
+  route parity while keeping the terminally attested protocol explicitly native
+  ([ADR-134](decisions/adr-134-exhaustive-job-stream-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

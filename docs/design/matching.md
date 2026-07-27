@@ -456,7 +456,7 @@ and deduplicated union winner fetch, so every delivered source belongs to the ma
 version. The fence is acquired before entering Rayon; source-free batches remain concurrent
 (ADR-128).
 
-### 5.5 Exhaustive bounded delivery (ADR-114/131/132/133)
+### 5.5 Exhaustive bounded delivery (ADR-114/131/132/133/134)
 
 `result_mode=all` uses the same post-verification collector seam without materializing the full
 answer. `ChunkCollector` retains one fixed-capacity `Vec<ExhaustiveMatch>`; a synchronous
@@ -492,6 +492,12 @@ maximum; it does not claim the stream, and a record cannot become `completed` un
 single consumer dequeues completion. Status holds the accepted record across count-based pruning,
 uses `no-store`, and rejects `keep_alive` because the registry has no client-selected time expiry
 (ADR-132).
+
+The stream route remains native because ES/OpenSearch retained async-search JSON has no equivalent
+for provisional chunks committed by a terminal checksum. It accepts only a query-free GET, rejects
+every other method with `Allow: GET` before claiming, and returns no-store NDJSON with one
+newline-terminated object per frame. Unknown and duplicate claims use structured 404 and 409
+errors. Dropping a claimed response retains ADR-114's failure-without-summary guarantee (ADR-134).
 
 DELETE uses the same terminal distinction as familiar async-search cleanup. A running record
 receives cooperative cancellation and stays pollable until terminal publication; a subsequent

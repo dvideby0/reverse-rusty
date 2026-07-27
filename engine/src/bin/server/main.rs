@@ -60,7 +60,7 @@ use arc_swap::ArcSwap;
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 use clap::Parser;
@@ -433,7 +433,7 @@ async fn main() {
             post(create_job_route).layer(DefaultBodyLimit::max(EXHAUSTIVE_JOB_BODY_LIMIT)),
         )
         .route("/_percolate/jobs/{id}", get(get_job).delete(cancel_job))
-        .route("/_percolate/jobs/{id}/stream", get(get_job_stream))
+        .route("/_percolate/jobs/{id}/stream", any(get_job_stream))
         .route("/_mpercolate", post(mpercolate))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))
