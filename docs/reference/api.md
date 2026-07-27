@@ -181,7 +181,7 @@ The full method/path matrix is below.
 | `/_doc/{id}` | DELETE | Remove a stored query (strict `refresh`; ES/OS identity metadata; logical delete count; explicit partial-repair contract, ADR-125) |
 | `/_search` | GET/POST | Percolate one or more titles (strict native or ES/OS percolate request; per-slot `stats`, `explain`, `profile`, paging; ADR-126) |
 | `/v2/_search` | POST | Strict single-document exact bounded top-K with ES/OS control aliases, winner-only enrichment, and no partial results (ADR-107/108/110/127); accepts `pit`/`cursor` pages (ADR-113) |
-| `/v2/_pit` | POST/DELETE | Strict ES/OS-familiar open / native close of a point-in-time snapshot for cursor pagination (in-process modes; remote assemblies 501 — ADR-113/129) |
+| `/v2/_pit` | POST/DELETE | Strict ES/OS-familiar point-in-time open/close for cursor pagination (in-process modes; remote assemblies 501 — ADR-113/129/130) |
 | `/v2/_mpercolate` | POST | Strict shared-options bounded top-K batch; ES/OS control aliases, whole-request exactness, and no PIT/cursor pagination (ADR-112/113/128) |
 | `/_percolate/jobs` | POST | Start one exact exhaustive background match; returns 202 with status and stream URLs (ADR-114) |
 | `/_percolate/jobs/{id}` | GET/DELETE | Inspect a retained exhaustive job / request cooperative cancellation |

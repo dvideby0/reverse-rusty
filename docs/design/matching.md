@@ -441,6 +441,13 @@ every position from the same all-or-nothing mutation-barrier fan and exposes the
 token under both `id` and `pit_id` (ADR-129). These HTTP aliases do not change registry, snapshot,
 placement, or cursor semantics.
 
+PIT close first bounds the request at the HTTP body boundary, then authenticates the complete
+bounded `id`/`pit_id` scalar-or-array request before touching the registry. It releases each live
+pin and returns one ES/OpenSearch/native response superset. The local freed-context count is one
+per live PIT; the coordinator count is the number of pinned logical primary positions, never the
+physical replica count. Already-absent entries remain a successful goal state but are reported as
+not closed, and the API exposes no cross-client delete-all operation (ADR-130).
+
 `POST /v2/_mpercolate` applies the same bounded collector to every title through the columnar batch
 kernel and returns request-ordered exact top-K slots under one aggregate heap admission, deadline,
 and winner-source credit (ADR-112). Source-enriched cluster batches use the same short

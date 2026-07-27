@@ -206,3 +206,47 @@ async fn cluster_v2_pit_pages_concatenate_and_stale_after_resize() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(closed["closed"], false);
 }
+
+#[tokio::test]
+async fn cluster_close_pit_supports_batches_and_counts_logical_contexts() {
+    let state = test_state(&[(1, "michael jordan".to_string())]);
+    let mut opened = Vec::new();
+    for _ in 0..2 {
+        let (status, body) = send(&state, req("POST", "/v2/_pit", &serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        opened.push(body["pit_id"].as_str().expect("PIT token").to_string());
+    }
+
+    let (status, closed) = send(
+        &state,
+        req(
+            "DELETE",
+            "/v2/_pit",
+            &serde_json::json!({"pit_id": opened.clone()}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{closed}");
+    assert_eq!(closed["closed"], true, "{closed}");
+    assert_eq!(closed["succeeded"], true, "{closed}");
+    assert_eq!(closed["num_freed"], 6, "{closed}");
+    assert_eq!(
+        closed["pits"],
+        serde_json::json!([
+            {"successful": true, "pit_id": opened[0]},
+            {"successful": true, "pit_id": opened[1]}
+        ])
+    );
+    assert_eq!(state.cluster.read().open_pit_count(), 0);
+    assert_eq!(state.prom.open_pits.get(), 0);
+
+    let (status, gone) = send(
+        &state,
+        req("DELETE", "/v2/_pit", &serde_json::json!({"id": opened[0]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{gone}");
+    assert_eq!(gone["closed"], false, "{gone}");
+    assert_eq!(gone["succeeded"], true, "{gone}");
+    assert_eq!(gone["num_freed"], 0, "{gone}");
+}

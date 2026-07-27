@@ -36,6 +36,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   fail-loud partial-creation aliases, structured extractor failures, and a dual-dialect response
   carrying both token names, creation time, and truthful shard counts
   ([ADR-129](decisions/adr-129-v2-open-pit-api-contract.md)).
+- Hardened `DELETE /v2/_pit` with strict ES/OpenSearch/native scalar and batch identities,
+  pre-decode body bounds, all-token pre-validation, structured extractor failures, and a truthful
+  response carrying aggregate, per-PIT, and logical-context release results
+  ([ADR-130](decisions/adr-130-v2-close-pit-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 
