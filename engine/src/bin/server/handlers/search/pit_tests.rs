@@ -55,6 +55,9 @@ fn pit_state(eng: Engine, pit_config: reverse_rusty::PitConfig) -> Arc<AppState>
         backup_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),
+        stats_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_STATS,
+        )),
         snapshot: arc_swap::ArcSwap::new(snap),
         pool,
         search_permits: None,

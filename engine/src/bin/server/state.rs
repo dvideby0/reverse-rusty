@@ -32,6 +32,9 @@ pub(crate) const DEFAULT_MAX_RANKED_ENRICHMENT_BYTES: usize = 16 * 1024 * 1024;
 /// Backups serialize behind the engine/cluster writer lock, so admitting more
 /// than one blocking worker would only create a detached blocking-pool queue.
 pub(crate) const MAX_CONCURRENT_BACKUPS: usize = 1;
+/// A stats snapshot scans class columns and collects/sorts posting lengths, so
+/// only one such corpus-wide blocking job is admitted per server.
+pub(crate) const MAX_CONCURRENT_STATS: usize = 1;
 
 pub(crate) struct AppState {
     pub(crate) engine: Mutex<Engine>,
@@ -43,6 +46,9 @@ pub(crate) struct AppState {
     /// closure so a disconnected request cannot release admission while its
     /// backup is still waiting on or holding the engine writer lock.
     pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Bounds the corpus-wide `GET /_stats` scan independently from search and
+    /// backup work. The permit is owned by the blocking worker.
+    pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) snapshot: ArcSwap<EngineSnapshot>,
     pub(crate) pool: rayon::ThreadPool,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
@@ -113,6 +119,8 @@ pub(crate) struct ClusterAppState {
     pub(crate) flush_serial: Mutex<()>,
     /// Coordinator analogue of [`AppState::backup_permits`].
     pub(crate) backup_permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Coordinator analogue of [`AppState::stats_permits`].
+    pub(crate) stats_permits: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) pool: rayon::ThreadPool,
     /// Bounded search concurrency (ADR-099): `Some` ⇒ every `/_search` /
     /// `/_mpercolate` acquires one permit before its `spawn_blocking` match work,

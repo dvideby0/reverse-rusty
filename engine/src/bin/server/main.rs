@@ -83,7 +83,7 @@ use handlers::{
     learn_and_apply_vocab, learn_vocab, mpercolate_route, open_pit_route, prometheus_metrics,
     put_doc, put_settings, put_vocab, reset_alias_feedback, search_route, stats,
     v2_mpercolate_route, v2_search_route, validate_and_apply_feedback, BACKUP_BODY_LIMIT,
-    EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT,
+    EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT, STATS_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -400,6 +400,9 @@ async fn main() {
         backup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),
+        stats_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_STATS,
+        )),
         snapshot: ArcSwap::new(initial_snapshot),
         pool,
         search_permits: (cli.max_concurrent_searches > 0)
@@ -449,7 +452,10 @@ async fn main() {
             "/_backup",
             any(backup_route).layer(DefaultBodyLimit::max(BACKUP_BODY_LIMIT)),
         )
-        .route("/_stats", get(stats))
+        .route(
+            "/_stats",
+            any(stats).layer(DefaultBodyLimit::max(STATS_BODY_LIMIT)),
+        )
         .route("/_cat/stats", get(cat_stats))
         .route("/_cat/segments", get(cat_segments))
         .route("/_health", get(health))

@@ -131,8 +131,10 @@ between the oldest and newest snapshot as lost and replay it from upstream.
 ## 4. Post-recovery verification checklist
 
 - [ ] `/_health` green; every shard `reverse_rusty_shard_ready 1` on its `/_metrics` (ADR-091).
-- [ ] `GET /_stats` total query count matches the recorded pre-loss count (or pre-loss minus the
-      known-lost window).
+- [ ] `GET /_stats` matches the recorded pre-loss snapshot (or known-lost window): compare
+      `live_queries` for standalone, or the cluster's physical `total_queries` +
+      `shard_queries[]` under the same placement. Do not treat the cluster physical total as a
+      distinct logical-document count (ADR-140).
 - [ ] **Golden-titles probe:** percolate a kept file of representative titles and diff the matched
       ids against the recorded expected output (the same probe set the backup rehearsal uses —
       [`backup-restore.md`](backup-restore.md)). Fan-out sanity: `GET /_cat/shards` shows every

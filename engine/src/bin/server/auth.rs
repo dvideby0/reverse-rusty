@@ -367,6 +367,9 @@ mod tests {
             backup_permits: Arc::new(tokio::sync::Semaphore::new(
                 crate::state::MAX_CONCURRENT_BACKUPS,
             )),
+            stats_permits: Arc::new(tokio::sync::Semaphore::new(
+                crate::state::MAX_CONCURRENT_STATS,
+            )),
             snapshot: arc_swap::ArcSwap::new(snap),
             pool,
             search_permits: None,

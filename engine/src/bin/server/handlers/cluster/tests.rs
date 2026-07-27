@@ -42,6 +42,9 @@ fn state_from_cluster(cluster: ClusterEngine) -> Arc<ClusterAppState> {
         backup_permits: Arc::new(tokio::sync::Semaphore::new(
             crate::state::MAX_CONCURRENT_BACKUPS,
         )),
+        stats_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_STATS,
+        )),
         pool,
         search_permits: None,
         ranked_search_permits: Arc::new(tokio::sync::Semaphore::new(2)),
@@ -111,7 +114,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         )
         .route("/_compact", post(cluster_compact))
         .route("/_forcemerge", post(cluster_compact))
-        .route("/_stats", get(cluster_stats))
+        .route(
+            "/_stats",
+            any(cluster_stats).layer(axum::extract::DefaultBodyLimit::max(
+                crate::handlers::STATS_BODY_LIMIT,
+            )),
+        )
         .route("/_cat/shards", get(cluster_cat_shards))
         .route("/_health", get(cluster_health))
         .route("/_metrics", get(cluster_metrics))
