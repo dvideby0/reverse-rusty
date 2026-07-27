@@ -1,268 +1,383 @@
+use std::collections::HashSet;
+
+use axum::extract::{Query, State};
+
 use super::{
-    error, extract_ranked_ingest, info, instrument, ApiError, AppState, Arc, BulkItem,
-    BulkItemInner, BulkResponse, HeaderMap, IngestItemStatus, Instant, IntoResponse, Json, State,
-    StatusCode, CLASS_D_REJECT_MSG,
+    error, info, instrument, ApiError, AppState, Arc, BulkItem, BulkItemError, BulkItemInner,
+    BulkResponse, Bytes, BytesRejection, HeaderMap, IngestItemStatus, Instant, IntoResponse, Json,
+    QueryRejection, Response, StatusCode, CLASS_D_REJECT_MSG, QUERY_INDEX,
 };
 
-/// POST /_bulk — NDJSON bulk ingest.
-///
-/// Format (ES-compatible):
-///   {"index": {"_id": 123}}
-///   {"query": "pokemon base set"}
-///   {"index": {"_id": 456}}
-///   {"query": "charizard holo"}
+mod request;
+
+pub(crate) use request::{
+    parse_bulk_request, BulkActionKind, BulkParams, BulkRequestError, BulkSource, ParsedBulkItem,
+};
+
+type PreparedItem = (usize, BulkActionKind, u64, BulkSource);
+
+fn item_inner(id: u64) -> BulkItemInner {
+    BulkItemInner {
+        index: QUERY_INDEX,
+        id,
+        version: None,
+        result: None,
+        status: 0,
+        error: None,
+    }
+}
+
+pub(crate) fn pending_item(action: BulkActionKind, id: u64) -> BulkItem {
+    let inner = item_inner(id);
+    match action {
+        BulkActionKind::Index => BulkItem::Index(inner),
+        BulkActionKind::Create => BulkItem::Create(inner),
+    }
+}
+
+pub(crate) fn error_item(
+    action: BulkActionKind,
+    id: u64,
+    status: StatusCode,
+    error_type: &'static str,
+    reason: impl Into<String>,
+) -> BulkItem {
+    let mut inner = item_inner(id);
+    inner.status = status.as_u16();
+    inner.error = Some(BulkItemError {
+        error_type,
+        reason: reason.into(),
+    });
+    match action {
+        BulkActionKind::Index => BulkItem::Index(inner),
+        BulkActionKind::Create => BulkItem::Create(inner),
+    }
+}
+
+pub(crate) fn item_inner_mut(item: &mut BulkItem) -> &mut BulkItemInner {
+    match item {
+        BulkItem::Index(inner) | BulkItem::Create(inner) => inner,
+    }
+}
+
+pub(crate) fn succeed_item(
+    item: &mut BulkItem,
+    status: StatusCode,
+    version: u32,
+    result: &'static str,
+) {
+    let inner = item_inner_mut(item);
+    inner.status = status.as_u16();
+    inner.version = Some(version);
+    inner.result = Some(result);
+    inner.error = None;
+}
+
+pub(crate) fn fail_item(
+    item: &mut BulkItem,
+    status: StatusCode,
+    error_type: &'static str,
+    reason: impl Into<String>,
+) {
+    let inner = item_inner_mut(item);
+    inner.status = status.as_u16();
+    inner.version = None;
+    inner.result = None;
+    inner.error = Some(BulkItemError {
+        error_type,
+        reason: reason.into(),
+    });
+}
+
+pub(crate) fn bulk_rejection(
+    prom: &crate::metrics::PrometheusMetrics,
+    status: StatusCode,
+    error_type: &'static str,
+    reason: impl Into<String>,
+) -> Response {
+    prom.http_requests_total
+        .with_label_values(&["bulk", status.as_str()])
+        .inc();
+    ApiError::response(status, error_type, reason).into_response()
+}
+
+pub(crate) fn bulk_query_rejection(
+    prom: &crate::metrics::PrometheusMetrics,
+    error: &QueryRejection,
+) -> Response {
+    bulk_rejection(
+        prom,
+        StatusCode::BAD_REQUEST,
+        "validation_error",
+        format!("invalid bulk query parameters: {error}"),
+    )
+}
+
+pub(crate) fn bulk_body_rejection(
+    prom: &crate::metrics::PrometheusMetrics,
+    error: &BytesRejection,
+) -> Response {
+    let status = error.status();
+    let error_type = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        "payload_too_large"
+    } else {
+        "validation_error"
+    };
+    bulk_rejection(
+        prom,
+        status,
+        error_type,
+        format!("invalid bulk body: {error}"),
+    )
+}
+
+fn request_rejection(
+    prom: &crate::metrics::PrometheusMetrics,
+    error: BulkRequestError,
+) -> Response {
+    bulk_rejection(prom, error.status, error.error_type, error.reason)
+}
+
+/// Strict HTTP boundary for `POST /_bulk`.
 #[instrument(skip_all)]
-pub(crate) async fn bulk_ingest(
+pub(crate) async fn bulk_route(
     State(state): State<Arc<AppState>>,
+    params: Result<Query<BulkParams>, QueryRejection>,
     headers: HeaderMap,
-    body: String,
-) -> impl IntoResponse {
-    let start = Instant::now();
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["bulk"])
+        .start_timer();
+    let Query(params) = match params {
+        Ok(params) => params,
+        Err(error) => return bulk_query_rejection(&state.prom, &error),
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(error) => return bulk_body_rejection(&state.prom, &error),
+    };
+    let items = match parse_bulk_request(&headers, &body, params) {
+        Ok(items) => items,
+        Err(error) => return request_rejection(&state.prom, error),
+    };
+    bulk_ingest_inner(&state, items)
+}
 
-    if let Some(ct) = headers.get("content-type") {
-        if let Ok(ct_str) = ct.to_str() {
-            let ct_lower = ct_str.to_ascii_lowercase();
-            if !ct_lower.starts_with("application/json")
-                && !ct_lower.starts_with("application/x-ndjson")
-            {
-                state
-                    .prom
-                    .http_requests_total
-                    .with_label_values(&["bulk", "415"])
-                    .inc();
-                return ApiError::response(
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "unsupported_media_type",
-                    "Content-Type must be application/json or application/x-ndjson",
-                )
-                .into_response();
+fn classify_items(items: Vec<ParsedBulkItem>) -> (Vec<BulkItem>, Vec<PreparedItem>) {
+    let mut responses = Vec::with_capacity(items.len());
+    let mut prepared = Vec::new();
+    for item in items {
+        let slot = responses.len();
+        match item.source {
+            Ok(source) => {
+                responses.push(pending_item(item.action, item.id));
+                prepared.push((slot, item.action, item.id, source));
+            }
+            Err(error) => responses.push(error_item(
+                item.action,
+                item.id,
+                StatusCode::BAD_REQUEST,
+                error.error_type,
+                error.reason,
+            )),
+        }
+    }
+    (responses, prepared)
+}
+
+fn can_use_fresh_batch(engine: &reverse_rusty::Engine, prepared: &[PreparedItem]) -> bool {
+    let mut ids = HashSet::with_capacity(prepared.len());
+    let snapshot = engine.snapshot();
+    prepared.iter().all(|(_, _, id, source)| {
+        source.version == 1 && ids.insert(*id) && !snapshot.has_live_query(*id)
+    })
+}
+
+fn apply_fresh_batch(
+    engine: &mut reverse_rusty::Engine,
+    responses: &mut [BulkItem],
+    prepared: &[PreparedItem],
+) -> std::io::Result<bool> {
+    let pairs: Vec<(u64, String)> = prepared
+        .iter()
+        .map(|(_, _, id, source)| (*id, source.query.clone()))
+        .collect();
+    let tags: Vec<Vec<(String, String)>> = prepared
+        .iter()
+        .map(|(_, _, _, source)| source.tags.clone())
+        .collect();
+    let ranks: Vec<Option<reverse_rusty::RankValues>> = prepared
+        .iter()
+        .map(|(_, _, _, source)| source.rank)
+        .collect();
+    let (report, outcomes) =
+        engine.try_bulk_ingest_detailed_with_tags_and_ranks(&pairs, &tags, &ranks)?;
+    for ((slot, _, _, source), outcome) in prepared.iter().zip(outcomes) {
+        match outcome {
+            IngestItemStatus::Ingested => {
+                succeed_item(
+                    &mut responses[*slot],
+                    StatusCode::CREATED,
+                    source.version,
+                    "created",
+                );
+            }
+            IngestItemStatus::RejectedParse(error) => {
+                fail_item(
+                    &mut responses[*slot],
+                    StatusCode::BAD_REQUEST,
+                    "parse_exception",
+                    error.to_string(),
+                );
+            }
+            IngestItemStatus::RejectedClassD => {
+                fail_item(
+                    &mut responses[*slot],
+                    StatusCode::BAD_REQUEST,
+                    "illegal_argument_exception",
+                    CLASS_D_REJECT_MSG,
+                );
             }
         }
     }
+    info!(
+        ingested = report.ingested,
+        rejected_parse = report.rejected_parse,
+        rejected_class_d = report.rejected_class_d,
+        "bulk ingest complete through fresh-segment fast path"
+    );
+    // Even an all-rejected compiled batch can finalize or grow the feature
+    // dictionary and commits an empty segment, so publish every successful
+    // direct-batch transaction just as the previous handler did.
+    Ok(true)
+}
 
-    // Parse NDJSON action/source pairs.
-    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
-    let mut pairs: Vec<(u64, String)> = Vec::new();
-    // Per-query metadata tags (ADR-049), parallel to `pairs`.
-    let mut tags_per_pair: Vec<Vec<(String, String)>> = Vec::new();
-    let mut ranks_per_pair: Vec<Option<reverse_rusty::RankValues>> = Vec::new();
-    // For each entry in `pairs`, the index of its provisional item in `items`,
-    // so the engine's per-item outcome can be mapped back to the right slot.
-    let mut pair_item_idx: Vec<usize> = Vec::new();
-    let mut items: Vec<BulkItem> = Vec::new();
-    let mut has_errors = false;
+fn apply_one(
+    engine: &mut reverse_rusty::Engine,
+    response: &mut BulkItem,
+    action: BulkActionKind,
+    id: u64,
+    source: &BulkSource,
+) {
+    if action == BulkActionKind::Create && engine.snapshot().has_live_query(id) {
+        fail_item(
+            response,
+            StatusCode::CONFLICT,
+            "version_conflict_engine_exception",
+            format!("document {id} already exists; `create` requires a missing id"),
+        );
+        return;
+    }
 
-    let mut i = 0;
-    while i < lines.len() {
-        let action_line = lines[i];
-        i += 1;
-
-        // Parse action: {"index": {"_id": N}} or just {"_id": N, ...}
-        let action: serde_json::Value = match serde_json::from_str(action_line) {
-            Ok(v) => v,
-            Err(e) => {
-                has_errors = true;
-                items.push(BulkItem {
-                    index: BulkItemInner {
-                        _id: 0,
-                        status: 400,
-                        error: Some(format!("invalid action JSON: {e}")),
-                    },
-                });
-                // Try to skip the source line too.
-                if i < lines.len() {
-                    i += 1;
+    let write = if action == BulkActionKind::Create {
+        engine
+            .try_insert_live_ranked(&source.query, id, source.version, &source.tags, source.rank)
+            .map(|outcome| match outcome {
+                reverse_rusty::segment::InsertOutcome::Inserted(_) => {
+                    reverse_rusty::segment::UpsertOutcome::Created(0)
                 }
-                continue;
-            }
-        };
+                reverse_rusty::segment::InsertOutcome::RejectedClassD => {
+                    reverse_rusty::segment::UpsertOutcome::RejectedClassD
+                }
+            })
+    } else {
+        engine.try_upsert_live_ranked(&source.query, id, source.version, &source.tags, source.rank)
+    };
 
-        let id = extract_bulk_id(&action);
-
-        // Next line is the source document.
-        if i >= lines.len() {
-            has_errors = true;
-            items.push(BulkItem {
-                index: BulkItemInner {
-                    _id: id.unwrap_or(0),
-                    status: 400,
-                    error: Some("missing source line after action".into()),
-                },
-            });
-            break;
+    match write {
+        Ok(reverse_rusty::segment::UpsertOutcome::Created(_)) => {
+            succeed_item(response, StatusCode::CREATED, source.version, "created");
         }
-
-        let source_line = lines[i];
-        i += 1;
-
-        let Some(id) = id else {
-            has_errors = true;
-            items.push(BulkItem {
-                index: BulkItemInner {
-                    _id: 0,
-                    status: 400,
-                    error: Some("could not extract _id from action".into()),
-                },
-            });
-            continue;
-        };
-
-        let source: serde_json::Value = match serde_json::from_str(source_line) {
-            Ok(v) => v,
-            Err(e) => {
-                has_errors = true;
-                items.push(BulkItem {
-                    index: BulkItemInner {
-                        _id: id,
-                        status: 400,
-                        error: Some(format!("invalid source JSON: {e}")),
-                    },
-                });
-                continue;
-            }
-        };
-
-        let query = if let Some(q) = source.get("query").and_then(|v| v.as_str()) {
-            q.to_string()
-        } else {
-            has_errors = true;
-            items.push(BulkItem {
-                index: BulkItemInner {
-                    _id: id,
-                    status: 400,
-                    error: Some("missing or non-string 'query' field".into()),
-                },
-            });
-            continue;
-        };
-
-        // A malformed tag value fails the ITEM loud (ADR-073), mirroring the
-        // parse-error per-item contract — never ingest with silently fewer tags.
-        let (tags, rank) = match source.as_object().map(extract_ranked_ingest).transpose() {
-            Ok(value) => value.unwrap_or_default(),
-            Err((error_type, msg)) => {
-                has_errors = true;
-                items.push(BulkItem {
-                    index: BulkItemInner {
-                        _id: id,
-                        status: 400,
-                        error: Some(format!("{error_type}: {msg}")),
-                    },
-                });
-                continue;
-            }
-        };
-
-        pairs.push((id, query));
-        tags_per_pair.push(tags);
-        ranks_per_pair.push(rank);
-        // Provisional success; the engine outcome (below) may downgrade this
-        // item to a 400 once the batch is compiled.
-        pair_item_idx.push(items.len());
-        items.push(BulkItem {
-            index: BulkItemInner {
-                _id: id,
-                status: 201,
-                error: None,
-            },
-        });
+        Ok(reverse_rusty::segment::UpsertOutcome::Updated { .. }) => {
+            succeed_item(response, StatusCode::OK, source.version, "updated");
+        }
+        Ok(reverse_rusty::segment::UpsertOutcome::RejectedClassD) => {
+            fail_item(
+                response,
+                StatusCode::BAD_REQUEST,
+                "illegal_argument_exception",
+                CLASS_D_REJECT_MSG,
+            );
+        }
+        Err(reverse_rusty::WriteError::Parse(error)) => {
+            fail_item(
+                response,
+                StatusCode::BAD_REQUEST,
+                "parse_exception",
+                error.to_string(),
+            );
+        }
+        Err(reverse_rusty::WriteError::Wal(error)) => {
+            error!(query_id = id, error = %error, "bulk item WAL append failed");
+            fail_item(
+                response,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "persistence_unavailable",
+                format!("bulk item could not be durably recorded: {error}"),
+            );
+        }
     }
+}
 
-    // Ingest the valid pairs.
-    if !pairs.is_empty() {
+fn bulk_ingest_inner(state: &Arc<AppState>, items: Vec<ParsedBulkItem>) -> Response {
+    let start = Instant::now();
+    let (mut responses, prepared) = classify_items(items);
+    let mut published = false;
+    if !prepared.is_empty() {
         let result = {
             let mut engine = state.engine.lock();
-            engine.try_bulk_ingest_detailed_with_tags_and_ranks(
-                &pairs,
-                &tags_per_pair,
-                &ranks_per_pair,
-            )
-        };
-
-        let (report, item_status) = match result {
-            Ok(outcome) => {
-                state.publish_snapshot();
-                outcome
+            if can_use_fresh_batch(&engine, &prepared) {
+                apply_fresh_batch(&mut engine, &mut responses, &prepared)
+            } else {
+                for (slot, action, id, source) in &prepared {
+                    apply_one(&mut engine, &mut responses[*slot], *action, *id, source);
+                }
+                // Rejected class-D compiles and WAL failures can still update
+                // diagnostic/dictionary health in the engine. Publish once
+                // after every completed ordered pass, matching PUT /_doc.
+                Ok(true)
             }
-            Err(e) => {
-                // Durability failure: the batch was NOT committed (all-or-nothing,
-                // ADR-017). 503 tells the client to retry — engine state is
-                // unchanged, so no snapshot republish is needed.
-                error!(error = %e, "bulk ingest persistence failed, batch rolled back");
-                state
-                    .prom
-                    .http_requests_total
-                    .with_label_values(&["bulk", "503"])
-                    .inc();
-                return ApiError::response(
+        };
+        match result {
+            Ok(changed) => {
+                if changed {
+                    state.publish_snapshot();
+                    published = true;
+                }
+            }
+            Err(error) => {
+                error!(error = %error, "bulk ingest persistence failed, batch rolled back");
+                return bulk_rejection(
+                    &state.prom,
                     StatusCode::SERVICE_UNAVAILABLE,
                     "persistence_unavailable",
-                    format!("bulk ingest could not be durably persisted: {e}"),
-                )
-                .into_response();
-            }
-        };
-
-        // Map each engine outcome back onto its provisional item. `item_status[k]`
-        // describes `pairs[k]`, whose response slot is `pair_item_idx[k]`. Parse
-        // and class-D rejections become per-item 400s (mirroring PUT /_doc), so a
-        // caller can see exactly which queries were dropped and why.
-        for (status, &slot) in item_status.iter().zip(pair_item_idx.iter()) {
-            match status {
-                IngestItemStatus::Ingested => {}
-                IngestItemStatus::RejectedParse(e) => {
-                    items[slot].index.status = 400;
-                    items[slot].index.error = Some(format!("parse error: {e}"));
-                    has_errors = true;
-                }
-                IngestItemStatus::RejectedClassD => {
-                    items[slot].index.status = 400;
-                    items[slot].index.error = Some(CLASS_D_REJECT_MSG.into());
-                    has_errors = true;
-                }
+                    format!("bulk ingest could not be durably persisted: {error}"),
+                );
             }
         }
-
-        info!(
-            ingested = report.ingested,
-            rejected_parse = report.rejected_parse,
-            rejected_class_d = report.rejected_class_d,
-            "bulk ingest complete"
-        );
     }
 
+    let errors = responses
+        .iter_mut()
+        .any(|item| item_inner_mut(item).error.is_some());
     let took_ms = start.elapsed().as_secs_f64() * 1000.0;
+    info!(
+        items = responses.len(),
+        errors, published, "bulk request complete"
+    );
     state
         .prom
         .http_requests_total
         .with_label_values(&["bulk", "200"])
         .inc();
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["bulk"])
-        .observe(start.elapsed().as_secs_f64());
     Json(BulkResponse {
+        took: took_ms.floor() as u64,
         took_ms,
-        errors: has_errors,
-        items,
+        errors,
+        items: responses,
     })
     .into_response()
-}
-
-/// Extract _id from ES-style action line.
-/// Accepts: {"index": {"_id": 123}} or {"_id": 123}
-pub(crate) fn extract_bulk_id(action: &serde_json::Value) -> Option<u64> {
-    // ES style: {"index": {"_id": N}}
-    if let Some(inner) = action.get("index") {
-        if let Some(id) = inner.get("_id").and_then(serde_json::Value::as_u64) {
-            return Some(id);
-        }
-    }
-    // Flat style: {"_id": N}
-    if let Some(id) = action.get("_id").and_then(serde_json::Value::as_u64) {
-        return Some(id);
-    }
-    // Also try "id" without underscore.
-    action.get("id").and_then(serde_json::Value::as_u64)
 }

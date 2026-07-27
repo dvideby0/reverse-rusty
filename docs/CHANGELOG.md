@@ -59,6 +59,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   source/timeout/fail-closed controls and batch timing/status fields, generation-consistent
   standalone enrichment, and an explicit coordinator profile boundary
   ([ADR-135](decisions/adr-135-mpercolate-api-contract.md)).
+- Hardened `POST /_bulk` with strict NDJSON framing and controls, consistent ordered
+  replace-or-create/create-only semantics, source-version and response metadata preservation, and a
+  safe fresh-corpus immutable-segment fast path
+  ([ADR-136](decisions/adr-136-bulk-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

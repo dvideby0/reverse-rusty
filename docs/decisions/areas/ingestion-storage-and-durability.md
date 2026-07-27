@@ -21,6 +21,7 @@ Write paths, segments, WAL and source persistence, compaction, recovery, and dur
 | [066](../adr-066-tombstone-durability-at-commit.md) | Tombstone durability | Persists dead-local bitmaps and a WAL watermark so deleted base rows cannot reappear after reopen. | Accepted |
 | [121](../adr-121-atomic-source-sidecar-commit.md) | Atomic source-sidecar commits | Lets the manifest atomically select the source generation paired with its segment registry. | Accepted |
 | [122](../adr-122-fail-closed-positional-tombstones.md) | Fail-closed positional tombstones | Uses generation-bearing addresses so stale or dead positional deletes reject before WAL append. | Accepted |
+| [136](../adr-136-bulk-api-contract.md) | Bulk REST API contract | Makes NDJSON strict, aligns index/create semantics, and preserves the fresh-corpus segment fast path. | Accepted |
 
 ---
 

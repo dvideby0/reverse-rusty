@@ -38,7 +38,7 @@ pub(crate) use admin::{
     cluster_reconcile, cluster_register_node, cluster_resize, cluster_resync, cluster_root,
     cluster_state, cluster_stats,
 };
-pub(crate) use doc::{cluster_bulk, cluster_delete_doc, cluster_get_doc, cluster_put_doc};
+pub(crate) use doc::{cluster_bulk_route, cluster_delete_doc, cluster_get_doc, cluster_put_doc};
 pub(crate) use search::{cluster_mpercolate_route, cluster_search_route};
 pub(crate) use vocab::{
     cluster_discover_aliases, cluster_discover_and_record_aliases, cluster_get_alias_feedback,

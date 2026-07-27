@@ -1,201 +1,155 @@
 use super::{
-    extract_bulk_id, extract_ranked_ingest, info, instrument, upsert_status, ApiError, Arc,
-    ClusterAppState, ClusterBulkItem, ClusterBulkItemInner, ClusterBulkResponse, HeaderMap,
-    Instant, IntoResponse, Json, Response, ShardError, State, StatusCode,
+    bulk_body_rejection, bulk_query_rejection, bulk_rejection, error_item, fail_item, info,
+    instrument, item_inner_mut, parse_bulk_request, pending_item, shard_error_status, succeed_item,
+    Arc, BulkActionKind, BulkItem, BulkItemError, BulkParams, BulkResponse, Bytes, BytesRejection,
+    ClusterAppState, HeaderMap, Instant, IntoResponse, Json, ParsedBulkItem, Query, QueryRejection,
+    Response, ShardError, State, StatusCode,
 };
 
-/// POST /_bulk — NDJSON bulk: each index action is one cluster upsert (the same
-/// frame `PUT /_doc` writes), one per-item status each. Items after a durability
-/// failure keep their own honest 503s (per-item upserts are independent — there is
-/// no all-or-nothing batch at the coordinator).
+/// Strict coordinator HTTP boundary for `POST /_bulk`.
 #[instrument(skip_all)]
-pub(crate) async fn cluster_bulk(
+pub(crate) async fn cluster_bulk_route(
     State(state): State<Arc<ClusterAppState>>,
+    params: Result<Query<BulkParams>, QueryRejection>,
     headers: HeaderMap,
-    body: String,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let start = Instant::now();
-
-    if let Some(ct) = headers.get("content-type") {
-        if let Ok(ct_str) = ct.to_str() {
-            let ct_lower = ct_str.to_ascii_lowercase();
-            if !ct_lower.starts_with("application/json")
-                && !ct_lower.starts_with("application/x-ndjson")
-            {
-                state
-                    .prom
-                    .http_requests_total
-                    .with_label_values(&["bulk", "415"])
-                    .inc();
-                return ApiError::response(
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "unsupported_media_type",
-                    "Content-Type must be application/json or application/x-ndjson",
-                )
-                .into_response();
-            }
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["bulk"])
+        .start_timer();
+    let Query(params) = match params {
+        Ok(params) => params,
+        Err(error) => return bulk_query_rejection(&state.prom, &error),
+    };
+    let body = match body {
+        Ok(body) => body,
+        Err(error) => return bulk_body_rejection(&state.prom, &error),
+    };
+    let items = match parse_bulk_request(&headers, &body, params) {
+        Ok(items) => items,
+        Err(error) => {
+            return bulk_rejection(&state.prom, error.status, error.error_type, error.reason);
         }
-    }
+    };
+    cluster_bulk_inner(&state, items)
+}
 
-    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
-    let mut items: Vec<ClusterBulkItem> = Vec::new();
-    let mut has_errors = false;
+fn cluster_bulk_inner(state: &Arc<ClusterAppState>, items: Vec<ParsedBulkItem>) -> Response {
+    let start = Instant::now();
+    let mut responses: Vec<BulkItem> = Vec::with_capacity(items.len());
     let mut accepted = 0usize;
 
     // One writer guard across the batch (the Mutex<Engine> analogue), so two
     // concurrent bulks don't interleave their per-item apply order.
-    let _w = state.write_serial.lock();
+    let _write = state.write_serial.lock();
     let cluster = state.cluster.read();
-
-    let mut i = 0;
-    while i < lines.len() {
-        let action_line = lines[i];
-        i += 1;
-
-        let action: serde_json::Value = match serde_json::from_str(action_line) {
-            Ok(v) => v,
-            Err(e) => {
-                has_errors = true;
-                items.push(ClusterBulkItem {
-                    index: ClusterBulkItemInner {
-                        _id: 0,
-                        status: 400,
-                        error: Some(format!("invalid action JSON: {e}")),
-                    },
-                });
-                if i < lines.len() {
-                    i += 1;
-                }
+    for item in items {
+        let source = match item.source {
+            Ok(source) => source,
+            Err(error) => {
+                responses.push(error_item(
+                    item.action,
+                    item.id,
+                    StatusCode::BAD_REQUEST,
+                    error.error_type,
+                    error.reason,
+                ));
                 continue;
             }
         };
-        let id = extract_bulk_id(&action);
-
-        if i >= lines.len() {
-            has_errors = true;
-            items.push(ClusterBulkItem {
-                index: ClusterBulkItemInner {
-                    _id: id.unwrap_or(0),
-                    status: 400,
-                    error: Some("missing source line after action".into()),
-                },
-            });
-            break;
-        }
-        let source_line = lines[i];
-        i += 1;
-
-        let Some(id) = id else {
-            has_errors = true;
-            items.push(ClusterBulkItem {
-                index: ClusterBulkItemInner {
-                    _id: 0,
-                    status: 400,
-                    error: Some("could not extract _id from action".into()),
-                },
-            });
-            continue;
-        };
-
-        let source: serde_json::Value = match serde_json::from_str(source_line) {
-            Ok(v) => v,
-            Err(e) => {
-                has_errors = true;
-                items.push(ClusterBulkItem {
-                    index: ClusterBulkItemInner {
-                        _id: id,
-                        status: 400,
-                        error: Some(format!("invalid source JSON: {e}")),
-                    },
-                });
-                continue;
+        let mut response = pending_item(item.action, item.id);
+        let result = match item.action {
+            BulkActionKind::Index => {
+                cluster.upsert_query_with_tags(item.id, &source.query, source.version, &source.tags)
             }
+            BulkActionKind::Create => cluster
+                .create_query_with_tags(item.id, &source.query, source.version, &source.tags)
+                .map(|outcome| (0, outcome)),
         };
-        let Some(query) = source.get("query").and_then(|v| v.as_str()) else {
-            has_errors = true;
-            items.push(ClusterBulkItem {
-                index: ClusterBulkItemInner {
-                    _id: id,
-                    status: 400,
-                    error: Some("missing or non-string 'query' field".into()),
-                },
-            });
-            continue;
-        };
-        // A malformed tag value fails the ITEM loud (ADR-073), mirroring the
-        // parse-error per-item contract — never ingest with silently fewer tags.
-        let tags = match source.as_object().map(extract_ranked_ingest).transpose() {
-            Ok(value) => value.unwrap_or_default().0,
-            Err((error_type, msg)) => {
-                has_errors = true;
-                items.push(ClusterBulkItem {
-                    index: ClusterBulkItemInner {
-                        _id: id,
-                        status: 400,
-                        error: Some(format!("{error_type}: {msg}")),
-                    },
-                });
-                continue;
-            }
-        };
-
-        // Bulk carries no per-item version (parity with the single-node `_bulk` path,
-        // which ingests at the default version 1); `PUT /_doc/{id}` is the versioned write.
-        let (status, error) = match cluster.upsert_query_with_tags(id, query, 1, &tags) {
+        match result {
             Ok((removed, outcome)) => {
-                let (status, _, error) = upsert_status(removed, &outcome);
+                let (status, result, error) = super::upsert_status(removed, &outcome);
                 if status.is_success() {
                     accepted += 1;
+                    succeed_item(&mut response, status, source.version, result);
+                } else {
+                    fail_item(
+                        &mut response,
+                        status,
+                        if matches!(
+                            outcome,
+                            reverse_rusty::cluster::AddOutcome::RejectedParse(_)
+                        ) {
+                            "parse_exception"
+                        } else {
+                            "illegal_argument_exception"
+                        },
+                        error.unwrap_or_else(|| "bulk item was rejected".to_string()),
+                    );
                 }
-                (status.as_u16(), error)
+            }
+            Err(ShardError::DuplicateLogicalId(_)) if item.action == BulkActionKind::Create => {
+                fail_item(
+                    &mut response,
+                    StatusCode::CONFLICT,
+                    "version_conflict_engine_exception",
+                    format!(
+                        "document {} already exists; `create` requires a missing id",
+                        item.id
+                    ),
+                );
             }
             Err(ShardError::PartiallyApplied {
                 applied, failed, ..
             }) => {
                 accepted += 1;
-                (
-                    200,
-                    Some(format!(
-                        "partial: applied on {applied:?}, pending on {failed:?}; \
+                succeed_item(&mut response, StatusCode::OK, source.version, "partial");
+                let inner = item_inner_mut(&mut response);
+                inner.error = Some(BulkItemError {
+                    error_type: "partial_write",
+                    reason: format!(
+                        "applied on {applied:?}, pending on {failed:?}; durably logged — \
                          POST /_cluster/resync converges it"
-                    )),
-                )
+                    ),
+                });
             }
-            Err(e) => (503, Some(format!("write rejected: {e}"))),
-        };
-        // Any item carrying an error detail flips the top-level flag — including a
-        // 200 "partial" (durably logged, repair queued): a client checking only
-        // `errors` must see the degraded state (review finding), even though the
-        // right reaction is a resync, not a retry.
-        if !(200..300).contains(&status) || error.is_some() {
-            has_errors = true;
+            Err(error) => {
+                let status = shard_error_status(&error);
+                fail_item(
+                    &mut response,
+                    status,
+                    "cluster_write_error",
+                    format!("write rejected: {error}"),
+                );
+            }
         }
-        items.push(ClusterBulkItem {
-            index: ClusterBulkItemInner {
-                _id: id,
-                status,
-                error,
-            },
-        });
+        responses.push(response);
     }
     drop(cluster);
 
-    info!(accepted, items = items.len(), "cluster bulk complete");
+    let errors = responses.iter_mut().any(|item| {
+        let inner = item_inner_mut(item);
+        inner.error.is_some()
+    });
     let took_ms = start.elapsed().as_secs_f64() * 1000.0;
+    info!(
+        accepted,
+        items = responses.len(),
+        errors,
+        "cluster bulk complete"
+    );
     state
         .prom
         .http_requests_total
         .with_label_values(&["bulk", "200"])
         .inc();
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["bulk"])
-        .observe(start.elapsed().as_secs_f64());
-    Json(ClusterBulkResponse {
+    Json(BulkResponse {
+        took: took_ms.floor() as u64,
         took_ms,
-        errors: has_errors,
-        items,
+        errors,
+        items: responses,
     })
     .into_response()
 }

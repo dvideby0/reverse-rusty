@@ -7,7 +7,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{rejection::QueryRejection, Path, Query, State},
+    body::Bytes,
+    extract::{
+        rejection::{BytesRejection, QueryRejection},
+        Path, Query, State,
+    },
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -66,7 +70,7 @@ impl PutDocParams {
 }
 
 #[derive(Deserialize, Clone, Copy)]
-enum RefreshPolicy {
+pub(crate) enum RefreshPolicy {
     #[serde(rename = "false")]
     Deferred,
     #[serde(rename = "true")]
@@ -301,23 +305,41 @@ impl DeleteDocParams {
 
 // -- POST /_bulk
 #[derive(Serialize)]
-struct BulkResponse {
-    took_ms: f64,
-    errors: bool,
-    items: Vec<BulkItem>,
+pub(crate) struct BulkResponse {
+    pub(crate) took: u64,
+    pub(crate) took_ms: f64,
+    pub(crate) errors: bool,
+    pub(crate) items: Vec<BulkItem>,
 }
 
 #[derive(Serialize)]
-struct BulkItem {
-    index: BulkItemInner,
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BulkItem {
+    Index(BulkItemInner),
+    Create(BulkItemInner),
 }
 
 #[derive(Serialize)]
-struct BulkItemInner {
-    _id: u64,
-    status: u16,
+pub(crate) struct BulkItemInner {
+    #[serde(rename = "_index")]
+    pub(crate) index: &'static str,
+    #[serde(rename = "_id")]
+    pub(crate) id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+    #[serde(rename = "_version")]
+    pub(crate) version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) result: Option<&'static str>,
+    pub(crate) status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<BulkItemError>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct BulkItemError {
+    #[serde(rename = "type")]
+    pub(crate) error_type: &'static str,
+    pub(crate) reason: String,
 }
 
 #[cfg(test)]
@@ -332,7 +354,11 @@ mod get;
 mod parsing;
 mod put;
 
-pub(crate) use bulk::{bulk_ingest, extract_bulk_id};
+pub(crate) use bulk::{
+    bulk_body_rejection, bulk_query_rejection, bulk_rejection, bulk_route, error_item, fail_item,
+    item_inner_mut, parse_bulk_request, pending_item, succeed_item, BulkActionKind, BulkParams,
+    ParsedBulkItem,
+};
 pub(crate) use delete::delete_doc;
 pub(crate) use get::get_doc;
 pub(crate) use parsing::{coerce_tag_scalar, extract_ranked_ingest, json_type_name};

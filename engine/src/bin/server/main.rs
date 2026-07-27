@@ -75,7 +75,7 @@ use reverse_rusty::segment::Engine;
 
 use cli::Cli;
 use handlers::{
-    api_root, backup, bulk_ingest, cancel_job, cat_segments, cat_stats, close_pit_route, compact,
+    api_root, backup, bulk_route, cancel_job, cat_segments, cat_stats, close_pit_route, compact,
     create_job_route, delete_doc, discover_aliases, discover_and_record_aliases, flush,
     get_alias_feedback, get_aliases, get_doc, get_job, get_job_stream, get_settings, get_vocab,
     health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
@@ -435,7 +435,7 @@ async fn main() {
         .route("/_percolate/jobs/{id}", get(get_job).delete(cancel_job))
         .route("/_percolate/jobs/{id}/stream", any(get_job_stream))
         .route("/_mpercolate", post(mpercolate_route))
-        .route("/_bulk", post(bulk_ingest))
+        .route("/_bulk", post(bulk_route))
         .route("/_flush", post(flush))
         .route("/_compact", post(compact))
         .route("/_backup", post(backup))

@@ -20,7 +20,9 @@ while explicit vocabulary changes rebuild from retained canonical query source b
 **TL;DR (for agents)**
 - **Owns:** LSM engine (`segment.rs`), the write path and storage model
 - **Key invariant:** Segments are immutable once sealed; writes go to the memtable only; never rebuild existing segments by default
-- **Write path:** `insert_live` → memtable → `flush()` seals to base segment; `bulk_ingest()` compiles a batch directly into a new segment
+- **Write path:** `insert_live` → memtable → `flush()` seals to base segment; the additive
+  `bulk_ingest()` primitive compiles a batch directly into a new segment; REST `/_bulk` uses that
+  fast path only when its upsert/create semantics make it safe (ADR-136)
 - **Update model:** tombstone old local rows + insert a new version; snapshot publication makes the result visible atomically
 - **Measurements:** current ingest captures live in [performance/results.md](../performance/results.md)
 - **Built controls:** manual `recommended_shard_count` / resize helpers; optional deterministic compaction re-anchoring
@@ -116,10 +118,18 @@ This is exactly the §1 model, now named and tuned.
 and an explicit vocabulary/normalizer rebuild. Everything else is incremental delta + merge.
 
 **Bulk add = build a segment directly, don't funnel through the memtable.** This is the analog of
-RocksDB *ingest-external-SST* / Lucene *addIndexes*: the current implementation parses/compiles the
-batch in deterministic passes, packs postings + exact SoA into a new segment, commits its segment and
-source metadata atomically, then publishes. It bypasses the live memtable and does not rewrite
-existing segments.
+RocksDB *ingest-external-SST* / Lucene *addIndexes*: the additive `Engine::bulk_ingest*` primitive
+parses/compiles the batch in deterministic passes, packs postings + exact SoA into a new segment,
+commits its segment and source metadata atomically, then publishes. It bypasses the live memtable and
+does not rewrite existing segments.
+
+The public REST `POST /_bulk` contract is wider than that additive primitive (ADR-136): `index`
+means replace-or-create and `create` means create-if-absent. A standalone request uses the direct
+segment path only when every valid source has version 1, all IDs are unique, and all IDs are absent
+from the captured snapshot. Existing IDs, repeats, or source versions other than 1 use ordered
+WAL-backed live writes under one writer lock, followed by one publication. The coordinator likewise
+applies ordered logged upserts/creates under one batch writer guard. This preserves the initial-corpus
+throughput path without letting storage optimization change logical document semantics.
 
 ---
 
@@ -212,8 +222,10 @@ but a general multi-generation feature model with blue/green serving is still pr
 - **Today (implemented):** a multi-segment LSM-shaped engine — `Vec<base Segment>` + a mutable
   `memtable` Segment; matching unions across all segments with per-segment candidate dedup; `flush()`
   seals the memtable into a base segment; `bulk_ingest()` compiles a batch directly into a new base
-  segment without rebuilding existing ones; tombstones handle update/delete. That already realizes the
-  memtable + delta + tombstone core *and* read-amp = segment count (measured by `segbench`).
+  segment without rebuilding existing ones; REST `/_bulk` reserves that direct path for fresh
+  unique default-version IDs and otherwise performs ordered live upserts/creates (ADR-136);
+  tombstones handle update/delete. That already realizes the memtable + delta + tombstone core *and*
+  read-amp = segment count (measured by `segbench`).
 - **Implemented since initial design:**
   1. ~~Leveled/tiered compaction~~ → ClickHouse-inspired score-based compaction (ADR-009).
   2. ~~Per-segment anchor filters~~ → cache-line blocked bloom filter (ADR-011).

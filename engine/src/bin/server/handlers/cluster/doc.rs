@@ -9,44 +9,30 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    extract::{rejection::QueryRejection, Path, Query, State},
+    body::Bytes,
+    extract::{
+        rejection::{BytesRejection, QueryRejection},
+        Path, Query, State,
+    },
     http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
-use serde::Serialize;
 use tracing::{error, info, instrument, warn};
 
 use reverse_rusty::cluster::{AddOutcome, ShardError};
 
 use crate::dto::ApiError;
 use crate::handlers::doc::{
-    extract_bulk_id, extract_ranked_ingest, DeleteDocParams, DeleteDocResponse, GetDocParams,
-    GetDocResponse, PutDocBody, PutDocParams, PutDocResponse, CLASS_D_REJECT_MSG, QUERY_INDEX,
+    bulk_body_rejection, bulk_query_rejection, bulk_rejection, error_item, extract_ranked_ingest,
+    fail_item, item_inner_mut, parse_bulk_request, pending_item, succeed_item, BulkActionKind,
+    BulkItem, BulkItemError, BulkParams, BulkResponse, DeleteDocParams, DeleteDocResponse,
+    GetDocParams, GetDocResponse, ParsedBulkItem, PutDocBody, PutDocParams, PutDocResponse,
+    CLASS_D_REJECT_MSG, QUERY_INDEX,
 };
 use crate::state::ClusterAppState;
 
 use super::{shard_error_response, shard_error_status};
-
-#[derive(Serialize)]
-struct ClusterBulkResponse {
-    took_ms: f64,
-    errors: bool,
-    items: Vec<ClusterBulkItem>,
-}
-
-#[derive(Serialize)]
-struct ClusterBulkItem {
-    index: ClusterBulkItemInner,
-}
-
-#[derive(Serialize)]
-struct ClusterBulkItemInner {
-    _id: u64,
-    status: u16,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
 
 /// Render one upsert outcome as the PUT /_doc response. Shared with the per-item
 /// bulk mapping so single and bulk writes can never drift.
@@ -83,7 +69,7 @@ mod delete;
 mod get;
 mod put;
 
-pub(crate) use bulk::cluster_bulk;
+pub(crate) use bulk::cluster_bulk_route;
 pub(crate) use delete::cluster_delete_doc;
 pub(crate) use get::cluster_get_doc;
 pub(crate) use put::cluster_put_doc;
