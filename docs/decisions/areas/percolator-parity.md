@@ -23,6 +23,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 | [128](../adr-128-v2-mpercolate-api-contract.md) | V2 batch percolate API contract | Makes exact bounded batches strict, compatibly controlled, and mutation-consistent through union enrichment. | Accepted |
 | [129](../adr-129-v2-open-pit-api-contract.md) | V2 open-PIT API contract | Makes PIT creation strict and returns one truthful Elasticsearch/OpenSearch response superset. | Accepted |
 | [130](../adr-130-v2-close-pit-api-contract.md) | V2 close-PIT API contract | Makes PIT close strict, batch-capable, atomically validated, and truthful across dialects. | Accepted |
+| [131](../adr-131-exhaustive-job-create-api-contract.md) | Exhaustive-job create API contract | Makes creation strict, bounded, ergonomically defaulted, and familiar without weakening exact delivery. | Accepted |
 
 ---
 

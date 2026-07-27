@@ -76,12 +76,12 @@ use reverse_rusty::segment::Engine;
 use cli::Cli;
 use handlers::{
     api_root, backup, bulk_ingest, cancel_job, cat_segments, cat_stats, close_pit_route, compact,
-    create_job, delete_doc, discover_aliases, discover_and_record_aliases, flush,
+    create_job_route, delete_doc, discover_aliases, discover_and_record_aliases, flush,
     get_alias_feedback, get_aliases, get_doc, get_job, get_job_stream, get_settings, get_vocab,
     health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
     mpercolate, open_pit_route, prometheus_metrics, put_doc, put_settings, put_vocab,
     reset_alias_feedback, search_route, stats, v2_mpercolate_route, v2_search_route,
-    validate_and_apply_feedback, PIT_BODY_LIMIT,
+    validate_and_apply_feedback, EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -428,7 +428,10 @@ async fn main() {
                 .delete(close_pit_route)
                 .layer(DefaultBodyLimit::max(PIT_BODY_LIMIT)),
         )
-        .route("/_percolate/jobs", post(create_job))
+        .route(
+            "/_percolate/jobs",
+            post(create_job_route).layer(DefaultBodyLimit::max(EXHAUSTIVE_JOB_BODY_LIMIT)),
+        )
         .route("/_percolate/jobs/{id}", get(get_job).delete(cancel_job))
         .route("/_percolate/jobs/{id}/stream", get(get_job_stream))
         .route("/_mpercolate", post(mpercolate))

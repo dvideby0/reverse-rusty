@@ -12,7 +12,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
-use axum::extract::{Path, State};
+use axum::extract::{
+    rejection::{JsonRejection, QueryRejection},
+    Path, Query, State,
+};
 use axum::http::{header, Method, Response, StatusCode};
 use axum::Json;
 use serde::Serialize;
@@ -24,13 +27,25 @@ use crate::jobs::{ExhaustiveJobs, JobView, StartError, StreamError};
 use crate::state::{AppState, ClusterAppState};
 #[cfg(test)]
 use request::DocumentBody;
-use request::{prepare, request_fingerprint, validate_resolved_boosts, validation, CreateJobBody};
+use request::{
+    prepare, request_fingerprint, validate_resolved_boosts, validation, CreateJobBody,
+    CreateJobParams,
+};
+
+/// Exhaustive creation contains one document and optional small filter/rank
+/// programs. Bound it before JSON deserialization so a client cannot use the
+/// server-wide bulk allowance to amplify parser memory on this control route.
+pub(crate) const EXHAUSTIVE_JOB_BODY_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct CreateJobResponse {
+    id: String,
     job_id: String,
     event_id: String,
     state: crate::jobs::JobPhase,
+    is_running: bool,
+    is_partial: bool,
+    start_time_in_millis: u64,
     snapshot_generation: u64,
     status_url: String,
     stream_url: String,
@@ -40,12 +55,19 @@ pub(crate) struct CreateJobResponse {
 fn start_response(outcome: crate::jobs::StartOutcome) -> (StatusCode, Json<CreateJobResponse>) {
     let job = outcome.job;
     let base = format!("/_percolate/jobs/{}", job.job_id);
+    let is_running = job.state == crate::jobs::JobPhase::Running;
     (
         StatusCode::ACCEPTED,
         Json(CreateJobResponse {
+            id: job.job_id.clone(),
             job_id: job.job_id,
             event_id: job.event_id,
             state: job.state,
+            is_running,
+            // An exact result set exists only after the completion frame has
+            // committed the terminal summary.
+            is_partial: job.state != crate::jobs::JobPhase::Completed,
+            start_time_in_millis: job.created_unix_ms,
             snapshot_generation: job.snapshot_generation,
             status_url: base.clone(),
             stream_url: format!("{base}/stream"),
@@ -79,11 +101,61 @@ fn start_error(error: StartError) -> (StatusCode, Json<ApiError>) {
     }
 }
 
+fn query_rejection(error: &QueryRejection) -> (StatusCode, Json<ApiError>) {
+    validation(format!("invalid exhaustive-job query parameters: {error}"))
+}
+
+fn body_rejection(error: &JsonRejection) -> (StatusCode, Json<ApiError>) {
+    let rejection_status = error.status();
+    let error_type = if rejection_status == StatusCode::PAYLOAD_TOO_LARGE {
+        "payload_too_large"
+    } else if rejection_status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+        "unsupported_media_type"
+    } else {
+        "validation_error"
+    };
+    let status = if rejection_status == StatusCode::PAYLOAD_TOO_LARGE
+        || rejection_status == StatusCode::UNSUPPORTED_MEDIA_TYPE
+    {
+        rejection_status
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    ApiError::response(
+        status,
+        error_type,
+        format!("invalid exhaustive-job body: {error}"),
+    )
+}
+
+/// Strict production boundary for exhaustive-job creation.
+#[allow(clippy::unused_async)] // Axum handlers are asynchronous entry points.
+pub(crate) async fn create_job_route(
+    State(state): State<Arc<AppState>>,
+    params: Result<Query<CreateJobParams>, QueryRejection>,
+    body: Result<Json<CreateJobBody>, JsonRejection>,
+) -> Result<(StatusCode, Json<CreateJobResponse>), (StatusCode, Json<ApiError>)> {
+    let Query(params) = params.map_err(|error| query_rejection(&error))?;
+    let Json(body) = body.map_err(|error| body_rejection(&error))?;
+    create_job_inner(&state, body, params)
+}
+
+/// Direct lifecycle seam; HTTP parsing is covered by route tests.
+#[cfg(test)]
+#[allow(clippy::unused_async)] // Keeps the seam congruent with the Axum handler.
 pub(crate) async fn create_job(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateJobBody>,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), (StatusCode, Json<ApiError>)> {
-    let prepared = prepare(&state.exhaustive_jobs, body)?;
+    create_job_inner(&state, body, CreateJobParams::default())
+}
+
+fn create_job_inner(
+    state: &AppState,
+    body: CreateJobBody,
+    params: CreateJobParams,
+) -> Result<(StatusCode, Json<CreateJobResponse>), (StatusCode, Json<ApiError>)> {
+    let prepared = prepare(&state.exhaustive_jobs, body, params)?;
     let snapshot = state.snapshot.load_full();
     let pred = snapshot.compile_tag_predicate(&prepared.filter);
     let program = match prepared.rank.as_ref() {
@@ -135,11 +207,23 @@ pub(crate) async fn create_job(
         .map_err(start_error)
 }
 
-pub(crate) async fn cluster_create_job(
+#[allow(clippy::unused_async)] // Axum handlers are asynchronous entry points.
+pub(crate) async fn cluster_create_job_route(
     State(state): State<Arc<ClusterAppState>>,
-    Json(body): Json<CreateJobBody>,
+    params: Result<Query<CreateJobParams>, QueryRejection>,
+    body: Result<Json<CreateJobBody>, JsonRejection>,
 ) -> Result<(StatusCode, Json<CreateJobResponse>), (StatusCode, Json<ApiError>)> {
-    let prepared = prepare(&state.exhaustive_jobs, body)?;
+    let Query(params) = params.map_err(|error| query_rejection(&error))?;
+    let Json(body) = body.map_err(|error| body_rejection(&error))?;
+    cluster_create_job_inner(&state, body, params)
+}
+
+fn cluster_create_job_inner(
+    state: &Arc<ClusterAppState>,
+    body: CreateJobBody,
+    params: CreateJobParams,
+) -> Result<(StatusCode, Json<CreateJobResponse>), (StatusCode, Json<ApiError>)> {
+    let prepared = prepare(&state.exhaustive_jobs, body, params)?;
     let program = {
         let cluster = state.cluster.read();
         match prepared.rank.as_ref() {
@@ -160,7 +244,7 @@ pub(crate) async fn cluster_create_job(
         prepared.rank.as_ref(),
         prepared.timeout,
     );
-    let state_for_job = Arc::clone(&state);
+    let state_for_job = Arc::clone(state);
     let title = prepared.title;
     let filter = prepared.filter;
     let scope = prepared.scope;

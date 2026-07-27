@@ -36,8 +36,8 @@ pub(crate) use cluster::{
 };
 pub(crate) use doc::{bulk_ingest, delete_doc, get_doc, put_doc};
 pub(crate) use jobs::{
-    cancel_job, cluster_cancel_job, cluster_create_job, cluster_get_job, cluster_get_job_stream,
-    create_job, get_job, get_job_stream,
+    cancel_job, cluster_cancel_job, cluster_create_job_route, cluster_get_job,
+    cluster_get_job_stream, create_job_route, get_job, get_job_stream, EXHAUSTIVE_JOB_BODY_LIMIT,
 };
 pub(crate) use pit::{
     close_pit_route, cluster_close_pit_route, cluster_open_pit_route, open_pit_route,

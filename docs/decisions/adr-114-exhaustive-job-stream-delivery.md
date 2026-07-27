@@ -5,6 +5,10 @@
 - **Status:** Accepted
 - **Date:** 2026-07-22
 
+> **Later HTTP contract:** ADR-131 makes creation strict, defaults route-implied fields, adds
+> native/ES/OpenSearch control aliases and familiar status projections, and leaves this delivery
+> protocol unchanged.
+
 ## Context
 
 ADR-107 deliberately made `result_mode=all` a named contract but did not expose it on the

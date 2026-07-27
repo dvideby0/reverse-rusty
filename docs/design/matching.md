@@ -456,7 +456,7 @@ and deduplicated union winner fetch, so every delivered source belongs to the ma
 version. The fence is acquired before entering Rayon; source-free batches remain concurrent
 (ADR-128).
 
-### 5.5 Exhaustive bounded delivery (ADR-114)
+### 5.5 Exhaustive bounded delivery (ADR-114/131)
 
 `result_mode=all` uses the same post-verification collector seam without materializing the full
 answer. `ChunkCollector` retains one fixed-capacity `Vec<ExhaustiveMatch>`; a synchronous
@@ -474,6 +474,16 @@ summary; dropping the response while the completion is still queued invalidates 
 job. Shard nodes apply an independent server-owned maximum to the caller's remaining stream
 budget before acquiring admission, so a direct client cannot retain every blocking worker with an
 arbitrarily distant deadline.
+
+The creation HTTP boundary is strict and defaults the route-implied mode/sink instead of requiring
+redundant native fields. It accepts native millisecond/partial controls and ES/OpenSearch time-value
+and partial-result aliases in either body or query string, rejecting aliases, locations, unknowns,
+nulls, and async retention/wait controls that cannot map truthfully. Client event identity is
+optional; generated identity improves first-use ergonomics while a caller-supplied key retains the
+idempotent retry contract. The 202 response preserves native job fields and adds familiar
+`id`/running/partial/start-time projections. A route-local pre-deserialization cap bounds control
+request memory independently of the server's bulk-ingest allowance (ADR-131). None of these HTTP
+projections changes exact completion or stream ownership.
 
 The compatibility collector historically sorts/deduplicates its complete `Vec<u64>`, because
 library callers can leave multiple live physical rows for one logical id. Exhaustive delivery
