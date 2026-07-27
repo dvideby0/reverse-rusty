@@ -85,6 +85,30 @@ impl ClusterReadView<'_> {
             .fetch_ranked_sources_bounded(ranked, max_source_bytes, deadline)
     }
 
+    /// Exact bounded top-K matching for a title batch under this view.
+    pub fn try_percolate_filtered_top_k_batch(
+        &self,
+        titles: &[impl AsRef<str> + Sync],
+        filter: &[(String, Vec<String>)],
+        options: crate::result::TopKOptions,
+        program: &crate::rank::CompiledRankProgram,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<crate::cluster::ClusterBatchRankedMatch, crate::cluster::ClusterRankedError> {
+        self.cluster
+            .try_percolate_filtered_top_k_batch(titles, filter, options, program, deadline)
+    }
+
+    /// Fetch all batch winner sources while direct mutations remain frozen.
+    pub fn fetch_ranked_sources_batch_bounded(
+        &self,
+        ranked: &crate::cluster::ClusterBatchRankedMatch,
+        max_source_bytes: usize,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<Vec<String>>, crate::cluster::ClusterRankedError> {
+        self.cluster
+            .fetch_ranked_sources_batch_bounded(ranked, max_source_bytes, deadline)
+    }
+
     /// Compile a winner explanation under the same coordinator vocabulary.
     pub fn explain_ranked_source(
         &self,

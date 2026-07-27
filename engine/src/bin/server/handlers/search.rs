@@ -29,7 +29,7 @@ mod tests;
 pub(crate) use mpercolate::mpercolate;
 pub(crate) use percolate::search_route;
 pub(crate) use v2::{
-    cluster_v2_mpercolate, cluster_v2_search_route, v2_mpercolate, v2_search_route,
+    cluster_v2_mpercolate_route, cluster_v2_search_route, v2_mpercolate_route, v2_search_route,
 };
 // The request-resolution helper is shared with the coordinator-mode handlers
 // (ADR-070), so both modes parse the identical native + ES envelopes.

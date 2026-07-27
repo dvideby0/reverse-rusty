@@ -3,6 +3,65 @@ use super::{
     SlotDelivered,
 };
 
+pub(super) trait RankedBatchClusterRead {
+    fn top_k_batch(
+        &self,
+        titles: &[String],
+        filter: &[(String, Vec<String>)],
+        options: reverse_rusty::TopKOptions,
+        program: &reverse_rusty::CompiledRankProgram,
+        deadline: Instant,
+    ) -> Result<
+        reverse_rusty::cluster::ClusterBatchRankedMatch,
+        reverse_rusty::cluster::ClusterRankedError,
+    >;
+
+    fn fetch_sources_batch(
+        &self,
+        ranked: &reverse_rusty::cluster::ClusterBatchRankedMatch,
+        enrichment_limit: usize,
+        deadline: Instant,
+    ) -> Result<Vec<Vec<String>>, reverse_rusty::cluster::ClusterRankedError>;
+}
+
+macro_rules! impl_ranked_batch_cluster_read {
+    ($type:ty) => {
+        impl RankedBatchClusterRead for $type {
+            fn top_k_batch(
+                &self,
+                titles: &[String],
+                filter: &[(String, Vec<String>)],
+                options: reverse_rusty::TopKOptions,
+                program: &reverse_rusty::CompiledRankProgram,
+                deadline: Instant,
+            ) -> Result<
+                reverse_rusty::cluster::ClusterBatchRankedMatch,
+                reverse_rusty::cluster::ClusterRankedError,
+            > {
+                self.try_percolate_filtered_top_k_batch(
+                    titles,
+                    filter,
+                    options,
+                    program,
+                    Some(deadline),
+                )
+            }
+
+            fn fetch_sources_batch(
+                &self,
+                ranked: &reverse_rusty::cluster::ClusterBatchRankedMatch,
+                enrichment_limit: usize,
+                deadline: Instant,
+            ) -> Result<Vec<Vec<String>>, reverse_rusty::cluster::ClusterRankedError> {
+                self.fetch_ranked_sources_batch_bounded(ranked, enrichment_limit, Some(deadline))
+            }
+        }
+    };
+}
+
+impl_ranked_batch_cluster_read!(reverse_rusty::cluster::ClusterEngine);
+impl_ranked_batch_cluster_read!(reverse_rusty::cluster::ClusterReadView<'_>);
+
 /// Single-node kernel: the columnar batch entry + distinct-winner enrichment
 /// under the fail-closed budget, charged per DELIVERED occurrence (the same
 /// rule as the cluster batch fetch).
@@ -114,8 +173,8 @@ pub(super) fn local_batch_delivery(
 
 /// Coordinator kernel: the one-call-per-shard batch fan + the union winner
 /// fetch under the same ONE credit.
-pub(super) fn cluster_batch_delivery(
-    cluster: &reverse_rusty::cluster::ClusterEngine,
+pub(super) fn cluster_batch_delivery<C: RankedBatchClusterRead>(
+    cluster: &C,
     program: &reverse_rusty::CompiledRankProgram,
     filter: &[(String, Vec<String>)],
     spec: &BatchSpec<'_>,
@@ -128,11 +187,11 @@ pub(super) fn cluster_batch_delivery(
         deadline,
     } = *spec;
     let ranked = cluster
-        .try_percolate_filtered_top_k_batch(titles, filter, options, program, Some(deadline))
+        .top_k_batch(titles, filter, options, program, deadline)
         .map_err(DeliveryError::Backend)?;
     let per_slot_sources = if include_source {
         cluster
-            .fetch_ranked_sources_batch_bounded(&ranked, enrichment_limit, Some(deadline))
+            .fetch_sources_batch(&ranked, enrichment_limit, deadline)
             .map_err(|error| match error {
                 reverse_rusty::cluster::ClusterRankedError::EnrichmentLimit { .. } => {
                     DeliveryError::EnrichmentLimit

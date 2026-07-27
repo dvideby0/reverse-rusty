@@ -118,6 +118,77 @@ async fn cluster_v2_search_supports_shared_url_controls_and_strict_errors() {
 }
 
 #[tokio::test]
+async fn cluster_v2_mpercolate_is_exact_strict_and_compatibly_shaped() {
+    let state = test_state(&[
+        (3, "topps chrome".to_string()),
+        (1, "topps chrome".to_string()),
+        (2, "topps chrome".to_string()),
+    ]);
+    let (status, json) = send(
+        &state,
+        req(
+            "POST",
+            "/v2/_mpercolate",
+            &serde_json::json!({
+                "documents": [
+                    {"title": "topps chrome"},
+                    {"title": "no match"}
+                ],
+                "_source": false,
+                "timeout": "1s",
+                "track_total_hits": 1,
+                "allow_partial_search_results": false
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert!(json["took"].is_u64(), "{json}");
+    assert!(json["took_ms"].is_f64(), "{json}");
+    assert_eq!(json["responses"].as_array().map(Vec::len), Some(2));
+    assert_eq!(json["responses"][0]["timed_out"], false, "{json}");
+    assert_eq!(json["responses"][0]["status"], 200, "{json}");
+    assert_eq!(
+        json["responses"][0]["hits"]["total"],
+        serde_json::json!({"value": 1, "relation": "gte"})
+    );
+    assert!(
+        json["responses"][0]["hits"]["hits"][0]
+            .get("_source")
+            .is_none(),
+        "{json}"
+    );
+
+    for (label, path, request) in [
+        (
+            "unknown query parameter",
+            "/v2/_mpercolate?size=1",
+            serde_json::json!({"documents": [{"title": "topps chrome"}]}),
+        ),
+        (
+            "unknown top-level field",
+            "/v2/_mpercolate",
+            serde_json::json!({
+                "documents": [{"title": "topps chrome"}],
+                "preference": "local"
+            }),
+        ),
+        (
+            "unknown document field",
+            "/v2/_mpercolate",
+            serde_json::json!({
+                "documents": [{"title": "topps chrome", "sku": "ABC-1"}]
+            }),
+        ),
+    ] {
+        let (status, json) = send(&state, req("POST", path, &request)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {json}");
+        assert_eq!(json["status"], 400, "{label}: {json}");
+        assert_eq!(json["error"]["type"], "validation_error", "{label}: {json}");
+    }
+}
+
+#[tokio::test]
 async fn cluster_v2_search_enforces_validation_deadline_and_enrichment_cap() {
     let state = test_state(&[(1, "topps chrome".to_string())]);
     let (status, json) = send(
