@@ -21,6 +21,7 @@ Metadata filtering, ranking, API compatibility, aliases, and other production pe
 | [126](../adr-126-search-api-contract.md) | Search API contract | Makes compatibility search strict, generation-consistent, and ES/OS-shaped where semantics align. | Accepted |
 | [127](../adr-127-v2-search-api-contract.md) | V2 search API contract | Makes exact bounded search strict, ES/OS-familiar, and mutation-consistent through winner enrichment. | Accepted |
 | [128](../adr-128-v2-mpercolate-api-contract.md) | V2 batch percolate API contract | Makes exact bounded batches strict, compatibly controlled, and mutation-consistent through union enrichment. | Accepted |
+| [129](../adr-129-v2-open-pit-api-contract.md) | V2 open-PIT API contract | Makes PIT creation strict and returns one truthful Elasticsearch/OpenSearch response superset. | Accepted |
 
 ---
 

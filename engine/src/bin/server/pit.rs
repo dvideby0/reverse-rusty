@@ -310,11 +310,6 @@ pub(crate) fn pit_error_response(error: PitError) -> (StatusCode, Json<ApiError>
     }
 }
 
-/// Convert a requested keep-alive into the registry's argument shape.
-pub(crate) fn keep_alive_from_secs(secs: Option<u64>) -> Option<std::time::Duration> {
-    secs.map(std::time::Duration::from_secs)
-}
-
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);

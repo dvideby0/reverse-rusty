@@ -39,7 +39,7 @@ pub(crate) use jobs::{
     cancel_job, cluster_cancel_job, cluster_create_job, cluster_get_job, cluster_get_job_stream,
     create_job, get_job, get_job_stream,
 };
-pub(crate) use pit::{close_pit, cluster_close_pit, cluster_open_pit, open_pit};
+pub(crate) use pit::{close_pit, cluster_close_pit, cluster_open_pit_route, open_pit_route};
 pub(crate) use search::{
     cluster_v2_mpercolate_route, cluster_v2_search_route, mpercolate, search_route,
     v2_mpercolate_route, v2_search_route,

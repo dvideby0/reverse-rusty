@@ -9,7 +9,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 
-use crate::handlers::pit::{close_pit, open_pit};
+use crate::handlers::pit::{close_pit, open_pit, open_pit_route};
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 
@@ -17,6 +17,8 @@ use super::v2::{v2_mpercolate, v2_search, V2MPercolateBody, V2SearchBody};
 
 use reverse_rusty::segment::Engine;
 use reverse_rusty::{Normalizer, RankValues};
+
+mod open_route;
 
 /// 25 ranked queries all matching "2020 topps chrome update", with score ties
 /// so the id tie-break is exercised across page boundaries.
@@ -73,11 +75,11 @@ fn v2_body(value: serde_json::Value) -> V2SearchBody {
     serde_json::from_value(value).expect("valid v2 body")
 }
 
-async fn open(state: &Arc<AppState>, keep_alive_s: Option<u64>) -> Result<String, StatusCode> {
+fn open(state: &Arc<AppState>, keep_alive_s: Option<u64>) -> Result<String, StatusCode> {
     let body = keep_alive_s.map(|s| {
         Json(serde_json::from_value(serde_json::json!({ "keep_alive_s": s })).expect("body"))
     });
-    match open_pit(State(Arc::clone(state)), body).await {
+    match open_pit(State(Arc::clone(state)), body) {
         Ok(response) => {
             let json = serde_json::to_value(response.0).expect("open json");
             Ok(json["pit_id"].as_str().expect("pit_id string").to_string())
@@ -138,7 +140,7 @@ fn base_body(size: usize, include_source: bool) -> serde_json::Value {
 #[tokio::test]
 async fn pit_pages_concatenate_and_pin_across_mutation() {
     let state = state();
-    let pit = open(&state, None).await.expect("open pit");
+    let pit = open(&state, None).expect("open pit");
 
     let one_shot = run(
         &state,
@@ -216,7 +218,7 @@ async fn pit_pages_concatenate_and_pin_across_mutation() {
 #[tokio::test]
 async fn exactly_full_final_page_terminates_with_an_empty_page() {
     let state = state();
-    let pit = open(&state, None).await.expect("open pit");
+    let pit = open(&state, None).expect("open pit");
     // 25 rows, size 25: the single page is full, so a cursor is minted.
     let full = run(
         &state,
@@ -251,7 +253,7 @@ async fn exactly_full_final_page_terminates_with_an_empty_page() {
 #[tokio::test]
 async fn deleted_winner_source_enrichment_fails_closed_under_pit() {
     let state = state();
-    let pit = open(&state, None).await.expect("open pit");
+    let pit = open(&state, None).expect("open pit");
     // The full pinned ranking, so the victim can be chosen from page 2's rows.
     let one_shot = run(
         &state,
@@ -304,7 +306,7 @@ async fn deleted_winner_source_enrichment_fails_closed_under_pit() {
 #[tokio::test]
 async fn token_and_page_shape_failures_are_typed() {
     let state = state();
-    let pit = open(&state, None).await.expect("open pit");
+    let pit = open(&state, None).expect("open pit");
 
     // Garbage cursor: 400 validation; tampered/foreign-key tokens: 409 stale.
     let err = run(
@@ -380,7 +382,7 @@ async fn token_and_page_shape_failures_are_typed() {
 #[tokio::test]
 async fn cursor_fingerprint_mismatch_is_a_named_400() {
     let state = state();
-    let pit = open(&state, None).await.expect("open pit");
+    let pit = open(&state, None).expect("open pit");
     let page1 = run(
         &state,
         base_body(7, false),
@@ -427,17 +429,15 @@ async fn pit_admission_caps_are_typed() {
             ..reverse_rusty::PitConfig::default()
         },
     );
-    let _first = open(&state, None).await.expect("first pit");
+    let _first = open(&state, None).expect("first pit");
     assert_eq!(
-        open(&state, None).await.expect_err("cap"),
+        open(&state, None).expect_err("cap"),
         StatusCode::TOO_MANY_REQUESTS
     );
     // Over-max keep-alive (default ceiling 600s) is the client's error.
     let default_state = self::state();
     assert_eq!(
-        open(&default_state, Some(10_000))
-            .await
-            .expect_err("keep_alive too large"),
+        open(&default_state, Some(10_000)).expect_err("keep_alive too large"),
         StatusCode::BAD_REQUEST
     );
 }
