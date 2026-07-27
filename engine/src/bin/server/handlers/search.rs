@@ -26,7 +26,10 @@ mod pit_tests;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use mpercolate::mpercolate;
+pub(crate) use mpercolate::{
+    mpercolate_body_rejection, mpercolate_query_rejection, mpercolate_rejection, mpercolate_route,
+    prepare_mpercolate, MPercolateBody, MPercolateParams,
+};
 pub(crate) use percolate::search_route;
 pub(crate) use v2::{
     cluster_v2_mpercolate_route, cluster_v2_search_route, v2_mpercolate_route, v2_search_route,

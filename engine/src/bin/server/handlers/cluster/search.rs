@@ -31,8 +31,10 @@ use reverse_rusty::segment::MatchStats;
 use crate::dto::{ApiError, HitSource};
 use crate::handlers::doc::QUERY_INDEX;
 use crate::handlers::search::{
-    resolve_percolate, resolve_percolate_strict, resolve_search_controls, to_rank_spec,
-    CompatibilityDocBody, DocBody, RankBody, SearchControlInput, SearchParams,
+    mpercolate_body_rejection, mpercolate_query_rejection, mpercolate_rejection,
+    prepare_mpercolate, resolve_percolate_strict, resolve_search_controls, to_rank_spec,
+    CompatibilityDocBody, MPercolateBody, MPercolateParams, RankBody, SearchControlInput,
+    SearchParams,
 };
 use crate::state::ClusterAppState;
 
@@ -411,73 +413,77 @@ async fn cluster_search_inner(
     Ok(Json(response))
 }
 
-#[derive(Deserialize)]
-pub(crate) struct ClusterMPercolateBody {
-    documents: Option<Vec<DocBody>>,
-    filter: Option<serde_json::Value>,
-    query: Option<serde_json::Value>,
-    include_broad: Option<bool>,
-    include_source: Option<bool>,
-    size: Option<usize>,
-    from: Option<usize>,
-    timeout_ms: Option<u64>,
-    /// Optional ranking (ADR-059/075): order each document's hits by a numeric
-    /// priority tag and/or additive request boosts. Absent ⇒ engine order.
-    rank: Option<RankBody>,
-}
-
 #[derive(Serialize)]
 pub(crate) struct ClusterMPercolateResponse {
+    took: u64,
     took_ms: f64,
     responses: Vec<ClusterPercolateItem>,
 }
 
 #[derive(Serialize)]
 struct ClusterPercolateItem {
+    timed_out: bool,
+    status: u16,
     hits: ClusterHits,
 }
 
-/// POST /_mpercolate — batch percolation against the cluster (ES `_msearch`-shaped
-/// `responses[]`, one per input document in submission order).
+/// Strict HTTP extractor boundary for coordinator `POST /_mpercolate`.
 #[instrument(skip_all)]
-pub(crate) async fn cluster_mpercolate(
+pub(crate) async fn cluster_mpercolate_route(
     State(state): State<Arc<ClusterAppState>>,
-    Json(body): Json<ClusterMPercolateBody>,
+    params: Result<Query<MPercolateParams>, QueryRejection>,
+    body: Result<Json<MPercolateBody>, JsonRejection>,
+) -> Result<Json<ClusterMPercolateResponse>, Reject> {
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["mpercolate"])
+        .start_timer();
+    let Query(_) = params.map_err(|error| mpercolate_query_rejection(&state.prom, &error))?;
+    let Json(body) = body.map_err(|error| mpercolate_body_rejection(&state.prom, &error))?;
+    cluster_mpercolate_inner(state, body).await
+}
+
+/// POST /_mpercolate — strict native batch percolation against the cluster
+/// (`responses[]`, one per input document in submission order).
+async fn cluster_mpercolate_inner(
+    state: Arc<ClusterAppState>,
+    body: MPercolateBody,
 ) -> Result<Json<ClusterMPercolateResponse>, Reject> {
     let start = Instant::now();
 
-    let include_broad = body.include_broad.unwrap_or(state.include_broad);
-    let include_source = body.include_source.unwrap_or(false);
-    let timeout = tokio::time::Duration::from_millis(body.timeout_ms.unwrap_or(30_000));
-    let page_size = body.size.unwrap_or(1000);
-    let page_from = body.from.unwrap_or(0);
-    let rank_spec = to_rank_spec(body.rank);
+    let prepared = prepare_mpercolate(body, false).map_err(|message| {
+        mpercolate_rejection(
+            &state.prom,
+            StatusCode::BAD_REQUEST,
+            "validation_error",
+            message,
+        )
+    })?;
+    if prepared.profile {
+        return Err(mpercolate_rejection(
+            &state.prom,
+            StatusCode::NOT_IMPLEMENTED,
+            "profile_unsupported",
+            "`profile=true` requires the standalone columnar batch evaluator; \
+             coordinator `/_mpercolate` evaluates titles independently",
+        ));
+    }
+    let include_broad = prepared.include_broad.unwrap_or(state.include_broad);
+    let include_source = prepared.include_source;
+    let timeout = prepared.timeout;
+    let page_size = prepared.size;
+    let page_from = prepared.page_from;
+    let rank_spec = prepared.rank;
     let ranked = rank_spec.is_some();
-
-    let (titles, _single, filter_spec) =
-        match resolve_percolate(None, body.documents, body.filter, body.query) {
-            Ok(t) => t,
-            Err(msg) => {
-                state
-                    .prom
-                    .http_requests_total
-                    .with_label_values(&["mpercolate", "400"])
-                    .inc();
-                return Err(ApiError::response(
-                    StatusCode::BAD_REQUEST,
-                    "validation_error",
-                    msg,
-                ));
-            }
-        };
 
     // ADR-099: see cluster_search above (lock-free; the kill-switch resolves in the
     // blocking task).
-    let deadline = body.timeout_ms.is_some().then(|| start + timeout);
+    let deadline = prepared.explicit_timeout.then(|| start + timeout);
     let results = percolate_blocking(
         &state,
-        titles,
-        filter_spec,
+        prepared.titles,
+        prepared.filter,
         include_broad,
         rank_spec,
         timeout,
@@ -504,6 +510,8 @@ pub(crate) async fn cluster_mpercolate(
         )
         .map_err(|e| source_unavailable(&state, "mpercolate", &e))?;
         responses.push(ClusterPercolateItem {
+            timed_out: false,
+            status: StatusCode::OK.as_u16(),
             hits: ClusterHits {
                 total: rows.len(),
                 hits,
@@ -516,13 +524,10 @@ pub(crate) async fn cluster_mpercolate(
         .http_requests_total
         .with_label_values(&["mpercolate", "200"])
         .inc();
-    state
-        .prom
-        .http_request_duration
-        .with_label_values(&["mpercolate"])
-        .observe(start.elapsed().as_secs_f64());
+    let took_ms = start.elapsed().as_secs_f64() * 1000.0;
     Ok(Json(ClusterMPercolateResponse {
-        took_ms: start.elapsed().as_secs_f64() * 1000.0,
+        took: took_ms.floor() as u64,
+        took_ms,
         responses,
     }))
 }

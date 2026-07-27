@@ -401,6 +401,15 @@ sources take the exclusive `ClusterReadView` side of the core mutation barrier t
 cloning the paged sources. That fence covers direct library mutations as well as REST writes; the
 default source-free cluster path remains fully concurrent (ADR-126).
 
+Full-result `POST /_mpercolate` uses the same strict native/ES-shaped percolate resolver and keeps
+standalone matching, compatibility ranking, and source projection on one captured snapshot. A
+shared source row that has advanced to a replacement generation therefore fails enrichment rather
+than splicing newer query text onto an older match. Its `responses[]` envelope is
+multi-search-familiar but deliberately native: one shared JSON option set, ordered fail-closed
+slots, and no NDJSON or partial slot success. Only the standalone implementation drives the
+ADR-026 columnar batch kernel and can emit its aggregate broad profile; the coordinator's
+compatibility path fans out per-title matches and rejects `profile: true` explicitly (ADR-135).
+
 **Bounded local + distributed ranking (ADR-107/108/110).** `ExactStore` also carries one fixed signed
 `i64` priority column. `RankProgramSpec` compiles the priority field and tag boosts to an integer-only
 `CompiledRankProgram`; addition saturates. `EngineSnapshot::try_match_title_top_k` connects the

@@ -187,7 +187,7 @@ The full method/path matrix is below.
 | `/_percolate/jobs/{id}` | GET | Strict retained status with native and ES/OS-familiar fields plus bounded wait polling (ADR-114/132) |
 | `/_percolate/jobs/{id}` | DELETE | Strictly cancel running work or remove a terminal retained result; acknowledged native/ES response (ADR-114/133) |
 | `/_percolate/jobs/{id}/stream` | GET | Strictly claim one native, bounded, terminally attested `application/x-ndjson` consumer (ADR-114/134) |
-| `/_mpercolate` | POST | Batch percolate (high throughput; columnar broad lane; `responses[]` envelope) |
+| `/_mpercolate` | POST | Strict full-result batch percolate with a native JSON shared-options request, ES/OS-familiar controls/status fields, fail-closed slots, and standalone columnar broad-lane amortization (ADR-135) |
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |
 | `/_flush` | POST | Flush memtable to immutable segment |
 | `/_compact` | POST | Force segment compaction |
@@ -296,6 +296,10 @@ Behavior deltas from single-node mode (all deliberate, none silent):
 - **Compatibility `include_source` defaults to `false`** (`_source` costs a per-hit source probe);
   explicitly requesting it on a remote cluster answers 501. ADR-110 source streaming applies only to
   `/v2/_search`.
+- **Compatibility `/_mpercolate` keeps per-title cluster fan-out** rather than claiming the
+  standalone ADR-026 columnar-batch optimization. Its ordered match slots remain exact, but
+  `profile: true` returns `501 profile_unsupported`; the top-level broad summary is standalone-only
+  (ADR-135).
 - **`GET /_settings` works in cluster mode** — it returns the live cluster + per-shard configuration
   (`mode`, `shards`, `replication_factor`, `include_broad`, `durable`, and the assembled `per_shard`
   `EngineConfig`). Only **`PUT /_settings`** is 501 in cluster mode (see below).

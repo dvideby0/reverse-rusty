@@ -41,7 +41,7 @@ use crate::handlers::{
     cluster_get_aliases, cluster_get_doc, cluster_get_job, cluster_get_job_stream,
     cluster_get_settings, cluster_get_vocab, cluster_handoff, cluster_health,
     cluster_import_aliases, cluster_learn_aliases, cluster_learn_and_apply_vocab,
-    cluster_learn_vocab, cluster_metrics, cluster_mpercolate, cluster_put_doc,
+    cluster_learn_vocab, cluster_metrics, cluster_mpercolate_route, cluster_put_doc,
     cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
     cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
@@ -382,7 +382,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             get(cluster_get_job).delete(cluster_cancel_job),
         )
         .route("/_percolate/jobs/{id}/stream", any(cluster_get_job_stream))
-        .route("/_mpercolate", post(cluster_mpercolate))
+        .route("/_mpercolate", post(cluster_mpercolate_route))
         .route("/_bulk", post(cluster_bulk))
         .route("/_flush", post(cluster_flush))
         .route("/_checkpoint", post(cluster_checkpoint))

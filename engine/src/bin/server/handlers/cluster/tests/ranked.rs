@@ -334,8 +334,12 @@ async fn mpercolate_returns_per_document_responses() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["took"].is_u64(), "{body}");
+    assert!(body["took_ms"].is_f64(), "{body}");
     let responses = body["responses"].as_array().expect("responses");
     assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0]["timed_out"], false);
+    assert_eq!(responses[0]["status"], 200);
     assert_eq!(responses[0]["hits"]["total"], 1);
     assert_eq!(responses[1]["hits"]["total"], 1);
     assert_eq!(responses[2]["hits"]["total"], 0);
@@ -347,4 +351,66 @@ async fn mpercolate_returns_per_document_responses() {
         responses[1]["hits"]["hits"][0]["_source"]["query"],
         "1995 fleer"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cluster_mpercolate_is_strict_and_names_profile_limit() {
+    let state = test_state(&seed());
+
+    let (status, body) = send(
+        &state,
+        req(
+            "POST",
+            "/_mpercolate",
+            &serde_json::json!({
+                "query": {
+                    "percolate": {
+                        "field": "query",
+                        "documents": [{"title": "1994 topps"}]
+                    }
+                },
+                "_source": false,
+                "timeout": "1s",
+                "allow_partial_search_results": false
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["responses"][0]["hits"]["hits"][0]["_id"], 1);
+    assert!(
+        body["responses"][0]["hits"]["hits"][0]
+            .get("_source")
+            .is_none(),
+        "{body}"
+    );
+
+    for (label, path, request, expected) in [
+        (
+            "unknown query",
+            "/_mpercolate?size=1",
+            serde_json::json!({"documents": []}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "unknown document field",
+            "/_mpercolate",
+            serde_json::json!({"documents": [{"title": "x", "ignored": true}]}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            "profile",
+            "/_mpercolate",
+            serde_json::json!({"documents": [], "profile": true}),
+            StatusCode::NOT_IMPLEMENTED,
+        ),
+    ] {
+        let (status, body) = send(&state, req("POST", path, &request)).await;
+        assert_eq!(status, expected, "{label}: {body}");
+        assert_eq!(
+            body["status"],
+            u64::from(expected.as_u16()),
+            "{label}: {body}"
+        );
+    }
 }

@@ -95,7 +95,7 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
             "/_percolate/jobs/{id}/stream",
             any(crate::handlers::cluster_get_job_stream),
         )
-        .route("/_mpercolate", post(cluster_mpercolate))
+        .route("/_mpercolate", post(cluster_mpercolate_route))
         .route("/_bulk", post(cluster_bulk))
         .route("/_flush", post(cluster_flush))
         .route("/_checkpoint", post(cluster_checkpoint))

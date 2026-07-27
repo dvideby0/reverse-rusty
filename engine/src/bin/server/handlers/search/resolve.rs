@@ -124,9 +124,9 @@ pub(crate) fn resolve_percolate(
     resolve_percolate_with_mode(document, documents, native_filter, es_query, false)
 }
 
-/// Strict compatibility-search resolver. Other percolate surfaces retain their
-/// established permissive document/query envelope; `GET|POST /_search` opts into
-/// the ES/OS subset checks from ADR-126 explicitly.
+/// Strict compatibility resolver. `GET|POST /_search` (ADR-126) and
+/// `POST /_mpercolate` (ADR-135) opt into these ES/OS subset checks; internal
+/// v2/job request lowering retains its separately validated established envelope.
 pub(crate) fn resolve_percolate_strict(
     document: Option<DocBody>,
     documents: Option<Vec<DocBody>>,
