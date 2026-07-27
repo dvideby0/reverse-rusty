@@ -47,7 +47,7 @@
   rollback on shard refusal, token signing, TTL renewal, and 429/501 error classifications are
   unchanged. Validation completes before snapshot pinning. The auth allowlist is unchanged. Durable,
   wire, matching, candidate, and hot-path formats are untouched. `DELETE /v2/_pit` is explicitly
-  outside this decision and receives its own API audit.
+  outside this decision and receives its own API audit in ADR-130.
 
 - **Proof.** Local router tests cover query-only Elasticsearch controls, OpenSearch controls and
   `+json`, the dual response identity, creation time, truthful shard counts, native alias

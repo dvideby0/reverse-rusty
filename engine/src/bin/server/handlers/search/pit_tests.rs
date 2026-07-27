@@ -9,7 +9,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 
-use crate::handlers::pit::{close_pit, open_pit, open_pit_route};
+use crate::handlers::pit::{close_pit, close_pit_route, open_pit, open_pit_route, PIT_BODY_LIMIT};
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 
@@ -18,6 +18,7 @@ use super::v2::{v2_mpercolate, v2_search, V2MPercolateBody, V2SearchBody};
 use reverse_rusty::segment::Engine;
 use reverse_rusty::{Normalizer, RankValues};
 
+mod close_route;
 mod open_route;
 
 /// 25 ranked queries all matching "2020 topps chrome update", with score ties
@@ -360,7 +361,6 @@ async fn token_and_page_shape_failures_are_typed() {
         State(Arc::clone(&state)),
         Json(serde_json::from_value(serde_json::json!({"pit_id": pit})).expect("close body")),
     )
-    .await
     .expect("close");
     assert_eq!(
         serde_json::to_value(closed.0).expect("json")["closed"],

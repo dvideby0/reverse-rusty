@@ -1,5 +1,5 @@
 //! PIT lifecycle endpoints (`POST /v2/_pit` open, `DELETE /v2/_pit` close;
-//! ADR-113).
+//! ADR-113/129/130).
 //!
 //! A PIT pins the current engine snapshot under a bounded, renew-on-use
 //! keep-alive so `/v2/_search` cursor pages traverse one frozen view. The
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::{
     body::Bytes,
     extract::{
-        rejection::{BytesRejection, QueryRejection},
+        rejection::{BytesRejection, JsonRejection, QueryRejection},
         Query, State,
     },
     http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
@@ -26,6 +26,11 @@ use crate::state::{AppState, ClusterAppState};
 use crate::pit::{pit_error_response, token_failure_response};
 
 use reverse_rusty::cluster::ClusterPitError;
+
+/// PIT lifecycle requests are small by construction. Keep their parser below
+/// the server-wide bulk body limit so an array of tiny strings cannot amplify
+/// into an attacker-sized `Vec<String>` before batch-count validation.
+pub(crate) const PIT_BODY_LIMIT: usize = 64 * 1024;
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
@@ -70,13 +75,52 @@ pub(crate) struct OpenPitResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum ClosePitIds {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl ClosePitIds {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(id) => vec![id],
+            Self::Many(ids) => ids,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ClosePitBody {
+    /// Elasticsearch request spelling.
+    #[serde(default, deserialize_with = "deserialize_non_null")]
+    id: Option<ClosePitIds>,
+    /// OpenSearch and original Reverse Rusty request spelling.
+    #[serde(default, deserialize_with = "deserialize_non_null")]
+    pit_id: Option<ClosePitIds>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ClosePitParams {}
+
+#[derive(Serialize)]
+struct ClosePitItem {
+    successful: bool,
     pit_id: String,
 }
 
 #[derive(Serialize)]
 pub(crate) struct ClosePitResponse {
+    /// Original Reverse Rusty result: every requested PIT was live and closed.
     closed: bool,
+    /// Elasticsearch result: the close operation itself completed.
+    succeeded: bool,
+    /// Elasticsearch result: local snapshot/shard contexts actually released.
+    num_freed: usize,
+    /// OpenSearch per-PIT result, in request order.
+    pits: Vec<ClosePitItem>,
 }
 
 type Reject = (StatusCode, Json<ApiError>);
@@ -208,6 +252,86 @@ fn query_rejection(error: &QueryRejection) -> Reject {
     validation(format!("invalid v2 PIT query parameters: {error}"))
 }
 
+fn close_body_rejection(error: &JsonRejection) -> Reject {
+    let status = error.status();
+    let error_type = if status == StatusCode::PAYLOAD_TOO_LARGE {
+        "payload_too_large"
+    } else if status == StatusCode::UNSUPPORTED_MEDIA_TYPE {
+        "unsupported_media_type"
+    } else {
+        "validation_error"
+    };
+    let status = if status == StatusCode::PAYLOAD_TOO_LARGE
+        || status == StatusCode::UNSUPPORTED_MEDIA_TYPE
+    {
+        status
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    ApiError::response(
+        status,
+        error_type,
+        format!("invalid v2 PIT close body: {error}"),
+    )
+}
+
+struct CloseTarget {
+    token: String,
+    pit: reverse_rusty::PitId,
+}
+
+struct CloseOutcome {
+    token: String,
+    closed: bool,
+    freed: usize,
+}
+
+fn resolve_close_targets(
+    tokens: &crate::pit::PitTokens,
+    body: ClosePitBody,
+    max_open: usize,
+) -> Result<Vec<CloseTarget>, Reject> {
+    let ids = one_alias(body.id, body.pit_id, "id` and `pit_id")
+        .map_err(validation)?
+        .ok_or_else(|| validation("DELETE /v2/_pit requires exactly one of `id` or `pit_id`"))?
+        .into_vec();
+    if ids.is_empty() {
+        return Err(validation("the PIT id list must not be empty"));
+    }
+    let max_batch = max_open.max(1);
+    if ids.len() > max_batch {
+        return Err(validation(format!(
+            "too many PIT ids: got {}, maximum is the configured open-PIT limit {max_batch}",
+            ids.len()
+        )));
+    }
+    ids.into_iter()
+        .map(|token| {
+            let pit = tokens.verify_pit(&token).map_err(token_failure_response)?;
+            Ok(CloseTarget { token, pit })
+        })
+        .collect()
+}
+
+fn close_response(outcomes: Vec<CloseOutcome>) -> Json<ClosePitResponse> {
+    let closed = outcomes.iter().all(|outcome| outcome.closed);
+    let num_freed = outcomes
+        .iter()
+        .fold(0usize, |total, outcome| total.saturating_add(outcome.freed));
+    Json(ClosePitResponse {
+        closed,
+        succeeded: true,
+        num_freed,
+        pits: outcomes
+            .into_iter()
+            .map(|outcome| ClosePitItem {
+                successful: outcome.closed,
+                pit_id: outcome.token,
+            })
+            .collect(),
+    })
+}
+
 fn creation_time_millis() -> u64 {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -288,29 +412,55 @@ fn open_pit_inner(
     }
 }
 
-/// Close a PIT, releasing its pinned snapshot. Closing an already-gone PIT is
-/// `closed: false`, not an error — the client's goal state is achieved.
+/// Strict HTTP boundary for local PIT close. ES `id`, OpenSearch/native
+/// `pit_id`, and scalar-or-array inputs share one pre-validated close path.
 #[instrument(skip_all)]
-pub(crate) async fn close_pit(
+#[allow(clippy::unused_async)] // Axum handlers are asynchronous entry points.
+pub(crate) async fn close_pit_route(
+    State(state): State<Arc<AppState>>,
+    params: Result<Query<ClosePitParams>, QueryRejection>,
+    body: Result<Json<ClosePitBody>, JsonRejection>,
+) -> Result<Json<ClosePitResponse>, Reject> {
+    let Query(_) = params.map_err(|error| query_rejection(&error))?;
+    let Json(body) = body.map_err(|error| close_body_rejection(&error))?;
+    close_pit_inner(&state, body)
+}
+
+/// Direct test seam for the lifecycle suites.
+#[cfg(test)]
+pub(crate) fn close_pit(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ClosePitBody>,
-) -> Result<Json<ClosePitResponse>, (StatusCode, Json<ApiError>)> {
-    let pit = state
-        .pit_tokens
-        .verify_pit(&body.pit_id)
-        .map_err(token_failure_response)?;
-    let closed = {
+) -> Result<Json<ClosePitResponse>, Reject> {
+    close_pit_inner(&state, body)
+}
+
+/// Close one or more PITs, releasing their pinned snapshots. Every token is
+/// verified before mutation, so malformed batches never partially close.
+fn close_pit_inner(state: &AppState, body: ClosePitBody) -> Result<Json<ClosePitResponse>, Reject> {
+    let targets = resolve_close_targets(&state.pit_tokens, body, state.pit_config.max_open)?;
+    let outcomes = {
         let now = Instant::now();
         let mut pits = state.pits.lock();
         // Reap first: an expired target honestly reports `closed: false`, and
         // a DELETE-first client still frees every expired cap slot (dropping
         // the reaped Arcs IS the local release) — codex review.
         drop(pits.reap_expired(now));
-        let closed = pits.close(pit).is_some();
+        let outcomes = targets
+            .into_iter()
+            .map(|target| {
+                let closed = pits.close(target.pit).is_some();
+                CloseOutcome {
+                    token: target.token,
+                    closed,
+                    freed: usize::from(closed),
+                }
+            })
+            .collect();
         state.prom.open_pits.set(pits.len() as i64);
-        closed
+        outcomes
     };
-    Ok(Json(ClosePitResponse { closed }))
+    Ok(close_response(outcomes))
 }
 
 fn cluster_pit_error_response(error: ClusterPitError) -> (StatusCode, Json<ApiError>) {
@@ -365,24 +515,36 @@ pub(crate) async fn cluster_open_pit_route(
     }
 }
 
-/// Coordinator-mode close: releases the registry entry and every shard pin.
+/// Strict HTTP boundary for coordinator PIT close.
 #[instrument(skip_all)]
-pub(crate) async fn cluster_close_pit(
+pub(crate) async fn cluster_close_pit_route(
     State(state): State<Arc<ClusterAppState>>,
-    Json(body): Json<ClosePitBody>,
-) -> Result<Json<ClosePitResponse>, (StatusCode, Json<ApiError>)> {
-    let pit = state
-        .pit_tokens
-        .verify_pit(&body.pit_id)
-        .map_err(token_failure_response)?;
+    params: Result<Query<ClosePitParams>, QueryRejection>,
+    body: Result<Json<ClosePitBody>, JsonRejection>,
+) -> Result<Json<ClosePitResponse>, Reject> {
+    let Query(_) = params.map_err(|error| query_rejection(&error))?;
+    let Json(body) = body.map_err(|error| close_body_rejection(&error))?;
+    let targets = resolve_close_targets(&state.pit_tokens, body, state.pit_config.max_open)?;
     let worker = Arc::clone(&state);
-    let closed = tokio::task::spawn_blocking(move || {
+    let outcomes = tokio::task::spawn_blocking(move || {
         let cluster = worker.cluster.read();
-        let closed = cluster.close_pit(pit, Instant::now());
+        let shards = cluster.num_shards();
+        let now = Instant::now();
+        let outcomes = targets
+            .into_iter()
+            .map(|target| {
+                let closed = cluster.close_pit(target.pit, now);
+                CloseOutcome {
+                    token: target.token,
+                    closed,
+                    freed: if closed { shards } else { 0 },
+                }
+            })
+            .collect();
         worker.prom.open_pits.set(cluster.open_pit_count() as i64);
-        closed
+        outcomes
     })
     .await
     .map_err(|_| join_failure())?;
-    Ok(Json(ClosePitResponse { closed }))
+    Ok(close_response(outcomes))
 }

@@ -76,7 +76,10 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         .route(
             "/v2/_pit",
             post(crate::handlers::cluster_open_pit_route)
-                .delete(crate::handlers::cluster_close_pit),
+                .delete(crate::handlers::cluster_close_pit_route)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::handlers::PIT_BODY_LIMIT,
+                )),
         )
         .route("/_mpercolate", post(cluster_mpercolate))
         .route("/_bulk", post(cluster_bulk))

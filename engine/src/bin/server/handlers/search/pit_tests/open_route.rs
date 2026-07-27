@@ -12,7 +12,10 @@ async fn routed_open(
     use tower::ServiceExt;
 
     let response = Router::new()
-        .route("/v2/_pit", post(open_pit_route))
+        .route(
+            "/v2/_pit",
+            post(open_pit_route).layer(axum::extract::DefaultBodyLimit::max(PIT_BODY_LIMIT)),
+        )
         .with_state(Arc::clone(state))
         .oneshot(request)
         .await
