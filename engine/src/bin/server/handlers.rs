@@ -15,7 +15,8 @@ mod search;
 mod vocab;
 
 pub(crate) use admin::{
-    api_root, cat_segments, cat_stats, compact, flush_route, health, prometheus_metrics, stats,
+    api_root, cat_segments, cat_stats, compact_route, flush_route, force_merge_route, health,
+    prometheus_metrics, stats,
 };
 pub(crate) use alias::{
     discover_aliases, discover_and_record_aliases, get_alias_feedback, get_aliases, import_aliases,

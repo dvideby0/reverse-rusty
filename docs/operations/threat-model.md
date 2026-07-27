@@ -64,7 +64,7 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
   `RR_AUTH_TOKEN` for the mutation gate and should add a **NetworkPolicy** (and/or an authenticating
   proxy / `--auth-protect-reads`) to restrict in-cluster reach — loopback isolation is a Compose-only
   default, not a property of the service.
-- **Threats addressed:** unauthorized writes/admin (insert/delete/`_bulk`/`_flush`/`_compact`/`_backup`/
+- **Threats addressed:** unauthorized writes/admin (insert/delete/`_bulk`/`_flush`/`_compact`/`_forcemerge`/`_backup`/
   `_settings`/vocab), credential brute-force timing, accidental open-by-default.
 - **Residual:** a single shared token (no per-principal identity, no scopes); reads are open unless
   `--auth-protect-reads`. Mitigate by front-ending with a reverse proxy / mTLS gateway when

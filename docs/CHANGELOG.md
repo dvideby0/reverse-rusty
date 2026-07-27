@@ -67,6 +67,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   ES/OpenSearch shard results, shared standalone/coordinator metrics, and fail-loud local-shard
   durability
   ([ADR-137](decisions/adr-137-flush-api-contract.md)).
+- Made native `POST /_compact` actually force all sealed segments, added strict
+  Elasticsearch/OpenSearch-familiar `POST /_forcemerge` controls and shard results, moved merge work
+  off async runtime workers, and preserved fail-closed rollback
+  ([ADR-138](decisions/adr-138-compaction-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

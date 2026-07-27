@@ -432,11 +432,11 @@ pub(crate) async fn cluster_cat_segments() -> Response {
     )
 }
 
-/// POST /_compact — single-node only; per-shard compaction runs under each shard's
-/// own engine policy.
+/// POST /_compact or /_forcemerge — standalone only; per-shard compaction runs
+/// under each shard's own engine policy.
 pub(crate) async fn cluster_compact() -> Response {
     not_in_cluster_mode(
-        "POST /_compact",
+        "POST /_compact or /_forcemerge",
         "per-shard compaction follows each shard engine's policy; use POST /_checkpoint \
          for the cluster durability commit",
     )

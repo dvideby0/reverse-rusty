@@ -229,6 +229,7 @@ mod tests {
             (Method::HEAD, "/_flush"),
             (Method::POST, "/_flush"),
             (Method::POST, "/_compact"),
+            (Method::POST, "/_forcemerge"),
             (Method::POST, "/_backup"),
             (Method::PUT, "/_vocab"),
             (Method::POST, "/_vocab/learn"),
