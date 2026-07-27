@@ -79,7 +79,7 @@ use handlers::{
     create_job_route, delete_doc, discover_aliases, discover_and_record_aliases, flush,
     get_alias_feedback, get_aliases, get_doc, get_job, get_job_stream, get_settings, get_vocab,
     health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
-    mpercolate, open_pit_route, prometheus_metrics, put_doc, put_settings, put_vocab,
+    mpercolate_route, open_pit_route, prometheus_metrics, put_doc, put_settings, put_vocab,
     reset_alias_feedback, search_route, stats, v2_mpercolate_route, v2_search_route,
     validate_and_apply_feedback, EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT,
 };
@@ -434,7 +434,7 @@ async fn main() {
         )
         .route("/_percolate/jobs/{id}", get(get_job).delete(cancel_job))
         .route("/_percolate/jobs/{id}/stream", any(get_job_stream))
-        .route("/_mpercolate", post(mpercolate))
+        .route("/_mpercolate", post(mpercolate_route))
         .route("/_bulk", post(bulk_ingest))
         .route("/_flush", post(flush))
         .route("/_compact", post(compact))

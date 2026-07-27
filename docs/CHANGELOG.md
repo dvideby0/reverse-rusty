@@ -55,6 +55,10 @@ reverse chronological and describe outcomes, not the current architecture or fut
   cache-safe newline-delimited responses, pre-claim HEAD rejection, and standalone/coordinator
   route parity while keeping the terminally attested protocol explicitly native
   ([ADR-134](decisions/adr-134-exhaustive-job-stream-api-contract.md)).
+- Hardened full-result `POST /_mpercolate` with one strict native/ES-shaped request, truthful
+  source/timeout/fail-closed controls and batch timing/status fields, generation-consistent
+  standalone enrichment, and an explicit coordinator profile boundary
+  ([ADR-135](decisions/adr-135-mpercolate-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

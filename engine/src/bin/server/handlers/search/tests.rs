@@ -4,10 +4,9 @@
 //! (`match_title`), so the batch endpoint can't silently diverge from
 //! `/_search`. The library already proves batch == scalar (tests/broad_batch);
 //! this proves the HTTP layer threads results through in order and unchanged.
-use super::mpercolate::{mpercolate, MPercolateBody};
+use super::mpercolate::{mpercolate, mpercolate_route, MPercolateBody, MPercolateDoc};
 use super::percolate::{search, search_route, SearchBody};
 use super::v2::{v2_mpercolate, v2_search, V2MPercolateBody, V2SearchBody};
-use super::DocBody;
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 use axum::extract::State;
@@ -64,7 +63,7 @@ fn body(docs: Option<Vec<&str>>, include_broad: Option<bool>, profile: bool) -> 
     MPercolateBody {
         documents: docs.map(|v| {
             v.into_iter()
-                .map(|t| DocBody {
+                .map(|t| MPercolateDoc {
                     title: t.to_string(),
                 })
                 .collect()
@@ -73,12 +72,16 @@ fn body(docs: Option<Vec<&str>>, include_broad: Option<bool>, profile: bool) -> 
         query: None,
         include_broad,
         include_source: Some(false),
+        source: None,
         // Large cap so no per-document truncation can mask a result mismatch.
         size: Some(1_000_000),
         from: None,
         rank: None,
         timeout_ms: None,
+        timeout: None,
         profile: Some(profile),
+        explain: None,
+        allow_partial_search_results: None,
     }
 }
 
@@ -153,4 +156,5 @@ mod basic;
 mod batch;
 mod execution;
 mod filtered;
+mod mpercolate_contract;
 mod ranked;

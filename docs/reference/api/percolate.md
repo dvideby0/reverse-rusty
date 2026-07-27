@@ -9,9 +9,9 @@ materializing every matching ID. The route accepts exactly one `document`; batch
 approximate `terminated` delivery reject loudly, as does `from` (deep pagination is the
 PIT/cursor flow below, ADR-113). Exact exhaustive `all` is deliberately a separate background
 job/stream surface below (ADR-114), not a giant `/v2/_search` response. Existing `/_search` and
-`/_mpercolate` behavior and response bytes are unchanged. The v2 document is strict and contains
-only `title`; unknown top-level, document, PIT, rank, or boost fields are 400 errors rather than
-ignored input.
+`/_mpercolate` remain separate compatibility/full-result contracts rather than aliases for this
+bounded API. The v2 document is strict and contains only `title`; unknown top-level, document, PIT,
+rank, or boost fields are 400 errors rather than ignored input.
 
 ```json
 {
@@ -782,11 +782,12 @@ Semantics and bounds:
 
 ## `POST /_mpercolate` — Batch percolate (high throughput)
 
-The throughput counterpart to `/_search`. Percolates a **batch** of documents in one request and
-evaluates the broad lane **once per batch, columnar** (ADR-026) instead of once per document — so a
-hot broad anchor's huge posting is scanned once for the whole batch, not re-scanned per document.
-Returns an Elasticsearch `_msearch`-style `responses[]` envelope: one entry per input document, in
-submission order (`responses[i]` corresponds to `documents[i]`).
+The full-result throughput counterpart to `/_search` (ADR-135). It accepts one strict JSON request
+with a shared option set and returns one ordered `responses[i]` slot per input document.
+In **standalone mode**, it evaluates the broad lane once per title batch with the columnar kernel
+(ADR-026), so a hot anchor's large posting is scanned once for the batch rather than once per title.
+Coordinator mode preserves the same exact per-slot semantics but fans out one per-title match; it
+does not claim the standalone columnar amortization.
 
 ```bash
 curl -X POST localhost:9200/_mpercolate \
@@ -798,17 +799,35 @@ curl -X POST localhost:9200/_mpercolate \
       {"title": "Generic unmatched listing"}
     ],
     "include_broad": true,
+    "_source": true,
+    "timeout": "2s",
+    "allow_partial_search_results": false,
     "profile": true
   }'
 ```
 
 ```json
 {
+  "took": 0,
   "took_ms": 0.91,
   "responses": [
-    {"hits": {"total": 1, "hits": [{"_id": 1, "_source": {"query": "dell laptop"}}]}},
-    {"hits": {"total": 1, "hits": [{"_id": 2, "_source": {"query": "leather jacket"}}]}},
-    {"hits": {"total": 0, "hits": []}}
+    {
+      "timed_out": false,
+      "status": 200,
+      "hits": {
+        "total": 1,
+        "hits": [{"_index": "queries", "_id": 1, "_source": {"query": "dell laptop"}}]
+      }
+    },
+    {
+      "timed_out": false,
+      "status": 200,
+      "hits": {
+        "total": 1,
+        "hits": [{"_index": "queries", "_id": 2, "_source": {"query": "leather jacket"}}]
+      }
+    },
+    {"timed_out": false, "status": 200, "hits": {"total": 0, "hits": []}}
   ],
   "broad": {
     "strategy": "columnar",
@@ -822,27 +841,49 @@ curl -X POST localhost:9200/_mpercolate \
 }
 ```
 
-Optional request fields:
+The request must choose exactly one document shape:
+
+- Native: `documents: [{"title":"..."}, ...]`, optionally with a top-level native `filter`.
+- ES/OS-familiar: the strict `query.percolate` or `query.bool` subset documented for
+  [`/_search`](#getpost-_search--percolate-titles), using `field: "query"` and either `document`
+  or `documents`.
+
+The shapes cannot be mixed. The top-level body, each native document, the percolate query, the
+ranking block, and the query string are strict: unsupported fields and every query parameter return
+a structured `400` instead of being ignored. The media type is `application/json`; malformed JSON
+returns structured `400`, an oversized payload preserves `413`, and a missing/wrong JSON content type
+preserves `415`.
+
+Shared request fields:
 
 | Field | Default | Description |
 |---|---|---|
 | `include_broad` | server default (`--include-broad`) | Per-request override: evaluate class C and accepted class D for this batch. Class H remains always visible |
-| `include_source` | `true` single-node; `false` cluster | Include original query text in each hit. An explicit `true` works for an in-process cluster; a remote/gRPC cluster returns 501 |
+| `include_source` / `_source` | `true` standalone; `false` cluster | Boolean aliases controlling stored query text. Specify at most one. An explicit `true` works for an in-process cluster; a remote/gRPC cluster returns 501 |
 | `size` | 1000 | Maximum hits per document |
 | `from` | 0 | Per-document offset into each document's hits for pagination |
 | `rank` | – | Optional ranking block (ADR-059), applied per document — see [Ranking](#ranking-adr-059) |
-| `timeout_ms` | 30000 | Per-request timeout in ms; returns 408 on expiry. Set explicitly, it also arms **cooperative cancellation** of the in-flight match work (ADR-099) — see note. |
-| `profile` | false | Include the top-level `broad` summary |
+| `timeout_ms` / `timeout` | 30000 ms | Native milliseconds or an ES/OS time value such as `250ms` or `2s`; specify at most one. Expiry returns whole-request 408 and an explicit value arms cooperative cancellation (ADR-099) |
+| `profile` | false | Standalone only: include the top-level columnar `broad` summary. A coordinator returns `501 profile_unsupported` for `true`; `false` is accepted |
+| `explain` | false | `false` is accepted; `true` returns 400 and directs the caller to `/_search` per document |
+| `allow_partial_search_results` | false | `false` names the actual fail-closed contract; `true` returns 400 |
 
-Each per-document result is **byte-identical** to calling `/_search` with that single title (for the
-same `size`/`from`/`rank`) — batching is a performance change only, never a semantic one (proven by
-`tests/broad_batch.rs`). The optional top-level `broad` summary surfaces the columnar evaluator's
-amortization: as the batch grows, `broad_postings_scanned` rises far slower than `broad_candidates`
-(each huge posting is consulted once per batch). An empty `documents` array is a valid no-op (`200` with
-`responses: []`); a missing `documents` field is a `400`.
+Every successful slot has `timed_out: false`, `status: 200`, and a `hits` object. Its exact matched
+IDs, total, ranking, page, and source projection are the same as a corresponding per-title search.
+Standalone source enrichment stays on the exact snapshot used for matching and fails with
+`source_unavailable` rather than attaching text from a concurrent replacement. Cluster source
+enrichment retains its mutation-fenced read view. An empty native `documents` array is a valid no-op
+(`200` with `responses: []`); a missing document shape is a `400`.
 
-**When to use which.** Reach for `/_mpercolate` for high-throughput batch/streaming percolation,
-especially with broad queries enabled. Both endpoints support `size`/`from` pagination and the `rank`
-block; reach for `/_search` when you want the rich, per-document observability it alone provides —
-per-slot `stats`, `explain`, and `profile`. Because the broad lane is amortized per batch, `/_mpercolate`
-deliberately does not produce per-document candidate/posting stats — only the batch-level `broad` summary.
+This is **not** the Elasticsearch/OpenSearch multi-search wire format. Their current `_msearch`
+endpoints use alternating NDJSON metadata/query lines and may return independent slot errors.
+Current ES/OS multi-document percolation also returns union hits with
+`_percolator_document_slot`; Reverse Rusty deliberately returns one independent response per input
+so the standalone batch kernel can share work. NDJSON, per-document control sets, and partial slot
+success are rejected rather than imitated incompletely.
+
+**When to use which.** Use standalone `/_mpercolate` for high-throughput batch/streaming
+percolation, especially with broad queries enabled. Both endpoints support `size`/`from` and
+`rank`; use `/_search` for rich per-document `stats`, explanations, or profiles. The standalone
+batch endpoint deliberately exposes only its aggregate broad summary, while the coordinator names
+that unavailable columnar profile instead of returning misleading zeros.
