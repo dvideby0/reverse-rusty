@@ -22,7 +22,7 @@ pub(crate) use alias::{
     discover_aliases, discover_and_record_aliases, get_alias_feedback, get_aliases, import_aliases,
     learn_and_apply_aliases, reset_alias_feedback, validate_and_apply_feedback,
 };
-pub(crate) use backup::backup;
+pub(crate) use backup::{backup_route, BACKUP_BODY_LIMIT};
 pub(crate) use cluster::{
     cluster_backup, cluster_bulk_route, cluster_cat_segments, cluster_cat_shards,
     cluster_cat_stats, cluster_checkpoint, cluster_compact, cluster_delete_doc,

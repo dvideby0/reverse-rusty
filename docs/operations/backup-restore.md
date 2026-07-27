@@ -33,8 +33,11 @@ that deletion and capture a manifest that references a file the copy missed — 
 
 `POST /_backup` avoids this by doing the copy **inside the engine, under its write lock**: no
 compaction can run during the snapshot, so the manifest and the files it names are always
-consistent. The whole backup is staged in a sibling temp dir and atomically renamed into place, so
-a crash mid-backup never leaves a half-written `dest`.
+consistent. The filesystem work runs on a blocking worker rather than an async HTTP runtime
+thread. The whole backup is staged in a uniquely-owned sibling
+`<dest>.backup.tmp.<pid>.<sequence>` dir, verified, and atomically promoted without replacing an
+entry that already occupies `dest`. A crash mid-backup never leaves a half-written `dest`; it can
+leave that operation's uniquely named staging dir, which may be pruned once no backup is running.
 
 ## Taking a backup (REST)
 
@@ -44,18 +47,38 @@ curl -fsS -XPOST http://<host>:9200/_backup \
   -H 'content-type: application/json' \
   -H "authorization: Bearer $RR_AUTH_TOKEN" \   # if auth is enabled (ADR-062)
   -d '{"dest": "/backups/rr-2026-06-19"}'
-# → {"acknowledged": true, "dest": "/backups/rr-2026-06-19", ...}
+# single-node:
+# → {"took":12,"took_ms":12.7,"acknowledged":true,"dest":"/backups/rr-2026-06-19"}
+# in-process cluster also returns the checkpoint generation:
+# → {"took":18,"took_ms":18.4,"acknowledged":true,"dest":"...","epoch":7}
 ```
 
 Notes:
+- The route is strict and synchronous: POST only, no query parameters, exactly one JSON `dest`
+  field, and a 64 KiB body limit. Missing/wrong JSON content type is 415; malformed, duplicate,
+  unknown, empty/whitespace, or NUL-containing input is 400; oversize input is 413. A successful
+  response means copy, verification, and atomic promotion all finished.
 - `dest` is a path **on the server's filesystem**, not the client's. Mount your backup volume into
   the container and point `dest` there.
-- `dest` must **not already exist** (a 400 otherwise) — never overwrite a prior backup in place.
+- `dest` must **not already contain any filesystem entry** (a 400 otherwise, including a dangling
+  symlink) — never overwrite a prior backup in place.
 - An in-memory engine/cluster (no `--data-dir`) returns 400; a persistence-degraded engine returns
   503 (its on-disk state is known-incomplete — investigate before backing up).
 - The in-process-cluster call checkpoints first, so it doubles as a durability commit point.
 - A remote cluster's coordinator is stateless and returns 400. Use the per-volume procedure below;
   the coordinator cannot create a cross-shard snapshot.
+
+### Why there is no `/_snapshot` alias
+
+Elasticsearch and OpenSearch create `/_snapshot/{repository}/{snapshot}` only after a repository
+has been registered, and their default request starts asynchronous work that is inspected through
+snapshot/task status APIs
+([Elasticsearch create snapshot](https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-snapshot-create),
+[OpenSearch create snapshot](https://docs.opensearch.org/latest/api-reference/snapshots/create-snapshot/)).
+Reverse Rusty has no repository registry or snapshot-task lifecycle: it accepts one fresh
+server-side path and waits for a verified full copy. Mapping repository and snapshot path segments
+onto an arbitrary filesystem path, or acknowledging background work without a status surface,
+would be false compatibility. `/_backup` therefore remains an explicitly native operation.
 
 ## Restoring
 

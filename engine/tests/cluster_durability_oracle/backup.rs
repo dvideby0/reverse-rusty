@@ -259,6 +259,44 @@ fn backup_refuses_existing_dest_without_checkpointing() {
     let _ = std::fs::remove_dir_all(&backup);
 }
 
+/// A dangling symlink is still an occupied destination. It must be rejected
+/// before checkpointing, not replaced by the final directory promotion.
+#[cfg(unix)]
+#[test]
+fn backup_refuses_dangling_symlink_without_checkpointing() {
+    use std::os::unix::fs::symlink;
+
+    let (queries, _titles) = build_corpus();
+    let dir = unique_dir("backup_symlink_src");
+    let root = unique_dir("backup_symlink_root");
+    std::fs::create_dir_all(&root).unwrap();
+    let backup = root.join("backup");
+    symlink(root.join("missing"), &backup).unwrap();
+
+    let cluster = ClusterEngine::build(vocab(), &durable_cfg(3, dir.clone(), false), &queries)
+        .expect("durable cluster builds");
+    let epoch_before = cluster.epoch();
+    match cluster.backup_to(&backup) {
+        Err(ShardError::Config(_)) => {}
+        other => panic!("expected Config error for a dangling symlink, got {other:?}"),
+    }
+    assert_eq!(
+        cluster.epoch(),
+        epoch_before,
+        "checkpoint must not run for a dangling destination symlink"
+    );
+    assert!(
+        std::fs::symlink_metadata(&backup)
+            .expect("symlink remains")
+            .file_type()
+            .is_symlink(),
+        "backup must not replace the destination symlink"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// `verify_cluster_backup` catches a corrupted per-shard segment.
 #[test]
 fn cluster_backup_corrupt_segment_fails_verify() {

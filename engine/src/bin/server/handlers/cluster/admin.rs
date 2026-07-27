@@ -23,19 +23,22 @@ use axum::{
     body::Bytes,
     extract::{
         rejection::{BytesRejection, QueryRejection},
-        Query, State,
+        Query, RawQuery, State,
     },
-    http::{Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use prometheus::{Encoder, TextEncoder};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracing::{error, info, instrument};
 
 use crate::dto::ApiVersion;
 use crate::handlers::admin::{
     acquire_flush, validate_flush_method, validate_flush_request, FlushParams, FlushResponse,
+};
+use crate::handlers::backup::{
+    backup_rejection, validate_backup_method, validate_backup_request, BackupResponse,
 };
 use crate::state::ClusterAppState;
 
@@ -374,12 +377,6 @@ pub(crate) async fn cluster_checkpoint(State(state): State<Arc<ClusterAppState>>
     }
 }
 
-#[derive(Deserialize)]
-pub(crate) struct BackupBody {
-    /// Server-side destination directory for the snapshot. Must not already exist.
-    dest: String,
-}
-
 /// POST /_backup — snapshot the cluster's durable state into `dest`, a server-side
 /// path that must not already exist (ADR-079): checkpoint, then copy the coordinator
 /// manifest + per-shard segments + `sources.dat` + the coordinator log. Restore by
@@ -393,27 +390,69 @@ pub(crate) struct BackupBody {
 #[instrument(skip_all)]
 pub(crate) async fn cluster_backup(
     State(state): State<Arc<ClusterAppState>>,
-    Json(body): Json<BackupBody>,
+    method: Method,
+    raw_query: RawQuery,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let start = Instant::now();
-    let dest = std::path::PathBuf::from(&body.dest);
-    let result = {
-        let _w = state.write_serial.lock();
-        let cluster = state.cluster.read();
-        cluster.backup_to(&dest)
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["backup"])
+        .start_timer();
+    let started = Instant::now();
+    if let Err(response) = validate_backup_method(&state.prom, &method) {
+        return *response;
+    }
+    let prepared = match validate_backup_request(&state.prom, raw_query, &headers, body) {
+        Ok(prepared) => prepared,
+        Err(response) => return *response,
     };
+    let work_state = Arc::clone(&state);
+    let dest = prepared.path;
+    let result = match tokio::task::spawn_blocking(move || {
+        let _writer = work_state.write_serial.lock();
+        let cluster = work_state.cluster.read();
+        cluster.backup_to(&dest).map(|()| cluster.epoch())
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join_error) => {
+            error!(error = %join_error, "cluster backup worker failed");
+            return backup_rejection(
+                &state.prom,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "cluster backup worker failed",
+            );
+        }
+    };
+    let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
     match result {
-        Ok(()) => {
+        Ok(epoch) => {
             info!(
-                dest = %body.dest,
-                took_ms = start.elapsed().as_millis() as u64,
+                dest = %prepared.dest,
+                took_ms,
+                epoch,
                 "cluster backup complete"
             );
-            Json(serde_json::json!({"acknowledged": true, "dest": body.dest})).into_response()
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["backup", "200"])
+                .inc();
+            Json(BackupResponse::new(took_ms, prepared.dest, Some(epoch))).into_response()
         }
-        Err(e) => {
-            error!(dest = %body.dest, error = %e, "cluster backup failed");
-            shard_error_response("backup failed", &e)
+        Err(error) => {
+            let status = shard_error_status(&error);
+            error!(dest = %prepared.dest, error = %error, "cluster backup failed");
+            state
+                .prom
+                .http_requests_total
+                .with_label_values(&["backup", status.as_str()])
+                .inc();
+            shard_error_response("backup failed", &error)
         }
     }
 }

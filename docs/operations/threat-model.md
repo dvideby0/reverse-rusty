@@ -99,9 +99,10 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
 ### 3. Backup write surface — authenticated, operator-named path (ADR-079)
 
 - `POST /_backup {"dest": "<path>"}` snapshots the durable state to a **server-side** directory. It is
-  **gated by the default-deny auth** (a non-GET mutation), staged into a sibling `<dest>.backup.tmp` +
-  atomically renamed, **refuses a pre-existing dest**, and verifies every segment before commit
-  (`storage/backup.rs`).
+  **gated by the default-deny auth** (a non-GET mutation), staged into a uniquely-owned sibling
+  `<dest>.backup.tmp.<pid>.<sequence>`, and atomically promoted with no-clobber semantics on the
+  shipped Linux platform. It **refuses any pre-existing destination entry** (including a dangling
+  symlink) and verifies every segment before commit (`storage/backup.rs`).
 - **Finding — no path normalization.** The handler converts the client-supplied `dest` string straight
   to a `PathBuf` (`bin/server/handlers/backup.rs`) with no canonicalization or jail. An authenticated
   caller can therefore write a backup tree anywhere the **service account** can write (uid 10001 in the
@@ -115,8 +116,9 @@ TLS + token → [ADR-071](../decisions/adr-071-grpc-tls-auth.md), transport hard
   - **Deferred hardening (optional):** a config-driven allowlist / jail root for `dest` (reject paths
     that escape a configured backup root). It is tracked under
     [`Security hardening beyond the v1 trust model`](../roadmap.md#security-hardening-beyond-the-v1-trust-model).
-- **Threats addressed:** unauthorized backup (auth-gated), silent overwrite of an existing backup
-  (refused), a torn backup corrupting the source (the source is read-only during the copy; ADR-079).
+- **Threats addressed:** unauthorized backup (auth-gated), silent overwrite or staging-tree
+  collision between competing backups (refused/isolated), a torn backup corrupting the source (the
+  source is read-only during the copy; ADR-079/139).
 
 ### 4. Process ↔ host (the container)
 

@@ -46,7 +46,7 @@ use crate::handlers::{
     cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
     cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
     cluster_v2_mpercolate_route, cluster_v2_search_route, cluster_validate_and_apply_feedback,
-    EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT,
+    BACKUP_BODY_LIMIT, EXHAUSTIVE_JOB_BODY_LIMIT, PIT_BODY_LIMIT,
 };
 use crate::metrics::PrometheusMetrics;
 use crate::state::{request_id_middleware, ClusterAppState};
@@ -387,7 +387,10 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
         .route("/_bulk", post(cluster_bulk_route))
         .route("/_flush", any(cluster_flush_route))
         .route("/_checkpoint", post(cluster_checkpoint))
-        .route("/_backup", post(cluster_backup))
+        .route(
+            "/_backup",
+            any(cluster_backup).layer(DefaultBodyLimit::max(BACKUP_BODY_LIMIT)),
+        )
         .route("/_compact", post(cluster_compact))
         .route("/_forcemerge", post(cluster_compact))
         .route("/_stats", get(cluster_stats))

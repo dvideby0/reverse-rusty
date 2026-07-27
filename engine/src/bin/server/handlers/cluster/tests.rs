@@ -100,6 +100,12 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         .route("/_bulk", post(cluster_bulk_route))
         .route("/_flush", any(cluster_flush_route))
         .route("/_checkpoint", post(cluster_checkpoint))
+        .route(
+            "/_backup",
+            any(cluster_backup).layer(axum::extract::DefaultBodyLimit::max(
+                crate::handlers::BACKUP_BODY_LIMIT,
+            )),
+        )
         .route("/_compact", post(cluster_compact))
         .route("/_forcemerge", post(cluster_compact))
         .route("/_stats", get(cluster_stats))
@@ -168,6 +174,7 @@ fn seed() -> Vec<(u64, String)> {
 }
 
 mod admin;
+mod backup;
 mod bulk;
 mod crud;
 mod flush;

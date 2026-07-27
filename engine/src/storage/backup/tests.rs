@@ -36,6 +36,26 @@ fn tmp_root(tag: &str) -> PathBuf {
     dir
 }
 
+fn staging_entries(dest: &Path) -> Vec<PathBuf> {
+    let prefix = format!(
+        "{}.backup.tmp.",
+        dest.file_name()
+            .and_then(|name| name.to_str())
+            .expect("UTF-8 test destination")
+    );
+    let parent = dest.parent().expect("test destination parent");
+    std::fs::read_dir(parent)
+        .expect("read test destination parent")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+        })
+        .collect()
+}
+
 #[test]
 fn engine_backup_round_trips_files_and_verifies() {
     let root = tmp_root("engine-rt");
@@ -60,7 +80,7 @@ fn engine_backup_round_trips_files_and_verifies() {
     );
     verify_backup(&dest).unwrap();
     // No leftover staging dir.
-    assert!(!staging_dir(&dest).exists());
+    assert!(staging_entries(&dest).is_empty());
 }
 
 #[test]
@@ -104,6 +124,61 @@ fn engine_backup_refuses_existing_dest() {
         Err(BackupError::DestExists(_)) => {}
         other => panic!("expected DestExists, got {other:?}"),
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn engine_backup_refuses_dangling_symlink_destination() {
+    use std::os::unix::fs::symlink;
+
+    let root = tmp_root("engine-dangling-symlink");
+    let src = root.join("src");
+    std::fs::create_dir_all(src.join(SEGMENTS_DIR)).unwrap();
+    write_manifest(&empty_manifest(vec![]), &src.join(ENGINE_MANIFEST)).unwrap();
+    let dest = root.join("dest");
+    symlink(root.join("missing-target"), &dest).unwrap();
+
+    match copy_engine_dir(&src, &dest) {
+        Err(BackupError::DestExists(path)) => assert_eq!(path, dest),
+        other => panic!("expected DestExists, got {other:?}"),
+    }
+    assert!(
+        std::fs::symlink_metadata(&dest)
+            .expect("destination symlink remains")
+            .file_type()
+            .is_symlink(),
+        "backup must not replace a dangling destination symlink"
+    );
+}
+
+#[test]
+fn final_promotion_refuses_an_entry_created_after_staging() {
+    let root = tmp_root("commit-race");
+    let dest = root.join("dest");
+    let staging = reserve_staging_dir(&dest).expect("reserve staging");
+    std::fs::create_dir(&dest).expect("competing destination");
+
+    match commit_staging(&staging, &dest) {
+        Err(BackupError::DestExists(path)) => assert_eq!(path, dest),
+        other => panic!("expected DestExists, got {other:?}"),
+    }
+    assert!(dest.is_dir(), "competing destination must remain");
+    assert!(
+        staging.is_dir(),
+        "failed promotion retains its staging tree"
+    );
+    std::fs::remove_dir_all(staging).unwrap();
+}
+
+#[test]
+fn staging_reservations_are_unique() {
+    let root = tmp_root("unique-staging");
+    let dest = root.join("dest");
+    let first = reserve_staging_dir(&dest).expect("first staging");
+    let second = reserve_staging_dir(&dest).expect("second staging");
+    assert_ne!(first, second);
+    std::fs::remove_dir_all(first).unwrap();
+    std::fs::remove_dir_all(second).unwrap();
 }
 
 #[test]
@@ -267,5 +342,8 @@ fn copy_verifies_before_commit_so_a_bad_source_leaves_no_dest() {
         !dest.exists(),
         "verify failure must not leave a dest behind"
     );
-    assert!(!staging_dir(&dest).exists(), "staging must be cleaned up");
+    assert!(
+        staging_entries(&dest).is_empty(),
+        "owned staging must be cleaned up"
+    );
 }
