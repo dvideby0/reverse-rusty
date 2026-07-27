@@ -19,7 +19,7 @@ use std::time::Instant;
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
-    routing::{get, post},
+    routing::{any, get, post},
     Router,
 };
 use parking_lot::{Mutex, RwLock};
@@ -381,7 +381,7 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
             "/_percolate/jobs/{id}",
             get(cluster_get_job).delete(cluster_cancel_job),
         )
-        .route("/_percolate/jobs/{id}/stream", get(cluster_get_job_stream))
+        .route("/_percolate/jobs/{id}/stream", any(cluster_get_job_stream))
         .route("/_mpercolate", post(cluster_mpercolate))
         .route("/_bulk", post(cluster_bulk))
         .route("/_flush", post(cluster_flush))

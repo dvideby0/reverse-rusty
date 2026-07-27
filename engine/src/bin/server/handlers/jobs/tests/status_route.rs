@@ -71,9 +71,14 @@ async fn wait_for_completion_returns_the_terminally_attested_status() {
     let status_request = send(route(&state), &uri);
     let consume_completion = async {
         tokio::time::sleep(Duration::from_millis(10)).await;
-        let response = get_job_stream(Method::GET, State(Arc::clone(&state)), Path(job_id))
-            .await
-            .expect("stream");
+        let response = get_job_stream(
+            Method::GET,
+            State(Arc::clone(&state)),
+            Path(job_id),
+            RawQuery(None),
+        )
+        .await
+        .expect("stream");
         let bytes = to_bytes(response.into_body(), 64 * 1024)
             .await
             .expect("stream body");

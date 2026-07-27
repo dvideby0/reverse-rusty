@@ -62,6 +62,7 @@ async fn terminal_delete_releases_the_record_and_event_id() {
         Method::GET,
         State(Arc::clone(&state)),
         Path(created.job_id.clone()),
+        RawQuery(None),
     )
     .await
     .expect("stream");

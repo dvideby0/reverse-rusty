@@ -3,7 +3,7 @@ use arc_swap::ArcSwap;
 use axum::body::to_bytes;
 use axum::extract::State;
 use axum::http::Request;
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::Router;
 use parking_lot::Mutex;
 use reverse_rusty::segment::Engine;
@@ -13,6 +13,7 @@ use tower::ServiceExt;
 mod create_route;
 mod delete_route;
 mod status_route;
+mod stream_route;
 
 struct CancelWhileWaiting {
     checks: usize,
@@ -112,6 +113,7 @@ async fn stream_ends_in_exact_completion_and_post_is_idempotent() {
         Method::GET,
         State(Arc::clone(&state)),
         Path(created.job_id.clone()),
+        RawQuery(None),
     )
     .await
     .expect("stream");
@@ -290,6 +292,7 @@ async fn retained_event_fingerprint_survives_tag_dict_growth() {
         Method::GET,
         State(Arc::clone(&state)),
         Path(created.job_id.clone()),
+        RawQuery(None),
     )
     .await
     .expect("claim initial stream");
@@ -322,53 +325,6 @@ async fn retained_event_fingerprint_survives_tag_dict_growth() {
     assert!(reused.reused);
     assert_eq!(reused.job_id, created.job_id);
     assert_eq!(reused.snapshot_generation, created.snapshot_generation);
-}
-
-#[tokio::test]
-async fn head_never_claims_the_single_consumer_stream() {
-    let state = state(5, 8);
-    let (_, Json(created)) = create_job(State(Arc::clone(&state)), Json(request("event-head")))
-        .await
-        .expect("accepted");
-    let path = format!("/_percolate/jobs/{}/stream", created.job_id);
-    let app = Router::new()
-        .route("/_percolate/jobs/{id}/stream", get(get_job_stream))
-        .with_state(Arc::clone(&state));
-
-    let head = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::HEAD)
-                .uri(&path)
-                .body(Body::empty())
-                .expect("HEAD request"),
-        )
-        .await
-        .expect("HEAD response");
-    assert_eq!(head.status(), StatusCode::METHOD_NOT_ALLOWED);
-
-    let get = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri(path)
-                .body(Body::empty())
-                .expect("GET request"),
-        )
-        .await
-        .expect("GET response");
-    assert_eq!(get.status(), StatusCode::OK);
-    let bytes = to_bytes(get.into_body(), 64 * 1024)
-        .await
-        .expect("stream body");
-    let completion = std::str::from_utf8(&bytes)
-        .expect("utf8")
-        .lines()
-        .last()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("frame"))
-        .expect("terminal frame");
-    assert_eq!(completion["type"], "completion");
 }
 
 #[tokio::test]

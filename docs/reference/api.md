@@ -186,7 +186,7 @@ The full method/path matrix is below.
 | `/_percolate/jobs` | POST | Strict exact exhaustive job creation with native/ES/OS controls, optional idempotency key, and familiar async status fields (ADR-114/131) |
 | `/_percolate/jobs/{id}` | GET | Strict retained status with native and ES/OS-familiar fields plus bounded wait polling (ADR-114/132) |
 | `/_percolate/jobs/{id}` | DELETE | Strictly cancel running work or remove a terminal retained result; acknowledged native/ES response (ADR-114/133) |
-| `/_percolate/jobs/{id}/stream` | GET | Claim the job's one bounded `application/x-ndjson` stream consumer |
+| `/_percolate/jobs/{id}/stream` | GET | Strictly claim one native, bounded, terminally attested `application/x-ndjson` consumer (ADR-114/134) |
 | `/_mpercolate` | POST | Batch percolate (high throughput; columnar broad lane; `responses[]` envelope) |
 | `/_bulk` | POST | NDJSON bulk ingest (per-item status) |
 | `/_flush` | POST | Flush memtable to immutable segment |

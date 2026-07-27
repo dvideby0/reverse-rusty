@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::Router;
 use parking_lot::{Mutex, RwLock};
 use tower::ServiceExt;
@@ -90,6 +90,10 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
         .route(
             "/_percolate/jobs/{id}",
             get(crate::handlers::cluster_get_job).delete(crate::handlers::cluster_cancel_job),
+        )
+        .route(
+            "/_percolate/jobs/{id}/stream",
+            any(crate::handlers::cluster_get_job_stream),
         )
         .route("/_mpercolate", post(cluster_mpercolate))
         .route("/_bulk", post(cluster_bulk))

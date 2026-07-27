@@ -14,9 +14,10 @@ use std::time::{Duration, Instant};
 use axum::body::{Body, Bytes};
 use axum::extract::{
     rejection::{JsonRejection, QueryRejection},
-    Path, Query, State,
+    Path, Query, RawQuery, State,
 };
 use axum::http::{header, Method, Response, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
@@ -475,18 +476,52 @@ pub(crate) async fn cluster_get_job(
     status(&state.exhaustive_jobs, &id, params).await
 }
 
-fn stream(jobs: &ExhaustiveJobs, id: &str) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
-    let receiver = jobs.take_stream(id).map_err(|error| match error {
-        StreamError::NotFound => ApiError::response(
-            StatusCode::NOT_FOUND,
-            "job_not_found",
-            format!("exhaustive job {id} is not retained"),
-        ),
-        StreamError::AlreadyTaken => ApiError::response(
-            StatusCode::CONFLICT,
-            "stream_already_claimed",
-            "an exhaustive job stream has exactly one consumer",
-        ),
+#[derive(Debug)]
+pub(crate) struct StreamHttpError {
+    response: (StatusCode, Json<ApiError>),
+    allow_get: bool,
+}
+
+impl StreamHttpError {
+    fn new(response: (StatusCode, Json<ApiError>)) -> Self {
+        Self {
+            response,
+            allow_get: false,
+        }
+    }
+
+    fn with_allow_get(mut self) -> Self {
+        self.allow_get = true;
+        self
+    }
+}
+
+impl IntoResponse for StreamHttpError {
+    fn into_response(self) -> axum::response::Response {
+        let mut response = self.response.into_response();
+        if self.allow_get {
+            response
+                .headers_mut()
+                .insert(header::ALLOW, axum::http::HeaderValue::from_static("GET"));
+        }
+        response
+    }
+}
+
+fn stream(jobs: &ExhaustiveJobs, id: &str) -> Result<Response<Body>, StreamHttpError> {
+    let receiver = jobs.take_stream(id).map_err(|error| {
+        StreamHttpError::new(match error {
+            StreamError::NotFound => ApiError::response(
+                StatusCode::NOT_FOUND,
+                "job_not_found",
+                format!("exhaustive job {id} is not retained"),
+            ),
+            StreamError::AlreadyTaken => ApiError::response(
+                StatusCode::CONFLICT,
+                "stream_already_claimed",
+                "an exhaustive job stream has exactly one consumer",
+            ),
+        })
     })?;
     let body_stream = ReceiverStream::new(receiver)
         .filter_map(crate::jobs::JobFrame::into_bytes)
@@ -497,11 +532,11 @@ fn stream(jobs: &ExhaustiveJobs, id: &str) -> Result<Response<Body>, (StatusCode
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::from_stream(body_stream))
         .map_err(|error| {
-            ApiError::response(
+            StreamHttpError::new(ApiError::response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "stream_error",
                 error.to_string(),
-            )
+            ))
         })
 }
 
@@ -509,8 +544,10 @@ pub(crate) async fn get_job_stream(
     method: Method,
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+    RawQuery(raw_query): RawQuery,
+) -> Result<Response<Body>, StreamHttpError> {
     reject_non_get_stream_method(&method)?;
+    reject_stream_query(raw_query.as_deref())?;
     stream(&state.exhaustive_jobs, &id)
 }
 
@@ -518,20 +555,32 @@ pub(crate) async fn cluster_get_job_stream(
     method: Method,
     State(state): State<Arc<ClusterAppState>>,
     Path(id): Path<String>,
-) -> Result<Response<Body>, (StatusCode, Json<ApiError>)> {
+    RawQuery(raw_query): RawQuery,
+) -> Result<Response<Body>, StreamHttpError> {
     reject_non_get_stream_method(&method)?;
+    reject_stream_query(raw_query.as_deref())?;
     stream(&state.exhaustive_jobs, &id)
 }
 
-fn reject_non_get_stream_method(method: &Method) -> Result<(), (StatusCode, Json<ApiError>)> {
+fn reject_non_get_stream_method(method: &Method) -> Result<(), StreamHttpError> {
     if method == Method::GET {
         Ok(())
     } else {
-        Err(ApiError::response(
+        Err(StreamHttpError::new(ApiError::response(
             StatusCode::METHOD_NOT_ALLOWED,
             "method_not_allowed",
-            "an exhaustive stream is claimed only by GET; HEAD is not supported",
+            "an exhaustive stream is claimed only by GET",
         ))
+        .with_allow_get())
+    }
+}
+
+fn reject_stream_query(raw_query: Option<&str>) -> Result<(), StreamHttpError> {
+    match raw_query {
+        None | Some("") => Ok(()),
+        Some(_) => Err(StreamHttpError::new(validation(
+            "exhaustive job streams do not accept query parameters",
+        ))),
     }
 }
 
