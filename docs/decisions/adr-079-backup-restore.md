@@ -94,3 +94,7 @@ class-D v4 fence preserved by a verbatim manifest copy), ADR-062 (the auth gate)
 ADR-065 criterion 11 (the requirement). Deferred: online no-quiesce backup via retention leases;
 incremental/differential backups; streaming to a remote/object-store dest; a `POST /_restore`
 endpoint.
+
+**Outcome update (2026-07-27).** [ADR-139](adr-139-backup-api-contract.md) retains this snapshot
+selection and verification design while hardening its REST boundary and replacing the deterministic
+staging name/ordinary final rename with uniquely owned staging and no-clobber promotion.

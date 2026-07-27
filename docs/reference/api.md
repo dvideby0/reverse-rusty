@@ -168,8 +168,9 @@ Endpoints are grouped by concern — open the one you need:
 - **[Observability](api/observability.md)** — metrics, cat tables, health (`/_stats`, `/_cat/stats`, `/_cat/segments`, `/_health`, `/_metrics`).
 - **[Vocabulary](api/vocab.md)** — read / replace / learn vocabulary (`GET`/`PUT /_vocab`, `/_vocab/learn`, `/_vocab/learn_and_apply`) + the learned-alias registry (`/_vocab/aliases*`, ADR-060).
 - **[Settings](api/settings.md)** — read + runtime-update engine settings (`GET`/`PUT /_settings`).
-- **[Backup & restore](../operations/backup-restore.md)** — snapshot a durable local engine or
-  in-process cluster (`POST /_backup`); remote clusters use quiesced node-volume snapshots (ADR-079).
+- **[Backup & restore](../operations/backup-restore.md)** — strictly snapshot a durable local
+  engine or in-process cluster (`POST /_backup`); remote clusters use quiesced node-volume
+  snapshots (ADR-079/139).
 
 The full method/path matrix is below.
 
@@ -194,7 +195,7 @@ The full method/path matrix is below.
 | `/_flush` | GET/POST | Strictly flush memtables with ES/OS `force`, `wait_if_ongoing`, timing, and shard results (ADR-137) |
 | `/_compact` | POST | Strict native force-all compaction with timing, shard result, and detailed merge report (ADR-138) |
 | `/_forcemerge` | POST | ES/OS-familiar policy/force-all alias with strict supported controls (ADR-138) |
-| `/_backup` | POST | Snapshot a durable single engine or in-process cluster to a server-side dir (body `{"dest":"..."}`); a stateless remote coordinator returns 400 ([backup/restore](../operations/backup-restore.md), ADR-079) |
+| `/_backup` | POST | Strict native, synchronous snapshot of a durable single engine or in-process cluster to a fresh server-side dir (body `{"dest":"..."}`); one backup is admitted per server and excess calls wait asynchronously; a stateless remote coordinator returns 400 ([backup/restore](../operations/backup-restore.md), ADR-079/139) |
 | `/_stats` | GET | JSON metrics snapshot |
 | `/_cat/stats` | GET | Human-readable metrics |
 | `/_cat/segments` | GET | Per-segment LSM detail (text table or `?format=json`) |
@@ -327,7 +328,7 @@ Cluster-only endpoints:
 | Endpoint | Method | Description |
 |---|---|---|
 | `/_checkpoint` | POST | For a durable in-process cluster, seal shards + commit the coordinator manifest + truncate the log (ADR-031/032); on a stateless remote coordinator it is only a local maintenance boundary and does not flush remote nodes |
-| `/_backup` | POST | Snapshot a durable in-process cluster to a server-side dir: checkpoint, then copy the coordinator manifest + per-shard segments + sources + log. A stateless remote coordinator returns 400; use node-volume snapshots ([backup/restore](../operations/backup-restore.md), ADR-079) |
+| `/_backup` | POST | Strictly snapshot a durable in-process cluster to a fresh server-side dir: checkpoint, then copy and verify the coordinator manifest + per-shard segments + sources + log; the response includes that checkpoint `epoch`. A stateless remote coordinator returns 400; use node-volume snapshots ([backup/restore](../operations/backup-restore.md), ADR-079/139) |
 | `/_cat/shards` | GET | Per-shard query counts + node assignments (text table or `?format=json`) |
 | `/_cluster/state` | GET | The committed control-plane document (membership + shard→node map + ring params, ADR-037) |
 | `/_cluster/nodes` | POST | Register a cluster member (`{"id": N, "addr": "...", "role": "data"\|"manager"}`) |

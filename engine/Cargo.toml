@@ -28,6 +28,9 @@ memmap2 = "0.9"
 rayon = "1"
 roaring = "0.11"
 arc-swap = "1"
+# Atomic no-clobber directory promotion for verified backups. The call is used
+# only on platforms that expose rename-with-flags; other targets fail closed.
+rustix = { version = "1", features = ["fs"] }
 # serde/serde_json are core, not server: Vocab JSON persistence (vocab.rs),
 # EngineConfig Serialize (config.rs), ExplainDetail (explain.rs), and the JSONL
 # query loader (loader.rs) all live in the library. They must NOT be gated.

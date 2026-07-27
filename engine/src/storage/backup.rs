@@ -17,16 +17,19 @@
 //! only produce a consistent on-disk snapshot.
 //!
 //! ## Atomicity of the backup itself
-//! Everything is staged into a sibling `<dest>.backup.tmp` directory, fsync'd, and
-//! renamed into place. A crash mid-backup leaves only the staging dir (removed on
-//! the next attempt), never a half-populated `dest`. Within the staging dir the
-//! manifest is written LAST, mirroring the engine's own "build durable, then
-//! commit" discipline, so the staged tree is internally consistent before the
-//! rename.
+//! Everything is staged into a unique sibling
+//! `<dest>.backup.tmp.<pid>.<sequence>` directory, fsync'd, and promoted with an
+//! atomic no-clobber rename. Platforms or filesystems without that primitive
+//! fail closed instead of using a racy check-then-rename. A crash mid-backup
+//! leaves only its uniquely-owned staging dir, never a half-populated `dest`.
+//! Within the staging dir the manifest is written LAST, mirroring the engine's
+//! own "build durable, then commit" discipline, so the staged tree is internally
+//! consistent before the rename.
 
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{load_query_sources, read_cluster_manifest, read_manifest, MmapSegment};
 
@@ -120,27 +123,109 @@ fn fsync_dir(dir: &Path) -> io::Result<()> {
     std::fs::File::open(dir)?.sync_all()
 }
 
-/// The sibling staging directory for `dest` (same parent ⇒ same filesystem ⇒ the
-/// final rename is atomic, never `EXDEV`).
-fn staging_dir(dest: &Path) -> PathBuf {
+static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Whether any filesystem entry occupies `path`. Unlike [`Path::exists`], this
+/// treats a dangling symlink as occupied, so a backup cannot silently replace
+/// it during the final rename.
+fn path_entry_exists(path: &Path) -> Result<bool, BackupError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(BackupError::Io(error)),
+    }
+}
+
+/// Reserve a unique sibling staging directory for `dest` (same parent ⇒ same
+/// filesystem ⇒ the final rename is atomic, never `EXDEV`). Unique ownership
+/// prevents two processes targeting the same destination from deleting or
+/// writing each other's staging trees.
+fn reserve_staging_dir(dest: &Path) -> Result<PathBuf, BackupError> {
     let mut name = dest
         .file_name()
         .map(std::ffi::OsString::from)
         .unwrap_or_default();
-    name.push(".backup.tmp");
-    match dest.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(parent) => parent.join(name),
-        None => PathBuf::from(name),
+    name.push(".backup.tmp.");
+    name.push(std::process::id().to_string());
+    name.push(".");
+    let parent = dest
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+
+    for _ in 0..1_024 {
+        let sequence = STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let mut candidate_name = name.clone();
+        candidate_name.push(sequence.to_string());
+        let candidate = parent.join(candidate_name);
+        match std::fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(BackupError::Io(error)),
+        }
+    }
+    Err(BackupError::Io(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not reserve a unique backup staging directory",
+    )))
+}
+
+/// Rename a directory without replacing an entry that appeared at `dest` after
+/// request validation. Linux/Android, Apple, and Redox platforms expose an
+/// atomic no-replace flag. If that call or target platform cannot provide the
+/// primitive, fail closed rather than weakening the no-clobber contract with a
+/// check-then-rename race.
+fn rename_noreplace(staging: &Path, dest: &Path) -> io::Result<()> {
+    #[cfg(any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos",
+        target_os = "redox",
+    ))]
+    {
+        use rustix::fs::{renameat_with, RenameFlags, CWD};
+        renameat_with(CWD, staging, CWD, dest, RenameFlags::NOREPLACE).map_err(Into::into)
+    }
+
+    #[cfg(not(any(
+        target_os = "android",
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "tvos",
+        target_os = "visionos",
+        target_os = "watchos",
+        target_os = "redox",
+    )))]
+    {
+        let _ = (staging, dest);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "atomic no-replace rename is unavailable on this platform",
+        ))
     }
 }
 
-/// Atomically commit a fully-staged directory to `dest` (rename + parent fsync).
-fn commit_staging(staging: &Path, dest: &Path) -> io::Result<()> {
-    std::fs::rename(staging, dest)?;
-    match dest.parent().filter(|p| !p.as_os_str().is_empty()) {
-        Some(parent) => fsync_dir(parent),
-        None => fsync_dir(Path::new(".")),
+/// Atomically commit a fully-staged directory to `dest` without clobbering a
+/// competing entry, then make the new parent-directory entry durable.
+fn commit_staging(staging: &Path, dest: &Path) -> Result<(), BackupError> {
+    if let Err(error) = rename_noreplace(staging, dest) {
+        return if error.kind() == io::ErrorKind::AlreadyExists {
+            Err(BackupError::DestExists(dest.to_path_buf()))
+        } else {
+            Err(BackupError::Io(error))
+        };
     }
+    match dest.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => fsync_dir(parent)?,
+        None => fsync_dir(Path::new("."))?,
+    }
+    Ok(())
 }
 
 /// Run `stage` into a fresh staging dir, `verify` the staged tree, then atomically
@@ -152,18 +237,15 @@ where
     S: FnOnce(&Path) -> Result<(), BackupError>,
     V: FnOnce(&Path) -> Result<(), BackupError>,
 {
-    if dest.exists() {
+    if path_entry_exists(dest)? {
         return Err(BackupError::DestExists(dest.to_path_buf()));
     }
-    let staging = staging_dir(dest);
-    // Remove any leftover staging from a prior aborted attempt.
-    std::fs::remove_dir_all(&staging).ok();
-    std::fs::create_dir_all(&staging)?;
-    match stage(&staging).and_then(|()| verify(&staging)) {
-        Ok(()) => {
-            commit_staging(&staging, dest)?;
-            Ok(())
-        }
+    let staging = reserve_staging_dir(dest)?;
+    match stage(&staging)
+        .and_then(|()| verify(&staging))
+        .and_then(|()| commit_staging(&staging, dest))
+    {
+        Ok(()) => Ok(()),
         Err(e) => {
             std::fs::remove_dir_all(&staging).ok();
             Err(e)

@@ -23,19 +23,23 @@ use axum::{
     body::Bytes,
     extract::{
         rejection::{BytesRejection, QueryRejection},
-        Query, State,
+        Query, RawQuery, State,
     },
-    http::{Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
 use prometheus::{Encoder, TextEncoder};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tracing::{error, info, instrument};
 
 use crate::dto::ApiVersion;
 use crate::handlers::admin::{
     acquire_flush, validate_flush_method, validate_flush_request, FlushParams, FlushResponse,
+};
+use crate::handlers::backup::{
+    acquire_backup_permit, backup_error_response, backup_rejection, validate_backup_method,
+    validate_backup_request, BackupResponse,
 };
 use crate::state::ClusterAppState;
 
@@ -374,12 +378,6 @@ pub(crate) async fn cluster_checkpoint(State(state): State<Arc<ClusterAppState>>
     }
 }
 
-#[derive(Deserialize)]
-pub(crate) struct BackupBody {
-    /// Server-side destination directory for the snapshot. Must not already exist.
-    dest: String,
-}
-
 /// POST /_backup — snapshot the cluster's durable state into `dest`, a server-side
 /// path that must not already exist (ADR-079): checkpoint, then copy the coordinator
 /// manifest + per-shard segments + `sources.dat` + the coordinator log. Restore by
@@ -393,28 +391,99 @@ pub(crate) struct BackupBody {
 #[instrument(skip_all)]
 pub(crate) async fn cluster_backup(
     State(state): State<Arc<ClusterAppState>>,
-    Json(body): Json<BackupBody>,
+    method: Method,
+    raw_query: RawQuery,
+    headers: HeaderMap,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let start = Instant::now();
-    let dest = std::path::PathBuf::from(&body.dest);
-    let result = {
-        let _w = state.write_serial.lock();
-        let cluster = state.cluster.read();
-        cluster.backup_to(&dest)
+    let _duration = state
+        .prom
+        .http_request_duration
+        .with_label_values(&["backup"])
+        .start_timer();
+    let started = Instant::now();
+    if let Err(response) = validate_backup_method(&state.prom, &method) {
+        return *response;
+    }
+    let prepared = match validate_backup_request(&state.prom, raw_query, &headers, body) {
+        Ok(prepared) => prepared,
+        Err(response) => return *response,
+    };
+    let Ok(permit) = acquire_backup_permit(&state.backup_permits).await else {
+        error!("cluster backup admission unexpectedly closed");
+        return backup_rejection(
+            &state.prom,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "backup admission unavailable",
+        );
+    };
+    let work_state = Arc::clone(&state);
+    let dest = prepared.path;
+    let worker = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _writer = work_state.write_serial.lock();
+        let cluster = work_state.cluster.read();
+        cluster.backup_to(&dest).map(|()| cluster.epoch())
+    });
+    let prom = state.prom.clone();
+    let dest_label = prepared.dest.clone();
+    let reporter = tokio::spawn(async move {
+        let result = match worker.await {
+            Ok(result) => result,
+            Err(join_error) => {
+                error!(error = %join_error, "cluster backup worker failed");
+                prom.http_requests_total
+                    .with_label_values(&["backup", "500"])
+                    .inc();
+                return Err(join_error);
+            }
+        };
+        let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        match &result {
+            Ok(epoch) => {
+                info!(
+                    dest = %dest_label,
+                    took_ms,
+                    epoch,
+                    "cluster backup complete"
+                );
+                prom.http_requests_total
+                    .with_label_values(&["backup", "200"])
+                    .inc();
+            }
+            Err(error) => {
+                let status = shard_error_status(error);
+                error!(dest = %dest_label, error = %error, "cluster backup failed");
+                prom.http_requests_total
+                    .with_label_values(&["backup", status.as_str()])
+                    .inc();
+            }
+        }
+        Ok((result, took_ms))
+    });
+    let (result, took_ms) = match reporter.await {
+        Ok(Ok(completion)) => completion,
+        Ok(Err(join_error)) => {
+            return backup_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("cluster backup worker failed: {join_error}"),
+            );
+        }
+        Err(join_error) => {
+            error!(error = %join_error, "cluster backup completion reporter failed");
+            return backup_rejection(
+                &state.prom,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "cluster backup completion reporter failed",
+            );
+        }
     };
     match result {
-        Ok(()) => {
-            info!(
-                dest = %body.dest,
-                took_ms = start.elapsed().as_millis() as u64,
-                "cluster backup complete"
-            );
-            Json(serde_json::json!({"acknowledged": true, "dest": body.dest})).into_response()
-        }
-        Err(e) => {
-            error!(dest = %body.dest, error = %e, "cluster backup failed");
-            shard_error_response("backup failed", &e)
-        }
+        Ok(epoch) => Json(BackupResponse::new(took_ms, prepared.dest, Some(epoch))).into_response(),
+        Err(error) => shard_error_response("backup failed", &error),
     }
 }
 

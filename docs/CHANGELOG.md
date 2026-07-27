@@ -71,6 +71,11 @@ reverse chronological and describe outcomes, not the current architecture or fut
   Elasticsearch/OpenSearch-familiar `POST /_forcemerge` controls and shard results, moved merge work
   off async runtime workers, and preserved fail-closed rollback
   ([ADR-138](decisions/adr-138-compaction-api-contract.md)).
+- Hardened native `POST /_backup` with one strict bounded standalone/coordinator contract,
+  synchronous timing and checkpoint-epoch results, single-slot blocking-worker admission that
+  survives disconnects with independently supervised outcomes, unique staging, and fail-closed
+  atomic no-clobber promotion that refuses dangling or raced destination entries
+  ([ADR-139](decisions/adr-139-backup-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

@@ -34,13 +34,24 @@ impl ClusterEngine {
                 "cluster is in-memory (no data_dir): nothing to back up".into(),
             ));
         };
-        // Reject an existing dest up front: checkpoint() has side effects (epoch bump,
-        // log truncation), so a request that can't succeed must not run it.
-        if dest.exists() {
-            return Err(ShardError::Config(format!(
-                "backup destination already exists: {}",
-                dest.display()
-            )));
+        // Reject every existing directory entry up front, including a dangling
+        // symlink: checkpoint() has side effects (epoch bump, log truncation), so
+        // a request that cannot succeed must not run it. `Path::exists` follows
+        // symlinks and would miss that precondition.
+        match std::fs::symlink_metadata(dest) {
+            Ok(_) => {
+                return Err(ShardError::Config(format!(
+                    "backup destination already exists: {}",
+                    dest.display()
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ShardError::Log(format!(
+                    "could not inspect backup destination {}: {error}",
+                    dest.display()
+                )))
+            }
         }
         // Make the source dir a consistent on-disk snapshot (seal + atomic manifest
         // + log truncate + orphan GC). Fails loud if any shard fell back to memory.

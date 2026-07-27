@@ -24,6 +24,9 @@ fn state_with_engine(engine: Engine) -> Arc<AppState> {
     Arc::new(AppState {
         engine: Mutex::new(engine),
         flush_serial: Mutex::new(()),
+        backup_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_BACKUPS,
+        )),
         snapshot: ArcSwap::new(snapshot),
         pool,
         search_permits: None,

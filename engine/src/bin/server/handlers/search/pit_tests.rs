@@ -52,6 +52,9 @@ fn pit_state(eng: Engine, pit_config: reverse_rusty::PitConfig) -> Arc<AppState>
     Arc::new(AppState {
         engine: parking_lot::Mutex::new(eng),
         flush_serial: parking_lot::Mutex::new(()),
+        backup_permits: Arc::new(tokio::sync::Semaphore::new(
+            crate::state::MAX_CONCURRENT_BACKUPS,
+        )),
         snapshot: arc_swap::ArcSwap::new(snap),
         pool,
         search_permits: None,

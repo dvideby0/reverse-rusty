@@ -1605,6 +1605,7 @@ dependencies = [
  "reverse-rusty-ref-matcher",
  "reverse-rusty-shard-proto",
  "roaring",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
