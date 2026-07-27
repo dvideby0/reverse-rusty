@@ -96,7 +96,7 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
             any(crate::handlers::cluster_get_job_stream),
         )
         .route("/_mpercolate", post(cluster_mpercolate_route))
-        .route("/_bulk", post(cluster_bulk))
+        .route("/_bulk", post(cluster_bulk_route))
         .route("/_flush", post(cluster_flush))
         .route("/_checkpoint", post(cluster_checkpoint))
         .route("/_compact", post(cluster_compact))
@@ -166,6 +166,7 @@ fn seed() -> Vec<(u64, String)> {
 }
 
 mod admin;
+mod bulk;
 mod crud;
 mod jobs;
 mod pit;

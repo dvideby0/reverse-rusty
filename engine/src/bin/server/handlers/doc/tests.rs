@@ -1,7 +1,7 @@
 //! Handler-level document API tests: ES/OS-shaped GET/HEAD/PUT/DELETE contracts,
 //! atomic replace-by-id visibility, strict controls, and source metadata.
 
-use super::{delete_doc, get_doc, put_doc, DeleteDocParams};
+use super::{bulk_route, delete_doc, get_doc, put_doc, DeleteDocParams};
 use crate::metrics::PrometheusMetrics;
 use crate::state::AppState;
 use axum::body::Body;
@@ -126,6 +126,7 @@ fn tags_of(body: &serde_json::Value) -> Result<Vec<(String, String)>, String> {
     super::extract_ingest_tags(obj)
 }
 
+mod bulk;
 mod delete;
 mod get;
 mod parsing;
