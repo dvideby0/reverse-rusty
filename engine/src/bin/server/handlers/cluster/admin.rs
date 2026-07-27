@@ -38,8 +38,8 @@ use crate::handlers::admin::{
     acquire_flush, validate_flush_method, validate_flush_request, FlushParams, FlushResponse,
 };
 use crate::handlers::backup::{
-    acquire_backup_permit, backup_rejection, validate_backup_method, validate_backup_request,
-    BackupResponse,
+    acquire_backup_permit, backup_error_response, backup_rejection, validate_backup_method,
+    validate_backup_request, BackupResponse,
 };
 use crate::state::ClusterAppState;
 
@@ -420,51 +420,70 @@ pub(crate) async fn cluster_backup(
     };
     let work_state = Arc::clone(&state);
     let dest = prepared.path;
-    let result = match tokio::task::spawn_blocking(move || {
+    let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let _writer = work_state.write_serial.lock();
         let cluster = work_state.cluster.read();
         cluster.backup_to(&dest).map(|()| cluster.epoch())
-    })
-    .await
-    {
-        Ok(result) => result,
+    });
+    let prom = state.prom.clone();
+    let dest_label = prepared.dest.clone();
+    let reporter = tokio::spawn(async move {
+        let result = match worker.await {
+            Ok(result) => result,
+            Err(join_error) => {
+                error!(error = %join_error, "cluster backup worker failed");
+                prom.http_requests_total
+                    .with_label_values(&["backup", "500"])
+                    .inc();
+                return Err(join_error);
+            }
+        };
+        let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        match &result {
+            Ok(epoch) => {
+                info!(
+                    dest = %dest_label,
+                    took_ms,
+                    epoch,
+                    "cluster backup complete"
+                );
+                prom.http_requests_total
+                    .with_label_values(&["backup", "200"])
+                    .inc();
+            }
+            Err(error) => {
+                let status = shard_error_status(error);
+                error!(dest = %dest_label, error = %error, "cluster backup failed");
+                prom.http_requests_total
+                    .with_label_values(&["backup", status.as_str()])
+                    .inc();
+            }
+        }
+        Ok((result, took_ms))
+    });
+    let (result, took_ms) = match reporter.await {
+        Ok(Ok(completion)) => completion,
+        Ok(Err(join_error)) => {
+            return backup_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("cluster backup worker failed: {join_error}"),
+            );
+        }
         Err(join_error) => {
-            error!(error = %join_error, "cluster backup worker failed");
+            error!(error = %join_error, "cluster backup completion reporter failed");
             return backup_rejection(
                 &state.prom,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "cluster backup worker failed",
+                "cluster backup completion reporter failed",
             );
         }
     };
-    let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
     match result {
-        Ok(epoch) => {
-            info!(
-                dest = %prepared.dest,
-                took_ms,
-                epoch,
-                "cluster backup complete"
-            );
-            state
-                .prom
-                .http_requests_total
-                .with_label_values(&["backup", "200"])
-                .inc();
-            Json(BackupResponse::new(took_ms, prepared.dest, Some(epoch))).into_response()
-        }
-        Err(error) => {
-            let status = shard_error_status(&error);
-            error!(dest = %prepared.dest, error = %error, "cluster backup failed");
-            state
-                .prom
-                .http_requests_total
-                .with_label_values(&["backup", status.as_str()])
-                .inc();
-            shard_error_response("backup failed", &error)
-        }
+        Ok(epoch) => Json(BackupResponse::new(took_ms, prepared.dest, Some(epoch))).into_response(),
+        Err(error) => shard_error_response("backup failed", &error),
     }
 }
 

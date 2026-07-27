@@ -73,8 +73,8 @@ reverse chronological and describe outcomes, not the current architecture or fut
   ([ADR-138](decisions/adr-138-compaction-api-contract.md)).
 - Hardened native `POST /_backup` with one strict bounded standalone/coordinator contract,
   synchronous timing and checkpoint-epoch results, single-slot blocking-worker admission that
-  survives disconnects, unique staging, and fail-closed atomic no-clobber promotion that refuses
-  dangling or raced destination entries
+  survives disconnects with independently supervised outcomes, unique staging, and fail-closed
+  atomic no-clobber promotion that refuses dangling or raced destination entries
   ([ADR-139](decisions/adr-139-backup-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates

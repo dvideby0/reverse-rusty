@@ -36,7 +36,8 @@ compaction can run during the snapshot, so the manifest and the files it names a
 consistent. The filesystem work runs on a blocking worker rather than an async HTTP runtime
 thread. One backup is admitted per server; another call waits asynchronously without occupying a
 blocking worker. Once admitted, its permit lives with the blocking work, so a client disconnect
-cannot admit a queue of detached backups. The whole backup is staged in a uniquely-owned sibling
+cannot admit a queue of detached backups. A separate completion supervisor records the eventual
+success or failure even after that disconnect. The whole backup is staged in a uniquely-owned sibling
 `<dest>.backup.tmp.<pid>.<sequence>` dir, verified, and atomically promoted without replacing an
 entry that already occupies `dest`. A crash mid-backup never leaves a half-written `dest`; it can
 leave that operation's uniquely named staging dir, which may be pruned once no backup is running.
@@ -63,7 +64,8 @@ Notes:
   unknown, empty/whitespace, or NUL-containing input is 400; oversize input is 413. A successful
   response means copy, verification, and atomic promotion all finished.
 - Each server admits one backup at a time. Excess calls wait asynchronously for that slot and can
-  be cancelled safely while waiting; an admitted backup finishes even if its client disconnects.
+  be cancelled safely while waiting; an admitted backup finishes and its outcome is logged and
+  counted even if its client disconnects.
 - `dest` is a path **on the server's filesystem**, not the client's. Mount your backup volume into
   the container and point `dest` there.
 - `dest` must **not already contain any filesystem entry** (a 400 otherwise, including a dangling

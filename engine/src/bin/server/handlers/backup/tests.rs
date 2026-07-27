@@ -286,3 +286,50 @@ async fn dropped_request_does_not_cancel_admitted_backup_or_block_timers() {
     drop(state);
     std::fs::remove_dir_all(root).expect("cleanup");
 }
+
+#[tokio::test]
+async fn detached_backup_failure_is_reported_and_counted() {
+    let root = temp_root("detached-failure");
+    let state = durable_state(&root);
+    let dest = root.join("raced-destination");
+    let held_state = Arc::clone(&state);
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _engine = held_state.engine.lock();
+        locked_tx.send(()).expect("report held engine");
+        release_rx.recv().expect("release held engine");
+    });
+    locked_rx.recv().expect("wait for held engine");
+
+    let mut admitted = Box::pin(execute_backup_for_test(Arc::clone(&state), dest.clone()));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), admitted.as_mut())
+            .await
+            .is_err(),
+        "the admitted worker must be waiting for the engine lock"
+    );
+    std::fs::create_dir(&dest).expect("create raced destination");
+    drop(admitted);
+    release_tx.send(()).expect("release engine");
+    holder.join().expect("lock holder");
+
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while state.backup_permits.available_permits() != 1
+            || state
+                .prom
+                .http_requests_total
+                .with_label_values(&["backup", "400"])
+                .get()
+                != 1
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached failure is supervised and counted");
+    assert!(dest.is_dir(), "the competing destination remains untouched");
+
+    drop(state);
+    std::fs::remove_dir_all(root).expect("cleanup");
+}

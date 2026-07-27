@@ -43,7 +43,9 @@
   closure. Excess calls wait asynchronously and disappear cleanly if cancelled while waiting.
   Once admitted, disconnecting the HTTP future neither cancels the backup nor releases admission
   early; this avoids both an HTTP cancellation seam inside filesystem commit and an unbounded
-  detached blocking-worker queue.
+  detached blocking-worker queue. An independently spawned completion reporter owns the blocking
+  join handle and records the final log plus status metric before forwarding the outcome to a
+  still-connected handler, so a detached disk/corruption/promotion failure is never silent.
 
 - **Decision — destination and staging ownership.** Every operation atomically reserves a unique
   sibling `<dest>.backup.tmp.<pid>.<sequence>` directory. It never removes or writes another
@@ -61,4 +63,5 @@
   no-clobber final promotion, unique staging reservations, and failure cleanup. New standalone and
   coordinator route tests pin strict validation, body bounds, stable precondition errors, common
   timing fields, cluster epoch reporting, verified output, runtime responsiveness, bounded
-  pre-spawn admission, and completion after a dropped admitted request.
+  pre-spawn admission, completion after a dropped admitted request, and status accounting for a
+  detached failure.

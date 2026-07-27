@@ -47,7 +47,13 @@ pub(crate) struct PreparedBackup {
 
 enum BackupExecutionError {
     AdmissionClosed,
+    Reporter(tokio::task::JoinError),
     Worker(tokio::task::JoinError),
+}
+
+struct BackupCompletion {
+    result: Result<(), BackupError>,
+    took_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -82,6 +88,14 @@ pub(crate) fn backup_rejection(
     prom.http_requests_total
         .with_label_values(&["backup", status.as_str()])
         .inc();
+    backup_error_response(status, error_type, reason)
+}
+
+pub(crate) fn backup_error_response(
+    status: StatusCode,
+    error_type: &'static str,
+    reason: impl Into<String>,
+) -> Response {
     ApiError::response(status, error_type, reason).into_response()
 }
 
@@ -201,25 +215,71 @@ pub(crate) async fn acquire_backup_permit(
 async fn execute_backup(
     state: Arc<AppState>,
     dest: PathBuf,
-) -> Result<Result<(), BackupError>, BackupExecutionError> {
+    dest_label: String,
+    started: Instant,
+) -> Result<BackupCompletion, BackupExecutionError> {
     let permit = acquire_backup_permit(&state.backup_permits)
         .await
         .map_err(|()| BackupExecutionError::AdmissionClosed)?;
-    tokio::task::spawn_blocking(move || {
+    let prom = state.prom.clone();
+    let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut engine = state.engine.lock();
         engine.backup_to(&dest)
-    })
-    .await
-    .map_err(BackupExecutionError::Worker)
+    });
+    let reporter = tokio::spawn(async move {
+        let result = match worker.await {
+            Ok(result) => result,
+            Err(join_error) => {
+                error!(error = %join_error, "backup worker failed");
+                prom.http_requests_total
+                    .with_label_values(&["backup", "500"])
+                    .inc();
+                return Err(join_error);
+            }
+        };
+        let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
+        match &result {
+            Ok(()) => {
+                info!(dest = %dest_label, took_ms, "backup complete");
+                prom.http_requests_total
+                    .with_label_values(&["backup", "200"])
+                    .inc();
+            }
+            Err(error) => {
+                let (status, _) = backup_error_details(error);
+                error!(dest = %dest_label, error = %error, "backup failed");
+                prom.http_requests_total
+                    .with_label_values(&["backup", status.as_str()])
+                    .inc();
+            }
+        }
+        Ok(BackupCompletion { result, took_ms })
+    });
+    reporter
+        .await
+        .map_err(BackupExecutionError::Reporter)?
+        .map_err(BackupExecutionError::Worker)
 }
 
 #[cfg(test)]
 async fn execute_backup_for_test(
     state: Arc<AppState>,
     dest: PathBuf,
-) -> Result<Result<(), BackupError>, BackupExecutionError> {
-    execute_backup(state, dest).await
+) -> Result<BackupCompletion, BackupExecutionError> {
+    let dest_label = dest.to_string_lossy().into_owned();
+    execute_backup(state, dest, dest_label, Instant::now()).await
+}
+
+fn backup_error_details(error: &BackupError) -> (StatusCode, &'static str) {
+    match error {
+        BackupError::NotDurable => (StatusCode::BAD_REQUEST, "not_durable"),
+        BackupError::DestExists(_) => (StatusCode::BAD_REQUEST, "dest_exists"),
+        BackupError::PersistenceDegraded => {
+            (StatusCode::SERVICE_UNAVAILABLE, "persistence_degraded")
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "backup_error"),
+    }
 }
 
 /// Snapshot the standalone engine's durable state into a fresh server-side
@@ -246,8 +306,15 @@ pub(crate) async fn backup_route(
         Ok(prepared) => prepared,
         Err(response) => return *response,
     };
-    let result = match execute_backup(Arc::clone(&state), prepared.path).await {
-        Ok(result) => result,
+    let completion = match execute_backup(
+        Arc::clone(&state),
+        prepared.path,
+        prepared.dest.clone(),
+        started,
+    )
+    .await
+    {
+        Ok(completion) => completion,
         Err(BackupExecutionError::AdmissionClosed) => {
             error!("backup admission unexpectedly closed");
             return backup_rejection(
@@ -257,38 +324,30 @@ pub(crate) async fn backup_route(
                 "backup admission unavailable",
             );
         }
-        Err(BackupExecutionError::Worker(join_error)) => {
-            error!(error = %join_error, "backup worker failed");
+        Err(BackupExecutionError::Reporter(join_error)) => {
+            error!(error = %join_error, "backup completion reporter failed");
             return backup_rejection(
                 &state.prom,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
-                "backup worker failed",
+                "backup completion reporter failed",
+            );
+        }
+        Err(BackupExecutionError::Worker(join_error)) => {
+            return backup_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                format!("backup worker failed: {join_error}"),
             );
         }
     };
-    let took_ms = started.elapsed().as_secs_f64() * 1_000.0;
-    match result {
+    match completion.result {
         Ok(()) => {
-            info!(dest = %prepared.dest, took_ms, "backup complete");
-            state
-                .prom
-                .http_requests_total
-                .with_label_values(&["backup", "200"])
-                .inc();
-            Json(BackupResponse::new(took_ms, prepared.dest, None)).into_response()
+            Json(BackupResponse::new(completion.took_ms, prepared.dest, None)).into_response()
         }
         Err(error) => {
-            error!(dest = %prepared.dest, error = %error, "backup failed");
-            let (status, error_type) = match &error {
-                BackupError::NotDurable => (StatusCode::BAD_REQUEST, "not_durable"),
-                BackupError::DestExists(_) => (StatusCode::BAD_REQUEST, "dest_exists"),
-                BackupError::PersistenceDegraded => {
-                    (StatusCode::SERVICE_UNAVAILABLE, "persistence_degraded")
-                }
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "backup_error"),
-            };
-            backup_rejection(&state.prom, status, error_type, error.to_string())
+            let (status, error_type) = backup_error_details(&error);
+            backup_error_response(status, error_type, error.to_string())
         }
     }
 }
