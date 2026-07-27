@@ -5,7 +5,7 @@
 //!   GET  /_doc/{id}          Retrieve query source, version, and canonical tags
 //!   HEAD /_doc/{id}          Bodyless existence check
 //!   DELETE /_doc/{id}        Remove a stored query
-//!   POST /_search            Percolate title(s) (body: {"document": {"title": "..."}} or "documents")
+//!   GET|POST /_search        Percolate title(s) (body: {"document": {"title": "..."}} or "documents")
 //!   POST /_mpercolate        Batch percolate (body: {"documents":[...]}, responses[] envelope)
 //!   POST /_bulk              NDJSON bulk ingest ({action}\n{source}\n...)
 //!   POST /_flush             Flush memtable to immutable segment
@@ -80,7 +80,8 @@ use handlers::{
     get_alias_feedback, get_aliases, get_doc, get_job, get_job_stream, get_settings, get_vocab,
     health, import_aliases, learn_and_apply_aliases, learn_and_apply_vocab, learn_vocab,
     mpercolate, open_pit, prometheus_metrics, put_doc, put_settings, put_vocab,
-    reset_alias_feedback, search, stats, v2_mpercolate, v2_search, validate_and_apply_feedback,
+    reset_alias_feedback, search_route, stats, v2_mpercolate, v2_search,
+    validate_and_apply_feedback,
 };
 use metrics::PrometheusMetrics;
 use state::{request_id_middleware, AppState};
@@ -418,7 +419,7 @@ async fn main() {
     let app = Router::new()
         .route("/", get(api_root))
         .route("/_doc/{id}", get(get_doc).put(put_doc).delete(delete_doc))
-        .route("/_search", post(search))
+        .route("/_search", get(search_route).post(search_route))
         .route("/v2/_search", post(v2_search))
         .route("/v2/_mpercolate", post(v2_mpercolate))
         .route("/v2/_pit", post(open_pit).delete(close_pit))
@@ -475,7 +476,7 @@ async fn main() {
     info!(
         address = %addr,
         slow_query_threshold_ms = slow_threshold,
-        endpoints = "GET /, GET/HEAD/PUT/DELETE /_doc/{id}, POST /_search, POST /_mpercolate, POST /_bulk, POST /_flush, POST /_compact, POST /_backup, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record, GET /_vocab/aliases/feedback, POST /_vocab/aliases/feedback/reset, POST /_vocab/aliases/validate_and_apply",
+        endpoints = "GET /, GET/HEAD/PUT/DELETE /_doc/{id}, GET/POST /_search, POST /_mpercolate, POST /_bulk, POST /_flush, POST /_compact, POST /_backup, GET /_stats, GET /_cat/stats, GET /_health, GET /_metrics, GET/PUT /_vocab, POST /_vocab/learn, POST /_vocab/learn_and_apply, GET /_vocab/aliases, POST /_vocab/aliases/import, POST /_vocab/aliases/learn_and_apply, POST /_vocab/aliases/discover, POST /_vocab/aliases/discover_and_record, GET /_vocab/aliases/feedback, POST /_vocab/aliases/feedback/reset, POST /_vocab/aliases/validate_and_apply",
         "server listening"
     );
 

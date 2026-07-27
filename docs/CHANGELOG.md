@@ -22,6 +22,9 @@ reverse chronological and describe outcomes, not the current architecture or fut
 - Aligned document deletion with the ES/OpenSearch shape and refresh controls, made logical delete
   counts placement-independent, and exposed the existing remote partial-repair contract accurately
   ([ADR-125](decisions/adr-125-delete-document-contract.md)).
+- Hardened compatibility `GET`/`POST /_search` with strict native/ES request parsing, supported
+  ES/OS controls and response identity, snapshot-generation-safe enrichment, and complete
+  multi-document profile semantics ([ADR-126](decisions/adr-126-search-api-contract.md)).
 
 ## 2026-07-25 — Semantic correctness, durability, and performance gates
 

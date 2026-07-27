@@ -61,7 +61,10 @@ fn router(state: &Arc<ClusterAppState>) -> Router {
                 .put(cluster_put_doc)
                 .delete(cluster_delete_doc),
         )
-        .route("/_search", post(cluster_search))
+        .route(
+            "/_search",
+            get(cluster_search_route).post(cluster_search_route),
+        )
         .route("/v2/_search", post(crate::handlers::cluster_v2_search))
         .route(
             "/v2/_pit",

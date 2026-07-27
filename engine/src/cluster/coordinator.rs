@@ -56,6 +56,7 @@ mod topology;
 mod vocab;
 
 pub use exhaustive::ClusterExhaustiveMatch;
+pub use matching::ClusterReadView;
 pub use pit::ClusterPitError;
 pub use ranked::{ClusterRankedError, ClusterRankedHit, ClusterRankedMatch};
 pub use ranked_batch::{ClusterBatchRankedMatch, ClusterRankedTitle};

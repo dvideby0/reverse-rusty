@@ -39,7 +39,7 @@ pub(crate) use admin::{
     cluster_state, cluster_stats,
 };
 pub(crate) use doc::{cluster_bulk, cluster_delete_doc, cluster_get_doc, cluster_put_doc};
-pub(crate) use search::{cluster_mpercolate, cluster_search};
+pub(crate) use search::{cluster_mpercolate, cluster_search_route};
 pub(crate) use vocab::{
     cluster_discover_aliases, cluster_discover_and_record_aliases, cluster_get_alias_feedback,
     cluster_get_aliases, cluster_get_settings, cluster_get_vocab, cluster_import_aliases,

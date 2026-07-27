@@ -43,7 +43,7 @@ use crate::handlers::{
     cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_metrics, cluster_mpercolate,
     cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign, cluster_rebalance,
     cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback, cluster_resize,
-    cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
+    cluster_resync, cluster_root, cluster_search_route, cluster_state, cluster_stats,
     cluster_v2_mpercolate, cluster_v2_search, cluster_validate_and_apply_feedback,
 };
 use crate::metrics::PrometheusMetrics;
@@ -359,7 +359,10 @@ pub(crate) async fn run(cli: Cli, auth_config: Option<AuthConfig>) {
                 .put(cluster_put_doc)
                 .delete(cluster_delete_doc),
         )
-        .route("/_search", post(cluster_search))
+        .route(
+            "/_search",
+            get(cluster_search_route).post(cluster_search_route),
+        )
         .route("/v2/_search", post(cluster_v2_search))
         .route("/v2/_mpercolate", post(cluster_v2_mpercolate))
         .route(

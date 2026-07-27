@@ -31,8 +31,8 @@ pub(crate) use cluster::{
     cluster_learn_aliases, cluster_learn_and_apply_vocab, cluster_learn_vocab, cluster_metrics,
     cluster_mpercolate, cluster_put_doc, cluster_put_settings, cluster_put_vocab, cluster_reassign,
     cluster_rebalance, cluster_reconcile, cluster_register_node, cluster_reset_alias_feedback,
-    cluster_resize, cluster_resync, cluster_root, cluster_search, cluster_state, cluster_stats,
-    cluster_validate_and_apply_feedback,
+    cluster_resize, cluster_resync, cluster_root, cluster_search_route, cluster_state,
+    cluster_stats, cluster_validate_and_apply_feedback,
 };
 pub(crate) use doc::{bulk_ingest, delete_doc, get_doc, put_doc};
 pub(crate) use jobs::{
@@ -41,7 +41,7 @@ pub(crate) use jobs::{
 };
 pub(crate) use pit::{close_pit, cluster_close_pit, cluster_open_pit, open_pit};
 pub(crate) use search::{
-    cluster_v2_mpercolate, cluster_v2_search, mpercolate, search, v2_mpercolate, v2_search,
+    cluster_v2_mpercolate, cluster_v2_search, mpercolate, search_route, v2_mpercolate, v2_search,
 };
 pub(crate) use vocab::{
     get_settings, get_vocab, learn_and_apply_vocab, learn_vocab, put_settings, put_vocab,

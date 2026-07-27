@@ -9,7 +9,66 @@ use crate::segment::MatchStats;
 
 use super::ClusterEngine;
 
+/// A mutation-frozen cluster view for a read that must combine Boolean matches
+/// with later source enrichment.
+///
+/// Ordinary percolation remains lock-free at this level. This stronger view is
+/// intentionally explicit because it takes the exclusive side of the
+/// coordinator mutation barrier until drop, so every direct library mutation
+/// waits until all match IDs and requested sources have been read.
+pub struct ClusterReadView<'a> {
+    cluster: &'a ClusterEngine,
+    _mutation_guard: std::sync::RwLockWriteGuard<'a, ()>,
+}
+
+impl ClusterReadView<'_> {
+    /// Match one title with merged statistics under this view.
+    pub fn percolate_filtered_with_stats(
+        &self,
+        title: &str,
+        filter: &[(String, Vec<String>)],
+        include_broad: bool,
+    ) -> Result<(Vec<u64>, MatchStats), ShardError> {
+        self.cluster
+            .percolate_filtered_with_stats(title, filter, include_broad)
+    }
+
+    /// Match and score one title under this view.
+    pub fn percolate_filtered_ranked(
+        &self,
+        title: &str,
+        filter: &[(String, Vec<String>)],
+        include_broad: bool,
+        rank: &crate::rank::RankSpec,
+    ) -> Result<(Vec<(u64, i64)>, MatchStats), ShardError> {
+        self.cluster
+            .percolate_filtered_ranked(title, filter, include_broad, rank)
+    }
+
+    /// Fetch one live source under the same mutation-frozen view as matching.
+    pub fn get_source(&self, logical: u64) -> Result<Option<String>, ShardError> {
+        self.cluster.get_source(logical)
+    }
+}
+
 impl ClusterEngine {
+    /// Freeze direct cluster mutations and return a coherent read view.
+    ///
+    /// This is not a long-lived PIT. It is a short request-scoped fence for
+    /// operations such as compatibility search that must match first and then
+    /// materialize sources without pairing an old match with a replacement
+    /// query. Callers should drop the view immediately after enrichment.
+    pub fn consistent_read_view(&self) -> ClusterReadView<'_> {
+        let mutation_guard = self
+            .pit_open_barrier
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ClusterReadView {
+            cluster: self,
+            _mutation_guard: mutation_guard,
+        }
+    }
+
     /// The shards a title is routed to: shard 0 (the replicated-lane evaluator)
     /// plus the shard owning each anchor-eligible (non-hot) title feature. Reuses
     /// the same `match_features` primitives the match path uses, so routing and

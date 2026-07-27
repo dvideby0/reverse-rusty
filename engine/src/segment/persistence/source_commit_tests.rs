@@ -15,6 +15,34 @@ fn config(dir: &std::path::Path) -> crate::config::EngineConfig {
 }
 
 #[test]
+fn old_snapshot_rejects_a_newer_shared_source_generation() {
+    let mut engine =
+        Engine::new(crate::normalize::Normalizer::default_vocab().expect("normalizer"));
+    engine
+        .try_insert_live("topps chrome", 7, 1)
+        .expect("insert");
+    let old = engine.snapshot();
+    engine
+        .try_upsert_live("michael jordan", 7, 2)
+        .expect("replace");
+    let current = engine.snapshot();
+
+    assert!(
+        old.has_live_query(7),
+        "the old exact row remains present in the old snapshot"
+    );
+    assert_eq!(
+        old.get_query_source(7),
+        None,
+        "the shared store's newer source must not be paired with the old exact row"
+    );
+    assert_eq!(
+        current.get_query_source(7).as_deref(),
+        Some("michael jordan")
+    );
+}
+
+#[test]
 fn post_manifest_crash_recovers_source_explain_rebuild_checkpoint_and_backup() {
     let dir = scratch_dir("post-manifest");
     let backup = scratch_dir("post-manifest-backup-root").join("backup");

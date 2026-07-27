@@ -212,5 +212,21 @@ async fn cluster_v2_missing_winner_source_is_a_no_partial_502() {
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
     assert_eq!(json["error"]["type"], "source_unavailable");
     assert!(json.get("hits").is_none(), "partial hits must never escape");
+
+    let (status, json) = send(
+        &state,
+        req(
+            "POST",
+            "/_search",
+            &serde_json::json!({
+                "document": {"title": "topps chrome"},
+                "include_source": true
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{json}");
+    assert_eq!(json["error"]["type"], "source_unavailable");
+    assert!(json.get("hits").is_none(), "partial hits must never escape");
     let _ = std::fs::remove_dir_all(dir);
 }

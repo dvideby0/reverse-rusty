@@ -113,6 +113,42 @@ impl SourceStore {
         }
     }
 
+    /// Generation-attested source lookup for immutable engine snapshots. The
+    /// store itself is shared across snapshots, so the generation comparison
+    /// and text clone must happen under the same resident/overlay read guard.
+    pub(crate) fn get_bounded_at_generation(
+        &self,
+        logical: u64,
+        expected_generation: u64,
+        max_bytes: usize,
+    ) -> Result<Option<String>, usize> {
+        let copy = |source: &StoredSource| {
+            if source.source_generation() != expected_generation {
+                return Ok(None);
+            }
+            if source.query.len() > max_bytes {
+                return Err(source.query.len());
+            }
+            Ok(Some(source.query.clone()))
+        };
+        match self {
+            SourceStore::Resident(map) => match rw_read(map).get(&logical) {
+                Some(source) => copy(source),
+                None => Ok(None),
+            },
+            SourceStore::Lazy { base, overlay } => {
+                let overlay = rw_read(overlay);
+                match overlay.get(&logical) {
+                    Some(Some(source)) => copy(source),
+                    Some(None) => Ok(None),
+                    None => base.as_ref().map_or(Ok(None), |base| {
+                        base.get_bounded_at_generation(logical, expected_generation, max_bytes)
+                    }),
+                }
+            }
+        }
+    }
+
     pub fn insert(&self, logical: u64, text: String) {
         self.insert_document(logical, text, 1, &[]);
     }

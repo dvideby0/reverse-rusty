@@ -14,6 +14,7 @@ use tracing::{info, instrument};
 use reverse_rusty::segment::{BatchMatchOptions, BroadStrategy};
 
 use crate::dto::{ApiError, HitSource};
+use crate::handlers::doc::QUERY_INDEX;
 use crate::state::AppState;
 
 use super::rank::{order_and_page, to_rank_spec, RankBody};
@@ -317,6 +318,7 @@ pub(crate) async fn mpercolate(
                         None
                     };
                     SearchHitItem {
+                        _index: QUERY_INDEX,
                         _id: id,
                         _score: score,
                         _source: source,

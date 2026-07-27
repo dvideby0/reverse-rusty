@@ -138,7 +138,9 @@ impl EngineSnapshot {
     }
 
     pub fn get_query_source(&self, logical_id: u64) -> Option<String> {
-        self.query_store.get(logical_id)
+        self.get_query_source_bounded(logical_id, usize::MAX)
+            .ok()
+            .flatten()
     }
 
     /// Canonical stored document for `GET /_doc/{id}`: original DSL text, the
@@ -212,7 +214,11 @@ impl EngineSnapshot {
         logical_id: u64,
         max_bytes: usize,
     ) -> Result<Option<String>, usize> {
-        self.query_store.get_bounded(logical_id, max_bytes)
+        let Some((_, source_generation, _)) = self.source_metadata_for_logical(logical_id) else {
+            return Ok(None);
+        };
+        self.query_store
+            .get_bounded_at_generation(logical_id, source_generation, max_bytes)
     }
 
     pub fn explain_hit(

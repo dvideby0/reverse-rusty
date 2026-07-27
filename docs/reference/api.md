@@ -27,7 +27,7 @@ Options:
 | `--load-file` | — | Pre-load queries from a CSV or JSONL file at startup |
 | `--vocab-file` | — | Load vocabulary from a JSON file at startup |
 | `--threads` | *(physical cores)* | Number of rayon worker threads |
-| `--max-concurrent-searches` | 0 *(unbounded)* | Max `/_search`+`/_mpercolate` requests occupying the match pool at once; excess queue within their own `timeout_ms` (ADR-099) |
+| `--max-concurrent-searches` | 0 *(unbounded)* | Max `/_search`+`/_mpercolate` requests occupying the match pool at once; excess queue within their own timeout (`timeout` or `timeout_ms`, ADR-099) |
 | `--max-ranked-enrichment-bytes` | 16777216 (16 MiB) | Maximum winner source bytes fetched by one local or cluster `/v2/_search` or `/v2/_mpercolate`; overflow fails the whole response with `413 rank_enrichment_limit` (ADR-110/112) |
 | `--pit-default-keep-alive-secs` | 60 | Keep-alive for a `POST /v2/_pit` point-in-time when the request names none; renewed on every use (ADR-113) |
 | `--pit-max-keep-alive-secs` | 600 | Ceiling on a requested PIT keep-alive; over-ask is a 400 (ADR-113) |
@@ -55,7 +55,7 @@ Options:
 | `--hot-anchor-threshold` | 0 (off) | The hot-anchor threshold θ (class H, ADR-105; recommended 1024): a query whose deciding anchor has no top-64 mask bit but frequency ≥ θ is stored in the always-probed, columnar-evaluated hot tier instead of fattening the realtime lane. Dynamic via `/_settings`; in remote cluster mode run every `shardserver` with the same value (divergence is cost-only, never correctness) |
 | `--broad-columnar` | true | Use the columnar broad evaluator (once per batch); set `false` to fall back to the inline per-title broad probe — the kill-switch (identical results, no amortization). Dynamic via `/_settings` |
 | `--broad-materialize` | true | Use the pure-anchor materialization fast path (emit pure-anchor broad queries straight from the anchor bitmap, skipping verification). Dynamic via `/_settings` |
-| `--max-percolate-batch` | 10000 | Maximum documents accepted in one `POST /_mpercolate` batch; larger requests are rejected with 400. Dynamic via `/_settings` |
+| `--max-percolate-batch` | 10000 | Maximum documents accepted in one `/_mpercolate` or multi-document `/_search` request; larger requests are rejected with 400. Dynamic via `/_settings` |
 
 Example with persistence, vocabulary, and pre-loaded queries:
 
@@ -159,7 +159,7 @@ Endpoints are grouped by concern — open the one you need:
 - **[Documents](api/documents.md)** — register / retrieve / existence-check / delete a stored query
   (`PUT`/`GET`/`HEAD`/`DELETE /_doc/{id}`), including durable metadata-tag read-back and ES/OS
   `_source` filtering.
-- **[Percolate](api/percolate.md)** — match titles against stored queries (`POST /_search`,
+- **[Percolate](api/percolate.md)** — match titles against stored queries (`GET`/`POST /_search`,
   local/cluster bounded `POST /v2/_search`, `POST /_mpercolate`, and `POST /v2/_mpercolate`), including filtered
   percolation and exhaustive `result_mode=all` jobs with a terminally verified NDJSON stream.
 - **[Ingest & lifecycle](api/ingest.md)** — bulk ingest + segment lifecycle (`POST /_bulk`, `/_flush`, `/_compact`).
@@ -179,7 +179,7 @@ The full method/path matrix is below.
 | `/_doc/{id}` | GET/HEAD | Retrieve a stored query / bodyless existence check |
 | `/_doc/{id}` | PUT | Register or atomically replace/create-only a query (`op_type=index|create`; strict `refresh`; ES/OS response metadata, ADR-117) |
 | `/_doc/{id}` | DELETE | Remove a stored query (strict `refresh`; ES/OS identity metadata; logical delete count; explicit partial-repair contract, ADR-125) |
-| `/_search` | POST | Percolate one or more titles (rich: per-slot `stats`, `explain`, `profile`, paging) |
+| `/_search` | GET/POST | Percolate one or more titles (strict native or ES/OS percolate request; per-slot `stats`, `explain`, `profile`, paging; ADR-126) |
 | `/v2/_search` | POST | Single-node or cluster, single-document exact bounded top-K + winner-only enrichment (ADR-107/108/110); accepts `pit`/`cursor` pages (ADR-113) |
 | `/v2/_pit` | POST/DELETE | Open / close a point-in-time snapshot for cursor pagination (in-process modes; remote assemblies 501 — ADR-113) |
 | `/v2/_mpercolate` | POST | Bounded top-K batch search; PIT/cursor pagination is rejected (ADR-112/113) |
